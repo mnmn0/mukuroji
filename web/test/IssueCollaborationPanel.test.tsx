@@ -277,6 +277,45 @@ describe('IssueCollaborationPanel', () => {
     }
   })
 
+  test('links the relation endpoints the server resolved for the viewer', () => {
+    const html = renderToStaticMarkup(
+      <IssueActivityTab
+        controller={{
+          ...issueCollaborationControllerFixture,
+          activity: [{
+            actorUserId: 'demo@example.com',
+            eventId: 'event-related',
+            eventType: 'work-item.relation-added',
+            occurredAt: '2026-07-12T04:00:00.000Z',
+            relatedWorkItem: { id: 'issue-7', teamId: 'core-team', key: 'CT-7', title: '請求書の締め処理' },
+          }, {
+            actorUserId: 'demo@example.com',
+            eventId: 'event-parent',
+            eventType: 'work-item.parent-changed',
+            occurredAt: '2026-07-12T04:01:00.000Z',
+            parentWorkItem: { id: 'issue-9', teamId: 'core-team', title: 'キーのない親' },
+            previousParentWorkItem: { id: 'issue-3', teamId: 'core-team', key: 'CT-3', title: '旧い親' },
+          }, {
+            actorUserId: 'demo@example.com',
+            eventId: 'event-hidden',
+            eventType: 'work-item.blocker-added',
+            occurredAt: '2026-07-12T04:02:00.000Z',
+          }],
+        }}
+        locale="ja"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('href="/browse/CT-7"')
+    expect(html).toContain('請求書の締め処理')
+    expect(html).toContain('href="/teams/core-team/issues?issueId=issue-9"')
+    expect(html).toContain('キーのない親')
+    expect(html.indexOf('変更前の親')).toBeLessThan(html.indexOf('キーのない親'))
+    expect(html).toContain('href="/browse/CT-3"')
+    expect(html.match(/data-testid="activity-relation-work-items"/g)).toHaveLength(2)
+  })
+
   test('keeps the latest canonical comment when pages overlap', () => {
     const persisted = issueCollaborationControllerFixture.comments[0]
     const updated = {

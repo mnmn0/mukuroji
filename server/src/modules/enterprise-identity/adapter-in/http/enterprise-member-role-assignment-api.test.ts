@@ -663,3 +663,141 @@ test('lets an admin keep maintaining an assigned role that already holds adminis
     expect((await identity.getSnapshot(workspaceId)).customRoles[0]?.name).toBe('Member desk')
   })
 })
+
+test('cancels an assignment write when the member changed after the route checked it', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'owner' })
+    // The fixture members are read at version 1; a later version means a concurrent change.
+    let storedVersion = 1
+    const identity = new InMemoryEnterpriseIdentityClient(
+      undefined,
+      undefined,
+      undefined,
+      async () => storedVersion,
+    )
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const assignBody = {
+      memberKey: 'sato@example.com',
+      roleId: 'workspace:portfolio-viewer',
+      scopeType: 'workspace',
+    }
+
+    storedVersion = 2
+    const promotedMeanwhile = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      assignBody,
+      'assign-while-promoted',
+    )
+    expect(promotedMeanwhile.status).toBe(409)
+    expect(await promotedMeanwhile.json()).toMatchObject({
+      code: 'EnterpriseRoleAssignmentMemberChanged',
+    })
+    expect((await identity.getSnapshot(workspaceId)).roleAssignments).toEqual([])
+
+    storedVersion = 1
+    const created = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      assignBody,
+      'assign-after-reload',
+    )
+    expect(created.status).toBe(201)
+    const { assignment } = await created.json() as { assignment: { id: string } }
+
+    storedVersion = 2
+    const roleChangedMeanwhile = await sendAssignmentRequest(
+      `/api/enterprise/security/role-assignments/${encodeURIComponent(assignment.id)}`,
+      'DELETE',
+    )
+    expect(roleChangedMeanwhile.status).toBe(409)
+    expect(await roleChangedMeanwhile.json()).toMatchObject({
+      code: 'EnterpriseRoleAssignmentMemberChanged',
+    })
+    expect((await identity.getSnapshot(workspaceId)).roleAssignments).toHaveLength(1)
+
+    storedVersion = 1
+    const removed = await sendAssignmentRequest(
+      `/api/enterprise/security/role-assignments/${encodeURIComponent(assignment.id)}`,
+      'DELETE',
+    )
+    expect(removed.status).toBe(204)
+  })
+})
+
+test('pins the Enterprise state that showed no assignments when promoting a member', async () => {
+  await withTestEnvironment({
+    ...enterpriseEnvironment,
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+  }, async () => {
+    const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:unrelated',
+      name: 'Unrelated',
+      permissions: ['workspace.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    })
+
+    const promotion = await sendAssignmentRequest(
+      '/api/workspace/members/sato@example.com',
+      'PATCH',
+      { role: 'admin', expectedVersion: 1 },
+    )
+    expect(promotion.status).toBe(200)
+    const guestChange = await sendAssignmentRequest(
+      '/api/workspace/members/suzuki@example.com',
+      'PATCH',
+      { role: 'member', expectedVersion: 1 },
+    )
+    expect(guestChange.status).toBe(200)
+    expect(calls.workspaceMemberUpdates.map((update) => update.authorizationConditionChecks))
+      .toEqual([
+        [{
+          ConditionCheck: expect.objectContaining({
+            TableName: 'EnterpriseIdentityTable',
+            Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' },
+            ExpressionAttributeValues: expect.objectContaining({ ':expectedControlRevision': 1 }),
+          }),
+        }],
+        undefined,
+      ])
+  })
+})
+
+test('refuses a promotion with 503 when the Enterprise revision cannot be fenced', async () => {
+  await withTestEnvironment({
+    ...enterpriseEnvironment,
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+  }, async () => {
+    const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+    /** Memory client whose snapshots carry no CONTROL revision. */
+    class RevisionlessIdentityClient extends InMemoryEnterpriseIdentityClient {
+      /**
+       * Returns the snapshot without its CONTROL revision.
+       *
+       * @param id - Workspace ID.
+       * @returns The snapshot.
+       */
+      override async getSnapshot(id: string) {
+        const { controlRevision: _controlRevision, ...snapshot } = await super.getSnapshot(id)
+        return snapshot
+      }
+    }
+    setTestAppDependencies({ enterpriseIdentity: new RevisionlessIdentityClient() })
+
+    const promotion = await sendAssignmentRequest(
+      '/api/workspace/members/sato@example.com',
+      'PATCH',
+      { role: 'admin', expectedVersion: 1 },
+    )
+    expect(promotion.status).toBe(503)
+    expect(await promotion.json()).toMatchObject({ code: 'EnterpriseAuthorizationUnavailable' })
+    expect(calls.workspaceMemberUpdates).toEqual([])
+  })
+})

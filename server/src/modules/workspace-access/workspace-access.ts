@@ -302,6 +302,12 @@ export type UpdateWorkspaceMemberInput = {
    * Private Document manager 検証時に読み込んだ ACL generation です。
    */
   expectedDocumentAuthorizationRevision?: number
+  /**
+   * Conditions on state outside Workspace Access that the update was authorized against, such as
+   * the Enterprise identity revision read while checking direct role assignments. A failed one
+   * rejects the update with `WorkspaceMemberAuthorizationChanged`.
+   */
+  authorizationConditionChecks?: readonly WorkspaceAccessTransactWriteItem[]
 }
 
 /** Directory reconciliation で member を作成または収束させる入力です。 */
@@ -2430,6 +2436,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
 
     transactItems.push(...membershipConditions)
 
+    const authorizationConditionStart = transactItems.length
+    const authorizationConditionChecks = input.authorizationConditionChecks ?? []
+    transactItems.push(...authorizationConditionChecks)
+
     if (memberAuditPut) {
       transactItems.push(memberAuditPut)
     }
@@ -2441,6 +2451,17 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       if (isAwsError(error, 'TransactionCanceledException')) {
         if (!isConditionalTransactionCancellation(error)) {
           throw toWorkspaceAccessError(error)
+        }
+
+        if (authorizationConditionChecks.some((_check, offset) =>
+          isTransactionConditionalFailureAt(error, authorizationConditionStart + offset)
+        )) {
+          throw new WorkspaceAccessError(
+            409,
+            'WorkspaceMemberAuthorizationChanged',
+            'Role assignments of this member changed. Reload and try again.',
+            { cause: error },
+          )
         }
 
         if (isTransactionConditionalFailureAt(error, planningRevisionItemIndex)) {
@@ -3545,6 +3566,62 @@ function normalizeEmail(value: string) {
 function normalizeOptional(value: string | undefined) {
   const normalized = value?.trim()
   return normalized || undefined
+}
+
+/** Input for a commit-time condition that pins one Workspace member record to the version read. */
+export type WorkspaceMemberVersionConditionInput = {
+  /** Owning Workspace identifier. */
+  readonly workspaceId: string
+  /** Stable member key whose record is pinned. */
+  readonly memberKey: string
+  /** Version that was read, or undefined when the member record did not exist. */
+  readonly expectedVersion?: number
+  /** Workspace Access table name; defaults to the configured table. */
+  readonly tableName?: string
+}
+
+/**
+ * Builds a condition that fails when a Workspace member record changed since it was read.
+ *
+ * @remarks
+ * Other modules add it to their own transaction when a decision depended on the member's role
+ * or status, so a concurrent role change cancels the write instead of slipping past the check.
+ * Every role and status change advances the member version.
+ * @param input - Member and the version the caller decided on.
+ * @returns A DynamoDB condition check on the member record.
+ */
+export function createWorkspaceMemberVersionConditionCheck(
+  input: WorkspaceMemberVersionConditionInput,
+): WorkspaceAccessTransactWriteItem {
+  const tableName = input.tableName ??
+    readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
+    'mukuroji-workspace-access-local'
+  const key = {
+    workspaceId: normalizeRequired(input.workspaceId, 'Workspace ID'),
+    recordKey: createMemberRecordKey(input.memberKey),
+  }
+  if (input.expectedVersion === undefined) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: 'attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: { '#recordKey': 'recordKey' },
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression: '#entryType = :entryType AND #version = :version',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#version': 'version' },
+      ExpressionAttributeValues: {
+        ':entryType': 'workspace-member',
+        ':version': input.expectedVersion,
+      },
+    },
+  }
 }
 
 function addDays(value: Date, days: number) {

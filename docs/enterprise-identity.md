@@ -308,7 +308,11 @@ permission を足せません（`403 EnterpriseRoleAssignmentAdminProtected`）�
 管理系 permission を含まないこと（guest には guest 可であること）を、書き込む state の role 定義で再確認します。
 解除時の管理系 role の判定も、削除する state の role 定義で行います。
 Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
-`409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
+`409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。
+割り当ての作成・解除は、判定に使った member の version を条件に書き込むので、判定の後に member の role や
+status が変わると `409 EnterpriseRoleAssignmentMemberChanged` になります。Owner / admin への変更も、
+assignment がないことを確かめた enterprise identity の revision を条件に書き込み、その間に割り当てが
+作られると `409 WorkspaceMemberAuthorizationChanged` になります（ADR 0049）。Guest になった member の direct assignment は、
 評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを
 使います。
 
