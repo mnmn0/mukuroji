@@ -69,6 +69,17 @@ describe('Automation management validation domain', () => {
       .toThrow(`Work Item template title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
   })
 
+  test('rejects a Project template name that Project creation would refuse', () => {
+    const template = (nameJa: string) => ({
+      kind: 'project',
+      name: 'Project template',
+      enabled: true,
+      payload: { nameJa },
+    })
+    expect(() => validateCreateAutomationTemplateInput(template('line\nbreak')))
+      .toThrow('Project template Japanese name must not contain control characters.')
+  })
+
   test('validates webhook and recurring inputs at a transport-neutral boundary', () => {
     expect(validateCreateAutomationInboundWebhookEndpointInput({ name: '  CI  ' }))
       .toEqual({ name: 'CI' })

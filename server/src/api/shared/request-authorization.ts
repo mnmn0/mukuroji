@@ -582,6 +582,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/archive',
     permission: 'projects.manage',
   },
+  // The archive impact shown before an archive is gated like the archive itself.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/archive-impact',
+    permission: 'projects.manage',
+  },
   // Restoring or renaming a Project is gated like archiving it.
   {
     method: '*',
@@ -636,6 +642,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId/archive',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/archive-impact',
     permission: 'teams.manage',
   },
   // Listing archived Teams, reordering, restoring, and renaming are gated like archiving.
