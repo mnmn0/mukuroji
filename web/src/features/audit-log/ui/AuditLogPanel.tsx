@@ -17,7 +17,11 @@ import {
   suggestedAuditEventTypes,
   suggestedAuditTargetTypes,
 } from '../model/auditEventTypes'
-import type { AuditLogFilterDraft, AuditLogFilterProblem } from '../model/auditLogFilters'
+import {
+  changeAuditLogTargetType,
+  type AuditLogFilterDraft,
+  type AuditLogFilterProblem,
+} from '../model/auditLogFilters'
 import type { IssuedAuditExportLinks } from '../mutations/useAuditExportActions'
 import { AuditExportSection } from './AuditExportSection'
 
@@ -111,7 +115,8 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
    */
   const field = (name: keyof AuditLogFilterDraft) => `${formId}-${name}`
   /**
-   * Replaces one form value.
+   * Replaces one form value. Changing the target type goes through its own handler, which
+   * also clears the target ID so a stale ID never outlives its type.
    *
    * @param name - Form field.
    * @param value - New value.
@@ -200,7 +205,7 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
             <select
               className="workbench-input min-h-10 px-3"
               id={field('targetType')}
-              onChange={(event) => update('targetType', event.target.value)}
+              onChange={(event) => onChangeDraft(changeAuditLogTargetType(draft, event.target.value))}
               value={draft.targetType}
             >
               <option value="">{t('auditLog.filter.anyTarget')}</option>

@@ -89,6 +89,18 @@ export function buildAuditLogFilters(draft: AuditLogFilterDraft, timeZone?: stri
 }
 
 /**
+ * Changes the target type of the form, clearing a target ID that belonged to another type.
+ *
+ * @param draft - Current form values.
+ * @param targetType - New target type, or empty for every target.
+ * @returns The new form values; the same object when the type does not change.
+ */
+export function changeAuditLogTargetType(draft: AuditLogFilterDraft, targetType: string): AuditLogFilterDraft {
+  if (draft.targetType === targetType) return draft
+  return { ...draft, targetType, targetId: '' }
+}
+
+/**
  * Returns whether filters narrow the search in any way.
  *
  * @param filters - Search filters.

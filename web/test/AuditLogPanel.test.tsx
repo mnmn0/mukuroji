@@ -8,12 +8,14 @@ import { auditEventsFixture, auditExportsFixture } from '../src/features/audit-l
 import { formatAuditEventType } from '../src/features/audit-log/model/auditEventTypes'
 import {
   buildAuditLogFilters,
+  changeAuditLogTargetType,
   emptyAuditLogFilterDraft,
   zonedDayBoundary,
 } from '../src/features/audit-log/model/auditLogFilters'
 import { AuditLogPanel, type AuditLogPanelProps } from '../src/features/audit-log/ui/AuditLogPanel'
 
 const originalFetch = globalThis.fetch
+
 
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -95,6 +97,13 @@ describe('audit log filters', () => {
     expect(buildAuditLogFilters({ ...emptyAuditLogFilterDraft, eventTypes })).toEqual({ ok: false, problem: 'tooManyEventTypes' })
     expect(buildAuditLogFilters({ ...emptyAuditLogFilterDraft, fromDate: '2026-11-16', toDate: '2026-11-10' }, 'UTC'))
       .toEqual({ ok: false, problem: 'invalidPeriod' })
+  })
+
+  test('clears the target ID when the target type changes', () => {
+    const draft = { ...emptyAuditLogFilterDraft, targetType: 'member', targetId: 'm-1', actorId: 'sub-sato' }
+
+    expect(changeAuditLogTargetType(draft, '')).toEqual({ ...emptyAuditLogFilterDraft, actorId: 'sub-sato' })
+    expect(changeAuditLogTargetType(draft, 'member')).toBe(draft)
   })
 
   test('drops a target ID only when it is empty and searches everything without filters', () => {
