@@ -97,6 +97,7 @@ import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
+import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -664,6 +665,19 @@ export function PlanningPage() {
                   locale={locale}
                   t={t}
                   timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
+          renderEntityActivity={accessToken && snapshot
+            ? (entity) => (
+                <PlanningEntityActivityContainer
+                  accessToken={accessToken}
+                  entities={snapshot.entities}
+                  entityId={entity.id}
+                  key={entity.id}
+                  labels={labels.entityActivity}
+                  ownerOptions={ownerOptions}
+                  revision={snapshot.revision}
                 />
               )
             : undefined}
