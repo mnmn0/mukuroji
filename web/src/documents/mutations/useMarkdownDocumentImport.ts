@@ -3,8 +3,22 @@ import {
   createMutationFingerprint,
   createMutationRequestRunner,
 } from '../../shared/api/mutationHeaders'
-import { createDocument, type CreateDocumentInput } from '../api'
+import {
+  applyDocumentOperations,
+  createDocument,
+  type CreateDocumentInput,
+} from '../api'
 import { createDocumentClientId } from '../model/document'
+import {
+  planMarkdownFolderImport,
+  type MarkdownFolderImportFailure,
+  type MarkdownFolderImportRequest,
+} from '../model/markdownFolderImport'
+import {
+  createMarkdownFolderImportProgress,
+  runMarkdownFolderImport,
+  type MarkdownFolderImportProgress,
+} from './markdownFolderImportRunner'
 import {
   convertMarkdownToDocument,
   type MarkdownDocumentImportRequest,
@@ -49,6 +63,7 @@ export function useMarkdownDocumentImport({
 }: UseMarkdownDocumentImportOptions) {
   const [mutationRunner] = useState(createMutationRequestRunner)
   const retainedRef = useRef<RetainedImport | undefined>(undefined)
+  const retainedFolderRef = useRef<MarkdownFolderImportProgress | undefined>(undefined)
   const pendingRef = useRef(false)
   const [isImporting, setIsImporting] = useState(false)
 
@@ -121,5 +136,83 @@ export function useMarkdownDocumentImport({
     return undefined
   }
 
-  return { importMarkdown, isImporting }
+  /**
+   * Creates a folder for each directory and a page for each Markdown file of
+   * a chosen folder, then points relative links between the files at the
+   * created pages.
+   *
+   * @param request - Markdown files and destination.
+   * @returns Why the folder cannot be imported, or undefined once every page
+   *   is created or when the import is skipped.
+   */
+  const importMarkdownFolder = async (
+    request: MarkdownFolderImportRequest,
+  ): Promise<MarkdownFolderImportFailure | undefined> => {
+    if (!accessToken || pendingRef.current) return undefined
+    pendingRef.current = true
+    setIsImporting(true)
+    try {
+      return await planAndCreateFolder(accessToken, request)
+    } finally {
+      pendingRef.current = false
+      setIsImporting(false)
+    }
+  }
+
+  /**
+   * Plans the folder import, or resumes the plan of a failed attempt with the
+   * same files, and creates what is not created yet.
+   *
+   * @param token - Workspace API token.
+   * @param request - Markdown files and destination.
+   * @returns Why the folder cannot be imported, or undefined once done.
+   */
+  const planAndCreateFolder = async (
+    token: string,
+    request: MarkdownFolderImportRequest,
+  ): Promise<MarkdownFolderImportFailure | undefined> => {
+    const fingerprint = await createMutationFingerprint(
+      request.projectId ?? '',
+      ...request.files.flatMap((file) => [file.path, file.source]),
+    )
+    let state = retainedFolderRef.current?.fingerprint === fingerprint
+      ? retainedFolderRef.current
+      : undefined
+    if (!state) {
+      const planned = planMarkdownFolderImport(request.files, {
+        createId: createDocumentClientId,
+      })
+      if (!planned.ok) {
+        return { code: planned.code, ...(planned.path ? { path: planned.path } : {}) }
+      }
+      state = createMarkdownFolderImportProgress({
+        clientId: createDocumentClientId('markdown-import'),
+        fingerprint,
+        plan: planned.plan,
+        positionBase: new Date().toISOString(),
+        scope: request.projectId
+          ? { projectId: request.projectId, type: 'project' }
+          : { type: 'workspace' },
+      })
+      retainedFolderRef.current = state
+    }
+    await runMarkdownFolderImport(state, {
+      applyOperations: (operationKey, fingerprint, documentId, input) =>
+        mutationRunner.run(operationKey, fingerprint, (context) =>
+          applyDocumentOperations(token, documentId, input, context),
+        ),
+      create: (operationKey, fingerprint, input) =>
+        mutationRunner.run(operationKey, fingerprint, (context) =>
+          createDocument(token, input, context),
+        ),
+    })
+    retainedFolderRef.current = undefined
+    const { plan, documentIds } = state
+    const openedKey = plan.rootKey ?? plan.pages[0]?.key
+    const openedId = openedKey ? documentIds.get(openedKey) : undefined
+    if (openedId) await onCreated(openedId)
+    return undefined
+  }
+
+  return { importMarkdown, importMarkdownFolder, isImporting }
 }
