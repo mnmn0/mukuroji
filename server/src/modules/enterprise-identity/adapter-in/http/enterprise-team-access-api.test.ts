@@ -332,3 +332,23 @@ test('rejects capacity request creation when Team teams.manage access is missing
     })
   })
 })
+
+test('requires projects.manage on every Project to add a member to all Projects of a Team', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const send = (authorization: string) => app.request('/api/teams/core-team/members', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memberKey: 'sato@example.com', role: 'member' }),
+    })
+
+    const teamOnly = await send(await configureEnterpriseTeamAccess(['teams.read', 'teams.manage']))
+    expect(teamOnly.status).toBe(403)
+    expect(await teamOnly.json()).toMatchObject({ code: 'TeamProjectsManageDenied' })
+
+    const withProjects = await send(
+      await configureEnterpriseTeamAccess(['teams.read', 'teams.manage', 'projects.manage']),
+    )
+    expect(withProjects.status).toBe(200)
+    expect(await withProjects.json()).toMatchObject({ addedProjectIds: ['refero'] })
+  })
+})

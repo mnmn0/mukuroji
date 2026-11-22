@@ -11,6 +11,7 @@ import { isRecord } from '../shared/value-guards'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireWorkspaceAdministration,
   toProjectDataErrorResponse,
 } from '../shared/project-access'
@@ -130,14 +131,33 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
       }
 
+      const activeProjects = team.projects.filter((project) => project.archivedAt === undefined)
+      // Granting a Project role needs `projects.manage` on that Project, the same as the Project
+      // member route, so a role limited to Team management cannot grant Project access. Every
+      // Project is checked before the first grant, so a refusal changes nothing.
+      if (
+        principal.enterprisePermissions !== undefined &&
+        activeProjects.some((project) => !hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: project.id,
+          parentTeamId: teamId,
+        }))
+      ) {
+        throw new ProjectDataError(
+          403,
+          'TeamProjectsManageDenied',
+          'Adding a member to every Project of a Team requires managing each of its Projects.',
+        )
+      }
+
       const response: AddDirectoryTeamMemberResponse = {
         teamId,
         memberKey: profile.id,
         addedProjectIds: [],
         existingProjectIds: [],
       }
-      for (const project of team.projects) {
-        if (project.archivedAt !== undefined) continue
+      for (const project of activeProjects) {
         const members = await workspaceDependencies.projectDirectory.getProjectMembers(
           principal.directoryId,
           project.id,
@@ -301,6 +321,7 @@ const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 4
   WorkspaceMemberInactive: 409,
   WorkspaceMemberVersionConflict: 409,
   DirectoryAuthorizationChanged: 403,
+  TeamProjectsManageDenied: 403,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
   ProjectNotArchived: 409,
