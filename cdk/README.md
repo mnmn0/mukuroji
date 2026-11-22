@@ -1310,6 +1310,14 @@ AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
 削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
 確認します。この仕組みより前に deploy した release は残っていないため戻せません。
 
+`releases/` と `release-assets.txt` は deploy と rollback の script が bucket を直接読むためだけに置いています。
+CloudFront の viewer-request function がこれらの path に 404 を返すので、ブラウザからは開けません。
+
+Web build の SHA と `/api/health` の `applicationCommitSha` が違うと、画面に再読み込みを促すお知らせが出ます。
+deploy は API の後に Web を upload するため、その間に開いていた画面にも出ます。API だけ、または Web だけを
+戻した場合は食い違いが続き、再読み込みしても「更新の途中の可能性があります」という旨のお知らせが出続けるので、
+両方を同じ commit に揃えてください。
+
 #### Web bucket の保存期間
 
 Web bucket は versioning を有効にし、次の期間で古い file を消します。

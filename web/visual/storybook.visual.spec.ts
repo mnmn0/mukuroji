@@ -9,12 +9,16 @@ const visualStoryIds = [
   'application-pages-workspaceroutes--settings-route',
   'application-pages-reportspage--overview',
   'application-pages-planningpage--timeline',
+  'application-projects-project-overview--all-widgets',
   'application-pages-loginpage--default',
   'application-notifications-settings--default',
   'application-documents-workspace--library-home',
   'design-system-responsive-disclosure--desktop',
   'design-system-app-update-notice--english',
 ] as const
+
+/** Stories taller than the viewport whose lower widgets are part of the comparison. */
+const fullPageStoryIds: ReadonlySet<string> = new Set(['application-projects-project-overview--all-widgets'])
 
 /** Themes compared for every story. */
 const visualThemes = ['light', 'dark'] as const
@@ -32,7 +36,7 @@ for (const storyId of visualStoryIds) {
         await document.fonts.ready
       })
 
-      await expect(page).toHaveScreenshot(`${storyId}--${theme}.png`)
+      await expect(page).toHaveScreenshot(`${storyId}--${theme}.png`, { fullPage: fullPageStoryIds.has(storyId) })
     })
   }
 }
