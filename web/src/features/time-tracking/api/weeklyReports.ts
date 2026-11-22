@@ -1,10 +1,12 @@
 import {
   isWeeklyReportDate,
+  parseTeamWeeklySummaryResponse,
   parseWeeklyReportIndirectTime,
   WEEKLY_REPORT_SECTION_NAMES,
   type SubmitWeeklyReportRequest,
   type TeamWeeklyReportMemberStatus,
   type TeamWeeklyReportStatusResponse,
+  type TeamWeeklySummaryResponse,
   type WeeklyReportDraft,
   type WeeklyReportHistoryEntry,
   type WeeklyReportHistoryResponse,
@@ -341,4 +343,27 @@ export async function getTeamWeeklyReportStatus(
     })
   }
   return { teamId: data.teamId, weekStart: data.weekStart, members }
+}
+
+/**
+ * Reads the week of the Team and of each Project the signed-in member may read: completed Work
+ * Items, delays against the schedule baseline, overdue Work Items, and Milestones reached.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param teamId - Team ID.
+ * @param weekStart - First day of the week.
+ * @returns The summary, counted by the server over the Work Items the member may read.
+ */
+export async function getTeamWeeklySummary(
+  accessToken: string,
+  teamId: string,
+  weekStart: string,
+): Promise<TeamWeeklySummaryResponse> {
+  const data = await requestTimeTrackingJson(
+    createTeamTimeTrackingUrl(teamId, `/weekly-summary?weekStart=${encodeURIComponent(weekStart)}`),
+    accessToken,
+  )
+  const summary = parseTeamWeeklySummaryResponse(data)
+  if (!summary) throw invalidResponse('Team weekly summary')
+  return summary
 }
