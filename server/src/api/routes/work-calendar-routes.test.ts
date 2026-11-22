@@ -193,6 +193,16 @@ test('saves a Team calendar, rewrites the following Work Items, and refuses a st
   const read = await request('/api/teams/core-team/work-calendar')
   expect(await read.json()).toMatchObject({ changeAdjustment: 'keep-end-date', calendar: { revision: 1 } })
 
+  // A retry of the same save resumes it instead of failing on the revision it already took.
+  const resumed = await request('/api/teams/core-team/work-calendar', 'PUT', {
+    overrides: { additionalHolidays: ['2026-12-09'] },
+    adjustment: 'keep-end-date',
+    expectedRevision: 0,
+  })
+  expect(resumed.status).toBe(200)
+  // The fake store keeps the old schedules, so the shared Work Item still needs its rewrite.
+  expect(await resumed.json()).toMatchObject({ calendar: { revision: 1 }, updatedCount: 1, conflictCount: 0 })
+
   const stale = await request('/api/teams/core-team/work-calendar', 'PUT', {
     overrides: { additionalHolidays: [] },
     adjustment: 'keep-duration',

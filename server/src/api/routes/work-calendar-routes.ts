@@ -5,6 +5,7 @@ import {
   isWorkCalendarAdjustment,
   readWorkCalendarOverrides,
   readWorkspaceCalendarSettings,
+  type WorkCalendar,
   type WorkCalendarAdjustment,
   type WorkCalendarOverrides,
   type WorkCalendarResponse,
@@ -14,6 +15,7 @@ import {
   InvalidStoredWorkCalendarError,
   WorkCalendarRevisionConflictError,
   type StoredWorkCalendarScope,
+  type WorkCalendarWrite,
 } from '../../modules/tenant-administration'
 import {
   applyWorkCalendarChange,
@@ -144,17 +146,11 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const result = await applyWorkCalendarChange(
         change.rules,
         createWorkCalendarChangePorts(c, principal, change.teamIds, body),
-        () => workspaceDependencies.workCalendars.save(
-          principal.directoryId,
-          {
-            scope,
-            overrides: input.overrides,
-            ...(scope.kind === 'team' ? { changeAdjustment: input.adjustment } : {}),
-          },
-          input.expectedRevision,
-          principal.userKey,
-          new Date().toISOString(),
-        ),
+        () => saveOrResumeWorkCalendar(principal, {
+          scope,
+          overrides: input.overrides,
+          ...(scope.kind === 'team' ? { changeAdjustment: input.adjustment } : {}),
+        }, input.expectedRevision),
       )
       return c.json(result)
     } catch (error) {
@@ -207,6 +203,65 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       return toWorkCalendarErrorResponse(c, error)
     }
   })
+}
+
+/**
+ * Saves a Team or Project calendar, or resumes a save this member already committed.
+ *
+ * When an earlier attempt saved the calendar but failed while rewriting Work Items, its retry
+ * carries the same expected revision. The stored row is then exactly the next revision with the
+ * same rules by the same member, so the retry takes it as saved and rewrites the Work Items that
+ * still have the old calendar (ADR 0058).
+ *
+ * @param principal - Member who saves the calendar.
+ * @param write - Scope, overrides, and adjustment to save.
+ * @param expectedRevision - Revision the member edited.
+ * @returns The saved calendar.
+ * @throws WorkCalendarRevisionConflictError when another save came first.
+ */
+async function saveOrResumeWorkCalendar(
+  principal: WorkspacePrincipal,
+  write: WorkCalendarWrite,
+  expectedRevision: number,
+): Promise<WorkCalendar> {
+  const { workCalendars } = workspaceDependencies
+  try {
+    return await workCalendars.save(
+      principal.directoryId,
+      write,
+      expectedRevision,
+      principal.userKey,
+      new Date().toISOString(),
+    )
+  } catch (error) {
+    if (!(error instanceof WorkCalendarRevisionConflictError)) throw error
+    const stored = (await workCalendars.listTeam(principal.directoryId, write.scope.teamId)).find((calendar) =>
+      calendar.scope.kind === write.scope.kind &&
+      (calendar.scope.kind === 'team' || write.scope.kind === 'team' || calendar.scope.projectId === write.scope.projectId)
+    )
+    if (
+      stored &&
+      stored.revision === expectedRevision + 1 &&
+      stored.updatedBy === principal.userKey &&
+      haveSameWorkCalendarOverrides(stored, write.overrides) &&
+      stored.changeAdjustment === write.changeAdjustment
+    ) {
+      return stored
+    }
+    throw error
+  }
+}
+
+/**
+ * Compares the rules of a stored calendar with the overrides of a save.
+ *
+ * @param stored - Stored calendar.
+ * @param overrides - Overrides of the save.
+ * @returns Whether both have the same rules.
+ */
+function haveSameWorkCalendarOverrides(stored: WorkCalendarOverrides, overrides: WorkCalendarOverrides): boolean {
+  return JSON.stringify([stored.workingWeekdays ?? null, stored.publicHolidays ?? null, stored.additionalHolidays]) ===
+    JSON.stringify([overrides.workingWeekdays ?? null, overrides.publicHolidays ?? null, overrides.additionalHolidays])
 }
 
 /** Which Teams a calendar change reads and the rules it follows. */

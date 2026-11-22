@@ -61,6 +61,9 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   Project ごとの baseline fence で DynamoDB の transaction 上限を超えた transaction は半分に分けて書く。
   書き込みのたびに変更者の認可（Workspace member の version など）を fence し、変わっていたら変更を止める。
   1回の変更で書き換えるのは 480 件まで、超えると 413。
+  保存のあとで書き換えが途中で失敗した場合、同じ変更者が同じ `expectedRevision` と同じ規則で送り直すと、
+  保存済みの行（次の revision）を保存済みとして扱い、古い写しのままの `shared` な Work Item を書き換える。
+  再開では変更前のカレンダーが分からないので、まだ取り込んでいない旧来の Work Item は取り込まない。
   他の更新と衝突した transaction は、読み直した Work Item で同じ変更前・変更後のカレンダーから1件ずつ計画し直して再試行する
   （取り込み中の旧来の Work Item も対象から外れない）。それでも衝突した Work Item は数だけ返す。
 - Project のカレンダーの変更が書き換えるのは、その Project に割り当てられた Work Item だけ（Project manager が他の Project の日程を変えない）。
