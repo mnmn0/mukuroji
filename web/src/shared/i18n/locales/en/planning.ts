@@ -311,4 +311,6 @@ export const planningMessages = {
   'planning.activity.value.off': 'Off',
   'planning.activity.before': 'Before:',
   'planning.activity.after': 'After:',
+  'planning.cycleWeekStart.error': 'Could not load the Workspace week start. New Cycle dates are proposed from Monday.',
+  'planning.cycleWeekStart.staleError': 'Could not reload the Workspace week start. New Cycle dates are proposed from the settings loaded earlier.',
 } as const

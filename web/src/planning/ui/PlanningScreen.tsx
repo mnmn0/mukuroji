@@ -309,6 +309,13 @@ export type PlanningScreenProps = {
    * New Cycles start on this Workspace week start day by default; Monday when omitted.
    */
   weekStartDay?: WorkspaceWeekStartDay
+  /**
+   * Shown in the Cycle settings of the create form when the Workspace week start could not be
+   * read, so the proposed dates are not taken for the configured calendar.
+   */
+  weekStartErrorMessage?: string
+  /** Reads the Workspace week start again after a failure. */
+  onRetryWeekStart?: () => void
   /** 画面で使う locale 済み文言です。 */
   labels: PlanningLabels
   /** API から取得した planning snapshot です。 */
@@ -554,6 +561,8 @@ export function PlanningScreen({
   updateHistoryErrorMessage,
   updateTargetDetails = [],
   weekStartDay,
+  weekStartErrorMessage,
+  onRetryWeekStart,
 }: PlanningScreenProps) {
   const activeEntities = useMemo(
     () => snapshot?.entities.filter((entity) => !entity.archivedAt) ?? [],
@@ -572,6 +581,20 @@ export function PlanningScreen({
       {ownerOptionsErrorMessage}
       {onRetryOwnerOptions ? (
         <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryOwnerOptions}>
+          {labels.retry}
+        </button>
+      ) : null}
+    </p>
+  ) : undefined
+  const weekStartNotice = weekStartErrorMessage ? (
+    <p
+      className="col-span-full flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-warning)]"
+      data-testid="planning-cycle-week-start-error"
+      role="alert"
+    >
+      {weekStartErrorMessage}
+      {onRetryWeekStart ? (
+        <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryWeekStart}>
           {labels.retry}
         </button>
       ) : null}
@@ -885,6 +908,7 @@ export function PlanningScreen({
                 ownerNotice={ownerNotice}
                 ownerOptions={resolvedOwnerOptions}
                 weekStartDay={weekStartDay}
+                weekStartNotice={weekStartNotice}
               />
               {archive ? (
                 <PlanningArchivePanel
@@ -1643,6 +1667,7 @@ function CreateEntityPanel({
   ownerNotice,
   ownerOptions,
   weekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+  weekStartNotice,
 }: {
   canCreateInScope?: PlanningScreenProps['canCreateInScope']
   canManageEntity?: PlanningScreenProps['canManageEntity']
@@ -1656,6 +1681,8 @@ function CreateEntityPanel({
   ownerOptions: readonly PlanningOwnerOption[]
   /** Workspace week start day that a new weekly Cycle starts on. */
   weekStartDay?: WorkspaceWeekStartDay
+  /** Notice in the Cycle settings when the Workspace week start could not be read. */
+  weekStartNotice?: ReactNode
 }) {
   const ownerListId = useId()
   const [entityType, setEntityType] = useState<PlanningEntityType>(() =>
@@ -1825,6 +1852,7 @@ function CreateEntityPanel({
       </div>
       {entityType === 'cycle' ? (
         <div className="workbench-panel-muted grid grid-cols-4 gap-3 p-4 max-[800px]:grid-cols-2 max-[520px]:grid-cols-1">
+          {weekStartNotice}
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">{labels.entityEditor.cadenceCount}<input className="workbench-input h-10 px-3" min={1} name="cadenceCount" required step={1} type="number" value={cadenceCount} onChange={(event) => setCadenceCount(event.target.value)} /></label>
           <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.cadenceUnit}<select className="workbench-input h-10 px-3" name="cadenceUnit" value={cadenceUnit} onChange={(event) => setCadenceUnit(event.target.value === 'month' ? 'month' : 'week')}><option value="week">{labels.cadenceWeek}</option><option value="month">{labels.cadenceMonth}</option></select></label>
           <PlanningInput label={labels.entityEditor.capacity} min={1} name="capacity" required type="number" defaultValue={String(DEFAULT_CYCLE_CAPACITY)} />

@@ -630,6 +630,10 @@ export function PlanningPage() {
         </div>
         <PlanningScreen
           weekStartDay={workspaceCalendar.settings?.weekStartDay}
+          weekStartErrorMessage={workspaceCalendar.error
+            ? t(workspaceCalendar.settings ? 'planning.cycleWeekStart.staleError' : 'planning.cycleWeekStart.error')
+            : undefined}
+          onRetryWeekStart={workspaceCalendar.retry}
           updateBaselineDelays={selectedUpdateTarget && updateBaselineDelays
             ? { target: selectedUpdateTarget, delays: updateBaselineDelays }
             : undefined}
