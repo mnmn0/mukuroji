@@ -173,7 +173,9 @@ export function parseAgentUsageBucket(item: Record<string, unknown>): AgentUsage
 
 /** DynamoDB implementation that keeps usage rows in the Agent Runs table. */
 export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
+  /** Document client for the Agent Runs table. */
   readonly #client: AgentRunUsageDocumentClient
+  /** Agent Runs table name. */
   readonly #tableName: string
 
   /**
