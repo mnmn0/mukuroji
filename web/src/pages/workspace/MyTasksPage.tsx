@@ -477,10 +477,14 @@ export function MyTasksPage() {
       const accessToken = workspace.accessToken
       const guardEnterpriseSession = workspace.guardEnterpriseSession
       if (!myTasksHierarchiesKey || !accessToken) return
-      const hierarchies = await guardEnterpriseSession(
-        loadTeamWorkItemHierarchies(normalizeHierarchyTeamIds(myTasksOutlineTeamIds), accessToken),
+      // The pending read is handed to SWR, which drops it when a later refresh started after it.
+      await mutateCache(
+        myTasksHierarchiesKey,
+        guardEnterpriseSession(
+          loadTeamWorkItemHierarchies(normalizeHierarchyTeamIds(myTasksOutlineTeamIds), accessToken),
+        ),
+        { revalidate: false },
       )
-      await mutateCache(myTasksHierarchiesKey, hierarchies, { revalidate: false })
     },
     tasksCacheKey: workItems.workItemsKey,
   }), [
