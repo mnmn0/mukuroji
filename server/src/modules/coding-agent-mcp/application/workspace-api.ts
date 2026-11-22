@@ -120,20 +120,20 @@ export type WorkspaceIssueStatus = {
 export function createWorkspaceIssues(api: WorkspaceApi) {
   /**
    * Resolves a key such as `ABC-123`, or a Work Item ID with its Team, to the Work Item.
-   * @param reference - Key or Work Item ID.
-   * @param teamId - Team of a Work Item ID; not needed for a key.
+   * With a Team the reference is always an ID, because an older Work Item ID such as `task-1`
+   * can look like a key of another Work Item.
+   * @param reference - Key, or Work Item ID when `teamId` is given.
+   * @param teamId - Team of a Work Item ID; omitted for a key.
    * @returns The Team and Work Item ID.
    */
   async function resolveIssue(reference: string, teamId?: string): Promise<ResolvedIssueReference> {
+    if (teamId !== undefined) return { teamId, workItemId: reference }
     const key = parseWorkItemKey(reference)
-    if (key) {
-      const found = await api.lookupKey(key.key)
-      return { teamId: found.teamId, workItemId: found.workItemId }
-    }
-    if (teamId === undefined) {
+    if (!key) {
       throw new AgentTaskError('invalid_request', 'Pass a key such as ABC-123, or pass teamId with a Work Item ID.')
     }
-    return { teamId, workItemId: reference }
+    const found = await api.lookupKey(key.key)
+    return { teamId: found.teamId, workItemId: found.workItemId }
   }
 
   /**

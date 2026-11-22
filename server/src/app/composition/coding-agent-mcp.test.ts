@@ -498,6 +498,10 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
         { id: 'done', name: 'Done', category: 'completed', initial: false },
       ],
     }] } })
+    // With a Team the value is an ID even when it looks like a key.
+    expect((await call(client, 'get_issue', { id: 'task', teamId: 'team' })).content).toMatchObject({ data: { id: 'task', key: 'ABC-7' } })
+    const keyLikeId = await call(client, 'get_issue', { id: 'ABC-7', teamId: 'team' })
+    expect(keyLikeId.content).toMatchObject({ error: { code: 'not_found' } })
     const withoutTeam = await call(client, 'get_issue', { id: 'task' })
     expect(withoutTeam.isError).toBe(true)
     expect(withoutTeam.content).toMatchObject({ error: { code: 'invalid_request' } })

@@ -87,7 +87,7 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_users` | Project の active なメンバーと role。担当者を選ぶため。Project の member 以上の権限が要る |
 | `list_issue_statuses` | Team の Work Item Type ごとの workflow status（ID・名前・カテゴリー・初期 status） |
 | `list_issues` | Team の Work Item を Project・担当者（メンバー ID か `me`）・status・Type・更新時刻で絞ってページ取得 |
-| `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す |
+| `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す。`teamId` を渡すと値は常に ID として読む（`task-1` のような古い ID を key と取り違えないため） |
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
 
 作成・更新のツール（`save_issue`、`save_comment` など）は #705 の続きで追加します。
