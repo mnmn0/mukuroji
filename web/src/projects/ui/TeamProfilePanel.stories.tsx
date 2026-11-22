@@ -87,6 +87,7 @@ const meta = {
       existingProjectIds: ['refero'],
     }),
     onRetryWorkspaceMembers: () => undefined,
+    onRetryMembers: () => undefined,
   },
 } satisfies Meta<typeof TeamProfilePanel>
 

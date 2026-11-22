@@ -38,6 +38,11 @@ export function useTeamProfileActions(accessToken: string): TeamProfileActions {
   const [pending, setPending] = useState(false)
   const [errorMessageKey, setErrorMessageKey] = useState<MessageKey>()
 
+  /** Reloads the directory and every Project member list a Team settings change can affect. */
+  const refresh = async () => {
+    await Promise.all([mutate(isDirectoryAdministrationKey), mutate(isProjectMemberKey)])
+  }
+
   /**
    * Runs one change and refreshes the lists it affects.
    *
@@ -50,10 +55,13 @@ export function useTeamProfileActions(accessToken: string): TeamProfileActions {
     setErrorMessageKey(undefined)
     try {
       const result = await action()
-      await Promise.all([mutate(isDirectoryAdministrationKey), mutate(isProjectMemberKey)])
+      await refresh()
       return result
     } catch (error) {
       setErrorMessageKey(readTeamProfileErrorKey(error))
+      // A Team-wide add commits each Project separately, so a failure after some grants still
+      // changed memberships; reload the lists so the panel shows what was granted.
+      await refresh()
       return undefined
     } finally {
       setPending(false)

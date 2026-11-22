@@ -106,6 +106,7 @@ export function TeamProfilePanelContainer({ accessToken, locale }: TeamProfilePa
       workspaceMembersStatus={workspaceMembersStatus}
       onAddMember={actions.addMember}
       onRetryWorkspaceMembers={() => void access.mutate()}
+      onRetryMembers={() => void projectMembers.mutate()}
       onSaveProfile={actions.saveProfile}
       onSelectTeam={setSelectedTeamId}
     />
@@ -143,6 +144,8 @@ export type TeamProfilePanelProps = {
   workspaceMembersStatus: TeamProfileWorkspaceMembersStatus
   /** Loads the Workspace member list again after it failed. */
   onRetryWorkspaceMembers: () => void
+  /** Loads the members of the Team's Projects again after some failed. */
+  onRetryMembers: () => void
   /** Whether a change is in flight. */
   pending: boolean
   /** Message of the last failed change. */
@@ -179,6 +182,7 @@ export function TeamProfilePanel({
   workspaceMembers,
   workspaceMembersStatus,
   onRetryWorkspaceMembers,
+  onRetryMembers,
   pending,
   errorMessage,
   locale,
@@ -246,6 +250,7 @@ export function TeamProfilePanel({
             members={members}
             membersLoading={membersLoading}
             membersPartial={membersPartial}
+            onRetryMembers={onRetryMembers}
             pending={pending}
             projectCount={projectCount}
             t={t}
@@ -370,6 +375,8 @@ type TeamProfileMembersProps = {
   membersLoading: boolean
   /** Whether the members of some Projects could not be read. */
   membersPartial: boolean
+  /** Loads the members of the Team's Projects again after some failed. */
+  onRetryMembers: () => void
   /** Number of active Projects of the Team. */
   projectCount: number
   /** Active Workspace members offered to add. */
@@ -396,6 +403,7 @@ function TeamProfileMembers({
   members,
   membersLoading,
   membersPartial,
+  onRetryMembers,
   projectCount,
   workspaceMembers,
   workspaceMembersReady,
@@ -447,7 +455,12 @@ function TeamProfileMembers({
         </ul>
       )}
       {membersPartial ? (
-        <p className="m-0 text-sm text-fg-amber-900" role="status">{t('projects.teamProfile.membersPartial')}</p>
+        <div className="flex flex-wrap items-center gap-3" data-testid="team-profile-members-partial" role="status">
+          <span className="text-sm text-fg-amber-900">{t('projects.teamProfile.membersPartial')}</span>
+          <button className="workbench-button-secondary min-h-10 px-4" onClick={onRetryMembers} type="button">
+            {t('projects.administration.retry')}
+          </button>
+        </div>
       ) : null}
       {projectCount === 0 ? (
         <p className="m-0 text-sm text-[var(--workbench-muted)]">{t('projects.teamProfile.noProjects')}</p>

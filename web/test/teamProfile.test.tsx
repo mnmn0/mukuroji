@@ -101,6 +101,7 @@ describe('TeamProfilePanel', () => {
         workspaceMembers={[{ memberKey: 'sato', label: '佐藤' }, { memberKey: 'tanaka', label: '田中' }]}
         workspaceMembersStatus="ready"
         onAddMember={async () => undefined}
+        onRetryMembers={() => undefined}
         onRetryWorkspaceMembers={() => undefined}
         onSaveProfile={async () => true}
         onSelectTeam={() => undefined}
@@ -111,6 +112,7 @@ describe('TeamProfilePanel', () => {
     expect(markup).toContain('<option value="sato" selected="">佐藤</option>')
     expect(markup).toContain('アルファ（manager）')
     expect(markup).toContain(t('projects.teamProfile.membersPartial'))
+    expect(markup).toContain('data-testid="team-profile-members-partial"')
     expect(markup).toContain(t('projects.teamProfile.addMember'))
   })
 
@@ -130,6 +132,7 @@ describe('TeamProfilePanel', () => {
         workspaceMembers={[]}
         workspaceMembersStatus="ready"
         onAddMember={async () => undefined}
+        onRetryMembers={() => undefined}
         onRetryWorkspaceMembers={() => undefined}
         onSaveProfile={async () => true}
         onSelectTeam={() => undefined}
@@ -158,6 +161,7 @@ describe('TeamProfilePanel', () => {
         workspaceMembers={[]}
         workspaceMembersStatus="error"
         onAddMember={async () => undefined}
+        onRetryMembers={() => undefined}
         onRetryWorkspaceMembers={() => undefined}
         onSaveProfile={async () => true}
         onSelectTeam={() => undefined}

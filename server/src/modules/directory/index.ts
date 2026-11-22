@@ -58,3 +58,10 @@ export {
   type ProjectCharterStore,
   type ResolvedProjectCharterPerson,
 } from './application/project-charter-use-cases'
+export {
+  addMemberToTeamProjectsUseCase,
+  type TeamMemberGrantCaller,
+  type TeamMemberGrantInput,
+  type TeamMemberGrantMember,
+  type TeamMemberGrantPorts,
+} from './application/team-member-grant-use-case'

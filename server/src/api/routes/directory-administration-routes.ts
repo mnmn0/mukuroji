@@ -1,15 +1,12 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
-  normalizeProjectMemberKey,
+  addMemberToTeamProjectsUseCase,
   ProjectDataError,
   type TeamSearchSource,
 } from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
-import {
-  isDirectoryTeamMemberRole,
-  type AddDirectoryTeamMemberResponse,
-} from '@mukuroji/contracts'
+import { isDirectoryTeamMemberRole } from '@mukuroji/contracts'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { isRecord } from '../shared/value-guards'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
@@ -123,73 +120,67 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       if (!isRecord(body) || typeof body.memberKey !== 'string' || !isDirectoryTeamMemberRole(body.role)) {
         throw new ProjectDataError(400, 'InvalidProjectWrite', 'memberKey and role are required.')
       }
-      const role = body.role
       const profile = await readMemberProfile(body.memberKey)
-      const directory = await workspaceDependencies.projectDirectory.getDirectoryAdministration(
-        principal.directoryId,
-      )
-      const team = directory.teams.find((candidate) =>
-        candidate.id === teamId && candidate.archivedAt === undefined
-      )
-      if (!team) {
-        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
-      }
-
-      const activeProjects = team.projects.filter((project) => project.archivedAt === undefined)
-      // Granting a Project role needs `projects.manage` on that Project, the same as the Project
-      // member route, so a role limited to Team management cannot grant Project access. Every
-      // Project is checked before the first grant, so a refusal changes nothing.
-      if (
-        principal.enterprisePermissions !== undefined &&
-        activeProjects.some((project) => !hasEnterprisePermissionAtResource(principal, 'projects.manage', {
-          workspaceId: principal.directoryId,
-          kind: 'project',
-          targetId: project.id,
-          parentTeamId: teamId,
-        }))
-      ) {
-        throw new ProjectDataError(
-          403,
-          'TeamProjectsManageDenied',
-          'Adding a member to every Project of a Team requires managing each of its Projects.',
-        )
-      }
-
-      const response: AddDirectoryTeamMemberResponse = {
-        teamId,
-        memberKey: profile.id,
-        addedProjectIds: [],
-        existingProjectIds: [],
-      }
-      // An administrator adding themselves keeps the membership version they were authorized
-      // with, advanced only by their own grants, so a role change in between still fails.
-      const addsSelf = principal.principalKind !== 'service-account' &&
-        normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(profile.id)
-      for (const project of activeProjects) {
-        // Each grant advances the member's version, so it is read again before every Project.
-        const expectedVersion = addsSelf
-          ? principal.workspaceMember.version + response.addedProjectIds.length
-          : (await requireActiveWorkspaceMember(principal.directoryId, profile.id)).version
-        // The grant is insert-only and fenced by the caller's authorization, so a role granted
-        // concurrently is kept and a caller who loses access stops the remaining grants.
-        const { added } = await workspaceDependencies.projectDirectory.addProjectMemberIfAbsent(
-          principal.directoryId,
-          teamId,
-          project.id,
-          profile.id,
-          { role, email: profile.email, name: profile.name },
-          expectedVersion,
-          createApiMutationContext(c, principal, {
+      return await addMemberToTeamProjectsUseCase(
+        {
+          getDirectoryAdministration: (workspaceId) =>
+            workspaceDependencies.projectDirectory.getDirectoryAdministration(workspaceId),
+          addProjectMemberIfAbsent: (
+            workspaceId,
+            grantTeamId,
+            projectId,
+            memberKey,
+            grant,
+            expectedVersion,
+            auditContext: ReturnType<typeof createApiMutationContext>,
+            fences,
+          ) => workspaceDependencies.projectDirectory.addProjectMemberIfAbsent(
+            workspaceId,
+            grantTeamId,
+            projectId,
+            memberKey,
+            grant,
+            expectedVersion,
+            auditContext,
+            fences,
+          ),
+          readActiveMemberVersion: async (workspaceId, memberKey) =>
+            (await requireActiveWorkspaceMember(workspaceId, memberKey)).version,
+          // Granting a Project role needs `projects.manage` on that Project, the same as the
+          // Project member route, so a role limited to Team management cannot grant access.
+          canManageProject: (projectTeamId, projectId) =>
+            principal.enterprisePermissions === undefined ||
+            hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+              workspaceId: principal.directoryId,
+              kind: 'project',
+              targetId: projectId,
+              parentTeamId: projectTeamId,
+            }),
+          createAuditContext: (projectId) => createApiMutationContext(c, principal, {
             teamId,
-            projectId: project.id,
+            projectId,
             memberKey: profile.id,
-            role,
+            role: body.role,
           }),
-          createDirectoryAuthorizationChecks(principal),
-        )
-        ;(added ? response.addedProjectIds : response.existingProjectIds).push(project.id)
-      }
-      return response
+        },
+        {
+          workspaceId: principal.directoryId,
+          teamId,
+          member: { id: profile.id, email: profile.email, name: profile.name },
+          role: body.role,
+          caller: {
+            ...(principal.principalKind === 'service-account'
+              ? {}
+              : {
+                  membership: {
+                    memberKey: principal.workspaceMember.memberKey,
+                    version: principal.workspaceMember.version,
+                  },
+                }),
+            fences: createDirectoryAuthorizationChecks(principal),
+          },
+        },
+      )
     })
   })
 
