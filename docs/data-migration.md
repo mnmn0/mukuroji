@@ -322,9 +322,9 @@ local の emulator（Floci）では CLI が初回に table を作ります。Flo
 - **Team / Workspace の partition を Query で読む row store**: [ADR 0013](adr/0013-data-migration-runner.md) のとおり、
   必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`）は parallel scan の
   segment で読み切れる規模で、Workspace をまたいで table 全体を移すので Query の単位が要りません。
-- **#335・#340・#337 の migration 定義**: これらの schema 変更は初回 deploy（#636）より前に入り、旧 version の row を
-  持つ環境がまだ無いため、migration は作りません。初回 deploy の後に保存済み row の version を上げる変更は、
-  上の確認項目に従って migration を同じ PR に入れます。push 前チェックは [AGENTS.md](../AGENTS.md) と
+- **#335・#340・#337 の migration 定義**: #335・#340 の schema 変更は初回 deploy（#636）より前に入り、旧 version の
+  row を持つ環境がまだ無いため、migration は作りません。#337 も初回 deploy より前に入るなら同じです。初回 deploy の後に
+  保存済み row の version を上げる変更（deploy 後に入る #337 を含む）は、上の確認項目に従って migration を同じ PR に入れます。push 前チェックは [AGENTS.md](../AGENTS.md) と
   review Skill の data integrity の観点で確かめます。
 - **実 AWS 上の operator proof（STS）の往復**: Floci には STS が無いので、初回 deploy 後の確認
   （[post-deploy-verification.md](post-deploy-verification.md)、#636）で確かめます。
