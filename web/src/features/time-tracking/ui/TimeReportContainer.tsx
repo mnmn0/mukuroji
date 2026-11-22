@@ -121,17 +121,20 @@ export function TimeReportContainer({
       {canSeeCosts ? (
         <TimeBudgetPanel
           defaultCurrency={settings.data?.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
-          hasLoadError={Boolean(budgetReport.error)}
-          isLoading={budgetReport.isLoading}
+          // The Workspace currency seeds a new budget, so the editor waits for the settings too.
+          hasLoadError={Boolean(budgetReport.error ?? settings.error)}
+          isLoading={budgetReport.isLoading || (!settings.data && !settings.error)}
           locale={locale}
           onChangeScope={setBudgetScope}
-          onRetry={() => { void budgetReport.mutate().catch(() => undefined) }}
+          onRetry={() => {
+            void Promise.all([budgetReport.mutate(), settings.mutate()]).catch(() => undefined)
+          }}
           onSave={(input) => saveBudget(budgetScope, input)}
           onUseBudgetPeriod={(next) => onChange(next, groupBy)}
           projects={projects}
           scope={budgetScope}
           t={t}
-          {...(budgetReport.data ? { summary: budgetReport.data } : {})}
+          {...(budgetReport.data && settings.data ? { summary: budgetReport.data } : {})}
         />
       ) : null}
       {canManageRateCard ? (
