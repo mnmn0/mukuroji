@@ -141,7 +141,7 @@ describe('planBulkInvitation', () => {
 
   test('puts rows back without moving cells or making an unknown role valid', () => {
     const plan = planBulkInvitation(
-      'email,name,role\nperson@example.com,"Jane;owner",guest\nrole@example.com,"Ken ""K""",leader\nplain@example.com,,',
+      'email,name,role\nperson@example.com,"Jane;owner",guest\nrole@example.com,"Ken ""K""",leader\nplain@example.com,,\n\'\'+quoted@example.com,\'-Kei,',
       context,
     )
     const retry = createBulkInvitationRetryCsv(plan.rows)
@@ -151,6 +151,7 @@ describe('planBulkInvitation', () => {
       ['person@example.com', 'Jane;owner', 'guest', 'guest', undefined],
       ['role@example.com', 'Ken "K"', 'member', 'leader', 'invalid-role'],
       ['plain@example.com', undefined, 'member', undefined, undefined],
+      ["'+quoted@example.com", '-Kei', 'member', undefined, undefined],
     ])
   })
 

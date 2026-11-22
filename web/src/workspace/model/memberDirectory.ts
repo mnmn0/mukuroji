@@ -1,3 +1,4 @@
+import { escapeSpreadsheetCell } from './spreadsheetCell'
 import type { WorkspaceMember, WorkspaceMemberStatus, WorkspaceRole } from '../api/access'
 
 /** Filter of the Workspace member list. */
@@ -67,17 +68,13 @@ export type WorkspaceMemberCsvHeaders = {
 }
 
 /**
- * Quotes one CSV cell. A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return
- * gets a leading `'`, so a spreadsheet opens it as text instead of running it as a formula. A cell
- * that already starts with `'` gets one too, so the bulk invitation can strip exactly one `'` and
- * read every value back unchanged.
+ * Quotes one CSV cell after escaping a leading formula character for spreadsheets.
  *
  * @param value - Cell text.
  * @returns The quoted cell.
  */
 function toCsvCell(value: string) {
-  const safe = /^[=+\-@\t\r']/u.test(value) ? `'${value}` : value
-  return `"${safe.replaceAll('"', '""')}"`
+  return `"${escapeSpreadsheetCell(value).replaceAll('"', '""')}"`
 }
 
 /**

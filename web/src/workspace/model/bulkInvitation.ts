@@ -5,6 +5,7 @@ import {
   normalizeWorkspaceInvitationEmail,
 } from '@mukuroji/contracts'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../api/access'
+import { escapeSpreadsheetCell, unescapeSpreadsheetCell } from './spreadsheetCell'
 
 /**
  * Why a row of a bulk invitation cannot be sent.
@@ -188,17 +189,6 @@ function readHeaderLayout(cells: readonly string[]): ColumnLayout | undefined {
   }
 }
 
-/**
- * Removes the `'` that the member CSV export puts before a cell starting with `=`, `+`, `-`, `@`,
- * a tab, a carriage return or `'`, so an exported file reads back with its original values.
- *
- * @param cell - Trimmed cell text.
- * @returns The cell without the spreadsheet escape.
- */
-function unescapeSpreadsheetCell(cell: string) {
-  return /^'[=+\-@\t\r']/u.test(cell) ? cell.slice(1) : cell
-}
-
 /** Layout of a record without a header: email, then name, then role. */
 const positionalLayout: ColumnLayout = { email: 0, name: 1, role: 2 }
 
@@ -315,14 +305,15 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
 
 /**
  * Builds a CSV of rows, so failed rows can be put back into the input and sent again. Every cell
- * is quoted, so a name holding a delimiter keeps its column, and the role column holds the role
+ * is quoted and escaped like the member export, so a name holding a delimiter keeps its column, a
+ * value starting with `'` or a formula character reads back unchanged, and the role column holds the role
  * as the row wrote it, so an unknown role stays unknown until the administrator corrects it.
  *
  * @param rows - Rows to write.
  * @returns CSV text with an `email,name,role` header.
  */
 export function createBulkInvitationRetryCsv(rows: readonly BulkInvitationRow[]) {
-  const quote = (value: string) => `"${value.replaceAll('"', '""')}"`
+  const quote = (value: string) => `"${escapeSpreadsheetCell(value).replaceAll('"', '""')}"`
   return ['email,name,role', ...rows.map((row) => [row.email, row.name ?? '', row.roleInput ?? ''].map(quote).join(','))]
     .join('\n')
 }
