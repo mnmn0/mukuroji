@@ -588,15 +588,30 @@ export type ProjectOverviewActionItems = {
   items: ProjectOverviewActionItem[]
   /** Open items read but left out because of the overview limit. */
   hiddenCount: number
-  /** Pages that could not be read or were left out, so items may be missing. */
-  unreadDocumentCount: number
+  /** Pages whose read failed, so their items are missing until a retry. */
+  failedDocumentCount: number
+  /**
+   * Whether some pages were not read on purpose: older pages past the read
+   * limit, or Documents past the listing pages loaded so far.
+   */
+  hasUnscannedDocuments: boolean
+}
+
+/** How completely the Project's pages were read for action items. */
+export type ProjectOverviewActionItemCoverage = {
+  /** Pages whose read failed. */
+  failedDocumentCount: number
+  /** Pages left out by the read limit. */
+  skippedDocumentCount: number
+  /** Whether the Project Document listing has more pages not loaded yet. */
+  hasMoreDocuments: boolean
 }
 
 /**
  * Prepares a Project's open Document action items for the overview.
  *
  * @param items - Open action items, earliest deadline first.
- * @param unreadDocumentCount - Pages whose items could not be read or were left out.
+ * @param coverage - Pages that failed, were left out, or were not listed yet.
  * @param members - Project members used to show owner names.
  * @param today - Viewer's local `YYYY-MM-DD` date.
  * @param limit - Most items to show.
@@ -604,7 +619,7 @@ export type ProjectOverviewActionItems = {
  */
 export function summarizeProjectOverviewActionItems(
   items: readonly ProjectActionItem[],
-  unreadDocumentCount: number,
+  coverage: ProjectOverviewActionItemCoverage,
   members: readonly ProjectMember[],
   today: string,
   limit = PROJECT_OVERVIEW_ACTION_ITEM_LIMIT,
@@ -622,6 +637,7 @@ export function summarizeProjectOverviewActionItems(
         overdue: item.dueDate !== undefined && item.dueDate < today,
       }
     }),
-    unreadDocumentCount,
+    failedDocumentCount: coverage.failedDocumentCount,
+    hasUnscannedDocuments: coverage.skippedDocumentCount > 0 || coverage.hasMoreDocuments,
   }
 }

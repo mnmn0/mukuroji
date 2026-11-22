@@ -493,7 +493,7 @@ describe('open action items of a Project', () => {
         { assigneeMemberKey: 'left', blockId: 'b', documentId: 'd', documentTitle: 'Minutes', itemId: '2', text: 'B' },
         { blockId: 'b', documentId: 'd', documentTitle: 'Minutes', itemId: '3', text: 'C' },
       ],
-      2,
+      { failedDocumentCount: 2, hasMoreDocuments: true, skippedDocumentCount: 0 },
       [{ email: 'sato@example.com', id: 'sato', name: 'Ichiro Sato', role: 'member', updatedAt: '2026-11-01T00:00:00.000Z', workspaceStatus: 'active' }],
       '2026-11-21',
       2,
@@ -504,6 +504,7 @@ describe('open action items of a Project', () => {
       ['left', false],
     ])
     expect(summary.hiddenCount).toBe(1)
-    expect(summary.unreadDocumentCount).toBe(2)
+    expect(summary.failedDocumentCount).toBe(2)
+    expect(summary.hasUnscannedDocuments).toBe(true)
   })
 })

@@ -1021,7 +1021,7 @@ type ActionItemsContentProps = {
   error?: ProjectOverviewDocumentsError
   /** Whether the action items are loading. */
   isLoading: boolean
-  /** Reads the action items again after a failure. */
+  /** Reads the action items again after a full or partial failure. */
   onRetry?: () => void
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
@@ -1081,10 +1081,13 @@ function ActionItemsContent({ actionItems, error, isLoading, onRetry, t }: Actio
           {t('projects.overview.actionItems.more').replace('{count}', String(actionItems.hiddenCount))}
         </StatusText>
       ) : null}
-      {actionItems.unreadDocumentCount > 0 ? (
-        <StatusText>
-          {t('projects.overview.actionItems.partial').replace('{count}', String(actionItems.unreadDocumentCount))}
+      {actionItems.failedDocumentCount > 0 ? (
+        <StatusText isError onRetry={onRetry} t={t}>
+          {t('projects.overview.actionItems.partialFailure').replace('{count}', String(actionItems.failedDocumentCount))}
         </StatusText>
+      ) : null}
+      {actionItems.hasUnscannedDocuments ? (
+        <StatusText>{t('projects.overview.actionItems.unscanned')}</StatusText>
       ) : null}
     </div>
   )

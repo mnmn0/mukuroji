@@ -73,12 +73,16 @@ export function ProjectOverviewPage() {
     () => actionItemsQuery.data
       ? summarizeProjectOverviewActionItems(
           actionItemsQuery.data.items,
-          actionItemsQuery.data.failedCount + actionItemsQuery.data.skippedCount,
+          {
+            failedDocumentCount: actionItemsQuery.data.failedCount,
+            hasMoreDocuments: projectDocuments.hasMore,
+            skippedDocumentCount: actionItemsQuery.data.skippedCount,
+          },
           (members.data ?? []).filter(isActiveProjectAssignmentCandidate),
           toLocalDate(new Date()),
         )
       : undefined,
-    [actionItemsQuery.data, members.data],
+    [actionItemsQuery.data, members.data, projectDocuments.hasMore],
   )
   const agentRunBoard = useTeamAgentRunBoard(
     canRead && workspace.softwareFactoryEnabled ? workspace.accessToken : undefined,

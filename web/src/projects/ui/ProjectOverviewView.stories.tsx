@@ -54,7 +54,7 @@ const meta = {
           text: 'API の命名を決める',
         },
       ],
-      1,
+      { failedDocumentCount: 0, hasMoreDocuments: false, skippedDocumentCount: 1 },
       [
         { id: 'lead', email: 'lead@example.com', name: '佐藤 リード', role: 'manager', updatedAt: '2026-06-01T00:00:00.000Z', workspaceStatus: 'active' },
         { id: 'dev', email: 'dev@example.com', name: '鈴木 開発', role: 'member', updatedAt: '2026-06-01T00:00:00.000Z', workspaceStatus: 'active' },
