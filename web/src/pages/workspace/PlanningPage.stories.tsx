@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import {
   emptyPlanningSnapshotFixture,
   planningSnapshotFixture,
@@ -107,6 +108,25 @@ type Story = StoryObj<typeof meta>
  * Milestone、dependency、cycle rollover を操作できる Timeline です。
  */
 export const Timeline: Story = {}
+
+/**
+ * Create form for a Cycle in a Workspace whose week starts on Sunday, after a later reload of the
+ * week start failed: the proposed dates start on a Sunday and a notice offers to read it again.
+ */
+export const CycleWeekStartFromWorkspace: Story = {
+  args: {
+    onRetryWeekStart: () => undefined,
+    weekStartDay: 0,
+    weekStartErrorMessage: 'Workspace の週の開始曜日を読み直せませんでした。新しい Cycle の日付は前回読み込んだ設定で提案しています。',
+  },
+  play: async ({ canvasElement }) => {
+    const form = within(canvasElement.querySelector<HTMLElement>('[data-testid="planning-create-entity"]') ?? canvasElement)
+    await userEvent.selectOptions(form.getByRole('combobox', { name: /種別/u }), 'cycle')
+    await expect(form.getByTestId('planning-cycle-week-start-error')).toBeVisible()
+    const startDate = canvasElement.querySelector<HTMLInputElement>('[data-testid="planning-create-entity"] input[name="startDate"]')
+    await expect(new Date(`${startDate?.value ?? ''}T00:00:00.000Z`).getUTCDay()).toBe(0)
+  },
+}
 
 /**
  * 作成フォームの下にアーカイブ済みの計画と復元結果を表示した Roadmap です。

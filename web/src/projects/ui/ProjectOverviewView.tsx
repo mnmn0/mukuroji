@@ -1,6 +1,8 @@
 import {
   FACTORY_BOARD_LANES,
   type FactoryBoardLane,
+  type ProjectRaidEntryKind,
+  type ProjectRaidSeverity,
   type PlanningHealth,
   type PlanningUpdateState,
   type PlanningUpdateTargetSummary,
@@ -10,18 +12,22 @@ import { Link } from 'react-router'
 import { formatPlanningUpdateDate } from '../../planning/model/date'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import {
+  createDocumentPath,
   createPlanningPath,
   createPlanningProjectUpdatePath,
   createProjectIssuesPath,
   createTeamViewPath,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import type { ProjectDirectoryProject, ProjectDirectoryTeam } from '../api/directory'
 import {
   resolveProjectOverviewMemberName,
+  type ProjectOverviewActionItems,
   type ProjectOverviewAgentRuns,
+  type ProjectOverviewDocuments,
   type ProjectOverviewMembers,
+  type ProjectOverviewRaid,
+  type ProjectOverviewRaidItem,
   type ProjectOverviewSchedule,
   type ProjectOverviewWorkItemSummary,
 } from '../model/projectOverview'
@@ -34,6 +40,12 @@ export type ProjectOverviewMembersError = 'load' | 'denied'
 
 /** Why the Agent Run lane counts could not be shown: a failed read, or a role that may not read the board. */
 export type ProjectOverviewAgentRunsError = 'load' | 'denied'
+
+/** Why the Project log could not be shown: a failed read, or a role that may not read it. */
+export type ProjectOverviewRaidError = 'load' | 'denied'
+
+/** Why the related Documents could not be shown: a failed read, or a role that may not read them. */
+export type ProjectOverviewDocumentsError = 'load' | 'denied'
 
 /** Props for the pure Project overview view. */
 export type ProjectOverviewViewProps = {
@@ -73,8 +85,32 @@ export type ProjectOverviewViewProps = {
   agentRunsError?: ProjectOverviewAgentRunsError
   /** Whether the Team's Factory board is still loading. */
   isAgentRunsLoading?: boolean
+  /** Open risks, issues, and recent decisions of the Project log, absent while loading or after a failure. */
+  raid?: ProjectOverviewRaid
+  /** Why the Project log could not be shown, absent when it loaded or is loading. */
+  raidError?: ProjectOverviewRaidError
+  /** Whether the Project log is still loading. */
+  isRaidLoading?: boolean
+  /** Documents related to the Project, absent while loading or after every source failed. */
+  documents?: ProjectOverviewDocuments
+  /** Why some related Documents could not be shown, absent when every source loaded or is loading. */
+  documentsError?: ProjectOverviewDocumentsError
+  /** Whether the related Documents are still loading. */
+  isDocumentsLoading?: boolean
   /** Reads the Project Work Items again after a failure. */
   onRetryWorkItems?: () => void
+  /** Reads the Project log again after a failure. */
+  onRetryRaid?: () => void
+  /** Reads the related Documents again after a failure. */
+  onRetryDocuments?: () => void
+  /** Open checklist items in the Project's pages, absent while loading or after a failure. */
+  actionItems?: ProjectOverviewActionItems
+  /** Why the open action items could not be shown, absent when they loaded or are loading. */
+  actionItemsError?: ProjectOverviewDocumentsError
+  /** Whether the open action items are still loading. */
+  isActionItemsLoading?: boolean
+  /** Reads the open action items again after a failure. */
+  onRetryActionItems?: () => void
   /** Reads the Planning snapshot again after a failure. */
   onRetryPlanning?: () => void
   /** Reads the Project members again after a failure. */
@@ -100,6 +136,21 @@ const updateStateClassNames: Record<PlanningUpdateState, string> = {
   overdue: 'border-red-200 bg-red-50 text-fg-red-700',
 }
 
+/** Badge tokens for the severity of a log entry. */
+const severityClassNames: Record<ProjectRaidSeverity, string> = {
+  low: 'border-slate-200 bg-slate-50 text-fg-slate-700',
+  medium: 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  high: 'border-orange-200 bg-orange-50 text-fg-orange-700',
+  critical: 'border-red-200 bg-red-50 text-fg-red-700',
+}
+
+/** Message keys of the log entry kinds. */
+const raidKindMessageKeys: Record<ProjectRaidEntryKind, MessageKey> = {
+  risk: 'projects.raidLog.kind.risk',
+  issue: 'projects.raidLog.kind.issue',
+  'change-request': 'projects.raidLog.kind.changeRequest',
+}
+
 const linkClassName =
   'inline-flex min-h-9 items-center text-sm font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline focus-visible:underline'
 
@@ -110,9 +161,16 @@ const linkClassName =
  * @returns The pure Project overview.
  */
 export function ProjectOverviewView({
+  actionItems,
+  actionItemsError,
   agentRuns,
   agentRunsError,
+  documents,
+  documentsError,
+  isActionItemsLoading = false,
   isAgentRunsLoading = false,
+  isDocumentsLoading = false,
+  isRaidLoading = false,
   isMembersLoading,
   isPlanningError,
   isPlanningLoading,
@@ -120,11 +178,16 @@ export function ProjectOverviewView({
   locale,
   members,
   membersError,
+  onRetryActionItems,
   onRetryAgentRuns,
+  onRetryDocuments,
   onRetryMembers,
   onRetryPlanning,
+  onRetryRaid,
   onRetryWorkItems,
   project,
+  raid,
+  raidError,
   schedule,
   showAgentRuns = true,
   t,
@@ -241,6 +304,51 @@ export function ProjectOverviewView({
           />
         </OverviewSection>
 
+        <OverviewSection testId="project-overview-raid" title={t('projects.overview.raid.title')}>
+          <RaidContent
+            error={raidError}
+            isLoading={isRaidLoading}
+            locale={locale}
+            onRetry={onRetryRaid}
+            raid={raid}
+            t={t}
+          />
+          <p className="text-xs font-medium text-[var(--workbench-muted)]">{t('projects.overview.raid.manageHint')}</p>
+          <Link className={linkClassName} to={createProjectIssuesPath(project.id, team.id)}>
+            {t('projects.overview.raid.openLog')}
+          </Link>
+        </OverviewSection>
+
+        <OverviewSection testId="project-overview-documents" title={t('projects.overview.documents.title')}>
+          <DocumentsContent
+            documents={documents}
+            error={documentsError}
+            isLoading={isDocumentsLoading}
+            onRetry={onRetryDocuments}
+            t={t}
+          />
+          <Link className={linkClassName} to={createDocumentPath(undefined, project.id)}>
+            {t('projects.overview.documents.openDocuments')}
+          </Link>
+        </OverviewSection>
+
+        <OverviewSection
+          meta={actionItems && actionItems.items.length > 0
+            ? t('projects.overview.actionItems.total')
+              .replace('{count}', String(actionItems.items.length + actionItems.hiddenCount))
+            : undefined}
+          testId="project-overview-action-items"
+          title={t('projects.overview.actionItems.title')}
+        >
+          <ActionItemsContent
+            actionItems={actionItems}
+            error={actionItemsError}
+            isLoading={isActionItemsLoading}
+            onRetry={onRetryActionItems}
+            t={t}
+          />
+        </OverviewSection>
+
         {showAgentRuns ? (
           <OverviewSection
             meta={agentRuns
@@ -262,19 +370,6 @@ export function ProjectOverviewView({
           </OverviewSection>
         ) : null}
       </div>
-
-      <nav
-        aria-label={t('projects.overview.links.title')}
-        className="workbench-panel flex flex-wrap items-center gap-x-5 gap-y-1 px-5 py-3"
-        data-testid="project-overview-links"
-      >
-        <span className="text-sm font-semibold text-[var(--workbench-text)]">
-          {t('projects.overview.links.title')}
-        </span>
-        <Link className={linkClassName} to={workspaceNavPaths.documents}>
-          {t('projects.overview.links.documents')}
-        </Link>
-      </nav>
     </div>
   )
 }
@@ -484,6 +579,7 @@ function ProgressContent({ error, isLoading, onRetry, projectName, summary, t }:
     ['projects.overview.progress.done', summary.doneCount, 'done'],
     ['projects.overview.progress.overdue', summary.overdueCount, 'overdue'],
     ['projects.overview.progress.highPriority', summary.highPriorityOpenCount, 'high-priority'],
+    ['projects.overview.progress.blocked', summary.blockedCount, 'blocked'],
   ]
 
   return (
@@ -504,7 +600,7 @@ function ProgressContent({ error, isLoading, onRetry, projectName, summary, t }:
             <dt className="text-xs font-medium text-[var(--workbench-muted)]">{t(labelKey)}</dt>
             <dd
               className={`text-lg font-semibold tabular-nums ${
-                (token === 'overdue' || token === 'high-priority') && value > 0
+                attentionCountTokens.has(token) && value > 0
                   ? 'text-fg-red-700'
                   : 'text-[var(--workbench-text)]'
               }`}
@@ -517,6 +613,9 @@ function ProgressContent({ error, isLoading, onRetry, projectName, summary, t }:
     </div>
   )
 }
+
+/** Progress counts whose non-zero value asks for attention. */
+const attentionCountTokens: ReadonlySet<string> = new Set(['overdue', 'high-priority', 'blocked'])
 
 /** Props for the schedule widget content. */
 type ScheduleContentProps = {
@@ -699,6 +798,296 @@ function AgentRunsContent({ agentRuns, error, isLoading, onRetry, t }: AgentRuns
       </dl>
       {agentRuns.isIncomplete ? (
         <StatusText>{t('projects.overview.agentRuns.incomplete')}</StatusText>
+      ) : null}
+    </div>
+  )
+}
+
+/** Props for the Project log widget content. */
+type RaidContentProps = {
+  /** Why the log could not be shown. */
+  error?: ProjectOverviewRaidError
+  /** Whether the log is loading. */
+  isLoading: boolean
+  /** Locale used to format decision dates. */
+  locale: Locale
+  /** Reads the log again after a failure. */
+  onRetry?: () => void
+  /** Open counts and the listed entries. */
+  raid?: ProjectOverviewRaid
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the open log counts, the most severe open risks and issues, and the recent decisions.
+ *
+ * @param props - Log summary and load state.
+ * @returns Project log widget content.
+ */
+function RaidContent({ error, isLoading, locale, onRetry, raid, t }: RaidContentProps) {
+  if (error === 'denied') return <StatusText>{t('projects.overview.error.raidDenied')}</StatusText>
+  if (error) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.raid')}</StatusText>
+  }
+  if (isLoading || !raid) return <StatusText>{t('projects.overview.loading')}</StatusText>
+
+  const counts: ReadonlyArray<readonly [MessageKey, number, string]> = [
+    ['projects.overview.raid.openRisks', raid.openRiskCount, 'risks'],
+    ['projects.overview.raid.openIssues', raid.openIssueCount, 'issues'],
+    ['projects.overview.raid.pendingDecisions', raid.pendingDecisionCount, 'pending-decisions'],
+    ['projects.overview.raid.overdueReviews', raid.overdueReviewCount, 'overdue-reviews'],
+  ]
+
+  return (
+    <div className="grid gap-3">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm min-[600px]:grid-cols-4">
+        {counts.map(([labelKey, value, token]) => (
+          <div className="min-w-0" data-testid={`project-overview-raid-count-${token}`} key={token}>
+            <dt className="text-xs font-medium text-[var(--workbench-muted)]">{t(labelKey)}</dt>
+            <dd
+              className={`text-lg font-semibold tabular-nums ${
+                token === 'overdue-reviews' && value > 0 ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'
+              }`}
+            >
+              {value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <div className="grid gap-2">
+        <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{t('projects.overview.raid.attentionTitle')}</h4>
+        {raid.attention.length === 0
+          ? <StatusText>{t('projects.overview.raid.attentionEmpty')}</StatusText>
+          : (
+            <ul className="grid gap-2">
+              {raid.attention.map((item) => (
+                <RaidItemRow item={item} key={item.id} locale={locale} t={t} />
+              ))}
+            </ul>
+          )}
+        {raid.hiddenAttentionCount > 0 ? (
+          <StatusText>
+            {t('projects.overview.raid.attentionHidden').replace('{count}', String(raid.hiddenAttentionCount))}
+          </StatusText>
+        ) : null}
+      </div>
+      <div className="grid gap-2">
+        <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{t('projects.overview.raid.decisionsTitle')}</h4>
+        {raid.recentDecisions.length === 0
+          ? <StatusText>{t('projects.overview.raid.decisionsEmpty')}</StatusText>
+          : (
+            <ul className="grid gap-2">
+              {raid.recentDecisions.map((item) => (
+                <RaidItemRow item={item} key={item.id} locale={locale} t={t} />
+              ))}
+            </ul>
+          )}
+      </div>
+    </div>
+  )
+}
+
+/** Props for one listed log entry. */
+type RaidItemRowProps = {
+  /** Entry shown by the row. */
+  item: ProjectOverviewRaidItem
+  /** Locale used to format the decision date. */
+  locale: Locale
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders one open risk or issue, or one decided change request.
+ *
+ * @param props - Entry and labels.
+ * @returns A list item.
+ */
+function RaidItemRow({ item, locale, t }: RaidItemRowProps) {
+  return (
+    <li
+      className="grid gap-1 rounded-md border border-[var(--workbench-border)] px-3 py-2"
+      data-testid={`project-overview-raid-${item.id}`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0 break-words text-sm font-semibold text-[var(--workbench-text)]">{item.title}</span>
+        {item.decidedAt === undefined ? (
+          <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${severityClassNames[item.severity]}`}>
+            {t(`projects.raidLog.severity.${item.severity}`)}
+          </span>
+        ) : null}
+      </div>
+      {item.decidedAt !== undefined && item.response ? (
+        <p className="line-clamp-2 break-words text-xs font-medium text-[var(--workbench-text)]">{item.response}</p>
+      ) : null}
+      <p className="flex flex-wrap gap-x-3 text-xs font-medium text-[var(--workbench-muted)]">
+        <span>{t(raidKindMessageKeys[item.kind])}</span>
+        {item.decidedAt !== undefined ? (
+          <span>{t('projects.overview.raid.decidedAt').replace('{date}', formatOverviewDate(item.decidedAt, locale))}</span>
+        ) : item.reviewDueDate ? (
+          <span className={item.isReviewOverdue ? 'font-semibold text-fg-red-700' : undefined}>
+            {t('projects.raidLog.reviewDue').replace('{date}', item.reviewDueDate)}
+          </span>
+        ) : null}
+      </p>
+    </li>
+  )
+}
+
+/**
+ * Formats an ISO timestamp as a calendar date in the viewer's time zone.
+ *
+ * @param value - ISO timestamp.
+ * @param locale - Locale used to format the date.
+ * @returns The formatted date, or a dash for an invalid timestamp.
+ */
+function formatOverviewDate(value: string, locale: Locale) {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '—'
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium' }).format(date)
+}
+
+/** Props for the related Documents widget content. */
+type DocumentsContentProps = {
+  /** Listed Documents. */
+  documents?: ProjectOverviewDocuments
+  /** Why some Documents could not be shown. */
+  error?: ProjectOverviewDocumentsError
+  /** Whether the Documents are loading. */
+  isLoading: boolean
+  /** Reads the Documents again after a failure. */
+  onRetry?: () => void
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the Documents that link to the Project or sit in its scope.
+ *
+ * A failure of one source is shown beside the Documents read from the other source.
+ *
+ * @param props - Document list and load state.
+ * @returns Related Documents widget content.
+ */
+function DocumentsContent({ documents, error, isLoading, onRetry, t }: DocumentsContentProps) {
+  const errorText = error === 'denied'
+    ? <StatusText>{t('projects.overview.error.documentsDenied')}</StatusText>
+    : error
+      ? <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.documents')}</StatusText>
+      : null
+  if (!documents) {
+    return errorText ?? <StatusText>{t('projects.overview.loading')}</StatusText>
+  }
+
+  return (
+    <div className="grid gap-2">
+      {errorText}
+      {documents.items.length === 0 && !error && !isLoading
+        ? <StatusText>{t('projects.overview.documents.empty')}</StatusText>
+        : null}
+      {documents.items.length > 0 ? (
+        <ul className="grid gap-1.5">
+          {documents.items.map((document) => (
+            <li className="flex min-w-0 items-center justify-between gap-3 text-sm" key={document.id}>
+              <Link
+                className="min-w-0 truncate font-semibold text-[var(--workbench-text)] underline-offset-4 hover:underline focus-visible:underline"
+                to={createDocumentPath(document.id)}
+              >
+                {document.title}
+              </Link>
+              <span className="flex-none text-xs font-semibold text-[var(--workbench-muted)]">
+                {t(document.source === 'linked'
+                  ? 'projects.overview.documents.linked'
+                  : 'projects.overview.documents.inProject')}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {isLoading ? <StatusText>{t('projects.overview.loading')}</StatusText> : null}
+      {documents.hiddenCount > 0 || documents.hasMore ? (
+        <StatusText>{t('projects.overview.documents.more')}</StatusText>
+      ) : null}
+    </div>
+  )
+}
+
+/** Props for the open action items widget content. */
+type ActionItemsContentProps = {
+  /** Open action items, absent while loading or after a failure. */
+  actionItems?: ProjectOverviewActionItems
+  /** Why the action items could not be shown. */
+  error?: ProjectOverviewDocumentsError
+  /** Whether the action items are loading. */
+  isLoading: boolean
+  /** Reads the action items again after a full or partial failure. */
+  onRetry?: () => void
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the unchecked checklist items of the Project's pages with their
+ * owner, deadline, and the page they come from.
+ *
+ * @param props - Action items and load state.
+ * @returns Open action items widget content.
+ */
+function ActionItemsContent({ actionItems, error, isLoading, onRetry, t }: ActionItemsContentProps) {
+  if (error === 'denied') {
+    return <StatusText>{t('projects.overview.error.documentsDenied')}</StatusText>
+  }
+  if (error) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.actionItems')}</StatusText>
+  }
+  if (!actionItems) {
+    return isLoading ? <StatusText>{t('projects.overview.loading')}</StatusText> : null
+  }
+  return (
+    <div className="grid gap-2">
+      {actionItems.items.length === 0
+        ? <StatusText>{t('projects.overview.actionItems.empty')}</StatusText>
+        : (
+            <ul className="grid gap-2">
+              {actionItems.items.map((item) => (
+                <li className="grid min-w-0 gap-0.5 text-sm" key={`${item.documentId}/${item.blockId}/${item.itemId}`}>
+                  <span className="min-w-0 break-words font-semibold text-[var(--workbench-text)]">{item.text}</span>
+                  <span className="flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-xs font-medium text-[var(--workbench-muted)]">
+                    <span>
+                      {item.ownerLabel
+                        ? t('projects.overview.actionItems.owner').replace('{name}', item.ownerLabel)
+                        : t('projects.overview.actionItems.noOwner')}
+                    </span>
+                    {item.dueDate ? (
+                      <span className={item.overdue ? 'font-semibold text-[var(--workbench-danger)]' : undefined}>
+                        {t(item.overdue ? 'projects.overview.actionItems.dueOverdue' : 'projects.overview.actionItems.due')
+                          .replace('{date}', item.dueDate)}
+                      </span>
+                    ) : null}
+                    <Link
+                      className="min-w-0 truncate underline-offset-4 hover:underline focus-visible:underline"
+                      to={createDocumentPath(item.documentId)}
+                    >
+                      {item.documentTitle}
+                    </Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+      {actionItems.hiddenCount > 0 ? (
+        <StatusText>
+          {t('projects.overview.actionItems.more').replace('{count}', String(actionItems.hiddenCount))}
+        </StatusText>
+      ) : null}
+      {actionItems.failedDocumentCount > 0 ? (
+        <StatusText isError onRetry={onRetry} t={t}>
+          {t('projects.overview.actionItems.partialFailure').replace('{count}', String(actionItems.failedDocumentCount))}
+        </StatusText>
+      ) : null}
+      {actionItems.hasUnscannedDocuments ? (
+        <StatusText>{t('projects.overview.actionItems.unscanned')}</StatusText>
       ) : null}
     </div>
   )
