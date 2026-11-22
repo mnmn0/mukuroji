@@ -123,6 +123,7 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
@@ -223,6 +224,7 @@ export function TeamIssueScreen({
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
+  onTaskViewPresentationChange,
   userInitial,
   viewState,
   onViewStateChange,
@@ -1730,6 +1732,10 @@ export function TeamIssueScreen({
                       t={t}
                       tasks={visibleIssues}
                       workingCalendar={workingCalendar}
+                      {...createTaskGanttDisplayBinding(
+                        taskViewPresentation,
+                        onTaskViewPresentationChange,
+                      )}
                     />
                   ) : (
                     <IssueBoard

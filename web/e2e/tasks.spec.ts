@@ -4968,7 +4968,29 @@ test.describe('authenticated task page', () => {
     await page.emulateMedia({ media: 'screen' })
   })
 
-  test('Issue #379: Gantt の印刷は段階表示で隠れている行も含める', async ({ page }) => {
+  test('Issue #379: Gantt の倍率・1 行表示・進捗線は表示中のビューに入り、再読み込み後も残る', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const display = page.getByTestId('task-gantt-display')
+    await display.getByLabel('表示倍率').selectOption('month')
+    await display.getByRole('button', { name: '1 行表示', exact: true }).click()
+    await display.getByRole('button', { name: '進捗線', exact: true }).click()
+    await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+
+    await page.reload()
+    const reloadedDisplay = page.getByTestId('task-gantt-display')
+    await expect(reloadedDisplay.getByLabel('表示倍率')).toHaveValue('month')
+    await expect(reloadedDisplay.getByRole('button', { name: '1 行表示', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect(reloadedDisplay.getByRole('button', { name: '進捗線', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+  })
+
+  test('Issue #379: Gantt の印刷は画面外で描画していない行も含める', async ({ page }) => {
     await setScheduleFixtureClock(page)
     const fixture = referoTaskFixtures[0]!
     const tasks = Array.from({ length: 210 }, (_, index) => ({
@@ -4983,8 +5005,8 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('tab', { name: '期限順', exact: true })).toHaveAttribute('aria-selected', 'true')
 
     const chartRows = page.getByTestId('task-gantt-scroll').locator('article[role="row"]')
-    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
-    await expect(chartRows).toHaveCount(200)
+    await expect(page.getByTestId('task-gantt-bar-print-0')).toBeVisible()
+    expect(await chartRows.count()).toBeLessThan(210)
 
     await page.evaluate(() => {
       window.print = () => {
@@ -4997,8 +5019,42 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('body')).toHaveAttribute('data-e2e-printed-rows', '210')
 
     await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
-    await expect(chartRows).toHaveCount(200)
-    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+    await expect.poll(() => chartRows.count()).toBeLessThan(210)
+  })
+
+  test('Issue #379: Gantt は 300 行を 1 つのチャートでスクロールし、見えている付近の行だけを描画する', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    const fixture = referoTaskFixtures[0]!
+    const tasks = Array.from({ length: 300 }, (_, index) => ({
+      ...fixture,
+      id: `scroll-${index}`,
+      title: `Scroll task ${String(index).padStart(3, '0')}`,
+    }))
+    await mockAuthenticatedTaskPage(page, tasks)
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-scroll-0')).toBeVisible()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    await page.getByTestId('task-gantt-compact').click()
+
+    const chart = page.getByTestId('task-gantt-scroll')
+    const chartRows = chart.locator('article[role="row"]')
+    await expect(chart).toHaveAttribute('aria-rowcount', '301')
+    await expect(chart.getByRole('columnheader', { name: 'タスク / 担当者' })).toBeVisible()
+    expect(await chartRows.count()).toBeLessThan(100)
+    await expect(page.getByTestId('task-gantt-show-more')).toHaveCount(0)
+
+    // Scrolling to the end reaches the last row in the same chart, with the header still on top.
+    await chart.evaluate((element) => { element.scrollTop = element.scrollHeight })
+    const lastRow = chart.locator('article[aria-rowindex="301"]')
+    await expect(lastRow).toBeVisible()
+    await expect(lastRow).toContainText('Scroll task')
+    await expect(chart.getByRole('columnheader', { name: 'タスク / 担当者' })).toBeVisible()
+    expect(await chartRows.count()).toBeLessThan(100)
+    await expect(chart.locator('article[aria-rowindex="2"]')).toHaveCount(0)
+    await expect(page.getByTestId('task-gantt-today-line')).toBeVisible()
+
+    await chart.evaluate((element) => { element.scrollTop = 0 })
+    await expect(chart.locator('article[aria-rowindex="2"]')).toBeVisible()
   })
 
   test('Issue #379: WBS の表は段階表示で隠れている行も含めて表だけを印刷する', async ({ page }) => {
@@ -15002,7 +15058,7 @@ test.describe('Issue #458: 2,000 件の Team / Project 一覧', () => {
     const tablist = page.getByRole('tablist').first()
     for (const [name, showMoreSelector] of [
       ['ボード', '[data-testid^="project-task-show-more-"]'],
-      ['期限順', '[data-testid="task-gantt-show-more"]'],
+      ['期限順', '[data-testid="task-gantt-scroll"]'],
       ['期限カレンダー', undefined],
     ] as const) {
       const tab = tablist.getByRole('tab', { name, exact: true })
@@ -15110,7 +15166,7 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
   }
 
   test('表示期間と期限なしの Work Item だけを読み、全件読み取りを行わない', async ({ page }) => {
-    test.setTimeout(180_000)
+    test.setTimeout(240_000)
     await page.clock.setFixedTime(new Date('2026-11-15T03:00:00.000Z'))
     const tasks = createDatedSyntheticTasks()
     await mockAuthenticatedTaskPage(page, tasks)
@@ -15190,9 +15246,20 @@ test.describe('Issue #463: 10,000 件を超える Project の期限カレンダ�
     await expect(
       page.getByTestId('task-gantt-period-navigation').getByTestId('task-gantt-period-navigation-period'),
     ).toHaveText('2026-11-01 – 2027-01-31', { timeout: 60_000 })
-    await expect(page.getByTestId(`task-gantt-bar-dated-${novemberIndex}`)).toBeAttached({
-      timeout: 60_000,
-    })
+    // Only rows near the visible part are rendered, so the chart scrolls until the row appears.
+    const ganttChart = page.getByTestId('task-gantt-scroll')
+    const novemberBar = page.getByTestId(`task-gantt-bar-dated-${novemberIndex}`)
+    await expect(ganttChart).toBeVisible({ timeout: 60_000 })
+    const foundNovemberBar = await ganttChart.evaluate(async (element, testId) => {
+      for (let top = 0; top <= element.scrollHeight; top += element.clientHeight + 400) {
+        element.scrollTop = top
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        if (element.querySelector(`[data-testid="${testId}"]`)) return true
+      }
+      return false
+    }, `task-gantt-bar-dated-${novemberIndex}`)
+    expect(foundNovemberBar).toBe(true)
+    await expect(novemberBar).toBeAttached()
     await expect(page.getByTestId('tasks-error')).toHaveCount(0)
 
     const windows = listRequests.map((searchParams) =>

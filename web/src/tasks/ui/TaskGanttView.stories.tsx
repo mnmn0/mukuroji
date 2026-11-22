@@ -7,9 +7,11 @@ import { createWorkItemBaselineLookup } from '../../work-items/model/workItemSch
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { TaskGanttView } from './TaskGanttView'
+import { createDefaultDateRangeTaskSchedule } from '../model/taskSchedule'
 import {
   taskViewStoryConfigurationsByTeam,
   taskViewStoryPlanningSnapshot,
+  taskViewStorySelectedTask,
   taskViewStoryTasks,
 } from './TaskView.stories.fixtures'
 
@@ -251,5 +253,67 @@ export const GroupedByProject: Story = {
     const canvas = within(canvasElement)
 
     await expect(canvas.getByTestId('task-gantt-group-refero')).toHaveTextContent('Refero リニューアル')
+  },
+}
+
+/** Number of Work Items in the long-chart story, the size the chart must scroll through at once. */
+const LONG_GANTT_ROW_COUNT = 300
+
+/** Three hundred date-range Work Items spread over June, each one day behind its baseline. */
+const longGanttTasks = Array.from({ length: LONG_GANTT_ROW_COUNT }, (_, index) => {
+  const startDay = 1 + (index % 20)
+  return {
+    ...taskViewStorySelectedTask,
+    id: `long-${index}`,
+    title: `Work Item ${index + 1}`,
+    dueDate: formatStoryJuneDate(startDay + 3),
+    schedule: createDefaultDateRangeTaskSchedule(formatStoryJuneDate(startDay), formatStoryJuneDate(startDay + 3)),
+  }
+})
+
+/**
+ * Formats a June 2026 day of the month as a date.
+ *
+ * @param day - Day of the month.
+ * @returns The ISO date.
+ */
+function formatStoryJuneDate(day: number): string {
+  return `2026-06-${String(day).padStart(2, '0')}`
+}
+
+/**
+ * Three hundred rows in one scrolling chart: only the rows near the visible part are created,
+ * and scrolling to the end shows the last row with its baseline bar and today's line.
+ */
+export const ThreeHundredRows: Story = {
+  args: {
+    allProjectTasks: longGanttTasks,
+    planningSnapshot: undefined,
+    scheduleBaselineFor: createWorkItemBaselineLookup([{
+      teamId: 'core-team',
+      projectId: 'refero',
+      baseline: {
+        revision: 1,
+        capturedAt: '2026-05-25T00:00:00.000Z',
+        entries: longGanttTasks.map((task, index) => ({
+          workItemId: task.id,
+          startDate: formatStoryJuneDate(1 + (index % 20)),
+          endDate: formatStoryJuneDate(3 + (index % 20)),
+        })),
+      },
+    }]),
+    tasks: longGanttTasks,
+    windowStartMonth: '2026-06',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const chart = canvas.getByTestId('task-gantt-scroll')
+    await expect(chart).toHaveAttribute('aria-rowcount', String(LONG_GANTT_ROW_COUNT + 1))
+    await expect(chart.querySelectorAll('article[role="row"]').length).toBeLessThan(LONG_GANTT_ROW_COUNT)
+
+    chart.scrollTop = chart.scrollHeight
+    chart.dispatchEvent(new Event('scroll'))
+    await expect(await canvas.findByTestId(`task-gantt-baseline-bar-long-${LONG_GANTT_ROW_COUNT - 1}`)).toBeVisible()
+    await expect(canvas.queryByTestId('task-gantt-bar-long-0')).not.toBeInTheDocument()
   },
 }

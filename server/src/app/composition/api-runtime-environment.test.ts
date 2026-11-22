@@ -168,6 +168,19 @@ test('allows omitted SSO values in a complete runtime envelope', async () => {
   )
 })
 
+test('allows the blank connector secret of a stack without the connectors module', async () => {
+  const configuration = createValidConfiguration()
+  // CDK synthesizes Fn::Base64 of '' as an empty value, exactly like this record.
+  const secretString = replaceConfigurationRecord(
+    configuration.secretString,
+    'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN',
+    'value:CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:',
+  )
+  const environment = createPointerEnvironment()
+  await hydrateApiRuntimeEnvironment(environment, async () => [secretString])
+  expect(environment.CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN).toBe('')
+})
+
 test('loads a direct-only envelope with a single secret request', async () => {
   const configuration = createValidConfiguration()
   const environment = createPointerEnvironment()

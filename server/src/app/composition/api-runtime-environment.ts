@@ -28,6 +28,8 @@ const API_RUNTIME_CONFIGURATION_REVISION_ENVIRONMENT_NAME =
 
 /** Names whose empty value disables an optional feature. */
 const OPTIONAL_API_RUNTIME_VALUE_NAMES: ReadonlySet<string> = new Set([
+  // Blank when the stack has no connectors module (the default deploy).
+  'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN',
   'COGNITO_SSO_CLIENT_ID',
   'COGNITO_HOSTED_UI_DOMAIN',
   'COGNITO_SSO_REDIRECT_URI',

@@ -168,6 +168,7 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -1980,6 +1981,19 @@ export function TaskPage() {
   const activeTaskViewOption = taskViewController.activeSavedView
     ? createTaskViewOption(taskViewController.activeSavedView)
     : undefined
+  /**
+   * Applies presentation settings from the toolbar or a layout to the effective task view.
+   *
+   * @param settings - Next presentation settings.
+   */
+  const changeTaskViewPresentation = (settings: TaskViewPresentationSettings) => {
+    taskViewController.setEffectiveDefinition(
+      presentationSettingsToTaskViewDefinition(
+        taskViewController.effectiveDefinition,
+        settings,
+      ),
+    )
+  }
   const taskViewToolbar = (
     <>
     <TaskViewToolbar
@@ -2003,14 +2017,7 @@ export function TaskPage() {
       onReset={taskViewController.resetOverrides}
       onSaveAs={taskViewController.saveAs}
       onSelectView={taskViewController.selectView}
-      onSettingsChange={(settings) => {
-        taskViewController.setEffectiveDefinition(
-          presentationSettingsToTaskViewDefinition(
-            taskViewController.effectiveDefinition,
-            settings,
-          ),
-        )
-      }}
+      onSettingsChange={changeTaskViewPresentation}
       onUpdate={taskViewController.activeSavedView?.canEdit
         ? taskViewController.updateActiveView
         : undefined}
@@ -2233,6 +2240,7 @@ export function TaskPage() {
       taskErrorMessage={taskErrorMessage}
       taskViewToolbar={taskViewToolbar}
       taskViewDefinition={taskViewController.effectiveDefinition}
+      onTaskViewPresentationChange={changeTaskViewPresentation}
       taskViewPresentation={taskViewDefinitionToPresentationSettings(
         taskViewController.effectiveDefinition,
       )}
