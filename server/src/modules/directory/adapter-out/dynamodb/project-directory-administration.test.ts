@@ -194,6 +194,7 @@ test('lists archived Teams and Projects with both names for administration', asy
         id: 'alpha',
         nameJa: 'alpha 日本語',
         nameEn: 'alpha English',
+        profileRevision: 0,
         projects: [
           { id: 'live', nameJa: 'live 日本語', nameEn: 'live English', tone: 'green' },
           {
@@ -210,6 +211,7 @@ test('lists archived Teams and Projects with both names for administration', asy
         nameJa: 'beta 日本語',
         nameEn: 'beta English',
         archivedAt: '2026-06-07T00:00:00.000Z',
+        profileRevision: 0,
         projects: [],
       },
     ],
@@ -794,9 +796,13 @@ test('sets a Team description and leader, guarding the revision and the active l
   await expect(client.updateTeamProfile(directoryId, 'alpha', {
     description: ' 1行目\r\n\t2行目 ',
     leaderMemberKey: 'Leader-User',
+    expectedProfileRevision: 0,
   })).resolves.toEqual({ teamId: 'alpha', description: '1行目\n\t2行目', leaderMemberKey: 'leader-user' })
-  await expect(client.updateTeamProfile(directoryId, 'beta', { description: '', leaderMemberKey: null }))
-    .resolves.toEqual({ teamId: 'beta' })
+  await expect(client.updateTeamProfile(directoryId, 'beta', {
+    description: '',
+    leaderMemberKey: null,
+    expectedProfileRevision: 2,
+  })).resolves.toEqual({ teamId: 'beta' })
 
   expect(transactions()).toEqual([
     [
@@ -840,17 +846,34 @@ test('skips an unchanged Team profile and rejects an invalid one', async () => {
     createTeamRow('gone', 20, { archivedAt: '2026-01-01T00:00:00.000Z' }),
   ])
 
-  await expect(client.updateTeamProfile(directoryId, 'alpha', { description: '説明', leaderMemberKey: null }))
-    .resolves.toEqual({ teamId: 'alpha', description: '説明' })
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: '説明',
+    leaderMemberKey: null,
+    expectedProfileRevision: 0,
+  })).resolves.toEqual({ teamId: 'alpha', description: '説明' })
   expect(transactions()).toEqual([])
 
-  await expect(client.updateTeamProfile(directoryId, 'gone', { description: '', leaderMemberKey: null }))
+  // A form loaded before another administrator's save is refused instead of overwriting it.
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: '別の説明',
+    leaderMemberKey: null,
+    expectedProfileRevision: 3,
+  })).rejects.toMatchObject({ status: 409, code: 'TeamProfileConflict' })
+  expect(transactions()).toEqual([])
+
+  await expect(client.updateTeamProfile(directoryId, 'gone', {
+    description: '',
+    leaderMemberKey: null,
+    expectedProfileRevision: 0,
+  }))
     .rejects.toMatchObject({ status: 404, code: 'TeamNotFound' })
   for (const input of [
-    { description: 'x'.repeat(2001), leaderMemberKey: null },
-    { description: 'nul\u0000', leaderMemberKey: null },
-    { description: '', leaderMemberKey: 7 },
-    { leaderMemberKey: null },
+    { description: 'x'.repeat(2001), leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: 'nul\u0000', leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: '', leaderMemberKey: 7, expectedProfileRevision: 0 },
+    { leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: '', leaderMemberKey: null },
+    { description: '', leaderMemberKey: null, expectedProfileRevision: -1 },
   ]) {
     await expect(client.updateTeamProfile(directoryId, 'alpha', input))
       .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
@@ -864,7 +887,12 @@ test('lists the Team description and leader for administration', async () => {
 
   const directory = await client.getDirectoryAdministration(directoryId)
 
-  expect(directory.teams[0]).toMatchObject({ id: 'alpha', description: '説明', leaderMemberKey: 'leader' })
+  expect(directory.teams[0]).toMatchObject({
+    id: 'alpha',
+    description: '説明',
+    leaderMemberKey: 'leader',
+    profileRevision: 1,
+  })
 })
 
 /**
@@ -1009,7 +1037,7 @@ test('does not check the leader twice when the caller leads the Team', async () 
   await client.updateTeamProfile(
     directoryId,
     'alpha',
-    { description: '', leaderMemberKey: 'Admin@example.com' },
+    { description: '', leaderMemberKey: 'Admin@example.com', expectedProfileRevision: 0 },
     undefined,
     callerAuthorization,
   )

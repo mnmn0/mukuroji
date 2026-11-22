@@ -164,15 +164,15 @@ test('sets a Team profile with the leader resolved to an active Workspace member
     body: JSON.stringify(body),
   })
 
-  const updated = await send({ description: '説明', leaderMemberKey: 'Sato@Example.com' })
-  const inactive = await send({ description: '説明', leaderMemberKey: 'gone@example.com' })
+  const updated = await send({ description: '説明', leaderMemberKey: 'Sato@Example.com', expectedProfileRevision: 0 })
+  const inactive = await send({ description: '説明', leaderMemberKey: 'gone@example.com', expectedProfileRevision: 0 })
 
   expect(updated.status).toBe(200)
   expect(calls.directoryAdministration).toContainEqual({
     method: 'updateTeamProfile',
     directoryId: 'user#demo@example.com',
     teamId: 'core-team',
-    input: { description: '説明', leaderMemberKey: 'sato@example.com' },
+    input: { description: '説明', leaderMemberKey: 'sato@example.com', expectedProfileRevision: 0 },
   })
   expect(inactive.status).toBe(409)
   expect(await inactive.json()).toMatchObject({ code: 'WorkspaceMemberInactive' })
@@ -220,7 +220,7 @@ test('denies the Team profile and Team member routes to a Workspace member', asy
     app.request('/api/teams/core-team/profile', {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ description: '', leaderMemberKey: null }),
+      body: JSON.stringify({ description: '', leaderMemberKey: null, expectedProfileRevision: 0 }),
     }),
     app.request('/api/teams/core-team/members', {
       method: 'POST',

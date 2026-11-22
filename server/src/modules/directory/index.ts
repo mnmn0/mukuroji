@@ -10,6 +10,7 @@ export {
   type CreateProjectResponse,
   type CreateTeamRequestBody,
   type CreateTeamResponse,
+  type DirectoryAuthorizationConditionChecks,
   type Locale,
   type ProjectAccessEntry,
   type ProjectCreatorContext,

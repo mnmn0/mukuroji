@@ -37,6 +37,7 @@ export type TeamMemberGrantPorts<TFence, TAudit> = {
     expectedWorkspaceMemberVersion: number,
     auditContext: TAudit,
     authorizationFences: TFence[],
+    auditSequence: number,
   ): Promise<{ added: boolean }>
   /** Reads the current version of an active Workspace member, refusing an inactive one. */
   readActiveMemberVersion(workspaceId: string, memberKey: string): Promise<number>
@@ -104,7 +105,7 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
   // only by their own grants, so a change to their membership in between still fails.
   const addsSelf = caller.membership !== undefined &&
     isSameMemberKey(caller.membership.memberKey, member.id)
-  for (const project of activeProjects) {
+  for (const [index, project] of activeProjects.entries()) {
     // Each grant advances the member's version, so it is read again before every Project.
     const expectedVersion = addsSelf && caller.membership
       ? caller.membership.version + response.addedProjectIds.length
@@ -118,6 +119,9 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
       expectedVersion,
       ports.createAuditContext(project.id),
       caller.fences,
+      // One request shares its idempotency key and correlation across Projects, so each grant
+      // takes its own audit sequence slot.
+      index,
     )
     ;(added ? response.addedProjectIds : response.existingProjectIds).push(project.id)
   }

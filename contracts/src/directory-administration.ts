@@ -47,6 +47,8 @@ export type DirectoryAdministrationTeam = {
   description?: string
   /** Member key of the Team leader, when one is set. */
   leaderMemberKey?: string
+  /** Revision of the description and leader, 0 before the first change. */
+  profileRevision?: number
   /** Projects of the Team in display order, archived ones included. */
   projects: DirectoryAdministrationProject[]
 }
@@ -81,6 +83,8 @@ export type UpdateDirectoryTeamProfileInput = {
   description: string
   /** Member key of an active Workspace member who leads the Team, or null for no leader. */
   leaderMemberKey: string | null
+  /** Profile revision the editor loaded; a newer stored revision refuses the change. */
+  expectedProfileRevision: number
 }
 
 /** Response of a Team profile update. */
@@ -250,6 +254,7 @@ function isDirectoryAdministrationTeam(value: unknown): value is DirectoryAdmini
     (value.archivedAt === undefined || typeof value.archivedAt === 'string') &&
     (value.description === undefined || typeof value.description === 'string') &&
     (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+    (value.profileRevision === undefined || Number.isSafeInteger(value.profileRevision)) &&
     Array.isArray(value.projects) &&
     value.projects.every(isDirectoryAdministrationProject)
 }

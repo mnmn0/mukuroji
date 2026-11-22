@@ -917,6 +917,7 @@ export type ProjectDirectoryClient = {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param auditSequence - Audit sequence slot, distinct for each grant of one request.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   addProjectMemberIfAbsent(
@@ -928,6 +929,7 @@ export type ProjectDirectoryClient = {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+    auditSequence?: number,
   ): Promise<{ added: boolean }>
   /**
    * DynamoDB から project member role を削除します。
@@ -2029,6 +2031,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param auditSequence - Audit sequence slot, distinct for each grant of one request.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   async addProjectMemberIfAbsent(
@@ -2040,6 +2043,7 @@ export class DynamoDbProjectDirectoryClient {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+    auditSequence = 0,
   ): Promise<{ added: boolean }> {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -2076,6 +2080,7 @@ export class DynamoDbProjectDirectoryClient {
       occurredAt: updatedAt,
       changes: createAuditFieldChanges(undefined, item, ['email', 'name', 'role']),
       metadata: { projectId, memberKey: normalizedMemberKey },
+      sequence: auditSequence,
     })
     // The target's own row is already guarded active by the version update below, and one
     // transaction cannot touch a row twice, so a caller adding themselves drops that check.
@@ -3024,6 +3029,7 @@ export class DynamoDbProjectDirectoryClient {
         ...(team.archivedAt === undefined ? {} : { archivedAt: team.archivedAt }),
         ...(team.description === undefined ? {} : { description: team.description }),
         ...(team.leaderMemberKey === undefined ? {} : { leaderMemberKey: team.leaderMemberKey }),
+        profileRevision: team.profileRevision ?? 0,
         projects: projectItems
           .filter((project) => project.teamId === team.teamId)
           .map((project) => ({
@@ -3130,6 +3136,15 @@ export class DynamoDbProjectDirectoryClient {
 
     if (!team) {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+    // The editor's form must show the stored profile, so a save from a stale form cannot
+    // silently restore a field another administrator changed.
+    if ((team.profileRevision ?? 0) !== profile.expectedProfileRevision) {
+      throw new ProjectDataError(
+        409,
+        'TeamProfileConflict',
+        'The Team profile was changed by someone else. Reload and try again.',
+      )
     }
 
     const response: UpdateDirectoryTeamProfileResponse = {
@@ -5920,10 +5935,23 @@ function readDirectoryTeamProfile(input: unknown) {
   const leaderMemberKey = input.leaderMemberKey === null
     ? undefined
     : normalizeProjectMemberKey(input.leaderMemberKey)
+  const expectedProfileRevision = input.expectedProfileRevision
+  if (
+    typeof expectedProfileRevision !== 'number' ||
+    !Number.isSafeInteger(expectedProfileRevision) ||
+    expectedProfileRevision < 0
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'expectedProfileRevision must be a non-negative integer.',
+    )
+  }
 
   return {
     description: description === '' ? undefined : description,
     leaderMemberKey,
+    expectedProfileRevision,
   }
 }
 

@@ -1,10 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, within } from 'storybook/test'
-import type { DirectoryAdministrationTeam } from '@mukuroji/contracts'
+import { useState } from 'react'
+import { expect, userEvent, within } from 'storybook/test'
+import type { DirectoryAdministrationTeam, UpdateDirectoryTeamProfileInput } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { ProjectMember } from '../api/members'
 import { listTeamProfileProjects, summarizeTeamProfileMembers } from '../model/teamProfile'
-import { TeamProfilePanel } from './TeamProfilePanel'
+import { TeamProfilePanel, type TeamProfilePanelProps } from './TeamProfilePanel'
 
 const team: DirectoryAdministrationTeam = {
   id: 'core-team',
@@ -126,5 +127,39 @@ export const WorkspaceMembersError: Story = {
 export const InactiveMember: Story = {
   args: {
     errorMessage: createTranslator('ja')('projects.teamProfile.error.memberInactive'),
+  },
+}
+
+/**
+ * Stores saves in local state, as the reloaded directory would, so the form remounts after a save.
+ *
+ * @param props - Story args of the panel.
+ * @returns The panel over a Team that changes on save.
+ */
+function SavingTeamProfilePanel(props: TeamProfilePanelProps) {
+  const [current, setCurrent] = useState(team)
+  const save = async (_teamId: string, input: UpdateDirectoryTeamProfileInput) => {
+    setCurrent((previous) => ({
+      ...previous,
+      description: input.description,
+      ...(input.leaderMemberKey === null ? {} : { leaderMemberKey: input.leaderMemberKey }),
+      profileRevision: (previous.profileRevision ?? 0) + 1,
+    }))
+    return true
+  }
+  return <TeamProfilePanel {...props} team={current} teams={[current, designTeam]} onSaveProfile={save} />
+}
+
+/** A saved change reloads the Team, and the confirmation stays after the form is rebuilt. */
+export const SavedAfterReload: Story = {
+  render: (args) => <SavingTeamProfilePanel {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const description = canvas.getByLabelText('説明')
+    await userEvent.clear(description)
+    await userEvent.type(description, '新しい説明')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(await canvas.findByText('保存しました。')).toBeVisible()
+    await expect(canvas.getByLabelText('説明')).toHaveValue('新しい説明')
   },
 }

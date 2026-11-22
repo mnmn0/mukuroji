@@ -6,6 +6,7 @@ import {
   type TeamSearchSource,
 } from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
+import { createTeamMemberGrantPorts } from '../../app/composition/team-member-grant'
 import { isDirectoryTeamMemberRole } from '@mukuroji/contracts'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { isRecord } from '../shared/value-guards'
@@ -121,48 +122,31 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         throw new ProjectDataError(400, 'InvalidProjectWrite', 'memberKey and role are required.')
       }
       const profile = await readMemberProfile(body.memberKey)
+      const auditContext = createApiMutationContext(c, principal, {
+        teamId,
+        memberKey: profile.id,
+        role: body.role,
+      })
       return await addMemberToTeamProjectsUseCase(
-        {
-          getDirectoryAdministration: (workspaceId) =>
-            workspaceDependencies.projectDirectory.getDirectoryAdministration(workspaceId),
-          addProjectMemberIfAbsent: (
-            workspaceId,
-            grantTeamId,
-            projectId,
-            memberKey,
-            grant,
-            expectedVersion,
-            auditContext: ReturnType<typeof createApiMutationContext>,
-            fences,
-          ) => workspaceDependencies.projectDirectory.addProjectMemberIfAbsent(
-            workspaceId,
-            grantTeamId,
-            projectId,
-            memberKey,
-            grant,
-            expectedVersion,
-            auditContext,
-            fences,
-          ),
-          readActiveMemberVersion: async (workspaceId, memberKey) =>
-            (await requireActiveWorkspaceMember(workspaceId, memberKey)).version,
-          // Granting a Project role needs `projects.manage` on that Project, the same as the
-          // Project member route, so a role limited to Team management cannot grant access.
-          canManageProject: (projectTeamId, projectId) =>
-            principal.enterprisePermissions === undefined ||
-            hasEnterprisePermissionAtResource(principal, 'projects.manage', {
-              workspaceId: principal.directoryId,
-              kind: 'project',
-              targetId: projectId,
-              parentTeamId: projectTeamId,
-            }),
-          createAuditContext: (projectId) => createApiMutationContext(c, principal, {
-            teamId,
-            projectId,
-            memberKey: profile.id,
-            role: body.role,
-          }),
-        },
+        createTeamMemberGrantPorts(
+          workspaceDependencies.projectDirectory,
+          workspaceDependencies.workspaceAccess,
+          {
+            // Granting a Project role needs `projects.manage` on that Project, the same as the
+            // Project member route, so a role limited to Team management cannot grant access.
+            canManageProject: (projectTeamId, projectId) =>
+              principal.enterprisePermissions === undefined ||
+              hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+                workspaceId: principal.directoryId,
+                kind: 'project',
+                targetId: projectId,
+                parentTeamId: projectTeamId,
+              }),
+            // Every grant shares the request's audit context, and so its correlation; the use
+            // case gives each Project its own audit sequence slot.
+            createAuditContext: () => auditContext,
+          },
+        ),
         {
           workspaceId: principal.directoryId,
           teamId,
@@ -316,6 +300,7 @@ const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 4
   WorkspaceMemberVersionConflict: 409,
   DirectoryAuthorizationChanged: 403,
   TeamProjectsManageDenied: 403,
+  TeamProfileConflict: 409,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
   ProjectNotArchived: 409,

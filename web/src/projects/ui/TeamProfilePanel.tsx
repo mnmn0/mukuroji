@@ -191,6 +191,9 @@ export function TeamProfilePanel({
   onSaveProfile,
   onAddMember,
 }: TeamProfilePanelProps) {
+  // Kept above the keyed form: a real save reloads the Team and remounts the form, and the
+  // confirmation must survive that.
+  const [savedTeamId, setSavedTeamId] = useState<string>()
   return (
     <section className="workbench-panel grid gap-5 p-5" data-testid="team-profile-panel">
       <SectionHeader meta={t('projects.teamProfile.description')} title={t('projects.teamProfile.title')} />
@@ -237,13 +240,20 @@ export function TeamProfilePanel({
           ) : null}
           <TeamProfileForm
             // A new Team or a saved profile starts the form from the stored values.
-            key={`${team.id}\u0000${team.description ?? ''}\u0000${team.leaderMemberKey ?? ''}`}
+            key={`${team.id}\u0000${team.profileRevision ?? 0}\u0000${team.description ?? ''}\u0000${team.leaderMemberKey ?? ''}`}
             pending={pending}
+            saved={savedTeamId === team.id}
             t={t}
             team={team}
             workspaceMembers={workspaceMembers}
             workspaceMembersReady={workspaceMembersStatus === 'ready'}
-            onSave={(input) => onSaveProfile(team.id, input)}
+            onEdit={() => setSavedTeamId(undefined)}
+            onSave={async (input) => {
+              setSavedTeamId(undefined)
+              const succeeded = await onSaveProfile(team.id, input)
+              if (succeeded) setSavedTeamId(team.id)
+              return succeeded
+            }}
           />
           <TeamProfileMembers
             key={team.id}
@@ -276,8 +286,12 @@ type TeamProfileFormProps = {
   workspaceMembersReady: boolean
   /** Whether a change is in flight. */
   pending: boolean
+  /** Whether the last save of this Team succeeded and nothing was edited since. */
+  saved: boolean
   /** Localized message resolver. */
   t: (key: MessageKey) => string
+  /** Reports that a field was edited, so an earlier confirmation no longer applies. */
+  onEdit: () => void
   /** Saves the description and leader. */
   onSave: (input: UpdateDirectoryTeamProfileInput) => Promise<boolean>
 }
@@ -293,12 +307,13 @@ function TeamProfileForm({
   workspaceMembers,
   workspaceMembersReady,
   pending,
+  saved,
   t,
+  onEdit,
   onSave,
 }: TeamProfileFormProps) {
   const [description, setDescription] = useState(team.description ?? '')
   const [leaderMemberKey, setLeaderMemberKey] = useState(team.leaderMemberKey ?? '')
-  const [saved, setSaved] = useState(false)
   // Until the list loads, the stored leader is shown as is and cannot be changed.
   const leaderMissing = leaderMemberKey !== '' &&
     !workspaceMembers.some((member) => member.memberKey === leaderMemberKey)
@@ -310,12 +325,12 @@ function TeamProfileForm({
    */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    setSaved(false)
-    const succeeded = await onSave({
+    await onSave({
       description,
       leaderMemberKey: leaderMemberKey === '' ? null : leaderMemberKey,
+      // The stored revision this form was loaded from; a newer one refuses the save.
+      expectedProfileRevision: team.profileRevision ?? 0,
     })
-    setSaved(succeeded)
   }
 
   return (
@@ -326,7 +341,7 @@ function TeamProfileForm({
           className="workbench-input min-h-24 px-3 py-2 text-sm font-normal"
           maxLength={DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH}
           onChange={(event) => {
-            setSaved(false)
+            onEdit()
             setDescription(event.target.value)
           }}
           value={description}
@@ -338,7 +353,7 @@ function TeamProfileForm({
           className="workbench-input min-h-10 px-3 text-sm font-normal"
           disabled={!workspaceMembersReady}
           onChange={(event) => {
-            setSaved(false)
+            onEdit()
             setLeaderMemberKey(event.target.value)
           }}
           value={leaderMemberKey}

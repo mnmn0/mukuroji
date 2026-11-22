@@ -18,7 +18,7 @@ const team: DirectoryAdministrationTeam = {
 }
 
 /** One grant the fake store received. */
-type Grant = { projectId: string; expectedVersion: number; fences: string[] }
+type Grant = { projectId: string; expectedVersion: number; fences: string[]; auditSequence: number }
 
 /**
  * Creates fake ports over one Team.
@@ -32,9 +32,11 @@ function createPorts(existing: string[] = [], manageable = (_projectId: string) 
   let memberVersion = 10
   const ports: TeamMemberGrantPorts<string, string> = {
     getDirectoryAdministration: async () => ({ teams: [team] }),
-    addProjectMemberIfAbsent: async (_workspaceId, _teamId, projectId, _memberKey, _input, expectedVersion, _audit, fences) => {
+    addProjectMemberIfAbsent: async (
+      _workspaceId, _teamId, projectId, _memberKey, _input, expectedVersion, _audit, fences, auditSequence,
+    ) => {
       if (existing.includes(projectId)) return { added: false }
-      grants.push({ projectId, expectedVersion, fences })
+      grants.push({ projectId, expectedVersion, fences, auditSequence })
       memberVersion += 1
       return { added: true }
     },
@@ -59,10 +61,10 @@ test('adds the member to every active Project, keeping existing roles, fenced by
     addedProjectIds: ['alpha', 'gamma'],
     existingProjectIds: ['beta'],
   })
-  // The member's version is read again before each grant.
+  // The member's version is read again before each grant, and each grant has its own audit slot.
   expect(grants).toEqual([
-    { projectId: 'alpha', expectedVersion: 10, fences: ['caller'] },
-    { projectId: 'gamma', expectedVersion: 11, fences: ['caller'] },
+    { projectId: 'alpha', expectedVersion: 10, fences: ['caller'], auditSequence: 0 },
+    { projectId: 'gamma', expectedVersion: 11, fences: ['caller'], auditSequence: 2 },
   ])
 })
 
