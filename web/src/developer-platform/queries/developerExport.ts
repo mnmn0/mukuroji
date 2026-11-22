@@ -31,9 +31,8 @@ export async function exportDeveloperWorkItems(
 /**
  * Reads the hierarchy and schedule dependencies of the exported Work Items.
  *
- * Each Team is read once. A Team whose hierarchy cannot be read, such as one too large for a
- * single tree, leaves its Work Items without a WBS number or parent, and dependencies that cannot
- * be read leave the dependency cells empty, instead of failing the export.
+ * Each Team is read once. A failed hierarchy or dependency read fails the export, because a file
+ * without parents or dependencies would lose them when it is imported again.
  *
  * @param accessToken - Authorization header に使う access token です。
  * @param workItems - Exported Work Items.
@@ -49,6 +48,8 @@ async function readDeveloperExportContext(
     loadTeamWorkItemHierarchies(teamIds, accessToken),
     readDeveloperExportDependencies(accessToken),
   ])
+  const [hierarchyError] = hierarchies.errorsByTeam.values()
+  if (hierarchies.errorsByTeam.size > 0) throw hierarchyError
   return { hierarchies: hierarchies.nodesByTeam, dependencies }
 }
 

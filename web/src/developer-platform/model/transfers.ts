@@ -11,7 +11,6 @@ import type {
 import {
   createMultiTeamWorkItemOutlineRows,
   createWorkItemOutlineKey,
-  createWorkItemWbsNumberIndex,
 } from '../../work-items/model/workItemHierarchy'
 import { createMsProjectXml, type MsProjectTaskInput } from './msProjectXml'
 import { createSpreadsheetWorkbook } from './spreadsheet'
@@ -110,8 +109,8 @@ export type DeveloperExportContext = {
 export type DeveloperExportRow = {
   /** Exported Work Item. */
   workItem: CanonicalWorkItem
-  /** WBS number, when the Team's hierarchy could be read. */
-  wbsNumber?: string
+  /** Outline number across the whole export, such as `2.1`. */
+  wbsNumber: string
   /** One-based outline level among the exported Work Items. */
   outlineLevel: number
   /** Nearest exported ancestor. */
@@ -215,7 +214,7 @@ export function createDeveloperExportFile(
   }
   if (format === 'msproject') {
     return {
-      blob: new Blob([createMsProjectXml('mukuroji Work Items', toMsProjectTasks(rows))], {
+      blob: new Blob([createMsProjectXml('mukuroji Work Items', rows.map(toMsProjectTask))], {
         type: 'application/xml; charset=utf-8',
       }),
       fileName: `mukuroji-work-items-${suffix}.xml`,
@@ -282,7 +281,6 @@ export function createDeveloperExportRows(
 ): DeveloperExportRow[] {
   const exportedIds = new Set(workItems.map((workItem) => workItem.id))
   const exportedKeys = new Set(workItems.map((workItem) => createWorkItemOutlineKey(workItem.teamId, workItem.id)))
-  const wbsNumbers = createWorkItemWbsNumberIndex(context.hierarchies)
   const dependenciesBySuccessor = new Map<string, DeveloperExportRow['dependencies']>()
   for (const dependency of context.dependencies) {
     const predecessorKey = createWorkItemOutlineKey(dependency.predecessor.teamId, dependency.predecessor.workItemId)
@@ -301,17 +299,23 @@ export function createDeveloperExportRows(
   const outline = createMultiTeamWorkItemOutlineRows(workItems, context.hierarchies, new Set())
   const ancestors: string[] = []
   let previousTeamId: string | undefined
+  // Each Team numbers its WBS from 1, so the export numbers its rows from the outline instead;
+  // the numbers then stay unique when they are imported again as references.
+  const outlineCounters: number[] = []
   return outline.map(({ item: workItem, depth }) => {
+    outlineCounters.length = Math.min(outlineCounters.length, depth + 1)
+    const counterIndex = Math.min(depth, outlineCounters.length)
+    outlineCounters[counterIndex] = (outlineCounters[counterIndex] ?? 0) + 1
+    const wbsNumber = outlineCounters.join('.')
     if (workItem.teamId !== previousTeamId) ancestors.length = 0
     previousTeamId = workItem.teamId
     ancestors.length = Math.min(ancestors.length, depth)
     const parentId = depth > 0 ? ancestors[depth - 1] : undefined
     ancestors[depth] = workItem.id
     const key = createWorkItemOutlineKey(workItem.teamId, workItem.id)
-    const wbsNumber = wbsNumbers.get(key)
     return {
       workItem,
-      ...(wbsNumber ? { wbsNumber } : {}),
+      wbsNumber,
       outlineLevel: depth + 1,
       ...(parentId ? { parentId } : {}),
       dependencies: dependenciesBySuccessor.get(key) ?? [],
@@ -348,7 +352,7 @@ function readExportCell(row: DeveloperExportRow, column: (typeof exportColumns)[
   const { workItem } = row
   switch (column) {
     case 'wbsNumber':
-      return row.wbsNumber ?? ''
+      return row.wbsNumber
     case 'outlineLevel':
       return String(row.outlineLevel)
     case 'parentId':
@@ -392,7 +396,7 @@ function toExportWorkItem(row: DeveloperExportRow) {
   return {
     id: workItem.id,
     teamId: workItem.teamId,
-    ...(row.wbsNumber ? { wbsNumber: row.wbsNumber } : {}),
+    wbsNumber: row.wbsNumber,
     outlineLevel: row.outlineLevel,
     ...(row.parentId ? { parentId: row.parentId } : {}),
     title: workItem.title,
@@ -438,33 +442,14 @@ function writeAcceptanceCriteriaCell(criteria: DeveloperExportRow['acceptanceCri
   return criteria.map((criterion) => `${criterion.satisfied ? '[x]' : '[ ]'} ${criterion.text}`).join('\n')
 }
 
-/**
- * Builds the MS Project tasks of an export.
- *
- * Each Team numbers its own WBS from 1, so the tasks get outline numbers counted over the whole
- * export from the outline levels; a file with several Teams then has no duplicate numbers.
- *
- * @param rows - Export rows in outline order.
- * @returns The tasks.
- */
-function toMsProjectTasks(rows: readonly DeveloperExportRow[]): MsProjectTaskInput[] {
-  const counters: number[] = []
-  return rows.map((row) => {
-    counters.length = Math.min(counters.length, row.outlineLevel)
-    const index = Math.min(row.outlineLevel, counters.length + 1) - 1
-    counters[index] = (counters[index] ?? 0) + 1
-    return toMsProjectTask(row, counters.join('.'))
-  })
-}
 
 /**
  * Builds the MS Project task of one Work Item.
  *
  * @param row - Export row.
- * @param outlineNumber - Outline number of the task in the export.
  * @returns The task, with its dates from the schedule.
  */
-function toMsProjectTask(row: DeveloperExportRow, outlineNumber: string): MsProjectTaskInput {
+function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
   const { workItem } = row
   const schedule = workItem.schedule
   // A due date is written as a finish without a start, so it re-imports as a due date.
@@ -477,7 +462,7 @@ function toMsProjectTask(row: DeveloperExportRow, outlineNumber: string): MsProj
     key: workItem.id,
     name: workItem.title,
     ...(workItem.description ? { notes: workItem.description } : {}),
-    wbsNumber: outlineNumber,
+    wbsNumber: row.wbsNumber,
     outlineLevel: row.outlineLevel,
     ...dates,
     ...(schedule.mode === 'milestone' ? { milestone: true } : {}),

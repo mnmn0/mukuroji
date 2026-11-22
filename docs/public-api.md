@@ -334,7 +334,7 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 
 | 列 | 内容 |
 | --- | --- |
-| `wbsNumber` | WBS 番号。階層を読めない Team と archive 済みの Work Item では空 |
+| `wbsNumber` | export 全体で階層の順に振り直した番号（`1`、`1.1`、`2` など）。Team ごとの WBS 番号ではないので、複数 Team の export でも重ならず、import の参照キーにそのまま使える |
 | `outlineLevel` | export に含まれる Work Item の中での階層の深さ（1 から） |
 | `parentId` | export に含まれる最も近い祖先の ID |
 | `workItemTypeId` | Work Item Type の ID |
@@ -343,7 +343,7 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 | `contributors` | `member:<id> role:<id> effort:<分> status:<状態>` を `;` 区切り。JSON では配列 |
 | `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。改行を含む条件や `[`・`-`・`*`・`・` で始まる条件があるときは `[{ "text", "satisfied" }]` の JSON 配列。JSON では `{ text, satisfied }` の配列 |
 
-依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は export が失敗する（依存の列が空の file を import し直すと依存が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（Team ごとの WBS ではなく、export 全体で階層から振り直した番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。依存の日付制約は MS Project の link に対応する項目がないため、MS Project XML には書かない（CSV・JSON・Excel には残る）。API の export page 自体は追加の列を持たない。
+依存と relation は、相手も同じ export に含まれるものだけを書く。Planning か、いずれかの Team の階層を読めない場合は export が失敗する（依存や親の列が空の file を import し直すと、依存や階層が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（`wbsNumber` と同じ番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。依存の日付制約は MS Project の link に対応する項目がないため、MS Project XML には書かない（CSV・JSON・Excel には残る）。API の export page 自体は追加の列を持たない。
 
 Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
 

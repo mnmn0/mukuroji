@@ -531,7 +531,7 @@ describe('Developer Platform API', () => {
         return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/work-item-hierarchy')) {
-        // Only the first Work Item is in the read tree; the second keeps an empty WBS cell.
+        // The Team's own WBS number is not exported; the export numbers its outline itself.
         return new Response(JSON.stringify({
           schemaVersion: 1,
           teamId: 'team-product',
@@ -597,9 +597,9 @@ describe('Developer Platform API', () => {
       'id,teamId,wbsNumber,outlineLevel,parentId,title,description,assignedProjectId,assigneeUserId,workItemTypeId,workflowStatusId,statusCategory,dueDate,schedule,priority,dependencies,relations,contributors,acceptanceCriteria,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
     expect(await csvExport.blob.text()).toContain(
-      'work-item-1,team-product,2.1,1,,"\'=HYPERLINK(""https://example.com"")"',
+      'work-item-1,team-product,1,1,,"\'=HYPERLINK(""https://example.com"")"',
     )
-    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,,1,,Ship API,')
+    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,2,1,,Ship API,')
     expect(jsonExport.fileName).toMatch(
       /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.json$/u,
     )
@@ -608,7 +608,7 @@ describe('Developer Platform API', () => {
       workItems: [
         {
           id: 'work-item-1',
-          wbsNumber: '2.1',
+          wbsNumber: '1',
           customFieldValues: { risk: 'high' },
           schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
         },
@@ -633,6 +633,14 @@ describe('Developer Platform API', () => {
       if (url.endsWith('/api/planning')) {
         return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
       }
+      if (url.endsWith('/work-item-hierarchy')) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          teamId: 'team-product',
+          graphRevision: 1,
+          nodes: [],
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }
       if (urls.length === 1) {
         return new Response(JSON.stringify({
           code: 'rate_limited',
@@ -656,7 +664,6 @@ describe('Developer Platform API', () => {
 
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
-    // The hierarchy read gets an export page back, so the export has no WBS numbers.
     expect(urls).toEqual([
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100',
@@ -678,6 +685,24 @@ describe('Developer Platform API', () => {
 
     // A file with empty dependency cells would drop the dependencies when it is imported again.
     await expect(exportDeveloperWorkItems('access-token', 'csv')).rejects.toThrow()
+  })
+
+  test('fails the export when a Team hierarchy cannot be read', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/work-item-hierarchy')) {
+        return new Response(JSON.stringify({ code: 'unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ items: [createExportWorkItem({ id: 'work-item-1' })], hasMore: false }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    // A file without parents would flatten the hierarchy when it is imported again.
+    await expect(exportDeveloperWorkItems('access-token', 'json')).rejects.toThrow()
   })
 
   test('preserves stable API status and error code', async () => {
