@@ -7,7 +7,8 @@ import { getTeamTimeEntryPolicy, readTeamTimeEntryPolicyView, saveTeamTimeEntryP
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
 import { createTimeEntryFixture } from '../src/features/time-tracking/fixtures'
 import { classifyTimeTrackingFailure } from '../src/features/time-tracking/model/timeTrackingFailure'
-import { TimeEntryPolicyPanel, parseDailyLimitHours } from '../src/features/time-tracking/ui/TimeEntryPolicyPanel'
+import { parseDailyLimitHours } from '../src/features/time-tracking/model/timeEntryPolicy'
+import { TimeEntryPolicyPanel } from '../src/features/time-tracking/ui/TimeEntryPolicyPanel'
 import {
   createTimeTrackingFormatters,
   describeSavedTimeEntry,
