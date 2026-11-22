@@ -214,7 +214,7 @@ export function evaluateWeeklyReportReminders(
  * @param timeZone - IANA time zone.
  * @returns Hour from 0 to 23.
  */
-function readLocalHour(instant: Date, timeZone: string): number {
+export function readLocalHour(instant: Date, timeZone: string): number {
   const hour = new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone })
     .formatToParts(instant)
     .find((part) => part.type === 'hour')?.value
