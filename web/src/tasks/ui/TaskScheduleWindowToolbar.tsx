@@ -82,10 +82,21 @@ function TaskScheduleWindowToolbar({
   )
 }
 
+/**
+ * What the note under the calendar month navigation explains.
+ *
+ * - `loaded-period`: the screen loads only the Work Items of the shown period (Project).
+ * - `shown-month`: the screen loads every Work Item and the calendar places those of the shown
+ *   month (Team, My Tasks).
+ */
+export type TaskCalendarMonthNote = 'loaded-period' | 'shown-month'
+
 /** Props for the month navigation of a windowed calendar. */
 export type TaskCalendarMonthNavigationProps = {
   /** Month the calendar shows, in `YYYY-MM` form. */
   month: string
+  /** Note shown under the navigation; `loaded-period` when omitted. */
+  note?: TaskCalendarMonthNote
   /** Moves the calendar to another month. */
   onMonthChange: (month: string) => void
   /** Translator used for labels. */
@@ -101,14 +112,19 @@ export type TaskCalendarMonthNavigationProps = {
  * @param props - Visible month, movement callback, and translator.
  * @returns The calendar month navigation.
  */
-export function TaskCalendarMonthNavigation({ month, onMonthChange, t }: TaskCalendarMonthNavigationProps) {
+export function TaskCalendarMonthNavigation({
+  month,
+  note = 'loaded-period',
+  onMonthChange,
+  t,
+}: TaskCalendarMonthNavigationProps) {
   const window = createTaskCalendarMonthWindow(month)
   return (
     <TaskScheduleWindowToolbar
       ariaLabel={t('tasks.calendar.monthNavigation')}
       currentLabel={t('tasks.calendar.currentMonth')}
       nextLabel={t('tasks.calendar.nextMonth')}
-      note={t('tasks.scheduleWindow.note')}
+      note={t(note === 'shown-month' ? 'tasks.calendar.shownMonthNote' : 'tasks.scheduleWindow.note')}
       onCurrent={() => onMonthChange(getCurrentTaskMonth())}
       onNext={() => onMonthChange(shiftTaskMonth(month, 1))}
       onPrevious={() => onMonthChange(shiftTaskMonth(month, -1))}

@@ -10268,6 +10268,41 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.taskStatusUpdates).toBe(0)
   })
 
+  test('マイタスクをテーブルに切り替えると期限順に並べ、キーボードで選んで開ける', async ({ page }) => {
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const table = page.getByTestId('my-tasks-table')
+    await expect(table).toBeVisible()
+    await expect(page.getByTestId('my-tasks-kanban')).toHaveCount(0)
+    const rowIds = await table.locator('tbody tr[data-testid^="my-tasks-table-row-"]').evaluateAll(
+      (rows) => rows.map((row) => row.getAttribute('data-testid')),
+    )
+    expect(rowIds).toContain('my-tasks-table-row-refero-wireframe')
+    const dueDates = await table.locator('td[data-testid^="my-tasks-table-due-"]').allTextContents()
+    const datedDueDates = dueDates.filter((value) => /^\d{4}-\d{2}-\d{2}/.test(value))
+    expect(datedDueDates).toEqual([...datedDueDates].sort())
+
+    await page.keyboard.press('j')
+    const firstRow = table.locator('tbody tr[data-testid^="my-tasks-table-row-"]').first()
+    await expect(firstRow).toHaveAttribute('data-task-view-focused', 'true')
+
+    // At 390px the table scrolls inside itself and the page does not scroll sideways.
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(table).toBeVisible()
+    const pageScrollX = await page.evaluate(() => {
+      window.scrollTo(500, 0)
+      return window.scrollX
+    })
+    expect(pageScrollX).toBe(0)
+    await page.setViewportSize({ width: 1280, height: 720 })
+
+    await page.getByTestId('my-tasks-table-open-refero-wireframe').click()
+    await expect(page).toHaveURL(/wireframe/)
+  })
+
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
     page,
   }) => {

@@ -282,6 +282,7 @@ export const workItemsMessages = {
   'tasks.calendar.currentMonth': '今月',
   'tasks.calendar.nextMonth': '次の月',
   'tasks.calendar.monthNavigation': 'カレンダーの表示月',
+  'tasks.calendar.shownMonthNote': '表示中の月に予定がある Work Item と、予定のない Work Item を表示しています。',
   'tasks.gantt.previousPeriod': '1 か月前',
   'tasks.gantt.currentPeriod': '今月から',
   'tasks.gantt.nextPeriod': '1 か月後',

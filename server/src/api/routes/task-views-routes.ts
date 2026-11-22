@@ -1284,10 +1284,8 @@ function readTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
   if (
     value === 'table' ||
     value === 'board' ||
-    value === 'list' ||
     value === 'gantt' ||
-    value === 'calendar' ||
-    value === 'timeline'
+    value === 'calendar'
   ) {
     return value
   }

@@ -2451,7 +2451,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -2471,7 +2471,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
         scope: { kind: 'viewer' },
         filters: { priorities: ['high'] },
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [{ field: 'priority', direction: 'desc' }],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3583,7 +3583,7 @@ test('replays task view updates without reverting newer preference, default, or 
     scope: { kind: 'viewer' as const },
     filters: {},
     layout: {
-      mode: 'list' as const,
+      mode: 'table' as const,
       sort: [],
       columns: [{ field: 'title' }],
       density: 'compact' as const,
@@ -3754,7 +3754,7 @@ test('replays a same-key concurrent task view update after the receipt wins its 
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3835,7 +3835,7 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
     scope: { kind: 'viewer' as const },
     filters: {},
     layout: {
-      mode: 'list' as const,
+      mode: 'table' as const,
       sort: [],
       columns: [{ field: 'title' }],
       density: 'compact' as const,
@@ -3921,7 +3921,7 @@ test('keeps a committed task view deletion successful when preference cleanup is
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3980,7 +3980,7 @@ test('rejects task view updates when a concurrent delete removes the live row', 
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -4070,7 +4070,7 @@ test('returns a stable conflict when deletion commits between create replay read
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',

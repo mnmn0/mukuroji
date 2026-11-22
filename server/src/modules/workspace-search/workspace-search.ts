@@ -5585,10 +5585,8 @@ function requireTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
   if (
     value === 'table' ||
     value === 'board' ||
-    value === 'list' ||
     value === 'gantt' ||
-    value === 'calendar' ||
-    value === 'timeline'
+    value === 'calendar'
   ) return value
   return invalidTaskView('Task view layout mode is invalid.')
 }

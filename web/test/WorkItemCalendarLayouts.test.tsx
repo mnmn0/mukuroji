@@ -65,6 +65,9 @@ describe('Team Issue calendar', () => {
     expect(html).toContain(`data-testid="task-calendar-day-${today}"`)
     expect(html).toContain('data-testid="task-calendar-item-due-today"')
     expect(html).not.toContain('data-testid="team-issue-table-group"')
+    // Team loads every Work Item, so the note does not speak of a loaded period.
+    expect(html).toContain(t('tasks.calendar.shownMonthNote'))
+    expect(html).not.toContain(t('tasks.scheduleWindow.note'))
   })
 })
 
@@ -86,6 +89,8 @@ describe('My Tasks calendar', () => {
     expect(html).not.toContain('data-testid="my-tasks-kanban"')
     expect(html).toContain('data-testid="task-calendar-month-navigation"')
     expect(html).toContain('data-testid="task-calendar-item-due-today"')
+    expect(html).toContain(t('tasks.calendar.shownMonthNote'))
+    expect(html).not.toContain(t('tasks.scheduleWindow.note'))
   })
 })
 

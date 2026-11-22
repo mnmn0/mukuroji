@@ -1715,6 +1715,7 @@ export function TeamIssueScreen({
                       configuration={configuration}
                       configurationsByTeam={ganttConfigurationsByTeam}
                       month={calendarMonth}
+                      monthNote="shown-month"
                       onMonthChange={setCalendarMonth}
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       t={t}
