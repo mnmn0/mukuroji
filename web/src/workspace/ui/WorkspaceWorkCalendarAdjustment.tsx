@@ -1,16 +1,6 @@
-import { useMemo, useRef, useState } from 'react'
-import {
-  DEFAULT_WORK_CALENDAR_ADJUSTMENT,
-  type WorkCalendarAdjustment,
-  type WorkCalendarChangeImpact,
-  type WorkCalendarChangeResult,
-  type WorkspaceCalendarSettings,
-  type WorkspaceCalendarSettingsResponse,
-} from '@mukuroji/contracts'
+import { useMemo } from 'react'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
-import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { applyWorkspaceWorkCalendar, previewWorkspaceWorkCalendarChange } from '../api/workCalendar'
-import { useWorkspaceCalendarSettings } from '../queries/useWorkspaceCalendarSettings'
+import { useWorkspaceWorkCalendarAdjustment } from '../mutations/useWorkspaceWorkCalendarAdjustment'
 import {
   WorkCalendarAdjustmentFields,
   WorkCalendarImpactSummary,
@@ -36,53 +26,7 @@ export type WorkspaceWorkCalendarAdjustmentProps = {
  */
 export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: WorkspaceWorkCalendarAdjustmentProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const calendar = useWorkspaceCalendarSettings(accessToken)
-  const [adjustment, setAdjustment] = useState<WorkCalendarAdjustment>(DEFAULT_WORK_CALENDAR_ADJUSTMENT)
-  const [preview, setPreview] = useState<PreviewedImpact>()
-  const [result, setResult] = useState<WorkCalendarChangeResult>()
-  const [failed, setFailed] = useState(false)
-  const [isBusy, setIsBusy] = useState(false)
-  const applyContext = useRef<MutationRequestContext | undefined>(undefined)
-  const currentKey = calendar.settings ? previewKey(calendar.settings, adjustment) : undefined
-  // A preview only stands for the settings and adjustment it was made with.
-  const impact = preview && preview.key === currentKey ? preview.impact : undefined
-
-  /** Previews the adjustment against the saved Workspace calendar. */
-  async function requestPreview() {
-    const settings = calendar.settings
-    if (!settings) return
-    const key = previewKey(settings, adjustment)
-    setIsBusy(true)
-    setFailed(false)
-    setResult(undefined)
-    try {
-      const previewed = await previewWorkspaceWorkCalendarChange(accessToken, {
-        calendar: toWorkspaceCalendarSettings(settings),
-        adjustment,
-      })
-      setPreview({ key, impact: previewed })
-    } catch {
-      setFailed(true)
-    } finally {
-      setIsBusy(false)
-    }
-  }
-
-  /** Applies the previewed adjustment. */
-  async function apply() {
-    setIsBusy(true)
-    setFailed(false)
-    applyContext.current ??= createMutationRequestContext()
-    try {
-      setResult(await applyWorkspaceWorkCalendar(accessToken, { adjustment }, applyContext.current))
-      applyContext.current = undefined
-      setPreview(undefined)
-    } catch {
-      setFailed(true)
-    } finally {
-      setIsBusy(false)
-    }
-  }
+  const controller = useWorkspaceWorkCalendarAdjustment(accessToken)
 
   return (
     <section className="workbench-panel grid gap-3 p-5" data-testid="workspace-work-calendar-adjustment">
@@ -93,22 +37,17 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
         <p className="text-sm text-[var(--workbench-muted)]">{t('workspace.workCalendar.workspaceDescription')}</p>
       </header>
       <WorkCalendarAdjustmentFields
-        adjustment={adjustment}
-        disabled={isBusy}
-        onChange={(next) => {
-          setAdjustment(next)
-          setPreview(undefined)
-          setResult(undefined)
-          applyContext.current = undefined
-        }}
+        adjustment={controller.adjustment}
+        disabled={controller.isBusy}
+        onChange={controller.changeAdjustment}
         t={t}
       />
       <div className="flex flex-wrap gap-2">
         <button
           className="workbench-button-secondary"
           data-testid="workspace-work-calendar-preview"
-          disabled={isBusy || !calendar.settings}
-          onClick={() => void requestPreview()}
+          disabled={controller.isBusy || !controller.canPreview}
+          onClick={() => void controller.requestPreview()}
           type="button"
         >
           {t('workspace.workCalendar.preview')}
@@ -116,49 +55,18 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
         <button
           className="workbench-button-primary"
           data-testid="workspace-work-calendar-apply"
-          disabled={isBusy || !impact}
-          onClick={() => void apply()}
+          disabled={controller.isBusy || !controller.impact}
+          onClick={() => void controller.apply()}
           type="button"
         >
           {t('workspace.workCalendar.apply')}
         </button>
       </div>
-      {failed ? (
+      {controller.failed ? (
         <p className="text-sm text-[var(--workbench-danger)]" role="alert">{t('workspace.workCalendar.error.failed')}</p>
       ) : null}
-      {impact ? <WorkCalendarImpactSummary impact={impact} t={t} /> : null}
-      {result ? <WorkCalendarResultSummary result={result} t={t} /> : null}
+      {controller.impact ? <WorkCalendarImpactSummary impact={controller.impact} t={t} /> : null}
+      {controller.result ? <WorkCalendarResultSummary result={controller.result} t={t} /> : null}
     </section>
   )
-}
-
-/** Preview of a Workspace calendar adjustment, bound to what it previewed. */
-type PreviewedImpact = {
-  /** Key of the settings and adjustment the preview was made with. */
-  key: string
-  /** Previewed impact. */
-  impact: WorkCalendarChangeImpact
-}
-
-/**
- * Builds the key that binds a preview to the saved settings and the chosen adjustment.
- *
- * @param settings - Saved Workspace calendar settings.
- * @param adjustment - Chosen adjustment.
- * @returns The key.
- */
-function previewKey(settings: WorkspaceCalendarSettingsResponse, adjustment: WorkCalendarAdjustment): string {
-  return JSON.stringify([toWorkspaceCalendarSettings(settings), adjustment])
-}
-
-/**
- * Drops the national holiday dates a settings response carries, leaving the stored settings.
- *
- * @param settings - Settings response.
- * @returns The Workspace calendar settings.
- */
-function toWorkspaceCalendarSettings(settings: WorkspaceCalendarSettingsResponse): WorkspaceCalendarSettings {
-  const { nationalHolidayDates, ...stored } = settings
-  void nationalHolidayDates
-  return stored
 }

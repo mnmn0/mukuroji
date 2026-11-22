@@ -112,3 +112,22 @@ test('splits a transaction that exceeds the DynamoDB item limit', async () => {
   expect(written).toEqual([12, 12])
   expect(applied).toMatchObject({ updatedCount: 24, conflictCount: 0 })
 })
+
+test('counts earlier conflicts when a newer change stops the rewrite', async () => {
+  let version = 'v1'
+  const applied = await applyWorkCalendarChange(rules, {
+    readWorkItems: async () => workItems(30),
+    readCalendarVersion: async () => version,
+    async writeSchedules() {
+      version = 'v2'
+      throw new ProjectDataError(409, 'WorkItemScheduleConflict', 'A Work Item changed.')
+    },
+  }, async () => ({
+    scope: { kind: 'team', teamId: 'team-1' },
+    additionalHolidays: ['2026-12-09'],
+    revision: 1,
+    updatedAt: '2026-11-22T00:00:00.000Z',
+    updatedBy: 'user#a@example.com',
+  }))
+  expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 30 })
+})

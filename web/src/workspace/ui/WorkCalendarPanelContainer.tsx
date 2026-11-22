@@ -1,12 +1,6 @@
-import { useMemo, useRef, useState } from 'react'
-import type {
-  WorkCalendarChangeImpact,
-  WorkCalendarChangeResult,
-} from '@mukuroji/contracts'
+import { useMemo, useState } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
-import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { previewWorkCalendarChange, saveWorkCalendar } from '../api/workCalendar'
-import { WorkspaceAccessApiError } from '../api/errors'
+import { readWorkCalendarErrorKey, useWorkCalendarChange } from '../mutations/useWorkCalendarChange'
 import {
   createWorkCalendarDraft,
   toWorkCalendarOverrides,
@@ -64,99 +58,63 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
   const [teamId, projectId] = splitScope(scope?.value)
   const query = useWorkCalendar(accessToken, teamId, projectId)
   const [draftState, setDraftState] = useState<DraftState>()
-  const [impact, setImpact] = useState<WorkCalendarChangeImpact>()
-  const [result, setResult] = useState<WorkCalendarChangeResult>()
-  const [errorMessage, setErrorMessage] = useState<string>()
-  const [isBusy, setIsBusy] = useState(false)
-  const saveContext = useRef<MutationRequestContext | undefined>(undefined)
-  /** Changes whenever the outcome is cleared, so a reply to an earlier request is dropped. */
-  const requestGeneration = useRef(0)
+  const change = useWorkCalendarChange(accessToken, () => query.mutate())
   const calendar = query.data
   const ownDraft = draftState && draftState.scope === scope?.value ? draftState : undefined
   const draft = calendar ? ownDraft?.value ?? createWorkCalendarDraft(calendar) : undefined
   const baseRevision = ownDraft?.baseRevision ?? calendar?.calendar?.revision ?? 0
 
-  /** Clears the preview, result, and error after any change. */
-  function resetOutcome() {
-    requestGeneration.current += 1
-    setImpact(undefined)
-    setResult(undefined)
-    setErrorMessage(undefined)
-    saveContext.current = undefined
-  }
-
   /** Previews the drafted change. */
-  async function preview() {
+  function preview() {
     if (!teamId || !draft) return
-    const generation = requestGeneration.current
-    setIsBusy(true)
-    setErrorMessage(undefined)
-    try {
-      const previewed = await previewWorkCalendarChange(accessToken, teamId, {
-        ...(projectId ? { projectId } : {}),
-        overrides: toWorkCalendarOverrides(draft),
-        adjustment: draft.adjustment,
-      })
-      if (generation === requestGeneration.current) setImpact(previewed)
-    } catch (error) {
-      if (generation === requestGeneration.current) setErrorMessage(readErrorMessage(error, t))
-    } finally {
-      setIsBusy(false)
-    }
+    void change.preview(teamId, {
+      ...(projectId ? { projectId } : {}),
+      overrides: toWorkCalendarOverrides(draft),
+      adjustment: draft.adjustment,
+    })
   }
 
   /** Saves the previewed change and applies it to the Work Items that follow the calendar. */
   async function save() {
-    if (!teamId || !draft || !impact) return
-    setIsBusy(true)
-    setErrorMessage(undefined)
-    saveContext.current ??= createMutationRequestContext()
-    try {
-      const saved = await saveWorkCalendar(accessToken, teamId, {
-        ...(projectId ? { projectId } : {}),
-        overrides: toWorkCalendarOverrides(draft),
-        adjustment: draft.adjustment,
-        expectedRevision: baseRevision,
-      }, saveContext.current)
-      saveContext.current = undefined
-      setResult(saved)
-      setImpact(undefined)
-      setDraftState(undefined)
-      await query.mutate()
-    } catch (error) {
-      setErrorMessage(readErrorMessage(error, t))
-    } finally {
-      setIsBusy(false)
-    }
+    if (!teamId || !draft || !change.impact) return
+    const saved = await change.save(teamId, {
+      ...(projectId ? { projectId } : {}),
+      overrides: toWorkCalendarOverrides(draft),
+      adjustment: draft.adjustment,
+      expectedRevision: baseRevision,
+    })
+    if (saved) setDraftState(undefined)
   }
 
   return (
     <WorkCalendarPanel
       calendar={calendar}
       draft={draft}
-      errorMessage={errorMessage ?? (query.error ? readErrorMessage(query.error, t) : undefined)}
-      impact={impact}
-      isBusy={isBusy}
+      errorMessage={change.errorKey
+        ? t(change.errorKey)
+        : query.error ? t(readWorkCalendarErrorKey(query.error)) : undefined}
+      impact={change.impact}
+      isBusy={change.isBusy}
       isLoading={query.isLoading}
       onDraftChange={(value) => {
         if (!scope || !calendar) return
-        resetOutcome()
+        change.reset()
         setDraftState({ scope: scope.value, baseRevision, value })
       }}
-      onPreview={() => void preview()}
+      onPreview={preview}
       onRetry={() => {
-        resetOutcome()
+        change.reset()
         // Reloading starts again from the stored calendar, so a later save uses its new revision.
         setDraftState(undefined)
         void query.mutate()
       }}
       onSave={() => void save()}
       onScopeChange={(value) => {
-        resetOutcome()
+        change.reset()
         setDraftState(undefined)
         setSelectedScope(value)
       }}
-      result={result}
+      result={change.result}
       scopeOptions={scopeOptions}
       selectedScope={scope?.value}
       t={t}
@@ -196,20 +154,4 @@ function splitScope(value: string | undefined): [string | undefined, string | un
   if (!value) return [undefined, undefined]
   const separator = value.indexOf('/')
   return separator < 0 ? [value, undefined] : [value.slice(0, separator), value.slice(separator + 1)]
-}
-
-/**
- * Picks the message of a failed calendar request.
- *
- * @param error - Thrown error.
- * @param t - Translator.
- * @returns A message for the member.
- */
-function readErrorMessage(error: unknown, t: (key: MessageKey) => string): string {
-  if (error instanceof WorkspaceAccessApiError) {
-    if (error.status === 409) return t('workspace.workCalendar.error.conflict')
-    if (error.status === 413) return t('workspace.workCalendar.error.tooLarge')
-    if (error.status === 403) return t('workspace.workCalendar.error.forbidden')
-  }
-  return t('workspace.workCalendar.error.failed')
 }

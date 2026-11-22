@@ -407,22 +407,6 @@ export function TaskPage() {
   // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
-  // A Project with its own calendar, or a Team calendar, replaces the Workspace one (ADR 0058).
-  const {
-    data: projectWorkCalendar,
-    error: projectWorkCalendarError,
-    mutate: mutateProjectWorkCalendar,
-  } = useWorkCalendar(
-    accessToken,
-    selectedTeamId,
-    projectId,
-    Boolean(user && !currentUserError),
-  )
-  const workspaceCalendarPolicy = useMemo(
-    () => projectWorkCalendar?.resolvedPolicy ??
-      createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
-    [projectWorkCalendar?.resolvedPolicy, workspaceCalendar.settings],
-  )
   const {
     data: teams = [],
     error: projectDirectoryError,
@@ -580,6 +564,23 @@ export function TaskPage() {
       suppressIssueFallback,
       teams,
     ],
+  )
+  // A Project with its own calendar, or a Team calendar, replaces the Workspace one (ADR 0058). The
+  // Team is the one new Work Items are created in, which the route resolves even without `teamId`.
+  const {
+    data: projectWorkCalendar,
+    error: projectWorkCalendarError,
+    mutate: mutateProjectWorkCalendar,
+  } = useWorkCalendar(
+    accessToken,
+    creationTeam?.id ?? selectedTeamId,
+    projectId,
+    Boolean(user && !currentUserError),
+  )
+  const workspaceCalendarPolicy = useMemo(
+    () => projectWorkCalendar?.resolvedPolicy ??
+      createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
+    [projectWorkCalendar?.resolvedPolicy, workspaceCalendar.settings],
   )
   const workspaceId = (
     user?.attributes['custom:workspace_id'] ??

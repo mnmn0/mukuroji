@@ -227,7 +227,7 @@ export async function applyWorkCalendarChange(
     const chunk = plan.updates.slice(index, index + WORK_ITEM_SCHEDULE_CASCADE_LIMIT)
     if ((index > 0 || !save) && await superseded()) {
       // The newer change plans from the current Work Items and rewrites the rest itself.
-      conflictCount += plan.updates.length - index
+      conflictCount += plan.updates.length - index + conflicted.size
       return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
     }
     const outcome = await writeWithinTransactionLimit(ports, chunk, batches)
