@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
+import { WORKSPACE_INVITATION_NAME_MAX_LENGTH } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -38,9 +39,18 @@ import {
 } from '../mutations/useWorkspaceMemberCredentialReset'
 import {
   createWorkspaceAccessMutationSession,
+  getBulkInvitationRunner,
   getCredentialResetRunner,
 } from '../mutations/workspaceAccessMutationSession'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { sendBulkWorkspaceInvitations, type BulkInvitationOutcome } from '../mutations/bulkWorkspaceInvitations'
+import {
+  createWorkspaceMemberCsv,
+  emptyWorkspaceMemberFilter,
+  filterWorkspaceMembers,
+  type WorkspaceMemberFilter,
+} from '../model/memberDirectory'
+import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -84,6 +94,14 @@ type WorkspaceAccessPanelProps = {
    * invitation 作成 callback です。
    */
   onInvite?: (input: CreateWorkspaceInvitationInput) => Promise<void>
+  /**
+   * Sends many invitations, reporting each outcome as it arrives, and reloads the access ledger
+   * once at the end.
+   */
+  onInviteMany?: (
+    inputs: CreateWorkspaceInvitationInput[],
+    onOutcome: (index: number, outcome: BulkInvitationOutcome) => void,
+  ) => Promise<unknown>
   /**
    * 手動 Cognito cleanup の完了確認 callback です。
    */
@@ -302,6 +320,12 @@ export function WorkspaceAccessPanelContainer({
       : getCredentialResetRunner(administratorKey),
     [administratorKey],
   )
+  const bulkInvitationRunner = useMemo(
+    () => administratorKey === undefined
+      ? createMutationRequestRunner()
+      : getBulkInvitationRunner(administratorKey),
+    [administratorKey],
+  )
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
     accessToken: mutationSession.accessToken,
     requestRunner: credentialResetRunner,
@@ -372,6 +396,25 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      onInviteMany={async (inputs, onOutcome) => {
+        try {
+          // Each address gets its own operation key, so invitations sent side by side keep their
+          // own idempotency key and a retry of a failed row reuses that row's key.
+          return await sendBulkWorkspaceInvitations(
+            inputs,
+            (input) => bulkInvitationRunner.run(
+              `workspace-invitation:create:${input.email}`,
+              JSON.stringify(input),
+              (context) => createWorkspaceInvitation(accessToken, input, context),
+              shouldRetainWorkspaceMutationContext,
+            ).then(() => undefined),
+            onOutcome,
+          )
+        } finally {
+          // Rows run on their own runner, so this refresh keeps their retained contexts.
+          await retryLoad()
+        }
+      }}
       onReinviteInvitation={async (invitationId) => {
         await mutationRequestRunner.run(
           `workspace-invitation:reinvite:${invitationId}`,
@@ -429,6 +472,7 @@ export function WorkspaceAccessPanel({
   locale,
   onAcknowledgeInvitationCleanup,
   onInvite,
+  onInviteMany,
   onReinviteInvitation,
   onResendInvitation,
   onRetry,
@@ -704,6 +748,7 @@ export function WorkspaceAccessPanel({
                 {t('workspace.access.invite.name')}
                 <input
                   className="workbench-input min-h-10 px-3"
+                  maxLength={WORKSPACE_INVITATION_NAME_MAX_LENGTH}
                   name="name"
                   placeholder={t('workspace.access.invite.namePlaceholder')}
                 />
@@ -729,6 +774,15 @@ export function WorkspaceAccessPanel({
               </button>
             </div>
           </form>
+        ) : null}
+
+        {canInvite && onInviteMany ? (
+          <WorkspaceBulkInvitePanel
+            access={access}
+            availableRoles={availableInviteRoles}
+            t={t}
+            onInviteMany={onInviteMany}
+          />
         ) : null}
 
         <WorkspaceMemberLedger
@@ -831,12 +885,21 @@ function WorkspaceMemberLedger({
     (signInSecurity ?? []).map((entry) => [entry.memberKey, entry]),
   )
   const unenrolledMemberCount = signInSecurity?.filter((entry) => entry.mfa === 'not-enrolled').length
+  const [filter, setFilter] = useState<WorkspaceMemberFilter>(emptyWorkspaceMemberFilter)
+  const visibleMembers = filterWorkspaceMembers(access.members, filter)
 
   return (
     <section className="min-w-0 border-t border-[var(--workbench-border)] bg-surface">
       <LedgerSectionHeader
         description={t('workspace.access.members.description')}
         title={t('workspace.access.members.title')}
+      />
+      <WorkspaceMemberFilterBar
+        filter={filter}
+        members={visibleMembers}
+        t={t}
+        totalCount={access.members.length}
+        onChange={setFilter}
       />
       {signInSecurityLoadFailed ? (
         <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
@@ -873,7 +936,7 @@ function WorkspaceMemberLedger({
             </tr>
           </thead>
           <tbody>
-            {access.members.map((member) => {
+            {visibleMembers.map((member) => {
               const isCurrentMember = member.memberKey === access.currentMember.memberKey
               const canManage = canManageWorkspaceMember(access, member)
               const isLastActiveOwner = member.role === 'owner' &&
@@ -1014,8 +1077,131 @@ function WorkspaceMemberLedger({
         <p className="border-t border-[var(--workbench-border)] px-4 py-7 text-sm font-medium text-[var(--workbench-muted)]">
           {t('workspace.access.members.empty')}
         </p>
+      ) : visibleMembers.length === 0 ? (
+        <p
+          className="border-t border-[var(--workbench-border)] px-4 py-7 text-sm font-medium text-[var(--workbench-muted)]"
+          data-testid="workspace-member-filter-empty"
+        >
+          {t('workspace.access.filter.noMatch')}
+        </p>
       ) : null}
     </section>
+  )
+}
+
+/**
+ * Starts a browser download of a CSV file.
+ *
+ * @param csv - CSV text.
+ * @param fileName - Offered file name.
+ */
+function downloadCsv(csv: string, fileName: string) {
+  // The byte order mark makes Excel read the UTF-8 file, including Japanese names, correctly.
+  const objectUrl = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }))
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = fileName
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+}
+
+/**
+ * Search box, status and role filters, and CSV export of the member list.
+ */
+function WorkspaceMemberFilterBar({
+  filter,
+  members,
+  t,
+  totalCount,
+  onChange,
+}: {
+  /** Current filter. */
+  filter: WorkspaceMemberFilter
+  /** Members the filter keeps, which the export writes. */
+  members: readonly WorkspaceMember[]
+  /** Translates a message key. */
+  t: (key: MessageKey) => string
+  /** Number of members before filtering. */
+  totalCount: number
+  /** Replaces the filter. */
+  onChange: (filter: WorkspaceMemberFilter) => void
+}) {
+  const exportMembers = () => {
+    const csv = createWorkspaceMemberCsv(members, {
+      createdAt: t('workspace.access.export.createdAt'),
+      deactivatedAt: t('workspace.access.export.deactivatedAt'),
+      email: t('workspace.access.export.email'),
+      name: t('workspace.access.export.name'),
+      role: t('workspace.access.export.role'),
+      status: t('workspace.access.export.status'),
+    })
+    downloadCsv(csv, `workspace-members-${new Date().toISOString().slice(0, 10)}.csv`)
+  }
+
+  return (
+    <div
+      className="flex flex-wrap items-end gap-3 border-t border-[var(--workbench-border)] px-4 py-3"
+      data-testid="workspace-member-filter"
+    >
+      <label className="grid min-w-[220px] flex-1 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('workspace.access.filter.search')}
+        <input
+          className="workbench-input min-h-10 px-3 text-sm"
+          data-testid="workspace-member-search"
+          placeholder={t('workspace.access.filter.searchPlaceholder')}
+          type="search"
+          value={filter.query}
+          onChange={(event) => onChange({ ...filter, query: event.target.value })}
+        />
+      </label>
+      <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('workspace.access.statusLabel')}
+        <select
+          className="workbench-input min-h-10 px-3 text-sm"
+          data-testid="workspace-member-status-filter"
+          value={filter.status}
+          onChange={(event) => {
+            const status = (['all', 'active', 'deactivated'] as const).find((value) => value === event.target.value)
+            if (status) onChange({ ...filter, status })
+          }}
+        >
+          <option value="all">{t('workspace.access.filter.all')}</option>
+          <option value="active">{t('workspace.access.memberStatus.active')}</option>
+          <option value="deactivated">{t('workspace.access.memberStatus.deactivated')}</option>
+        </select>
+      </label>
+      <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('workspace.access.roleLabel')}
+        <select
+          className="workbench-input min-h-10 px-3 text-sm"
+          data-testid="workspace-member-role-filter"
+          value={filter.role}
+          onChange={(event) => {
+            const role = (['all', ...workspaceRoles] as const).find((value) => value === event.target.value)
+            if (role) onChange({ ...filter, role })
+          }}
+        >
+          <option value="all">{t('workspace.access.filter.all')}</option>
+          {workspaceRoles.map((role) => (
+            <option key={role} value={role}>{t(`workspace.access.role.${role}`)}</option>
+          ))}
+        </select>
+      </label>
+      <button
+        className="workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-60"
+        data-testid="workspace-member-export"
+        disabled={members.length === 0}
+        type="button"
+        onClick={exportMembers}
+      >
+        {t('workspace.access.export.button')}
+      </button>
+      <p className="w-full text-xs font-semibold text-[var(--workbench-muted)]" data-testid="workspace-member-count" role="status">
+        {t('workspace.access.filter.count')
+          .replace('{shown}', String(members.length))
+          .replace('{total}', String(totalCount))}
+      </p>
+    </div>
   )
 }
 
@@ -1476,6 +1662,14 @@ function resolveWorkspaceAccessErrorMessage(
   if (error instanceof WorkspaceAccessApiError) {
     if (error.code === 'CognitoUserDisabled') {
       return t('workspace.access.error.cognitoUserDisabled')
+    }
+
+    if (error.code === 'InvalidWorkspaceEmail') {
+      return t('workspace.access.bulk.issue.invalid-email')
+    }
+
+    if (error.code === 'InvalidWorkspaceInvitationName') {
+      return t('workspace.access.bulk.issue.name-too-long')
     }
 
     if (error.status === 409) {
