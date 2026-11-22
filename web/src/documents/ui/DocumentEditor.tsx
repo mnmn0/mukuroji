@@ -950,7 +950,7 @@ function ReadOnlyBlock({
                   className="border-b border-r border-[var(--workbench-border)] px-3 py-2.5 text-xs font-bold text-[var(--workbench-muted)] last:border-r-0"
                   key={`${block.id}-readonly-column-${index}`}
                 >
-                  {column}
+                  <DocumentLinkedText text={column} />
                 </th>
               ))}
             </tr>

@@ -43,7 +43,7 @@ export const Paragraph: Story = {
 }
 
 /**
- * Page links inside table cells and checklist items, as a folder import
+ * Page links inside table headers, cells, and checklist items, as a folder import
  * writes them.
  */
 export const TableAndChecklist: Story = {
@@ -53,7 +53,9 @@ export const TableAndChecklist: Story = {
         <thead>
           <tr>
             <th className="border px-3 py-2">Page</th>
-            <th className="border px-3 py-2">Link</th>
+            <th className="border px-3 py-2">
+              <DocumentLinkedText text="[Index](/documents/doc-index)" />
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -77,6 +79,10 @@ export const TableAndChecklist: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    await expect(canvas.getByRole('link', { name: 'Index' })).toHaveAttribute(
+      'href',
+      '/documents/doc-index',
+    )
     await expect(canvas.getByRole('link', { name: 'Guide' })).toHaveAttribute(
       'href',
       '/documents/doc-guide',
