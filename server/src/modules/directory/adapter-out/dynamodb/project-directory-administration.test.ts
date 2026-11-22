@@ -810,7 +810,7 @@ test('sets a Team description and leader, guarding the revision and the active l
         Update: expect.objectContaining({
           Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
           UpdateExpression:
-            'SET #profileRevision = :profileRevision, #description = :description, #leaderMemberKey = :leaderMemberKey',
+            'SET #profileRevision = :profileRevision, #description = :description, #leaderMemberKey = :leaderMemberKey REMOVE #profileRequestKey',
           ConditionExpression: expect.stringContaining('attribute_not_exists(#profileRevision)'),
           ExpressionAttributeValues: expect.objectContaining({
             ':description': '1行目\n\t2行目',
@@ -829,7 +829,7 @@ test('sets a Team description and leader, guarding the revision and the active l
     ],
     [{
       Update: expect.objectContaining({
-        UpdateExpression: 'SET #profileRevision = :profileRevision REMOVE #description, #leaderMemberKey',
+        UpdateExpression: 'SET #profileRevision = :profileRevision REMOVE #profileRequestKey, #description, #leaderMemberKey',
         ConditionExpression: expect.stringContaining('#profileRevision = :readProfileRevision'),
         ExpressionAttributeValues: expect.objectContaining({
           ':readProfileRevision': 2,
@@ -1046,4 +1046,47 @@ test('does not check the leader twice when the caller leads the Team', async () 
     expect.objectContaining({ Update: expect.anything() }),
     ...callerAuthorization,
   ]])
+})
+
+test('answers a retried profile save as its success and refuses another stale request', async () => {
+  const saved = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, {
+      description: '説明',
+      profileRevision: 1,
+      profileRequestKey: `${saved.idempotencyKeyHash}:${saved.requestFingerprint}`,
+    }),
+  ])
+  const input = { description: '説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+
+  // The first save committed but its response was lost; the same request is answered again.
+  await expect(client.updateTeamProfile(directoryId, 'alpha', input, saved))
+    .resolves.toEqual({ teamId: 'alpha', description: '説明' })
+  await expect(client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    input,
+    createRestoreContext('another-key', '/api/teams/alpha/profile'),
+  )).rejects.toMatchObject({ status: 409, code: 'TeamProfileConflict' })
+  expect(transactions()).toEqual([])
+})
+
+test('records the request of a profile save so its retry is recognized', async () => {
+  const context = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+
+  await client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 },
+    context,
+  )
+
+  expect(transactions()[0]).toEqual(expect.arrayContaining([{
+    Update: expect.objectContaining({
+      ExpressionAttributeValues: expect.objectContaining({
+        ':profileRequestKey': `${context.idempotencyKeyHash}:${context.requestFingerprint}`,
+      }),
+    }),
+  }]))
 })

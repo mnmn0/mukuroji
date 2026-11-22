@@ -37,7 +37,6 @@ export type TeamMemberGrantPorts<TFence, TAudit> = {
     expectedWorkspaceMemberVersion: number,
     auditContext: TAudit,
     authorizationFences: TFence[],
-    auditSequence: number,
   ): Promise<{ added: boolean }>
   /** Reads the current version of an active Workspace member, refusing an inactive one. */
   readActiveMemberVersion(workspaceId: string, memberKey: string): Promise<number>
@@ -95,6 +94,23 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
     )
   }
 
+  // A legacy Project ID shared with another active Team cannot carry a Team-qualified role, so
+  // access readers would ignore the grant; it is refused before any grant instead.
+  const sharedProjectIds = new Set(
+    directory.teams
+      .filter((candidate) => candidate.id !== teamId && candidate.archivedAt === undefined)
+      .flatMap((candidate) => candidate.projects)
+      .filter((project) => project.archivedAt === undefined)
+      .map((project) => project.id),
+  )
+  if (activeProjects.some((project) => sharedProjectIds.has(project.id))) {
+    throw new ProjectDataError(
+      409,
+      'TeamProjectIdShared',
+      'A Project of this Team shares its ID with a Project of another Team. Add the member from each Project instead.',
+    )
+  }
+
   const response: AddDirectoryTeamMemberResponse = {
     teamId,
     memberKey: member.id,
@@ -105,7 +121,7 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
   // only by their own grants, so a change to their membership in between still fails.
   const addsSelf = caller.membership !== undefined &&
     isSameMemberKey(caller.membership.memberKey, member.id)
-  for (const [index, project] of activeProjects.entries()) {
+  for (const project of activeProjects) {
     // Each grant advances the member's version, so it is read again before every Project.
     const expectedVersion = addsSelf && caller.membership
       ? caller.membership.version + response.addedProjectIds.length
@@ -119,9 +135,6 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
       expectedVersion,
       ports.createAuditContext(project.id),
       caller.fences,
-      // One request shares its idempotency key and correlation across Projects, so each grant
-      // takes its own audit sequence slot.
-      index,
     )
     ;(added ? response.addedProjectIds : response.existingProjectIds).push(project.id)
   }

@@ -243,6 +243,11 @@ type ProjectDirectoryTeamItem = {
    */
   profileRevision?: number
   /**
+   * Idempotency key hash and request fingerprint of the update that stored the current profile
+   * revision, so a retry of that same request is answered as the success it was.
+   */
+  profileRequestKey?: string
+  /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -917,7 +922,6 @@ export type ProjectDirectoryClient = {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @param auditSequence - Audit sequence slot, distinct for each grant of one request.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   addProjectMemberIfAbsent(
@@ -929,7 +933,6 @@ export type ProjectDirectoryClient = {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
-    auditSequence?: number,
   ): Promise<{ added: boolean }>
   /**
    * DynamoDB から project member role を削除します。
@@ -2031,7 +2034,6 @@ export class DynamoDbProjectDirectoryClient {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @param auditSequence - Audit sequence slot, distinct for each grant of one request.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   async addProjectMemberIfAbsent(
@@ -2043,7 +2045,6 @@ export class DynamoDbProjectDirectoryClient {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
-    auditSequence = 0,
   ): Promise<{ added: boolean }> {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -2080,7 +2081,6 @@ export class DynamoDbProjectDirectoryClient {
       occurredAt: updatedAt,
       changes: createAuditFieldChanges(undefined, item, ['email', 'name', 'role']),
       metadata: { projectId, memberKey: normalizedMemberKey },
-      sequence: auditSequence,
     })
     // The target's own row is already guarded active by the version update below, and one
     // transaction cannot touch a row twice, so a caller adding themselves drops that check.
@@ -3137,6 +3137,23 @@ export class DynamoDbProjectDirectoryClient {
     if (!team) {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
+    const response: UpdateDirectoryTeamProfileResponse = {
+      teamId,
+      ...(profile.description === undefined ? {} : { description: profile.description }),
+      ...(profile.leaderMemberKey === undefined ? {} : { leaderMemberKey: profile.leaderMemberKey }),
+    }
+    const requestKey = auditContext
+      ? `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`
+      : undefined
+    // A retry of the request that stored the current revision, whose response was lost, is
+    // answered as the success it was instead of as a conflict with itself.
+    if (
+      requestKey !== undefined &&
+      team.profileRequestKey === requestKey &&
+      team.profileRevision === profile.expectedProfileRevision + 1
+    ) {
+      return response
+    }
     // The editor's form must show the stored profile, so a save from a stale form cannot
     // silently restore a field another administrator changed.
     if ((team.profileRevision ?? 0) !== profile.expectedProfileRevision) {
@@ -3147,11 +3164,6 @@ export class DynamoDbProjectDirectoryClient {
       )
     }
 
-    const response: UpdateDirectoryTeamProfileResponse = {
-      teamId,
-      ...(profile.description === undefined ? {} : { description: profile.description }),
-      ...(profile.leaderMemberKey === undefined ? {} : { leaderMemberKey: profile.leaderMemberKey }),
-    }
     if (
       team.description === profile.description &&
       team.leaderMemberKey === profile.leaderMemberKey
@@ -3162,6 +3174,12 @@ export class DynamoDbProjectDirectoryClient {
     const setClauses = ['#profileRevision = :profileRevision']
     const removeClauses: string[] = []
     const values: Record<string, unknown> = { ':profileRevision': (team.profileRevision ?? 0) + 1 }
+    if (requestKey === undefined) {
+      removeClauses.push('#profileRequestKey')
+    } else {
+      setClauses.push('#profileRequestKey = :profileRequestKey')
+      values[':profileRequestKey'] = requestKey
+    }
     if (profile.description === undefined) {
       removeClauses.push('#description')
     } else {
@@ -3193,6 +3211,7 @@ export class DynamoDbProjectDirectoryClient {
             '#description': 'description',
             '#leaderMemberKey': 'leaderMemberKey',
             '#profileRevision': 'profileRevision',
+            '#profileRequestKey': 'profileRequestKey',
           },
           ExpressionAttributeValues: {
             ...condition.ExpressionAttributeValues,
@@ -5875,7 +5894,8 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       (value.description === undefined || typeof value.description === 'string') &&
       (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
       (value.profileRevision === undefined ||
-        (Number.isSafeInteger(value.profileRevision) && Number(value.profileRevision) >= 0))
+        (Number.isSafeInteger(value.profileRevision) && Number(value.profileRevision) >= 0)) &&
+      (value.profileRequestKey === undefined || typeof value.profileRequestKey === 'string')
   }
 
   return (

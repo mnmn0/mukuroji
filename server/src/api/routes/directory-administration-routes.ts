@@ -7,6 +7,7 @@ import {
 } from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
 import { createTeamMemberGrantPorts } from '../../app/composition/team-member-grant'
+import { deriveMutationAuditPartContext } from '../../modules/audit/audit'
 import { isDirectoryTeamMemberRole } from '@mukuroji/contracts'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { isRecord } from '../shared/value-guards'
@@ -142,9 +143,9 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
                 targetId: projectId,
                 parentTeamId: projectTeamId,
               }),
-            // Every grant shares the request's audit context, and so its correlation; the use
-            // case gives each Project its own audit sequence slot.
-            createAuditContext: () => auditContext,
+            // Every grant shares the request's correlation, with an audit identity bound to its
+            // Project so a retry keeps each event ID however the Team's Projects change.
+            createAuditContext: (projectId) => deriveMutationAuditPartContext(auditContext, projectId),
           },
         ),
         {
@@ -301,6 +302,7 @@ const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 4
   DirectoryAuthorizationChanged: 403,
   TeamProjectsManageDenied: 403,
   TeamProfileConflict: 409,
+  TeamProjectIdShared: 409,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
   ProjectNotArchived: 409,

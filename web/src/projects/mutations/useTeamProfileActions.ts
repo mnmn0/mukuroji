@@ -110,6 +110,7 @@ function isProjectMemberKey(key: unknown): boolean {
 function readTeamProfileErrorKey(error: unknown): MessageKey {
   if (error instanceof ProjectDirectoryApiError) {
     if (error.code === 'WorkspaceMemberInactive') return 'projects.teamProfile.error.memberInactive'
+    if (error.code === 'TeamProjectIdShared') return 'projects.teamProfile.error.sharedProjectId'
     // Includes TeamProfileConflict: another administrator saved the profile after it was loaded.
     if (error.status === 409) return 'projects.administration.error.conflict'
   }
