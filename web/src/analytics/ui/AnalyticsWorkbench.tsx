@@ -55,6 +55,7 @@ import {
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
 import { AnalyticsFlowChart } from './AnalyticsFlowChart'
+import { AnalyticsMilestoneTrendChart } from './AnalyticsMilestoneTrendChart'
 
 /**
  * Analytics workbench の表示と操作に必要な props です。
@@ -290,6 +291,7 @@ const metricKeys = [
   'sla',
   'remaining-scope',
   'cumulative-flow',
+  'milestone-trend',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -323,6 +325,7 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   sla: 'analytics.metric.sla',
   'remaining-scope': 'analytics.metric.remainingScope',
   'cumulative-flow': 'analytics.metric.cumulativeFlow',
+  'milestone-trend': 'analytics.metric.milestoneTrend',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -336,9 +339,29 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   sla: 'analytics.metricDescription.sla',
   'remaining-scope': 'analytics.metricDescription.remainingScope',
   'cumulative-flow': 'analytics.metricDescription.cumulativeFlow',
+  'milestone-trend': 'analytics.metricDescription.milestoneTrend',
+}
+
+/** Calendar bucket dimensions, the only group-by a Milestone trend accepts. */
+const calendarGroupDimensions = ['day', 'week', 'month'] as const
+
+/**
+ * Returns whether a group-by is absent or a calendar bucket.
+ *
+ * @param groupBy - Widget group-by.
+ * @returns Whether a Milestone trend accepts it.
+ */
+function isCalendarGroup(groupBy: AnalyticsWidget['groupBy']) {
+  return groupBy === undefined || calendarGroupDimensions.some((dimension) => dimension === groupBy.dimension)
 }
 
 const tableColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
+  baselineEndDate: 'analytics.milestoneTrend.baseline',
+  changeCount: 'analytics.milestoneTrend.changes',
+  forecastEndDate: 'analytics.milestoneTrend.latest',
+  milestoneId: 'analytics.milestoneTrend.milestoneId',
+  periodStartForecastEndDate: 'analytics.milestoneTrend.periodStart',
+  shiftDays: 'analytics.milestoneTrend.shift',
   occurredAt: 'analytics.table.occurredAt',
   projectId: 'analytics.table.projectId',
   teamId: 'analytics.table.teamId',
@@ -1596,8 +1619,12 @@ function AnalyticsBuilderPanel({
   visibility: AnalyticsReport['visibility']
   widgets: AnalyticsWidget[]
 }) {
-  const addWidget = (type: AnalyticsWidget['type'], visualization?: AnalyticsVisualization) => {
-    const metric: AnalyticsMetricKey = type === 'metric'
+  const addWidget = (
+    type: AnalyticsWidget['type'],
+    visualization?: AnalyticsVisualization,
+    chartMetric?: AnalyticsMetricKey,
+  ) => {
+    const metric: AnalyticsMetricKey = chartMetric ?? (type === 'metric'
       ? metricKeys[Math.min(widgets.filter((widget) => widget.type === 'metric').length, 3)]
       : type === 'table'
         ? 'overdue'
@@ -1605,7 +1632,7 @@ function AnalyticsBuilderPanel({
           ? 'cumulative-flow'
           : visualization === 'burndown' || visualization === 'burnup'
             ? 'remaining-scope'
-            : 'throughput'
+            : 'throughput')
     const nextWidget = {
       id: createAnalyticsClientId('widget'),
       metric,
@@ -1683,6 +1710,9 @@ function AnalyticsBuilderPanel({
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'area')}>
             {t('analytics.builder.type.area')}
+          </button>
+          <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'line', 'milestone-trend')}>
+            {t('analytics.builder.type.milestoneTrend')}
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('table')}>
             {t('analytics.builder.type.table')}
@@ -1800,7 +1830,11 @@ function AnalyticsWidgetEditor({
           onChange={(event) => {
             const metric = event.target.value as AnalyticsMetricKey
             // Only throughput, velocity, and remaining scope accept effort weighting, so other metrics drop it.
-            onChange(isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric })
+            const next = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            // A Milestone trend groups by Milestone, so it keeps only a calendar bucket.
+            onChange(metric === 'milestone-trend' && !isCalendarGroup(next.groupBy)
+              ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
+              : next)
           }}
         >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
@@ -1827,17 +1861,15 @@ function AnalyticsWidgetEditor({
             })}
           >
             <option value="">{t('analytics.builder.groupNone')}</option>
-            {[
-              'day',
-              'week',
-              'month',
+            {(widget.metric === 'milestone-trend' ? calendarGroupDimensions : [
+              ...calendarGroupDimensions,
               'team',
               'project',
               'assignee',
               'status',
               'work-item-type',
               'custom-field',
-            ].map((dimension) => (
+            ]).map((dimension) => (
               <option key={dimension} value={dimension}>
                 {t(dimension === 'custom-field'
                   ? 'analytics.group.customField'
@@ -2030,6 +2062,14 @@ function AnalyticsResultWidget({
                 ? workItemTypeLabels
                 : undefined
             }
+          />
+        ) : result.metric === 'milestone-trend' && result.series.length > 0 ? (
+          <AnalyticsMilestoneTrendChart
+            groups={result.groups}
+            label={widget?.title ?? result.definition.label}
+            series={result.series}
+            t={t}
+            timeZone={snapshot.timeZone}
           />
         ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
           isFlowVisualizationCompatible(widget.visualization, result.metric) ? (
@@ -2856,6 +2896,17 @@ function formatAnalyticsWarning(
   }
   if (warning === 'No SLA samples are available.') {
     return t('analytics.warning.noSlaSamples')
+  }
+  if (warning === 'No Milestones match this report scope.') {
+    return t('analytics.warning.noMilestones')
+  }
+  if (warning === 'Milestone history is not available for this run.') {
+    return t('analytics.warning.milestoneHistoryUnavailable')
+  }
+  const milestonesWithoutHistory = /^(\d+) Milestone\(s\) have no recorded date history; their current date is shown since creation\.$/u
+    .exec(warning)
+  if (milestonesWithoutHistory?.[1]) {
+    return t('analytics.warning.milestonesWithoutHistory').replace('{count}', milestonesWithoutHistory[1])
   }
   const unestimatedCompletions = /^(\d+) completed Work Item\(s\) had no estimate and counted as zero effort\.$/u
     .exec(warning)
