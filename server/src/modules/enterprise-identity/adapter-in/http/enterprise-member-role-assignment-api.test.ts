@@ -373,6 +373,31 @@ test('lets an auditor read the audit log but not export it or read Projects', as
   })
 })
 
+test('tells the Web that an auditor may read the audit log but not export it', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(false, { workspaceRole: 'member' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    /**
+     * Reads `/api/auth/me` as the auditor.
+     *
+     * @returns Parsed response body.
+     */
+    const readMe = async () => {
+      const response = await app.request('/api/auth/me', {
+        headers: { Authorization: createAuthorization() },
+      })
+      expect(response.status).toBe(200)
+      return response.json()
+    }
+    expect(await readMe()).toMatchObject({ canReadAuditLog: false, canExportAuditLog: false })
+
+    await assignToFixtureMember(identity, 'workspace:auditor')
+    expect(await readMe()).toMatchObject({ canReadAuditLog: true, canExportAuditLog: false })
+  })
+})
+
 test('refuses to remove a member\'s last assignment for a caller below their Workspace role', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     // A deactivated member gets their Workspace role back when reactivated, so the rule holds too.

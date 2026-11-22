@@ -48,6 +48,26 @@ test('does not grant Customer saved-view mutation capability to a guest', async 
   })
 })
 
+test('tells the Web which built-in Workspace roles may read and export the audit log', async () => {
+  const expectations = [
+    ['owner', true, true],
+    ['admin', true, false],
+    ['member', false, false],
+    ['guest', false, false],
+  ] as const
+  for (const [workspaceRole, canReadAuditLog, canExportAuditLog] of expectations) {
+    configureFakeProjectClients(true, { workspaceRole })
+
+    const response = await app.request('/api/auth/me', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ workspaceRole, canReadAuditLog, canExportAuditLog })
+    resetTestApp()
+  }
+})
+
 test('blocks a deactivated Workspace member before any business API read', async () => {
   const calls = configureFakeProjectClients(true, { workspaceStatus: 'deactivated' })
 
