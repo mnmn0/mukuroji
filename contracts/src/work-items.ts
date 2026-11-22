@@ -959,6 +959,33 @@ export type WorkItemKeyPrefixesResponse = {
 }
 
 /**
+ * Response of `GET` and `PUT /api/teams/{teamId}/work-item-key-prefix`: the key prefix a Team's
+ * new Work Items get and the prefixes it used before.
+ */
+export type TeamWorkItemKeyPrefixSettings = {
+  /** Team ID. */
+  teamId: string
+  /** Current prefix, such as `ABC`; absent before the Team's first key or prefix choice. */
+  keyPrefix?: string
+  /** Prefix the first Work Item would get when the Team has none yet. */
+  suggestedKeyPrefix?: string
+  /** Earlier prefixes whose keys still open their Work Items. */
+  previousPrefixes: string[]
+  /** Highest key number handed out so far; numbering continues across prefix changes. */
+  lastNumber: number
+  /** Whether the caller may change the prefix. */
+  canManage: boolean
+}
+
+/** Body of `PUT /api/teams/{teamId}/work-item-key-prefix`. */
+export type UpdateTeamWorkItemKeyPrefixRequest = {
+  /** New prefix: 2 to 10 letters or digits starting with a letter; lowercase is accepted. */
+  keyPrefix: string
+  /** Prefix the caller loaded, or `null` when the Team had none, to reject a concurrent change. */
+  expectedKeyPrefix: string | null
+}
+
+/**
  * Response of `GET /api/v1/work-items/{workItemId}/key`, which tells a Public API client the
  * Work Item key without adding a property to the stable `WorkItem` schema.
  */

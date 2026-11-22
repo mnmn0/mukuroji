@@ -2,7 +2,7 @@ import Markdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
-import { useWorkItemKeyPrefixes } from '../queries/WorkItemKeyPrefixesContext'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
 /**
  * SafeCommentBody の props です。

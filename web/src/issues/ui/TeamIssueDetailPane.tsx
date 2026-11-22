@@ -43,7 +43,7 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
-import { useWorkItemKeyPrefixes } from '../queries/WorkItemKeyPrefixesContext'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {

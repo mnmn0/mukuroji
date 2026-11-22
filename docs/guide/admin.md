@@ -10,7 +10,7 @@ coding agent の受け入れ、Enterprise のセキュリティ設定をまと�
 | --- | --- | --- |
 | 個人 | `/settings/personal`（`/settings` も同じ） | 表示設定、通知設定、サインインとセキュリティ、AI の利用、agent の接続 |
 | Workspace 管理 | `/settings/workspace` | アクセス台帳、ID・セキュリティ管理への入口、テナント管理、チームとプロジェクトの管理、API と外部連携、オートメーション |
-| Team | `/settings/team` | ワークフローとフィールド、エージェント設定 |
+| Team | `/settings/team` | ワークフローとフィールド、Work Item key の prefix、エージェント設定 |
 
 区分は画面の分け方だけで、操作できる範囲はこれまでどおりロールで決まります。
 
@@ -143,6 +143,18 @@ Enterprise ロールは Directory group mapping のほか、メンバー個人�
 - 最後に **設定を保存** を押します。他の人が先に保存していた場合は保存できないので、再読み込みしてやり直します。
 
 使用中のワークフローや状態は削除できません。優先度は 高 / 中 / 低 の3段階で固定です。ラベル（タグ）機能はありません。
+
+## Work Item key の prefix
+
+**設定** → **Team**（`/settings/team`）→ **Work Item key の prefix** で、Team の新しい Work Item の key
+（例: `PT-12` の `PT`）を変えられます。変更できるのは Team の管理者です。
+
+- Team の Project に Project code があれば、候補のボタンから選べます（`-` や `_` を除き、先頭の 10 文字）。
+  英字で始まる 2〜10 文字の英数字なら自由に入力もできます。
+- 別の Team が使っている prefix は選べません。
+- 変更後も、これまでの key（例: `PT-12`）でその Work Item を開けます。番号は続きから振られます
+  （`PT-12` の次に `CORE` に変えると `CORE-13`）。
+- まだ Work Item がない Team では、最初の Work Item より前に prefix を決められます。
 
 ## オートメーション
 

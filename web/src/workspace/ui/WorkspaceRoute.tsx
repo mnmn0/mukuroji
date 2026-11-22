@@ -30,7 +30,7 @@ import {
 } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
 import { AiActivityProvider } from '../../features/ai-assistance/ui/AiActivityProvider'
-import { WorkItemKeyPrefixesProvider } from '../../issues/queries/WorkItemKeyPrefixesContext'
+import { WorkItemKeyPrefixesProvider } from '../../issues/queries/WorkItemKeyPrefixesProvider'
 import { AiActivityLauncher } from '../../features/ai-assistance/ui/AiActivityLauncher'
 
 /** Header and sidebar metadata owned by one authenticated workspace route. */

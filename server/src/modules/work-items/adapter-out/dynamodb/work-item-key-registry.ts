@@ -494,6 +494,210 @@ export async function listWorkItemKeyPrefixes(
   return assignments
 }
 
+/** A Team's current key prefix and the prefixes it used before. */
+export type TeamWorkItemKeyPrefixState = {
+  /** Prefix that new Work Items get; absent before the Team's first key or prefix choice. */
+  keyPrefix?: string
+  /** Highest number handed out so far, across every prefix of the Team. */
+  lastNumber: number
+  /** Earlier prefixes of the Team, whose keys still resolve, in prefix order. */
+  previousPrefixes: string[]
+}
+
+/**
+ * Reads a Team's current key prefix and the prefixes it used before.
+ *
+ * @param documentClient - DynamoDB document client.
+ * @param tableName - Work Items table name.
+ * @param directoryId - Workspace ID.
+ * @param teamId - Team ID.
+ * @returns The prefix state; without a counter the Team has no prefix yet.
+ * @throws ProjectDataError when a stored registry row is malformed.
+ */
+export async function readTeamWorkItemKeyPrefixState(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+): Promise<TeamWorkItemKeyPrefixState> {
+  const [counterResponse, assignments] = await Promise.all([
+    documentClient.send(new GetCommand({
+      TableName: tableName,
+      Key: { directoryTeamId: createRegistryPartitionKey(directoryId), issueId: createCounterRecordKey(teamId) },
+      ConsistentRead: true,
+    })),
+    listWorkItemKeyPrefixes(documentClient, tableName, directoryId),
+  ])
+  const counter = counterResponse.Item
+  if (counter !== undefined && (!isWorkItemKeyCounterRecord(counter) || counter.teamId !== teamId)) {
+    throw createRegistryInvalidError()
+  }
+  const keyPrefix = counter?.keyPrefix
+  return {
+    ...(keyPrefix === undefined ? {} : { keyPrefix }),
+    lastNumber: counter?.lastNumber ?? 0,
+    previousPrefixes: assignments
+      .filter((assignment) => assignment.teamId === teamId && assignment.keyPrefix !== keyPrefix)
+      .map((assignment) => assignment.keyPrefix),
+  }
+}
+
+/** Input of {@link changeTeamWorkItemKeyPrefix}. */
+export type ChangeTeamWorkItemKeyPrefixInput = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team whose prefix changes. */
+  teamId: string
+  /** Canonical uppercase prefix new Work Items get. */
+  keyPrefix: string
+  /** Prefix the caller saw, or `null` when the Team had none; a different current prefix is a conflict. */
+  expectedKeyPrefix: string | null
+  /** ISO 8601 instant of the change. */
+  now: string
+  /** Authorization checks and the audit put committed in the same transaction. */
+  transactItems: readonly NonNullable<TransactWriteCommandInput['TransactItems']>[number][]
+}
+
+/**
+ * Sets the prefix that a Team's new Work Items get.
+ *
+ * The Team keeps every prefix it reserved, so existing keys still resolve and their prefixes
+ * stay linkable, and no other Team can take them. Numbers continue from the Team's counter
+ * across prefixes, so returning to an earlier prefix never reuses a key.
+ *
+ * @param documentClient - DynamoDB document client.
+ * @param tableName - Work Items table name.
+ * @param input - Team, new and expected prefixes, time, and extra transaction items.
+ * @returns The Team's prefix state after the change.
+ * @throws ProjectDataError 400 for an invalid prefix, 409 when another Team holds it or the
+ *   current prefix is not the expected one.
+ */
+export async function changeTeamWorkItemKeyPrefix(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  input: ChangeTeamWorkItemKeyPrefixInput,
+): Promise<TeamWorkItemKeyPrefixState> {
+  if (!isWorkItemKeyPrefix(input.keyPrefix)) {
+    throw new ProjectDataError(400, 'InvalidWorkItemKeyPrefix', 'A key prefix is 2 to 10 uppercase letters or digits that start with a letter.')
+  }
+  const current = await readTeamWorkItemKeyPrefixState(documentClient, tableName, input.directoryId, input.teamId)
+  // A retry of a change that already landed succeeds without writing again.
+  if (current.keyPrefix === input.keyPrefix) return current
+  if ((current.keyPrefix ?? null) !== input.expectedKeyPrefix) throw createPrefixConflictError()
+  const partitionKey = createRegistryPartitionKey(input.directoryId)
+  const prefixRecord: WorkItemKeyPrefixRecord = {
+    directoryTeamId: partitionKey,
+    issueId: `${PREFIX_RECORD_PREFIX}${input.keyPrefix}`,
+    entryType: 'work-item-key-prefix',
+    directoryId: input.directoryId,
+    keyPrefix: input.keyPrefix,
+    teamId: input.teamId,
+    registeredAt: input.now,
+  }
+  const counterKey = { directoryTeamId: partitionKey, issueId: createCounterRecordKey(input.teamId) }
+  const counterItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number] = current.keyPrefix === undefined
+    ? {
+        Put: {
+          TableName: tableName,
+          Item: {
+            ...counterKey,
+            entryType: 'work-item-key-counter',
+            directoryId: input.directoryId,
+            teamId: input.teamId,
+            keyPrefix: input.keyPrefix,
+            lastNumber: 0,
+            registeredAt: input.now,
+          } satisfies WorkItemKeyCounterRecord,
+          ConditionExpression: 'attribute_not_exists(issueId)',
+        },
+      }
+    : {
+        Update: {
+          TableName: tableName,
+          Key: counterKey,
+          UpdateExpression: 'SET #keyPrefix = :keyPrefix',
+          ConditionExpression: '#entryType = :counter AND #keyPrefix = :expected',
+          ExpressionAttributeNames: { '#entryType': 'entryType', '#keyPrefix': 'keyPrefix' },
+          ExpressionAttributeValues: {
+            ':counter': 'work-item-key-counter',
+            ':expected': current.keyPrefix,
+            ':keyPrefix': input.keyPrefix,
+          },
+        },
+      }
+  try {
+    await documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        // A prefix the Team reserved before is reused as is; any other holder is a conflict.
+        current.previousPrefixes.includes(input.keyPrefix)
+          ? {
+              ConditionCheck: {
+                TableName: tableName,
+                Key: { directoryTeamId: partitionKey, issueId: prefixRecord.issueId },
+                ConditionExpression: '#teamId = :teamId',
+                ExpressionAttributeNames: { '#teamId': 'teamId' },
+                ExpressionAttributeValues: { ':teamId': input.teamId },
+              },
+            }
+          : {
+              Put: {
+                TableName: tableName,
+                Item: prefixRecord,
+                ConditionExpression: 'attribute_not_exists(issueId)',
+              },
+            },
+        counterItem,
+        ...input.transactItems,
+      ],
+    }))
+  } catch (error) {
+    if (!isNamedError(error, 'TransactionCanceledException')) throw error
+    const reasons = readCancellationReasonCodes(error)
+    if (reasons[0] === 'ConditionalCheckFailed') {
+      throw new ProjectDataError(409, 'WorkItemKeyPrefixTaken', 'Another Team already uses this key prefix.')
+    }
+    if (reasons[1] === 'ConditionalCheckFailed' || reasons.includes('TransactionConflict')) {
+      throw createPrefixConflictError()
+    }
+    // A caller authorization check or the audit put failed: the caller's access changed.
+    if (reasons.slice(2).includes('ConditionalCheckFailed')) {
+      throw new ProjectDataError(409, 'WorkItemAuthorizationChanged', 'Work Item authorization changed during the mutation.')
+    }
+    throw error
+  }
+  return {
+    keyPrefix: input.keyPrefix,
+    lastNumber: current.lastNumber,
+    previousPrefixes: [...new Set([
+      ...current.previousPrefixes.filter((prefix) => prefix !== input.keyPrefix),
+      ...(current.keyPrefix === undefined ? [] : [current.keyPrefix]),
+    ])].sort(),
+  }
+}
+
+/**
+ * Reports whether a value is a canonical key prefix.
+ *
+ * @param value - Candidate prefix.
+ * @returns Whether `<value>-1` is a canonical Work Item key.
+ */
+export function isWorkItemKeyPrefix(value: unknown): value is string {
+  return typeof value === 'string' && parseWorkItemKey(`${value}-1`)?.prefix === value
+}
+
+/**
+ * Creates the error for a prefix change made against a prefix that is no longer current.
+ *
+ * @returns A 409 project data error.
+ */
+function createPrefixConflictError(): ProjectDataError {
+  return new ProjectDataError(
+    409,
+    'WorkItemKeyPrefixChanged',
+    'The Team key prefix changed. Reload and try again.',
+  )
+}
+
 /**
  * Creates the error for a registry row that does not have the expected shape.
  *

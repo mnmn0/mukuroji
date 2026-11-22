@@ -62,8 +62,12 @@ import {
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  changeTeamWorkItemKeyPrefix,
   listWorkItemKeyPrefixes,
+  readTeamWorkItemKeyPrefixState,
   readWorkItemKeyLocation,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
   type WorkItemKeyPrefixAssignment,
 } from './work-item-key-registry'
@@ -1379,6 +1383,21 @@ export type TeamIssuesClient = {
    * @returns Every prefix reservation of the Workspace.
    */
   listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]>
+  /**
+   * Reads a Team's current key prefix and earlier prefixes, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Sets the key prefix of a Team's new Work Items; the caller authorizes the Team first.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -3947,6 +3966,39 @@ export class DynamoDbTeamIssuesClient {
     await this.ensureLocalTables()
     try {
       return await listWorkItemKeyPrefixes(this.documentClient, this.issueTableName, directoryId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads a Team's current key prefix and earlier prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  async getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await readTeamWorkItemKeyPrefixState(this.documentClient, this.issueTableName, directoryId, teamId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Sets the key prefix of a Team's new Work Items.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  async changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await changeTeamWorkItemKeyPrefix(this.documentClient, this.issueTableName, input)
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)

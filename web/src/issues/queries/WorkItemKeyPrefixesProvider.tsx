@@ -1,12 +1,7 @@
-import { createContext, useContext, useMemo, type ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import useSWR from 'swr'
 import { getWorkItemKeyPrefixes } from '../api/workItems'
-
-/**
- * Key prefixes that exist in the Workspace, or undefined while they are unknown. Unknown keeps
- * the earlier behaviour of linking every key-shaped word, so a failed load never hides links.
- */
-export const WorkItemKeyPrefixesContext = createContext<ReadonlySet<string> | undefined>(undefined)
+import { WorkItemKeyPrefixesContext } from './workItemKeyPrefixesContext'
 
 /** Props of {@link WorkItemKeyPrefixesProvider}. */
 export type WorkItemKeyPrefixesProviderProps = {
@@ -35,13 +30,4 @@ export function WorkItemKeyPrefixesProvider({ accessToken, children }: WorkItemK
       {children}
     </WorkItemKeyPrefixesContext.Provider>
   )
-}
-
-/**
- * Reads the Workspace's Work Item key prefixes.
- *
- * @returns The known prefixes, or undefined when they are not loaded.
- */
-export function useWorkItemKeyPrefixes(): ReadonlySet<string> | undefined {
-  return useContext(WorkItemKeyPrefixesContext)
 }

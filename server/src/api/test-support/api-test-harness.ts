@@ -96,6 +96,8 @@ import {
   type WorkItemAuthorizationSnapshot,
   type WorkItemKeyLocation,
   type WorkItemKeyPrefixAssignment,
+  type TeamWorkItemKeyPrefixState,
+  type ChangeTeamWorkItemKeyPrefixInput,
   listWorkItemMemberIndexKeys,
   normalizeWorkItemMemberIndexKey,
 } from '../../modules/work-items'
@@ -874,6 +876,8 @@ function createTeamIssuesFake(
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
     listWorkItemKeyPrefixes: unsupported,
+    getTeamWorkItemKeyPrefix: unsupported,
+    changeTeamWorkItemKeyPrefix: unsupported,
     getProjectIssues: unsupported,
     getTeamIssuePage: unsupported,
     getProjectIssuePage: unsupported,
@@ -1570,6 +1574,8 @@ function configureFakeProjectClients(
     workItemKeyLocations?: Readonly<Record<string, WorkItemKeyLocation>>
     /** Work Item key prefix reservations returned by the prefix listing. */
     workItemKeyPrefixes?: readonly WorkItemKeyPrefixAssignment[]
+    /** Team key prefix states by Team ID; a change replaces the Team's state. */
+    teamWorkItemKeyPrefixes?: Record<string, TeamWorkItemKeyPrefixState>
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
     /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
@@ -1731,6 +1737,7 @@ function configureFakeProjectClients(
     authorizationRecordKeys: string[]
   }> = []
   const calls = {
+    keyPrefixChanges: [] as ChangeTeamWorkItemKeyPrefixInput[],
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     projectCharterUpdates,
     projectLifecycleTransitions,
@@ -3114,6 +3121,19 @@ function configureFakeProjectClients(
       },
       async listWorkItemKeyPrefixes() {
         return [...(options.workItemKeyPrefixes ?? [])]
+      },
+      async getTeamWorkItemKeyPrefix(_directoryId, teamId) {
+        return options.teamWorkItemKeyPrefixes?.[teamId] ?? { lastNumber: 0, previousPrefixes: [] }
+      },
+      async changeTeamWorkItemKeyPrefix(input) {
+        calls.keyPrefixChanges.push(input)
+        const current = options.teamWorkItemKeyPrefixes?.[input.teamId] ?? { lastNumber: 0, previousPrefixes: [] }
+        const next: TeamWorkItemKeyPrefixState = {
+          keyPrefix: input.keyPrefix,
+          lastNumber: current.lastNumber,
+          previousPrefixes: current.keyPrefix ? [current.keyPrefix] : [],
+        }
+        return next
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({

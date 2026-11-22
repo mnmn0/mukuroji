@@ -15,6 +15,8 @@ import type {
   WorkItemTriageContextSnapshot,
   WorkItemKeyLookupResponse,
   WorkItemKeyPrefixesResponse,
+  TeamWorkItemKeyPrefixSettings,
+  UpdateTeamWorkItemKeyPrefixRequest,
   WorkItemTypeChangePreview,
   WorkItemSummaryResponse,
   WorkspaceWorkItemListFilter,
@@ -298,6 +300,73 @@ export async function getWorkItemKeyPrefixes(accessToken: string) {
     throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
   }
   return response.prefixes
+}
+
+/**
+ * Reads the key prefix a Team's new Work Items get.
+ *
+ * @param teamId - Team ID.
+ * @param accessToken - Bearer token for the Work Item API.
+ * @returns The Team's prefix setting.
+ */
+export async function getTeamWorkItemKeyPrefix(teamId: string, accessToken: string) {
+  const response = await requestJson<unknown>(
+    `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-item-key-prefix`,
+    accessToken,
+  )
+  if (!isTeamWorkItemKeyPrefixSettings(response)) {
+    throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
+  }
+  return response
+}
+
+/**
+ * Changes the key prefix a Team's new Work Items get.
+ *
+ * @param teamId - Team ID.
+ * @param accessToken - Bearer token for the Work Item API.
+ * @param request - New prefix and the prefix the form was loaded with.
+ * @param mutationContext - Idempotency and correlation headers.
+ * @returns The Team's prefix setting after the change.
+ */
+export async function updateTeamWorkItemKeyPrefix(
+  teamId: string,
+  accessToken: string,
+  request: UpdateTeamWorkItemKeyPrefixRequest,
+  mutationContext: MutationRequestContext,
+) {
+  const response = await requestJson<unknown>(
+    `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/work-item-key-prefix`,
+    accessToken,
+    {
+      body: JSON.stringify(request),
+      headers: { 'Content-Type': 'application/json', ...createMutationHeaders(mutationContext) },
+      method: 'PUT',
+    },
+  )
+  if (!isTeamWorkItemKeyPrefixSettings(response)) {
+    throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
+  }
+  return response
+}
+
+/**
+ * Checks a Team key prefix setting before the form shows it.
+ *
+ * @param value - Parsed response body.
+ * @returns Whether the body has the setting's fields with the right types.
+ */
+function isTeamWorkItemKeyPrefixSettings(value: unknown): value is TeamWorkItemKeyPrefixSettings {
+  if (typeof value !== 'object' || value === null) return false
+  const field = (name: string): unknown => Reflect.get(value, name)
+  const previousPrefixes = field('previousPrefixes')
+  const optionalText = (name: string) => field(name) === undefined || typeof field(name) === 'string'
+  return typeof field('teamId') === 'string' &&
+    optionalText('keyPrefix') &&
+    optionalText('suggestedKeyPrefix') &&
+    Array.isArray(previousPrefixes) && previousPrefixes.every((prefix) => typeof prefix === 'string') &&
+    typeof field('lastNumber') === 'number' &&
+    typeof field('canManage') === 'boolean'
 }
 
 /**
