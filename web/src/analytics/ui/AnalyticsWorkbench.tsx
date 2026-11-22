@@ -513,15 +513,19 @@ export function AnalyticsWorkbench({
     AnalyticsReport['visibility']
   >(selectedReport?.visibility ?? 'personal')
   const [draftTeamId, setDraftTeamId] = useState(selectedReport?.teamId ?? '')
+  const [draftProjectId, setDraftProjectId] = useState(selectedReport?.projectId ?? '')
   const [isScheduleOpen, setIsScheduleOpen] = useState(initialScheduleOpen)
   const [isSaving, setIsSaving] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const reportSchedule = selectedReport?.schedule
   const isReportDraftValid = Boolean(draftName.trim()) &&
     widgets.length > 0 &&
-    (draftVisibility !== 'team' || Boolean(draftTeamId.trim()))
-  const isTeamVisibilityValid = selectedReport?.visibility !== 'team' ||
-    Boolean(selectedReport.teamId?.trim())
+    (draftVisibility !== 'team' || Boolean(draftTeamId.trim())) &&
+    (draftVisibility !== 'project' || Boolean(draftTeamId.trim() && draftProjectId.trim()))
+  const isTeamVisibilityValid = (selectedReport?.visibility !== 'team' ||
+    Boolean(selectedReport.teamId?.trim())) &&
+    (selectedReport?.visibility !== 'project' ||
+      Boolean(selectedReport.teamId?.trim() && selectedReport.projectId?.trim()))
   const metricResults = snapshot?.widgets.filter((result) =>
     resolveWidgetType(widgets, result.widgetId) === 'metric') ?? []
   const contentResults = snapshot?.widgets.filter((result) =>
@@ -549,7 +553,10 @@ export function AnalyticsWorkbench({
         id: draftId,
         name: draftName.trim(),
         schedule: selectedReport?.schedule,
-        teamId: draftVisibility === 'team' ? draftTeamId || undefined : undefined,
+        teamId: draftVisibility === 'team' || draftVisibility === 'project'
+          ? draftTeamId || undefined
+          : undefined,
+        projectId: draftVisibility === 'project' ? draftProjectId || undefined : undefined,
         timeZone,
         visibility: draftVisibility,
         widgets,
@@ -817,6 +824,7 @@ export function AnalyticsWorkbench({
             customFields={customFields}
             description={draftDescription}
             name={draftName}
+            selectedProjectId={draftProjectId}
             selectedTeamId={draftTeamId}
             t={t}
             teams={teams}
@@ -824,7 +832,12 @@ export function AnalyticsWorkbench({
             widgets={widgets}
             onDescriptionChange={setDraftDescription}
             onNameChange={setDraftName}
-            onSelectedTeamIdChange={setDraftTeamId}
+            onSelectedProjectIdChange={setDraftProjectId}
+            onSelectedTeamIdChange={(teamId) => {
+              setDraftTeamId(teamId)
+              // A Project belongs to one Team, so changing the Team clears the Project.
+              setDraftProjectId('')
+            }}
             onVisibilityChange={setDraftVisibility}
             onWidgetsChange={onWidgetsChange}
           />
@@ -904,6 +917,7 @@ export function AnalyticsWorkbench({
           initialSchedule={reportSchedule}
           members={members}
           isTeamVisibilityValid={isTeamVisibilityValid}
+          isProjectReport={selectedReport?.visibility === 'project'}
           reportName={selectedReport?.name ?? draftName}
           t={t}
           timeZone={timeZone}
@@ -1818,9 +1832,11 @@ function AnalyticsBuilderPanel({
   name,
   onDescriptionChange,
   onNameChange,
+  onSelectedProjectIdChange,
   onSelectedTeamIdChange,
   onVisibilityChange,
   onWidgetsChange,
+  selectedProjectId,
   selectedTeamId,
   t,
   teams,
@@ -1833,9 +1849,13 @@ function AnalyticsBuilderPanel({
   name: string
   onDescriptionChange: (description: string) => void
   onNameChange: (name: string) => void
+  /** Receives the Project a Project report is shared with. */
+  onSelectedProjectIdChange: (projectId: string) => void
   onSelectedTeamIdChange: (teamId: string) => void
   onVisibilityChange: (visibility: AnalyticsReport['visibility']) => void
   onWidgetsChange?: (widgets: AnalyticsWidget[]) => void
+  /** Project a Project report is shared with; empty until one is chosen. */
+  selectedProjectId: string
   selectedTeamId: string
   t: ReturnType<typeof createTranslator>
   teams: ProjectDirectoryTeam[]
@@ -1897,15 +1917,26 @@ function AnalyticsBuilderPanel({
           <select className="workbench-input min-h-10 px-3" value={visibility} onChange={(event) => onVisibilityChange(event.target.value as AnalyticsReport['visibility'])}>
             <option value="personal">{t('analytics.visibility.personal')}</option>
             <option value="team">{t('analytics.visibility.team')}</option>
+            <option value="project">{t('analytics.visibility.project')}</option>
             <option value="shared">{t('analytics.visibility.shared')}</option>
           </select>
         </label>
-        {visibility === 'team' ? (
+        {visibility === 'team' || visibility === 'project' ? (
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('analytics.builder.team')}
             <select className="workbench-input min-h-10 px-3" value={selectedTeamId} onChange={(event) => onSelectedTeamIdChange(event.target.value)}>
               <option value="">{t('analytics.builder.selectTeam')}</option>
               {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+            </select>
+          </label>
+        ) : null}
+        {visibility === 'project' ? (
+          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('analytics.builder.project')}
+            <select className="workbench-input min-h-10 px-3" disabled={!selectedTeamId} value={selectedProjectId} onChange={(event) => onSelectedProjectIdChange(event.target.value)}>
+              <option value="">{t('analytics.builder.selectProject')}</option>
+              {teams.find((team) => team.id === selectedTeamId)?.projects.map((project) =>
+                <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
           </label>
         ) : null}
@@ -2785,6 +2816,7 @@ function AnalyticsEvidenceDrawer({
 function AnalyticsScheduleDialog({
   defaultDayOfWeek,
   initialSchedule,
+  isProjectReport,
   isTeamVisibilityValid,
   members,
   onClose,
@@ -2796,6 +2828,8 @@ function AnalyticsScheduleDialog({
   /** Weekday a new weekly delivery is sent on, as `Date#getDay()` numbers it. */
   defaultDayOfWeek: number
   initialSchedule?: AnalyticsSchedule
+  /** Whether the report is shared with a Project, which needs both a Team and a Project. */
+  isProjectReport: boolean
   isTeamVisibilityValid: boolean
   /** Members the recipient picker offers; recipients are typed while this is empty. */
   members: readonly AnalyticsMemberOption[]
@@ -2809,13 +2843,14 @@ function AnalyticsScheduleDialog({
   // The recipient control is fixed while the dialog is open, so a member list that loads late
   // never replaces recipients already being edited; reopening the dialog shows the picker.
   const [recipientMembers] = useState(members)
+  const visibilityRequiredKey = isProjectReport
+    ? 'analytics.schedule.projectRequired'
+    : 'analytics.schedule.teamRequired'
   const [frequency, setFrequency] = useState(
     initialSchedule?.frequency ?? 'weekly',
   )
   const [validationMessage, setValidationMessage] = useState<string | undefined>(
-    isTeamVisibilityValid
-      ? undefined
-      : t('analytics.schedule.teamRequired'),
+    isTeamVisibilityValid ? undefined : t(visibilityRequiredKey),
   )
   const dialogRef = useModalFocus<HTMLElement>(onClose)
 
@@ -2844,7 +2879,7 @@ function AnalyticsScheduleDialog({
             const dayOfMonth = Number(data.get('dayOfMonth'))
             const recipientMemberKeys = readScheduleRecipients(data)
             if (!isTeamVisibilityValid) {
-              setValidationMessage(t('analytics.schedule.teamRequired'))
+              setValidationMessage(t(visibilityRequiredKey))
               return
             }
             if (recipientMemberKeys.length === 0) {

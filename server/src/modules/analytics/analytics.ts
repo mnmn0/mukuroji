@@ -5351,7 +5351,10 @@ function createReportDefinition(
   const teamId = input.teamId === undefined
     ? undefined
     : readIdentifier(input.teamId, 'Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = input.projectId === undefined
+    ? undefined
+    : readIdentifier(input.projectId, 'Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   return {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
     id: readRouteSafeReportId(input.id),
@@ -5362,6 +5365,7 @@ function createReportDefinition(
       : { description: readText(input.description, 'Analytics report description', 4_000) }),
     visibility,
     ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
     ownerMemberKey: readIdentifier(ownerMemberKey, 'Analytics report owner member key'),
     timeZone: normalizeTimeZone(input.timeZone, 'Analytics report time zone'),
     revision: 1,
@@ -5399,7 +5403,12 @@ function updateReportDefinition(
     : input.teamId === null
       ? undefined
       : readIdentifier(input.teamId, 'Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = input.projectId === undefined
+    ? current.projectId
+    : input.projectId === null
+      ? undefined
+      : readIdentifier(input.projectId, 'Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   const description = input.description === undefined
     ? current.description
     : input.description === null
@@ -5428,6 +5437,7 @@ function updateReportDefinition(
     ...(description === undefined ? { description: undefined } : { description }),
     visibility,
     ...(teamId === undefined ? { teamId: undefined } : { teamId }),
+    ...(projectId === undefined ? { projectId: undefined } : { projectId }),
     timeZone: input.timeZone === undefined
       ? current.timeZone
       : normalizeTimeZone(input.timeZone, 'Analytics report time zone'),
@@ -5453,7 +5463,10 @@ function normalizeStoredReport(value: unknown): AnalyticsReport {
   const teamId = value.teamId === undefined
     ? undefined
     : readIdentifier(value.teamId, 'Stored Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = value.projectId === undefined
+    ? undefined
+    : readIdentifier(value.projectId, 'Stored Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   const description = value.description === undefined
     ? undefined
     : readText(value.description, 'Stored Analytics report description', 4_000)
@@ -5471,6 +5484,7 @@ function normalizeStoredReport(value: unknown): AnalyticsReport {
     ...(description === undefined ? {} : { description }),
     visibility,
     ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
     ownerMemberKey: readIdentifier(
       value.ownerMemberKey,
       'Stored Analytics report owner member key',
@@ -6345,21 +6359,38 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
 }
 
 function readVisibility(value: unknown): AnalyticsReport['visibility'] {
-  if (value === 'personal' || value === 'team' || value === 'shared') return value
+  if (value === 'personal' || value === 'team' || value === 'project' || value === 'shared') return value
   throw invalid('AnalyticsVisibilityInvalid', 'Analytics report visibility is invalid.')
 }
 
-function validateVisibilityTeam(
+/**
+ * Requires the Team and Project fields that the report visibility needs, and no others.
+ *
+ * @param visibility - Normalized report visibility.
+ * @param teamId - Team of a Team report, or the owner Team of a Project report.
+ * @param projectId - Project of a Project report.
+ */
+function validateVisibilityScope(
   visibility: AnalyticsReport['visibility'],
   teamId: string | undefined,
+  projectId: string | undefined,
 ) {
   if (visibility === 'team' && teamId === undefined) {
     throw invalid('AnalyticsVisibilityInvalid', 'Team reports require a Team ID.')
   }
-  if (visibility !== 'team' && teamId !== undefined) {
+  if (visibility === 'project' && (teamId === undefined || projectId === undefined)) {
+    throw invalid('AnalyticsVisibilityInvalid', 'Project reports require a Team ID and a Project ID.')
+  }
+  if (visibility !== 'team' && visibility !== 'project' && teamId !== undefined) {
     throw invalid(
       'AnalyticsVisibilityInvalid',
-      'Only Team reports can specify a Team ID.',
+      'Only Team and Project reports can specify a Team ID.',
+    )
+  }
+  if (visibility !== 'project' && projectId !== undefined) {
+    throw invalid(
+      'AnalyticsVisibilityInvalid',
+      'Only Project reports can specify a Project ID.',
     )
   }
 }

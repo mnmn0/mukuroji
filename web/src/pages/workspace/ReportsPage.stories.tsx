@@ -467,6 +467,31 @@ export const HistoricalSnapshot: Story = {
 }
 
 /**
+ * Report shared with one Project of its Team. The Project list offers only the chosen Team's
+ * Projects, and changing the Team clears the Project.
+ */
+export const ProjectVisibility: Story = {
+  args: {
+    builder: true,
+    reports: [{
+      ...analyticsReportFixtures[0],
+      projectId: 'brand-refresh',
+      teamId: 'design-team',
+      visibility: 'project',
+    }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const project = canvas.getByRole('combobox', { name: '共有先プロジェクト' })
+    await expect(project).toHaveValue('brand-refresh')
+    await expect(within(project).queryByRole('option', { name: 'Refero' })).toBeNull()
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '共有先チーム' }), 'core-team')
+    await expect(project).toHaveValue('')
+    await expect(within(project).getByRole('option', { name: 'Refero' })).toBeInTheDocument()
+  },
+}
+
+/**
  * 月末31日を含む monthly delivery schedule editor です。
  */
 export const Schedule: Story = {

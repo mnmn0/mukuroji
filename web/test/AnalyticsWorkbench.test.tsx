@@ -741,6 +741,29 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Retry')
   })
 
+  test('shares a report with one Project of its Team', () => {
+    const projectReport = {
+      ...analyticsReportFixtures[0],
+      visibility: 'project' as const,
+      teamId: 'design-team',
+      projectId: 'brand-refresh',
+    }
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        builder
+        reports={[projectReport]}
+        selectedReportId={projectReport.id}
+        onWidgetsChange={() => undefined}
+      />,
+    )
+    expect(html).toContain('<option value="project" selected="">Project</option>')
+    expect(html).toContain('Shared project')
+    expect(html).toContain('<option value="brand-refresh" selected="">ブランド刷新</option>')
+    // Only the chosen Team's Projects are offered.
+    expect(html).not.toContain('<option value="refero"')
+  })
+
   test('keeps an empty assignee selection apart from all assignees', () => {
     const members = [{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]
     const render = (assigneeUserIds: string[] | undefined) => renderToStaticMarkup(

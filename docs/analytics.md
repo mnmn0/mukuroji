@@ -270,6 +270,9 @@ Analytics reader 自体は現在 archived の canonical row も読み、archive 
 
 - `personal`: owner memberだけが読み書きできます。
 - `team`: Team viewerが読み取れ、Team managerだけが作成・更新・削除できます。
+- `project`: `teamId` と `projectId` の組で Project を指します。その Team の Project を読める member が読み取れ、
+  その Project の manager（Enterprise では Team または Workspace の `teams.manage`）だけが作成・更新・削除
+  できます。Project ID は Team をまたいで重なりうるので、判定は必ず Team 付きで行います（ADR 0062）。
 - `shared`: active Workspace memberが読み取れ、Workspace owner/adminだけが作成・更新・削除できます。
 
 Guest は report を読み取れますが、Workspace business data を変更できません。Report definition の
@@ -326,11 +329,13 @@ collaboration projection がこの event を受信者の Inbox 行に変え、�
 有効にしていれば同じ channel delivery queue に載せます。Event は report ID を entity、snapshot ID を
 target に持ち、`/reports?v=1&report=<id>&snapshot=<id>` を deep link にします。Team visibility の
 report は event に Team ID を載せ、projection と外部送信の直前に recipient の Team access を再確認します。
+Project visibility の report は Team ID と Project ID を載せ、Project 単位の通知と同じ規則で recipient の
+Project access を再確認します。
 Report と同じく、Team の Project のどれかを読めれば Team access ありとします。Shared / personal report
 の外部送信は、Enterprise の Work Item 閲覧権限が Workspace・Team・Project のどれか1つにあれば送ります。
 
 Inbox は表示のたびに report を読み直し、report が削除されたか recipient が現在の visibility
-（personal は owner、team は Team の参照権限、shared は Workspace member）を満たさない場合は通知を
+（personal は owner、team は Team の参照権限、project は Team 付き Project の参照権限、shared は Workspace member）を満たさない場合は通知を
 隠し、表示名は現在の report 名に置き換えます。Link 先の snapshot 一覧は従来どおり recipient の
 現在の permission scope と一致する snapshot だけを返します。Analytics Lambda は AuditEvents に
 書くだけで、AuditEvents stream の direct consumer にはしません。
