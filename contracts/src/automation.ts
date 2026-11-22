@@ -437,6 +437,12 @@ export type AutomationProjectTemplateWorkItem = {
 /** Most Phases and Milestones one Project template can create together. */
 export const AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT = 30
 
+/**
+ * Marks a Milestone line in the template editor's Phase / Milestone outline.
+ * A Phase title cannot start with it, so the editor text always reads back the same way.
+ */
+export const AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER = '◆'
+
 /** Most schedule dependencies between WBS Work Items one Project template can hold. */
 export const AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT = 100
 

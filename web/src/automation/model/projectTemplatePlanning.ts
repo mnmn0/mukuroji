@@ -1,6 +1,7 @@
 import {
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
+  AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER,
   AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
   WORK_ITEM_TITLE_MAX_LENGTH,
@@ -45,6 +46,30 @@ export type ProjectTemplateDependencyLinesResult =
       line: number
     }
 
+/** A Planning entity a Project template's Phases and Milestones can be created under. */
+export type AutomationPlanningParentOption = {
+  /** Planning entity ID. */
+  id: string
+  /** Display title. */
+  title: string
+  /** Entity type: roadmap, initiative, or goal. */
+  type: 'roadmap' | 'initiative' | 'goal'
+  /** Team scope of the entity; absent for a Workspace entity. */
+  teamId?: string
+}
+
+/** Loading state of the Planning parent candidates shown when applying a Project template. */
+export type AutomationPlanningParentsState = {
+  /** Candidates, once loaded. */
+  parents?: AutomationPlanningParentOption[]
+  /** Whether the candidates are still loading. */
+  isLoading: boolean
+  /** Whether loading the candidates failed. */
+  failed: boolean
+  /** Loads the candidates again. */
+  onRetry: () => void
+}
+
 const indentUnit = '  '
 
 /** Short dependency type codes used in the editor, keyed by code. */
@@ -66,9 +91,10 @@ const dependencyCodeByType: Record<ScheduleDependencyType, string> = {
 /**
  * Reads a Phase / Milestone outline written one entry per line.
  *
- * A Phase is `title | start offset | duration`; a Milestone is `title | offset`, all in working
- * days. A Milestone indented two spaces belongs to the Phase above it; an unindented one stands
- * on its own. Blank lines are ignored.
+ * A Phase is `title | start offset | duration`; a Milestone starts with the marker and is
+ * `◆ title | offset`, all in working days. The marker, not the number of fields, tells the two
+ * apart, so any title round-trips. A Milestone indented two spaces belongs to the Phase above it;
+ * an unindented one stands on its own. Blank lines are ignored.
  *
  * @param text - Outline text from the template editor.
  * @returns The parsed Phases and Milestones, or the first error and its line number.
@@ -83,25 +109,25 @@ export function parseProjectTemplatePlanningOutline(text: string): ProjectTempla
     if (!rawLine.trim()) continue
     const indent = /^ */u.exec(rawLine)?.[0].length ?? 0
     if ((indent !== 0 && indent !== indentUnit.length) || rawLine[indent] === '\t') return { error: 'indent', line }
-    const segments = rawLine.trim().split('|')
-    if (segments.length < 2) return { error: 'format', line }
-    const last = segments.at(-1) ?? ''
-    const secondLast = segments.at(-2) ?? ''
-    const isPhase = segments.length >= 3 && isWholeNumber(last) && isWholeNumber(secondLast)
-    const title = segments.slice(0, isPhase ? -2 : -1).join('|').trim()
+    const content = rawLine.trim()
+    const isMilestone = content.startsWith(AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER)
+    const segments = (isMilestone ? content.slice(AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER.length) : content).split('|')
+    if (segments.length < (isMilestone ? 2 : 3)) return { error: 'format', line }
+    const fieldCount = isMilestone ? 1 : 2
+    const title = segments.slice(0, -fieldCount).join('|').trim()
     if (!title || [...title].length > WORK_ITEM_TITLE_MAX_LENGTH) return { error: 'title', line }
     count += 1
     if (count > AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT) return { error: 'limit', line }
-    if (isPhase) {
+    if (!isMilestone) {
       if (indent !== 0) return { error: 'indent', line }
-      const startOffsetWorkingDays = readWholeDays(secondLast, 0)
-      const durationWorkingDays = readWholeDays(last, 1)
+      const startOffsetWorkingDays = readWholeDays(segments.at(-2) ?? '', 0)
+      const durationWorkingDays = readWholeDays(segments.at(-1) ?? '', 1)
       if (startOffsetWorkingDays === undefined || durationWorkingDays === undefined) return { error: 'days', line }
       currentPhase = { title, startOffsetWorkingDays, durationWorkingDays }
       phases.push(currentPhase)
       continue
     }
-    const offsetWorkingDays = readWholeDays(last, 0)
+    const offsetWorkingDays = readWholeDays(segments.at(-1) ?? '', 0)
     if (offsetWorkingDays === undefined) return { error: 'days', line }
     const milestone = { title, offsetWorkingDays }
     if (indent === 0) {
@@ -127,13 +153,13 @@ export function formatProjectTemplatePlanningOutline(
   milestones: readonly AutomationProjectTemplateMilestone[] | undefined,
 ): string {
   const lines: string[] = []
+  const formatMilestone = (milestone: AutomationProjectTemplateMilestone) =>
+    `${AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER} ${milestone.title} | ${milestone.offsetWorkingDays}`
   for (const phase of phases ?? []) {
     lines.push(`${phase.title} | ${phase.startOffsetWorkingDays} | ${phase.durationWorkingDays}`)
-    for (const milestone of phase.milestones ?? []) {
-      lines.push(`${indentUnit}${milestone.title} | ${milestone.offsetWorkingDays}`)
-    }
+    for (const milestone of phase.milestones ?? []) lines.push(`${indentUnit}${formatMilestone(milestone)}`)
   }
-  for (const milestone of milestones ?? []) lines.push(`${milestone.title} | ${milestone.offsetWorkingDays}`)
+  for (const milestone of milestones ?? []) lines.push(formatMilestone(milestone))
   return lines.join('\n')
 }
 

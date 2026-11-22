@@ -1,14 +1,13 @@
 import type {
+  AutomationTemplate,
   AutomationTemplateApplication,
-  PlanningSnapshot,
   UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { createMutationRequestRunner, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import { getPlanningSnapshot } from '../../planning/api/snapshot'
-import { AutomationManagementPanel, type AutomationPlanningParentOption } from './AutomationManagementPanel'
+import { AutomationManagementPanel } from './AutomationManagementPanel'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
   applyAutomationTemplate,
@@ -30,6 +29,7 @@ import {
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
 import { useAutomationManagement } from '../queries/useAutomationManagement'
+import { useAutomationPlanningParents } from '../queries/useAutomationPlanningParents'
 
 /** Automation management panel container の props です。 */
 export type AutomationManagementPanelContainerProps = {
@@ -85,9 +85,9 @@ export function AutomationManagementPanelContainer({
   }
 
   const initialTab = readInitialTab()
-  const loadPlanningParents = useCallback(
-    async () => listAutomationPlanningParents(await getPlanningSnapshot(accessToken)),
-    [accessToken],
+  const planningParentsQuery = useAutomationPlanningParents(
+    accessToken,
+    canManage && (data?.templates ?? []).some(hasPlanningEntities),
   )
 
   return (
@@ -223,7 +223,16 @@ export function AutomationManagementPanelContainer({
       onPreviewTemplateApplication={canManage
         ? (template, input) => previewAutomationTemplateApplication(accessToken, template.id, input)
         : undefined}
-      onLoadPlanningParents={canManage ? loadPlanningParents : undefined}
+      planningParents={canManage
+        ? {
+            parents: planningParentsQuery.data,
+            isLoading: planningParentsQuery.isLoading,
+            failed: planningParentsQuery.error !== undefined,
+            onRetry: () => {
+              void planningParentsQuery.mutate()
+            },
+          }
+        : undefined}
       onCreateRecurringWork={canManage ? (input) => runMutation(
         'recurring:create',
         input,
@@ -251,25 +260,14 @@ export function AutomationManagementPanelContainer({
 }
 
 /**
- * Lists the Planning entities a Project template's Phases and Milestones can be placed under:
- * active roadmaps, initiatives, and goals outside any Project.
+ * Tells whether a template creates Phases or Milestones and so needs a Planning parent.
  *
- * @param snapshot - Planning snapshot the viewer can read.
- * @returns Candidates sorted by title.
+ * @param template - Automation template.
+ * @returns True for a Project template with Phases or Milestones.
  */
-function listAutomationPlanningParents(snapshot: PlanningSnapshot): AutomationPlanningParentOption[] {
-  const options: AutomationPlanningParentOption[] = []
-  for (const entity of snapshot.entities) {
-    if (entity.archivedAt !== undefined || entity.projectId !== undefined) continue
-    if (entity.type !== 'roadmap' && entity.type !== 'initiative' && entity.type !== 'goal') continue
-    options.push({
-      id: entity.id,
-      title: entity.title,
-      type: entity.type,
-      ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
-    })
-  }
-  return options.sort((first, second) => first.title.localeCompare(second.title))
+function hasPlanningEntities(template: AutomationTemplate) {
+  return template.kind === 'project' &&
+    ((template.payload.phases?.length ?? 0) > 0 || (template.payload.milestones?.length ?? 0) > 0)
 }
 
 function readInitialTab() {

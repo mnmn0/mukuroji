@@ -65,7 +65,12 @@ export const ProjectWithPlanningPreview: Story = {
     initialApplication: undefined,
     initialPreview: projectPlannedTemplatePreviewFixture,
     template: projectPlannedAutomationTemplateFixture,
-    onLoadPlanningParents: async () => [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+    planningParents: {
+      parents: [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+      isLoading: false,
+      failed: false,
+      onRetry: () => undefined,
+    },
     onPreview: async () => projectPlannedTemplatePreviewFixture,
   },
 }
@@ -76,7 +81,12 @@ export const ProjectWithPlanningPreviewErrors: Story = {
     initialApplication: undefined,
     initialPreview: projectPlannedTemplatePreviewWithErrorsFixture,
     template: projectPlannedAutomationTemplateFixture,
-    onLoadPlanningParents: async () => [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+    planningParents: {
+      parents: [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+      isLoading: false,
+      failed: false,
+      onRetry: () => undefined,
+    },
     onPreview: async () => projectPlannedTemplatePreviewWithErrorsFixture,
   },
 }

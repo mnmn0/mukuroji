@@ -180,11 +180,11 @@ export const automationMessages = {
   'automation.template.project.planning':
     'Phases / Milestones',
   'automation.template.project.planningPlaceholder':
-    'Preparation | 0 | 5\n  Requirements fixed | 4\nDesign done | 7',
+    'Preparation | 0 | 5\n  ◆ Requirements fixed | 4\n◆ Design done | 7',
   'automation.template.project.planningHint':
-    'A phase is "title | start | duration" and a milestone is "title | date", both in working days from the project start. A milestone indented two spaces under a phase belongs to it. Up to 30 in total.',
+    'A phase is "title | start | duration" and a milestone starts with ◆ as "◆ title | date", both in working days from the project start. A milestone indented two spaces under a phase belongs to it, and a phase title cannot start with ◆. Up to 30 in total.',
   'automation.template.project.planningError.format':
-    'Line {line}: write a phase as "title | start | duration" and a milestone as "title | date".',
+    'Line {line}: write a phase as "title | start | duration" and a milestone as "◆ title | date".',
   'automation.template.project.planningError.indent':
     'Line {line}: only a milestone under a phase can be indented, by two spaces.',
   'automation.template.project.planningError.title':
@@ -246,6 +246,8 @@ export const automationMessages = {
     'Choose one',
   'automation.template.application.planningParentHint':
     'Phases are created under a roadmap, initiative, or goal that is outside any project and in no other team.',
+  'automation.template.application.planningParentLoading': 'Loading Planning parents.',
+  'automation.template.application.planningParentRetry': 'Load again',
   'automation.template.application.planningParentUnavailable':
     'Could not load the Planning parents.',
   'automation.template.application.preview':

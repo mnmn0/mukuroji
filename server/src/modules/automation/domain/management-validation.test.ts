@@ -291,6 +291,8 @@ describe('Automation management validation domain', () => {
     expect(() => create({ phases: [{ title: '準備', startOffsetWorkingDays: 0, durationWorkingDays: 0 }] }))
       .toThrow('Phase duration')
     expect(() => create({ milestones: [{ title: '改行\nあり', offsetWorkingDays: 0 }] })).toThrow('line breaks')
+    expect(() => create({ phases: [{ title: '◆ 準備', startOffsetWorkingDays: 0, durationWorkingDays: 1 }] }))
+      .toThrow('must not start with')
     expect(() => create({
       milestones: Array.from(
         { length: AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT + 1 },

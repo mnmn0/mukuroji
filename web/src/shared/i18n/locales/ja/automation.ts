@@ -176,11 +176,11 @@ export const automationMessages = {
   'automation.template.project.planning':
     'Phase / Milestone',
   'automation.template.project.planningPlaceholder':
-    '準備 | 0 | 5\n  要件確定 | 4\n設計完了 | 7',
+    '準備 | 0 | 5\n  ◆ 要件確定 | 4\n◆ 設計完了 | 7',
   'automation.template.project.planningHint':
-    'Phase は「タイトル | 開始 | 日数」、Milestone は「タイトル | 日付」で、どちらも Project 開始からの稼働日です。Phase の下に半角スペース 2 つ字下げした Milestone はその Phase に入ります。合わせて 30 件までです。',
+    'Phase は「タイトル | 開始 | 日数」、Milestone は行頭に ◆ を付けて「◆ タイトル | 日付」で、どちらも Project 開始からの稼働日です。Phase の下に半角スペース 2 つ字下げした Milestone はその Phase に入ります。Phase のタイトルは ◆ で始められません。合わせて 30 件までです。',
   'automation.template.project.planningError.format':
-    '{line} 行目: Phase は「タイトル | 開始 | 日数」、Milestone は「タイトル | 日付」の形で書いてください。',
+    '{line} 行目: Phase は「タイトル | 開始 | 日数」、Milestone は「◆ タイトル | 日付」の形で書いてください。',
   'automation.template.project.planningError.indent':
     '{line} 行目: 字下げできるのは Phase の下の Milestone だけで、半角スペース 2 つです。',
   'automation.template.project.planningError.title':
@@ -242,6 +242,8 @@ export const automationMessages = {
     '選択してください',
   'automation.template.application.planningParentHint':
     'Phase は roadmap・initiative・goal の下に作ります。Project に属さず、ほかの Team に属さないものから選べます。',
+  'automation.template.application.planningParentLoading': 'Planning の親を読み込んでいます。',
+  'automation.template.application.planningParentRetry': '再読み込み',
   'automation.template.application.planningParentUnavailable':
     'Planning の親の候補を読み込めませんでした。',
   'automation.template.application.preview':

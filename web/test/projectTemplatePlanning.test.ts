@@ -19,29 +19,34 @@ const workItems = [
 
 describe('Project template Phase / Milestone outline', () => {
   test('reads Phases with indented Milestones and standalone Milestones, and writes them back', () => {
-    const text = ['準備 | 0 | 5', '  要件確定 | 4', '', 'A|B 判定 | 7'].join('\n')
+    const text = ['準備 | 0 | 5', '  ◆ 要件確定 | 4', '', '◆A|B 判定 | 7', 'X|Y 段階 | 8 | 2'].join('\n')
     const result = parseProjectTemplatePlanningOutline(text)
     expect(result).toEqual({
-      phases: [{
-        title: '準備',
-        startOffsetWorkingDays: 0,
-        durationWorkingDays: 5,
-        milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
-      }],
+      phases: [
+        {
+          title: '準備',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+        },
+        { title: 'X|Y 段階', startOffsetWorkingDays: 8, durationWorkingDays: 2 },
+      ],
       milestones: [{ title: 'A|B 判定', offsetWorkingDays: 7 }],
     })
     if (!('phases' in result)) throw new Error('The outline must parse.')
-    expect(formatProjectTemplatePlanningOutline(result.phases, result.milestones))
-      .toBe(['準備 | 0 | 5', '  要件確定 | 4', 'A|B 判定 | 7'].join('\n'))
+    const formatted = formatProjectTemplatePlanningOutline(result.phases, result.milestones)
+    expect(formatted).toBe(['準備 | 0 | 5', '  ◆ 要件確定 | 4', 'X|Y 段階 | 8 | 2', '◆ A|B 判定 | 7'].join('\n'))
+    expect(parseProjectTemplatePlanningOutline(formatted)).toEqual(result)
   })
 
   test('reports the first invalid line', () => {
-    expect(parseProjectTemplatePlanningOutline('準備')).toEqual({ error: 'format', line: 1 })
-    expect(parseProjectTemplatePlanningOutline('  要件確定 | 4')).toEqual({ error: 'indent', line: 1 })
+    expect(parseProjectTemplatePlanningOutline('準備 | 4')).toEqual({ error: 'format', line: 1 })
+    expect(parseProjectTemplatePlanningOutline('◆ 要件確定')).toEqual({ error: 'format', line: 1 })
+    expect(parseProjectTemplatePlanningOutline('  ◆ 要件確定 | 4')).toEqual({ error: 'indent', line: 1 })
     expect(parseProjectTemplatePlanningOutline('準備 | 0 | 5\n  設計 | 1 | 2')).toEqual({ error: 'indent', line: 2 })
     expect(parseProjectTemplatePlanningOutline('準備 | 0 | 0')).toEqual({ error: 'days', line: 1 })
-    expect(parseProjectTemplatePlanningOutline('| 4')).toEqual({ error: 'title', line: 1 })
-    expect(parseProjectTemplatePlanningOutline(Array.from({ length: 31 }, (_, index) => `M${index} | 0`).join('\n')))
+    expect(parseProjectTemplatePlanningOutline('◆ | 4')).toEqual({ error: 'title', line: 1 })
+    expect(parseProjectTemplatePlanningOutline(Array.from({ length: 31 }, (_, index) => `◆ M${index} | 0`).join('\n')))
       .toEqual({ error: 'limit', line: 31 })
   })
 })

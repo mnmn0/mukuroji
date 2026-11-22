@@ -34,6 +34,7 @@ import {
   countProjectTemplateWorkItems,
   formatLocalCalendarDate,
 } from '../model/projectTemplateWorkItems'
+import type { AutomationPlanningParentsState } from '../model/projectTemplatePlanning'
 
 const tabLabelKeys: Record<AutomationManagementTab, MessageKey> = {
   rules: 'automation.tab.rules',
@@ -172,8 +173,8 @@ export type AutomationManagementPanelProps = {
     template: AutomationTemplate,
     input: ApplyAutomationTemplateInput,
   ) => Promise<AutomationProjectTemplateApplicationPreview>
-  /** Loads the Planning entities a template's Phases and Milestones can be placed under. */
-  onLoadPlanningParents?: () => Promise<AutomationPlanningParentOption[]>
+  /** Planning entities a template's Phases and Milestones can be placed under, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
   /** Recurring Work 作成 callback です。 */
   onCreateRecurringWork?: (input: CreateRecurringWorkInput) => Promise<unknown> | unknown
   /** Recurring Work active/paused 切替 callback です。 */
@@ -211,7 +212,7 @@ export function AutomationManagementPanel({
   onUpdateTemplate,
   onRefreshTemplateApplication,
   onPreviewTemplateApplication,
-  onLoadPlanningParents,
+  planningParents,
   readOnly = false,
   recurringWork,
   rules,
@@ -349,7 +350,7 @@ export function AutomationManagementPanel({
             onDuplicate={onDuplicateTemplate}
             onRefreshApplication={onRefreshTemplateApplication}
             onPreviewApplication={onPreviewTemplateApplication}
-            onLoadPlanningParents={onLoadPlanningParents}
+            planningParents={planningParents}
             onToggle={onToggleTemplate}
             onUpdate={onUpdateTemplate}
           />
@@ -508,8 +509,8 @@ type TemplatesTabProps = {
     template: AutomationTemplate,
     input: ApplyAutomationTemplateInput,
   ) => Promise<AutomationProjectTemplateApplicationPreview>
-  /** Loads Planning parent candidates for template Phases and Milestones. */
-  onLoadPlanningParents?: () => Promise<AutomationPlanningParentOption[]>
+  /** Planning parent candidates for template Phases and Milestones, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
 }
 
 function TemplatesTab({
@@ -520,7 +521,7 @@ function TemplatesTab({
   onDuplicate,
   onRefreshApplication,
   onPreviewApplication,
-  onLoadPlanningParents,
+  planningParents,
   onToggle,
   onUpdate,
   readOnly,
@@ -628,7 +629,7 @@ function TemplatesTab({
                   template={template}
                   workflowTargets={workflowTargets}
                   onApply={(input) => onApply(template, input)}
-                  onLoadPlanningParents={onLoadPlanningParents}
+                  planningParents={planningParents}
                   onPreview={onPreviewApplication ? (input) => onPreviewApplication(template, input) : undefined}
                   onRefresh={onRefreshApplication}
                 />
@@ -661,22 +662,10 @@ type AutomationTemplateApplicationEditorProps = {
   initialApplication?: AutomationTemplateApplication
   /** Dry-runs the application; when given, applying a Project template waits for a clean preview. */
   onPreview?: (input: ApplyAutomationTemplateInput) => Promise<AutomationProjectTemplateApplicationPreview>
-  /** Loads Planning parent candidates for the template's Phases and Milestones. */
-  onLoadPlanningParents?: () => Promise<AutomationPlanningParentOption[]>
+  /** Planning parent candidates for the template's Phases and Milestones, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
   /** Story/test で表示する既存 preview です。 */
   initialPreview?: AutomationProjectTemplateApplicationPreview
-}
-
-/** A Planning entity a Project template's Phases and Milestones can be created under. */
-export type AutomationPlanningParentOption = {
-  /** Planning entity ID. */
-  id: string
-  /** Display title. */
-  title: string
-  /** Entity type: roadmap, initiative, or goal. */
-  type: 'roadmap' | 'initiative' | 'goal'
-  /** Team scope of the entity; absent for a Workspace entity. */
-  teamId?: string
 }
 
 /** Template application の target、immutable pin、durable result を表示します。 */
@@ -686,7 +675,7 @@ export function AutomationTemplateApplicationEditor({
   isApplying = false,
   locale,
   onApply,
-  onLoadPlanningParents,
+  planningParents,
   onPreview,
   onRefresh,
   teams,
@@ -716,44 +705,28 @@ export function AutomationTemplateApplicationEditor({
     : 0
   const needsStartDate = workItemCount > 0 || planningEntityCount > 0
   const startDateIsValid = !needsStartDate || /^\d{4}-\d{2}-\d{2}$/u.test(startDate)
-  const [planningParents, setPlanningParents] = useState<AutomationPlanningParentOption[]>()
-  const [planningParentsFailed, setPlanningParentsFailed] = useState(false)
+  const planningParentsFailed = planningParents?.failed === true
   const [planningParentId, setPlanningParentId] = useState('')
   const [preview, setPreview] = useState(initialPreview)
   // A preview passed in by a story or test has no key and counts as current until it is replaced.
   const [previewKey, setPreviewKey] = useState<string>()
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [previewErrorMessage, setPreviewErrorMessage] = useState<string>()
-  const usableParents = (planningParents ?? []).filter((parent) =>
+  const usableParents = (planningParents?.parents ?? []).filter((parent) =>
     parent.teamId === undefined || parent.teamId === targetValue
   )
   const selectedParentId = usableParents.some((parent) => parent.id === planningParentId) ? planningParentId : ''
   const planningParentIsValid = planningEntityCount === 0 || selectedParentId !== ''
   const currentPreviewKey = createPreviewKey(
+    template.version,
     targetValue,
     needsStartDate ? startDate : undefined,
     planningEntityCount > 0 ? selectedParentId : undefined,
   )
   const requiresPreview = template.kind === 'project' && onPreview !== undefined
-  const previewIsCurrent = preview !== undefined &&
+  const previewIsCurrent = preview !== undefined && preview.templateVersion === template.version &&
     (previewKey === currentPreviewKey || (previewKey === undefined && preview === initialPreview))
   const previewAllowsApply = !requiresPreview || (previewIsCurrent && preview.errors.length === 0)
-
-  useEffect(() => {
-    if (planningEntityCount === 0 || !onLoadPlanningParents) return
-    let cancelled = false
-    onLoadPlanningParents().then(
-      (parents) => {
-        if (!cancelled) setPlanningParents(parents)
-      },
-      () => {
-        if (!cancelled) setPlanningParentsFailed(true)
-      },
-    )
-    return () => {
-      cancelled = true
-    }
-  }, [onLoadPlanningParents, planningEntityCount])
 
   /** Builds the request for the current form values. */
   function readInput() {
@@ -883,8 +856,20 @@ export function AutomationTemplateApplicationEditor({
           >
             {t(planningParentsFailed
               ? 'automation.template.application.planningParentUnavailable'
-              : 'automation.template.application.planningParentHint')}
+              : planningParents?.isLoading
+                ? 'automation.template.application.planningParentLoading'
+                : 'automation.template.application.planningParentHint')}
           </span>
+          {planningParentsFailed ? (
+            <button
+              className="workbench-button-secondary min-h-9 justify-self-start px-3"
+              data-testid="automation-template-application-planning-parent-retry"
+              type="button"
+              onClick={planningParents?.onRetry}
+            >
+              {t('automation.template.application.planningParentRetry')}
+            </button>
+          ) : null}
         </label>
       ) : null}
       {!targetsAvailable ? (
@@ -1139,15 +1124,21 @@ function PreviewTable({ caption, rows }: {
 }
 
 /**
- * Identifies the form values a preview was computed for.
+ * Identifies the template version and form values a preview was computed for.
  *
+ * @param templateVersion - Template version being applied.
  * @param teamId - Selected Team ID.
  * @param startDate - Project start date, when the template needs one.
  * @param planningParentId - Planning parent, when the template has Phases or Milestones.
  * @returns A key that changes whenever one of the values does.
  */
-function createPreviewKey(teamId: string, startDate: string | undefined, planningParentId: string | undefined) {
-  return JSON.stringify([teamId, startDate ?? null, planningParentId ?? null])
+function createPreviewKey(
+  templateVersion: number,
+  teamId: string,
+  startDate: string | undefined,
+  planningParentId: string | undefined,
+) {
+  return JSON.stringify([templateVersion, teamId, startDate ?? null, planningParentId ?? null])
 }
 
 /**

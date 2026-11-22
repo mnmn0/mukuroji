@@ -777,9 +777,15 @@ export async function createProjectTemplatePlanningEntities(
     await requirePlanningActiveOwner(principal, principal.userKey)
     const workItemState = await readPlanningWorkItemState(principal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
+    // Entities an earlier attempt created that someone archived since; their Milestones are left out.
+    const archivedIndexes = new Set<number>()
     for (const entity of planningEntities) {
       const id = createProjectTemplatePlanningEntityId(application, entity.index)
       if (snapshot.entities.some((candidate) => candidate.id === id)) continue
+      if (entity.parentIndex !== undefined && archivedIndexes.has(entity.parentIndex)) {
+        archivedIndexes.add(entity.index)
+        continue
+      }
       const creation: PlanningEntityCreation = {
         id,
         type: entity.type,
@@ -797,17 +803,23 @@ export async function createProjectTemplatePlanningEntities(
         forecast: structuredClone(entity.range),
         expectedRevision: snapshot.revision,
       }
-      const response = await workItemDependencies.planning.create(
-        directoryId,
-        creation,
-        workItemState,
-        createPlanningEntityAuditTransaction(
+      try {
+        const response = await workItemDependencies.planning.create(
           directoryId,
-          createApiMutationContext(c, principal, { applicationId: application.id, ...creation }, `${id}_create`),
-          principal.userKey,
-        ),
-      )
-      snapshot = response.planning
+          creation,
+          workItemState,
+          createPlanningEntityAuditTransaction(
+            directoryId,
+            createApiMutationContext(c, principal, { applicationId: application.id, ...creation }, `${id}_create`),
+            principal.userKey,
+          ),
+        )
+        snapshot = response.planning
+      } catch (error) {
+        // The live graph leaves out archived entities, but the ID stays taken; keep the archive.
+        if (!(error instanceof PlanningError) || error.code !== 'PlanningEntityExists') throw error
+        archivedIndexes.add(entity.index)
+      }
     }
   } catch (error) {
     throw toProjectTemplatePlanningError(error)
@@ -842,6 +854,14 @@ export async function createProjectTemplateDependencies(
   const directoryId = principal.directoryId
   const idByWbsNumber = new Map(workItems.map((workItem) => [workItem.wbsNumber, workItemIds[workItem.index]]))
   try {
+    // Creating the Project advanced the applier's Workspace member version, so guard the writes
+    // with the member as it is now rather than as it was when the request was authenticated.
+    const currentMember = await requirePlanningActiveOwner(principal, principal.userKey)
+    const authorizationConditionChecks = createPlanningCallerAuthorizationConditionChecks(
+      principal,
+      [currentMember],
+      false,
+    )
     const workItemState = await readPlanningWorkItemState(principal, { teamId, projectId })
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
     for (const [position, dependency] of dependencies.entries()) {
@@ -879,7 +899,7 @@ export async function createProjectTemplateDependencies(
           expectedRevision: snapshot.revision,
         },
         workItemState,
-        createPlanningCallerAuthorizationConditionChecks(principal),
+        authorizationConditionChecks,
       )
       snapshot = response.planning
     }
@@ -910,7 +930,11 @@ function createProjectTemplatePlanningEntityId(application: AutomationTemplateAp
  */
 function toProjectTemplatePlanningError(error: unknown): unknown {
   if (!(error instanceof PlanningError)) return error
-  if (error.code === 'PlanningRevisionConflict' || error.code === 'PlanningWorkItemChanged') {
+  if (
+    error.code === 'PlanningRevisionConflict' ||
+    error.code === 'PlanningWorkItemChanged' ||
+    error.code === 'PlanningAuthorizationChanged'
+  ) {
     return new AutomationError(
       'conflict',
       'AutomationTemplatePlanningConflict',

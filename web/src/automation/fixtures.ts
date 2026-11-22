@@ -229,7 +229,7 @@ export const projectPlannedTemplatePreviewFixture: AutomationProjectTemplateAppl
   kind: 'project',
   teamId: 'core-team',
   name: '標準プロジェクト',
-  templateVersion: 2,
+  templateVersion: projectPlannedAutomationTemplateFixture.version,
   startDate: '2026-12-07',
   endDate: '2026-12-16',
   workItems: [

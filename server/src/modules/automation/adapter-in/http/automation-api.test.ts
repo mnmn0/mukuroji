@@ -3529,6 +3529,14 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
   expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
   expect(conflicted.status).toBe(409)
   expect(application.status).toBe('pending')
+  // Someone archives a created Milestone before the retry; the retry keeps it archived.
+  const beforeArchive = await planning.get('user#demo@example.com', { workItems: [] })
+  await planning.archive(
+    'user#demo@example.com',
+    'application_project_planning_plan_2',
+    { expectedRevision: beforeArchive.revision },
+    { workItems: [] },
+  )
 
   const response = await request()
   expect(response.status).toBe(200)
@@ -3539,7 +3547,7 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
   expect(createdIssues.size).toBe(3)
   const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
   expect(snapshot.entities
-    .filter((entity) => entity.projectId === application.id)
+    .filter((entity) => entity.projectId === application.id && entity.archivedAt === undefined)
     .map((entity) => ({
       id: entity.id,
       type: entity.type,
@@ -3563,14 +3571,6 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
       parentId: 'application_project_planning_plan_0',
       teamId: 'core-team',
       baseline: { startDate: '2026-12-11', endDate: '2026-12-11' },
-    },
-    {
-      id: 'application_project_planning_plan_2',
-      type: 'milestone',
-      title: '設計完了',
-      parentId: 'roadmap-1',
-      teamId: 'core-team',
-      baseline: { startDate: '2026-12-16', endDate: '2026-12-16' },
     },
   ])
   const withWorkItems = await planning.get('user#demo@example.com', {

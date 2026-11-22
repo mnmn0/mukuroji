@@ -1,6 +1,7 @@
 import {
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
+  AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER,
   AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
@@ -437,8 +438,12 @@ function validateProjectTemplatePhases(
     const milestones = phase.milestones === undefined
       ? []
       : validateProjectTemplateMilestones(phase.milestones, counter)
+    const title = readProjectTemplateLineTitle(phase.title, 'Project template Phase title')
+    if (title.startsWith(AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER)) {
+      throw invalidInput(`Project template Phase title must not start with ${AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER}.`)
+    }
     return {
-      title: readProjectTemplateLineTitle(phase.title, 'Project template Phase title'),
+      title,
       startOffsetWorkingDays: requireInteger(
         phase.startOffsetWorkingDays,
         'Project template Phase start offset',
