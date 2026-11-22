@@ -132,11 +132,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
-  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
-  // credential routes (#632).
+  // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
+  // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
-  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
+  expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
     'd258a1bc6137f5fed6afacffe832688b369093e7e555a412f418d747963e408a',
   )
