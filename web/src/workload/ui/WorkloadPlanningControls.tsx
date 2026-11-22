@@ -478,7 +478,8 @@ function applyScheduleHours(schedule: WorkingSchedule, hoursValue: string): Work
 function createSchedule(hoursValue: string, inheritsWorkspace: boolean): WorkingSchedule {
   const minutes = readScheduleMinutes(hoursValue)
   if (inheritsWorkspace) {
-    const day = { enabled: minutes > 0, minutes }
+    // Weekdays stay enabled even at zero hours, so raising the hours later brings them back.
+    const day = { enabled: true, minutes }
     return {
       monday: { ...day },
       tuesday: { ...day },
