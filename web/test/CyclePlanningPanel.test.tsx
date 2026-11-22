@@ -90,6 +90,19 @@ describe('CyclePlanningPanel', () => {
     expect(html).toMatch(/name="createNext"[^>]*checked=""|checked=""[^>]*name="createNext"/u)
   })
 
+  test('points to the capacity setting only when a full Cycle has backlog to add', () => {
+    const snapshot = createSnapshot()
+    const full = {
+      ...snapshot,
+      entities: snapshot.entities.map((entity) => entity.id === 'cycle-14' ? { ...entity, capacity: 2 } : entity),
+    }
+    const render = (value: PlanningSnapshot) => renderToStaticMarkup(
+      <CyclePlanningPanel labels={labels} snapshot={value} onSetCycleWorkItems={() => undefined} />,
+    )
+    expect(render(full)).toContain('data-testid="cycle-planning-capacity-full"')
+    expect(render(snapshot)).not.toContain('data-testid="cycle-planning-capacity-full"')
+  })
+
   test('offers next Cycle creation and hides changes without permission', () => {
     const html = renderToStaticMarkup(
       <CyclePlanningPanel
