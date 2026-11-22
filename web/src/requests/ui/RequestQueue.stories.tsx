@@ -8,6 +8,7 @@ import type {
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { aiTriageGenerationFixture } from '../../features/ai-assistance/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
+import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { requestSubmissionFixture } from '../fixtures'
 import { normalizeRequestSubmission } from '../model/requestForm'
 import { RequestQueue, type RequestQueueProps } from './RequestQueue'
@@ -24,6 +25,15 @@ const projectDirectory = new Map(
     ]),
   ]),
 )
+
+/**
+ * Team Work Item configuration for conversion stories. Required custom fields are
+ * removed so Apply converts with only the AI-adopted routing and title.
+ */
+const requestConversionConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  customFields: [],
+}
 
 /**
  * Request queue の Storybook metadata です。
@@ -50,6 +60,7 @@ const meta = {
     projectDirectory,
     selectedSubmission: normalizedSubmission,
     submissions: [normalizedSubmission],
+    workItemConfigurations: { 'core-team': requestConversionConfiguration },
   },
 } satisfies Meta<typeof RequestQueue>
 

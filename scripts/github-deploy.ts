@@ -142,6 +142,8 @@ export interface GitHubDeployContext {
   readonly runAttempt: string
   /** Release commit for `web-rollback`; empty for other operations. */
   readonly webReleaseCommit: string
+  /** Repository web URL (`GITHUB_SERVER_URL/GITHUB_REPOSITORY`); empty when unknown. */
+  readonly repositoryUrl?: string
 }
 
 /**
@@ -529,6 +531,60 @@ async function waitForHealthyCommit(
 }
 
 /**
+ * Reads the commit the running API reports, without failing the deploy when it cannot.
+ *
+ * @param dependencies - HTTP client.
+ * @param webUrl - Canonical Web URL of the running stack, if any.
+ * @returns The full commit SHA, or undefined when the stack is new or the health check fails.
+ */
+async function readRunningCommit(
+  dependencies: GitHubDeployDependencies,
+  webUrl: string | undefined,
+): Promise<string | undefined> {
+  if (webUrl === undefined) return undefined
+  try {
+    const reported = stringProperty(
+      await dependencies.fetchJson(new URL('/api/health', webUrl).toString()),
+      'applicationCommitSha',
+    )
+    return reported !== undefined && /^[0-9a-f]{40}$/.test(reported) ? reported : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Describes what one deploy changed, as job summary Markdown.
+ *
+ * The app's version is the deployed commit (ADR 0057), so the change history of a deploy is the
+ * range from the commit that ran before it to the commit it deployed.
+ *
+ * @param previousCommit - Commit the API reported before the deploy, if known.
+ * @param commitSha - Deployed commit.
+ * @param repositoryUrl - Repository web URL, or empty when unknown.
+ * @returns Markdown lines for the summary.
+ */
+export function describeDeployedChanges(
+  previousCommit: string | undefined,
+  commitSha: string,
+  repositoryUrl: string,
+): string[] {
+  if (previousCommit === undefined) {
+    return ['| Previous commit | unknown (first deploy, or `/api/health` did not answer) |']
+  }
+  if (previousCommit === commitSha) {
+    return [`| Previous commit | \`${previousCommit}\` (same commit, no changes) |`]
+  }
+  const repository = repositoryUrl.replace(/\/+$/, '')
+  return [
+    `| Previous commit | \`${previousCommit}\` |`,
+    repository === ''
+      ? `| Changes | \`${previousCommit.slice(0, 12)}...${commitSha.slice(0, 12)}\` |`
+      : `| Changes | ${repository}/compare/${previousCommit}...${commitSha} |`,
+  ]
+}
+
+/**
  * Deploys the stack and Web app, then checks the deployed commit.
  *
  * @param context - Workflow run values.
@@ -567,6 +623,7 @@ async function deploy(
         'the stored secrets are kept and reused.',
     )
   }
+  const previousCommit = await readRunningCommit(dependencies, before?.outputs.get('WebUrl'))
   const secrets = await ensureDeploySecrets(dependencies, context.region, before !== undefined)
   const apiAllowedOrigins = configuration.apiAllowedOrigins || (before?.outputs.get('WebUrl')?.replace(/\/+$/, '') ?? '')
   const parameters = buildStackParameters(configuration, secrets, context.commitSha, revision, apiAllowedOrigins)
@@ -599,6 +656,7 @@ async function deploy(
     '| | |',
     '| --- | --- |',
     `| Commit | \`${context.commitSha}\` |`,
+    ...describeDeployedChanges(previousCommit, context.commitSha, context.repositoryUrl ?? ''),
     `| Stack | \`${context.stackName}\` (${context.region}, ${after?.status ?? 'unknown'}) |`,
     `| ApiRuntimeConfigurationRevision | \`${revision}\` |`,
     `| CDK outputs SHA-256 | \`${digest}\` |`,
@@ -718,6 +776,9 @@ async function main(): Promise<number> {
       runId: process.env.GITHUB_RUN_ID ?? '',
       runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? '',
       webReleaseCommit: process.env.WEB_RELEASE_COMMIT?.trim() ?? '',
+      repositoryUrl: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`
+        : '',
     }, {
       run: runCommand,
       generateSecret: () => randomBytes(32).toString('hex'),
