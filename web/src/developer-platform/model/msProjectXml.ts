@@ -84,7 +84,7 @@ const dependencyTypeCodes: Record<MsProjectDependency['type'], number> = {
  *
  * Each task becomes one row keyed by its `UID`. The outline number names the parent, the first
  * assigned resource's e-mail address (or name) is the owner, the other assignments are
- * contributors with their work, and predecessor links become `UID TYPE +lag` entries.
+ * contributors (an array of `{ memberUserId, plannedEffortMinutes }`) with their work, and predecessor links become `UID TYPE +lag` entries.
  *
  * @param text - XML text saved by MS Project.
  * @returns Rows in task order.
@@ -136,8 +136,11 @@ export function readMsProjectXml(text: string): Array<Record<string, unknown>> {
       WBS: readText(task, 'OutlineNumber') || readText(task, 'WBS'),
       OutlineLevel: Number.isSafeInteger(outlineLevel) ? outlineLevel : 1,
       Owner: assignments[0]?.resource ?? '',
-      Contributors: assignments.slice(1).map((assignment) =>
-        `member:${assignment.resource}${assignment.workMinutes ? ` effort:${assignment.workMinutes}` : ''}`).join('; '),
+      // An array keeps a resource name with spaces as one member.
+      Contributors: assignments.slice(1).map((assignment) => ({
+        memberUserId: assignment.resource,
+        ...(assignment.workMinutes ? { plannedEffortMinutes: assignment.workMinutes } : {}),
+      })),
       Predecessors: predecessors.join('; '),
       Schedule: readSchedule(startDate, finishDate, readText(task, 'Milestone') === '1'),
       Notes: readText(task, 'Notes'),

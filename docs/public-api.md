@@ -348,5 +348,7 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
 
 - Excel は最初の 20 行から header 行を探し、その sheet の表を読む。cell は文字列にして送り、日付の書式の cell は `YYYY-MM-DD` にする。file は 10 MB まで、ZIP64・暗号化した file は読まない。
-- MS Project XML は Task ごとに `UID`、`Name`、`WBS`、`OutlineLevel`、`Owner`（最初の Assignment の Resource の e-mail か名前）、`Contributors`（ほかの Assignment と作業時間）、`Predecessors`（`<UID> SS -1` の形、lag は作業日 8 時間か暦日で日数に直す）、`Schedule`、`Notes` の列を作る。`Owner` は user ID として検証するため、Resource が user ID でない file では mapping で別の列か既定値を使う。document type 宣言のある XML は読まない。
+- MS Project XML は Task ごとに `UID`、`Name`、`WBS`、`OutlineLevel`、`Owner`（最初の Assignment の Resource の e-mail か名前）、`Contributors`（ほかの Assignment と作業時間）、`Predecessors`（`<UID> SS -1` の形、lag は作業日 8 時間か暦日で日数に直す）、`Schedule`、`Notes` の列を作る。Resource はメールアドレスか表示名で Workspace member に照合する（下の「責任者と Contributor の書き方」）。document type 宣言のある XML は読まない。
 - file を選んだときに mapping が空なら、mukuroji の export の列名と MS Project の列名から mapping を提案する。親の列があるときは WBS 番号と階層の深さは提案しない。
+
+責任者と Contributor の書き方: import の `assigneeUserId` と Contributor の member は、user ID（member のメールアドレス）か Workspace member の表示名で書ける。メールアドレスは小文字にして user ID として扱う。`@` を含まない値は表示名として、大文字小文字・前後の空白・全角半角の違いを無視して active な member と照合し、1 人だけに一致したときにその user ID にする。一致しない場合は `ImportMemberUnknown`、2 人以上に一致する場合は `ImportMemberAmbiguous` を row error で返す。表示名を使う row があるときだけ Workspace の member 一覧を読む。

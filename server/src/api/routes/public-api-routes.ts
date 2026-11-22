@@ -137,6 +137,12 @@ import {
   type WorkItemImportLinkRow,
 } from './work-item-import-links'
 import {
+  createWorkItemImportMemberMatcher,
+  matchWorkItemImportPeople,
+  namesImportMemberByDisplayName,
+  toWorkItemImportMemberError,
+} from './work-item-import-members'
+import {
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
@@ -2719,10 +2725,22 @@ async function validatePublicImport(
     string,
     ReturnType<typeof requireActiveWorkspaceAssignee>
   >()
+  // People may be written by e-mail address or display name, as MS Project resources are; the
+  // members are read only when a row uses a display name.
+  const matchMember = createWorkItemImportMemberMatcher(
+    preview.rows.some((row) => row.input !== undefined && namesImportMemberByDisplayName(row.input))
+      ? await workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId)
+      : undefined,
+  )
   for (const row of preview.rows) {
     if (!row.input) continue
+    const matched = matchWorkItemImportPeople(row.input, matchMember)
+    if ('mismatches' in matched) {
+      errorsByRow.get(row.row)?.push(...matched.mismatches.map((mismatch) => toWorkItemImportMemberError(row.row, mismatch)))
+      continue
+    }
     const candidate: CreateWorkItemInput = {
-      ...row.input,
+      ...matched.people,
       ...(row.input.assignedProjectId === undefined && input.assignedProjectId
         ? { assignedProjectId: input.assignedProjectId }
         : {}),
