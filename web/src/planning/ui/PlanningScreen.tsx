@@ -72,6 +72,8 @@ import {
 } from './PlanningEntityEditor'
 import {
   collectPlanningOwnerCandidates,
+  countCycleWorkItems,
+  DEFAULT_CYCLE_CAPACITY,
   resolvePlanningOwnerOptions,
   type PlanningOwnerOption,
 } from '../model/entityEditor'
@@ -821,8 +823,9 @@ export function PlanningScreen({
                   updateTargetDetails={updateTargetDetails}
                 />
               ) : null}
-              {selectedEntity && selectedEntity.type !== 'cycle' ? (
+              {selectedEntity ? (
                 <PlanningEntityEditor
+                  cycleWorkItemCount={countCycleWorkItems(selectedEntity.id, snapshot.workItemLinks)}
                   disabled={isAiOperationPending}
                   entity={selectedEntity}
                   key={`planning-entity-editor:${selectedEntity.id}`}
@@ -1674,9 +1677,10 @@ function CreateEntityPanel({
           ...(entityType === 'cycle' ? {
             cadence: {
               unit: data.get('cadenceUnit') === 'month' ? 'month' : 'week',
-              count: Math.max(1, Number(data.get('cadenceCount')) || 1),
+              count: Math.max(1, Math.trunc(Number(data.get('cadenceCount'))) || 1),
             },
-            capacity: Math.max(0, Number(data.get('capacity')) || 0),
+            // A Cycle refuses links beyond its capacity, so never create one that holds nothing.
+            capacity: Math.max(1, Math.trunc(Number(data.get('capacity'))) || DEFAULT_CYCLE_CAPACITY),
             carryOverPolicy: data.get('carryOverPolicy') === 'keep-incomplete'
               ? 'keep-incomplete'
               : 'move-incomplete',
@@ -1764,10 +1768,10 @@ function CreateEntityPanel({
       </div>
       {entityType === 'cycle' ? (
         <div className="workbench-panel-muted grid grid-cols-4 gap-3 p-4 max-[800px]:grid-cols-2 max-[520px]:grid-cols-1">
-          <label className="grid gap-2 text-sm font-semibold">{labels.cycle}<select className="workbench-input h-10 px-3" name="cadenceUnit"><option value="week">{labels.cadenceWeek}</option><option value="month">{labels.cadenceMonth}</option></select></label>
-          <PlanningInput label={labels.cycle} name="cadenceCount" type="number" defaultValue="2" />
-          <PlanningInput label={labels.capacity(0)} name="capacity" type="number" defaultValue="0" />
-          <label className="grid gap-2 text-sm font-semibold">{labels.cycleRollover}<select className="workbench-input h-10 px-3" name="carryOverPolicy"><option value="move-incomplete">{labels.carryOverMove}</option><option value="keep-incomplete">{labels.carryOverKeep}</option></select></label>
+          <PlanningInput label={labels.entityEditor.cadenceCount} min={1} name="cadenceCount" required type="number" defaultValue="2" />
+          <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.cadenceUnit}<select className="workbench-input h-10 px-3" name="cadenceUnit"><option value="week">{labels.cadenceWeek}</option><option value="month">{labels.cadenceMonth}</option></select></label>
+          <PlanningInput label={labels.entityEditor.capacity} min={1} name="capacity" required type="number" defaultValue={String(DEFAULT_CYCLE_CAPACITY)} />
+          <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.carryOverPolicy}<select className="workbench-input h-10 px-3" name="carryOverPolicy"><option value="move-incomplete">{labels.carryOverMove}</option><option value="keep-incomplete">{labels.carryOverKeep}</option></select></label>
         </div>
       ) : null}
       <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onCreate || (requiresParent ? parentCandidates.length === 0 : !canCreateInSelectedRootScope)} type="submit">{labels.create}</button>
@@ -2058,8 +2062,8 @@ function RootMoveScopeFields({
   )
 }
 
-function PlanningInput({ defaultValue, label, name, required = false, type = 'text' }: { defaultValue?: string; label: string; name: string; required?: boolean; type?: 'date' | 'number' | 'text' }) {
-  return <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">{label}<input className="workbench-input h-10 px-3" defaultValue={defaultValue} name={name} required={required} type={type} /></label>
+function PlanningInput({ defaultValue, label, min, name, required = false, type = 'text' }: { defaultValue?: string; label: string; min?: number; name: string; required?: boolean; type?: 'date' | 'number' | 'text' }) {
+  return <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">{label}<input className="workbench-input h-10 px-3" defaultValue={defaultValue} min={min} name={name} required={required} step={type === 'number' ? 1 : undefined} type={type} /></label>
 }
 
 function Progress({ labels, value }: { labels: PlanningLabels; value: number }) {
