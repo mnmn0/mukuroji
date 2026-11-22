@@ -693,9 +693,10 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('data-testid="analytics-assignee-filter"')
     expect(html).toContain('佐藤 花子')
     expect(html).toContain('>kato@example.com<')
-    // A selected assignee who is no longer a member stays visible and selected.
-    expect(html).toMatch(/checked=""[^>]*value="former@example.com"/u)
-    expect(html).not.toContain('Comma-separated emails')
+    // An assignee outside the member list, such as a former member, stays in the email field.
+    expect(html).toContain('Other assignees')
+    expect(html).toMatch(/value="former@example.com"/u)
+    expect(html).not.toMatch(/checked=""[^>]*value="former@example.com"/u)
     expect(html).toContain('<option value="impact" selected="">影響度</option>')
     expect(html).not.toContain('Example: impact')
     expect(html).toContain('data-testid="analytics-recipient-picker"')

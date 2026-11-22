@@ -59,6 +59,7 @@ export const analyticsMessages = {
   'analytics.filter.noProjects': 'No projects',
   'analytics.filter.assignee': 'Assignee',
   'analytics.filter.assigneePlaceholder': 'Comma-separated emails',
+  'analytics.filter.assigneeOther': 'Other assignees',
   'analytics.filter.status': 'Status',
   'analytics.filter.allStatuses': 'All statuses',
   'analytics.filter.noStatuses': 'No statuses',

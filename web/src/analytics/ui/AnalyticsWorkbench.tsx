@@ -1001,16 +1001,24 @@ function AnalyticsFilterToolbar({
     workItemTypes.map((type) => ({ label: type.label, value: type.filterValue })),
     filter.workItemTypeIds,
   )
-  const assigneeOptions = includeSelectedFilterOptions(
-    createAnalyticsMemberOptions(members),
-    filter.assigneeUserIds,
-  )
+  const memberOptions = createAnalyticsMemberOptions(members)
+  const memberIds = new Set(memberOptions.map((option) => option.value))
+  // Assignees outside the member list, such as departed members, stay reachable by email.
+  const pickedAssigneeIds = members.length > 0
+    ? filter.assigneeUserIds?.filter((id) => memberIds.has(id)) ?? []
+    : []
+  const otherAssigneeIds = members.length > 0
+    ? filter.assigneeUserIds?.filter((id) => !memberIds.has(id)) ?? []
+    : filter.assigneeUserIds ?? []
   const assigneeDraft = useDebouncedDraft(
-    filter.assigneeUserIds?.join(', ') ?? '',
-    (value) => onFilterChange?.({
-      ...filter,
-      assigneeUserIds: splitValues(value),
-    }),
+    otherAssigneeIds.join(', '),
+    (value) => {
+      const assigneeUserIds = [...new Set([...pickedAssigneeIds, ...(splitValues(value) ?? [])])]
+      onFilterChange?.({
+        ...filter,
+        assigneeUserIds: assigneeUserIds.length > 0 ? assigneeUserIds : undefined,
+      })
+    },
   )
   const timeZoneDraft = useDebouncedDraft(
     timeZone,
@@ -1097,14 +1105,20 @@ function AnalyticsFilterToolbar({
               allLabel={t('analytics.filter.allAssignees')}
               label={t('analytics.filter.assignee')}
               noneLabel={t('analytics.filter.noAssignees')}
-              options={assigneeOptions}
-              selectedValues={filter.assigneeUserIds}
+              options={memberOptions}
+              selectedValues={pickedAssigneeIds.length > 0 ? pickedAssigneeIds : undefined}
               testId="analytics-assignee-filter"
-              onChange={(assigneeUserIds) => onFilterChange?.({ ...filter, assigneeUserIds })}
+              onChange={(picked) => {
+                const assigneeUserIds = [...new Set([...(picked ?? []), ...otherAssigneeIds])]
+                onFilterChange?.({
+                  ...filter,
+                  assigneeUserIds: assigneeUserIds.length > 0 ? assigneeUserIds : undefined,
+                })
+              }}
             />
-          ) : (
-            <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-              {t('analytics.filter.assignee')}
+          ) : null}
+          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {members.length > 0 ? t('analytics.filter.assigneeOther') : t('analytics.filter.assignee')}
               <input
                 className="workbench-input min-h-10 px-3"
                 placeholder={t('analytics.filter.assigneePlaceholder')}
@@ -1119,7 +1133,6 @@ function AnalyticsFilterToolbar({
                 }}
               />
             </label>
-          )}
           <AnalyticsMultiSelectFilter
             allLabel={t('analytics.filter.allStatuses')}
             label={t('analytics.filter.status')}
@@ -2689,6 +2702,9 @@ function AnalyticsScheduleDialog({
   timeZone: string
 }) {
   const [isSaving, setIsSaving] = useState(false)
+  // The recipient control is fixed while the dialog is open, so a member list that loads late
+  // never replaces recipients already being edited; reopening the dialog shows the picker.
+  const [recipientMembers] = useState(members)
   const [frequency, setFrequency] = useState(
     initialSchedule?.frequency ?? 'weekly',
   )
@@ -2798,10 +2814,10 @@ function AnalyticsScheduleDialog({
               </select>
             </label>
           </div>
-          {members.length > 0 ? (
+          {recipientMembers.length > 0 ? (
             <AnalyticsRecipientPicker
               initialRecipients={initialSchedule?.recipientMemberKeys ?? []}
-              members={members}
+              members={recipientMembers}
               t={t}
             />
           ) : (

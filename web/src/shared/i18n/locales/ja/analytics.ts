@@ -59,6 +59,7 @@ export const analyticsMessages = {
   'analytics.filter.noProjects': '対象プロジェクトなし',
   'analytics.filter.assignee': '担当者',
   'analytics.filter.assigneePlaceholder': 'メールをカンマ区切りで入力',
+  'analytics.filter.assigneeOther': 'その他の担当者',
   'analytics.filter.status': 'ステータス',
   'analytics.filter.allStatuses': 'すべてのステータス',
   'analytics.filter.noStatuses': '対象ステータスなし',
