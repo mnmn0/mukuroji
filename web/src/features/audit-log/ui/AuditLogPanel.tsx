@@ -171,7 +171,7 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
             />
             <datalist id={eventTypeListId}>
               {suggestedAuditEventTypes.map((eventType) => (
-                <option key={eventType} value={eventType}>{formatAuditEventType(eventType, props.locale)}</option>
+                <option key={eventType} value={eventType}>{formatAuditEventType(eventType, props.t)}</option>
               ))}
             </datalist>
             <span className="text-xs font-medium text-[var(--workbench-muted)]" id={`${field('eventTypes')}-hint`}>
@@ -210,7 +210,7 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
             >
               <option value="">{t('auditLog.filter.anyTarget')}</option>
               {suggestedAuditTargetTypes.map((targetType) => (
-                <option key={targetType} value={targetType}>{formatAuditResourceType(targetType, props.locale)}</option>
+                <option key={targetType} value={targetType}>{formatAuditResourceType(targetType, props.t)}</option>
               ))}
               {draft.targetType && !suggestedAuditTargetTypes.includes(draft.targetType) ? (
                 <option value={draft.targetType}>{draft.targetType}</option>
@@ -385,7 +385,7 @@ function AuditEventRow({ event, locale, onFilterByActor, onFilterByTarget, t, ti
         </time>
         <div className="grid min-w-0 gap-1">
           <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm font-semibold text-[var(--workbench-text)]">
-            <span>{formatAuditEventType(event.eventType, locale)}</span>
+            <span>{formatAuditEventType(event.eventType, t)}</span>
             <code className="break-all text-xs font-medium text-[var(--workbench-muted)]">{event.eventType}</code>
           </p>
           <p className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--workbench-muted)]">
@@ -409,7 +409,7 @@ function AuditEventRow({ event, locale, onFilterByActor, onFilterByTarget, t, ti
                 title={t('auditLog.event.filterByTarget')}
                 type="button"
               >
-                {formatAuditResourceType(event.target.type, locale)}
+                {formatAuditResourceType(event.target.type, t)}
               </button>{' '}
               <code className="text-xs">{event.target.id}</code>
             </span>

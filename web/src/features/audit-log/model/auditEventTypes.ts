@@ -1,158 +1,153 @@
-import type { Locale } from '../../../shared/i18n/i18n'
+import type { MessageKey } from '../../../shared/i18n/i18n'
 
-/** Japanese and English label of one word in an event type. */
-type LocalizedWord = {
-  /** Japanese label. */
-  readonly ja: string
-  /** English label. */
-  readonly en: string
+/** Resolves a message key in the display locale. */
+type Translate = (key: MessageKey) => string
+
+/**
+ * Message keys of the resource part of an event type, keyed by everything before the last `.`.
+ */
+const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
+  'agent-run': 'auditLog.resource.agent-run',
+  'agent-settings': 'auditLog.resource.agent-settings',
+  'ai-assistance.policy': 'auditLog.resource.ai-assistance.policy',
+  'ai-assistance.provider-credential': 'auditLog.resource.ai-assistance.provider-credential',
+  'annotation': 'auditLog.resource.annotation',
+  'api-key': 'auditLog.resource.api-key',
+  'approval': 'auditLog.resource.approval',
+  'audit': 'auditLog.resource.audit',
+  'automation': 'auditLog.resource.automation',
+  'break-glass': 'auditLog.resource.break-glass',
+  'break-glass-account': 'auditLog.resource.break-glass-account',
+  'comment': 'auditLog.resource.comment',
+  'connector': 'auditLog.resource.connector',
+  'connector.credential': 'auditLog.resource.connector.credential',
+  'context-item': 'auditLog.resource.context-item',
+  'credential-policy': 'auditLog.resource.credential-policy',
+  'custom-role': 'auditLog.resource.custom-role',
+  'directory-group-mapping': 'auditLog.resource.directory-group-mapping',
+  'document': 'auditLog.resource.document',
+  'document.comment': 'auditLog.resource.document.comment',
+  'enterprise-security': 'auditLog.resource.enterprise-security',
+  'external-link': 'auditLog.resource.external-link',
+  'file': 'auditLog.resource.file',
+  'form': 'auditLog.resource.form',
+  'identity-domain': 'auditLog.resource.identity-domain',
+  'identity-provider': 'auditLog.resource.identity-provider',
+  'import': 'auditLog.resource.import',
+  'invitation': 'auditLog.resource.invitation',
+  'member': 'auditLog.resource.member',
+  'notification-reminders': 'auditLog.resource.notification-reminders',
+  'planning-entity': 'auditLog.resource.planning-entity',
+  'planning-update': 'auditLog.resource.planning-update',
+  'project': 'auditLog.resource.project',
+  'provisioning': 'auditLog.resource.provisioning',
+  'role-assignment': 'auditLog.resource.role-assignment',
+  'runtime-control': 'auditLog.resource.runtime-control',
+  'scim-credential': 'auditLog.resource.scim-credential',
+  'scim-group': 'auditLog.resource.scim-group',
+  'scim-user': 'auditLog.resource.scim-user',
+  'security-policy': 'auditLog.resource.security-policy',
+  'service-account': 'auditLog.resource.service-account',
+  'service-account-credential': 'auditLog.resource.service-account-credential',
+  'sync-conflict': 'auditLog.resource.sync-conflict',
+  'tenant.export': 'auditLog.resource.tenant.export',
+  'tenant.governance': 'auditLog.resource.tenant.governance',
+  'tenant.profile': 'auditLog.resource.tenant.profile',
+  'time-budget': 'auditLog.resource.time-budget',
+  'time-entry': 'auditLog.resource.time-entry',
+  'time-period': 'auditLog.resource.time-period',
+  'timer': 'auditLog.resource.timer',
+  'triage': 'auditLog.resource.triage',
+  'update-feed': 'auditLog.resource.update-feed',
+  'watcher': 'auditLog.resource.watcher',
+  'webhook': 'auditLog.resource.webhook',
+  'work-item': 'auditLog.resource.work-item',
+  'workflow': 'auditLog.resource.workflow',
 }
 
 /**
- * Labels of the resource part of an event type, keyed by everything before the last `.`.
+ * Message keys of the action part of an event type: a Japanese noun and an English past participle.
  */
-const resourceLabels: Readonly<Record<string, LocalizedWord>> = {
-  'agent-run': { ja: 'Agent Run', en: 'Agent Run' },
-  'agent-settings': { ja: 'Agent 設定', en: 'Agent settings' },
-  'ai-assistance.policy': { ja: 'AI 支援のポリシー', en: 'AI assistance policy' },
-  'ai-assistance.provider-credential': { ja: 'AI の接続キー', en: 'AI provider key' },
-  annotation: { ja: '注記', en: 'Annotation' },
-  'api-key': { ja: 'API キー', en: 'API key' },
-  approval: { ja: '承認', en: 'Approval' },
-  audit: { ja: '監査ログ', en: 'Audit log' },
-  automation: { ja: 'Automation', en: 'Automation' },
-  'break-glass': { ja: '緊急アクセス', en: 'Break-glass access' },
-  'break-glass-account': { ja: '緊急アクセス用アカウント', en: 'Break-glass account' },
-  comment: { ja: 'コメント', en: 'Comment' },
-  connector: { ja: 'コネクタ', en: 'Connector' },
-  'connector.credential': { ja: 'コネクタの認証情報', en: 'Connector credential' },
-  'context-item': { ja: 'コンテキスト', en: 'Context item' },
-  'credential-policy': { ja: '認証情報のポリシー', en: 'Credential policy' },
-  'custom-role': { ja: 'カスタムロール', en: 'Custom role' },
-  'directory-group-mapping': { ja: 'グループの対応付け', en: 'Directory group mapping' },
-  document: { ja: 'Document', en: 'Document' },
-  'document.comment': { ja: 'Document のコメント', en: 'Document comment' },
-  'enterprise-security': { ja: 'Enterprise セキュリティ', en: 'Enterprise security' },
-  'external-link': { ja: '外部リンク', en: 'External link' },
-  file: { ja: 'ファイル', en: 'File' },
-  form: { ja: 'フォーム', en: 'Form' },
-  'identity-domain': { ja: 'ドメイン', en: 'Identity domain' },
-  'identity-provider': { ja: 'ID プロバイダー', en: 'Identity provider' },
-  import: { ja: '取り込み', en: 'Import' },
-  invitation: { ja: '招待', en: 'Invitation' },
-  member: { ja: 'メンバー', en: 'Member' },
-  'notification-reminders': { ja: '通知リマインダー', en: 'Notification reminders' },
-  'planning-entity': { ja: '計画', en: 'Planning item' },
-  'planning-update': { ja: '計画の更新', en: 'Planning update' },
-  project: { ja: 'Project', en: 'Project' },
-  provisioning: { ja: 'プロビジョニング', en: 'Provisioning' },
-  'role-assignment': { ja: 'ロールの割り当て', en: 'Role assignment' },
-  'runtime-control': { ja: '稼働モード', en: 'Runtime control' },
-  'scim-credential': { ja: 'SCIM の認証情報', en: 'SCIM credential' },
-  'scim-group': { ja: 'SCIM グループ', en: 'SCIM group' },
-  'scim-user': { ja: 'SCIM ユーザー', en: 'SCIM user' },
-  'security-policy': { ja: 'セキュリティポリシー', en: 'Security policy' },
-  'service-account': { ja: 'サービスアカウント', en: 'Service account' },
-  'service-account-credential': { ja: 'サービスアカウントの認証情報', en: 'Service account credential' },
-  'sync-conflict': { ja: '同期の競合', en: 'Sync conflict' },
-  'tenant.export': { ja: 'Workspace の export', en: 'Workspace export' },
-  'tenant.governance': { ja: 'データ保持の設定', en: 'Data governance' },
-  'tenant.profile': { ja: 'Workspace のプロフィール', en: 'Workspace profile' },
-  'time-budget': { ja: '工数の予算', en: 'Time budget' },
-  'time-entry': { ja: '工数', en: 'Time entry' },
-  'time-period': { ja: '工数の締め期間', en: 'Time period' },
-  timer: { ja: 'タイマー', en: 'Timer' },
-  triage: { ja: 'トリアージ', en: 'Triage' },
-  'update-feed': { ja: '更新フィード', en: 'Update feed' },
-  watcher: { ja: 'ウォッチ', en: 'Watch' },
-  webhook: { ja: 'Webhook', en: 'Webhook' },
-  'work-item': { ja: 'Work Item', en: 'Work Item' },
-  workflow: { ja: 'Workflow', en: 'Workflow' },
-}
-
-/**
- * Labels of the action part of an event type: a Japanese noun and an English past participle.
- */
-const actionLabels: Readonly<Record<string, LocalizedWord>> = {
-  accepted: { ja: '承諾', en: 'accepted' },
-  activated: { ja: '有効化', en: 'activated' },
-  'activation-revoked': { ja: '有効化の取り消し', en: 'activation revoked' },
-  added: { ja: '追加', en: 'added' },
-  applied: { ja: '適用', en: 'applied' },
-  archived: { ja: 'アーカイブ', en: 'archived' },
-  assigned: { ja: '割り当て', en: 'assigned' },
-  attached: { ja: '添付', en: 'attached' },
-  authenticated: { ja: '認証', en: 'authenticated' },
-  backfilled: { ja: '過去データの補完', en: 'backfilled' },
-  'blocker-added': { ja: 'ブロッカーの追加', en: 'blocker added' },
-  'blocker-removed': { ja: 'ブロッカーの解除', en: 'blocker removed' },
-  'blocking-added': { ja: 'ブロック先の追加', en: 'blocked item added' },
-  'blocking-removed': { ja: 'ブロック先の解除', en: 'blocked item removed' },
-  cancelled: { ja: '取り消し', en: 'cancelled' },
-  'change-completed': { ja: '切り替えの完了', en: 'change completed' },
-  'change-failed': { ja: '切り替えの失敗', en: 'change failed' },
-  'change-started': { ja: '切り替えの開始', en: 'change started' },
-  'child-added': { ja: '子の追加', en: 'child added' },
-  'child-removed': { ja: '子の削除', en: 'child removed' },
-  closing: { ja: '解約の開始', en: 'closure started' },
-  commented: { ja: 'コメント', en: 'commented' },
-  completed: { ja: '完了', en: 'completed' },
-  created: { ja: '作成', en: 'created' },
-  deactivated: { ja: '無効化', en: 'deactivated' },
-  decided: { ja: '判断', en: 'decided' },
-  deleted: { ja: '削除', en: 'deleted' },
-  digest: { ja: 'ダイジェストの送信', en: 'digest sent' },
-  'directory-deprovisioned': { ja: 'ディレクトリによる削除', en: 'deprovisioned by directory' },
-  'directory-reactivated': { ja: 'ディレクトリによる再開', en: 'reactivated by directory' },
-  'directory-reconciled': { ja: 'ディレクトリとの照合', en: 'reconciled with directory' },
-  'directory-provisioned': { ja: 'ディレクトリによる追加', en: 'provisioned by directory' },
-  edited: { ja: '編集', en: 'edited' },
-  downloaded: { ja: 'ダウンロード', en: 'downloaded' },
-  'enforcement-updated': { ja: '強制設定の変更', en: 'enforcement updated' },
-  'export-downloaded': { ja: 'export のダウンロード', en: 'export downloaded' },
-  'export-requested': { ja: 'export の依頼', en: 'export requested' },
-  exported: { ja: 'export', en: 'exported' },
-  failed: { ja: '失敗', en: 'failed' },
-  installed: { ja: '導入', en: 'installed' },
-  issued: { ja: '発行', en: 'issued' },
-  'mfa-reset': { ja: '認証アプリのリセット', en: 'MFA reset' },
-  moved: { ja: '移動', en: 'moved' },
-  'owner-reconciled': { ja: 'オーナーの照合', en: 'owner reconciled' },
-  'parent-changed': { ja: '親の変更', en: 'parent changed' },
-  'password-reset-requested': { ja: 'パスワード再設定の依頼', en: 'password reset requested' },
-  previewed: { ja: 'プレビュー', en: 'previewed' },
-  reactivated: { ja: '利用再開', en: 'reactivated' },
-  received: { ja: '受信', en: 'received' },
-  reconciled: { ja: '照合', en: 'reconciled' },
-  'relation-added': { ja: '関連の追加', en: 'relation added' },
-  'relation-removed': { ja: '関連の削除', en: 'relation removed' },
-  rejected: { ja: '却下', en: 'rejected' },
-  removed: { ja: '除外', en: 'removed' },
-  renamed: { ja: '名前の変更', en: 'renamed' },
-  reordered: { ja: '並べ替え', en: 'reordered' },
-  replaced: { ja: '置き換え', en: 'replaced' },
-  reopened: { ja: '再開', en: 'reopened' },
-  replied: { ja: '返信', en: 'replied' },
-  'request-rejected': { ja: '要求の拒否', en: 'request rejected' },
-  requested: { ja: '依頼', en: 'requested' },
-  resolved: { ja: '解決', en: 'resolved' },
-  restored: { ja: '復元', en: 'restored' },
-  retried: { ja: '再試行', en: 'retried' },
-  revoked: { ja: '失効', en: 'revoked' },
-  'role-changed': { ja: 'ロールの変更', en: 'role changed' },
-  rotated: { ja: 'ローテーション', en: 'rotated' },
-  schedule: { ja: 'スケジュール実行', en: 'scheduled run' },
-  'schedule-cascade-updated': { ja: '日程の連動更新', en: 'schedule cascaded' },
-  'sibling-order-changed': { ja: '並び順の変更', en: 'sibling order changed' },
-  started: { ja: '開始', en: 'started' },
-  submitted: { ja: '送信', en: 'submitted' },
-  subscribed: { ja: 'ウォッチ開始', en: 'subscribed' },
-  superseded: { ja: '置き換え', en: 'superseded' },
-  unsubscribed: { ja: 'ウォッチ解除', en: 'unsubscribed' },
-  updated: { ja: '更新', en: 'updated' },
-  'upload-completed': { ja: 'アップロードの完了', en: 'upload completed' },
-  'version-created': { ja: '新しい版の作成', en: 'version created' },
-  viewed: { ja: '閲覧', en: 'viewed' },
+const actionLabelKeys: Readonly<Record<string, MessageKey>> = {
+  'accepted': 'auditLog.action.accepted',
+  'activated': 'auditLog.action.activated',
+  'activation-revoked': 'auditLog.action.activation-revoked',
+  'added': 'auditLog.action.added',
+  'applied': 'auditLog.action.applied',
+  'archived': 'auditLog.action.archived',
+  'assigned': 'auditLog.action.assigned',
+  'attached': 'auditLog.action.attached',
+  'authenticated': 'auditLog.action.authenticated',
+  'backfilled': 'auditLog.action.backfilled',
+  'blocker-added': 'auditLog.action.blocker-added',
+  'blocker-removed': 'auditLog.action.blocker-removed',
+  'blocking-added': 'auditLog.action.blocking-added',
+  'blocking-removed': 'auditLog.action.blocking-removed',
+  'cancelled': 'auditLog.action.cancelled',
+  'change-completed': 'auditLog.action.change-completed',
+  'change-failed': 'auditLog.action.change-failed',
+  'change-started': 'auditLog.action.change-started',
+  'child-added': 'auditLog.action.child-added',
+  'child-removed': 'auditLog.action.child-removed',
+  'closing': 'auditLog.action.closing',
+  'commented': 'auditLog.action.commented',
+  'completed': 'auditLog.action.completed',
+  'created': 'auditLog.action.created',
+  'deactivated': 'auditLog.action.deactivated',
+  'decided': 'auditLog.action.decided',
+  'deleted': 'auditLog.action.deleted',
+  'digest': 'auditLog.action.digest',
+  'directory-deprovisioned': 'auditLog.action.directory-deprovisioned',
+  'directory-reactivated': 'auditLog.action.directory-reactivated',
+  'directory-reconciled': 'auditLog.action.directory-reconciled',
+  'directory-provisioned': 'auditLog.action.directory-provisioned',
+  'edited': 'auditLog.action.edited',
+  'downloaded': 'auditLog.action.downloaded',
+  'enforcement-updated': 'auditLog.action.enforcement-updated',
+  'export-downloaded': 'auditLog.action.export-downloaded',
+  'export-requested': 'auditLog.action.export-requested',
+  'exported': 'auditLog.action.exported',
+  'failed': 'auditLog.action.failed',
+  'installed': 'auditLog.action.installed',
+  'issued': 'auditLog.action.issued',
+  'mfa-reset': 'auditLog.action.mfa-reset',
+  'moved': 'auditLog.action.moved',
+  'owner-reconciled': 'auditLog.action.owner-reconciled',
+  'parent-changed': 'auditLog.action.parent-changed',
+  'password-reset-requested': 'auditLog.action.password-reset-requested',
+  'previewed': 'auditLog.action.previewed',
+  'reactivated': 'auditLog.action.reactivated',
+  'received': 'auditLog.action.received',
+  'reconciled': 'auditLog.action.reconciled',
+  'relation-added': 'auditLog.action.relation-added',
+  'relation-removed': 'auditLog.action.relation-removed',
+  'rejected': 'auditLog.action.rejected',
+  'removed': 'auditLog.action.removed',
+  'renamed': 'auditLog.action.renamed',
+  'reordered': 'auditLog.action.reordered',
+  'replaced': 'auditLog.action.replaced',
+  'reopened': 'auditLog.action.reopened',
+  'replied': 'auditLog.action.replied',
+  'request-rejected': 'auditLog.action.request-rejected',
+  'requested': 'auditLog.action.requested',
+  'resolved': 'auditLog.action.resolved',
+  'restored': 'auditLog.action.restored',
+  'retried': 'auditLog.action.retried',
+  'revoked': 'auditLog.action.revoked',
+  'role-changed': 'auditLog.action.role-changed',
+  'rotated': 'auditLog.action.rotated',
+  'schedule': 'auditLog.action.schedule',
+  'schedule-cascade-updated': 'auditLog.action.schedule-cascade-updated',
+  'sibling-order-changed': 'auditLog.action.sibling-order-changed',
+  'started': 'auditLog.action.started',
+  'submitted': 'auditLog.action.submitted',
+  'subscribed': 'auditLog.action.subscribed',
+  'superseded': 'auditLog.action.superseded',
+  'unsubscribed': 'auditLog.action.unsubscribed',
+  'updated': 'auditLog.action.updated',
+  'upload-completed': 'auditLog.action.upload-completed',
+  'version-created': 'auditLog.action.version-created',
+  'viewed': 'auditLog.action.viewed',
 }
 
 /**
@@ -229,30 +224,43 @@ export const suggestedAuditTargetTypes: readonly string[] = [
  * returns the raw event type, so a new event type still reads as itself.
  *
  * @param eventType - Event type recorded by the server.
- * @param locale - Display locale.
+ * @param t - Message resolver of the display locale.
  * @returns The localized label.
  */
-export function formatAuditEventType(eventType: string, locale: Locale): string {
+export function formatAuditEventType(eventType: string, t: Translate): string {
   const separator = eventType.lastIndexOf('.')
   if (separator <= 0) return eventType
-  const resource = resourceLabels[eventType.slice(0, separator)]
-  if (!resource) return eventType
+  const resourceKey = resourceLabelKeys[eventType.slice(0, separator)]
+  if (!resourceKey) return eventType
+  const resource = t(resourceKey)
   const actionName = eventType.slice(separator + 1)
-  const action = actionLabels[actionName]
-  // A Latin word such as `Work Item` keeps a space before the particle, as the Japanese copy does.
-  const particle = /[A-Za-z0-9]$/u.test(resource.ja) ? ' の' : 'の'
-  if (locale === 'ja') return action ? `${resource.ja}${particle}${action.ja}` : `${resource.ja}: ${actionName}`
-  return action ? `${resource.en} ${action.en}` : `${resource.en}: ${actionName}`
+  const actionKey = actionLabelKeys[actionName]
+  if (!actionKey) return fillEventTypeLabel(t('auditLog.eventType.unknownAction'), resource, actionName)
+  // A Latin word such as `Work Item` keeps a space before the Japanese particle.
+  const template = /[A-Za-z0-9]$/u.test(resource) ? 'auditLog.eventType.labelAfterLatin' : 'auditLog.eventType.label'
+  return fillEventTypeLabel(t(template), resource, t(actionKey))
+}
+
+/**
+ * Fills the resource and action into an event type label template.
+ *
+ * @param template - Template with `{resource}` and `{action}`.
+ * @param resource - Resource label.
+ * @param action - Action label or raw action name.
+ * @returns The filled label.
+ */
+function fillEventTypeLabel(template: string, resource: string, action: string): string {
+  return template.replace('{resource}', resource).replace('{action}', action)
 }
 
 /**
  * Builds the display label of a resource type such as `work-item`.
  *
  * @param resourceType - Resource type recorded by the server.
- * @param locale - Display locale.
+ * @param t - Message resolver of the display locale.
  * @returns The localized label, or the raw type when it is unknown.
  */
-export function formatAuditResourceType(resourceType: string, locale: Locale): string {
-  if (resourceType === 'audit-log') return locale === 'ja' ? '監査ログ' : 'Audit log'
-  return resourceLabels[resourceType]?.[locale] ?? resourceType
+export function formatAuditResourceType(resourceType: string, t: Translate): string {
+  const key = resourceType === 'audit-log' ? resourceLabelKeys.audit : resourceLabelKeys[resourceType]
+  return key ? t(key) : resourceType
 }

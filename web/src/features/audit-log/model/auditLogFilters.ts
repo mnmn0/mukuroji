@@ -131,9 +131,14 @@ export function zonedDayBoundary(
   if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null
   const nextMidnight = Date.UTC(year, month - 1, day + 1)
   try {
-    const start = firstInstantOfDay(localMidnight, timeZone)
-    const end = firstInstantOfDay(nextMidnight, timeZone) - 1
-    return new Date(boundary === 'start' ? start : end).toISOString()
+    const instant = boundary === 'start'
+      ? firstInstantOfDay(localMidnight, timeZone)
+      : firstInstantOfDay(nextMidnight, timeZone) - 1
+    // A day the zone skipped entirely (such as Pacific/Apia on 2011-12-30) has no instant of
+    // its own, so the boundary would land on a neighbouring day; treat it as an invalid date.
+    const wallClock = instant + offsetAt(instant, timeZone)
+    if (!Number.isFinite(instant) || wallClock < localMidnight || wallClock >= nextMidnight) return null
+    return new Date(instant).toISOString()
   } catch {
     return null
   }

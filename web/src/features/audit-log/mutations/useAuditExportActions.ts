@@ -51,9 +51,12 @@ export function useAuditExportActions({ accessToken, guardRequest, refreshExport
     setIsRequesting(true)
     setError(undefined)
     try {
+      const fingerprint = JSON.stringify(filters)
+      // Each filter set keeps its own uncertain request, so asking for other filters in
+      // between does not drop the key a retry of the first one must reuse.
       await requestRunner.run(
-        'audit-export',
-        JSON.stringify(filters),
+        `audit-export:${fingerprint}`,
+        fingerprint,
         (context) => guardRequest(requestAuditExport(accessToken, filters, context)),
         isUncertainExportFailure,
       )

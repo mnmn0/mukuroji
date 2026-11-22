@@ -196,7 +196,7 @@ function describeExportFilters(job: AuditExportView, { locale, t, timeZone }: Au
     parts.push(`${t('auditLog.event.entity')}: ${filters.entityType}${filters.entityId ? ` / ${filters.entityId}` : ''}`)
   }
   if (filters.eventTypes?.length) {
-    parts.push(`${t('auditLog.filter.eventType')}: ${filters.eventTypes.map((type) => formatAuditEventType(type, locale)).join(', ')}`)
+    parts.push(`${t('auditLog.filter.eventType')}: ${filters.eventTypes.map((type) => formatAuditEventType(type, t)).join(', ')}`)
   }
   if (filters.targetType) {
     parts.push(`${t('auditLog.filter.targetType')}: ${filters.targetType}${filters.targetId ? ` / ${filters.targetId}` : ''}`)

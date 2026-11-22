@@ -89,6 +89,10 @@ describe('audit log filters', () => {
 
   test('starts a day whose midnight is skipped at its first real instant', () => {
     expect(zonedDayBoundary('2026-09-06', 'America/Santiago', 'start')).toBe('2026-09-06T04:00:00.000Z')
+    // Samoa skipped 2011-12-30 entirely, so neither boundary of that day exists.
+    expect(zonedDayBoundary('2011-12-30', 'Pacific/Apia', 'start')).toBeNull()
+    expect(zonedDayBoundary('2011-12-30', 'Pacific/Apia', 'end')).toBeNull()
+    expect(zonedDayBoundary('2011-12-31', 'Pacific/Apia', 'start')).toBe('2011-12-30T10:00:00.000Z')
     expect(zonedDayBoundary('2026-09-05', 'America/Santiago', 'end')).toBe('2026-09-06T03:59:59.999Z')
   })
 
@@ -118,13 +122,15 @@ describe('audit log filters', () => {
 
 describe('audit event type labels', () => {
   test('names known event types in Japanese and English and keeps unknown ones readable', () => {
-    expect(formatAuditEventType('work-item.updated', 'ja')).toBe('Work Item の更新')
-    expect(formatAuditEventType('member.role-changed', 'ja')).toBe('メンバーのロールの変更')
-    expect(formatAuditEventType('member.role-changed', 'en')).toBe('Member role changed')
-    expect(formatAuditEventType('tenant.profile.updated', 'en')).toBe('Workspace profile updated')
-    expect(formatAuditEventType('comment.teleported', 'ja')).toBe('コメント: teleported')
-    expect(formatAuditEventType('unknown.created', 'en')).toBe('unknown.created')
-    expect(formatAuditEventType('created', 'en')).toBe('created')
+    const ja = createTranslator('ja')
+    const en = createTranslator('en')
+    expect(formatAuditEventType('work-item.updated', ja)).toBe('Work Item の更新')
+    expect(formatAuditEventType('member.role-changed', ja)).toBe('メンバーのロールの変更')
+    expect(formatAuditEventType('member.role-changed', en)).toBe('Member role changed')
+    expect(formatAuditEventType('tenant.profile.updated', en)).toBe('Workspace profile updated')
+    expect(formatAuditEventType('comment.teleported', ja)).toBe('コメント: teleported')
+    expect(formatAuditEventType('unknown.created', en)).toBe('unknown.created')
+    expect(formatAuditEventType('created', en)).toBe('created')
   })
 })
 
