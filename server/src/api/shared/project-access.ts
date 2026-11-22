@@ -443,14 +443,38 @@ export function isEnterpriseTriageTeamScope(
 export function createEnterpriseControlAuthorizationConditionCheck(
   principal: WorkspacePrincipal,
 ): TriageAuthorizationConditionChecks[number] | undefined {
-  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  if (!getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()) return undefined
   const controlRevision = principal.enterpriseIdentityControlRevision
-  if (!enterpriseTableName) return undefined
   if (controlRevision === undefined) {
     throw new ProjectDataError(
       503,
       'EnterpriseAuthorizationUnavailable',
       'Enterprise authorization state is unavailable for this Triage mutation.',
+    )
+  }
+  return createEnterpriseControlRevisionConditionCheck(principal.directoryId, controlRevision)
+}
+
+/**
+ * Creates a commit-time fence on the Enterprise identity CONTROL revision that was read.
+ *
+ * @param workspaceId - Workspace whose Enterprise identity state was read.
+ * @param controlRevision - CONTROL revision of the snapshot the decision was made on.
+ * @returns A CONTROL condition check when the Enterprise table is configured, or undefined for
+ * local in-memory Enterprise authorization.
+ * @throws ProjectDataError 503 when the table is configured but no revision was read.
+ */
+export function createEnterpriseControlRevisionConditionCheck(
+  workspaceId: string,
+  controlRevision: number | undefined,
+): TriageAuthorizationConditionChecks[number] | undefined {
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  if (!enterpriseTableName) return undefined
+  if (controlRevision === undefined) {
+    throw new ProjectDataError(
+      503,
+      'EnterpriseAuthorizationUnavailable',
+      'Enterprise authorization state is unavailable. Retry the request.',
     )
   }
   const expressionAttributeNames: Record<string, string> = {
@@ -462,7 +486,7 @@ export function createEnterpriseControlAuthorizationConditionCheck(
     ConditionCheck: {
       TableName: enterpriseTableName,
       Key: {
-        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        scopeKey: `WORKSPACE#${workspaceId}`,
         recordKey: 'CONTROL',
       },
       ConditionExpression: controlRevision === 0

@@ -3807,6 +3807,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         {
           callerPermissions: principal.enterprisePermissions,
           requireGuestAssignable: target.role === 'guest',
+          // The target checks used this role and status, so a concurrent promotion or change to
+          // guest cancels the write.
+          memberFence: { memberKey: target.memberKey, expectedVersion: target.version },
           ...(isEnterpriseOwnerLevelCaller(principal)
             ? {}
             : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] }),
@@ -3853,6 +3856,11 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         {
           requireRemainingAssignment: member !== undefined &&
             !canRestoreEnterpriseLegacyAccess(principal, snapshot, member.role),
+          // The restore check used this role, so a concurrent role change cancels the removal.
+          memberFence: {
+            memberKey: member?.memberKey ?? assignment.principalId,
+            expectedVersion: member?.version,
+          },
           // The role is re-checked in the stored state, so a concurrent role edit cannot slip through.
           ...(isEnterpriseOwnerLevelCaller(principal)
             ? {}
