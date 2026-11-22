@@ -1010,13 +1010,16 @@ function AnalyticsFilterToolbar({
   const otherAssigneeIds = members.length > 0
     ? filter.assigneeUserIds?.filter((id) => !memberIds.has(id)) ?? []
     : filter.assigneeUserIds ?? []
+  // `undefined` keeps every assignee and `[]` keeps none, as in the other multi-select filters.
   const assigneeDraft = useDebouncedDraft(
     otherAssigneeIds.join(', '),
     (value) => {
-      const assigneeUserIds = [...new Set([...pickedAssigneeIds, ...(splitValues(value) ?? [])])]
+      const typed = splitValues(value) ?? []
       onFilterChange?.({
         ...filter,
-        assigneeUserIds: assigneeUserIds.length > 0 ? assigneeUserIds : undefined,
+        assigneeUserIds: filter.assigneeUserIds === undefined && typed.length === 0
+          ? undefined
+          : [...new Set([...pickedAssigneeIds, ...typed])],
       })
     },
   )
@@ -1106,13 +1109,15 @@ function AnalyticsFilterToolbar({
               label={t('analytics.filter.assignee')}
               noneLabel={t('analytics.filter.noAssignees')}
               options={memberOptions}
-              selectedValues={pickedAssigneeIds.length > 0 ? pickedAssigneeIds : undefined}
+              selectedValues={filter.assigneeUserIds === undefined ? undefined : pickedAssigneeIds}
               testId="analytics-assignee-filter"
               onChange={(picked) => {
-                const assigneeUserIds = [...new Set([...(picked ?? []), ...otherAssigneeIds])]
+                // "All assignees" lifts the restriction, including the typed assignees.
                 onFilterChange?.({
                   ...filter,
-                  assigneeUserIds: assigneeUserIds.length > 0 ? assigneeUserIds : undefined,
+                  assigneeUserIds: picked === undefined
+                    ? undefined
+                    : [...new Set([...picked, ...otherAssigneeIds])],
                 })
               }}
             />

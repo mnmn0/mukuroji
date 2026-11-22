@@ -661,6 +661,20 @@ describe('AnalyticsWorkbench', () => {
     expect(html).not.toContain('>sato@example.com<')
   })
 
+  test('keeps an empty assignee selection apart from all assignees', () => {
+    const members = [{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]
+    const render = (assigneeUserIds: string[] | undefined) => renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{ ...analyticsFilterFixture, assigneeUserIds }}
+        members={members}
+        onFilterChange={() => undefined}
+      />,
+    )
+    expect(render([])).toContain('No assignees')
+    expect(render(undefined)).toContain('All assignees')
+  })
+
   test('picks assignees, custom fields, and schedule recipients by name', () => {
     const members = [
       { id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' },
