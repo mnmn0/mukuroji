@@ -43,6 +43,11 @@ export type WriteCycleScheduleBaselineInput<TCallerCheck, TAuditContext = undefi
   savedBaselines: SavedCycleScheduleBaseline[]
   /** Saved baselines dropped from the list, whose rows are deleted. */
   savedIdsToDelete: string[]
+  /**
+   * Planning graph revision the Cycle permission and entries were read at. The write fails when
+   * the graph changed since, so a Cycle moved out of the caller's scope cannot be captured.
+   */
+  planningRevision: number
   /** Server-built conditions that fail the write when the caller lost access. */
   callerAuthorization: readonly TCallerCheck[]
   /** Request audit context; the store records the capture in the same transaction. */
@@ -91,10 +96,13 @@ export type CaptureCycleScheduleBaselineInput<TCallerCheck, TAuditContext> = {
   /** Optional trimmed name. */
   name?: string
   /**
-   * Reads the current plan of every Work Item in the Cycle that the caller may see. It is called
-   * after the list revision is pinned, so an older plan cannot become the newest baseline.
+   * Authorizes the caller against the current Planning snapshot and reads the plan of every Work
+   * Item in the Cycle that the caller may see. It is called after the list revision is pinned, so
+   * an older plan cannot become the newest baseline.
+   *
+   * @returns The entries and the Planning revision they were read at.
    */
-  readEntries: () => Promise<CycleScheduleBaselineEntry[]>
+  readPlan: () => Promise<{ entries: CycleScheduleBaselineEntry[]; planningRevision: number }>
   /** Server-built conditions that fail the write when the caller lost access. */
   callerAuthorization: readonly TCallerCheck[]
   /** Request audit context. */
@@ -120,7 +128,7 @@ export async function captureCycleScheduleBaselineUseCase<TCallerCheck, TAuditCo
 ): Promise<CycleScheduleBaselineResponse> {
   // Pin the list revision before reading the plan, so a concurrent capture of a newer plan wins.
   const previous = await store.getIndex(scope.workspaceId, scope.cycleId)
-  const entries = await capture.readEntries()
+  const { entries, planningRevision } = await capture.readPlan()
   if (entries.length > CYCLE_SCHEDULE_BASELINE_MAX_ENTRIES) {
     throw new PlanningError(
       413,
@@ -143,6 +151,7 @@ export async function captureCycleScheduleBaselineUseCase<TCallerCheck, TAuditCo
     writtenAt: capture.capturedAt,
     baseline,
     expectedRevision,
+    planningRevision,
     savedBaselines: kept,
     savedIdsToDelete: dropped,
     callerAuthorization: capture.callerAuthorization,

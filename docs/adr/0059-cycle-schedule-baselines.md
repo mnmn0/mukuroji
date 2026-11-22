@@ -16,7 +16,7 @@ Project の baseline と違い、Cycle には複数の Team・Project の Work I
   - 一覧の行 `CYCLE_SCHEDULE_BASELINE#<cycleId>`（`entryType` は `cycle-schedule-baseline-index`）: `revision` と、保存済み baseline の一覧 `savedBaselines`（ID・名前・保存時刻・Work Item 数、新しい順）。
   - baseline ごとの行 `CYCLE_SCHEDULE_BASELINE_SAVED#<cycleId>#<baselineId>`（`entryType` は `cycle-schedule-baseline-saved`）: entries（`teamId`・`workItemId`・予定開始日・予定終了日・予定工数）。
   - どちらの prefix も他方の key で始まらず、live graph の prefix（`ENTITY#`・`LINK#` など）でも始まらないので、Planning の graph 読み取りには入らない。
-- 保存（`POST /api/planning/cycles/:cycleId/schedule-baselines`、任意の `name`）は Cycle の manager 権限（Enterprise では `planning.manage`、`/next` と同じ）が要る。保存する Work Item は、保存する人の Planning snapshot でその Cycle に入っている Work Item。一覧の行の `revision` を条件にした Put、baseline の行の `attribute_not_exists` の Put、上限を超えた分の Delete、呼び出し元の権限の ConditionCheck、audit event `cycle.schedule_baseline_captured` を 1 つの TransactWrite にする。
+- 保存（`POST /api/planning/cycles/:cycleId/schedule-baselines`、任意の `name`）は Cycle の manager 権限（Enterprise では `planning.manage`、`/next` と同じ）が要る。保存する Work Item は、保存する人の Planning snapshot でその Cycle に入っている Work Item。一覧の行の `revision` を条件にした Put、baseline の行の `attribute_not_exists` の Put、上限を超えた分の Delete、権限を確かめた Planning の revision（`FENCE#` の META）の ConditionCheck、呼び出し元の権限の ConditionCheck、audit event `cycle.schedule_baseline_captured` を 1 つの TransactWrite にする。
 - 読み取り（`GET` 同じ path、`?baselineId=` で古いもの）は、読む人の snapshot に Cycle が見えるときだけ返す。entries は読む人の snapshot に見える Work Item だけに絞り、`entryCount` は全件を数える（Project の baseline の一覧と同じ）。
 - 保存できる数は Cycle ごとに新しい順に 10。11 件目を保存すると最も古いものの行を同じ transaction で消し、audit の metadata に消した ID を残す。Cycle は短いので「基準」の切り替えは作らない。
 - 比較（追加・除外・終了予定の遅れ・予定工数の増減）は Web が今の Planning snapshot と baseline から計算する。API は比較結果を持たない。
@@ -31,7 +31,8 @@ Project の baseline と違い、Cycle には複数の Team・Project の Work I
 
 ## 結果
 
+- 権限を確かめてから書くまでに Planning（Cycle の移動や Work Item の変更を含む）が変わると、保存は 409 になる。押し直せば新しい状態で保存できる。
 - 保存する人に見えない Work Item は baseline に入らない。保存は Cycle の manager が行う前提で、ほかの人がより多くの Work Item を見られる場合、その差は「追加」に出る。
 - Cycle を archive・削除しても baseline の行は残る（1 Cycle あたり最大 11 行・約 1 MB）。Cycle の ID は再利用しない。DynamoDB の保存料は Cycle 100 個で月 $0.03 程度に収まる。
-- 保存の transaction は最大で一覧の行・baseline の行・Delete 1 つ・権限の ConditionCheck・audit の数件で、上限の 100 件と 4 MB に収まる。
+- 保存の transaction は最大で一覧の行・baseline の行・Delete 1 つ・Planning の revision と権限の ConditionCheck・audit の数件で、上限の 100 件と 4 MB に収まる。
 - 文書: `docs/planning.md`「Cycle の schedule baseline」、`docs/guide/pm.md`。

@@ -141,7 +141,7 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 設計の判断は [ADR 0059](adr/0059-cycle-schedule-baselines.md) にあります（Project の baseline は [ADR 0043](adr/0043-named-schedule-baselines.md)）。
 
-`POST /api/planning/cycles/:cycleId/schedule-baselines`（body は任意の `{ name }`、Cycle の manager 権限）は、呼び出した人の Planning snapshot でその Cycle に link されている Work Item の、今の予定開始日・予定終了日・予定工数を名前付きの baseline として保存し、`201` で `{ cycleId, revision, baseline, savedBaselines }` を返します。名前は前後の空白を除いて 80 文字までで、制御文字は `400` です。1 baseline は 1000 件までで、超えると `413 CycleScheduleBaselineTooLarge` です。Cycle ごとに新しい順に 10 件残り、11 件目を保存すると最も古いものが消えます。保存は一覧の行の revision・権限の ConditionCheck・audit event `cycle.schedule_baseline_captured` と同じ transaction で書き、競合や権限の変化は `409 CycleScheduleBaselineConflict` です。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい baseline になります（Web は自動再送しません）。
+`POST /api/planning/cycles/:cycleId/schedule-baselines`（body は任意の `{ name }`、Cycle の manager 権限）は、呼び出した人の Planning snapshot でその Cycle に link されている Work Item の、今の予定開始日・予定終了日・予定工数を名前付きの baseline として保存し、`201` で `{ cycleId, revision, baseline, savedBaselines }` を返します。名前は前後の空白を除いて 80 文字までで、制御文字は `400` です。1 baseline は 1000 件までで、超えると `413 CycleScheduleBaselineTooLarge` です。Cycle ごとに新しい順に 10 件残り、11 件目を保存すると最も古いものが消えます。保存は一覧の行の revision・権限の ConditionCheck・audit event `cycle.schedule_baseline_captured` と同じ transaction で書き、権限と Work Item を読んだ時点の Planning の revision も同じ transaction で確かめるので、その間に Cycle の移動などで Planning が変わった場合も含め、競合や権限の変化は `409 CycleScheduleBaselineConflict` です。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい baseline になります（Web は自動再送しません）。
 
 `GET` 同じ path（`?baselineId=` で古いもの）は、読む人に Cycle が見えるときだけ最新の baseline と一覧を返し（見えない・Cycle でない・無い ID は `404`）、entries は読む人に見える Work Item だけに絞ります。`entryCount` は見えない分も数えます。
 

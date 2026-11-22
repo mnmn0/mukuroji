@@ -149,7 +149,8 @@ export class DynamoDbCycleScheduleBaselineStore implements CycleScheduleBaseline
 
   /**
    * Stores the new baseline row, the list row with a compare-and-set on its revision, the
-   * deletions of dropped rows, the caller's authorization fences, and the audit event in one
+   * deletions of dropped rows, a check that the Planning graph revision is still the one the
+   * caller was authorized at, the caller's authorization fences, and the audit event in one
    * transaction.
    *
    * @param input - Write input.
@@ -204,6 +205,15 @@ export class DynamoDbCycleScheduleBaselineStore implements CycleScheduleBaseline
           Key: { workspaceId: input.workspaceId, recordKey: savedRecordKey(input.cycleId, baselineId) },
         },
       })),
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: { workspaceId: `FENCE#${input.workspaceId}`, recordKey: 'META' },
+          ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+          ExpressionAttributeNames: { '#entryType': 'entryType', '#schemaVersion': 'schemaVersion', '#revision': 'revision' },
+          ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': input.planningRevision },
+        },
+      },
       ...input.callerAuthorization,
       ...(audit ? [audit] : []),
     ]

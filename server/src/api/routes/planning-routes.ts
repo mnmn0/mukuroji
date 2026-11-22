@@ -5140,25 +5140,26 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           `The baseline name must be text of at most ${PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH} characters without control characters.`,
         )
       }
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      const cycle = await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
-      if (cycle.type !== 'cycle') {
-        throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
-      }
       const response = await captureCycleScheduleBaselineUseCase(
         workItemDependencies.cycleScheduleBaselines,
         { workspaceId: principal.directoryId, cycleId },
         {
           capturedAt: new Date().toISOString(),
           ...(name === undefined ? {} : { name }),
-          readEntries: async () => readCycleBaselineEntries(
-            filterPlanningSnapshotForPrincipal(
-              principal,
-              await workItemDependencies.planning.get(principal.directoryId, await readPlanningWorkItemState(principal)),
-            ),
-            cycleId,
-          ),
+          readPlan: async () => {
+            const snapshot = await workItemDependencies.planning.get(
+              principal.directoryId,
+              await readPlanningWorkItemState(principal),
+            )
+            const cycle = await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
+            if (cycle.type !== 'cycle') {
+              throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+            }
+            return {
+              entries: readCycleBaselineEntries(filterPlanningSnapshotForPrincipal(principal, snapshot), cycleId),
+              planningRevision: snapshot.revision,
+            }
+          },
           callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
             principal,
             [],
