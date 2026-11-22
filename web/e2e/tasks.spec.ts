@@ -12643,6 +12643,47 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-member-mfa-sato-example-com')).toContainText('MFA未登録')
   })
 
+  test('Issue #432: 一括招待で読込中のファイルより後に選んだ大きすぎるファイルの結果を残す', async ({ page }) => {
+    // Holds the read of slow.csv until the test releases it, so a second file can be chosen first.
+    await page.addInitScript(() => {
+      const read = File.prototype.text
+      const holder: { release?: () => void } = {}
+      Object.assign(window, { releaseSlowFile: () => holder.release?.() })
+      File.prototype.text = function (this: File) {
+        if (this.name !== 'slow.csv') return read.call(this)
+        return new Promise<void>((resolve) => {
+          holder.release = resolve
+        }).then(() => read.call(this)).finally(() => {
+          // Lets the test wait until the stale read has finished.
+          setTimeout(() => Object.assign(window, { slowFileDone: true }), 0)
+        })
+      }
+    })
+    await page.goto('/settings/workspace')
+
+    const input = page.getByTestId('workspace-bulk-invite-input')
+    await input.fill('kept@example.com')
+    const file = page.getByTestId('workspace-bulk-invite-file')
+    await file.setInputFiles({ buffer: Buffer.from('slow@example.com'), mimeType: 'text/csv', name: 'slow.csv' })
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeDisabled()
+
+    await file.setInputFiles({
+      buffer: Buffer.alloc(1024 * 1024 + 1, 'a'),
+      mimeType: 'text/csv',
+      name: 'large.csv',
+    })
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeEnabled()
+    await page.evaluate(() => {
+      const release: unknown = Reflect.get(window, 'releaseSlowFile')
+      if (typeof release === 'function') release()
+    })
+
+    await page.waitForFunction(() => Reflect.get(window, 'slowFileDone') === true)
+    await expect(page.getByText('CSV ファイルが大きすぎます（1 MB まで）。')).toBeVisible()
+    await expect(input).toHaveValue('kept@example.com')
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeEnabled()
+  })
+
   test('設定画面で管理者がメンバーにパスワード再設定を送ると監査付きで実行する', async ({ page }) => {
     let passwordResets = 0
 
