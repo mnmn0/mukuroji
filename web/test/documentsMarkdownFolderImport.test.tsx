@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { renderToStaticMarkup } from 'react-dom/server'
 import type {
   ApplyDocumentOperationsInput,
   CreateDocumentInput,
@@ -10,6 +11,7 @@ import {
   MARKDOWN_FOLDER_IMPORT_MAX_FILES,
   planMarkdownFolderImport,
   resolveImportedPageLinks,
+  splitDocumentPageLinks,
   type MarkdownFolderFile,
   type MarkdownFolderImportPlan,
 } from '../src/documents/model/markdownFolderImport'
@@ -19,6 +21,7 @@ import {
   runMarkdownFolderImport,
   type MarkdownFolderImportRequests,
 } from '../src/documents/mutations/markdownFolderImportRunner'
+import { DocumentLinkedText } from '../src/documents/ui/DocumentLinkedText'
 
 /**
  * Returns sequential IDs so planned blocks are deterministic.
@@ -293,5 +296,33 @@ describe('folder import runner', () => {
     await runMarkdownFolderImport(progress, requests)
     expect(created).toHaveLength(3)
     expect(operations).toHaveLength(1)
+  })
+})
+
+describe('page links in stored text', () => {
+  test('splits out links to pages and leaves other links as text', () => {
+    expect(
+      splitDocumentPageLinks('See [Setup](/documents/doc-1) and [site](https://example.com).'),
+    ).toEqual([
+      { type: 'text', text: 'See ' },
+      { type: 'page-link', label: 'Setup', href: '/documents/doc-1' },
+      { type: 'text', text: ' and [site](https://example.com).' },
+    ])
+    expect(splitDocumentPageLinks('')).toEqual([{ type: 'text', text: '' }])
+    expect(splitDocumentPageLinks('[x](/documents/a/../b)')).toEqual([
+      { type: 'text', text: '[x](/documents/a/../b)' },
+    ])
+  })
+
+  test('renders page links as anchors', () => {
+    const markup = renderToStaticMarkup(
+      <DocumentLinkedText text="Read [Setup](/documents/doc-1) first" />,
+    )
+    expect(markup).toContain('<a')
+    expect(markup).toContain('href="/documents/doc-1"')
+    expect(markup).toContain('>Setup</a>')
+    expect(renderToStaticMarkup(<DocumentLinkedText text="<b>plain</b>" />)).toBe(
+      '&lt;b&gt;plain&lt;/b&gt;',
+    )
   })
 })

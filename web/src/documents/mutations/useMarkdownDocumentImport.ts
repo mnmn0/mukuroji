@@ -206,11 +206,13 @@ export function useMarkdownDocumentImport({
           createDocument(token, input, context),
         ),
     })
-    retainedFolderRef.current = undefined
     const { plan, documentIds } = state
     const openedKey = plan.rootKey ?? plan.pages[0]?.key
     const openedId = openedKey ? documentIds.get(openedKey) : undefined
+    // Progress stays until the refresh succeeds, so a retry after a failed
+    // refresh reuses the created nodes instead of creating them again.
     if (openedId) await onCreated(openedId)
+    retainedFolderRef.current = undefined
     return undefined
   }
 
