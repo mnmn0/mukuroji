@@ -146,6 +146,8 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
       onPreview={() => void preview()}
       onRetry={() => {
         resetOutcome()
+        // Reloading starts again from the stored calendar, so a later save uses its new revision.
+        setDraftState(undefined)
         void query.mutate()
       }}
       onSave={() => void save()}
