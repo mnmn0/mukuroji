@@ -5,10 +5,8 @@ import {
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
-import { useSWRConfig } from 'swr'
-import { captureCycleScheduleBaseline } from '../api/cycleBaselines'
 import { compareCycleBaseline } from '../model/cycleBaselines'
-import { cycleScheduleBaselineKey, useCycleScheduleBaseline } from '../queries/useCycleScheduleBaseline'
+import { useCycleScheduleBaselines } from '../mutations/useCycleScheduleBaselines'
 
 /** Localized labels of the Cycle baseline section. */
 export type CycleScheduleBaselineLabels = {
@@ -236,25 +234,7 @@ export function CycleScheduleBaselineContainer({
   labels,
   snapshot,
 }: CycleScheduleBaselineContainerProps) {
-  const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
-  const [isCapturing, setIsCapturing] = useState(false)
-  const [captureFailed, setCaptureFailed] = useState(false)
-  const query = useCycleScheduleBaseline(accessToken, cycle.id, selectedId)
-  const { mutate } = useSWRConfig()
-  const capture = async (name: string) => {
-    setIsCapturing(true)
-    setCaptureFailed(false)
-    try {
-      const saved = await captureCycleScheduleBaseline(accessToken, cycle.id, name)
-      // The newest baseline is the one just saved, so show it whichever one was selected.
-      await mutate(cycleScheduleBaselineKey(accessToken, cycle.id), saved, { revalidate: false })
-      setSelectedId(undefined)
-    } catch {
-      setCaptureFailed(true)
-    } finally {
-      setIsCapturing(false)
-    }
-  }
+  const { query, select, capture, isCapturing, captureFailed } = useCycleScheduleBaselines(accessToken, cycle.id)
   return (
     <CycleScheduleBaselinePanel
       canCapture={canCapture}
@@ -268,7 +248,7 @@ export function CycleScheduleBaselineContainer({
       snapshot={snapshot}
       onCapture={(name) => void capture(name)}
       onRetry={() => void query.mutate()}
-      onSelect={setSelectedId}
+      onSelect={select}
     />
   )
 }

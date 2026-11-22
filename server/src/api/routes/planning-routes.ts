@@ -5147,17 +5147,27 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           capturedAt: new Date().toISOString(),
           ...(name === undefined ? {} : { name }),
           readPlan: async () => {
+            // Pin the revision before reading Work Items: a Work Item write advances it, so a
+            // schedule read before that write cannot pair with the newer graph revision.
+            const pinnedRevision = await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId)
             const snapshot = await workItemDependencies.planning.get(
               principal.directoryId,
               await readPlanningWorkItemState(principal),
             )
+            if (snapshot.revision !== pinnedRevision) {
+              throw new PlanningError(
+                409,
+                'CycleScheduleBaselineConflict',
+                'The Cycle baselines or your permissions changed. Reload and try again.',
+              )
+            }
             const cycle = await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
             if (cycle.type !== 'cycle') {
               throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
             }
             return {
               entries: readCycleBaselineEntries(filterPlanningSnapshotForPrincipal(principal, snapshot), cycleId),
-              planningRevision: snapshot.revision,
+              planningRevision: pinnedRevision,
             }
           },
           callerAuthorization: createPlanningCallerAuthorizationConditionChecks(

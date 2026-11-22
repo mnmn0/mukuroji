@@ -112,3 +112,33 @@ test('rejects invalid names, non-Cycle entities, and callers who do not manage t
   expect((await planningApiRequest(path, 'POST', {})).status).toBe(403)
   expect((await planningApiRequest(path)).status).toBe(200)
 })
+
+/** Planning client whose revision moves between the pinned read and the snapshot read. */
+class RacingPlanningClient extends InMemoryPlanningClient {
+  /** Whether the next pinned revision read returns a revision older than the snapshot. */
+  race = false
+
+  /**
+   * Returns the revision, one behind when a race is simulated.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @returns The revision.
+   */
+  override async getAuthorizationRevision(workspaceId: string) {
+    const revision = await super.getAuthorizationRevision(workspaceId)
+    return this.race ? revision - 1 : revision
+  }
+}
+
+test('a capture fails instead of saving a plan when Planning changed while it was read', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const store = new InMemoryCycleScheduleBaselineStore()
+  const planning = new RacingPlanningClient()
+  setTestAppDependencies({ planning, cycleScheduleBaselines: store })
+  expect((await planningApiRequest('/api/planning/entities', 'POST', createCyclePlanningInput('cycle-a', 0))).status).toBe(201)
+  planning.race = true
+
+  const response = await planningApiRequest('/api/planning/cycles/cycle-a/schedule-baselines', 'POST', {})
+  expect(response.status).toBe(409)
+  expect(store.auditEvents).toEqual([])
+})
