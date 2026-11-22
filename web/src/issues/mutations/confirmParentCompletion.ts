@@ -85,3 +85,43 @@ export function confirmParentCompletionInBrowser(
     ? t('issues.outline.completeWarningUncounted')
     : t('issues.outline.completeWarning').replace('{count}', String(openChildCount)))
 }
+
+/** One Work Item of {@link confirmParentsCompletion}. */
+export type ConfirmParentsCompletionTarget = Pick<ConfirmParentCompletionInput, 'workItem' | 'nextStatusCategory'>
+
+/** Inputs for {@link confirmParentsCompletion}. */
+export type ConfirmParentsCompletionInput = Omit<ConfirmParentCompletionInput, 'workItem' | 'nextStatusCategory'> & {
+  /** Work Items whose status changes together. */
+  targets: readonly ConfirmParentsCompletionTarget[]
+}
+
+/**
+ * Asks once before completing several Work Items when any of them still has open children.
+ *
+ * Applies the same rules as {@link confirmParentCompletion} to every target, then asks a single
+ * question with the total open child count, or without a count when any could not be read.
+ *
+ * @param input - Work Items, target categories, policy, and how to ask.
+ * @returns Whether the change should go ahead.
+ */
+export async function confirmParentsCompletion({
+  targets,
+  confirm,
+  ...shared
+}: ConfirmParentsCompletionInput): Promise<boolean> {
+  const counts: (number | null)[] = []
+  await Promise.all(targets.map((target) => confirmParentCompletion({
+    ...shared,
+    ...target,
+    confirm: (openChildCount) => {
+      counts.push(openChildCount)
+      return true
+    },
+  })))
+  if (counts.length === 0) return true
+  const total = counts.reduce<number | null>(
+    (sum, count) => sum === null || count === null ? null : sum + count,
+    0,
+  )
+  return confirm(total)
+}

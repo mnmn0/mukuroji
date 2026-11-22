@@ -10432,6 +10432,34 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => requestCounts.issueUpdates).toBe(updatesBefore + 1)
   })
 
+  test('マイタスクから自分が担当する Work Item を続けて追加できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [] },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const form = page.getByTestId('my-tasks-quick-create')
+    const title = form.getByRole('textbox', { name: 'タスク名' })
+    await title.fill('クイック追加したタスク')
+    await form.getByLabel('期限').fill('2026-06-26')
+    await title.press('Enter')
+
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+    await expect(page.getByTestId('my-tasks-quick-create-feedback')).toContainText('クイック追加したタスク')
+    await expect(page.getByTestId('my-tasks-table')).toContainText('クイック追加したタスク')
+    await expect(title).toHaveValue('')
+    await expect(title).toBeFocused()
+
+    // The title keeps focus, so the next Work Item can be typed straight away.
+    await page.keyboard.type('続けて追加したタスク')
+    await page.keyboard.press('Enter')
+    await expect.poll(() => requestCounts.issueCreates).toBe(2)
+    await expect(page.getByTestId('my-tasks-table')).toContainText('続けて追加したタスク')
+  })
+
   test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/teams/core-team/issues')
@@ -10453,6 +10481,96 @@ test.describe('authenticated task page', () => {
       .toBeVisible()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
     expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Team の Work Item をテーブルで複数選んで一括アーカイブする', async ({ page }) => {
+    const requestedActions: unknown[] = []
+    const requestedItemIds: string[][] = []
+    /** Reads the Work Item IDs and action of one bulk request body. */
+    const readBulkRequest = (body: unknown) => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items) ||
+          !('action' in body)) {
+        throw new Error('Bulk request did not contain items and an action.')
+      }
+      const ids = body.items.flatMap((item: unknown) =>
+        typeof item === 'object' && item !== null && 'workItemId' in item && typeof item.workItemId === 'string'
+          ? [item.workItemId]
+          : []
+      )
+      return { action: body.action, ids }
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          canApply: true,
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            retryable: false,
+            status: 'ready',
+            teamId: 'core-team',
+            undoable: false,
+            workItemId,
+          })),
+          operationToken: 'team-bulk-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'team-bulk-operation',
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            resultingRevision: 2,
+            retryable: false,
+            status: 'succeeded',
+            teamId: 'core-team',
+            undoable: true,
+            workItemId,
+          })),
+          revision: 1,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues')
+    const wireframe = page.getByTestId('issue-row-select-wireframe')
+    const brand = page.getByTestId('issue-row-select-brand-guideline')
+    await wireframe.check()
+    await brand.check()
+    await expect(page.getByText('2件を選択中')).toBeVisible()
+
+    await page.getByRole('button', { name: '一括アーカイブ', exact: true }).click()
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(preview).toBeVisible()
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect.poll(() => requestedItemIds.length).toBe(2)
+    expect(requestedItemIds.map((ids) => [...ids].sort())).toEqual([
+      ['brand-guideline', 'wireframe'],
+      ['brand-guideline', 'wireframe'],
+    ])
+    expect(requestedActions).toEqual([
+      { archived: true, type: 'archive' },
+      { archived: true, type: 'archive' },
+    ])
+    await expect(page.getByRole('region', { name: '一括操作の実行結果' })).toBeVisible()
+    await expect(page.getByText('2件を選択中')).toHaveCount(0)
   })
 
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
