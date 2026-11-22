@@ -817,8 +817,10 @@ export async function createProjectTemplatePlanningEntities(
         snapshot = response.planning
       } catch (error) {
         // The live graph leaves out archived entities, but the ID stays taken; keep the archive.
+        // An entity that is live after all was created meanwhile and keeps its Milestones.
         if (!(error instanceof PlanningError) || error.code !== 'PlanningEntityExists') throw error
-        archivedIndexes.add(entity.index)
+        snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
+        if (!snapshot.entities.some((candidate) => candidate.id === id)) archivedIndexes.add(entity.index)
       }
     }
   } catch (error) {
@@ -857,6 +859,10 @@ export async function createProjectTemplateDependencies(
     // Creating the Project advanced the applier's Workspace member version, so guard the writes
     // with the member as it is now rather than as it was when the request was authenticated.
     const currentMember = await requirePlanningActiveOwner(principal, principal.userKey)
+    if (currentMember.role !== principal.workspaceMember.role) {
+      // The request was authorized for the old role; a retry authorizes it again.
+      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed. Reload and try again.')
+    }
     const authorizationConditionChecks = createPlanningCallerAuthorizationConditionChecks(
       principal,
       [currentMember],

@@ -13,6 +13,7 @@ const {
   createTeamIssuesFake,
   createInboundWebhookProvisioning,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   originalBulkRecoveryTitle,
   resetTestApp,
   runWithTestAppDependencies,
@@ -3482,9 +3483,22 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
     async projectCreateHook(_input, completionTransactItems) {
       expect(completionTransactItems).toHaveLength(0)
       teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+      // The applier loses Workspace administration after the request was authorized.
+      demoteApplier = true
     },
   })
   const createdIssues = configureProjectTemplatePlanningFakes(planning)
+  let demoteApplier = false
+  const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getActiveMember(workspaceId, memberKey) {
+        const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
+        return member && demoteApplier ? { ...member, role: 'member' } : member
+      },
+    },
+  })
   let failNextDependency = true
   const createWorkItemDependency = planning.createWorkItemDependency.bind(planning)
   planning.createWorkItemDependency = async (...args) => {
@@ -3524,6 +3538,13 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
     },
     body: JSON.stringify({ target: application.target }),
   })
+
+  const demoted = await request()
+  expect(await demoted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(demoted.status).toBe(409)
+  expect(application.status).toBe('pending')
+  expect(failNextDependency).toBe(true)
+  demoteApplier = false
 
   const conflicted = await request()
   expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
