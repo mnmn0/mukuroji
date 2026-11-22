@@ -18,6 +18,7 @@ import type {
   CreateAnalyticsReportInput,
 } from '@mukuroji/contracts'
 import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   WORKSPACE_CALENDAR_PERIOD_PRESETS,
   type WorkspaceCalendarPeriodPreset,
 } from '@mukuroji/contracts'
@@ -52,6 +53,7 @@ import {
   selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../model/periodPresets'
+import { listAnalyticsScheduleWeekdays } from '../model/scheduleWeekdays'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
 import { AnalyticsFlowChart } from './AnalyticsFlowChart'
@@ -783,6 +785,9 @@ export function AnalyticsWorkbench({
 
       {isScheduleOpen ? (
         <AnalyticsScheduleDialog
+          // A new weekly delivery goes out on the first day of the Workspace week, as a weekly
+          // report covers the week just ended.
+          defaultDayOfWeek={calendarSettings?.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay}
           initialSchedule={reportSchedule}
           isTeamVisibilityValid={isTeamVisibilityValid}
           reportName={selectedReport?.name ?? draftName}
@@ -2533,6 +2538,7 @@ function AnalyticsEvidenceDrawer({
 }
 
 function AnalyticsScheduleDialog({
+  defaultDayOfWeek,
   initialSchedule,
   isTeamVisibilityValid,
   onClose,
@@ -2541,6 +2547,8 @@ function AnalyticsScheduleDialog({
   t,
   timeZone,
 }: {
+  /** Weekday a new weekly delivery is sent on, as `Date#getDay()` numbers it. */
+  defaultDayOfWeek: number
   initialSchedule?: AnalyticsSchedule
   isTeamVisibilityValid: boolean
   onClose: () => void
@@ -2636,16 +2644,10 @@ function AnalyticsScheduleDialog({
             {frequency === 'weekly' ? (
               <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('analytics.schedule.dayOfWeek')}
-                <select className="workbench-input min-h-10 px-3" defaultValue={initialSchedule?.dayOfWeek ?? 1} name="dayOfWeek">
-                  {[
-                    'analytics.schedule.sunday',
-                    'analytics.schedule.monday',
-                    'analytics.schedule.tuesday',
-                    'analytics.schedule.wednesday',
-                    'analytics.schedule.thursday',
-                    'analytics.schedule.friday',
-                    'analytics.schedule.saturday',
-                  ].map((key, index) => <option key={key} value={index}>{t(key as MessageKey)}</option>)}
+                <select className="workbench-input min-h-10 px-3" defaultValue={initialSchedule?.dayOfWeek ?? defaultDayOfWeek} name="dayOfWeek">
+                  {listAnalyticsScheduleWeekdays(defaultDayOfWeek).map(({ dayOfWeek, key }) => (
+                    <option key={key} value={dayOfWeek}>{t(key)}</option>
+                  ))}
                 </select>
               </label>
             ) : null}
