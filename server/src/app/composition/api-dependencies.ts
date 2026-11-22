@@ -78,6 +78,7 @@ import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedU
 import {
   recordApiAccess,
   recordApiError,
+  recordClientError,
 } from '../../infrastructure/observability/api-observability'
 import { createXrayApiAccessRecorder } from '../../infrastructure/observability/xray-request-subsegment'
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
@@ -1662,6 +1663,7 @@ export function createProductionOperationalDependencies(): OperationalDependenci
       }
       : recordApiAccess,
     recordError: recordApiError,
+    recordClientError,
     runtimeControl: createProductionRuntimeControlProvider('api'),
   }
 }
@@ -1686,6 +1688,7 @@ function createTestOperationalDependencies(): OperationalDependencies {
     },
     recordAccess() {},
     recordError() {},
+    recordClientError() {},
     runtimeControl: createStaticRuntimeControlProvider('enabled'),
   }
 }
@@ -1955,6 +1958,7 @@ export function overrideAppDependencies(
         ? { recordAccess: overrides.recordAccess }
         : {}),
       ...(overrides.recordError ? { recordError: overrides.recordError } : {}),
+      ...(overrides.recordClientError ? { recordClientError: overrides.recordClientError } : {}),
       ...(overrides.runtimeControl
         ? { runtimeControl: overrides.runtimeControl }
         : {}),

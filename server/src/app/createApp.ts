@@ -16,16 +16,20 @@ import {
   createRuntimeControlAwareReadinessProbe,
 } from './composition/runtime-control'
 import {
-  registerCommonMiddleware,
-  registerEnterpriseSecurityAuditMiddleware,
-} from './middleware/common-middleware'
-import {
   registerRuntimeControlMiddleware,
 } from './middleware/runtime-control-middleware'
 import {
   registerSoftwareFactoryMiddleware,
 } from './middleware/software-factory-middleware'
+import { createClientErrorReportAdmission } from './routes/client-error-admission'
+import { createClientErrorRouter } from './routes/client-error-router'
 import { createSystemRouter } from './routes/system-router'
+import {
+  readCanonicalCorrelationId,
+  registerCommonMiddleware,
+  registerEnterpriseSecurityAuditMiddleware,
+} from './middleware/common-middleware'
+import { resolveTrustedRequestSource } from '../infrastructure/http/trusted-request-source'
 import { isSoftwareFactoryDeployed } from '../infrastructure/config/software-factory'
 
 /**
@@ -64,6 +68,16 @@ export function createApp(dependencies: AppDependencies): Hono {
       dependencies.operational.runtimeControl,
       dependencies.operational.recordRuntimeControl,
     ),
+  }))
+  app.route('/', createClientErrorRouter({
+    getAllowedOrigins,
+    admit: createClientErrorReportAdmission(
+      dependencies.developerPlatform.rateLimits,
+      resolveTrustedRequestSource,
+    ),
+    readCorrelationId: readCanonicalCorrelationId,
+    record: dependencies.operational.recordClientError,
+    now: Date.now,
   }))
   registerApiRoutes(app)
 

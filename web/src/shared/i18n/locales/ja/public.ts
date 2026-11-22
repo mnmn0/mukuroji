@@ -167,6 +167,7 @@ export const publicMessages = {
   'public.routeError.title': 'このページを読み込めませんでした',
   'public.routeError.description':
     '接続を確認して再読み込みしてください。アプリが更新された直後の場合は、再読み込みで新しい版を読み込みます。',
+  'public.routeError.reportId': 'エラーは運用担当に送られました。問い合わせるときはこの ID を伝えてください:',
   'public.routeError.reloadAction': '再読み込み',
   'public.routeError.loginAction': 'ログインに戻る',
   'public.notFound.eyebrow': 'ページが見つかりません',
