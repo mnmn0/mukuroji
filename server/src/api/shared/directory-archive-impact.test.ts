@@ -67,6 +67,8 @@ type SourceOptions = {
   runPages?: AgentRunPage[]
   /** Planning state. */
   planning?: Partial<PlanningAuthorizationState>
+  /** Assigned Project of each Work Item read one by one; `null` means the Work Item is gone. */
+  assignments?: Record<string, string | null>
   /** Webhook subscriptions. */
   subscriptions?: Array<Pick<WebhookSubscription, 'status' | 'teamIds'>>
 }
@@ -103,6 +105,11 @@ function createSources(options: SourceOptions = {}) {
       const page = pages[runPage] ?? { runs: [] }
       runPage += 1
       return page
+    },
+    readWorkItemAssignment: async (_directoryId, _teamId, workItemId) => {
+      const assignment = options.assignments?.[workItemId]
+      if (assignment === null) return undefined
+      return assignment === undefined ? {} : { assignedProjectId: assignment }
     },
     listWebhookSubscriptions: async () =>
       (options.subscriptions ?? []).map((subscription) =>
@@ -181,6 +188,7 @@ test('counts a Project archive by the Project, including dependencies on its Wor
       ],
     }],
     runPages: [{ runs: [activeRun('1'), activeRun('2'), activeRun('5')] }],
+    assignments: { '1': 'alpha', '2': 'beta' },
     planning: {
       entities: [{ id: 'p1', teamId: 'core', projectId: 'beta' }]
         .map((entity) => Object.assign(Object.create(null), entity)),
@@ -264,6 +272,7 @@ test('counts archived Work Items for dependencies but not as open', async () => 
     workItemPages: [{
       issues: [workItem('1', 'started', { archivedAt: '2026-01-01T00:00:00.000Z' })],
     }],
+    assignments: { '1': 'alpha' },
     planning: {
       workItemDependencies: [{
         predecessor: { teamId: 'core', workItemId: '1' },
@@ -280,4 +289,28 @@ test('counts archived Work Items for dependencies but not as open', async () => 
 
   expect(impact.openWorkItems).toEqual({ count: 0, hasMore: false })
   expect(impact).toMatchObject({ planningDependencies: 1, archiveBlocked: true })
+})
+
+test('finds Project dependency blockers beyond the counted Work Items and missing ones', async () => {
+  const dependency = (workItemId: string) => Object.assign(Object.create(null), {
+    predecessor: { teamId: 'core', workItemId },
+    successor: { teamId: 'other', workItemId: 'x' },
+  })
+  const { sources } = createSources({
+    // The count stops before reaching either endpoint.
+    workItemPages: Array.from({ length: 20 }, () => ({
+      issues: [workItem('counted', 'started')],
+      nextPosition: { kind: 'after-sort-order' as const, sortOrder: 1 },
+    })),
+    assignments: { far: 'alpha', gone: null, other: 'beta' },
+    planning: { workItemDependencies: [dependency('far'), dependency('gone'), dependency('other')] },
+  })
+
+  const impact = await readDirectoryArchiveImpact(
+    directoryId,
+    { kind: 'project', teamId: 'core', projectId: 'alpha' },
+    sources,
+  )
+
+  expect(impact).toMatchObject({ planningDependencies: 2, archiveBlocked: true })
 })

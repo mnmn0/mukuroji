@@ -7,11 +7,13 @@ import type {
 } from '@mukuroji/contracts'
 import type { AgentRunPage } from '../../modules/agent-runs'
 import { ProjectDataError } from '../../modules/directory'
+import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import type { PlanningAuthorizationState } from '../../modules/planning'
 import type {
   SortedWorkItemPage,
   SortedWorkItemPagePosition,
 } from '../../modules/work-items'
+import { mapInOrderWithConcurrency } from './agent-run-access'
 import {
   developerPlatformDependencies,
   workItemDependencies,
@@ -42,6 +44,16 @@ export type DirectoryArchiveImpactSources = {
     teamId: string,
     cursor: string | undefined,
   ): Promise<AgentRunPage>
+  /**
+   * Strongly reads the Project a Work Item is assigned to.
+   *
+   * @returns The assignment, or undefined when the Work Item no longer exists.
+   */
+  readWorkItemAssignment(
+    directoryId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<{ assignedProjectId?: string } | undefined>
   /** Lists every Webhook subscription of the Workspace. */
   listWebhookSubscriptions(directoryId: string): Promise<WebhookSubscription[]>
 }
@@ -80,6 +92,22 @@ const defaultSources: DirectoryArchiveImpactSources = {
   },
   readActiveRunPage: (directoryId, teamId, cursor) =>
     workItemDependencies.agentRuns.listActiveRuns(directoryId, teamId, cursor, ACTIVE_RUN_PAGE_LIMIT),
+  readWorkItemAssignment: async (directoryId, teamId, workItemId) => {
+    try {
+      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        directoryId,
+        teamId,
+        workItemId,
+        { consistentIssueRead: true, includeEvents: false },
+      )
+      return detail.issue.assignedProjectId === undefined
+        ? {}
+        : { assignedProjectId: detail.issue.assignedProjectId }
+    } catch (error) {
+      if (isTeamIssueNotFoundError(error)) return undefined
+      throw error
+    }
+  },
   listWebhookSubscriptions: (directoryId) =>
     developerPlatformDependencies.webhookSubscriptions.listWebhookSubscriptions(directoryId),
 }
@@ -117,22 +145,28 @@ export async function readDirectoryArchiveImpact(
     !entity.archivedAt && inScope(entity)
   ).length
   const planningWorkItemLinks = planning.workItemLinks.filter(inScope).length
-  // Mirrors the archive guards: a Team archive refuses every dependency on the Team, and a
-  // Project archive refuses dependencies on Work Items assigned to the Project.
-  const isBlockingEndpoint = (endpoint: { teamId: string; workItemId: string }) =>
-    endpoint.teamId === target.teamId &&
-    (target.kind === 'team' || workItems.workItemIds.has(endpoint.workItemId))
-  const planningDependencies = planning.workItemDependencies.filter((dependency) =>
-    isBlockingEndpoint(dependency.predecessor) || isBlockingEndpoint(dependency.successor)
-  ).length
-  const teamEndpointKeys = new Set(
+  const teamEndpointIds = [...new Set(
     planning.workItemDependencies
       .flatMap((dependency) => [dependency.predecessor, dependency.successor])
       .filter((endpoint) => endpoint.teamId === target.teamId)
       .map((endpoint) => endpoint.workItemId),
-  )
+  )]
   const endpointLimitExceeded = target.kind === 'project' &&
-    teamEndpointKeys.size > PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT
+    teamEndpointIds.length > PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT
+  // Mirrors the archive guards: a Team archive refuses every dependency on the Team, and a
+  // Project archive refuses dependencies whose Work Item is assigned to the Project or missing.
+  // Endpoints are read one by one, as the guard does, so the bounded Work Item count above
+  // never hides a blocker.
+  const blockingEndpointIds = target.kind === 'team' || endpointLimitExceeded
+    ? new Set(teamEndpointIds)
+    : await readProjectBlockingEndpointIds(sources, directoryId, target, teamEndpointIds)
+  const isBlockingEndpoint = (endpoint: { teamId: string; workItemId: string }) =>
+    endpoint.teamId === target.teamId && blockingEndpointIds.has(endpoint.workItemId)
+  const planningDependencies = target.kind === 'project' && endpointLimitExceeded
+    ? 0
+    : planning.workItemDependencies.filter((dependency) =>
+        isBlockingEndpoint(dependency.predecessor) || isBlockingEndpoint(dependency.successor)
+      ).length
 
   return {
     openWorkItems: { count: workItems.openCount, hasMore: workItems.hasMore },
@@ -146,6 +180,36 @@ export async function readDirectoryArchiveImpact(
     archiveBlocked: endpointLimitExceeded ||
       planningEntities + planningWorkItemLinks + planningDependencies > 0,
   }
+}
+
+/** Dependency endpoints read at once while resolving Project blockers. */
+const ENDPOINT_READ_CONCURRENCY = 8
+
+/**
+ * Finds the Team's dependency endpoints that block a Project archive: Work Items assigned to the
+ * Project, and Work Items that no longer exist.
+ *
+ * @param sources - Readers of the counted records.
+ * @param directoryId - Workspace directory.
+ * @param target - Project being archived.
+ * @param endpointIds - Team-local Work Item IDs of the Team's dependency endpoints.
+ * @returns The blocking Work Item IDs.
+ */
+async function readProjectBlockingEndpointIds(
+  sources: DirectoryArchiveImpactSources,
+  directoryId: string,
+  target: Extract<DirectoryArchiveImpactTarget, { kind: 'project' }>,
+  endpointIds: readonly string[],
+) {
+  const assignments = await mapInOrderWithConcurrency(
+    endpointIds,
+    ENDPOINT_READ_CONCURRENCY,
+    (workItemId) => sources.readWorkItemAssignment(directoryId, target.teamId, workItemId),
+  )
+  return new Set(endpointIds.filter((_, index) => {
+    const assignment = assignments[index]
+    return assignment === undefined || assignment.assignedProjectId === target.projectId
+  }))
 }
 
 /**
