@@ -222,7 +222,7 @@ GuardDuty の scan 結果 tag を手で付けます。scan 結果のない objec
 ```sh
 bun run local:files:scan                          # NO_THREATS_FOUND（download 可能）
 bun run local:files:scan -- --result THREATS_FOUND  # blocked の表示を確かめる
-bun run local:files:scan -- --result FAILED --prefix workspaces/<workspaceId>/
+bun run local:files:scan -- --result FAILED --prefix <object key の先頭>  # 対象を絞る
 ```
 
 既存volumeに旧schemaのWork Itemがあると、通知workerはfail-closedで停止します。
