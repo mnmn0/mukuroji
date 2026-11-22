@@ -6,6 +6,7 @@ import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDue
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
+import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 
 /**
  * Creates a scheduled sender for opted-in recipients' durable Inbox notifications.
@@ -19,7 +20,11 @@ export function createProductionSlackNotificationHandler() {
   if (!tableName || !identityTableName || !fileTableName) throw new Error('Slack notification runtime is not configured.')
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const store = new DynamoDbSlackDeliveryStore(documentClient, tableName)
-  const isAuthorized = createProductionNotificationDeliveryAuthorizer(documentClient, { identityTableName, fileTableName })
+  const isAuthorized = createProductionNotificationDeliveryAuthorizer(documentClient, {
+    identityTableName,
+    fileTableName,
+    timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
+  })
   const secrets = createSecretsManagerClient()
   const send = createSlackNotificationSender(async (secretId) => {
     const response = await secrets.send(new GetSecretValueCommand({ SecretId: secretId }), {
