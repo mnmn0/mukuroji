@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import type { TimeEntry, TimeEntryStatus } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS, type TimeEntry, type TimeEntryStatus } from '@mukuroji/contracts'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
 /** Canonical Work Items the member can record time on. */
@@ -96,6 +96,7 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
   } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
   await page.route((url) => url.pathname === '/api/workspace/calendar-settings', (route) => route.fulfill({ json: { fiscalYearStartMonth: 4, weekStartDay: state.weekStartDay } }))
+  await page.route((url) => url.pathname === '/api/workspace/time-entry-categories', (route) => route.fulfill({ json: DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS }))
   await page.route((url) => url.pathname.startsWith('/api/teams/core-team/weekly-reports'), async (route) => {
     const request = route.request()
     const url = new URL(request.url())

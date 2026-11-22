@@ -1,8 +1,9 @@
-import { TIME_ENTRY_CATEGORIES, type TimeEntry, type TimeEntryCategory } from '@mukuroji/contracts'
+import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { IndirectTimeEntryInput } from '../api/timeEntries'
+import { selectSelectableTimeEntryCategories, useTimeEntryCategories } from '../model/timeEntryCategoryContext'
 import { parseHoursInput, readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
-import { describeTimeTrackingFailure, timeEntryCategoryKeys, type TimeTrackingTranslator } from './timeTrackingText'
+import { describeTimeEntryCategory, describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** A Project a member may record indirect work on. */
 export type IndirectTimeEntryProjectOption = {
@@ -47,16 +48,6 @@ function formatHoursInput(minutes: number): string {
 }
 
 /**
- * Checks whether a select value is a known work category.
- *
- * @param value - Submitted value.
- * @returns Whether the value is a category.
- */
-function isCategory(value: string): value is TimeEntryCategory {
-  return TIME_ENTRY_CATEGORIES.some((category) => category === value)
-}
-
-/**
  * Form that records or edits indirect work, such as a meeting, as a category, a date, and hours,
  * without a Work Item.
  *
@@ -72,6 +63,9 @@ export function IndirectTimeEntryForm({
   targets,
 }: IndirectTimeEntryFormProps) {
   const id = useId()
+  const categories = useTimeEntryCategories()
+  const categoryOptions = selectSelectableTimeEntryCategories(categories, entry?.category)
+  const defaultCategory = entry?.category ?? (categoryOptions.includes('meeting') ? 'meeting' : categoryOptions[0] ?? '')
   const [error, setError] = useState<string>()
   const [isSaving, setIsSaving] = useState(false)
   const currentProjectId = entry?.projectId
@@ -107,7 +101,7 @@ export function IndirectTimeEntryForm({
       && date === defaultDateText && (hours === defaultHoursText || parseHoursInput(hours) === entry.durationMinutes)
     const minutes = keepRecordedInterval ? entry.durationMinutes : readIndirectMinutes(hours)
     const projectId = readText('projectId')
-    if (!isCategory(category) || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
+    if (!categoryOptions.includes(category) || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
       setError(t('timeTracking.form.invalidTime'))
       return
     }
@@ -149,12 +143,12 @@ export function IndirectTimeEntryForm({
           {t('timeTracking.indirect.category')}
           <select
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry?.category ?? 'meeting'}
+            defaultValue={defaultCategory}
             id={`${id}-category`}
             name="category"
           >
-            {TIME_ENTRY_CATEGORIES.map((category) => (
-              <option key={category} value={category}>{t(timeEntryCategoryKeys[category])}</option>
+            {categoryOptions.map((category) => (
+              <option key={category} value={category}>{describeTimeEntryCategory(t, category, categories)}</option>
             ))}
           </select>
         </label>

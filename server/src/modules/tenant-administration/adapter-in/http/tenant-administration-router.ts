@@ -11,11 +11,14 @@ import type {
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceCalendarSettingsResponse,
+  WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
+  readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -143,6 +146,19 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       return context.json(await readWorkspaceCalendar(principal, dependencies))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member picks a work category when recording time, so only authentication is required.
+  router.get('/api/workspace/time-entry-categories', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      const profile = await dependencies.client.getProfile(principal.directoryId)
+      const settings: WorkspaceTimeEntryCategorySettings =
+        profile?.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+      return context.json(settings)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -355,6 +371,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readTenantWeeklyReportReminderInput(body.weeklyReportReminders) }),
+    ...(body.timeEntryCategories === undefined
+      ? {}
+      : { timeEntryCategories: readTenantTimeEntryCategoryInput(body.timeEntryCategories) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -394,6 +413,26 @@ function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportRemind
       400,
       'InvalidWeeklyReportReminderSettings',
       'Weekly report reminder flags, weekdays, or hours are invalid, or both notices use the same hour.',
+    )
+  }
+  return settings
+}
+
+/**
+ * Validates the work category settings of a profile update.
+ *
+ * @param value - Untrusted `timeEntryCategories` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a key, name, or flag is invalid, a key repeats, there are
+ *   too many categories, or none is active.
+ */
+function readTenantTimeEntryCategoryInput(value: unknown): WorkspaceTimeEntryCategorySettings {
+  const settings = readWorkspaceTimeEntryCategorySettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTimeEntryCategorySettings',
+      'Work category keys, names, or flags are invalid, a key repeats, or no category is active.',
     )
   }
   return settings

@@ -1,3 +1,4 @@
+import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
 import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
 import type { WorkspaceCalendarSettings } from './workspace-calendar'
 
@@ -37,6 +38,8 @@ export type TenantProfile = {
   calendar?: WorkspaceCalendarSettings
   /** When unsubmitted weekly reports are reminded; absent until an administrator chooses. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /** Work categories offered for time entries; absent until an administrator chooses them. */
+  timeEntryCategories?: WorkspaceTimeEntryCategorySettings
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -239,6 +242,11 @@ export type UpdateTenantProfileInput = {
   calendar?: WorkspaceCalendarSettings
   /** Weekly report reminder settings; omitted keeps the stored settings. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /**
+   * Work categories for time entries; omitted keeps the stored settings. A category already
+   * offered may be retired but not removed.
+   */
+  timeEntryCategories?: WorkspaceTimeEntryCategorySettings
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

@@ -1,4 +1,9 @@
-import { isWeeklyReportDate, isWorkspaceWeekStartDay, type WorkspaceWeekStartDay } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  isWeeklyReportDate,
+  isWorkspaceWeekStartDay,
+  type WorkspaceWeekStartDay,
+} from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
@@ -10,6 +15,8 @@ import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
+import { useWorkspaceTimeEntryCategories } from '../../workspace/queries/useWorkspaceTimeEntryCategories'
+import { TimeEntryCategoryContext } from '../../features/time-tracking/model/timeEntryCategoryContext'
 import { resolveTimeReportGroupBy, resolveTimeReportRange } from '../../features/time-tracking/model/timeReport'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
@@ -64,6 +71,10 @@ export function TeamTimeTrackingPage() {
   const accessToken = enabled ? workspace.accessToken : undefined
   const calendarSettings = useWorkspaceCalendarSettings(accessToken, enabled)
   const weekStartDay = calendarSettings.settings?.weekStartDay
+  // Until the Workspace categories load, or when they fail to, the built-in categories are shown;
+  // the server still refuses a category the Workspace does not offer.
+  const categorySettings = useWorkspaceTimeEntryCategories(accessToken, enabled).settings ??
+    DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
   const requestedWeek = searchParams.get('week') ?? undefined
   const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
   // A weekly report opened from its history keeps the week it was saved under, even when the
@@ -166,115 +177,117 @@ export function TeamTimeTrackingPage() {
 
   return (
     <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
-      <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
-        <TimeTrackingViewTabs
-          getHref={tabHref}
-          onSelect={(candidate) => { void navigate(tabHref(candidate), { replace: true }) }}
-          t={t}
-          view={view}
-        />
-        {lookupError ? (
-          <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
-            <span>{t('timeTracking.page.lookupError')}</span>
-            <button
-              className="workbench-button-secondary min-h-8 px-3"
-              onClick={() => { void Promise.all([workItems.mutate(), writeAccess.mutate(), projectMembers.mutate()]).catch(() => undefined) }}
-              type="button"
-            >
-              {t('timeTracking.page.lookupRetry')}
-            </button>
-          </div>
-        ) : null}
-        {view === 'report' ? (
-          <TimeReportContainer
-            accessToken={accessToken}
-            groupBy={reportGroupBy}
-            key={`${teamId}:report`}
-            labels={reportLabels}
-            locale={workspace.locale}
-            onChange={(range, groupBy) => {
-              void navigate(createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy }), { replace: true })
-            }}
-            projects={teamProjects}
-            range={reportRange}
-            teamId={teamId}
+      <TimeEntryCategoryContext value={categorySettings}>
+        <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
+          <TimeTrackingViewTabs
+            getHref={tabHref}
+            onSelect={(candidate) => { void navigate(tabHref(candidate), { replace: true }) }}
+            t={t}
+            view={view}
           />
-        ) : !calendarSettings.settings ? (
-          calendarSettings.error ? (
+          {lookupError ? (
             <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
-              <span>{t('timeTracking.page.calendarSettingsError')}</span>
+              <span>{t('timeTracking.page.lookupError')}</span>
               <button
                 className="workbench-button-secondary min-h-8 px-3"
-                onClick={calendarSettings.retry}
+                onClick={() => { void Promise.all([workItems.mutate(), writeAccess.mutate(), projectMembers.mutate()]).catch(() => undefined) }}
                 type="button"
               >
-                {t('timeTracking.page.calendarSettingsRetry')}
+                {t('timeTracking.page.lookupRetry')}
               </button>
             </div>
+          ) : null}
+          {view === 'report' ? (
+            <TimeReportContainer
+              accessToken={accessToken}
+              groupBy={reportGroupBy}
+              key={`${teamId}:report`}
+              labels={reportLabels}
+              locale={workspace.locale}
+              onChange={(range, groupBy) => {
+                void navigate(createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy }), { replace: true })
+              }}
+              projects={teamProjects}
+              range={reportRange}
+              teamId={teamId}
+            />
+          ) : !calendarSettings.settings ? (
+            calendarSettings.error ? (
+              <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+                <span>{t('timeTracking.page.calendarSettingsError')}</span>
+                <button
+                  className="workbench-button-secondary min-h-8 px-3"
+                  onClick={calendarSettings.retry}
+                  type="button"
+                >
+                  {t('timeTracking.page.calendarSettingsRetry')}
+                </button>
+              </div>
+            ) : (
+              // Weekly views are laid out only once the Workspace week start is known.
+              <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+                {t('timeTracking.page.calendarSettingsLoading')}
+              </p>
+            )
+          ) : view === 'weekly-report' ? (
+            <PersonalWeeklyReportContainer
+              accessToken={accessToken}
+              hasWorkItemError={Boolean(myWorkItems.error)}
+              key={`${teamId}:weekly-report:${reportWeekStart}`}
+              locale={workspace.locale}
+              memberKey={workspace.userKey}
+              onMoveWeek={moveWeek}
+              onOpenWeek={(nextWeekStart) => {
+                void navigate(createTeamTimeTrackingPath(teamId, 'weekly-report', nextWeekStart, undefined, true), { replace: true })
+              }}
+              onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
+              teamId={teamId}
+              weekStart={reportWeekStart}
+              weekStartDay={reportWeekStartDay ?? calendarSettings.settings.weekStartDay}
+              workItems={myWorkItems.data}
+              workItemTitles={workItemTitles}
+            />
+          ) : view === 'team-weekly-reports' ? (
+            <TeamWeeklyReportsContainer
+              accessToken={accessToken}
+              key={`${teamId}:team-weekly-reports:${weekStart}`}
+              locale={workspace.locale}
+              memberNames={memberNames}
+              onMoveWeek={moveWeek}
+              teamId={teamId}
+              weekStart={weekStart}
+              weekStartDay={calendarSettings.settings.weekStartDay}
+            />
+          ) : view === 'approvals' ? (
+            <TimeApprovalQueueContainer
+              accessToken={accessToken}
+              key={`${teamId}:approvals`}
+              locale={workspace.locale}
+              memberNames={memberNames}
+              onMoveWeek={moveWeek}
+              teamId={teamId}
+              weekStart={weekStart}
+              weekStartDay={calendarSettings.settings.weekStartDay}
+              workItemTitles={workItemTitles}
+            />
           ) : (
-            // Weekly views are laid out only once the Workspace week start is known.
-            <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
-              {t('timeTracking.page.calendarSettingsLoading')}
-            </p>
-          )
-        ) : view === 'weekly-report' ? (
-          <PersonalWeeklyReportContainer
-            accessToken={accessToken}
-            hasWorkItemError={Boolean(myWorkItems.error)}
-            key={`${teamId}:weekly-report:${reportWeekStart}`}
-            locale={workspace.locale}
-            memberKey={workspace.userKey}
-            onMoveWeek={moveWeek}
-            onOpenWeek={(nextWeekStart) => {
-              void navigate(createTeamTimeTrackingPath(teamId, 'weekly-report', nextWeekStart, undefined, true), { replace: true })
-            }}
-            onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
-            teamId={teamId}
-            weekStart={reportWeekStart}
-            weekStartDay={reportWeekStartDay ?? calendarSettings.settings.weekStartDay}
-            workItems={myWorkItems.data}
-            workItemTitles={workItemTitles}
-          />
-        ) : view === 'team-weekly-reports' ? (
-          <TeamWeeklyReportsContainer
-            accessToken={accessToken}
-            key={`${teamId}:team-weekly-reports:${weekStart}`}
-            locale={workspace.locale}
-            memberNames={memberNames}
-            onMoveWeek={moveWeek}
-            teamId={teamId}
-            weekStart={weekStart}
-            weekStartDay={calendarSettings.settings.weekStartDay}
-          />
-        ) : view === 'approvals' ? (
-          <TimeApprovalQueueContainer
-            accessToken={accessToken}
-            key={`${teamId}:approvals`}
-            locale={workspace.locale}
-            memberNames={memberNames}
-            onMoveWeek={moveWeek}
-            teamId={teamId}
-            weekStart={weekStart}
-            weekStartDay={calendarSettings.settings.weekStartDay}
-            workItemTitles={workItemTitles}
-          />
-        ) : (
-          <PersonalTimesheetContainer
-            accessToken={accessToken}
-            key={`${teamId}:timesheet`}
-            locale={workspace.locale}
-            {...(workspace.userKey ? { memberKey: workspace.userKey } : {})}
-            onMoveWeek={moveWeek}
-            teamId={teamId}
-            weekStart={weekStart}
-            weekStartDay={calendarSettings.settings.weekStartDay}
-            isLoadingWorkItemOptions={isLoadingWorkItemOptions}
-            {...(indirectTargets ? { indirectTargets } : {})}
-            workItemOptions={workItemOptions}
-            workItemTitles={workItemTitles}
-          />
-        )}
-      </div>
+            <PersonalTimesheetContainer
+              accessToken={accessToken}
+              key={`${teamId}:timesheet`}
+              locale={workspace.locale}
+              {...(workspace.userKey ? { memberKey: workspace.userKey } : {})}
+              onMoveWeek={moveWeek}
+              teamId={teamId}
+              weekStart={weekStart}
+              weekStartDay={calendarSettings.settings.weekStartDay}
+              isLoadingWorkItemOptions={isLoadingWorkItemOptions}
+              {...(indirectTargets ? { indirectTargets } : {})}
+              workItemOptions={workItemOptions}
+              workItemTitles={workItemTitles}
+            />
+          )}
+        </div>
+      </TimeEntryCategoryContext>
     </WorkspaceRouteContent>
   )
 }

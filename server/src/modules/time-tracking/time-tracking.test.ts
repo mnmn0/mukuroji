@@ -530,6 +530,95 @@ describe('TimeTrackingService', () => {
     expect(timed.category).toBe('review')
   })
 
+  test('records time only under categories the Workspace offers and names them in reports', async () => {
+    let id = 0
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: {
+        readCategories: async () => ({
+          categories: [
+            { key: 'meeting', label: '打ち合わせ', active: true },
+            { key: 'custom-sales', label: '営業支援', active: true },
+            { key: 'leave', active: false },
+          ],
+        }),
+      },
+    })
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 60, timeZone: 'Asia/Tokyo' },
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    const sales = await service.createEntry({ ...base, category: 'custom-sales' }, false)
+    expect(sales.category).toBe('custom-sales')
+    // A retired category and one the Workspace does not define are both refused for new time.
+    for (const category of ['leave', 'design']) {
+      await expect(service.createEntry({ ...base, category }, false)).rejects.toMatchObject({
+        status: 400,
+        code: 'InvalidTimeEntryCategory',
+      })
+    }
+    await expect(service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: sales.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: 'leave',
+    })).rejects.toMatchObject({ status: 400, code: 'InvalidTimeEntryCategory' })
+
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      { key: 'custom-sales', label: '営業支援', minutes: 60 },
+    ])
+  })
+
+  test('keeps a category the Workspace retired after the entry was recorded', async () => {
+    let active = true
+    let id = 0
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: { readCategories: async () => ({ categories: [{ key: 'custom-sales', label: '営業支援', active }, { key: 'meeting', active: true }] }) },
+    })
+    const entry = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 60, timeZone: 'Asia/Tokyo' },
+      category: 'custom-sales',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+    active = false
+    const edited = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: 'custom-sales',
+      description: 'Proposal review',
+    })
+    expect(edited).toMatchObject({ category: 'custom-sales', description: 'Proposal review' })
+  })
+
   test('rejects invalid date-and-minutes entries', async () => {
     const { service } = createFixture()
     const base = {

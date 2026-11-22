@@ -1,4 +1,12 @@
-import type { TimeEntry, TimeEntryCategory, TimeEntryStatus } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  isBuiltInTimeEntryCategory,
+  type BuiltInTimeEntryCategory,
+  type TimeEntry,
+  type TimeEntryCategory,
+  type TimeEntryStatus,
+  type WorkspaceTimeEntryCategorySettings,
+} from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { classifyTimeTrackingFailure } from '../model/timeTrackingFailure'
 
@@ -33,7 +41,7 @@ export const timeEntryStatusBadgeClasses: Record<TimeEntryStatus, string> = {
   locked: 'workbench-badge',
 }
 
-/** Message key of each work category. */
+/** Message key of each built-in work category. */
 export const timeEntryCategoryKeys = {
   design: 'timeTracking.report.category.design',
   implementation: 'timeTracking.report.category.implementation',
@@ -42,7 +50,26 @@ export const timeEntryCategoryKeys = {
   management: 'timeTracking.report.category.management',
   training: 'timeTracking.report.category.training',
   leave: 'timeTracking.report.category.leave',
-} as const satisfies Record<TimeEntryCategory, MessageKey>
+} as const satisfies Record<BuiltInTimeEntryCategory, MessageKey>
+
+/**
+ * Names a work category: the name the Workspace gave it, the translated name of a built-in
+ * category, or the key of a category the Workspace no longer lists.
+ *
+ * @param t - Translator.
+ * @param category - Category key.
+ * @param categories - Workspace work categories.
+ * @returns Display name.
+ */
+export function describeTimeEntryCategory(
+  t: TimeTrackingTranslator,
+  category: TimeEntryCategory,
+  categories: WorkspaceTimeEntryCategorySettings = DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+): string {
+  const label = categories.categories.find((definition) => definition.key === category)?.label
+  if (label !== undefined) return label
+  return isBuiltInTimeEntryCategory(category) ? t(timeEntryCategoryKeys[category]) : category
+}
 
 /**
  * Names what an entry was spent on: its Work Item, or its work category for indirect work.
@@ -50,17 +77,19 @@ export const timeEntryCategoryKeys = {
  * @param t - Translator.
  * @param entry - Entry to describe.
  * @param workItemTitles - Work Item titles keyed by identifier.
+ * @param categories - Workspace work categories; the built-in ones when omitted.
  * @returns The Work Item title (or identifier), or an indirect-work label with the category.
  */
 export function describeTimeEntrySubject(
   t: TimeTrackingTranslator,
   entry: Pick<TimeEntry, 'category' | 'workItemId'>,
   workItemTitles: Readonly<Record<string, string>>,
+  categories?: WorkspaceTimeEntryCategorySettings,
 ): string {
   if (entry.workItemId !== undefined) return workItemTitles[entry.workItemId] ?? entry.workItemId
   const category = entry.category === undefined
     ? t('timeTracking.report.category.uncategorized')
-    : t(timeEntryCategoryKeys[entry.category])
+    : describeTimeEntryCategory(t, entry.category, categories)
   return interpolate(t('timeTracking.entry.indirect'), { category })
 }
 

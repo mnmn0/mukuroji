@@ -11,11 +11,13 @@ import type {
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
   WorkspaceCalendarSettingsResponse,
+  WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceNationalHolidayDates,
+  readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
@@ -63,6 +65,26 @@ export async function getWorkspaceCalendarSettings(
   // A missing or malformed list falls back to the bundled national holidays.
   const nationalHolidayDates = readWorkspaceNationalHolidayDates(body)
   return nationalHolidayDates ? { ...settings, nationalHolidayDates } : settings
+}
+
+/**
+ * Retrieves the work categories every Workspace member records time under.
+ *
+ * @param accessToken - Bearer token used for the read.
+ * @param signal - Optional cancellation signal for the request.
+ * @returns The validated Workspace work categories, active and retired.
+ * @throws WorkspaceAccessApiError When the request fails or the response is malformed.
+ */
+export async function getWorkspaceTimeEntryCategories(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceTimeEntryCategorySettings> {
+  const body = await sendTenantRequest('/workspace/time-entry-categories', accessToken, { signal })
+  const settings = readWorkspaceTimeEntryCategorySettings(body)
+  if (!settings) {
+    throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
+  }
+  return settings
 }
 
 /**
@@ -333,6 +355,8 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     (value.calendar === undefined || readWorkspaceCalendarSettings(value.calendar) !== undefined) &&
     (value.weeklyReportReminders === undefined ||
       readWeeklyReportReminderSettings(value.weeklyReportReminders) !== undefined) &&
+    (value.timeEntryCategories === undefined ||
+      readWorkspaceTimeEntryCategorySettings(value.timeEntryCategories) !== undefined) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
     (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&

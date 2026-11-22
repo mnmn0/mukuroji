@@ -14,6 +14,7 @@ export {
   type StartTimerInput,
   type StopTimerInput,
   type TimeTrackingAuditOptions,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
   type TimeTrackingReportInput,
   type TimeTrackingRepository,

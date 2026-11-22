@@ -20,6 +20,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from '../model/timeEntryCategoryContext'
 
 /** Props of the member's weekly timesheet. */
 export type PersonalTimesheetProps = {
@@ -100,6 +101,7 @@ export function PersonalTimesheet({
   workItemTitles,
 }: PersonalTimesheetProps) {
   const id = useId()
+  const categories = useTimeEntryCategories()
   const [creating, setCreating] = useState<'work-item' | 'indirect'>()
   const canRecordIndirect = indirectTargets !== undefined &&
     (indirectTargets.allowNoProject || indirectTargets.projects.length > 0)
@@ -244,7 +246,7 @@ export function PersonalTimesheet({
               {rows.map((row) => (
                 <tr className="border-t border-[var(--workbench-border)]" key={row.key}>
                   <th className="sticky left-0 max-w-[220px] truncate bg-surface px-3 py-2 text-left font-medium text-[var(--workbench-text)]" scope="row">
-                    {describeTimeEntrySubject(t, row, workItemTitles)}
+                    {describeTimeEntrySubject(t, row, workItemTitles, categories)}
                   </th>
                   {week.days.map((date) => (
                     <td className="px-2 py-2 text-right tabular-nums text-[var(--workbench-text)]" key={date}>

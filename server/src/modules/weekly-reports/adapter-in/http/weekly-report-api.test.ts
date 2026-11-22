@@ -222,7 +222,7 @@ test('rejects invalid weeks and bodies', async () => {
   expect(tooLong.status).toBe(400)
   const badMinutes = await request(`${OWN_PATH}/submissions`, 'POST', { ...submission(0), totalMinutes: -1 })
   expect(badMinutes.status).toBe(400)
-  const unknownCategory = await request(`${OWN_PATH}/submissions`, 'POST', { ...submission(0), indirectTime: [{ category: 'lunch', minutes: 30 }] })
+  const unknownCategory = await request(`${OWN_PATH}/submissions`, 'POST', { ...submission(0), indirectTime: [{ category: 'Lunch break', minutes: 30 }] })
   expect(unknownCategory.status).toBe(400)
   const repeatedCategory = await request(`${OWN_PATH}/submissions`, 'POST', {
     ...submission(0),

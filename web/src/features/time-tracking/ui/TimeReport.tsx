@@ -1,7 +1,7 @@
 import {
   NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
-  type TimeEntryCategory,
+  isBuiltInTimeEntryCategory,
   type TimeSummaryGroup,
   type TimeTrackingGroupBy,
   type TimeTrackingSummary,
@@ -72,16 +72,6 @@ const groupByKeys = {
 } as const satisfies Record<TimeTrackingGroupBy, string>
 
 /**
- * Returns whether a report key names a known work category.
- *
- * @param key - Report group key.
- * @returns Whether the key is a category with a message.
- */
-function isCategoryKey(key: string): key is TimeEntryCategory {
-  return Object.hasOwn(timeEntryCategoryKeys, key)
-}
-
-/**
  * Team report: totals grouped by day, week, member, Project, or Work Item for a period, with a CSV
  * export of the same report. Cost columns appear only when the server returned costs.
  *
@@ -134,7 +124,10 @@ export function TimeReport({
         return labels.workItems[group.key] ?? group.label
       case 'category':
         if (group.key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.category.uncategorized')
-        return isCategoryKey(group.key) ? t(timeEntryCategoryKeys[group.key]) : group.label
+        // The server labels a category with the name the Workspace gave it, or with its key.
+        return group.label === group.key && isBuiltInTimeEntryCategory(group.key)
+          ? t(timeEntryCategoryKeys[group.key])
+          : group.label
     }
   }
 

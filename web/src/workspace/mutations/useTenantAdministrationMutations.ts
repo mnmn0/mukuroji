@@ -20,6 +20,7 @@ import {
   type MutationRequestContext,
 } from '../../shared/api/mutationHeaders'
 import { isWorkspaceCalendarSettingsKey } from '../queries/useWorkspaceCalendarSettings'
+import { isWorkspaceTimeEntryCategoriesKey } from '../queries/useWorkspaceTimeEntryCategories'
 
 /** Stable error view returned by tenant administration mutations. */
 export type TenantAdministrationMutationError = {
@@ -90,6 +91,7 @@ export function useTenantAdministrationMutations({
         defaultPolicy: profile.defaultPolicy,
         ...(profile.calendar ? { calendar: profile.calendar } : {}),
         ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
+        ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
         expectedRevision: profile.revision,
       }, context),
     )
@@ -97,6 +99,10 @@ export function useTenantAdministrationMutations({
     // the saved value is written into every cached entry instead of only revalidating mounted ones.
     if (saved && profile.calendar) {
       await mutateGlobal(isWorkspaceCalendarSettingsKey, profile.calendar, { revalidate: false })
+        .catch(() => undefined)
+    }
+    if (saved && profile.timeEntryCategories) {
+      await mutateGlobal(isWorkspaceTimeEntryCategoriesKey, profile.timeEntryCategories, { revalidate: false })
         .catch(() => undefined)
     }
     return saved

@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono'
 import {
-  TIME_ENTRY_CATEGORIES,
+  readTimeEntryCategoryKey,
   type TimeEntry,
   type TimeEntryCategory,
   type TimeEntryStatus,
@@ -857,9 +857,9 @@ function readExpectedRevisionQuery(value: string | undefined): number {
 
 /** Reads a work category from a request body. */
 function readCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) {
-    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'category must be a work category key.')
   }
   return category
 }

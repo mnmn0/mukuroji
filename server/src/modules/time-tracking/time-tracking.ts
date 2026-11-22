@@ -8,9 +8,12 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
-  TIME_ENTRY_CATEGORIES,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
+  isActiveTimeEntryCategory,
+  readTimeEntryCategoryKey,
+  type WorkspaceTimeEntryCategorySettings,
   type RunningTimer,
   type TimeBudget,
   type TimeEntry,
@@ -356,6 +359,22 @@ export type TimeTrackingEstimateSource = {
   listPlannedEffort(workspaceId: string, teamId: string): Promise<ReadonlyMap<string, number>>
 }
 
+/**
+ * Read port for the work categories a Workspace offers.
+ *
+ * The categories are owned by the tenant profile; time tracking only checks new entries against
+ * them and names report groups with them.
+ */
+export type TimeTrackingCategorySource = {
+  /**
+   * Reads the Workspace work categories.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns The stored categories, or the defaults when the Workspace has not saved any.
+   */
+  readCategories(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings>
+}
+
 /** A budget update request. */
 export type SaveTimeBudgetInput = {
   /** Workspace identifier. */
@@ -641,6 +660,8 @@ export class TimeTrackingService {
   private readonly idempotency?: TimeTrackingIdempotencyPort
   /** Read port for canonical Work Item estimates. */
   private readonly estimates?: TimeTrackingEstimateSource
+  /** Read port for Workspace work categories; the built-in categories when absent. */
+  private readonly categories?: TimeTrackingCategorySource
 
   /** Creates a time tracking service. */
   constructor(
@@ -651,6 +672,7 @@ export class TimeTrackingService {
       audit?: TimeTrackingAuditOptions
       idempotency?: TimeTrackingIdempotencyPort
       estimates?: TimeTrackingEstimateSource
+      categories?: TimeTrackingCategorySource
     } = {},
   ) {
     this.repository = repository
@@ -659,6 +681,33 @@ export class TimeTrackingService {
     this.audit = options.audit
     this.idempotency = options.idempotency
     this.estimates = options.estimates
+    this.categories = options.categories
+  }
+
+  /**
+   * Reads the Workspace work categories, or the built-in ones when no source is configured.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Work category settings in effect.
+   */
+  private async readCategorySettings(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings> {
+    return this.categories
+      ? await this.categories.readCategories(workspaceId)
+      : DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  }
+
+  /**
+   * Requires that new work may be recorded under a category.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param category - Requested category key.
+   * @throws TimeTrackingError When the Workspace does not offer the category or has retired it.
+   */
+  private async requireActiveCategory(workspaceId: string, category: TimeEntryCategory): Promise<void> {
+    const settings = await this.readCategorySettings(workspaceId)
+    if (!isActiveTimeEntryCategory(settings, category)) {
+      throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'The Workspace does not offer this work category.')
+    }
   }
 
   /** Creates a manual time entry in draft state. */
@@ -681,6 +730,7 @@ export class TimeTrackingService {
     completion?: TimeTrackingIdempotencyCompletion,
   ): Promise<TimeEntry> {
     const normalized = normalizeCreateInput(input, canManageRates)
+    if (normalized.category !== undefined) await this.requireActiveCategory(normalized.workspaceId, normalized.category)
     const periodGuard = await this.requireOpenPeriod(normalized.workspaceId, normalized.teamId, [normalized])
     const now = readNow(this.now)
     const entry: TimeEntry = {
@@ -764,6 +814,10 @@ export class TimeTrackingService {
         ? undefined
         : readCategory(input.category)
     requireWorkItemOrCategory(workItemId, category)
+    // An entry may keep a category the Workspace retired after it was recorded; only a change is checked.
+    if (category !== undefined && category !== current.category) {
+      await this.requireActiveCategory(current.workspaceId, category)
+    }
     const currency = input.currency ?? current.currency
     validateCurrency(currency)
     const hourlyRateMinor = input.hourlyRateMinor === undefined
@@ -1457,7 +1511,10 @@ export class TimeTrackingService {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const categoryLabels = input.groupBy === 'category'
+      ? readCategoryLabels(await this.readCategorySettings(input.workspaceId))
+      : undefined
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels)
     const includeBudget = input.includeCosts && (
       input.budgetScope !== 'project' ||
       input.managedProjectIds === undefined ||
@@ -2454,15 +2511,15 @@ function resolveDurationInterval(duration: TimeEntryDurationInput): { startAt: s
 }
 
 /**
- * Validates a work category.
+ * Validates the shape of a work category key; whether the Workspace offers it is checked separately.
  *
- * @param value - Category value from a request or a stored entry.
- * @returns The category when it is one of the supported values.
+ * @param value - Category value from a request.
+ * @returns The category key.
  */
 function readCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) {
-    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `Category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'Category must be a work category key.')
   }
   return category
 }
@@ -2623,6 +2680,7 @@ function aggregateEntries(
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
   managedProjectIds?: ReadonlySet<string>,
+  categoryLabels?: ReadonlyMap<string, string>,
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
     return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds)
@@ -2638,7 +2696,7 @@ function aggregateEntries(
         : groupBy === 'category'
           ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
           : entry.projectId ?? 'unassigned'
-    const group = grouped.get(key) ?? createMutableSummaryGroup(key, readFallbackGroupLabel(groupBy, entry))
+    const group = grouped.get(key) ?? createMutableSummaryGroup(key, categoryLabels?.get(key) ?? readFallbackGroupLabel(groupBy, entry))
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
     group.entryIds.add(entry.id)
@@ -2653,6 +2711,18 @@ function aggregateEntries(
   return [...grouped.values()]
     .sort((left, right) => left.key.localeCompare(right.key))
     .map((group) => toSummaryGroup(group, includeCosts))
+}
+
+/**
+ * Collects the names the Workspace gave its work categories, for report group labels.
+ *
+ * @param settings - Workspace work category settings.
+ * @returns Names keyed by category; built-in categories without a name are left out and keep
+ *   their key as the label.
+ */
+function readCategoryLabels(settings: WorkspaceTimeEntryCategorySettings): ReadonlyMap<string, string> {
+  return new Map(settings.categories.flatMap((category) =>
+    category.label === undefined ? [] : [[category.key, category.label] as const]))
 }
 
 /**
@@ -3249,13 +3319,15 @@ function readDurationOnlyFlag(value: unknown): true {
 }
 
 /**
- * Reads a stored work category, failing closed on values this version does not know.
+ * Reads a stored work category key, failing closed on values that are not a key.
+ *
+ * The key is not checked against the Workspace categories, which may have retired it since.
  *
  * @param value - Stored `category` attribute.
  * @returns The stored category.
  */
 function readStoredCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry category is invalid.')
   return category
 }
