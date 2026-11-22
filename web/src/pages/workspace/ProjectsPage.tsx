@@ -29,6 +29,7 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
  */
 export function ProjectsPage() {
   const workspace = useWorkspaceRouteContext()
+  const loadArchiveImpact = workspace.onLoadArchiveImpact
   const navigate = useNavigate()
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const { teamId: routeTeamId } = useParams()
@@ -221,6 +222,13 @@ export function ProjectsPage() {
                     project.teamId,
                     project.projectId,
                   )
+                : undefined}
+              onLoadArchiveImpact={loadArchiveImpact
+                ? async (project) => await loadArchiveImpact({
+                    kind: 'project',
+                    teamId: project.teamId,
+                    projectId: project.projectId,
+                  })
                 : undefined}
               onAssigneeChange={(assigneeId) => replaceFilter('assignee', assigneeId)}
               onClearFilters={clearFilters}

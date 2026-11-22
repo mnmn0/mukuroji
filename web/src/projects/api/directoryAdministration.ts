@@ -1,6 +1,8 @@
 import {
   isDirectoryAdministrationResponse,
+  isDirectoryArchiveImpactResponse,
   type DirectoryAdministrationTeam,
+  type DirectoryArchiveImpactResponse,
   type RenameDirectoryProjectInput,
   type RenameDirectoryTeamInput,
 } from '@mukuroji/contracts'
@@ -30,6 +32,49 @@ export async function getDirectoryAdministration(
   }
 
   return data.teams
+}
+
+/** Team or Project whose archive impact is read. */
+export type DirectoryArchiveImpactTarget =
+  | {
+      /** A Team and every Project in it. */
+      kind: 'team'
+      /** Team identifier. */
+      teamId: string
+    }
+  | {
+      /** One Project of a Team. */
+      kind: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Project identifier. */
+      projectId: string
+    }
+
+/**
+ * Reads what archiving a Team or Project affects, for the archive confirmation.
+ *
+ * @param accessToken - Bearer token of the administrator.
+ * @param target - Team or Project about to be archived.
+ * @param signal - Optional abort signal.
+ * @returns Open Work Items, active Agent Runs, Planning references, and Webhook counts.
+ */
+export async function getDirectoryArchiveImpact(
+  accessToken: string,
+  target: DirectoryArchiveImpactTarget,
+  signal?: AbortSignal,
+): Promise<DirectoryArchiveImpactResponse> {
+  const teamPath = `/teams/${encodeURIComponent(target.teamId)}`
+  const path = target.kind === 'team'
+    ? `${teamPath}/archive-impact`
+    : `${teamPath}/projects/${encodeURIComponent(target.projectId)}/archive-impact`
+  const data = await sendDirectoryAdministrationRequest(path, accessToken, { signal })
+
+  if (!isDirectoryArchiveImpactResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
 }
 
 /**

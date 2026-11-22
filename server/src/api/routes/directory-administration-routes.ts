@@ -9,6 +9,7 @@ import {
   requireWorkspaceAdministration,
   toProjectDataErrorResponse,
 } from '../shared/project-access'
+import { readDirectoryArchiveImpact } from '../shared/directory-archive-impact'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { syncDirectorySearchDocumentBestEffort } from '../shared/search-access'
@@ -29,6 +30,25 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       await workspaceDependencies.projectDirectory.getDirectoryAdministration(
         principal.directoryId,
       ))
+  })
+
+  /** Counts what archiving an active Team affects, before the archive is confirmed. */
+  routeApp.get('/api/teams/:teamId/archive-impact', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) =>
+      await readDirectoryArchiveImpact(principal.directoryId, {
+        kind: 'team',
+        teamId: readRouteIdentifier(c, 'teamId'),
+      }))
+  })
+
+  /** Counts what archiving an active Project affects, before the archive is confirmed. */
+  routeApp.get('/api/teams/:teamId/projects/:projectId/archive-impact', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) =>
+      await readDirectoryArchiveImpact(principal.directoryId, {
+        kind: 'project',
+        teamId: readRouteIdentifier(c, 'teamId'),
+        projectId: readRouteIdentifier(c, 'projectId'),
+      }))
   })
 
   /** Sets the display order of every active Team. */
@@ -231,8 +251,16 @@ function readRouteIdentifier(c: Context, name: 'teamId' | 'projectId') {
     throw new ProjectDataError(400, 'InvalidProjectWrite', `${name} is required.`)
   }
 
+  // Matches the reorder list bound, and keeps an oversized key from reaching DynamoDB as a 500.
+  if (value.length > DIRECTORY_ROUTE_IDENTIFIER_MAX_LENGTH || /\p{Cc}/u.test(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', `${name} is invalid.`)
+  }
+
   return value
 }
+
+/** Longest Team or Project identifier a directory administration route accepts. */
+const DIRECTORY_ROUTE_IDENTIFIER_MAX_LENGTH = 256
 
 /**
  * Brings the Team search document in line with one strongly consistent read of the Team.

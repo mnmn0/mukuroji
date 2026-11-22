@@ -1,5 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
+import {
+  ArchiveImpactNotice,
+  isArchiveImpactConfirmDisabled,
+  useArchiveImpact,
+  type ArchiveImpactLabels,
+  type ArchiveImpactState,
+  type ArchiveImpactSummary,
+} from '../archive-impact'
 import { BrandMark } from '../BrandMark'
 import { HandoffIcon, FormIcon } from '../icons'
 
@@ -222,7 +230,26 @@ export type SidebarArchiveLabels = {
    * 確認 dialog の実行ボタンです。
    */
   confirm: string
+  /** Labels of the archive impact counts; the counts are not shown without them. */
+  impact?: ArchiveImpactLabels
 }
+
+/** Team or Project whose archive impact the sidebar asks for. */
+export type SidebarArchiveImpactTarget =
+  | {
+      /** A Team and every Project in it. */
+      kind: 'team'
+      /** Team identifier. */
+      teamId: string
+    }
+  | {
+      /** One Project of a Team. */
+      kind: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Project identifier. */
+      projectId: string
+    }
 
 /**
  * サイドバーで使う表示文言です。
@@ -466,6 +493,8 @@ export type SidebarProps = {
    * プロジェクトをアーカイブするときに呼ばれます。
    */
   onArchiveProject?: (teamId: string, projectId: string) => void | Promise<void>
+  /** Reads what archiving a Team or Project affects, shown in the archive confirmation. */
+  onLoadArchiveImpact?: (target: SidebarArchiveImpactTarget) => Promise<ArchiveImpactSummary>
   /**
    * 主要ナビゲーションが選択されたときに呼ばれます。
    */
@@ -541,6 +570,22 @@ type SidebarArchiveTarget = {
    * プロジェクトを対象とする場合のプロジェクト ID です。
    */
   projectId?: string
+}
+
+/**
+ * Converts the open archive confirmation into the target whose impact is read.
+ *
+ * @param target - Open confirmation target, if any.
+ * @returns The Team or Project target, or undefined when nothing is confirmed.
+ */
+function toSidebarArchiveImpactTarget(
+  target: SidebarArchiveTarget | undefined,
+): SidebarArchiveImpactTarget | undefined {
+  if (!target) return undefined
+  if (target.kind === 'team') return { kind: 'team', teamId: target.teamId }
+  return target.projectId === undefined
+    ? undefined
+    : { kind: 'project', teamId: target.teamId, projectId: target.projectId }
 }
 
 /** Adapts the shared document outline to the sidebar's size classes. */
@@ -760,6 +805,7 @@ export function Sidebar({
   onCreateProject,
   onArchiveTeam,
   onArchiveProject,
+  onLoadArchiveImpact,
   onSelectNav,
   onSelectTeamView,
   showFactoryBoard = true,
@@ -821,6 +867,13 @@ export function Sidebar({
   const [archivingItemKey, setArchivingItemKey] = useState<string | undefined>()
   const [archiveErrorMessage, setArchiveErrorMessage] = useState<string | undefined>()
   const [archiveTarget, setArchiveTarget] = useState<SidebarArchiveTarget | undefined>()
+  const archiveImpactTarget = toSidebarArchiveImpactTarget(archiveTarget)
+  const archiveImpact = useArchiveImpact(
+    archiveImpactTarget ? JSON.stringify(archiveImpactTarget) : undefined,
+    archiveImpactTarget && onLoadArchiveImpact && resolvedLabels.archive.impact
+      ? () => onLoadArchiveImpact(archiveImpactTarget)
+      : undefined,
+  )
   const archiveReturnFocusElementRef = useRef<HTMLElement | null>(null)
   const createButtonRef = useRef<HTMLButtonElement>(null)
   const moreButtonRef = useRef<HTMLButtonElement>(null)
@@ -1348,6 +1401,7 @@ export function Sidebar({
       {archiveTarget ? (
         <SidebarArchiveConfirmationModal
           errorMessage={archiveErrorMessage}
+          impact={archiveImpact}
           isBusy={Boolean(archivingItemKey)}
           labels={resolvedLabels.archive}
           fallbackFocusRef={sidebarRef}
@@ -1535,6 +1589,8 @@ type SidebarArchiveConfirmationModalProps = {
    * アーカイブ API を実行中かどうかです。
    */
   isBusy: boolean
+  /** Archive impact counts, when the viewer may read them. */
+  impact?: ArchiveImpactState
   /**
    * dialog 内で使う表示文言です。
    */
@@ -1560,6 +1616,7 @@ type SidebarArchiveConfirmationModalProps = {
 function SidebarArchiveConfirmationModal({
   errorMessage,
   fallbackFocusRef,
+  impact,
   isBusy,
   labels,
   returnFocusRef,
@@ -1657,6 +1714,9 @@ function SidebarArchiveConfirmationModal({
               ? labels.confirmTeamDescription(target.name)
               : labels.confirmProjectDescription(target.name)}
           </p>
+          {impact && labels.impact ? (
+            <ArchiveImpactNotice labels={labels.impact} state={impact} />
+          ) : null}
           {errorMessage ? (
             <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
               {errorMessage}
@@ -1674,7 +1734,7 @@ function SidebarArchiveConfirmationModal({
             </button>
             <button
               className="min-h-10 rounded-[7px] border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition-colors duration-150 hover:border-red-800 hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={isBusy}
+              disabled={isBusy || isArchiveImpactConfirmDisabled(impact)}
               onClick={() => void onConfirm()}
               type="button"
             >

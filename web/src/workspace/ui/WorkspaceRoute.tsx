@@ -489,6 +489,7 @@ function WorkspaceRouteShell({
           mobileDialogLabel={t('sidebar.mobileDialog')}
           onArchiveProject={onArchiveProject ? handleArchiveProject : undefined}
           onArchiveTeam={onArchiveTeam ? handleArchiveTeam : undefined}
+          onLoadArchiveImpact={workspace.onLoadArchiveImpact}
           onCreateProject={workspace.onCreateProject}
           onCreateTeam={workspace.onCreateTeam}
           onMobileClose={closeMobileSidebar}

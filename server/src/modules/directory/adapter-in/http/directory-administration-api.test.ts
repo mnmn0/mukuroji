@@ -126,3 +126,30 @@ test('requires a bearer token', async () => {
 
   expect(response.status).toBe(401)
 })
+
+test('reads the archive impact only for an active Team or Project of a Workspace administrator', async () => {
+  configureFakeProjectClients(true)
+
+  const missingTeam = await app.request('/api/teams/missing-team/archive-impact', { headers })
+  const archivedProject = await app.request(
+    '/api/teams/core-team/projects/old-project/archive-impact',
+    { headers },
+  )
+  const oversizedId = await app.request(`/api/teams/${'x'.repeat(257)}/archive-impact`, { headers })
+
+  expect(missingTeam.status).toBe(404)
+  expect(archivedProject.status).toBe(404)
+  expect(oversizedId.status).toBe(400)
+})
+
+test('denies the archive impact to a Workspace member', async () => {
+  const calls = configureFakeProjectClients(true, { workspaceRole: 'member' })
+
+  const responses = await Promise.all([
+    app.request('/api/teams/core-team/archive-impact', { headers }),
+    app.request('/api/teams/core-team/projects/refero/archive-impact', { headers }),
+  ])
+
+  expect(responses.map((response) => response.status)).toEqual([403, 403])
+  expect(calls.directoryAdministration).toEqual([])
+})
