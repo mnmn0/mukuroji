@@ -239,6 +239,12 @@ describe('Planning API', () => {
     await expect(listArchivedPlanningEntities('token')).rejects.toMatchObject({ status: 502 })
   })
 
+  test('explains a Cycle capacity refusal for a mutation', () => {
+    const exceeded = new PlanningApiError(409, 'raw', 'PlanningCycleCapacityExceeded')
+    expect(resolvePlanningErrorMessageKey(exceeded, 'mutation')).toBe('planning.cycle.capacityExceeded')
+    expect(resolvePlanningErrorMessageKey(exceeded, 'load')).toBe('planning.error')
+  })
+
   test('explains restore preconditions only for a restore', () => {
     const parentArchived = new PlanningApiError(409, 'raw', 'PlanningRestoreParentUnavailable')
     const ownerInactive = new PlanningApiError(409, 'raw', 'PlanningOwnerInactive')

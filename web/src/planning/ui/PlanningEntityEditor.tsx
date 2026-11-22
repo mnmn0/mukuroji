@@ -1,4 +1,6 @@
 import type {
+  CycleCarryOverPolicy,
+  PlanningCadence,
   PlanningEntity,
   PlanningEntityPatch,
   PlanningEntityStatus,
@@ -9,6 +11,8 @@ import type {
 import { useId, useState, type ReactNode } from 'react'
 import {
   createPlanningEntityEditorDraft,
+  cycleCarryOverPolicyOptions,
+  planningCadenceUnitOptions,
   planningEntityStatusOptions,
   planningHealthOptions,
   planningProgressModeOptions,
@@ -58,6 +62,22 @@ export type PlanningEntityEditorLabels = {
   baselineDate: string
   /** Single-day forecast date field for Milestones. */
   forecastDate: string
+  /** Heading of the Cycle settings group. */
+  cycleSettings: string
+  /** Cycle cadence length field. */
+  cadenceCount: string
+  /** Cycle cadence unit field. */
+  cadenceUnit: string
+  /** Cycle Work Item capacity field. */
+  capacity: string
+  /** Hint under the capacity field with the Work Items already in the Cycle. */
+  capacityHint: (committed: number) => string
+  /** Carry-over policy field. */
+  carryOverPolicy: string
+  /** Display names of cadence units. */
+  cadenceUnits: Record<PlanningCadence['unit'], string>
+  /** Display names of carry-over policies. */
+  carryOverPolicies: Record<CycleCarryOverPolicy, string>
   /** Save button. */
   save: string
   /** Reset button that restores the stored values. */
@@ -96,6 +116,8 @@ export type PlanningEntityEditorProps = {
   ownerOptions?: readonly PlanningOwnerOption[]
   /** Notice under the owner field, such as a member-list load failure with a retry button. */
   ownerNotice?: ReactNode
+  /** Work Items currently linked to the Cycle, which its capacity must hold. Ignored for other entities. */
+  cycleWorkItemCount?: number
   /** Disables every control, for example while an AI review is pending. */
   disabled?: boolean
   /** Saves the changed fields. Omit to render the editor read-only. */
@@ -104,12 +126,14 @@ export type PlanningEntityEditorProps = {
 
 /**
  * Edits the title, description, owner, status, health, risk, progress and dates of one
- * Planning entity, and sends only the changed fields.
+ * Planning entity, plus the cadence, capacity and carry-over policy of a Cycle, and sends only
+ * the changed fields.
  *
  * @param props - Entity, labels, owner suggestions and the save callback.
  * @returns The editor form.
  */
 export function PlanningEntityEditor({
+  cycleWorkItemCount = 0,
   disabled = false,
   entity,
   labels,
@@ -131,6 +155,7 @@ export function PlanningEntityEditor({
   const readOnly = !onSave
   const locked = readOnly || disabled || isSaving
   const singleDay = entity.type === 'milestone'
+  const isCycle = entity.type === 'cycle'
 
   /** Applies one field change and clears a stale validation message. */
   const update = (change: Partial<PlanningEntityEditorDraft>) => {
@@ -145,7 +170,7 @@ export function PlanningEntityEditor({
       onSubmit={(event) => {
         event.preventDefault()
         if (!onSave || locked) return
-        const result = resolvePlanningEntityEdit(entity, draft)
+        const result = resolvePlanningEntityEdit(entity, draft, cycleWorkItemCount)
         if (result.kind === 'invalid') {
           setMessage(labels.problems[result.problem])
           return
@@ -266,6 +291,53 @@ export function PlanningEntityEditor({
           )}
           <EditorDate label={singleDay ? labels.forecastDate : labels.forecastEnd} name="forecastEnd" value={draft.forecastEnd} onChange={(forecastEnd) => update({ forecastEnd })} />
         </div>
+        {isCycle ? (
+          <fieldset className="grid gap-3" data-testid="planning-entity-editor-cycle">
+            <legend className="mb-2 text-sm font-semibold text-[var(--workbench-text)]">{labels.cycleSettings}</legend>
+            <div className="grid grid-cols-4 gap-3 max-[1000px]:grid-cols-2 max-[640px]:grid-cols-1">
+              <EditorField label={labels.cadenceCount}>
+                <input
+                  className="workbench-input h-10 px-3"
+                  min={1}
+                  name="cadenceCount"
+                  required
+                  step={1}
+                  type="number"
+                  value={draft.cadenceCount}
+                  onChange={(event) => update({ cadenceCount: event.target.value })}
+                />
+              </EditorField>
+              <EditorSelect
+                label={labels.cadenceUnit}
+                name="cadenceUnit"
+                options={planningCadenceUnitOptions}
+                optionLabels={labels.cadenceUnits}
+                value={draft.cadenceUnit}
+                onChange={(cadenceUnit) => update({ cadenceUnit })}
+              />
+              <EditorField hint={labels.capacityHint(cycleWorkItemCount)} label={labels.capacity}>
+                <input
+                  className="workbench-input h-10 px-3"
+                  min={0}
+                  name="capacity"
+                  required
+                  step={1}
+                  type="number"
+                  value={draft.capacity}
+                  onChange={(event) => update({ capacity: event.target.value })}
+                />
+              </EditorField>
+              <EditorSelect
+                label={labels.carryOverPolicy}
+                name="carryOverPolicy"
+                options={cycleCarryOverPolicyOptions}
+                optionLabels={labels.carryOverPolicies}
+                value={draft.carryOverPolicy}
+                onChange={(carryOverPolicy) => update({ carryOverPolicy })}
+              />
+            </div>
+          </fieldset>
+        ) : null}
       </fieldset>
       {message ? (
         <p className="text-sm font-semibold text-[var(--workbench-muted)]" data-testid="planning-entity-editor-message" role="status">
