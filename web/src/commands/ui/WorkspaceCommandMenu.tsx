@@ -456,6 +456,15 @@ export function WorkspaceCommandMenu({
       return
     }
 
+    if (
+      event.key === 'Enter' &&
+      event.target instanceof HTMLButtonElement &&
+      !event.target.hasAttribute('data-command-index')
+    ) {
+      // Retry and close buttons keep their native Enter activation.
+      return
+    }
+
     if (event.key === 'Enter' && commandItems[activeCommandIndex]) {
       event.preventDefault()
       executeItem(commandItems[activeCommandIndex])

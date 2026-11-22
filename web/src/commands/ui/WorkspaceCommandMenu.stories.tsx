@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { SEARCH_SCHEMA_VERSION, type WorkspaceSearchResult } from '@mukuroji/contracts'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { WorkspaceCommandMenu } from './WorkspaceCommandMenu'
 
 /** Search API behavior a command menu story reproduces. */
@@ -133,12 +133,17 @@ export const CrowdedWorkItemsWithProject: Story = {
  * Project 専用検索だけが失敗し、Workspace 全体の結果と再試行を出す状態です。
  */
 export const ProjectSearchFailed: Story = {
-  args: { accessToken: 'storybook-command-menu-token' },
+  args: { accessToken: 'storybook-command-menu-token', onNavigate: fn() },
   beforeEach: () => installCommandMenuSearchFetch('project-search-failed'),
-  play: async ({ canvasElement }) => {
+  play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement.ownerDocument.body)
     await userEvent.type(canvas.getByLabelText('検索と command を開く'), 'ログイン')
     await expect(await canvas.findByText(/Project の候補を読み込めませんでした/u)).toBeInTheDocument()
-    await expect(canvas.getByRole('button', { name: '再試行' })).toBeInTheDocument()
+    const retry = canvas.getByRole('button', { name: '再試行' })
+    retry.focus()
+    await userEvent.keyboard('{Enter}')
+    // Enter on the focused retry button retries instead of opening the active result.
+    await expect(args.onNavigate).not.toHaveBeenCalled()
+    await expect(await canvas.findByText(/Project の候補を読み込めませんでした/u)).toBeInTheDocument()
   },
 }
