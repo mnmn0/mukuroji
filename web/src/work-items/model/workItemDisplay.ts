@@ -225,6 +225,17 @@ export function resolveWorkItemTypeWorkflowStatuses(
   })
 }
 
+/**
+ * Returns every custom field a configuration defines, in display order.
+ *
+ * @param configuration - Configuration whose custom fields to list.
+ * @returns Custom field definitions, or an empty list without a configuration.
+ */
+export function resolveConfigurationCustomFields(configuration: WorkItemConfigurationLike) {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  return resolvedConfiguration ? sortCustomFieldDefinitions(resolvedConfiguration.customFields) : []
+}
+
 /** Returns the custom fields available to a Work Item Type in display order. */
 export function resolveWorkItemTypeCustomFields(
   configuration: WorkItemConfigurationLike,
