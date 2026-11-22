@@ -276,6 +276,8 @@ local の DynamoDB endpoint でだけ動きます。使い捨ての table に旧
 STS は使えないので、実行者の確認だけは固定の `local-emulator` に置き換えます（実行者の確認は unit test で確かめます）。
 Floci の scan の不具合を避けるため segment は 1 です。
 
+CI では `.github/workflows/local-runtime.yml` の「Rehearse data migration」step が、Floci を起動した後に同じ command を実行します。
+
 ### Checkpoint table
 
 key は `migrationId`（partition key、S）と `partitionId`（sort key、S）です。checkpoint row は `schemaVersion: 2`
@@ -315,9 +317,14 @@ local の emulator（Floci）では CLI が初回に table を作ります。Flo
 - dual-read の reader（`fromSchemaVersion` と `toSchemaVersion` の両方を読む）
 - Floci 上の dry run・`--apply`・`verify` の結果
 
-## 未実装（Issue #365 の残り）
+## 対象外にしたもの（Issue #365）
 
-- rehearsal の CI smoke（`local-runtime.yml` の変更が要る）
-- Team / Workspace の partition を Query で読む row store（今は scan segment のみ）
-- #335・#340・#337 の migration 定義
-- review Skill / `AGENTS.md` の push 前チェックへの組み込み
+- **Team / Workspace の partition を Query で読む row store**: [ADR 0013](adr/0013-data-migration-runner.md) のとおり、
+  必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`）は parallel scan の
+  segment で読み切れる規模で、Workspace をまたいで table 全体を移すので Query の単位が要りません。
+- **#335・#340・#337 の migration 定義**: これらの schema 変更は初回 deploy（#636）より前に入り、旧 version の row を
+  持つ環境がまだ無いため、migration は作りません。初回 deploy の後に保存済み row の version を上げる変更は、
+  上の確認項目に従って migration を同じ PR に入れます。push 前チェックは [AGENTS.md](../AGENTS.md) と
+  review Skill の data integrity の観点で確かめます。
+- **実 AWS 上の operator proof（STS）の往復**: Floci には STS が無いので、初回 deploy 後の確認
+  （[post-deploy-verification.md](post-deploy-verification.md)、#636）で確かめます。
