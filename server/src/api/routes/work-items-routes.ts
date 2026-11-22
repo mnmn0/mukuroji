@@ -265,7 +265,7 @@ import {
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import { readOpenWorkItemChildCount, readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
-import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from '../shared/public-directory-access'
+import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from '../shared/project-directory-visibility'
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
