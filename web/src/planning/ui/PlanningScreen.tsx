@@ -66,6 +66,7 @@ import {
   type PlanningArchiveLabels,
 } from './PlanningArchivePanel'
 import { CyclePlanningPanel, type CyclePlanningLabels, type CyclePlanningPanelProps } from './CyclePlanningPanel'
+import type { CycleScheduleBaselineLabels } from './CycleScheduleBaselinePanel'
 import {
   PlanningEntityEditor,
   type PlanningEntityEditorLabels,
@@ -224,6 +225,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   entityDetailTabs: PlanningEntityDetailTabsLabels
   /** Selected entity の活動 tab の文言です。 */
   entityActivity: PlanningEntityActivityLabels
+  /** Cycle のベースラインの文言です。 */
+  cycleBaseline: CycleScheduleBaselineLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -407,6 +410,8 @@ export type PlanningScreenProps = {
   onUpdateCycleAutomation?: CyclePlanningPanelProps['onUpdateCycleAutomation']
   /** 複数の Work Item を Cycle に入れる、または外す callback です。 */
   onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
+  /** Cycle の計画で選んだ Cycle のベースラインを描きます。省略すると表示しません。 */
+  renderCycleBaseline?: CyclePlanningPanelProps['renderCycleBaseline']
   /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
   renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** 選択中の entity の活動 tab を描きます。省略すると tab を出さず編集欄だけを表示します。 */
@@ -539,6 +544,7 @@ export function PlanningScreen({
   onSetCycleWorkItems,
   onViewChange,
   onUpdateWorkItemDependency,
+  renderCycleBaseline,
   renderCycleBurndown,
   renderEntityActivity,
   snapshot,
@@ -813,6 +819,7 @@ export function PlanningScreen({
                   onCreateNextCycle={onCreateNextCycle}
                   onSetCycleWorkItems={onSetCycleWorkItems}
                   onUpdateCycleAutomation={onUpdateCycleAutomation}
+                  renderCycleBaseline={renderCycleBaseline}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'roadmap' ? (

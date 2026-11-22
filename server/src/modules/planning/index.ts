@@ -42,3 +42,15 @@ export {
   PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
   PLANNING_UPDATE_SCHEDULE_SHARD_COUNT,
 } from './planning-update-schedule-index'
+
+export {
+  captureCycleScheduleBaselineUseCase,
+  readCycleScheduleBaselineUseCase,
+} from './application/cycle-schedule-baseline'
+
+export {
+  CYCLE_SCHEDULE_BASELINE_CAPTURED_EVENT_TYPE,
+  DynamoDbCycleScheduleBaselineStore,
+  InMemoryCycleScheduleBaselineStore,
+  type CycleScheduleBaselineStore,
+} from './adapter-out/dynamodb/cycle-schedule-baseline-store'

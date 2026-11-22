@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 import {
   CYCLE_WORK_ITEMS_BATCH_LIMIT,
+  createProjectScheduleBaselineEntry,
+  isProjectScheduleBaselineId,
+  normalizeProjectScheduleBaselineName,
+  PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH,
+  type CaptureCycleScheduleBaselineRequest,
+  type CycleScheduleBaselineResponse,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type ConfigurePlanningUpdateCadenceInput,
@@ -56,7 +62,9 @@ import {
   resolveEnterpriseDirectoryPrincipal,
 } from '../../modules/enterprise-identity'
 import {
+  captureCycleScheduleBaselineUseCase,
   PlanningError,
+  readCycleScheduleBaselineUseCase,
   type PlanningCallerAuthorizationConditionCheck,
   createPlanningEntityWithAssignedId,
   type PlanningEntityCreation,
@@ -5075,4 +5083,138 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       return toPlanningErrorResponse(c, error)
     }
   })
+
+  /**
+   * Returns the newest, or one saved (`?baselineId=`), schedule baseline of a Cycle the reader
+   * may see, with only the entries of Work Items the reader may currently see.
+   */
+  routeApp.get('/api/planning/cycles/:cycleId/schedule-baselines', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const baselineId = readCycleBaselineIdQuery(c.req.query('baselineId'))
+      const workItemState = await readPlanningWorkItemState(principal)
+      const visible = filterPlanningSnapshotForPrincipal(
+        principal,
+        await workItemDependencies.planning.get(principal.directoryId, workItemState),
+      )
+      requireVisibleCycle(visible, cycleId)
+      const visibleKeys = new Set(visible.workItems.map((workItem) => createCycleBaselineEntryKey(workItem.teamId, workItem.id)))
+      return c.json(await readCycleScheduleBaselineUseCase(
+        workItemDependencies.cycleScheduleBaselines,
+        { workspaceId: principal.directoryId, cycleId },
+        (entry) => visibleKeys.has(createCycleBaselineEntryKey(entry.teamId, entry.workItemId)),
+        baselineId,
+      ) satisfies CycleScheduleBaselineResponse)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Saves the current plan of the Cycle's Work Items as a new named baseline. Only a manager of
+   * the Cycle may save one, and each save is recorded in the audit log in the same transaction.
+   */
+  routeApp.post('/api/planning/cycles/:cycleId/schedule-baselines', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CaptureCycleScheduleBaselineRequest>(c.req)
+      const name = normalizeProjectScheduleBaselineName(input.name)
+      if (name === null) {
+        throw new PlanningError(
+          400,
+          'InvalidPlanningInput',
+          `The baseline name must be text of at most ${PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH} characters without control characters.`,
+        )
+      }
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      const cycle = await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
+      if (cycle.type !== 'cycle') {
+        throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+      }
+      const visible = filterPlanningSnapshotForPrincipal(principal, snapshot)
+      const workItems = new Map(visible.workItems.map((workItem) => [
+        createCycleBaselineEntryKey(workItem.teamId, workItem.id),
+        workItem,
+      ]))
+      const entries = visible.workItemLinks
+        .filter((link) => link.cycleId === cycleId)
+        .flatMap((link) => {
+          const workItem = workItems.get(createCycleBaselineEntryKey(link.teamId, link.workItemId))
+          return workItem
+            ? [{ teamId: workItem.teamId, ...createProjectScheduleBaselineEntry(workItem.id, workItem.schedule) }]
+            : []
+        })
+      const response = await captureCycleScheduleBaselineUseCase(
+        workItemDependencies.cycleScheduleBaselines,
+        { workspaceId: principal.directoryId, cycleId },
+        {
+          capturedAt: new Date().toISOString(),
+          ...(name === undefined ? {} : { name }),
+          entries,
+          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+          auditContext: createApiMutationContext(c, principal, { cycleId, ...(name === undefined ? {} : { name }) }),
+        },
+      )
+      return c.json(response satisfies CycleScheduleBaselineResponse, 201)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+}
+
+/**
+ * Builds the key that matches a Cycle baseline entry to a Work Item.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns A key unique per Team and Work Item.
+ */
+function createCycleBaselineEntryKey(teamId: string, workItemId: string) {
+  return JSON.stringify([teamId, workItemId])
+}
+
+/**
+ * Reads the optional `baselineId` query of a Cycle baseline read.
+ *
+ * @param value - Raw query value.
+ * @returns The baseline ID, or undefined for the newest baseline.
+ * @throws PlanningError 400 when the ID is invalid.
+ */
+function readCycleBaselineIdQuery(value: string | undefined) {
+  if (value === undefined) return undefined
+  if (!isProjectScheduleBaselineId(value)) {
+    throw new PlanningError(400, 'InvalidPlanningInput', 'baselineId is invalid.')
+  }
+  return value
+}
+
+/**
+ * Requires a Cycle that the reader's filtered snapshot holds.
+ *
+ * @param visible - Planning snapshot filtered for the reader.
+ * @param cycleId - Requested Cycle ID.
+ * @throws PlanningError 404 when the Cycle is missing, hidden, or not a Cycle.
+ */
+function requireVisibleCycle(visible: PlanningSnapshot, cycleId: string) {
+  if (!visible.entities.some((entity) => entity.id === cycleId && entity.type === 'cycle')) {
+    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+  }
 }
