@@ -62,6 +62,7 @@ const meta = {
 
 export default meta
 
+/** Story variants for the Cycle schedule baseline panel. */
 type Story = StoryObj<typeof meta>
 
 /** A Cycle manager sees the comparison and can save another baseline. */
