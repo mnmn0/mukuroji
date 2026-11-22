@@ -224,6 +224,22 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('rejects an import whose links alone exceed what a Team can store', () => {
+    // Each of 201 rows relates to the next 50, so every row holds 100 relations but the import
+    // adds 10,050 links, more than the 10,000 a Team stores.
+    const rows = Array.from({ length: 201 }, (_, index) => ({
+      Key: `r${index}`,
+      Relations: Array.from({ length: 50 }, (_, offset) => ({ type: 'related', key: `r${(index + offset + 1) % 201}` })),
+    }))
+    const preview = previewWorkItemImport('json', source(rows), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Relations', targetField: 'relations' },
+    ])
+
+    expect(preview.errors.map((error) => [error.field, error.code])).toEqual([['relations', 'ImportRelationLimitExceeded']])
+  })
+
   test('accepts as many declared relations as a Work Item can hold', () => {
     const declare = (count: number) => [
       { Key: 'hub', Relations: Array.from({ length: count }, (_, index) => ({ type: 'related', key: `spoke-${index}` })) },

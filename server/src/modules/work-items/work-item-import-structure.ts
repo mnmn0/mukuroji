@@ -5,6 +5,7 @@ import {
   WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
   type WorkItemContributionStatus,
@@ -373,6 +374,23 @@ export function resolveWorkItemImportStructure(
     for (const endpoint of endpoints) {
       projectedRelationCounts.set(endpoint, (projectedRelationCounts.get(endpoint) ?? 0) + 1)
     }
+  }
+  // The Team stores at most this many parent and relation links, so an import that alone exceeds
+  // it would stop partway; the row whose link passes the limit is reported.
+  const graphLinks = links.flatMap((link) =>
+    link.kind === 'parent'
+      ? [{ row: link.childRow, field: 'parentKey' }]
+      : link.kind === 'relation'
+        ? [{ row: link.sourceRow, field: 'relations' }]
+        : [])
+  const firstLinkOverTeamLimit = graphLinks[WORK_ITEM_TEAM_RELATION_LINK_LIMIT]
+  if (firstLinkOverTeamLimit) {
+    errors.push({
+      row: firstLinkOverTeamLimit.row,
+      field: firstLinkOverTeamLimit.field,
+      code: 'ImportRelationLimitExceeded',
+      message: `The import would add ${graphLinks.length} parent and relation links; a Team can store at most ${WORK_ITEM_TEAM_RELATION_LINK_LIMIT}.`,
+    })
   }
   for (const [row, count] of projectedRelationCounts) {
     if (count <= WORK_ITEM_RELATION_ID_LIMIT) continue
