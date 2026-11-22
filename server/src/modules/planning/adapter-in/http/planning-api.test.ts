@@ -897,6 +897,64 @@ test('filters legacy Planning entities and dependencies by Project, Team, and Wo
   )).toBe(true)
 })
 
+test('lets a reader watch a visible Milestone and nothing else', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const calls: { method: string; input: Record<string, unknown> }[] = []
+  const watch = { subscribed: false, explicit: false, automatic: false, reasons: [], watcherCount: 0 }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({
+      async getWatcherState(input) {
+        calls.push({ method: 'get', input })
+        return watch
+      },
+      async subscribe(input) {
+        calls.push({ method: 'subscribe', input: { ...input } })
+        return { ...watch, subscribed: true, explicit: true, reasons: ['manual'], watcherCount: 1 }
+      },
+      async unsubscribe(input) {
+        calls.push({ method: 'unsubscribe', input: { ...input } })
+        return watch
+      },
+    }),
+  })
+  const entityKey = 'user#demo@example.com#planning-entity#refero-milestone'
+
+  const read = await planningApiRequest('/api/planning/entities/refero-milestone/watch')
+  expect(read.status).toBe(200)
+  expect(await read.json()).toEqual({ watch })
+  const watched = await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'PUT')
+  expect(watched.status).toBe(200)
+  expect((await watched.json()).watch.subscribed).toBe(true)
+  expect((await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'DELETE')).status).toBe(200)
+  expect(calls.map(({ method, input }) => [method, input.entityKey])).toEqual([
+    ['get', entityKey],
+    ['subscribe', entityKey],
+    ['unsubscribe', entityKey],
+  ])
+  expect(calls[1]?.input).toMatchObject({
+    planningEntityId: 'refero-milestone',
+    teamId: 'core-team',
+    projectId: 'refero',
+    memberKey: 'demo@example.com',
+  })
+
+  // A Milestone in a Project the reader cannot see is not found, and only Milestones are watched.
+  expect((await planningApiRequest('/api/planning/entities/private-milestone/watch')).status).toBe(404)
+  expect((await planningApiRequest('/api/planning/entities/private-milestone/watch', 'PUT')).status).toBe(404)
+  expect((await planningApiRequest('/api/planning/entities/refero-phase/watch', 'PUT')).status).toBe(400)
+  expect(calls).toHaveLength(3)
+})
+
 test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',

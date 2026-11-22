@@ -270,6 +270,7 @@ Entity の作成・複製・更新・移動・archive・復元と、次の Cycle
 - `GET /api/planning/updates`: cursor-paginated immutable history
 - `GET /api/planning/updates/export`: versioned JSON export
 - `GET|PUT|DELETE /api/planning/update-watch`: current member の watch state
+- `GET|PUT|DELETE /api/planning/entities/:entityId/watch`: Milestone の watch state。完了と日付の変更が watcher に届きます（[通知](./notifications.md#milestone-の-watch)）
 - `GET|POST /api/planning/updates/:updateVersion/comments`: append-only comments
 - `GET|PUT|DELETE /api/planning/updates/:updateVersion/reactions`: member reactions
 

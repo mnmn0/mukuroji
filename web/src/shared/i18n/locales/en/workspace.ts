@@ -570,6 +570,8 @@ export const workspaceMessages = {
   'workspace.inbox.event.timesheet': 'Time submission',
   'workspace.inbox.reason.timesheet': 'Unsubmitted time',
   'workspace.inbox.event.weeklyReport': 'Weekly report submission',
+  'workspace.inbox.event.milestoneCompleted': 'Milestone completed',
+  'workspace.inbox.event.milestoneRescheduled': 'Milestone rescheduled',
   'workspace.inbox.reason.weeklyReport': 'Unsubmitted weekly report',
   'workspace.inbox.reason.weeklyReportEscalation': 'Member weekly report unsubmitted',
   'workspace.settings.notifications.remindersTitle': 'Reminder timing',

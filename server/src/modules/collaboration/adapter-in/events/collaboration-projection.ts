@@ -30,6 +30,7 @@ import type {
   CollaborationRealtimePublisher,
 } from '../../application/ports/realtime-publisher'
 import {
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
   createProjectCollaborationEntityKey,
@@ -504,6 +505,33 @@ const planningUpdateActivityEventTypes = new Set([
   'planning-update.commented',
 ])
 /**
+ * Milestone updates that notify the Milestone's current watchers. Kept as literals so this Lambda
+ * does not bundle the API; they must match the event types the Planning entity audit writes.
+ */
+const planningMilestoneNotificationEventTypes = new Set([
+  'planning-entity.milestone-completed',
+  'planning-entity.milestone-rescheduled',
+])
+
+/**
+ * Reports whether a notification shows Planning content, so its recipients need Planning read
+ * (or write, for an owner's due reminder) access instead of Work Item access.
+ *
+ * @param event - Notification source event.
+ * @returns True for scheduled Planning, update activity, and Milestone notifications.
+ */
+function isPlanningContentNotification(
+  event: Pick<AuditProjectionEvent, 'planningNotificationKind'> & Partial<Pick<AuditProjectionEvent, 'eventType'>>,
+) {
+  return event.planningNotificationKind !== undefined || (
+    event.eventType !== undefined && (
+      planningUpdateActivityEventTypes.has(event.eventType) ||
+      planningMilestoneNotificationEventTypes.has(event.eventType)
+    )
+  )
+}
+
+/**
  * Scheduled Analytics report delivery to one recipient. Kept as a literal so this Lambda does not
  * bundle the Analytics module; it must match the event type the Analytics notifier writes.
  */
@@ -810,6 +838,10 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
+  if (!(await isCurrentPlanningMilestoneNotification(authorizationEvent))) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
 
   // A timesheet reminder is fenced on the entry it was revalidated against, so a submission that
   // lands before the save cancels it and the stream retry drops the reminder.
@@ -1112,7 +1144,8 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
   if (
     !supportsCollaborationWatcherNotifications(event.eventType) &&
-    !notifiesWorkItemChangeWatchers(event)
+    !notifiesWorkItemChangeWatchers(event) &&
+    !planningMilestoneNotificationEventTypes.has(event.eventType)
   ) {
     return []
   }
@@ -1174,6 +1207,15 @@ export function createSubscribedWatcherScopes(
     | 'workspaceId'
   >,
 ) {
+  if (planningMilestoneNotificationEventTypes.has(event.eventType)) {
+    // Only the Milestone's own watchers; Project watchers follow comments, not Planning edits.
+    return event.entityId
+      ? [{
+          entityKey: createPlanningEntityCollaborationEntityKey(event.workspaceId, event.entityId),
+          reason: 'watcher',
+        }]
+      : []
+  }
   if (workItemChangeWatcherEventTypes.has(event.eventType)) {
     // Project watchers follow comments, not every field change of each Work Item.
     return event.scopeKey ? [{ entityKey: event.scopeKey, reason: 'watcher' }] : []
@@ -2156,8 +2198,7 @@ export function resolveEnterpriseNotificationAuthorization(
 
   const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' ||
     event.planningNotificationKind === 'overdue')
-  const planningContent = event.planningNotificationKind !== undefined ||
-    (event.eventType !== undefined && planningUpdateActivityEventTypes.has(event.eventType))
+  const planningContent = isPlanningContentNotification(event)
   const permissions: EnterprisePermissionId[] = planningContent
     ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
     : [contentPermission]
@@ -2462,7 +2503,7 @@ async function isEligibleRecipient(
     permissionCeiling = boundary.permissionCeiling
     const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
     const permissions: EnterprisePermissionId[] =
-      event.planningNotificationKind || planningUpdateActivityEventTypes.has(event.eventType)
+      isPlanningContentNotification(event)
       ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
       : [contentPermission]
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
@@ -2477,8 +2518,7 @@ async function isEligibleRecipient(
   if (
     enterpriseIdentity &&
     (
-      event.planningNotificationKind !== undefined ||
-      planningUpdateActivityEventTypes.has(event.eventType) ||
+      isPlanningContentNotification(event) ||
       // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
       event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
       // Weekly report reminders are fenced the same way as timesheet reminders.
@@ -2714,6 +2754,9 @@ export async function authorizeNotificationDelivery(
     ? createCurrentPlanningUpdateActivityScopeEvent(scoped, planningScope)
     : undefined
   if (planningActivity && !currentPlanningActivityEvent) return false
+  if (!(await isCurrentPlanningMilestoneNotification(scoped))) return false
+  if (planningMilestoneNotificationEventTypes.has(scoped.eventType) &&
+    !(await isCurrentWatcher(scoped, memberKey))) return false
   const current = planningScope.checked && !planningActivity
     ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
     : scoped
@@ -2897,6 +2940,63 @@ async function readCurrentWorkItemScope(
     revision: item.revision,
     ...(item.reopenedAt === undefined ? {} : { reopenedAt: item.reopenedAt }),
   }
+}
+
+/**
+ * Rechecks a Milestone notification against the Milestone it was written for.
+ *
+ * The Milestone must still exist, be a Milestone, be unarchived, and sit in the Team / Project the
+ * event captured; a Milestone moved since then is not reported, so its title never reaches readers
+ * of only one of the two scopes. Other events pass.
+ *
+ * @param event - Notification source event.
+ * @returns Whether the event may still be delivered.
+ */
+async function isCurrentPlanningMilestoneNotification(event: AuditProjectionEvent): Promise<boolean> {
+  if (!planningMilestoneNotificationEventTypes.has(event.eventType)) return true
+  if (!event.entityId) return false
+  const recordKey = `ENTITY#${encodeURIComponent(event.entityId)}`
+  const { Item: milestone } = await documentClient.send(new GetCommand({
+    TableName: requireEnv('PLANNING_TABLE_NAME'),
+    Key: { workspaceId: event.workspaceId, recordKey },
+    ConsistentRead: true,
+  }))
+  if (!milestone) return false
+  if (
+    milestone.workspaceId !== event.workspaceId ||
+    milestone.recordKey !== recordKey ||
+    milestone.entryType !== 'planning-entity' ||
+    milestone.id !== event.entityId
+  ) {
+    throw new Error('Planning Milestone notification source row is invalid.')
+  }
+  if (milestone.type !== 'milestone' || milestone.archivedAt !== undefined) return false
+  const teamId = readOptionalPlanningScopeId(milestone.teamId, 'Planning Milestone Team scope')
+  const projectId = readOptionalPlanningScopeId(milestone.projectId, 'Planning Milestone Project scope')
+  if (projectId && !teamId) return false
+  return teamId === event.teamId && projectId === event.projectId
+}
+
+/**
+ * Strongly reads whether a member still watches the subject of a watcher-only notification.
+ *
+ * @param event - Notification source event whose watcher scopes are rebuilt.
+ * @param memberKey - Normalized recipient member key.
+ * @returns Whether one of the event's watcher scopes holds a current subscription of the member.
+ */
+async function isCurrentWatcher(event: AuditProjectionEvent, memberKey: string): Promise<boolean> {
+  for (const { entityKey } of createSubscribedWatcherScopes(event)) {
+    const recordKey = `WATCHER#${memberKey}`
+    const watcher = await documentClient.send(new GetCommand({
+      TableName: requireEnv('COLLABORATION_TABLE_NAME'), Key: { entityKey, recordKey }, ConsistentRead: true,
+    }))
+    if (watcher.Item?.entityKey === entityKey && watcher.Item.recordKey === recordKey &&
+      toSubscribedWatcherCandidates([watcher.Item], 'watcher').some((candidate) =>
+        normalizeMemberKey(candidate.memberKey) === memberKey)) {
+      return true
+    }
+  }
+  return false
 }
 
 /**

@@ -28,6 +28,22 @@ export const PLANNING_ENTITY_AUDIT_EVENT_TYPES: Readonly<Record<PlanningEntityCh
   restored: 'planning-entity.restored',
 }
 
+/** Milestone change that notifies the Milestone's watchers. */
+export type PlanningMilestoneNotificationKind = 'completed' | 'rescheduled'
+
+/**
+ * Audit event types of a Milestone update that notifies the Milestone's watchers.
+ *
+ * They replace `planning-entity.updated` for that update and keep the `planning-entity.` prefix,
+ * so the entity activity and the Milestone trend read them like any other update.
+ */
+export const PLANNING_MILESTONE_NOTIFICATION_EVENT_TYPES: Readonly<
+  Record<PlanningMilestoneNotificationKind, string>
+> = {
+  completed: 'planning-entity.milestone-completed',
+  rescheduled: 'planning-entity.milestone-rescheduled',
+}
+
 /** Timestamps every write changes; the event's own time already records them. */
 const PLANNING_ENTITY_AUDIT_OMITTED_FIELDS = new Set(['createdAt', 'updatedAt'])
 
@@ -90,9 +106,12 @@ export function createPlanningEntityAuditEvent(
 ): MutationAuditEventInput {
   const { result } = input
   const { entity } = result
+  const milestoneNotification = readPlanningMilestoneNotificationKind(result)
   return {
     directoryId: input.workspaceId,
-    eventType: PLANNING_ENTITY_AUDIT_EVENT_TYPES[result.action],
+    eventType: milestoneNotification
+      ? PLANNING_MILESTONE_NOTIFICATION_EVENT_TYPES[milestoneNotification]
+      : PLANNING_ENTITY_AUDIT_EVENT_TYPES[result.action],
     entityType: PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
     entityId: entity.id,
     action: result.action,
@@ -115,8 +134,58 @@ export function createPlanningEntityAuditEvent(
       ...(result.movedDescendantCount === undefined
         ? {}
         : { movedDescendantCount: result.movedDescendantCount }),
+      // Watchers are added by the notification projection; the editor is removed there.
+      ...(milestoneNotification
+        ? {
+            deepLink: createPlanningEntityDeepLink(entity.id),
+            notificationTitle: excerpt(entity.title),
+            notificationCandidates: [],
+          }
+        : {}),
     },
   }
+}
+
+/**
+ * Tells whether an entity change is a Milestone update its watchers are told about.
+ *
+ * Completing the Milestone wins over a date change made in the same edit. A change of the
+ * baseline or forecast day is a reschedule; other edits stay plain updates.
+ *
+ * @param result - Committed entity change.
+ * @returns The notification kind, or undefined when the change notifies no one.
+ */
+export function readPlanningMilestoneNotificationKind(
+  result: Pick<PlanningEntityTransactionResult, 'action' | 'entity' | 'previous'>,
+): PlanningMilestoneNotificationKind | undefined {
+  const { entity, previous } = result
+  if (
+    result.action !== 'updated' ||
+    !previous ||
+    entity.type !== 'milestone' ||
+    previous.type !== 'milestone' ||
+    entity.archivedAt !== undefined
+  ) {
+    return undefined
+  }
+  if (entity.status === 'completed' && previous.status !== 'completed') return 'completed'
+  if (
+    entity.forecast.endDate !== previous.forecast.endDate ||
+    entity.baseline.endDate !== previous.baseline.endDate
+  ) {
+    return 'rescheduled'
+  }
+  return undefined
+}
+
+/**
+ * Creates the Planning page link that selects one entity.
+ *
+ * @param entityId - Workspace-local Planning entity ID.
+ * @returns Relative Web path.
+ */
+export function createPlanningEntityDeepLink(entityId: string) {
+  return `/planning?${new URLSearchParams({ entityId }).toString()}`
 }
 
 /**

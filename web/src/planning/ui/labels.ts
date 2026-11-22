@@ -178,6 +178,14 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       activity: t('planning.detail.activity'),
     },
     entityActivity: createPlanningEntityActivityLabels(t, locale),
+    milestoneWatch: {
+      watch: t('planning.milestoneWatch.watch'),
+      watching: t('planning.milestoneWatch.watching'),
+      watcherCount: (count: number) =>
+        t('planning.milestoneWatch.watcherCount').replace('{count}', count.toLocaleString(locale)),
+      description: t('planning.milestoneWatch.description'),
+      error: t('planning.milestoneWatch.error'),
+    },
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),

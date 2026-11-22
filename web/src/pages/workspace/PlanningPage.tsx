@@ -99,6 +99,7 @@ import {
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
 import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
+import { PlanningMilestoneWatchContainer } from '../../planning/ui/PlanningMilestoneWatch'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -688,6 +689,17 @@ export function PlanningPage() {
                   labels={labels.entityActivity}
                   ownerOptions={ownerOptions}
                   revision={snapshot.revision}
+                />
+              )
+            : undefined}
+          renderMilestoneWatch={accessToken
+            ? (milestone) => (
+                <PlanningMilestoneWatchContainer
+                  accessToken={accessToken}
+                  canWatch={canMutatePlanningContent}
+                  entityId={milestone.id}
+                  key={milestone.id}
+                  labels={labels.milestoneWatch}
                 />
               )
             : undefined}
