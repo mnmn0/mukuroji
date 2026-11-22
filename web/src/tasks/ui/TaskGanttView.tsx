@@ -80,7 +80,7 @@ import {
   type TaskGanttTaskRow,
 } from '../model/taskGanttRows'
 import { ChevronIcon } from '../../shared/ui/icons'
-import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
+import { printTaskView, type TaskViewPrintPaper } from '../../shared/ui/viewPrint'
 import type { TaskGanttDisplaySettings } from '../model/taskGanttDisplay'
 import {
   createTaskGanttImage,

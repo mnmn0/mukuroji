@@ -41,7 +41,14 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       forecastLegend: t('planning.crossProject.forecast'),
       baselineLegend: t('planning.crossProject.baseline'),
       dependencyLegend: t('planning.crossProject.dependency'),
-      openProject: t('planning.crossProject.openProject'),
+      openProjectOverview: t('planning.crossProject.openOverview'),
+      openProjectGantt: t('planning.crossProject.openGantt'),
+      openProjectOverviewFor: (name) => t('planning.crossProject.openOverviewFor').replace('{name}', name),
+      openProjectGanttFor: (name) => t('planning.crossProject.openGanttFor').replace('{name}', name),
+      print: {
+        a3: t('tasks.gantt.printA3'),
+        a4: t('tasks.gantt.printA4'),
+      },
       variance: (days) => (days > 0
         ? t('planning.crossProject.late')
         : t('planning.crossProject.early')).replace('{days}', Math.abs(days).toLocaleString(locale)),
