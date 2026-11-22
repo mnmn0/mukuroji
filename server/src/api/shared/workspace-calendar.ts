@@ -11,7 +11,7 @@ import {
   normalizeWorkItemSchedule,
   rebaseWorkItemScheduleCalendar,
 } from '../../modules/work-items'
-import { workspaceDependencies } from './app-dependencies'
+import { ambientWorkCalendarSources, type WorkCalendarSources } from './app-dependencies'
 
 /** Workspace calendar inputs every shared calendar resolution starts from. */
 export type WorkspaceCalendarInputs = {
@@ -44,14 +44,18 @@ export type WorkCalendarTarget = {
  * propagates so a stored calendar is never silently replaced.
  *
  * @param directoryId - Workspace directory to read.
+ * @param sources - Calendar reads; the request-bound ones by default.
  * @returns The settings and national holiday dates.
  */
-export async function readWorkspaceCalendarInputs(directoryId: string): Promise<WorkspaceCalendarInputs> {
+export async function readWorkspaceCalendarInputs(
+  directoryId: string,
+  sources: WorkCalendarSources = ambientWorkCalendarSources,
+): Promise<WorkspaceCalendarInputs> {
   // The synced dates are read even when the Workspace does not use them, because a Team or Project
   // calendar can turn the national holidays on.
   const [settings, nationalHolidayDates] = await Promise.all([
-    readWorkspaceCalendarSettingsOf(directoryId),
-    workspaceDependencies.nationalHolidays.listDates(),
+    readWorkspaceCalendarSettingsOf(directoryId, sources),
+    sources.nationalHolidays.listDates(),
   ])
   return { settings, nationalHolidayDates }
 }
@@ -61,10 +65,15 @@ export async function readWorkspaceCalendarInputs(directoryId: string): Promise<
  *
  * @param directoryId - Workspace directory.
  * @param teamId - Team to read.
+ * @param sources - Calendar reads; the request-bound ones by default.
  * @returns The Team calendar and the Project calendars.
  */
-export async function readTeamWorkCalendars(directoryId: string, teamId: string): Promise<TeamWorkCalendars> {
-  const calendars = await workspaceDependencies.workCalendars.listTeam(directoryId, teamId)
+export async function readTeamWorkCalendars(
+  directoryId: string,
+  teamId: string,
+  sources: WorkCalendarSources = ambientWorkCalendarSources,
+): Promise<TeamWorkCalendars> {
+  const calendars = await sources.workCalendars.listTeam(directoryId, teamId)
   const projects = new Map<string, WorkCalendar>()
   let team: WorkCalendar | undefined
   for (const calendar of calendars) {
@@ -104,15 +113,17 @@ export function resolveWorkCalendarPolicyFrom(
  *
  * @param directoryId - Workspace directory that owns the new Work Item.
  * @param target - Team and Project of the new Work Item.
+ * @param sources - Calendar reads; the request-bound ones by default.
  * @returns A new calendar policy.
  */
 export async function readWorkspaceWorkItemCalendarPolicy(
   directoryId: string,
   target?: WorkCalendarTarget,
+  sources: WorkCalendarSources = ambientWorkCalendarSources,
 ): Promise<WorkItemScheduleCalendarPolicy> {
-  const inputs = await readWorkspaceCalendarInputs(directoryId)
+  const inputs = await readWorkspaceCalendarInputs(directoryId, sources)
   if (!target) return resolveWorkCalendarPolicyFrom(inputs, undefined, undefined)
-  const calendars = await readTeamWorkCalendars(directoryId, target.teamId)
+  const calendars = await readTeamWorkCalendars(directoryId, target.teamId, sources)
   return resolveWorkCalendarPolicyFrom(
     inputs,
     calendars.team,
@@ -131,16 +142,18 @@ export async function readWorkspaceWorkItemCalendarPolicy(
  * @param directoryId - Workspace directory that owns the new Work Item.
  * @param target - Team and Project of the new Work Item.
  * @param value - Untrusted schedule of the create request.
+ * @param sources - Calendar reads; the request-bound ones by default.
  * @returns The schedule to create the Work Item with.
  */
 export async function applySharedCalendarToNewSchedule(
   directoryId: string,
   target: WorkCalendarTarget,
   value: unknown,
+  sources: WorkCalendarSources = ambientWorkCalendarSources,
 ): Promise<unknown> {
   if (!requestsSharedCalendar(value)) return value
   const schedule = normalizeWorkItemSchedule(value)
-  const policy = await readWorkspaceWorkItemCalendarPolicy(directoryId, target)
+  const policy = await readWorkspaceWorkItemCalendarPolicy(directoryId, target, sources)
   return rebaseWorkItemScheduleCalendar(schedule, policy, 'keep-end-date').schedule
 }
 
@@ -181,12 +194,14 @@ function requestsSharedCalendar(value: unknown): boolean {
  * propagates so a stored week start is never silently replaced.
  *
  * @param directoryId - Workspace directory to read.
+ * @param sources - Calendar reads; the request-bound ones by default.
  * @returns The stored settings, or the defaults.
  */
 export async function readWorkspaceCalendarSettingsOf(
   directoryId: string,
+  sources: WorkCalendarSources = ambientWorkCalendarSources,
 ): Promise<WorkspaceCalendarSettings> {
-  const profile = await workspaceDependencies.tenantAdministration.getProfile(directoryId)
+  const profile = await sources.tenantAdministration.getProfile(directoryId)
   return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
 }
 

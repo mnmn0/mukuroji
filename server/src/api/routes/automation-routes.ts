@@ -1984,6 +1984,7 @@ async function executeAutomationWorkItemCreate(
         context.execution.workspaceId,
         { teamId, ...(automationProjectId ? { projectId: automationProjectId } : {}) },
         normalizedBody.schedule,
+        dependencies.workCalendarSources,
       ),
     },
     await dependencies.workItemConfigurations.getTeamConfiguration(

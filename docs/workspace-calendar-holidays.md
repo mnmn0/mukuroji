@@ -33,6 +33,8 @@ Team と Project は Workspace の稼働カレンダーへの上書きを持て�
 - 書き換えは schedule cascade の書き込み（24 件ずつ、Work Item の revision で fence、audit は `schedule-cascade-updated`）を使う。
   1回に書き換えるのは 480 件まで、1 Team の Work Item が 1000 件を超えるときも 413。衝突した transaction は読み直して1件ずつ再試行し、それでも衝突した Work Item は件数だけ返す。
 - Project のカレンダーの変更は、その Project に割り当てられた Work Item だけを書き換える。
+- 書き換えの途中で同じ範囲のカレンダーが保存し直されたら、残りは新しい変更に任せて衝突として数える。
+- 書き換えは日程 dependency を伝播させない。制約を満たさなくなった Work Item は Planning の constraint conflict として表示される。
 - preview の例は開始日順に最大 10 件で、読む人が見られる Work Item だけを出す。
 
 ## 休日の決まり方

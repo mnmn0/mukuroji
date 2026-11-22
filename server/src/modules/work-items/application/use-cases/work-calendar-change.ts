@@ -91,6 +91,12 @@ export type WorkCalendarChangePorts = {
    * @throws ProjectDataError 409 when a Work Item changed since it was read.
    */
   writeSchedules(updates: readonly WorkCalendarScheduleUpdate[], batch: number): Promise<void>
+  /**
+   * Reads a value that changes whenever any calendar the change resolved from is saved again.
+   * Rewrites stop once it differs from the value read after this change's own save, so an older
+   * change never overwrites the schedules a newer one wrote.
+   */
+  readCalendarVersion(): Promise<string>
 }
 
 /**
@@ -180,9 +186,12 @@ export async function previewWorkCalendarChange(
  * Saves a calendar change, then rewrites the Work Items that follow the calendar.
  *
  * The plan is checked against the write limit before anything is saved. Rewrites go in bounded
- * transactions; a transaction that meets a concurrent change is retried once per Work Item from a
- * fresh read with the same before and after calendars, so an older Work Item that was being
- * adopted keeps its chance to follow the calendar. Work Items that still conflict are counted.
+ * transactions; a transaction that meets a concurrent Work Item change is retried once per Work
+ * Item from a fresh read with the same before and after calendars, so an older Work Item that was
+ * being adopted keeps its chance to follow the calendar. Before each further transaction and the
+ * retry, the calendar version is read again; once a newer calendar change has been saved, this one
+ * stops and counts the rest as conflicts, leaving them to the newer change. Work Items that still
+ * conflict are counted.
  *
  * @param rules - Which Work Items the change reaches and how.
  * @param ports - Work Item reads and writes.
@@ -195,6 +204,8 @@ export async function applyWorkCalendarChange(
   ports: WorkCalendarChangePorts,
   save?: () => Promise<WorkCalendar>,
 ): Promise<WorkCalendarChangeResult> {
+  // Without a save of its own, the change is bound to the calendars as they were when it planned.
+  const plannedVersion = save ? undefined : await ports.readCalendarVersion()
   const plan = planWorkCalendarChange({ ...rules, workItems: await ports.readWorkItems() })
   if (plan.updates.length > WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS) {
     throw new ProjectDataError(
@@ -204,25 +215,37 @@ export async function applyWorkCalendarChange(
     )
   }
   const calendar = save ? await save() : undefined
+  const version = plannedVersion ?? await ports.readCalendarVersion()
+  /** Reports whether a newer calendar change has started since this one saved. */
+  const superseded = async () => await ports.readCalendarVersion() !== version
   let batch = 0
   let updatedCount = 0
+  let conflictCount = 0
   const conflicted = new Set<string>()
   for (let index = 0; index < plan.updates.length; index += WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
     const chunk = plan.updates.slice(index, index + WORK_ITEM_SCHEDULE_CASCADE_LIMIT)
+    if ((index > 0 || !save) && await superseded()) {
+      // The newer change plans from the current Work Items and rewrites the rest itself.
+      conflictCount += plan.updates.length - index
+      return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
+    }
     if (await writeOrConflict(ports, chunk, batch++)) updatedCount += chunk.length
     else for (const update of chunk) conflicted.add(workItemKey(update.teamId, update.workItemId))
   }
-  let conflictCount = 0
   if (conflicted.size > 0) {
-    const fresh = await ports.readWorkItems()
-    const retry = planWorkCalendarChange({
-      ...rules,
-      workItems: fresh.filter((workItem) => conflicted.has(workItemKey(workItem.teamId, workItem.id))),
-    })
-    // Work Items that no longer need a rewrite were settled by the concurrent change.
-    for (const update of retry.updates) {
-      if (await writeOrConflict(ports, [update], batch++)) updatedCount += 1
-      else conflictCount += 1
+    if (await superseded()) {
+      conflictCount += conflicted.size
+    } else {
+      const fresh = await ports.readWorkItems()
+      const retry = planWorkCalendarChange({
+        ...rules,
+        workItems: fresh.filter((workItem) => conflicted.has(workItemKey(workItem.teamId, workItem.id))),
+      })
+      // Work Items that no longer need a rewrite were settled by the concurrent change.
+      for (const update of retry.updates) {
+        if (await writeOrConflict(ports, [update], batch++)) updatedCount += 1
+        else conflictCount += 1
+      }
     }
   }
   return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }

@@ -9236,19 +9236,22 @@ function workingDurationDays(
   range: { startDate: string; endDate: string },
   calendar: PlanningWorkingCalendar,
 ) {
+  const dayMilliseconds = 86_400_000
   const start = Date.parse(`${range.startDate}T00:00:00.000Z`)
   const end = Date.parse(`${range.endDate}T00:00:00.000Z`)
   const workingWeekdays = new Set(calendar.workingWeekdays)
-  const holidays = new Set(calendar.holidays)
-  let count = 0
-  for (let day = start; day <= end; day += 86_400_000) {
-    const date = new Date(day)
-    if (
-      workingWeekdays.has(PLANNING_WEEKDAYS_BY_UTC_DAY[date.getUTCDay()] ?? 'sunday') &&
-      !holidays.has(date.toISOString().slice(0, 10))
-    ) {
-      count += 1
-    }
+  const isWorkingWeekday = (day: number) =>
+    workingWeekdays.has(PLANNING_WEEKDAYS_BY_UTC_DAY[new Date(day).getUTCDay()] ?? 'sunday')
+  // Whole weeks are counted arithmetically, so the work stays bounded for any date range.
+  const totalDays = Math.floor((end - start) / dayMilliseconds) + 1
+  const wholeWeeks = Math.floor(totalDays / 7)
+  let count = wholeWeeks * workingWeekdays.size
+  for (let day = start + wholeWeeks * 7 * dayMilliseconds; day <= end; day += dayMilliseconds) {
+    if (isWorkingWeekday(day)) count += 1
+  }
+  for (const holiday of new Set(calendar.holidays)) {
+    const day = Date.parse(`${holiday}T00:00:00.000Z`)
+    if (day >= start && day <= end && isWorkingWeekday(day)) count -= 1
   }
   return Math.max(count, 1)
 }

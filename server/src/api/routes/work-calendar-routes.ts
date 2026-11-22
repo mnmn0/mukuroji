@@ -168,9 +168,8 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessRead(principal)
       requireWorkspaceAdministration(principal)
       const current = await readWorkspaceCalendarInputs(principal.directoryId)
-      const candidate: WorkspaceCalendarInputs = calendar.publicHolidays === 'japan'
-        ? { settings: calendar, nationalHolidayDates: await workspaceDependencies.nationalHolidays.listDates() }
-        : { settings: calendar }
+      // The candidate keeps the synced holidays, which a Team or Project calendar may turn on.
+      const candidate: WorkspaceCalendarInputs = { ...current, settings: calendar }
       const change = await createWorkspaceCalendarChange(principal, current, candidate, adjustment)
       return c.json(await previewWorkCalendarChange(
         change.rules,
@@ -316,6 +315,20 @@ function createWorkCalendarChangePorts(
     async readWorkItems() {
       const teams = await Promise.all(teamIds.map((teamId) => readTeamWorkItems(principal.directoryId, teamId)))
       return teams.flat()
+    },
+    async readCalendarVersion() {
+      const [profile, calendars] = await Promise.all([
+        workspaceDependencies.tenantAdministration.getProfile(principal.directoryId),
+        Promise.all(teamIds.map((teamId) => workspaceDependencies.workCalendars.listTeam(principal.directoryId, teamId))),
+      ])
+      return JSON.stringify([
+        profile?.revision ?? 0,
+        calendars.flat().map((calendar) => [
+          calendar.scope.teamId,
+          calendar.scope.kind === 'project' ? calendar.scope.projectId : '',
+          calendar.revision,
+        ]),
+      ])
     },
     async writeSchedules(updates, batch) {
       const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules

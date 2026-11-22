@@ -64,6 +64,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
 - 計画と書き換えの手順は work-items module の use case（`application/use-cases/work-calendar-change.ts`）が持ち、
   route は入力の検証・認可・port の接続だけを行う。
 - 日本の祝日の同期済みの一覧は、Workspace が祝日を使わない設定でも読む（Team・Project が祝日を使う上書きを持てるため）。
+- Automation の worker（イベント・スケジュール）も、注入されたカレンダーの読み取りで作成先のカレンダーを解決する。
 - preview の例は最大 10 件で、読む人が見られる Work Item だけを出す。
 
 ### 権限
@@ -97,6 +98,11 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   - Team・Project をまたいで移動した Work Item は、次にそのカレンダーを適用するまで移動前の写しのまま。
   - Workspace の apply は旧来（`calendarSource` なし）の Work Item を取り込まない。Team・Project の変更でだけ取り込む。
   - 日程 dependency の伝播は従来どおり暦日の lag で動かす。critical path は lag を稼働日の差として足す。
+  - カレンダーの変更による日程の書き換えは日程 dependency を伝播させず、依存先の確認も求めない。
+    書き換えで dependency の制約を満たさなくなった Work Item は、Planning の派生 summary の constraint conflict として表示される
+    （カレンダーの変更は一括の調整で、1件ずつの日程変更の確認とは別に扱う）。
+  - 書き換えの各 transaction の前に、解決に使ったカレンダー（Workspace profile の revision と Team・Project の行の revision）を読み直し、
+    新しい変更が保存されていたら残りを書かずに衝突として数える。確認と書き込みの間のごく短い時間の競合は防がない。
   - import job は作成先 Team のカレンダーを使い、行ごとの Project のカレンダーは使わない。
   - 1 Team の Work Item は 1000 件（`WORK_ITEM_HIERARCHY_MAX_ITEMS`）まで読む。超える Team のカレンダー変更は 413 で断る。
 - 見直す条件: 1回の変更で 480 件を超える Team が増えたら、書き換えを非同期 job にする。
