@@ -5200,6 +5200,24 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-row-print-209')).toBeVisible()
     await expect(printButtons).toBeHidden()
     await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeHidden()
+    // The row action column is left off the paper, so the last printed column ends at the
+    // table's right edge instead of leaving the action column's width blank.
+    const printedEdges = await page.evaluate(() => {
+      const table = document.querySelector('[data-print-root="task-table"] table')
+      const headers = Array.from(table?.querySelectorAll('thead th') ?? [])
+      const printedHeaders = headers.filter((header) => header.getClientRects().length > 0)
+      return {
+        lastPrintedHeaderRight: printedHeaders.at(-1)?.getBoundingClientRect().right ?? 0,
+        printedHeaderCount: printedHeaders.length,
+        renderedColumnCount: Array.from(table?.querySelectorAll('col') ?? [])
+          .filter((column) => getComputedStyle(column).display !== 'none').length,
+        tableRight: table?.getBoundingClientRect().right ?? 0,
+        totalHeaderCount: headers.length,
+      }
+    })
+    expect(printedEdges.printedHeaderCount).toBe(printedEdges.totalHeaderCount - 1)
+    expect(printedEdges.renderedColumnCount).toBe(printedEdges.printedHeaderCount)
+    expect(Math.abs(printedEdges.tableRight - printedEdges.lastPrintedHeaderRight)).toBeLessThan(2)
 
     await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
     await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
@@ -12455,11 +12473,12 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/reports')
 
+    // Team groups show the directory's Team names, not the API labels.
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Core team',
+      'コアチーム',
     )
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Design team',
+      'デザインチーム',
     )
     await expect(page.getByTestId('analytics-widget-table-overdue')).toContainText(
       'Harden billing webhook retries',

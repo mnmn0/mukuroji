@@ -216,6 +216,7 @@ import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { listTaskGanttRowTasks } from '../model/taskGanttRows'
+import type { TaskCalendarPeriods } from '../model/taskGanttTimeline'
 
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
@@ -488,6 +489,8 @@ export type TaskScreenProps = {
    * shades its non-working days.
    */
   workspaceCalendarPolicy?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  workspaceCalendarPeriods?: TaskCalendarPeriods
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
@@ -658,6 +661,7 @@ export function TaskScreen({
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   workspaceCalendarPolicy,
+  workspaceCalendarPeriods,
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
@@ -3804,6 +3808,7 @@ export function TaskScreen({
               <TaskWorkspace
                 activeTab={activeTab}
                 workingCalendar={workspaceCalendarPolicy}
+                calendarPeriods={workspaceCalendarPeriods}
                 scheduleWindowNavigation={scheduleWindowNavigation}
                 allTasks={tasks}
                 assigneeOptions={assigneeOptions}

@@ -131,6 +131,7 @@ export const analyticsMessages = {
   'analytics.group.status': 'ステータス',
   'analytics.group.work-item-type': 'Work Item Type',
   'analytics.group.customField': 'カスタムフィールド',
+  'analytics.group.unset': '未設定',
   'analytics.size.small': '小',
   'analytics.size.medium': '中',
   'analytics.size.large': '大',

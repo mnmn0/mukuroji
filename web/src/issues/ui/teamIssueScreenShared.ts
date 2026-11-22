@@ -19,6 +19,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type CancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
+import type { TaskCalendarPeriods } from '../../tasks/model/taskGanttTimeline'
 import { type WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import { type TeamIssueViewState } from '../../task-views/model/taskViewSurfaceState'
@@ -190,6 +191,8 @@ export type TeamIssueScreenProps = {
    * default calendar is used and nothing is shaded when it is omitted.
    */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  calendarPeriods?: TaskCalendarPeriods
   /** Shown when the Workspace working calendar could not be read, so the default is in use. */
   workingCalendarErrorMessage?: string
   /** Reads the Workspace working calendar again after a failure. */
