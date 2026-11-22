@@ -234,6 +234,39 @@ export const MilestoneGroups: Story = {
 }
 
 /**
+ * 自分に届いた定期配信を新しい順に並べた選択肢です。選ぶとその回の report と snapshot を開きます。
+ */
+export const MyDeliveries: Story = {
+  args: {
+    deliveries: [
+      {
+        reportId: analyticsReportFixtures[0].id,
+        reportName: analyticsReportFixtures[0].name,
+        snapshotId: 'snapshot-2026-11-20',
+        format: 'pdf',
+        deliveredAt: '2026-11-20T00:00:00.000Z',
+      },
+      {
+        reportId: analyticsReportFixtures[0].id,
+        reportName: analyticsReportFixtures[0].name,
+        snapshotId: 'snapshot-2026-11-13',
+        format: 'csv',
+        deliveredAt: '2026-11-13T00:00:00.000Z',
+      },
+    ],
+    onOpenDelivery: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const select = canvas.getByTestId('analytics-delivery-selector')
+    await userEvent.selectOptions(select, 'snapshot-2026-11-13')
+    await expect(args.onOpenDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ snapshotId: 'snapshot-2026-11-13' }),
+    )
+  },
+}
+
+/**
  * 担当者・カスタムフィールド・配信先を名前の一覧から選ぶ状態です。一覧にいない選択済みの担当者も
  * 選択されたまま残ります。
  */
