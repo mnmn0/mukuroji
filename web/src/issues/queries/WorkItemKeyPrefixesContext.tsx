@@ -17,7 +17,8 @@ export type WorkItemKeyPrefixesProviderProps = {
 }
 
 /**
- * Loads the Workspace's Work Item key prefixes once and shares them with key links below.
+ * Loads the Workspace's Work Item key prefixes and shares them with key links below. The list is
+ * read again when the window regains focus, so a Team that got its first key since is linked.
  *
  * @param props - Access token and children.
  * @returns The children inside the prefix context.
@@ -26,7 +27,7 @@ export function WorkItemKeyPrefixesProvider({ accessToken, children }: WorkItemK
   const { data } = useSWR(
     accessToken ? ['work-item-key-prefixes', accessToken] as const : null,
     ([, token]) => getWorkItemKeyPrefixes(token),
-    { revalidateOnFocus: false, shouldRetryOnError: false },
+    { shouldRetryOnError: false },
   )
   const prefixes = useMemo(() => data ? new Set(data) : undefined, [data])
   return (
