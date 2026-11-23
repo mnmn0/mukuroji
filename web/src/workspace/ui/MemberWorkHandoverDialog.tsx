@@ -58,7 +58,7 @@ export function MemberWorkHandoverDialog({
   const [request, setRequest] = useState<BulkOperationRequest>()
   const [preview, setPreview] = useState<BulkOperationPreview>()
   const [operation, setOperation] = useState<BulkOperation>()
-  const [busy, setBusy] = useState<'preview' | 'apply' | 'retry' | 'undo'>()
+  const [busy, setBusy] = useState<'preview' | 'apply' | 'resume' | 'retry' | 'undo'>()
   const [errorMessage, setErrorMessage] = useState<string>()
   const dialogRef = useModalFocus<HTMLElement>(() => {
     if (!busy) onClose()
@@ -221,6 +221,7 @@ export function MemberWorkHandoverDialog({
             <BulkOperationResultPanel
               errorMessage={errorMessage}
               isApplying={busy === 'apply'}
+              isResuming={busy === 'resume'}
               isRetrying={busy === 'retry'}
               isUndoing={busy === 'undo'}
               operation={operation}
@@ -234,6 +235,10 @@ export function MemberWorkHandoverDialog({
                 setOperation(undefined)
                 setErrorMessage(undefined)
               }}
+              // A running operation, such as one another tab started, resumes by sending the same apply again.
+              onResume={operation && request && preview ? () => void run('resume', async () => {
+                setOperation(await handlers.apply(request, preview))
+              }) : undefined}
               onRetry={operation ? () => void run('retry', async () => {
                 setOperation(await handlers.retry(operation.id, operation))
               }) : undefined}

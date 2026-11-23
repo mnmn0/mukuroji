@@ -40,6 +40,7 @@ import {
   readAssignedProjectId,
   readTeamIssueAssigneeUserId,
   applyWorkItemStatusTransitionToActualDates,
+  isStoredContributorAssignmentList,
   normalizeWorkItemSchedule,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
@@ -69,7 +70,7 @@ import {
   deliverAutomationWebhook,
   isBulkReassignMemberApplied,
   isBulkReassignMemberUndoApplied,
-  restoreBulkReassignMemberUndoIds,
+  listBulkReassignMemberRemovedShares,
   createAutomationCommentId,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
@@ -1286,9 +1287,7 @@ function createApiBulkOperationAdapter(
         throw error
       }
       const undoInput: Record<string, unknown> = {
-        ...(operation.action.type === 'reassign-member'
-          ? restoreBulkReassignMemberUndoIds(item.undoPayload, loaded.detail.issue)
-          : item.undoPayload),
+        ...item.undoPayload,
         expectedRevision: item.resultingRevision,
       }
       const actualDateRequest = readWorkItemActualDateCorrection(undoInput)
@@ -1319,7 +1318,12 @@ function createApiBulkOperationAdapter(
             normalizedBody,
             undoConfiguration,
           )
-      // Restoring the previous contributors re-validates every member they bring back.
+      // A share the handover merged away comes back under its own ID with its own role, and every
+      // member brought back is checked as newly assigned.
+      const removedShares = operation.action.type === 'reassign-member' &&
+        isStoredContributorAssignmentList(item.undoPayload.contributorAssignments)
+        ? listBulkReassignMemberRemovedShares(item.undoPayload.contributorAssignments, loaded.detail.issue)
+        : []
       const configuredBody = undoConfiguration === undefined || operation.action.type !== 'reassign-member'
         ? preparedUndoBody
         : {
@@ -1330,7 +1334,11 @@ function createApiBulkOperationAdapter(
                 principal.directoryId,
                 preparedUndoBody,
                 undoConfiguration,
-                loaded.detail.issue.contributorAssignments ?? [],
+                [...(loaded.detail.issue.contributorAssignments ?? []), ...removedShares],
+                {
+                  fencedMembers: removedShares.flatMap((share) =>
+                    share.memberUserId === undefined ? [] : [share.memberUserId]),
+                },
               ),
             ),
           }

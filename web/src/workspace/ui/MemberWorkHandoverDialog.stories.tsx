@@ -105,6 +105,9 @@ function createOperation(request: BulkOperationRequest): BulkOperation {
   }
 }
 
+/** Number of applies the resume story has answered, so the first one reports a running operation. */
+let applyCount = 0
+
 const meta = {
   title: 'Application/Workspace/MemberWorkHandoverDialog',
   component: MemberWorkHandoverDialog,
@@ -171,5 +174,33 @@ export const NothingToHandOver: Story = {
   args: { loadState: { status: 'loaded', items: [] } },
   play: async ({ canvasElement }) => {
     await expect(within(canvasElement.ownerDocument.body).getByTestId('member-work-handover-empty')).toBeVisible()
+  },
+}
+
+/** The handover was already running from another tab; resuming sends the same apply again. */
+export const ResumeRunningHandover: Story = {
+  args: {
+    handlers: {
+      ...meta.args.handlers,
+      apply: fn(async (request: BulkOperationRequest): Promise<BulkOperation> => {
+        const operation = createOperation(request)
+        return applyCount++ === 0
+          ? {
+              ...operation,
+              items: operation.items.map((item) => ({ ...item, status: 'ready', undoable: false })),
+              status: 'running',
+            }
+          : operation
+      }),
+    },
+  },
+  play: async ({ args, canvasElement }) => {
+    applyCount = 0
+    const canvas = within(canvasElement.ownerDocument.body)
+    await userEvent.selectOptions(canvas.getByTestId('member-work-handover-successor'), 'suzuki@example.com')
+    await userEvent.click(canvas.getByTestId('member-work-handover-preview'))
+    await userEvent.click(await canvas.findByRole('button', { name: '適用' }))
+    await userEvent.click(await canvas.findByTestId('bulk-resume'))
+    await expect(args.handlers.apply).toHaveBeenCalledTimes(2)
   },
 }

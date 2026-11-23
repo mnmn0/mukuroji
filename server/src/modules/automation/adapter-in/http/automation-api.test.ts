@@ -736,6 +736,66 @@ test('checks a successor whose existing share absorbs the handed-over share', as
   })
 })
 
+test('undoes a merged handover with the original share and its archived job role', async () => {
+  const runUndo = async (inactiveWorkspaceMemberKeys: string[]) => {
+    const calls = configureFakeProjectClients(true, {
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys,
+      issueContributorAssignments: [
+        { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', plannedEffortMinutes: 90, status: 'planned' },
+      ],
+      jobRoles: [{ id: 'legacy-writer', name: 'Legacy writer', archived: true }],
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload: {
+          assigneeUserId: 'sato@example.com',
+          contributorAssignments: [
+            { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', jobRoleId: 'legacy-writer', plannedEffortMinutes: 60, status: 'planned' },
+            { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', plannedEffortMinutes: 30, status: 'planned' },
+          ],
+        },
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    })
+    expect(response.status).toBe(200)
+    return { body: await response.json(), calls }
+  }
+
+  // The merged-away share comes back under its own ID, so its archived role stays allowed.
+  const restored = await runUndo([])
+  expect(restored.body).toMatchObject({ status: 'undone' })
+  expect(restored.calls.issueUpdates).toHaveLength(1)
+
+  // The member it brings back is still checked as newly assigned.
+  const inactive = await runUndo(['leaver@example.com'])
+  expect(inactive.body.status).not.toBe('undone')
+  expect(inactive.calls.issueUpdates).toHaveLength(0)
+})
+
 test('fences bulk Project-move undo with the Planning revision', async () => {
   const calls = configureFakeProjectClients(true, {
     detailAssignedProjectId: 'project-2',

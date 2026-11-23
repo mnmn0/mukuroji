@@ -6,7 +6,7 @@ import {
   createBulkReassignMemberUndoPayload,
   isBulkReassignMemberApplied,
   isBulkReassignMemberUndoApplied,
-  restoreBulkReassignMemberUndoIds,
+  listBulkReassignMemberRemovedShares,
 } from './bulk-reassign-member'
 
 const action = { fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' }
@@ -88,7 +88,7 @@ test('tells when a handover has taken effect', () => {
   }, action)).toBe(false)
 })
 
-test('recognizes an undone merge whose restored share got a new assignment ID', () => {
+test('restores a merged-away share and recognizes the undo by value', () => {
   const before = {
     assigneeUserId: 'owner@example.com',
     contributorAssignments: [
@@ -98,13 +98,9 @@ test('recognizes an undone merge whose restored share got a new assignment ID', 
   }
   const payload = createBulkReassignMemberUndoPayload(before)
   const afterMerge = { contributorAssignments: [share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 90 })] }
-  expect(restoreBulkReassignMemberUndoIds(payload, afterMerge)).toEqual({
-    assigneeUserId: 'owner@example.com',
-    contributorAssignments: [
-      { status: 'planned', memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 },
-      { assignmentId: 'a2', status: 'planned', memberUserId: 'successor@example.com', plannedEffortMinutes: 30 },
-    ],
-  })
+  expect(listBulkReassignMemberRemovedShares(before.contributorAssignments, afterMerge)).toEqual([
+    share('a1', { memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 }),
+  ])
   const undone = {
     assigneeUserId: 'owner@example.com',
     contributorAssignments: [

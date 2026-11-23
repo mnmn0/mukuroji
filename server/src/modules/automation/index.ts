@@ -57,7 +57,7 @@ export {
   createBulkReassignMemberUndoPayload,
   isBulkReassignMemberApplied,
   isBulkReassignMemberUndoApplied,
-  restoreBulkReassignMemberUndoIds,
+  listBulkReassignMemberRemovedShares,
   type BulkReassignMemberPatch,
   type BulkReassignMemberWorkItem,
 } from './domain/bulk-reassign-member'

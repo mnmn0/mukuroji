@@ -114,38 +114,30 @@ export function createBulkReassignMemberUndoPayload(
 }
 
 /**
- * Drops assignment IDs that no longer exist from a handover's undo payload.
+ * Lists the shares a handover's undo brings back under an assignment ID the Work Item no longer has.
  *
- * A handover that merged a share into the target member's removed that share's ID, and an
- * update must not name an unknown ID, so the restored share is submitted as a new assignment.
+ * A handover that merged a share into the target member's removed that share. Its undo restores
+ * the share with its original assignment ID, so the restored share keeps what it was allowed to
+ * hold (such as a job role archived since) instead of being validated as a new share. The caller
+ * treats these shares as existing ones and checks their members as newly assigned.
  *
- * @param payload - Stored Bulk undo payload.
+ * @param restoredShares - Contributors in the stored undo payload, already validated as a stored list.
  * @param workItem - Current Work Item.
- * @returns The payload with only current assignment IDs kept.
+ * @returns The restored shares whose assignment IDs are not on the Work Item now.
  */
-export function restoreBulkReassignMemberUndoIds(
-  payload: Record<string, AutomationValue>,
+export function listBulkReassignMemberRemovedShares(
+  restoredShares: readonly WorkItemContributorAssignment[],
   workItem: Pick<BulkReassignMemberWorkItem, 'contributorAssignments'>,
-): Record<string, AutomationValue> {
-  const contributors = payload.contributorAssignments
-  if (!Array.isArray(contributors)) return payload
+): WorkItemContributorAssignment[] {
   const currentIds = new Set((workItem.contributorAssignments ?? []).map((assignment) => assignment.assignmentId))
-  return {
-    ...payload,
-    contributorAssignments: contributors.map((assignment) => {
-      if (!isAutomationRecord(assignment) || typeof assignment.assignmentId !== 'string' ||
-        currentIds.has(assignment.assignmentId)) return assignment
-      const { assignmentId: _removed, ...rest } = assignment
-      return rest
-    }),
-  }
+  return restoredShares.filter((assignment) => !currentIds.has(assignment.assignmentId))
 }
 
 /**
  * Tells whether a handover's undo has already been applied to a Work Item.
  *
- * Restoring a merged share gives it a new assignment ID, so contributors are compared by their
- * values in order rather than by ID.
+ * Contributors are compared by their values in order rather than by assignment ID, so a
+ * restored share is recognized however the write stored it.
  *
  * @param workItem - Current Work Item.
  * @param payload - Stored Bulk undo payload.
