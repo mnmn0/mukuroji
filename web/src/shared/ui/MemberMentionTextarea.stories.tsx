@@ -60,6 +60,21 @@ export const PickByName: Story = {
   },
 }
 
+/** Moving the caret out of the typed `@query` closes the list, so Enter types a newline again. */
+export const CaretLeavesMention: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const textarea = canvas.getByRole('combobox', { name: 'コメント' })
+    await userEvent.type(textarea, '@山田')
+    await expect(canvas.getByRole('listbox', { name: 'メンションの候補' })).toBeVisible()
+    await userEvent.keyboard('{Home}')
+    await expect(canvas.queryByRole('listbox', { name: 'メンションの候補' })).toBeNull()
+    await userEvent.keyboard('{Enter}')
+    await expect(textarea).toHaveValue('\n@山田')
+    await expect(canvas.getByTestId('picked-members')).toHaveTextContent('')
+  },
+}
+
 /** Members with the same name are inserted with their email so the token stays unique. */
 export const DuplicateNames: Story = {
   play: async ({ canvasElement }) => {

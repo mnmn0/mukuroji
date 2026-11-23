@@ -82,6 +82,19 @@ export function MemberMentionTextarea({
     setActiveIndex(0)
   }
 
+  /**
+   * Follows caret moves such as Home or ArrowLeft, keeping the highlighted suggestion while the query is unchanged.
+   *
+   * @param value - Current textarea text.
+   * @param cursor - Caret position after the selection change.
+   */
+  const refreshQuery = (value: string, cursor: number) => {
+    const query = readMentionAtCursor(value, cursor)?.query
+    if (query === mentionQuery) return
+    setMentionQuery(query)
+    setActiveIndex(0)
+  }
+
   /** Replaces the typed `@query` with the member's token and records the pick. */
   const insertMention = (member: MentionableMember) => {
     const textarea = textareaRef.current
@@ -110,7 +123,12 @@ export function MemberMentionTextarea({
       event.preventDefault()
       const step = event.key === 'ArrowDown' ? 1 : -1
       setActiveIndex((index) => (index + step + suggestions.length) % suggestions.length)
-    } else if ((event.key === 'Enter' || event.key === 'Tab') && activeSuggestion) {
+    } else if (
+      (event.key === 'Enter' || event.key === 'Tab')
+      && activeSuggestion
+      // Only pick while the caret is still inside the typed `@query`; otherwise Enter is a newline.
+      && readMentionAtCursor(event.currentTarget.value, event.currentTarget.selectionStart) !== undefined
+    ) {
       event.preventDefault()
       insertMention(activeSuggestion)
     } else if (event.key === 'Escape') {
@@ -143,6 +161,7 @@ export function MemberMentionTextarea({
         }}
         onClick={(event) => readQuery(event.currentTarget.value, event.currentTarget.selectionStart)}
         onKeyDown={handleKeyDown}
+        onSelect={(event) => refreshQuery(event.currentTarget.value, event.currentTarget.selectionStart)}
       />
       {isOpen ? (
         <ul
