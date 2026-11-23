@@ -8,7 +8,13 @@ import {
   type CreateAutomationTemplateInput,
   type UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
-import { isNonnegativeSafeInteger, isRecord, readRecord } from '../../shared/api/jsonValidation'
+import {
+  isNonnegativeSafeInteger,
+  isOptionalString,
+  isPositiveSafeInteger,
+  isRecord,
+  readRecord,
+} from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
 
@@ -135,12 +141,12 @@ export function applyAutomationTemplate(
  * @param input - Application target, as it would be sent to apply.
  * @returns The preview.
  */
-export function previewAutomationTemplateApplication(
+export async function previewAutomationTemplateApplication(
   accessToken: string,
   templateId: string,
   input: ApplyAutomationTemplateInput,
-) {
-  return requestJson<AutomationProjectTemplateApplicationPreview>(
+): Promise<AutomationProjectTemplateApplicationPreview> {
+  const response = await requestJson<unknown>(
     `${automationApiBaseUrl}/automation/templates/${encodeURIComponent(templateId)}/application-previews`,
     accessToken,
     {
@@ -149,6 +155,53 @@ export function previewAutomationTemplateApplication(
       method: 'POST',
     },
   )
+  if (!isAutomationProjectTemplateApplicationPreview(response)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
+  return response
+}
+
+/**
+ * Returns whether a value has every field of a Project template preview the Web client reads.
+ *
+ * @param value - Unknown preview response.
+ * @returns Whether the value is a Project template application preview.
+ */
+function isAutomationProjectTemplateApplicationPreview(
+  value: unknown,
+): value is AutomationProjectTemplateApplicationPreview {
+  return isRecord(value) &&
+    value.kind === 'project' &&
+    typeof value.teamId === 'string' &&
+    typeof value.name === 'string' &&
+    isPositiveSafeInteger(value.templateVersion) &&
+    typeof value.calendarFingerprint === 'string' &&
+    isOptionalString(value.startDate) &&
+    isOptionalString(value.endDate) &&
+    Array.isArray(value.workItems) &&
+    value.workItems.every((workItem) => isRecord(workItem) &&
+      typeof workItem.wbsNumber === 'string' &&
+      typeof workItem.title === 'string' &&
+      typeof workItem.startDate === 'string' &&
+      typeof workItem.endDate === 'string') &&
+    Array.isArray(value.planningEntities) &&
+    value.planningEntities.every((entity) => isRecord(entity) &&
+      (entity.type === 'phase' || entity.type === 'milestone') &&
+      typeof entity.title === 'string' &&
+      isOptionalString(entity.phaseTitle) &&
+      typeof entity.startDate === 'string' &&
+      typeof entity.endDate === 'string') &&
+    isNonnegativeSafeInteger(value.dependencyCount) &&
+    Array.isArray(value.errors) &&
+    value.errors.every((error) => isRecord(error) &&
+      typeof error.code === 'string' &&
+      typeof error.message === 'string' &&
+      isOptionalString(error.wbsNumber) &&
+      (error.dependencyNumber === undefined || isPositiveSafeInteger(error.dependencyNumber)))
 }
 
 /**

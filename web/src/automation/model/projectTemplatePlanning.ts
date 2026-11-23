@@ -116,10 +116,14 @@ export function parseProjectTemplatePlanningOutline(text: string): ProjectTempla
     if (segments.length < (isMilestone ? 2 : 3)) return { error: 'format', line }
     const fieldCount = isMilestone ? 1 : 2
     const title = segments.slice(0, -fieldCount).join('|').trim()
+    // The same checks as the server: length in characters and in UTF-16 code units, well-formed
+    // text, and no line break such as U+2028 that the line split above does not cut at.
     if (
       !title ||
       [...title].length > WORK_ITEM_TITLE_MAX_LENGTH ||
-      title.length > AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH
+      title.length > AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH ||
+      /\p{Cs}/u.test(title) ||
+      /[\r\n\u2028\u2029]/u.test(title)
     ) {
       return { error: 'title', line }
     }
@@ -139,6 +143,8 @@ export function parseProjectTemplatePlanningOutline(text: string): ProjectTempla
     const milestone = { title, offsetWorkingDays }
     if (indent === 0) {
       milestones.push(milestone)
+      // An indented Milestone after this one has no Phase above it.
+      currentPhase = undefined
     } else if (currentPhase) {
       currentPhase.milestones = [...(currentPhase.milestones ?? []), milestone]
     } else {

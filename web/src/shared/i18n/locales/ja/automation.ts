@@ -184,7 +184,7 @@ export const automationMessages = {
   'automation.template.project.planningError.indent':
     '{line} 行目: 字下げできるのは Phase の下の Milestone だけで、半角スペース 2 つです。',
   'automation.template.project.planningError.title':
-    '{line} 行目: タイトルを 256 文字以内で入力してください。',
+    '{line} 行目: タイトルを 256 文字以内、かつ UTF-16 で 500 単位以内（絵文字など一部の文字は 2 単位）で、改行を含めずに入力してください。',
   'automation.template.project.planningError.days':
     '{line} 行目: 開始と日付は 0 以上、日数は 1 以上で、どれも 3650 稼働日までです。',
   'automation.template.project.planningError.limit':
@@ -242,6 +242,8 @@ export const automationMessages = {
     '選択してください',
   'automation.template.application.planningParentHint':
     'Phase は roadmap・initiative・goal の下に作ります。Project に属さず、ほかの Team に属さないものから選べます。',
+  'automation.template.application.planningParentEmpty':
+    'この Team の Phase を置ける roadmap・initiative・goal がありません。別の Team を選ぶか、Planning で Workspace かこの Team のものを作ってください。',
   'automation.template.application.planningParentLoading': 'Planning の親を読み込んでいます。',
   'automation.template.application.planningParentRetry': '再読み込み',
   'automation.template.application.planningParentUnavailable':
@@ -252,6 +254,8 @@ export const automationMessages = {
     '確認中...',
   'automation.template.application.previewRequired':
     '適用する前にプレビューで作成内容と問題がないことを確認してください。',
+  'automation.template.application.previewStale':
+    'プレビューの後にテンプレートか稼働カレンダーが変わりました。何も作成していません。もう一度プレビューしてから適用してください。',
   'automation.template.application.previewError':
     'プレビューを取得できませんでした。もう一度試してください。',
   'automation.template.application.previewTitle':

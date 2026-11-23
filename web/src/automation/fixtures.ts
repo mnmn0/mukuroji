@@ -230,6 +230,7 @@ export const projectPlannedTemplatePreviewFixture: AutomationProjectTemplateAppl
   teamId: 'core-team',
   name: '標準プロジェクト',
   templateVersion: projectPlannedAutomationTemplateFixture.version,
+  calendarFingerprint: 'calendar-fixture',
   startDate: '2026-12-07',
   endDate: '2026-12-16',
   workItems: [

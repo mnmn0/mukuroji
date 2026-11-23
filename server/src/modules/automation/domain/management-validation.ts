@@ -12,6 +12,7 @@ import {
   type AutomationProjectTemplateDependency,
   type AutomationProjectTemplateMilestone,
   type AutomationProjectTemplatePhase,
+  type AutomationProjectTemplatePreviewExpectation,
   type AutomationProjectTemplateWorkItem,
   type AutomationValue,
   type CreateAutomationInboundWebhookEndpointInput,
@@ -513,6 +514,32 @@ function countProjectTemplatePlanningEntity(counter: { count: number }) {
  * @param label - Field name used in error messages.
  * @returns The trimmed title.
  */
+/**
+ * Reads the preview a caller accepted before applying a Project template.
+ *
+ * @param value - Untrusted `expectedPreview` value.
+ * @returns The template version and calendar fingerprint to check when applying.
+ */
+function readProjectTemplatePreviewExpectation(value: unknown): AutomationProjectTemplatePreviewExpectation {
+  const expectation = requireRecord(value, 'Expected template preview')
+  assertOnlyKeys(expectation, ['calendarFingerprint', 'templateVersion'], 'Expected template preview')
+  if (
+    typeof expectation.templateVersion !== 'number' ||
+    !Number.isSafeInteger(expectation.templateVersion) ||
+    expectation.templateVersion < 1
+  ) {
+    throw invalidInput('Expected template preview version must be a positive integer.')
+  }
+  return {
+    templateVersion: expectation.templateVersion,
+    calendarFingerprint: requireBoundedText(
+      expectation.calendarFingerprint,
+      'Expected template preview calendar fingerprint',
+      128,
+    ),
+  }
+}
+
 function readProjectTemplateLineTitle(value: unknown, label: string) {
   // Planning stores the title, so its UTF-16 limit applies as well as the editor's character limit.
   const title = requireBoundedText(value, label, AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH)
@@ -550,8 +577,11 @@ export function validateApplyAutomationTemplateInput(
   value: unknown,
 ): ApplyAutomationTemplateInput {
   const input = requireRecord(value, 'Template application')
-  assertOnlyKeys(input, ['target'], 'Template application')
+  assertOnlyKeys(input, ['expectedPreview', 'target'], 'Template application')
   const target = requireRecord(input.target, 'Template application target')
+  if (input.expectedPreview !== undefined && target.kind !== 'project') {
+    throw invalidInput('Only a Project template application accepts an expected preview.')
+  }
   if (target.kind === 'project') {
     assertOnlyKeys(
       target,
@@ -564,6 +594,9 @@ export function validateApplyAutomationTemplateInput(
     const planningParentId = target.planningParentId === undefined
       ? undefined
       : requireBoundedText(target.planningParentId, 'Project template Planning parent ID', 256)
+    const expectedPreview = input.expectedPreview === undefined
+      ? undefined
+      : readProjectTemplatePreviewExpectation(input.expectedPreview)
     return {
       target: {
         kind: 'project',
@@ -571,6 +604,7 @@ export function validateApplyAutomationTemplateInput(
         ...(startDate === undefined ? {} : { startDate }),
         ...(planningParentId === undefined ? {} : { planningParentId }),
       },
+      ...(expectedPreview === undefined ? {} : { expectedPreview }),
     }
   }
   if (target.kind === 'workflow') {

@@ -743,6 +743,9 @@ export function AutomationTemplateApplicationEditor({
     if (!onPreview || !targetsAvailable || !startDateIsValid) return
     const input = readInput()
     if (!input) return
+    // An earlier result no longer counts once a new preview starts, even if it fails.
+    setPreview(undefined)
+    setPreviewKey(undefined)
     setIsPreviewing(true)
     setPreviewErrorMessage(undefined)
     try {
@@ -761,7 +764,16 @@ export function AutomationTemplateApplicationEditor({
     const input = readInput()
     if (!input) return
     try {
-      setApplication(await onApply(input))
+      // The server refuses a new application whose template or calendar changed since this preview.
+      setApplication(await onApply(requiresPreview && preview
+        ? {
+            ...input,
+            expectedPreview: {
+              templateVersion: preview.templateVersion,
+              calendarFingerprint: preview.calendarFingerprint,
+            },
+          }
+        : input))
     } catch {
       return
     }
@@ -847,7 +859,7 @@ export function AutomationTemplateApplicationEditor({
           >
             <option value="">{t('automation.template.application.planningParentNone')}</option>
             {usableParents.map((parent) => (
-              <option key={parent.id} value={parent.id}>{`${parent.title} (${parent.type})`}</option>
+              <option key={parent.id} value={parent.id}>{`${parent.title} (${t(`planning.type.${parent.type}`)})`}</option>
             ))}
           </select>
           <span className={planningParentsFailed
@@ -858,7 +870,9 @@ export function AutomationTemplateApplicationEditor({
               ? 'automation.template.application.planningParentUnavailable'
               : planningParents?.isLoading
                 ? 'automation.template.application.planningParentLoading'
-                : 'automation.template.application.planningParentHint')}
+                : planningParents?.parents !== undefined && usableParents.length === 0
+                  ? 'automation.template.application.planningParentEmpty'
+                  : 'automation.template.application.planningParentHint')}
           </span>
           {planningParentsFailed ? (
             <button

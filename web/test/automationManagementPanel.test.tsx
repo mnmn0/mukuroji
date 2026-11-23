@@ -712,6 +712,7 @@ describe('AutomationManagementPanel', () => {
       teamId: 'core-team',
       name: 'ローンチ準備',
       templateVersion: 2,
+      calendarFingerprint: 'calendar-test',
       startDate: '2026-12-07',
       endDate: '2026-12-16',
       workItems: [
@@ -754,7 +755,24 @@ describe('AutomationManagementPanel', () => {
     expect(applicationHtml).toContain('Period: 2026-12-07 to 2026-12-16')
     expect(applicationHtml).toContain('Dependency 1: Dependency 1 needs its successor')
     expect(applicationHtml).toContain('Milestone: Preparation / Scope fixed')
-    expect(applicationHtml).toMatch(/data-testid="automation-template-application-submit" disabled=""/u)
+
+    // Without Phases no Planning parent is needed, so only the preview's errors decide.
+    const wbsOnlyTemplate = { ...plannedTemplate, payload: { ...plannedTemplate.payload, phases: undefined } }
+    const wbsOnlyPreview = { ...preview, planningEntities: [] }
+    const renderWbsOnly = (errors: typeof preview.errors) => renderToStaticMarkup(
+      <AutomationTemplateApplicationEditor
+        initialPreview={{ ...wbsOnlyPreview, errors }}
+        locale="en"
+        teams={teams}
+        template={wbsOnlyTemplate}
+        workflowTargets={[]}
+        onApply={async () => projectTemplateApplicationFixture}
+        onPreview={async () => wbsOnlyPreview}
+      />,
+    )
+    const submitDisabled = /data-testid="automation-template-application-submit" disabled=""/u
+    expect(renderWbsOnly([])).not.toMatch(submitDisabled)
+    expect(renderWbsOnly(preview.errors)).toMatch(submitDisabled)
   })
 
   test('renders Workflow workspace/team targets with expected revisions and result state', () => {

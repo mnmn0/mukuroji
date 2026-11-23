@@ -10,6 +10,7 @@ import type { ProjectDirectoryTeam } from '../../projects/api'
 import { AutomationManagementPanel } from './AutomationManagementPanel'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
+  AutomationApiError,
   applyAutomationTemplate,
   createAutomationInboundWebhookEndpoint,
   createAutomationRule,
@@ -76,7 +77,11 @@ export function AutomationManagementPanelContainer({
         request,
         () => mutate(),
         (mutationError) => {
-          setMutationErrorMessage(readErrorMessage(mutationError, t('automation.error.mutation')))
+          setMutationErrorMessage(
+            mutationError instanceof AutomationApiError && mutationError.code === 'AutomationTemplatePreviewStale'
+              ? t('automation.template.application.previewStale')
+              : readErrorMessage(mutationError, t('automation.error.mutation')),
+          )
         },
       )
     } finally {

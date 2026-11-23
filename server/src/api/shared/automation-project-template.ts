@@ -12,9 +12,11 @@ import {
   type AutomationTemplateApplicationTarget,
   type DateRangeWorkItemSchedule,
   type PlanningDateRange,
+  type PlanningEntity,
   type PlanningWorkItemSummary,
   type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
+import { createHash } from 'node:crypto'
 import type { Context } from 'hono'
 import { ProjectDataError } from '../../modules/directory'
 import {
@@ -726,26 +728,44 @@ export async function preflightProjectTemplatePlanning(
   }
   try {
     const snapshot = await workItemDependencies.planning.get(principal.directoryId, { workItems: [] })
-    const parent = await requirePlanningEntityPermission(
-      principal,
-      snapshot.entities,
-      target.planningParentId,
-      'member',
-    )
-    if (
-      parent.archivedAt !== undefined ||
-      !PROJECT_TEMPLATE_PLANNING_PARENT_TYPES.has(parent.type) ||
-      parent.projectId !== undefined ||
-      (parent.teamId !== undefined && parent.teamId !== target.teamId)
-    ) {
-      throw new AutomationError(
-        'invalid-input',
-        'AutomationProjectTemplatePlanningParentInvalid',
-        'The Planning parent must be an active roadmap, initiative, or goal outside any Project and in no other Team.',
-      )
-    }
+    await requireProjectTemplatePlanningParent(principal, snapshot.entities, target.teamId, target.planningParentId)
   } catch (error) {
     report(toProjectTemplatePlanningError(error))
+  }
+}
+
+/**
+ * Checks that a Planning entity can hold a template's Phases and Milestones for the target Team.
+ *
+ * The caller needs the same scope permission as creating a child entity through the Planning API,
+ * and the entity must be an active roadmap, initiative, or goal outside any Project and in no Team
+ * other than the target.
+ *
+ * @param principal - Workspace administrator applying the template.
+ * @param entities - Planning entities of the snapshot the check is made against.
+ * @param teamId - Team that receives the Project.
+ * @param parentId - Planning parent chosen for the application.
+ * @throws PlanningError when the caller may not add children to it, or AutomationError when it
+ *   cannot hold the template's entities.
+ */
+async function requireProjectTemplatePlanningParent(
+  principal: WorkspacePrincipal,
+  entities: readonly PlanningEntity[],
+  teamId: string,
+  parentId: string,
+) {
+  const parent = await requirePlanningEntityPermission(principal, entities, parentId, 'member')
+  if (
+    parent.archivedAt !== undefined ||
+    !PROJECT_TEMPLATE_PLANNING_PARENT_TYPES.has(parent.type) ||
+    parent.projectId !== undefined ||
+    (parent.teamId !== undefined && parent.teamId !== teamId)
+  ) {
+    throw new AutomationError(
+      'invalid-input',
+      'AutomationProjectTemplatePlanningParentInvalid',
+      'The Planning parent must be an active roadmap, initiative, or goal outside any Project and in no other Team.',
+    )
   }
 }
 
@@ -754,7 +774,8 @@ export async function preflightProjectTemplatePlanning(
  *
  * Each entity uses an ID derived from the application and its creation index. An entity that
  * already exists under that ID, even archived, is left as it is, so a retried application creates
- * only the missing ones.
+ * only the missing ones. Milestones whose Phase someone archived or moved since an earlier
+ * attempt are left out. Each write re-checks the applier's authorization in its transaction.
  *
  * @param c - Hono request context used for audit metadata.
  * @param principal - Workspace administrator applying the template; becomes the owner.
@@ -762,6 +783,7 @@ export async function preflightProjectTemplatePlanning(
  * @param target - Project application target with the Planning parent.
  * @param projectId - Project created by the application.
  * @param planningEntities - Expanded template Phases and Milestones.
+ * @returns How many of the entities exist for this application, created now or earlier.
  */
 export async function createProjectTemplatePlanningEntities(
   c: Context,
@@ -770,8 +792,8 @@ export async function createProjectTemplatePlanningEntities(
   target: Extract<AutomationTemplateApplicationTarget, { kind: 'project' }>,
   projectId: string,
   planningEntities: readonly ExpandedProjectTemplatePlanningEntity[],
-) {
-  if (planningEntities.length === 0) return
+): Promise<number> {
+  if (planningEntities.length === 0) return 0
   const directoryId = principal.directoryId
   const parentId = target.planningParentId
   if (!parentId) {
@@ -791,24 +813,34 @@ export async function createProjectTemplatePlanningEntities(
       false,
       await createConsistentProjectTemplateReadContext(scopedPrincipal),
     )
-    await requirePlanningActiveOwner(principal, principal.userKey)
+    const authorizationConditionChecks = await createProjectTemplateAuthorizationConditionChecks(principal)
     const workItemState = await readPlanningWorkItemState(scopedPrincipal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
+    // The parent was checked before the Project was created; check it again on the graph the
+    // writes are guarded by, so a parent moved or archived since is a conflict to retry.
+    try {
+      await requireProjectTemplatePlanningParent(principal, snapshot.entities, target.teamId, parentId)
+    } catch (error) {
+      if (error instanceof AutomationError || (error instanceof PlanningError && error.status < 500)) {
+        throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+      }
+      throw error
+    }
+    /** Whether an existing entity was archived or moved out of the application's scope. */
+    const isOutOfScope = (entity: PlanningEntity) => entity.archivedAt !== undefined ||
+      entity.teamId !== scope.teamId ||
+      entity.projectId !== scope.projectId
     // Entities an earlier attempt created that someone archived or moved since; their Milestones are left out.
     const archivedIndexes = new Set<number>()
+    let existingCount = 0
     for (const entity of planningEntities) {
       const id = createProjectTemplatePlanningEntityId(application, entity.index)
       const existing = snapshot.entities.find((candidate) => candidate.id === id)
       if (existing) {
         // An archive whose compaction failed stays in the live graph with archivedAt set. A Phase
         // someone moved to another scope is theirs now; its missing Milestones are left out too.
-        if (
-          existing.archivedAt !== undefined ||
-          existing.teamId !== scope.teamId ||
-          existing.projectId !== scope.projectId
-        ) {
-          archivedIndexes.add(entity.index)
-        }
+        if (isOutOfScope(existing)) archivedIndexes.add(entity.index)
+        existingCount += 1
         continue
       }
       if (entity.parentIndex !== undefined && archivedIndexes.has(entity.parentIndex)) {
@@ -842,20 +874,45 @@ export async function createProjectTemplatePlanningEntities(
             createApiMutationContext(c, principal, { applicationId: application.id, ...creation }, `${id}_create`),
             principal.userKey,
           ),
+          authorizationConditionChecks,
         )
         snapshot = response.planning
+        existingCount += 1
       } catch (error) {
         // The live graph leaves out archived entities, but the ID stays taken; keep the archive.
-        // An entity that is live after all was created meanwhile and keeps its Milestones.
+        // An entity that is live after all was created meanwhile and keeps its Milestones,
+        // unless it has been archived or moved since, as for one found in the first snapshot.
         if (!(error instanceof PlanningError) || error.code !== 'PlanningEntityExists') throw error
         snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
         const reread = snapshot.entities.find((candidate) => candidate.id === id)
-        if (reread === undefined || reread.archivedAt !== undefined) archivedIndexes.add(entity.index)
+        if (reread === undefined || isOutOfScope(reread)) archivedIndexes.add(entity.index)
+        existingCount += 1
       }
     }
+    return existingCount
   } catch (error) {
     throw toProjectTemplatePlanningError(error)
   }
+}
+
+/**
+ * Builds the transaction checks that guard a template's Planning writes with the applier's
+ * authorization as it is now.
+ *
+ * Creating the Project advanced the applier's Workspace member version, so the checks use the
+ * member as it is now rather than as it was when the request was authenticated.
+ *
+ * @param principal - Workspace administrator applying the template.
+ * @returns Workspace member and Enterprise control checks for each write.
+ * @throws PlanningError `PlanningAuthorizationChanged` when the applier's role changed since the
+ *   request was authorized; a retry authorizes it again.
+ */
+async function createProjectTemplateAuthorizationConditionChecks(principal: WorkspacePrincipal) {
+  const currentMember = await requirePlanningActiveOwner(principal, principal.userKey)
+  if (currentMember.role !== principal.workspaceMember.role) {
+    throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed. Reload and try again.')
+  }
+  return createPlanningCallerAuthorizationConditionChecks(principal, [currentMember], false)
 }
 
 /**
@@ -884,19 +941,8 @@ export async function createProjectTemplateDependencies(
   const directoryId = principal.directoryId
   const idByWbsNumber = new Map(workItems.map((workItem) => [workItem.wbsNumber, workItemIds[workItem.index]]))
   try {
-    // Creating the Project advanced the applier's Workspace member version, so guard the writes
-    // with the member as it is now rather than as it was when the request was authenticated.
-    const currentMember = await requirePlanningActiveOwner(principal, principal.userKey)
-    if (currentMember.role !== principal.workspaceMember.role) {
-      // The request was authorized for the old role; a retry authorizes it again.
-      throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed. Reload and try again.')
-    }
+    const authorizationConditionChecks = await createProjectTemplateAuthorizationConditionChecks(principal)
     const readContext = await createConsistentProjectTemplateReadContext(principal)
-    const authorizationConditionChecks = createPlanningCallerAuthorizationConditionChecks(
-      principal,
-      [currentMember],
-      false,
-    )
     // Read only the template's endpoints, wherever they are now: a reused Work Item may have moved
     // to another Project since an earlier attempt, and the endpoint checks below authorize it there.
     const workItemState = await readProjectTemplateDependencyEndpoints(
@@ -948,6 +994,17 @@ export async function createProjectTemplateDependencies(
       snapshot = response.planning
     }
   } catch (error) {
+    // The template's own dates were checked before anything was written, so a conflict here comes
+    // from dates someone changed on the created Work Items; after fixing them, a retry resumes.
+    if (error instanceof PlanningError && error.code === 'PlanningWorkItemDependencyConflict') {
+      throw new AutomationError(
+        'conflict',
+        'AutomationTemplateDependencyConflict',
+        'A created Work Item\'s dates no longer allow a template dependency. ' +
+          'Fix the dates and retry with the same Idempotency-Key.',
+        true,
+      )
+    }
     throw toProjectTemplatePlanningError(error)
   }
 }
@@ -1076,6 +1133,10 @@ function toProjectTemplatePlanningError(error: unknown): unknown {
     )
   }
   if (error.status >= 500) return new AutomationError('unavailable', error.code, error.message, true)
+  // Planning has no room left; once some is freed, a retry resumes where this attempt stopped.
+  if (error.code === 'PlanningCapacityExceeded') {
+    return new AutomationError('payload-too-large', error.code, error.message, true)
+  }
   const category = error.status === 403
     ? 'forbidden'
     : error.status === 404
@@ -1146,6 +1207,7 @@ export async function previewProjectTemplateApplication(
     teamId: target.teamId,
     name,
     templateVersion: template.version,
+    calendarFingerprint: createProjectTemplateCalendarFingerprint(calendarPolicy),
     ...(needsStartDate && target.startDate ? { startDate: target.startDate } : {}),
     ...(endDate === undefined ? {} : { endDate }),
     workItems: workItems.map((workItem) => ({
@@ -1193,4 +1255,19 @@ function readProjectTemplatePreviewError(error: unknown): Pick<AutomationProject
     return { code: converted.code, message: converted.message }
   }
   throw converted
+}
+
+/**
+ * Fingerprints a working calendar, so an application can check that it counts days with the
+ * calendar its accepted preview used.
+ *
+ * @param calendarPolicy - Workspace working calendar.
+ * @returns Opaque fingerprint that changes whenever the calendar's days change.
+ */
+export function createProjectTemplateCalendarFingerprint(calendarPolicy: WorkItemScheduleCalendarPolicy): string {
+  return createHash('sha256').update(JSON.stringify({
+    timeZone: calendarPolicy.timeZone,
+    workingWeekdays: [...calendarPolicy.workingWeekdays].sort(),
+    holidays: [...calendarPolicy.holidays].sort(),
+  })).digest('base64url')
 }

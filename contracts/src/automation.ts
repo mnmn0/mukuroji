@@ -696,6 +696,20 @@ export type AutomationTemplateApplication = {
 export type ApplyAutomationTemplateInput = {
   /** Project または Workflow の適用先です。 */
   target: AutomationTemplateApplicationTarget
+  /**
+   * The Project template preview the caller accepted. A new application is refused when the
+   * template version or the working calendar has changed since; a retry of an existing receipt
+   * ignores it and resumes with what the receipt pinned.
+   */
+  expectedPreview?: AutomationProjectTemplatePreviewExpectation
+}
+
+/** What a caller saw in an accepted Project template preview, checked again when applying. */
+export type AutomationProjectTemplatePreviewExpectation = {
+  /** Template version of the preview. */
+  templateVersion: number
+  /** Working calendar fingerprint of the preview. */
+  calendarFingerprint: string
 }
 
 /** One Work Item a Project template application would create, placed on real dates. */
@@ -749,6 +763,11 @@ export type AutomationProjectTemplateApplicationPreview = {
   name: string
   /** Template version the preview was computed from. */
   templateVersion: number
+  /**
+   * Opaque fingerprint of the Workspace working calendar the dates were counted with. Send it
+   * back in `expectedPreview` so the application uses the same calendar.
+   */
+  calendarFingerprint: string
   /** Project start date the relative dates were counted from, when one was given. */
   startDate?: string
   /** Last date of any Work Item, Phase, or Milestone; absent when nothing is dated. */

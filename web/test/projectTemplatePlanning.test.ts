@@ -47,6 +47,12 @@ describe('Project template Phase / Milestone outline', () => {
     expect(parseProjectTemplatePlanningOutline('準備 | 0 | 0')).toEqual({ error: 'days', line: 1 })
     expect(parseProjectTemplatePlanningOutline('◆ | 4')).toEqual({ error: 'title', line: 1 })
     expect(parseProjectTemplatePlanningOutline(`◆ ${'𠮷'.repeat(251)} | 4`)).toEqual({ error: 'title', line: 1 })
+    // The server rejects these too: a line break the line split keeps, and a lone surrogate.
+    expect(parseProjectTemplatePlanningOutline('準備\u2028確認 | 0 | 1')).toEqual({ error: 'title', line: 1 })
+    expect(parseProjectTemplatePlanningOutline('◆ 確認\ud800 | 4')).toEqual({ error: 'title', line: 1 })
+    // A top-level Milestone ends the Phase above it, so an indented one after it has no Phase.
+    expect(parseProjectTemplatePlanningOutline('Phase A | 0 | 5\n◆ Standalone | 2\n  ◆ Child | 3'))
+      .toEqual({ error: 'indent', line: 3 })
     expect(parseProjectTemplatePlanningOutline(Array.from({ length: 31 }, (_, index) => `◆ M${index} | 0`).join('\n')))
       .toEqual({ error: 'limit', line: 31 })
   })

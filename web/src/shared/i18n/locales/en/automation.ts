@@ -188,7 +188,7 @@ export const automationMessages = {
   'automation.template.project.planningError.indent':
     'Line {line}: only a milestone under a phase can be indented, by two spaces.',
   'automation.template.project.planningError.title':
-    'Line {line}: enter a title of 256 characters or fewer.',
+    'Line {line}: enter a title of up to 256 characters and 500 UTF-16 code units (some characters, such as emoji, count as 2), without line breaks.',
   'automation.template.project.planningError.days':
     'Line {line}: start and date must be 0 or more and duration 1 or more, up to 3650 working days.',
   'automation.template.project.planningError.limit':
@@ -246,6 +246,8 @@ export const automationMessages = {
     'Choose one',
   'automation.template.application.planningParentHint':
     'Phases are created under a roadmap, initiative, or goal that is outside any project and in no other team.',
+  'automation.template.application.planningParentEmpty':
+    'No roadmap, initiative, or goal can hold this team\'s phases. Choose another team, or create one in Planning for the workspace or this team.',
   'automation.template.application.planningParentLoading': 'Loading Planning parents.',
   'automation.template.application.planningParentRetry': 'Load again',
   'automation.template.application.planningParentUnavailable':
@@ -256,6 +258,8 @@ export const automationMessages = {
     'Checking...',
   'automation.template.application.previewRequired':
     'Preview the application and make sure it has no problems before applying.',
+  'automation.template.application.previewStale':
+    'The template or the working calendar changed after the preview. Nothing was created; preview again before applying.',
   'automation.template.application.previewError':
     'Could not load the preview. Try again.',
   'automation.template.application.previewTitle':

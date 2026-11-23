@@ -112,6 +112,7 @@ import {
 } from '../shared/app-dependencies'
 import { toTriageErrorResponse } from '../shared/request-intake-access'
 import {
+  createProjectTemplateCalendarFingerprint,
   createProjectTemplateDependencies,
   createProjectTemplatePlanningEntities,
   createProjectTemplateWorkItems,
@@ -510,15 +511,16 @@ async function executeAutomationTemplateApplication(
         planningEntities,
       )
       const createsContent = expandedWorkItems.length > 0 || planningEntities.length > 0
-      const result = {
+      /** Builds the receipt result once the number of Planning entities that exist is known. */
+      const createResult = (planningEntityCount: number) => ({
         kind: 'project' as const,
         teamId: target.teamId,
         projectId: application.id,
         name: names.nameJa,
         ...(expandedWorkItems.length > 0 ? { workItemCount: expandedWorkItems.length } : {}),
-        ...(planningEntities.length > 0 ? { planningEntityCount: planningEntities.length } : {}),
+        ...(planningEntityCount > 0 ? { planningEntityCount } : {}),
         ...(templateDependencies.length > 0 ? { dependencyCount: templateDependencies.length } : {}),
-      }
+      })
       // A retry of a WBS application resumes with the Project that an earlier attempt created.
       const existingProject = createsContent
         ? await findProjectTemplateProject(principal.directoryId, target.teamId, application.id)
@@ -549,7 +551,7 @@ async function executeAutomationTemplateApplication(
         // retry resumes.
         createsContent
           ? []
-          : [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result)],
+          : [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, createResult(0))],
       )
       // The attempt that created the Project already projected it; a reused one may have been edited.
       if (!existingProject) {
@@ -579,7 +581,8 @@ async function executeAutomationTemplateApplication(
               expandedWorkItems,
             )
           : []
-        await createProjectTemplatePlanningEntities(
+        // Milestones left out under a Phase someone archived or moved are not counted.
+        const planningEntityCount = await createProjectTemplatePlanningEntities(
           c,
           principal,
           application,
@@ -606,7 +609,7 @@ async function executeAutomationTemplateApplication(
             ...base,
             status: 'succeeded',
             revision: application.revision + 1,
-            result,
+            result: createResult(planningEntityCount),
             updatedAt: new Date().toISOString(),
           },
           application.revision,
@@ -3039,14 +3042,31 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         await requireTeamConfigurationAdministration(principal, input.target.scopeId)
       }
       // A Project template's WBS keeps the calendar of the first request on every retry; a retry
-      // returns its receipt without reading the calendar again.
+      // returns its receipt without reading the calendar again. A new receipt must match the
+      // preview the caller accepted, so the dates it creates are the dates the caller saw.
       const application = await automationDependencies.ruleTemplates.reserveTemplateApplication(
         principal.directoryId,
         principal.actorId,
         c.req.param('templateId'),
         input.target,
         idempotencyKey,
-        () => readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+        async (templateVersion) => {
+          const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
+          const expected = input.expectedPreview
+          if (
+            expected !== undefined && (
+              expected.templateVersion !== templateVersion ||
+              expected.calendarFingerprint !== createProjectTemplateCalendarFingerprint(calendarPolicy)
+            )
+          ) {
+            throw new AutomationError(
+              'conflict',
+              'AutomationTemplatePreviewStale',
+              'The template or the working calendar changed after the preview. Preview again before applying.',
+            )
+          }
+          return calendarPolicy
+        },
       )
       return c.json(await executeAutomationTemplateApplication(c, principal, application))
     } catch (error) {
