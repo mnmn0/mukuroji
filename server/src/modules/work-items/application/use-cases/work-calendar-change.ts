@@ -265,9 +265,15 @@ export async function applyWorkCalendarChange(
       conflictCount += plan.updates.length - index + conflicted.size
       return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
     }
-    const outcome = await writeWithinTransactionLimit(ports, chunk, batches)
+    const outcome = await writeWithinTransactionLimit(ports, chunk, batches, superseded)
     updatedCount += outcome.writtenCount
     for (const update of outcome.conflicted) conflicted.add(workItemKey(update.teamId, update.workItemId))
+    if (outcome.supersededCount > 0) {
+      // A newer change was saved while a split chunk was written; it owns the rest.
+      const remaining = plan.updates.length - index - chunk.length
+      conflictCount += outcome.supersededCount + remaining + conflicted.size
+      return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
+    }
   }
   if (conflicted.size > 0) {
     if (await superseded()) {
@@ -336,6 +342,8 @@ type ChunkOutcome = {
   writtenCount: number
   /** Rewrites whose transaction conflicted with another update. */
   conflicted: WorkCalendarScheduleUpdate[]
+  /** Rewrites left unwritten because a newer calendar change was saved meanwhile. */
+  supersededCount: number
 }
 
 /**
@@ -347,17 +355,20 @@ type ChunkOutcome = {
  * @param ports - Work Item writes.
  * @param updates - Rewrites of the chunk.
  * @param batches - Transaction numbering of the change.
- * @returns The written count and the conflicted rewrites.
+ * @param superseded - Reports whether a newer calendar change has been saved; checked before each
+ *   transaction of a split, so a split never writes with obsolete rules.
+ * @returns The written count, the conflicted rewrites, and the rewrites left to a newer change.
  */
 async function writeWithinTransactionLimit(
   ports: WorkCalendarChangePorts,
   updates: readonly WorkCalendarScheduleUpdate[],
   batches: BatchCounter,
+  superseded: () => Promise<boolean>,
 ): Promise<ChunkOutcome> {
   try {
     return await writeOrConflict(ports, updates, batches.next++)
-      ? { writtenCount: updates.length, conflicted: [] }
-      : { writtenCount: 0, conflicted: [...updates] }
+      ? { writtenCount: updates.length, conflicted: [], supersededCount: 0 }
+      : { writtenCount: 0, conflicted: [...updates], supersededCount: 0 }
   } catch (error) {
     if (
       !(error instanceof ProjectDataError) ||
@@ -367,12 +378,23 @@ async function writeWithinTransactionLimit(
       throw error
     }
     const middle = Math.ceil(updates.length / 2)
-    const first = await writeWithinTransactionLimit(ports, updates.slice(0, middle), batches)
-    const second = await writeWithinTransactionLimit(ports, updates.slice(middle), batches)
-    return {
-      writtenCount: first.writtenCount + second.writtenCount,
-      conflicted: [...first.conflicted, ...second.conflicted],
+    const halves = [updates.slice(0, middle), updates.slice(middle)]
+    const outcome: ChunkOutcome = { writtenCount: 0, conflicted: [], supersededCount: 0 }
+    for (const [index, half] of halves.entries()) {
+      if (await superseded()) {
+        outcome.supersededCount += halves.slice(index).reduce((count, rest) => count + rest.length, 0)
+        return outcome
+      }
+      const written = await writeWithinTransactionLimit(ports, half, batches, superseded)
+      outcome.writtenCount += written.writtenCount
+      outcome.conflicted.push(...written.conflicted)
+      if (written.supersededCount > 0) {
+        outcome.supersededCount += written.supersededCount +
+          halves.slice(index + 1).reduce((count, rest) => count + rest.length, 0)
+        return outcome
+      }
     }
+    return outcome
   }
 }
 

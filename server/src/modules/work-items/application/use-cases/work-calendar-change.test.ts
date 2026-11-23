@@ -188,3 +188,22 @@ test('stops retrying conflicted Work Items once a newer change has been saved', 
   expect(writes).toBe(1)
   expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 3 })
 })
+
+test('stops a split transaction once a newer change has been saved', async () => {
+  let version = savedOnce
+  const written: number[] = []
+  const applied = await applyWorkCalendarChange(rules, {
+    readWorkItems: async () => workItems(24),
+    readCalendarVersion: async () => version,
+    async writeSchedules(updates) {
+      if (updates.length > 12) {
+        throw new ProjectDataError(413, 'WorkItemScheduleCascadeLimitExceeded', 'The schedule cascade exceeds the limit.')
+      }
+      written.push(updates.length)
+      // Another change saves after the first half is written.
+      version = new Map([['workspace', 1], ['team:team-1', 2]])
+    },
+  }, { plannedVersion: unsaved, save: saveTeamCalendar })
+  expect(written).toEqual([12])
+  expect(applied).toMatchObject({ updatedCount: 12, conflictCount: 12 })
+})
