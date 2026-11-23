@@ -12,6 +12,8 @@ import {
   type ChannelDelivery,
   type EmailRecipientLookup,
 } from '../../modules/notifications'
+import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import { createMemberNotificationLocaleReader } from './notification-locale'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
@@ -97,6 +99,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
   const ses = new SESv2Client({ region })
   const send = createEmailNotificationSender({
     sender, appOrigin,
+    readLocale: createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)),
     readRecipient: createCognitoEmailRecipientReader(documentClient, workspaceAccessTableName, userPoolId, new CognitoIdentityProviderClient({ region })),
     async sendEmail(message, signal) {
       await ses.send(new SendEmailCommand({

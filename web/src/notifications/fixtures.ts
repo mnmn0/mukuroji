@@ -87,6 +87,25 @@ export const blockerClearedNotificationFixture: InboxNotification = {
 }
 
 /**
+ * Storybook と UI test で使う、概要を message code で持つ期限超過の通知です。
+ * 表示言語で文にし、code がなければ保存済みの英語の概要を出します。
+ */
+export const overdueMessageNotificationFixture: InboxNotification = {
+  id: 'notification-overdue-1',
+  eventId: 'event-overdue-1',
+  eventType: 'work-item.overdue',
+  reasons: ['assignee'],
+  title: 'リリース手順を作る',
+  summary: 'Work Item "リリース手順を作る" is overdue.',
+  message: { code: 'work-item.overdue', params: { title: 'リリース手順を作る' } },
+  teamId: 'core-team',
+  projectId: 'refero',
+  issueId: 'release-steps',
+  occurredAt: '2026-07-12T03:20:00.000Z',
+  state: 'unread',
+}
+
+/**
  * Storybook で NotificationInbox を操作可能にする controller fixture です。
  */
 export const notificationInboxControllerFixture: NotificationInboxController = {

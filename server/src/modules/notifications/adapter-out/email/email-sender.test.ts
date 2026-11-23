@@ -87,4 +87,33 @@ describe('Email notification sender', () => {
     expect(await sender(verified, named('TooManyRequestsException')).send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailRateLimited' })
     expect(await sender(verified, new Error('socket hang up')).send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailDeliveryUnavailable' })
   })
+  test('writes a coded summary in the recipient language and keeps a plain stored summary', async () => {
+    const coded: ChannelDelivery = { ...delivery, notification: { ...delivery.notification, title: undefined,
+      summary: 'Work Item "Release" is overdue.', message: { code: 'work-item.overdue', params: { title: 'Release' } } } }
+    const english = renderEmailNotification(coded, 'https://app.example.test', 'en')
+    const japanese = renderEmailNotification(coded, 'https://app.example.test', 'ja')
+    expect(english.subject).toBe('[mukuroji] Work Item "Release" is overdue.')
+    expect(japanese.subject).toBe('[mukuroji] 「Release」は期限を過ぎています。')
+    expect(japanese.text).toContain('「Release」は期限を過ぎています。')
+    expect(renderEmailNotification(coded, 'https://app.example.test').text).toContain('「Release」は期限を過ぎています。')
+    expect(renderEmailNotification(delivery, 'https://app.example.test', 'en').text).toContain('Please review')
+    const messages: EmailMessage[] = []
+    const send = createEmailNotificationSender({
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test',
+      readRecipient: async () => ({ kind: 'verified', address: 'member@example.test' }),
+      readLocale: async (recipient) => recipient.memberKey === 'member@example.test' ? 'en' : 'ja',
+      sendEmail: async (message) => { messages.push(message) },
+    })
+    expect(await send(coded)).toEqual({ succeeded: true, retryable: false })
+    expect(messages[0]?.text).toContain('Work Item "Release" is overdue.')
+  })
+  test('retries without sending when the recipient language cannot be read', async () => {
+    const send = createEmailNotificationSender({
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test',
+      readRecipient: async () => ({ kind: 'verified', address: 'member@example.test' }),
+      readLocale: async () => { throw new Error('directory unavailable') },
+      sendEmail: async () => { throw new Error('Must not send') },
+    })
+    expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
+  })
 })

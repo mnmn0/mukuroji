@@ -112,6 +112,9 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   WORK_ITEM_TITLE_MAX_LENGTH,
+  createNotificationMessage,
+  formatNotificationMessage,
+  type NotificationMessage,
   type ParsedWorkItemKey,
 } from '@mukuroji/contracts'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
@@ -2627,6 +2630,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was created.',
         createdAt: now,
       })
+      const createdMessage = createNotificationMessage('work-item.created-assigned')
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.created',
@@ -2634,7 +2638,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'created',
         occurredAt: now,
-        summary: 'Work Item was created and assigned.',
+        summary: formatNotificationMessage(createdMessage, 'en'),
         changes: createAuditFieldChanges(undefined, item, [
           'key',
           'title',
@@ -2664,6 +2668,7 @@ export class DynamoDbTeamIssuesClient {
           sourceTriageEntryId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
+          notificationMessage: createdMessage,
           notificationCandidates: [
             { memberKey: assigneeUserId, reason: 'assignment' },
           ],
@@ -2967,6 +2972,8 @@ export class DynamoDbTeamIssuesClient {
         afterIssue,
         baselineReads,
       )
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.schedule-cascade-updated',
@@ -2975,8 +2982,7 @@ export class DynamoDbTeamIssuesClient {
         action: 'schedule-cascade-updated',
         sequence,
         occurredAt,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
         metadata: {
           adapter: 'canonical-work-item',
@@ -2986,6 +2992,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -3583,6 +3590,8 @@ export class DynamoDbTeamIssuesClient {
       )
       const baselineSlip = baselineRead.slip
       baselineFence = baselineRead.fence
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3590,8 +3599,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
@@ -3621,6 +3629,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -6242,38 +6251,42 @@ function createWorkItemBaselineSlipCandidates(
  * @param slip - Slip recorded for the change, if any.
  * @returns The summary, or `undefined` when the change did not cross the threshold.
  */
-function createWorkItemBaselineSlipSummary(slip: WorkItemBaselineSlipChange | undefined): string | undefined {
+function createWorkItemBaselineSlipMessage(slip: WorkItemBaselineSlipChange | undefined): NotificationMessage | undefined {
   if (!slip || !crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) {
     return undefined
   }
-  return `Work Item now ends ${slip.delayDays} days after its schedule baseline.`
+  return createNotificationMessage('work-item.baseline-slip', { delayDays: slip.delayDays })
 }
 
 /**
- * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
+ * Chooses the most specific text for a Work Item update notification and activity entry.
+ *
+ * @param before - Work Item before the update.
+ * @param after - Work Item after the update.
+ * @returns The notification message; its English text is the audit summary.
  */
-function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+function createWorkItemNotificationMessage(before: TeamIssueItem, after: TeamIssueItem): NotificationMessage {
   if (before.archivedAt !== after.archivedAt) {
-    return after.archivedAt ? 'Work Item was archived.' : 'Work Item was restored.'
+    return createNotificationMessage(after.archivedAt ? 'work-item.archived' : 'work-item.restored')
   }
 
   if (before.assigneeUserId !== after.assigneeUserId) {
-    return 'Work Item assignment changed.'
+    return createNotificationMessage('work-item.assignment-changed')
   }
 
   if (before.statusCategory !== 'completed' && after.statusCategory === 'completed') {
-    return 'Work Item was completed.'
+    return createNotificationMessage('work-item.completed')
   }
 
   if (before.workflowStatusId !== after.workflowStatusId) {
-    return 'Work Item status changed.'
+    return createNotificationMessage('work-item.status-changed')
   }
 
   if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
-    return 'Work Item schedule changed.'
+    return createNotificationMessage('work-item.schedule-changed')
   }
 
-  return 'Work Item was updated.'
+  return createNotificationMessage('work-item.updated')
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
