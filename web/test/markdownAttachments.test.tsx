@@ -14,6 +14,8 @@ import {
   markdownAttachmentMaxSizeBytes,
   readMarkdownAttachmentFileId,
 } from '../src/files/model/markdownAttachments'
+import { MarkdownAttachmentReactContext } from '../src/files/ui/markdownAttachmentContext'
+import { MarkdownDescriptionField } from '../src/issues/ui/MarkdownDescriptionField'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -136,5 +138,44 @@ const x = 1
     expect(html).toContain(`data-testid="markdown-attachment-link-${scanningPdfFileFixture.id}"`)
     expect(html).not.toContain('href="attachment:')
     expect(html).toContain('disabled=""')
+  })
+})
+
+describe('attachment context and read-only descriptions', () => {
+  const availablePdf = {
+    ...scanningPdfFileFixture,
+    currentVersion: { ...scanningPdfFileFixture.currentVersion, scanStatus: 'available' as const },
+  } satisfies FileAttachment
+  const controller = { ...fileArtifactsControllerFixture, files: [availablePdf] }
+
+  test('keeps attachment downloads usable for a viewer who cannot edit the description', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownDescriptionField
+          artifacts={controller}
+          defaultValue={`[spec](attachment:${availablePdf.id})`}
+          disabled
+          form="editor"
+          label="Description"
+          name="description"
+          readOnly
+          t={t}
+        />,
+    )
+    const button = html.match(new RegExp(`<button[^>]*data-testid="markdown-attachment-link-${availablePdf.id}"[^>]*>`))?.[0]
+    expect(button).toBeDefined()
+    expect(button).not.toContain('disabled=""')
+    expect(html).toContain('<textarea')
+    expect(html).toMatch(/<textarea[^>]*disabled=""/)
+  })
+
+  test('resolves attachments from the surrounding Work Item context', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownAttachmentReactContext.Provider value={{ controller, t }}>
+        <SafeCommentBody bodyMarkdown={`[spec](attachment:${availablePdf.id})`} />
+      </MarkdownAttachmentReactContext.Provider>,
+    )
+    const button = html.match(/<button[^>]*markdown-attachment-link[^>]*>/)?.[0]
+    expect(button).toBeDefined()
+    expect(button).not.toContain('disabled=""')
   })
 })

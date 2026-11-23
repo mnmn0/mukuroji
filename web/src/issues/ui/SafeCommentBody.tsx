@@ -8,6 +8,7 @@ import {
   MarkdownAttachmentLink,
   type MarkdownAttachmentContext,
 } from '../../files/ui/MarkdownAttachment'
+import { useMarkdownAttachmentContext } from '../../files/ui/markdownAttachmentContext'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 
 /**
@@ -24,7 +25,8 @@ export type SafeCommentBodyProps = {
   className?: string
   /**
    * File controller used to show `attachment:` images and links to this viewer.
-   * Without it, attachment references are shown as placeholders.
+   * Defaults to the nearest `MarkdownAttachmentReactContext`; without either, attachment
+   * references are shown as placeholders.
    */
   attachments?: MarkdownAttachmentContext
 }
@@ -49,8 +51,9 @@ const commentSanitizeSchema = {
  * 外部 URL の画像は読み込みません。
  */
 export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: SafeCommentBodyProps) {
-  const attachmentController = attachments?.controller
-  const attachmentTranslator = attachments?.t
+  const inheritedAttachments = useMarkdownAttachmentContext()
+  const attachmentController = (attachments ?? inheritedAttachments)?.controller
+  const attachmentTranslator = (attachments ?? inheritedAttachments)?.t
   // Stable renderers keep attachment components mounted across parent re-renders.
   const components = useMemo<Components>(() => {
     const context = attachmentController && attachmentTranslator

@@ -30,7 +30,8 @@ export type MarkdownDescriptionFieldProps = {
    */
   readOnly?: boolean
   /**
-   * Disables editing and uploads while the surrounding form is busy.
+   * Disables editing and uploads while the surrounding form is busy. The field is not placed
+   * in a disabled fieldset, so attachment downloads in the rendered view stay usable.
    */
   disabled?: boolean
   /**
@@ -116,6 +117,7 @@ export function MarkdownDescriptionField({
       <textarea
         className="workbench-input w-full min-w-0 resize-y px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)] min-h-40"
         defaultValue={defaultValue}
+        disabled={disabled}
         form={form}
         hidden={!showsWriteMode}
         id={`${form}:${name}`}

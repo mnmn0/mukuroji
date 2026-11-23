@@ -996,10 +996,7 @@ function IssueDetailContent({
         )
       case 'description':
         return (
-          <fieldset
-            className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
-          >
+          <>
             <MarkdownDescriptionField
               artifacts={artifacts}
               defaultValue={issue.description}
@@ -1013,7 +1010,7 @@ function IssueDetailContent({
               t={t}
             />
             {renderMentionedWorkItemKeys()}
-          </fieldset>
+          </>
         )
       case 'custom-fields':
         return hasCustomFields ? (

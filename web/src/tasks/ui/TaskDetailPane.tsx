@@ -1179,10 +1179,7 @@ export function TaskDetailPane({
         )
       case 'description':
         return (
-          <fieldset
-            className="contents"
-            disabled={isReadOnly || isWorkItemMutationPending}
-          >
+          <>
             <MarkdownDescriptionField
               artifacts={artifacts}
               defaultValue={seededDescription}
@@ -1195,7 +1192,7 @@ export function TaskDetailPane({
               readOnly={isReadOnly}
               t={t}
             />
-          </fieldset>
+          </>
         )
       case 'custom-fields':
         return hasCustomFields ? (
