@@ -54,6 +54,7 @@ export {
 export { isAutomationValue } from './domain/automation-value'
 export {
   validateApplyAutomationTemplateInput,
+  listProjectTemplateWbsNumbers,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
