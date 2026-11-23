@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import type { ProjectRaidEntry, ProjectRaidEntryInput } from '@mukuroji/contracts'
+import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  type CuratedContextItem,
+  type ProjectRaidEntry,
+  type ProjectRaidEntryInput,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { SWRConfig, unstable_serialize } from 'swr'
+import { projectRaidLogKey } from '../src/projects/queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from '../src/projects/ui/ProjectRaidLogPanel'
 import { useSaveProjectRaidEntry } from '../src/projects/mutations/useSaveProjectRaidEntry'
+import { usePromoteProjectRisk } from '../src/projects/mutations/usePromoteProjectRisk'
 import { createProjectRaidLogCsv } from '../src/projects/model/projectRaidLogExport'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -191,6 +199,66 @@ describe('saving Project log entries', () => {
     expect(keys[0]).not.toBe('')
     expect(keys[1]).not.toBe(keys[0])
     expect(keys[2]).toBe(keys[0])
+  })
+
+  test('joins a running promotion of the same risk instead of sending another request', async () => {
+    const posts: string[] = []
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === 'POST') {
+        posts.push(String(input))
+        await held
+        return new Response('{}', { status: 503 })
+      }
+      return new Response('{}', { status: 503 })
+    }
+    let promote: NonNullable<ReturnType<typeof usePromoteProjectRisk>>['promote'] | undefined
+
+    /**
+     * Captures the promote function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      promote = usePromoteProjectRisk({ accessToken: 'token', teamId: 'core-team', projectId: 'refero', workItemId: 'wi-1' })?.promote
+      return null
+    }
+
+    const fallback = {
+      [unstable_serialize(projectRaidLogKey('token', 'core-team', 'refero'))]: {
+        teamId: 'core-team',
+        projectId: 'refero',
+        entries: [],
+        viewer: { canEdit: true },
+      },
+    }
+    renderToStaticMarkup(<SWRConfig value={{ fallback, provider: () => new Map() }}><Probe /></SWRConfig>)
+    if (!promote) throw new Error('Expected the promote function.')
+    const item: CuratedContextItem = {
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id: 'risk-a',
+      teamId: 'core-team',
+      workItemId: 'wi-1',
+      kind: 'risk',
+      state: 'active',
+      title: 'A',
+      body: '',
+      mentionMemberKeys: [],
+      createdBy: { id: 'demo@example.com', displayName: 'Demo User' },
+      createdAt: '2026-06-07T09:00:00.000Z',
+      updatedBy: { id: 'demo@example.com', displayName: 'Demo User' },
+      updatedAt: '2026-06-07T09:00:00.000Z',
+      revision: 1,
+    }
+    const first = promote(item)
+    const second = promote(item)
+    release()
+    await expect(first).rejects.toThrow()
+    await expect(second).rejects.toThrow()
+    expect(posts).toHaveLength(1)
   })
 
   test('gives distinct operations with the same input their own Idempotency-Key', async () => {
