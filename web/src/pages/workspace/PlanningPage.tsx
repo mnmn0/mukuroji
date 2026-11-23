@@ -675,6 +675,7 @@ export function PlanningPage() {
                   key={cycle.id}
                   labels={labels.cycleBaseline}
                   snapshot={snapshot}
+                  onCaptured={() => void mutatePlanning()}
                 />
               )
             : undefined}

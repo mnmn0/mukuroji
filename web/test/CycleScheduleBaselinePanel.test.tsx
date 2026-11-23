@@ -90,7 +90,7 @@ describe('Cycle schedule baselines', () => {
         labels={labels}
         response={response}
         snapshot={snapshot}
-        onCapture={() => undefined}
+        onCapture={async () => true}
         onRetry={() => undefined}
         onSelect={() => undefined}
       />,
@@ -117,7 +117,7 @@ describe('Cycle schedule baselines', () => {
         labels={labels}
         response={{ cycleId: 'cycle-14', revision: 0, baseline: null, savedBaselines: [] }}
         snapshot={snapshot}
-        onCapture={() => undefined}
+        onCapture={async () => true}
         onRetry={() => undefined}
         onSelect={() => undefined}
       />,
@@ -131,5 +131,12 @@ describe('Cycle schedule baselines', () => {
     expect(isEvictedBaselineSelection('cb-1', notFound)).toBe(true)
     expect(isEvictedBaselineSelection(undefined, notFound)).toBe(false)
     expect(isEvictedBaselineSelection('cb-1', new PlanningApiError(503, 'busy', 'CycleScheduleBaselineRetryable'))).toBe(false)
+  })
+
+  test('shows a small effort change in minutes instead of rounding it to zero hours', () => {
+    expect(labels.effortDelta(0)).toBe('Planned effort unchanged')
+    expect(labels.effortDelta(1)).toBe('Planned effort +1 min')
+    expect(labels.effortDelta(-3)).toBe('Planned effort −3 min')
+    expect(labels.effortDelta(90)).toBe('Planned effort +1.5h')
   })
 })

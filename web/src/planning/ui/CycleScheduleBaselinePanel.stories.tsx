@@ -54,7 +54,7 @@ const meta = {
     labels,
     response,
     snapshot,
-    onCapture: () => undefined,
+    onCapture: async () => true,
     onRetry: () => undefined,
     onSelect: () => undefined,
   },

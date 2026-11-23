@@ -76,8 +76,8 @@ export type CycleScheduleBaselinePanelProps = {
   captureFailed: boolean
   /** Localized labels. */
   labels: CycleScheduleBaselineLabels
-  /** Saves a new baseline with an optional name. */
-  onCapture: (name: string) => void
+  /** Saves a new baseline with an optional name, resolving to whether it was saved. */
+  onCapture: (name: string) => Promise<boolean>
   /** Chooses which saved baseline to compare against. */
   onSelect: (baselineId: string) => void
   /** Loads the baseline again. */
@@ -176,8 +176,11 @@ export function CycleScheduleBaselinePanel({
           data-testid="cycle-baseline-capture"
           onSubmit={(event) => {
             event.preventDefault()
-            onCapture(name)
-            setName('')
+            const submitted = name
+            // Keep the name when the save fails, and keep anything typed while it was saving.
+            void onCapture(submitted).then((saved) => {
+              if (saved) setName((current) => (current === submitted ? '' : current))
+            })
           }}
         >
           <label className="grid min-w-0 gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
@@ -219,6 +222,8 @@ export type CycleScheduleBaselineContainerProps = {
   canCapture: boolean
   /** Localized labels. */
   labels: CycleScheduleBaselineLabels
+  /** Called after a save succeeds, so the page can reload the Planning snapshot. */
+  onCaptured?: () => void
 }
 
 /**
@@ -232,9 +237,14 @@ export function CycleScheduleBaselineContainer({
   canCapture,
   cycle,
   labels,
+  onCaptured,
   snapshot,
 }: CycleScheduleBaselineContainerProps) {
-  const { query, select, retry, capture, isCapturing, captureFailed } = useCycleScheduleBaselines(accessToken, cycle.id)
+  const { query, select, retry, capture, isCapturing, captureFailed } = useCycleScheduleBaselines(
+    accessToken,
+    cycle.id,
+    onCaptured,
+  )
   return (
     <CycleScheduleBaselinePanel
       canCapture={canCapture}
@@ -246,7 +256,7 @@ export function CycleScheduleBaselineContainer({
       labels={labels}
       response={query.data}
       snapshot={snapshot}
-      onCapture={(name) => void capture(name)}
+      onCapture={capture}
       onRetry={retry}
       onSelect={select}
     />

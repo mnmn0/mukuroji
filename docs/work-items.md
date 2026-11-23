@@ -120,7 +120,7 @@ Planning の Project / Initiative の近況（Planning update）の作成欄は�
 
 Focus は、責任者または Contributor の未完了 Work Item が baseline より Team 設定の日数以上遅れると `slipped` signal を出す（`docs/focus.md`）。
 
-まだ無いもの: Focus の `slipped` signal の通知・Automation trigger、Cycle 単位の baseline。
+まだ無いもの: Focus の `slipped` signal の通知・Automation trigger。
 
 ### Estimate, remaining effort, and progress
 

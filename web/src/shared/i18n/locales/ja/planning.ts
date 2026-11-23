@@ -281,6 +281,8 @@ export const planningMessages = {
   'planning.cycle.baseline.effortSame': '予定工数の変化なし',
   'planning.cycle.baseline.effortMore': '予定工数 +{hours}h',
   'planning.cycle.baseline.effortLess': '予定工数 −{hours}h',
+  'planning.cycle.baseline.effortMoreMinutes': '予定工数 +{minutes}分',
+  'planning.cycle.baseline.effortLessMinutes': '予定工数 −{minutes}分',
   'planning.cycle.baseline.slippedTitle': '終了予定が遅れた Work Item',
   'planning.cycle.baseline.slippedDays': '{days} 日遅れ',
   'planning.cycle.baseline.slippedNone': '終了予定が遅れた Work Item はありません。',

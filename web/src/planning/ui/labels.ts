@@ -202,6 +202,11 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       hidden: (count) => t('planning.cycle.baseline.hidden').replace('{count}', String(count)),
       effortDelta: (minutes) => {
         if (minutes === 0) return t('planning.cycle.baseline.effortSame')
+        // Below 0.1 h the hours would round to 0, so show minutes to keep a real change visible.
+        if (Math.abs(minutes) < 6) {
+          return t(minutes > 0 ? 'planning.cycle.baseline.effortMoreMinutes' : 'planning.cycle.baseline.effortLessMinutes')
+            .replace('{minutes}', String(Math.abs(minutes)))
+        }
         const hours = String(Math.round(Math.abs(minutes) / 6) / 10)
         return t(minutes > 0 ? 'planning.cycle.baseline.effortMore' : 'planning.cycle.baseline.effortLess').replace('{hours}', hours)
       },

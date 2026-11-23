@@ -281,6 +281,8 @@ export const planningMessages = {
   'planning.cycle.baseline.effortSame': 'Planned effort unchanged',
   'planning.cycle.baseline.effortMore': 'Planned effort +{hours}h',
   'planning.cycle.baseline.effortLess': 'Planned effort −{hours}h',
+  'planning.cycle.baseline.effortMoreMinutes': 'Planned effort +{minutes} min',
+  'planning.cycle.baseline.effortLessMinutes': 'Planned effort −{minutes} min',
   'planning.cycle.baseline.slippedTitle': 'Work Items whose planned end slipped',
   'planning.cycle.baseline.slippedDays': '{days} days late',
   'planning.cycle.baseline.slippedNone': 'No Work Item ends later than in the baseline.',

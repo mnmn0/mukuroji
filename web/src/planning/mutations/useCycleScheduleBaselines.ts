@@ -22,9 +22,10 @@ export function isEvictedBaselineSelection(selectedId: string | undefined, error
  *
  * @param accessToken - Planning API access token.
  * @param cycleId - Cycle whose baselines are read and saved.
+ * @param onCaptured - Called after a save succeeds, so the page can reload the plan it compares against.
  * @returns The baseline query, the selection, the retry and save actions, and the save state.
  */
-export function useCycleScheduleBaselines(accessToken: string, cycleId: string) {
+export function useCycleScheduleBaselines(accessToken: string, cycleId: string, onCaptured?: () => void) {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
   const [isCapturing, setIsCapturing] = useState(false)
   const [captureFailed, setCaptureFailed] = useState(false)
@@ -35,8 +36,9 @@ export function useCycleScheduleBaselines(accessToken: string, cycleId: string) 
    * Saves the Cycle's current plan as a new baseline and shows it.
    *
    * @param name - Optional baseline name.
+   * @returns Whether the baseline was saved.
    */
-  const capture = async (name: string) => {
+  const capture = async (name: string): Promise<boolean> => {
     setIsCapturing(true)
     setCaptureFailed(false)
     try {
@@ -44,8 +46,12 @@ export function useCycleScheduleBaselines(accessToken: string, cycleId: string) 
       // The newest baseline is the one just saved, so show it whichever one was selected.
       await mutate(cycleScheduleBaselineKey(accessToken, cycleId), saved, { revalidate: false })
       setSelectedId(undefined)
+      // The comparison reads the page's Planning snapshot, which may be older than the saved plan.
+      onCaptured?.()
+      return true
     } catch {
       setCaptureFailed(true)
+      return false
     } finally {
       setIsCapturing(false)
     }
