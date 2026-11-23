@@ -909,11 +909,15 @@ function WhiteboardObjectNode({
       ? createWorkItemSearchPath(object.workItemId)
       : undefined
 
+  const objectLabel = text || t(`documents.whiteboard.${object.type}`)
+
   return (
     <>
       <g
         aria-label={
-          text || t(`documents.whiteboard.${object.type}`)
+          object.type === 'note' && object.done
+            ? `${t('documents.whiteboard.noteDone')}: ${objectLabel}`
+            : objectLabel
         }
         className={onPointerDown ? 'cursor-grab active:cursor-grabbing' : ''}
         onDoubleClick={() => workItemPath && onNavigate?.(workItemPath)}

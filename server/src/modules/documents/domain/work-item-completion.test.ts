@@ -87,7 +87,9 @@ test('checks only the checklist items turned into the completed Work Item', () =
     ],
   }
 
-  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor)).toEqual([{
+  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor)).toEqual({
+    elementKeys: ['item:actions:linked'],
+    operations: [{
     type: 'update-block',
     operationId: 'completion:event-1:block:actions',
     blockId: 'actions',
@@ -100,7 +102,8 @@ test('checks only the checklist items turned into the completed Work Item', () =
         { id: 'other-work-item', text: 'Write notes', checked: false },
       ],
     },
-  }])
+  }],
+  })
 })
 
 test('changes nothing when the linked item is already checked or was deleted', () => {
@@ -118,7 +121,8 @@ test('changes nothing when the linked item is already checked or was deleted', (
     ],
   }
 
-  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor)).toEqual([])
+  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor))
+    .toEqual({ operations: [], elementKeys: [] })
 })
 
 test('marks the linked Whiteboard note done and ignores Work Item cards', () => {
@@ -139,7 +143,9 @@ test('marks the linked Whiteboard note done and ignores Work Item cards', () => 
     ],
   }
 
-  expect(planWorkItemCompletionOperations(whiteboard, workItemId, operationIdFor)).toEqual([{
+  expect(planWorkItemCompletionOperations(whiteboard, workItemId, operationIdFor)).toEqual({
+    elementKeys: ['object:note-1'],
+    operations: [{
     type: 'update-object',
     operationId: 'completion:event-1:object:note-1',
     objectId: 'note-1',
@@ -150,6 +156,48 @@ test('marks the linked Whiteboard note done and ignores Work Item cards', () => 
       bounds: { x: 0, y: 0, width: 100, height: 80 },
       zIndex: 1,
       done: true,
+    },
+  }],
+  })
+})
+
+test('checks only the eligible items of a block on a redelivered event', () => {
+  const page: DocumentDetail = {
+    ...base,
+    kind: 'page',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [
+        { id: 'first', text: 'Send the estimate', checked: false },
+        { id: 'reopened', text: 'Book the room', checked: false },
+      ],
+    }],
+    relations: [
+      relation('checklist-item:actions:first', { kind: 'block', blockId: 'actions' }),
+      relation('checklist-item:actions:reopened', { kind: 'block', blockId: 'actions' }),
+    ],
+  }
+
+  const plan = planWorkItemCompletionOperations(
+    page,
+    workItemId,
+    operationIdFor,
+    (elementKey) => elementKey === 'item:actions:first',
+  )
+
+  expect(plan.elementKeys).toEqual(['item:actions:first'])
+  expect(plan.operations).toEqual([{
+    type: 'update-block',
+    operationId: 'completion:event-1:block:actions',
+    blockId: 'actions',
+    block: {
+      id: 'actions',
+      type: 'checklist',
+      items: [
+        { id: 'first', text: 'Send the estimate', checked: true },
+        { id: 'reopened', text: 'Book the room', checked: false },
+      ],
     },
   }])
 })

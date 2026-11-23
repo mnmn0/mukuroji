@@ -4227,27 +4227,28 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       if (ancestorRows.some((ancestor) => ancestor.document.archivedAt !== undefined)) {
         return false
       }
-      const planned = planWorkItemCompletionOperations(
-        row.document,
-        input.workItemId,
-        (elementKey) => workItemCompletionOperationId(input.eventId, elementKey),
-      )
       // The first attempt of an event records which elements it set out to
       // complete. A redelivered event only works through that scope, so an
       // element that was already done then, and unchecked since, stays as
-      // the editor left it.
+      // the editor left it, even inside a block the event still changes.
       const scope = await this.getWorkItemCompletionScope(
         input.workspaceId,
         documentId,
         input.eventId,
       )
-      const inScope = scope === undefined
-        ? planned
-        : planned.filter((operation) => scope.operationIds.includes(operation.operationId))
-      // An element this event already completed keeps its receipt, so a
+      const scopeElementKeys = scope === undefined ? undefined : new Set(scope.elementKeys)
+      const planned = planWorkItemCompletionOperations(
+        row.document,
+        input.workItemId,
+        (operationKey) => workItemCompletionOperationId(input.eventId, operationKey),
+        scopeElementKeys === undefined
+          ? undefined
+          : (elementKey) => scopeElementKeys.has(elementKey),
+      )
+      // A block or note this event already changed keeps its receipt, so a
       // retried event never undoes an edit made after the first attempt.
       const operations: DocumentOperation[] = []
-      for (const operation of inScope) {
+      for (const operation of planned.operations) {
         if (operations.length >= DOCUMENT_MAX_OPERATION_COUNT) break
         const receipt = await this.getOperationReceipt(
           input.workspaceId,
@@ -4261,7 +4262,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             this.tableName,
             input,
             documentId,
-            planned.map((operation) => operation.operationId),
+            planned.elementKeys,
             this.now(),
           )]
         : []
@@ -4394,11 +4395,19 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       ConsistentRead: true,
     }))
     const item: unknown = result.Item
-    if (!isRecord(item) || !Array.isArray(item.operationIds)) return undefined
-    const operationIds = item.operationIds.filter(
-      (operationId): operationId is string => typeof operationId === 'string',
-    )
-    return { operationIds }
+    if (item === undefined) return undefined
+    // A damaged scope must not widen or narrow what a redelivered event
+    // changes, so the event fails and is retried instead.
+    const elementKeys = isRecord(item) && item.entryType === 'work-item-completion-scope'
+      ? item.elementKeys
+      : undefined
+    if (
+      !Array.isArray(elementKeys) ||
+      !elementKeys.every((elementKey): elementKey is string => typeof elementKey === 'string')
+    ) {
+      throw invalidStoredDocumentData()
+    }
+    return { elementKeys: [...elementKeys] }
   }
 
   /** Document を安全な text format へ export します。 */
@@ -6065,8 +6074,8 @@ function blockTextLength(block: DocumentBlock): number {
 
 /** Elements one Work Item completion event set out to complete in a Document. */
 type StoredWorkItemCompletionScope = {
-  /** Operation IDs of the elements, as planned on the event's first attempt. */
-  operationIds: string[]
+  /** Keys of the elements, as planned on the event's first attempt. */
+  elementKeys: string[]
 }
 
 /**
@@ -6086,7 +6095,7 @@ function workItemCompletionScopeKey(documentId: string, eventId: string): string
  * @param tableName - Documents table name.
  * @param input - Completion request.
  * @param documentId - Document the event changes.
- * @param operationIds - Operation IDs planned on the first attempt.
+ * @param elementKeys - Keys of the elements planned on the first attempt.
  * @param now - Write time.
  * @returns Put that fails if another attempt recorded the scope first.
  */
@@ -6094,7 +6103,7 @@ function workItemCompletionScopePut(
   tableName: string,
   input: ReflectWorkItemCompletionRequest,
   documentId: string,
-  operationIds: readonly string[],
+  elementKeys: readonly string[],
   now: Date,
 ): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
   const nowEpoch = Math.floor(now.getTime() / 1_000)
@@ -6107,7 +6116,7 @@ function workItemCompletionScopePut(
         entryType: 'work-item-completion-scope',
         documentId,
         workItemId: input.workItemId,
-        operationIds: [...operationIds],
+        elementKeys: [...elementKeys],
         createdAt: now.toISOString(),
         expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
       },

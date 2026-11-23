@@ -11,12 +11,49 @@ const CHECKLIST_ITEM_RELATION_PREFIX = 'checklist-item:'
 const WHITEBOARD_NOTE_RELATION_PREFIX = 'whiteboard-note:'
 
 /**
- * Builds the operation ID of one completed element.
+ * Builds the operation ID of one completion operation.
  *
- * @param elementKey - `block:<blockId>` or `object:<objectId>`.
- * @returns Operation ID unique to the completion event and the element.
+ * @param operationKey - `block:<blockId>` or `object:<objectId>`.
+ * @returns Operation ID unique to the completion event and the changed block or object.
  */
-export type WorkItemCompletionOperationId = (elementKey: string) => string
+export type WorkItemCompletionOperationId = (operationKey: string) => string
+
+/**
+ * Tells whether one element may be completed by this attempt.
+ *
+ * @param elementKey - `item:<blockId>:<itemId>` or `object:<objectId>`.
+ * @returns True when the element may be marked done.
+ */
+export type WorkItemCompletionElementFilter = (elementKey: string) => boolean
+
+/** Operations that complete the elements linked to a Work Item. */
+export type WorkItemCompletionPlan = {
+  /** Operations to apply; empty when nothing needs to change. */
+  operations: DocumentOperation[]
+  /** Keys of the elements the operations mark done, as `item:<blockId>:<itemId>` or `object:<objectId>`. */
+  elementKeys: string[]
+}
+
+/**
+ * Builds the key of one checklist item for a completion scope.
+ *
+ * @param blockId - Checklist block ID.
+ * @param itemId - Checklist item ID.
+ * @returns Element key of the item.
+ */
+function checklistItemElementKey(blockId: string, itemId: string): string {
+  return `item:${blockId}:${itemId}`
+}
+
+/**
+ * Builds the key of one Whiteboard note for a completion scope.
+ *
+ * @param objectId - Whiteboard object ID.
+ * @returns Element key of the note.
+ */
+function noteElementKey(objectId: string): string {
+  return `object:${objectId}`
+}
 
 /**
  * Tells whether a relation ID is one that completion reflects: a checklist
@@ -39,30 +76,34 @@ export function isWorkItemCompletionRelationId(relationId: string): boolean {
  * relation and Whiteboard notes linked by a `whiteboard-note:<objectId>`
  * relation. Other relations to the Work Item, such as plain links, embedded
  * Work Item cards, or relations a viewer typed by hand with another ID, are
- * left alone. Elements that are already done produce no operation. The
- * caller derives operation IDs from the completion event so it can record
- * which elements one event already completed.
+ * left alone. Elements that are already done, or that `isEligible` rejects,
+ * are not changed. The caller derives operation IDs from the completion event
+ * so it can record which operations one event already applied, and passes
+ * `isEligible` to limit a redelivered event to the elements its first attempt
+ * set out to complete.
  *
  * @param document - Current Document.
  * @param workItemId - Canonical ID of the completed Work Item.
- * @param operationIdFor - Builds the operation ID of one element for this completion event.
- * @returns Operations to apply; empty when nothing needs to change.
+ * @param operationIdFor - Builds the operation ID of one block or object for this completion event.
+ * @param isEligible - Tells whether an element may be completed; every element by default.
+ * @returns Operations to apply and the keys of the elements they complete.
  */
 export function planWorkItemCompletionOperations(
   document: DocumentDetail,
   workItemId: string,
   operationIdFor: WorkItemCompletionOperationId,
-): DocumentOperation[] {
+  isEligible: WorkItemCompletionElementFilter = () => true,
+): WorkItemCompletionPlan {
   const relations = document.relations.filter((relation) =>
     relation.target.kind === 'work-item' && relation.target.workItemId === workItemId)
-  if (relations.length === 0) return []
+  if (relations.length === 0) return { operations: [], elementKeys: [] }
   if (document.kind === 'page' || document.kind === 'template') {
-    return planChecklistOperations(document, relations, operationIdFor)
+    return planChecklistOperations(document, relations, operationIdFor, isEligible)
   }
   if (document.kind === 'whiteboard') {
-    return planNoteOperations(document, relations, operationIdFor)
+    return planNoteOperations(document, relations, operationIdFor, isEligible)
   }
-  return []
+  return { operations: [], elementKeys: [] }
 }
 
 /**
@@ -70,14 +111,16 @@ export function planWorkItemCompletionOperations(
  *
  * @param document - Page or template.
  * @param relations - Relations of the Document that target the Work Item.
- * @param operationIdFor - Builds the operation ID of one element.
- * @returns Block update operations.
+ * @param operationIdFor - Builds the operation ID of one block.
+ * @param isEligible - Tells whether an item may be checked.
+ * @returns Block update operations and the keys of the items they check.
  */
 function planChecklistOperations(
   document: Extract<DocumentDetail, { kind: 'page' | 'template' }>,
   relations: readonly DocumentRelation[],
   operationIdFor: WorkItemCompletionOperationId,
-): DocumentOperation[] {
+  isEligible: WorkItemCompletionElementFilter,
+): WorkItemCompletionPlan {
   const itemIdsByBlock = new Map<string, Set<string>>()
   for (const relation of relations) {
     if (relation.source.kind !== 'block') continue
@@ -90,11 +133,19 @@ function planChecklistOperations(
     itemIdsByBlock.set(relation.source.blockId, itemIds)
   }
   const operations: DocumentOperation[] = []
+  const elementKeys: string[] = []
   for (const block of document.blocks) {
     if (block.type !== 'checklist') continue
-    const itemIds = itemIdsByBlock.get(block.id)
-    if (!itemIds) continue
-    if (!block.items.some((item) => itemIds.has(item.id) && !item.checked)) continue
+    const linkedItemIds = itemIdsByBlock.get(block.id)
+    if (!linkedItemIds) continue
+    const itemIds = new Set(block.items
+      .filter((item) =>
+        linkedItemIds.has(item.id) &&
+        !item.checked &&
+        isEligible(checklistItemElementKey(block.id, item.id)))
+      .map((item) => item.id))
+    if (itemIds.size === 0) continue
+    elementKeys.push(...[...itemIds].map((itemId) => checklistItemElementKey(block.id, itemId)))
     operations.push({
       block: {
         ...block,
@@ -106,7 +157,7 @@ function planChecklistOperations(
       type: 'update-block',
     })
   }
-  return operations
+  return { operations, elementKeys }
 }
 
 /**
@@ -114,14 +165,16 @@ function planChecklistOperations(
  *
  * @param document - Whiteboard.
  * @param relations - Relations of the Document that target the Work Item.
- * @param operationIdFor - Builds the operation ID of one element.
- * @returns Object update operations.
+ * @param operationIdFor - Builds the operation ID of one object.
+ * @param isEligible - Tells whether a note may be marked done.
+ * @returns Object update operations and the keys of the notes they mark done.
  */
 function planNoteOperations(
   document: Extract<DocumentDetail, { kind: 'whiteboard' }>,
   relations: readonly DocumentRelation[],
   operationIdFor: WorkItemCompletionOperationId,
-): DocumentOperation[] {
+  isEligible: WorkItemCompletionElementFilter,
+): WorkItemCompletionPlan {
   const objectIds = new Set<string>()
   for (const relation of relations) {
     if (relation.source.kind !== 'whiteboard-object') continue
@@ -129,8 +182,12 @@ function planNoteOperations(
     objectIds.add(relation.source.objectId)
   }
   const operations: DocumentOperation[] = []
+  const elementKeys: string[] = []
   for (const object of document.whiteboard.objects) {
     if (object.type !== 'note' || !objectIds.has(object.id) || object.done === true) continue
+    const elementKey = noteElementKey(object.id)
+    if (!isEligible(elementKey)) continue
+    elementKeys.push(elementKey)
     operations.push({
       object: { ...object, done: true },
       objectId: object.id,
@@ -138,5 +195,5 @@ function planNoteOperations(
       type: 'update-object',
     })
   }
-  return operations
+  return { operations, elementKeys }
 }
