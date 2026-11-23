@@ -36,6 +36,9 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
   行は保存のたびに 1 から増える `revision` を持ち、保存は計算の前に読んだ revision の次としてだけ
   書ける（条件付き Put）。後から始めた保存が先に終わった場合、遅れた方は 409 で断り、新しい snapshot を
   古い計算で上書きしない。
+  保存要求ごとに `TEAM_PORTFOLIO_SNAPSHOT_RECEIPT#<teamId>#<Idempotency-Key のハッシュ>` の受領行を
+  同じ transaction で書き、応答が失われて同じ key で再送されたときは計算し直さずにその月の snapshot を返す。
+  同じ key で別の要求が来たら 409 `PortfolioSnapshotIdempotencyConflict` にする。受領行は消さない。
 - 保存は `PUT /api/teams/:teamId/portfolio/snapshots/:month` で、`teams.manage` の操作として扱い、
   Team 全体を管理している人だけができる。システム管理者か、Team の全 Project を読めて費用も見られる
   工数管理者で、Team への直接の権限があっても読めない Project や費用の見えない Project が1つでもあれば

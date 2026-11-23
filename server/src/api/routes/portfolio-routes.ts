@@ -11,6 +11,7 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   assertPortfolioProjectLimit,
   canCaptureTeamPortfolioSnapshot,
+  captureTeamPortfolioSnapshot,
   buildTeamPortfolioProjects,
   redactTeamPortfolioSnapshot,
   type PortfolioBudgetSource,
@@ -116,34 +117,30 @@ export function registerPortfolioRoutes(routeApp: Hono): void {
       const month = readMonth(c)
       const timeZone = readTimeZone(c)
       const access = await readPortfolioAccess(principal, teamId)
-      if (!access.managesWholeTeam) {
-        throw new ProjectDataError(403, 'PortfolioSnapshotForbidden', 'Only a manager of the whole Team can save its portfolio snapshot.')
-      }
       const now = new Date()
-      if (month !== currentMonth(now, timeZone)) {
-        throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'Only the current month can be saved.')
-      }
-      // Read the month's revision before the metrics, so a capture that finishes after a newer
-      // save is rejected rather than replacing it.
-      const previous = await workItemDependencies.portfolioSnapshots.get(principal.directoryId, teamId, month)
-      const projects = await computeTeamPortfolio(principal, access, timeZone, now)
-      const stored = {
-        workspaceId: principal.directoryId,
-        teamId,
-        month,
-        capturedAt: now.toISOString(),
-        revision: (previous?.revision ?? 0) + 1,
-        projects,
-      }
-      await workItemDependencies.portfolioSnapshots.put({
-        snapshot: stored,
-        callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
-          principal,
-          [],
-          principal.principalKind !== 'service-account',
-        ),
-        auditContext: createApiMutationContext(c, principal, { month }),
-      })
+      const auditContext = createApiMutationContext(c, principal, { month })
+      const stored = await captureTeamPortfolioSnapshot(
+        {
+          store: workItemDependencies.portfolioSnapshots,
+          computeProjects: async () => await computeTeamPortfolio(principal, access, timeZone, now),
+        },
+        {
+          workspaceId: principal.directoryId,
+          teamId,
+          month,
+          currentMonth: currentMonth(now, timeZone),
+          now,
+          canCapture: access.managesWholeTeam,
+          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+          auditContext,
+          idempotencyKeyHash: auditContext.idempotencyKeyHash,
+          requestFingerprint: auditContext.requestFingerprint,
+        },
+      )
       const readable = new Set(access.readableProjectIds)
       return c.json({
         snapshot: redactTeamPortfolioSnapshot(stored, (projectId) => readable.has(projectId), access.canSeeCost),
@@ -328,6 +325,7 @@ const PORTFOLIO_ERROR_CODES = new Set([
   'PortfolioTooLarge',
   'PortfolioSnapshotForbidden',
   'PortfolioSnapshotConflict',
+  'PortfolioSnapshotIdempotencyConflict',
   'PortfolioSnapshotCorruptState',
   'PortfolioSnapshotStorageFailure',
   'PortfolioSnapshotRetryable',

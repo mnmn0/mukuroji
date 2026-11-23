@@ -14,6 +14,7 @@ import { createMutationAuditEventPut, type MutationAuditContext } from '../../..
 import { ProjectDataError } from '../../../directory'
 import type {
   StoredTeamPortfolioSnapshot,
+  TeamPortfolioSnapshotReceipt,
   TeamPortfolioSnapshotStore as SnapshotStore,
   WriteTeamPortfolioSnapshotInput as WriteInput,
 } from '../../application/team-portfolio'
@@ -29,6 +30,50 @@ export type TeamPortfolioSnapshotStore = SnapshotStore<PortfolioSnapshotCallerAu
 
 /** Planning-table record type of one monthly portfolio snapshot. */
 const ENTRY_TYPE = 'team-portfolio-snapshot'
+
+/** Planning-table record type of one save request's receipt. */
+const RECEIPT_TYPE = 'team-portfolio-snapshot-receipt'
+
+/**
+ * Builds the Planning-table record key of one save request's receipt.
+ *
+ * @param teamId - Team ID.
+ * @param keyHash - Hash of the request's idempotency key.
+ * @returns The record key.
+ */
+function receiptRecordKey(teamId: string, keyHash: string) {
+  return `TEAM_PORTFOLIO_SNAPSHOT_RECEIPT#${encodeURIComponent(teamId)}#${keyHash}`
+}
+
+/**
+ * Validates a stored receipt row.
+ *
+ * @param row - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace.
+ * @param teamId - Expected Team.
+ * @param keyHash - Expected key hash.
+ * @returns The receipt.
+ * @throws ProjectDataError when the row is malformed.
+ */
+function parseReceipt(row: Record<string, unknown>, workspaceId: string, teamId: string, keyHash: string): TeamPortfolioSnapshotReceipt {
+  const { requestFingerprint, month, revision } = row
+  if (
+    row.workspaceId !== workspaceId ||
+    row.recordKey !== receiptRecordKey(teamId, keyHash) ||
+    row.entryType !== RECEIPT_TYPE ||
+    row.schemaVersion !== 1 ||
+    row.teamId !== teamId ||
+    row.keyHash !== keyHash ||
+    typeof requestFingerprint !== 'string' ||
+    !isPortfolioMonth(month) ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1
+  ) {
+    throw corruptSnapshot()
+  }
+  return { keyHash, requestFingerprint, month, revision }
+}
 
 /**
  * Largest serialized snapshot body a row may hold, leaving room under DynamoDB's 400 KB item
@@ -127,6 +172,25 @@ export class DynamoDbTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
   }
 
   /**
+   * Reads the receipt of an earlier save request with a strongly consistent read.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param teamId - Team ID.
+   * @param keyHash - Hash of the idempotency key.
+   * @returns The validated receipt, or `null`.
+   */
+  async getReceipt(workspaceId: string, teamId: string, keyHash: string): Promise<TeamPortfolioSnapshotReceipt | null> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: receiptRecordKey(teamId, keyHash) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    return row === undefined ? null : parseReceipt(row, workspaceId, teamId, keyHash)
+  }
+
+  /**
    * Stores one month's snapshot, replacing an earlier one, with the caller's authorization
    * fences and the audit event in the same transaction.
    *
@@ -165,6 +229,24 @@ export class DynamoDbTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
               }),
         },
       },
+      {
+        // Kept for every save, so a retry is recognized after later saves too.
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            workspaceId: snapshot.workspaceId,
+            recordKey: receiptRecordKey(snapshot.teamId, input.receipt.keyHash),
+            entryType: RECEIPT_TYPE,
+            schemaVersion: 1,
+            teamId: snapshot.teamId,
+            keyHash: input.receipt.keyHash,
+            requestFingerprint: input.receipt.requestFingerprint,
+            month: input.receipt.month,
+            revision: input.receipt.revision,
+          },
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      },
       ...input.callerAuthorization,
       ...(audit ? [audit] : []),
     ]
@@ -180,6 +262,8 @@ export class DynamoDbTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
 export class InMemoryTeamPortfolioSnapshotStore implements TeamPortfolioSnapshotStore {
   /** Snapshots keyed by Workspace, Team, and month. */
   private readonly snapshots = new Map<string, StoredTeamPortfolioSnapshot>()
+  /** Receipts keyed by Workspace, Team, and key hash. */
+  private readonly receipts = new Map<string, TeamPortfolioSnapshotReceipt>()
   /** Audit events the writes would record, oldest first, for tests to inspect. */
   readonly auditEvents: { eventType: string; teamId: string; month: string; actorId: string }[] = []
 
@@ -196,6 +280,19 @@ export class InMemoryTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
   }
 
   /**
+   * Reads a copy of the receipt of an earlier save request.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param teamId - Team ID.
+   * @param keyHash - Hash of the idempotency key.
+   * @returns The receipt, or `null`.
+   */
+  async getReceipt(workspaceId: string, teamId: string, keyHash: string): Promise<TeamPortfolioSnapshotReceipt | null> {
+    const receipt = this.receipts.get(JSON.stringify([workspaceId, teamId, keyHash]))
+    return receipt ? { ...receipt } : null
+  }
+
+  /**
    * Stores a copy of one month's snapshot.
    *
    * @param input - Write input.
@@ -204,10 +301,12 @@ export class InMemoryTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
     assertSnapshotSize(input.snapshot)
     const { snapshot } = input
     const key = JSON.stringify([snapshot.workspaceId, snapshot.teamId, snapshot.month])
-    if ((this.snapshots.get(key)?.revision ?? 0) !== snapshot.revision - 1) {
+    const receiptKey = JSON.stringify([snapshot.workspaceId, snapshot.teamId, input.receipt.keyHash])
+    if ((this.snapshots.get(key)?.revision ?? 0) !== snapshot.revision - 1 || this.receipts.has(receiptKey)) {
       throw snapshotConflict()
     }
     this.snapshots.set(key, structuredClone(snapshot))
+    this.receipts.set(receiptKey, { ...input.receipt })
     this.auditEvents.push({
       eventType: 'team.portfolio_snapshot_saved',
       teamId: snapshot.teamId,

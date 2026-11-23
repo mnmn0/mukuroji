@@ -324,6 +324,20 @@ export type WriteTeamPortfolioSnapshotInput<TCallerCheck, TAudit> = {
   callerAuthorization: readonly TCallerCheck[]
   /** Audit context of the request. */
   auditContext: TAudit
+  /** Receipt of the request, stored with the snapshot so a retry finds the completed save. */
+  receipt: TeamPortfolioSnapshotReceipt
+}
+
+/** Durable record of one save request, keyed by its idempotency key. */
+export type TeamPortfolioSnapshotReceipt = {
+  /** Hash of the request's idempotency key. */
+  keyHash: string
+  /** Fingerprint of the request; a retry with the same key must match it. */
+  requestFingerprint: string
+  /** Month the request saved. */
+  month: string
+  /** Revision the request wrote. */
+  revision: number
 }
 
 /** Persistence of monthly portfolio snapshots. */
@@ -338,10 +352,109 @@ export interface TeamPortfolioSnapshotStore<TCallerCheck, TAudit> {
    */
   get(workspaceId: string, teamId: string, month: string): Promise<StoredTeamPortfolioSnapshot | null>
   /**
-   * Stores the snapshot of one month, replacing the revision before it.
+   * Reads the receipt of an earlier save request with the same idempotency key.
    *
-   * @param input - Snapshot, fences, and audit context.
-   * @throws ProjectDataError 409 when another save of the month came first.
+   * @param workspaceId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param keyHash - Hash of the idempotency key.
+   * @returns The receipt, or `null` when no save used the key.
+   */
+  getReceipt(workspaceId: string, teamId: string, keyHash: string): Promise<TeamPortfolioSnapshotReceipt | null>
+  /**
+   * Stores the snapshot of one month, replacing the revision before it, with the request's
+   * receipt in the same transaction.
+   *
+   * @param input - Snapshot, fences, audit context, and receipt.
+   * @throws ProjectDataError 409 when another save of the month or of the same key came first.
    */
   put(input: WriteTeamPortfolioSnapshotInput<TCallerCheck, TAudit>): Promise<void>
+}
+
+/** Input of {@link captureTeamPortfolioSnapshot}. */
+export type CaptureTeamPortfolioSnapshotInput<TCallerCheck, TAudit> = {
+  /** Workspace that owns the Team. */
+  workspaceId: string
+  /** Team to capture. */
+  teamId: string
+  /** Requested month as `YYYY-MM`. */
+  month: string
+  /** Current month in the request's timezone; only it can be saved. */
+  currentMonth: string
+  /** Instant of the capture. */
+  now: Date
+  /** Whether the caller manages the whole Team (see {@link canCaptureTeamPortfolioSnapshot}). */
+  canCapture: boolean
+  /** Checks committed with the write so a caller who lost access cannot save. */
+  callerAuthorization: readonly TCallerCheck[]
+  /** Audit context of the request. */
+  auditContext: TAudit
+  /** Hash of the request's idempotency key. */
+  idempotencyKeyHash: string
+  /** Fingerprint of the request. */
+  requestFingerprint: string
+}
+
+/** Collaborators of {@link captureTeamPortfolioSnapshot}. */
+export type CaptureTeamPortfolioSnapshotPorts<TCallerCheck, TAudit> = {
+  /** Snapshot persistence. */
+  store: TeamPortfolioSnapshotStore<TCallerCheck, TAudit>
+  /** Computes the current metrics of every Project of the Team. */
+  computeProjects: () => Promise<PortfolioProjectMetrics[]>
+}
+
+/**
+ * Saves this month's snapshot of a Team. A retry of a completed request (same idempotency key
+ * and fingerprint) returns the month's snapshot without capturing again; the same key with a
+ * different request is a conflict. The revision is read before the metrics, so a capture that
+ * finishes after a newer save is rejected instead of replacing it.
+ *
+ * @param ports - Store and metric source.
+ * @param input - Validated request and caller context.
+ * @returns The stored snapshot.
+ * @throws ProjectDataError 403 when the caller does not manage the whole Team, 400 for another
+ *   month, and 409 for a reused key or a lost race.
+ */
+export async function captureTeamPortfolioSnapshot<TCallerCheck, TAudit>(
+  ports: CaptureTeamPortfolioSnapshotPorts<TCallerCheck, TAudit>,
+  input: CaptureTeamPortfolioSnapshotInput<TCallerCheck, TAudit>,
+): Promise<StoredTeamPortfolioSnapshot> {
+  if (!input.canCapture) {
+    throw new ProjectDataError(403, 'PortfolioSnapshotForbidden', 'Only a manager of the whole Team can save its portfolio snapshot.')
+  }
+  if (input.month !== input.currentMonth) {
+    throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'Only the current month can be saved.')
+  }
+  const receipt = await ports.store.getReceipt(input.workspaceId, input.teamId, input.idempotencyKeyHash)
+  if (receipt) {
+    if (receipt.requestFingerprint !== input.requestFingerprint || receipt.month !== input.month) {
+      throw new ProjectDataError(409, 'PortfolioSnapshotIdempotencyConflict', 'The idempotency key was used for another request.')
+    }
+    const saved = await ports.store.get(input.workspaceId, input.teamId, input.month)
+    if (!saved) {
+      throw new ProjectDataError(502, 'PortfolioSnapshotCorruptState', 'The stored portfolio snapshot is missing.')
+    }
+    return saved
+  }
+  const previous = await ports.store.get(input.workspaceId, input.teamId, input.month)
+  const projects = await ports.computeProjects()
+  const snapshot: StoredTeamPortfolioSnapshot = {
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    month: input.month,
+    capturedAt: input.now.toISOString(),
+    revision: (previous?.revision ?? 0) + 1,
+    projects,
+  }
+  await ports.store.put({
+    snapshot,
+    callerAuthorization: input.callerAuthorization,
+    auditContext: input.auditContext,
+    receipt: {
+      keyHash: input.idempotencyKeyHash,
+      requestFingerprint: input.requestFingerprint,
+      month: input.month,
+      revision: snapshot.revision,
+    },
+  })
+  return snapshot
 }
