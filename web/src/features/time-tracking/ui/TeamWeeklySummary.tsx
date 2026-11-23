@@ -1,22 +1,14 @@
 import {
   WEEKLY_SUMMARY_SECTION_NAMES,
-  type WeeklySummaryItem,
   type WeeklySummaryScope,
-  type WeeklySummarySectionName,
   type WeeklySummaryTotals,
 } from '@mukuroji/contracts'
 import { useId, useState, type ReactNode } from 'react'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../../shared/routing/paths'
+import { describeTeamSummaryItem, TEAM_SUMMARY_SECTION_TITLES } from './teamSummaryText'
 import type { TimeTrackingFormatters, TimeTrackingTranslator } from './timeTrackingText'
 
-/** Message key of each section heading. */
-export const TEAM_SUMMARY_SECTION_TITLES: Record<WeeklySummarySectionName, MessageKey> = {
-  completed: 'timeTracking.weeklySummary.completed',
-  delayed: 'timeTracking.weeklySummary.delayed',
-  overdue: 'timeTracking.weeklySummary.overdue',
-  milestonesReached: 'timeTracking.weeklySummary.milestonesReached',
-}
 
 /** Counted sections a summary view shows, weekly or monthly. */
 export type TeamSummaryContent = {
@@ -245,25 +237,4 @@ function ScopeSummary({ formatters, projectNames, scope, t, teamId }: ScopeSumma
       </div>
     </section>
   )
-}
-
-/**
- * Describes the date that put a Work Item in a section; also used by the Markdown copy.
- *
- * @param name - Section.
- * @param item - Listed Work Item.
- * @param t - Translator.
- * @param formatters - Date formatters.
- * @returns Short description, or an empty string when the Work Item has no such date.
- */
-export function describeTeamSummaryItem(name: WeeklySummarySectionName, item: WeeklySummaryItem, t: TimeTrackingTranslator, formatters: TimeTrackingFormatters) {
-  switch (name) {
-    case 'completed':
-    case 'milestonesReached':
-      return item.actualEndDate ? t('timeTracking.weeklySummary.completedOn').replace('{date}', formatters.day(item.actualEndDate)) : ''
-    case 'overdue':
-      return item.plannedEndDate ? t('timeTracking.weeklySummary.dueOn').replace('{date}', formatters.day(item.plannedEndDate)) : ''
-    case 'delayed':
-      return t('timeTracking.weeklySummary.delayDays').replace('{days}', String(item.delayDays ?? 0))
-  }
 }

@@ -7,9 +7,9 @@ import {
   timeTrackingFixtureWeekStart,
 } from '../src/features/time-tracking/fixtures'
 import { createWeekPeriod } from '../src/features/time-tracking/model/timePeriod'
-import { formatMonth } from '../src/features/time-tracking/ui/TeamMonthlySummaryContainer'
 import { TeamWeeklySummary } from '../src/features/time-tracking/ui/TeamWeeklySummary'
 import { formatTeamSummaryMarkdown } from '../src/features/time-tracking/ui/teamSummaryMarkdown'
+import { formatMonth } from '../src/features/time-tracking/ui/teamSummaryText'
 import { TimeWeekNavigator } from '../src/features/time-tracking/ui/TimeWeekNavigator'
 import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'

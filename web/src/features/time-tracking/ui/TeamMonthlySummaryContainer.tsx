@@ -5,6 +5,7 @@ import { createTranslator } from '../../../shared/i18n/i18n'
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { TeamWeeklySummary } from './TeamWeeklySummary'
 import { formatTeamSummaryMarkdown } from './teamSummaryMarkdown'
+import { formatMonth } from './teamSummaryText'
 import { createTimeTrackingFormatters, type TimeTrackingTranslator } from './timeTrackingText'
 import { writeClipboardText } from './writeClipboardText'
 
@@ -105,17 +106,4 @@ function TimeMonthNavigator({ label, onMove, t }: TimeMonthNavigatorProps) {
       <h3 aria-live="polite" className="text-base font-semibold text-[var(--workbench-text)]">{label}</h3>
     </nav>
   )
-}
-
-/**
- * Formats a calendar month for display.
- *
- * @param month - Month as `YYYY-MM`.
- * @param locale - Display locale.
- * @returns Such as `2026年11月` or `November 2026`.
- */
-export function formatMonth(month: string, locale: Locale): string {
-  const [year, monthNumber] = month.split('-').map(Number)
-  return new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', { year: 'numeric', month: 'long', timeZone: 'UTC' })
-    .format(new Date(Date.UTC(year ?? 1970, (monthNumber ?? 1) - 1, 1)))
 }

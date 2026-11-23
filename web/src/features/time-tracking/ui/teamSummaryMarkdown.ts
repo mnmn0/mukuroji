@@ -1,5 +1,6 @@
 import { WEEKLY_SUMMARY_SECTION_NAMES } from '@mukuroji/contracts'
-import { describeTeamSummaryItem, TEAM_SUMMARY_SECTION_TITLES, type TeamSummaryContent } from './TeamWeeklySummary'
+import type { TeamSummaryContent } from './TeamWeeklySummary'
+import { describeTeamSummaryItem, TEAM_SUMMARY_SECTION_TITLES } from './teamSummaryText'
 import type { TimeTrackingFormatters, TimeTrackingTranslator } from './timeTrackingText'
 
 /**
