@@ -1195,7 +1195,27 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     let anonymized = 0
     for (const item of page.items) {
       const payload = item.payload
-      if (typeof payload !== 'string') continue
+      if (typeof payload !== 'string') {
+        // Rows stored as attributes, such as Team and Project work calendars, keep their actor on the row.
+        const updatedBy = item.updatedBy
+        if (typeof updatedBy !== 'string' || !isPersonalMemberIdentity(updatedBy)) continue
+        await this.documentClient.send(new PutCommand({
+          TableName: target.tableName,
+          Item: {
+            ...item,
+            updatedBy: createTenantDeletedMemberAlias(
+              operation.workspaceId,
+              operation.operationId,
+              updatedBy,
+              this.pseudonymKey,
+            ),
+          },
+          ConditionExpression: 'updatedBy = :expectedUpdatedBy',
+          ExpressionAttributeValues: { ':expectedUpdatedBy': updatedBy },
+        }))
+        anonymized += 1
+        continue
+      }
       const anonymizedPayload = anonymizeTenantAdministrationPayload(
         payload,
         operation,

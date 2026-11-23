@@ -279,7 +279,12 @@ export async function applyWorkCalendarChange(
         workItems: fresh.filter((workItem) => conflicted.has(workItemKey(workItem.teamId, workItem.id))),
       })
       // Work Items that no longer need a rewrite were settled by the concurrent change.
-      for (const update of retry.updates) {
+      for (const [index, update] of retry.updates.entries()) {
+        // A newer change may have saved while the Work Items were read again or retried.
+        if (await superseded()) {
+          conflictCount += retry.updates.length - index
+          break
+        }
         if (await writeOrConflict(ports, [update], batches.next++)) updatedCount += 1
         else conflictCount += 1
       }

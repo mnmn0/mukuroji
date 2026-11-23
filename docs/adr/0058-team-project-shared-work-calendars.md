@@ -29,6 +29,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   省いた項目は継承する。解決順は Workspace → Team → Project で、稼働曜日と日本の祝日の有無は後の層が勝ち、会社の休日は足し合わせる。
 - 行は `revision` を持ち、保存は `expectedRevision` の条件付き Put にする（0 なら行がないこと）。古い revision は 409。
 - Workspace partition に置くので、tenant export と Workspace の closure で一緒に扱われる。新しい table・GSI は作らない。
+  行は payload ではなく属性で保存するので、closure の member 匿名化は行の `updatedBy` を直接仮名にする。
 
 ### Work Item の policy
 

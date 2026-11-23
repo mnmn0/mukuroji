@@ -169,3 +169,22 @@ test('counts earlier conflicts when a newer change stops the rewrite', async () 
   }, { plannedVersion: unsaved, save: saveTeamCalendar })
   expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 30 })
 })
+
+test('stops retrying conflicted Work Items once a newer change has been saved', async () => {
+  let version = savedOnce
+  let writes = 0
+  const applied = await applyWorkCalendarChange(rules, {
+    readWorkItems: async () => {
+      // The fresh read for the retry sees Work Items another change already moved on.
+      if (writes > 0) version = new Map([['workspace', 1], ['team:team-1', 2]])
+      return workItems(3)
+    },
+    readCalendarVersion: async () => version,
+    async writeSchedules() {
+      writes += 1
+      throw new ProjectDataError(409, 'WorkItemScheduleConflict', 'A Work Item changed.')
+    },
+  }, { plannedVersion: unsaved, save: saveTeamCalendar })
+  expect(writes).toBe(1)
+  expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 3 })
+})
