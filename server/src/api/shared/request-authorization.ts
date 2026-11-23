@@ -670,6 +670,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/project-order',
     permission: 'teams.manage',
   },
+  // Changing the key prefix of a Team's new Work Items is a Team setting.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/work-item-key-prefix',
+    permission: 'teams.manage',
+  },
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId',
