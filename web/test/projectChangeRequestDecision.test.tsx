@@ -84,7 +84,11 @@ type FakeCalls = {
  * @param decisionStatuses - Status codes answered to successive decision requests.
  * @returns The calls seen.
  */
-function installFakeApi(items: Record<string, FakeWorkItem>, decisionStatuses: number[]): FakeCalls {
+function installFakeApi(
+  items: Record<string, FakeWorkItem>,
+  decisionStatuses: number[],
+  storedEntries?: ProjectRaidEntry[],
+): FakeCalls {
   const calls: FakeCalls = { confirms: [], captures: 0, decisions: [] }
   globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost')
@@ -145,6 +149,15 @@ function installFakeApi(items: Record<string, FakeWorkItem>, decisionStatuses: n
         baseline: null,
         activeBaselineId: `baseline-${calls.captures}`,
         savedBaselines: [],
+      })
+    }
+    if (url.pathname.endsWith('/raid-log') && init?.method === undefined) {
+      return Response.json({
+        teamId: 'core-team',
+        projectId: 'refero',
+        entries: storedEntries ?? [changeRequest(
+          Object.keys(items).map((workItemId) => ({ workItemId, operation: { type: 'move', targetDate: '2026-11-25' } })),
+        )],
       })
     }
     if (url.pathname.endsWith('/decision')) {
@@ -288,6 +301,19 @@ describe('approving a change request', () => {
     expect(calls.decisions).toHaveLength(2)
     expect(calls.decisions[1]).toEqual(calls.decisions[0])
     expect(calls.decisions[1]?.body).toMatchObject({ outcome: 'rejected' })
+  })
+
+  test('refuses to change dates for a request someone else has already decided', async () => {
+    const entry = changeRequest([{ workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } }])
+    const calls = installFakeApi({
+      a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
+    }, [], [{ ...entry, status: 'closed', revision: 2 }])
+
+    await expect(captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: '変更要求' }))
+      .rejects.toMatchObject({ status: 409 })
+    expect(calls.confirms).toEqual([])
+    expect(calls.captures).toBe(0)
+    expect(calls.decisions).toEqual([])
   })
 
   test('shows the closed request even when the log cannot be reloaded', async () => {

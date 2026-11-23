@@ -25,7 +25,7 @@
   （`{ expectedRevision, outcome, baselineId? }`）で記録する。判断は登録を close し、`decision`
   （outcome・日時・判断した member・差し替えた baseline）を残す。判断済みの登録は更新できない。
 - 判断できるのは Project のマネージャーだけにする（baseline の capture と同じ）。Enterprise では Project に対する `projects.manage` で判定する。
-- 承認の操作は Web が次の順で行う。
+- 承認の操作は Web が次の順で行う。始める前に登録を読み直し、ほかの人が先に編集・判断・クローズしていたら（revision が違うか open でない）、日程に触れずに衝突として止める。読み直してから判断を記録するまでの間の競合は、最後の判断の `expectedRevision` で検出する。
   1. 各 `scheduleChanges` を、Work Item 画面と同じ preview → confirm で適用する。関連 Work Item が別の Project に
      移っていたら止める。すでに反映済みのものは飛ばす。依存のある Work Item 同士では、適用の順番や後の連鎖で
      結果が変わるため、全件を適用したあと全件が要求どおりの日付かを確かめる。外れたものがあれば、もう一巡適用する。
