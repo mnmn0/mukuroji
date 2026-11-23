@@ -4,9 +4,11 @@ import { MaintenanceNotice } from './maintenance/MaintenanceNotice'
 import { BuildDriftNotice } from './release/BuildDriftNotice'
 import { ConnectivityNotice } from './pwa/ConnectivityNotice'
 import { ServiceWorkerUpdateNotice } from './pwa/ServiceWorkerUpdateNotice'
+import { installClientErrorReporting } from './observability/clientErrorReporting'
 import { createAppRouter } from './router'
 
 const router = createAppRouter()
+installClientErrorReporting(router)
 
 /**
  * Mounts the application router together with the app-wide maintenance, update, build drift, and

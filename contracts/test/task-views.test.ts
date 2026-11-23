@@ -26,6 +26,7 @@ describe('task view contracts', () => {
       'my-tasks',
       'focus',
       'triage',
+      'work-items',
     ])
     expect(new Set(TASK_VIEW_SURFACES).size).toBe(TASK_VIEW_SURFACES.length)
 
@@ -89,6 +90,7 @@ describe('task view contracts', () => {
         isDefault: true,
         isPersonalDefault: false,
         isTeamDefault: true,
+        isProjectDefault: false,
         defaultSource: 'team',
       },
       createdAt: '2026-08-09T00:00:00.000Z',
@@ -132,6 +134,7 @@ describe('task view contracts', () => {
       capabilities: {
         canManageSharedViews: false,
         canSetTeamDefault: true,
+        canSetProjectDefault: false,
         canWrite: true,
         writableTeamIds: ['core-team'],
         writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],

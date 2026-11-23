@@ -108,6 +108,10 @@ const taskViewFilterIds: readonly string[] = [
   'dueDatePreset',
   'includeArchived',
   'workItemTypeIds',
+  'projectScopes',
+  'involvement',
+  'contributorUserIds',
+  'contributorJobRoles',
 ]
 const taskViewLayoutOverrideIds: readonly string[] = [
   'mode',
@@ -753,7 +757,52 @@ function readTaskViewFilters(value: unknown): TaskViewFilters | undefined {
     if (typeof value.includeArchived !== 'boolean') return undefined
     filters.includeArchived = value.includeArchived
   }
+  if (Object.hasOwn(value, 'projectScopes')) {
+    const projectScopes = readTeamQualifiedPairs(value.projectScopes, 'projectId')
+    if (!projectScopes) return undefined
+    filters.projectScopes = projectScopes.map(({ teamId, id }) => ({ teamId, projectId: id }))
+  }
+  if (Object.hasOwn(value, 'involvement')) {
+    if (value.involvement !== 'mine') return undefined
+    filters.involvement = 'mine'
+  }
+  if (Object.hasOwn(value, 'contributorUserIds')) {
+    const contributorUserIds = readStringArray(value.contributorUserIds)
+    // The server accepts one contributor, which is what the Work Item list applies.
+    if (!contributorUserIds || contributorUserIds.length > 1) return undefined
+    filters.contributorUserIds = contributorUserIds
+  }
+  if (Object.hasOwn(value, 'contributorJobRoles')) {
+    const jobRoles = readTeamQualifiedPairs(value.contributorJobRoles, 'jobRoleId')
+    if (!jobRoles || jobRoles.length > 1) return undefined
+    filters.contributorJobRoles = jobRoles.map(({ teamId, id }) => ({ teamId, jobRoleId: id }))
+  }
   return filters
+}
+
+/**
+ * Reads a list of Team-qualified identifiers from unknown JSON.
+ *
+ * @param value - Unknown list value.
+ * @param idKey - Property holding the Team-local identifier.
+ * @returns Detached pairs, or undefined when any entry is malformed.
+ */
+function readTeamQualifiedPairs(
+  value: unknown,
+  idKey: 'projectId' | 'jobRoleId',
+): { teamId: string, id: string }[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const pairs: { teamId: string, id: string }[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || Object.keys(entry).some((key) => key !== 'teamId' && key !== idKey)) {
+      return undefined
+    }
+    const teamId = entry.teamId
+    const id = entry[idKey]
+    if (typeof teamId !== 'string' || typeof id !== 'string') return undefined
+    pairs.push({ teamId, id })
+  }
+  return pairs
 }
 
 /**
@@ -1238,6 +1287,13 @@ function cloneTaskViewFilters(filters: TaskViewFilters): TaskViewFilters {
       workflowCategories: [...filters.workflowCategories],
     } : {}),
     ...(filters.priorities ? { priorities: [...filters.priorities] } : {}),
+    ...(filters.projectScopes ? {
+      projectScopes: filters.projectScopes.map((projectScope) => ({ ...projectScope })),
+    } : {}),
+    ...(filters.contributorUserIds ? { contributorUserIds: [...filters.contributorUserIds] } : {}),
+    ...(filters.contributorJobRoles ? {
+      contributorJobRoles: filters.contributorJobRoles.map((jobRole) => ({ ...jobRole })),
+    } : {}),
   }
 }
 
