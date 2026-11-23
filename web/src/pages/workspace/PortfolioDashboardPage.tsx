@@ -83,7 +83,7 @@ export function PortfolioDashboardPage() {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const timeZone = useMemo(readBrowserTimeZone, [])
+  const timeZone = useMemo(() => readBrowserTimeZone(), [])
   const calendar = useLocalCalendar(timeZone)
   const compareMonthOptions = useMemo(() => {
     const months: string[] = []
