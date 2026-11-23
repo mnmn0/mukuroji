@@ -209,6 +209,10 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
   **再接続** も同じで、押した本人が完了します。
 - **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
+  import は 1 回 10,000 行・8 MB まで取り込めます。確定すると「5,000 行中 1,200 行を作成」のように進み具合が出て、
+  終わるまで画面を開いておく必要はありません。大きな import は 10 分ごとに区切って続きを処理し、途中で止まっても続きから再開します。
+  Project manager が自分の Project の表から書き出すときは、表示中の view の **CSV で書き出す / Excel で書き出す** を使います
+  （[PM ガイド](pm.md)）。ここの export は取り込み直せる形式（親子・依存・Contributor・受け入れ条件つき）です。
   export には親子・WBS 番号・依存・relation・Contributor・受け入れ条件が入り、そのまま import し直せます。
   ただし MS Project XML には依存の日付制約（「この日より後に終える」など）を書けないため、制約のある依存を
   MS Project XML で import し直すと制約はなくなります。制約を残すときは CSV・JSON・Excel を使ってください。

@@ -300,13 +300,16 @@ External link の削除は link、provider identity claim、link 固有の sync 
 
 ## CSV/JSON import と export
 
-Import は mapping の作成、dry-run、source の再送、report 確認の順に進める。
+Import は mapping の作成、dry-run、source の再送、report 確認の順に進める。1 回の source は 10,000 行・8 MB（UTF-8）まで（#394。以前は 1,000 行・2 MB）。超えると `413`（`ImportRowLimitExceeded` / `ImportPayloadTooLarge`）になる。
 
 1. UTF-8 の CSV または JSON source と、`sourceField` から canonical/custom `targetField` への mapping を送る。`schedule` に `calendarPolicy` がない行は Workspace の稼働カレンダーを使い、`date-range` で `durationDays` もない行はその稼働カレンダーで稼働日数を数える。
 2. `/api/developer/imports/dry-run` で parse、変換、required field、workflow status、custom field、Team/Project access を検証する。Dry-run は Work Item や ImportJob を保存せず、`totalRows`、`validRows`、`invalidRows`、row/field error と sample preview を返す。
 3. Error を修正し、`POST /api/developer/imports` へ同じ mapping と source 全体を再送する。API は現在の管理権限を確認し、source を暗号化・versioning 済み storage に固定して durable job を queue するため、row ごとの remote validation 完了を待たない。
 4. 成功時は `202 Accepted` と `queued` の import record を返す。Worker は durable queue から job を取得し、現在の Team/Project access、workflow、assignee、custom field 設定を再検証してから `running`、`completed` または `failed` へ遷移させる。実行中も row ごとに current RBAC を確認し、終了後は validation failure の場合も集計と bounded row error report を取得できる。
 5. `DELETE /api/developer/imports/{importJobId}` は未完了 job に cancellation を要求する。実行中の Worker は永続化した cancellation 状態を確認し、安全な区切りで停止する。
+6. `GET /api/developer/imports/{importJobId}/progress` は `{ jobId, status, totalRows?, processedRows, totalLinks?, processedLinks }`（`ImportJobProgress`）を返す。Worker は全行を作ってから親子・依存・relation・受け入れ条件の link を付けるので、行と link を分けて数える。総数は Worker が source を検証するまで省く。Web の Developer Platform 画面は job が終わるまで 3 秒ごとに読み、「5,000 行中 1,200 行を作成」のように出す。権限は `GET /api/developer/imports/{importJobId}` と同じ。
+
+大きな import は 1 回の Worker 実行で終わらせない。Worker は job を claim してから 10 分（`WORK_ITEM_IMPORT_SLICE_SECONDS`）を過ぎると、次の行か link に進む前に lease を外し、同じ job の message を queue に積んで今の message を終える（ADR 0071）。次の実行は checkpoint の次から続け、そのたびに source を読み直して現在の権限と設定で全行を再検証する。message を積めなかったときは今の message を retry にする。
 
 ### 階層・依存・Contributor・受け入れ条件の import
 
@@ -339,7 +342,7 @@ Worker retry を使い切った job は `failed` として source を削除し�
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。この page の Work Item は閉じた `WorkItem` schema のままにする。Web の export は `GET /api/developer/work-item-exports?format=csv|json` を使い、Workspace 管理者（`canExport`）に限るため、この page の Work Item（`WorkItemExportItem` schema）は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）も含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。`teamId`・`assignedProjectId`・`assigneeUserId`・`workflowStatusId`・`workItemTypeId`・`updatedAfter`（ISO 8601）で絞り込める（`/api/developer/work-item-exports` も同じ）。絞り込みは cursor に束縛され、別の条件で cursor を使うと `400` になる。閲覧できない Team・Project を指定すると、存在を明かさないよう空の page を返す。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。この page の Work Item は閉じた `WorkItem` schema のままにする。Web の export は `GET /api/developer/work-item-exports?format=csv|json` を使い、Workspace 管理者（`canExport`）に限るため、この page の Work Item（`WorkItemExportItem` schema）は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）も含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
 
 Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から選べる。Excel と MS Project XML は JSON の export page から browser で作る。各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）と Planning の依存（`GET /api/planning`）を読み、次の列を足して WBS の順に並べる。
 
