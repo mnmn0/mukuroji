@@ -445,9 +445,9 @@ export const ModeRoundTripRetainsDraft: Story = {
 
     await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
     await userEvent.click(canvas.getByRole('button', { name: '登録' }))
-    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeVisible()
+    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeVisible()
     await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
-    await expect(canvas.queryByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeNull()
+    await expect(canvas.queryByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeNull()
     fireEvent.submit(canvas.getByTestId('create-task-form'))
     await waitFor(() => expect(canvas.getByText('最大値以下で入力してください。')).toBeVisible())
   },
@@ -716,5 +716,30 @@ export const StartsFromTemplate: Story = {
         { text: '手順書を更新する', satisfied: false },
       ],
     })))
+  },
+}
+
+/** Acceptance criteria typed in detailed mode keep quick capture from dropping them on submit. */
+export const AcceptanceCriteriaRequireDetailedSubmit: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+    initialMode: 'detailed',
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
+      void input
+    }),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.type(canvas.getByRole('textbox', { name: 'タスク名' }), 'Criteria draft')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '担当者' }), 'sato@example.com')
+    await userEvent.click(canvas.getByRole('button', { name: '受け入れ条件を編集' }))
+    await userEvent.click(canvas.getByRole('button', { name: '条件を追加' }))
+    await userEvent.type(canvas.getByRole('textbox', { name: '条件 1' }), 'Tests pass')
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+
+    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeVisible()
+    await expect(args.onSubmit).not.toHaveBeenCalled()
   },
 }

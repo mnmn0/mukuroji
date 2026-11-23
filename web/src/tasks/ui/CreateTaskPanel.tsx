@@ -320,7 +320,9 @@ export function CreateTaskPanel({
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
-          if (effectiveMode === 'quick' && detailedOnlyEditsRef.current) {
+          // Quick capture cannot carry acceptance criteria, so written criteria keep the form detailed.
+          const hasWrittenCriteria = acceptanceCriteriaDraft.rows?.some((row) => row.text.trim() !== '') ?? false
+          if (effectiveMode === 'quick' && (detailedOnlyEditsRef.current || hasWrittenCriteria)) {
             setFieldErrors({ mode: t('tasks.create.quickDetailsRequireDetailed') })
             return
           }
@@ -745,7 +747,13 @@ export function CreateTaskPanel({
         {effectiveMode === 'detailed' ? (
           <WorkItemAcceptanceCriteriaEditor
             criteria={undefined}
-            draftState={{ draft: acceptanceCriteriaDraft, setDraft: setAcceptanceCriteriaDraft }}
+            draftState={{
+              draft: acceptanceCriteriaDraft,
+              setDraft: (update) => {
+                markDirty()
+                setAcceptanceCriteriaDraft(update)
+              },
+            }}
             formId="create-task-form"
             locale={locale}
           />

@@ -1402,6 +1402,19 @@
       },
       "CreatePublicWorkItemRequest": {
         "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "priority"
+            ]
+          },
+          {
+            "required": [
+              "templateId"
+            ]
+          }
+        ],
+        "description": "Send priority, or a templateId whose template supplies the priority (medium when the template has none).",
         "properties": {
           "assignedProjectId": {
             "type": "string"
