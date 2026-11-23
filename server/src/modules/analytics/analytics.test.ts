@@ -34,6 +34,8 @@ import {
   compareDynamoDbStringSortKeys,
   createAnalyticsCsv,
   createAnalyticsNextDeliveryAtRecordKey,
+  ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
+  analyticsSnapshotReadPlanningGroups,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
   createAnalyticsScheduleShard,
@@ -2159,6 +2161,94 @@ describe('Analytics export', () => {
       filter: { ...base.filter, period: { from: '2026-01-01T00:00:00.000Z', to: '2026-01-07T00:00:00.000Z' } },
     }
     expect(await readPdfText(createAnalyticsPdf(snapshot, 'en'))).toContain('2026-01-01 - 2026-01-07')
+  })
+})
+
+describe('Analytics priority, Cycle, and Milestone groups', () => {
+  const started = (id: string, overrides: Partial<CanonicalWorkItem> = {}) =>
+    createWorkItem(id, { statusCategory: 'started', ...overrides })
+  const groupBy = (dimension: 'priority' | 'cycle' | 'milestone'): AnalyticsQueryInput['widgets'] => [{
+    id: `wip-by-${dimension}`,
+    title: 'WIP',
+    type: 'chart',
+    metric: 'wip',
+    groupBy: { dimension },
+  }]
+
+  test('groups by the priority at as-of, rewinding later priority changes', () => {
+    const changedLater = started('changed', { priority: 'high' })
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [changedLater, started('steady', { priority: 'high' })],
+      events: [createAuditEvent(
+        'changed-priority',
+        changedLater,
+        '2026-01-08T00:00:00.000Z',
+        [{ field: 'priority', before: 'low', after: 'high' }],
+      )],
+      query: createQuery(groupBy('priority')),
+    })
+    expect(snapshot.widgets[0]?.groups.map((group) => [group.key, group.value])).toEqual([
+      ['high', 1],
+      ['low', 1],
+    ])
+  })
+
+  test('groups by readable Cycles and Milestones and keeps the rest unset', () => {
+    const inCycle = started('in-cycle')
+    const planningGroups = {
+      links: new Map([
+        [`core\u0000${inCycle.id}`, {
+          cycle: { id: 'cycle-1', title: 'Sprint 1' },
+          milestone: { id: 'milestone-1', title: 'Beta' },
+        }],
+      ]),
+      entityScopeKeys: ['cycle-1\u0000core\u0000', 'milestone-1\u0000core\u0000'],
+    }
+    const workItems = [inCycle, started('no-cycle')]
+    const byCycle = createTestAnalyticsSnapshot({
+      workItems,
+      events: [],
+      planningGroups,
+      query: createQuery(groupBy('cycle')),
+    })
+    expect(byCycle.widgets[0]?.groups.map((group) => [group.key, group.label, group.value])).toEqual([
+      ['', 'Unassigned', 1],
+      ['cycle-1', 'Sprint 1', 1],
+    ])
+    const byMilestone = createTestAnalyticsSnapshot({
+      workItems,
+      events: [],
+      planningGroups,
+      query: createQuery(groupBy('milestone')),
+    })
+    expect(byMilestone.widgets[0]?.groups.map((group) => group.label)).toEqual(['Unassigned', 'Beta'])
+    expect(analyticsSnapshotReadPlanningGroups(createQuery(groupBy('cycle')), byCycle)).toBeTrue()
+
+    // The readable Cycles and Milestones are part of the permission scope.
+    const narrowed = createTestAnalyticsSnapshot({
+      workItems,
+      events: [],
+      planningGroups: { ...planningGroups, entityScopeKeys: ['cycle-1\u0000core\u0000'] },
+      query: createQuery(groupBy('cycle')),
+    })
+    expect(narrowed.permissionScopeHash).not.toBe(byCycle.permissionScopeHash)
+  })
+
+  test('warns instead of grouping when the run cannot read Planning', () => {
+    const query = createQuery(groupBy('cycle'))
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [started('a')], events: [], query })
+    expect(snapshot.widgets[0]).toMatchObject({
+      groups: [],
+      value: null,
+      warnings: [ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING],
+    })
+    expect(analyticsSnapshotReadPlanningGroups(query, snapshot)).toBeFalse()
+    // Without Planning the hash matches a snapshot that never read it.
+    expect(snapshot.permissionScopeHash).toBe(createTestAnalyticsSnapshot({
+      workItems: [started('a')],
+      events: [],
+      query: createQuery(groupBy('priority')),
+    }).permissionScopeHash)
   })
 })
 

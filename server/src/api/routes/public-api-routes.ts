@@ -65,6 +65,7 @@ import type {
 } from '../../modules/developer-platform/application/ports'
 import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
+  AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   createAgentRunDeletionFences,
   createAgentRunMutationFenceExtension,
   prepareAgentRunCommentFence,
@@ -1765,6 +1766,12 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           true,
         )
       }
+      const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
+        method: 'DELETE',
+        path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+        query: { teamId },
+        body: { expectedRevision },
+      })
       const [externalLinkFence, documentBacklinkFence, relationCleanup, collectionCleanup] = await Promise.all([
         developerPlatformDependencies.transactions.prepareWorkItemDeletionFenceTransactWrite?.({
           workspaceId: principal.directoryId,
@@ -1779,6 +1786,13 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           principal.directoryId,
           teamId,
           workItemId,
+          {
+            context: deletionAuditContext,
+            actorMemberKey: principal.userKey,
+            createDeepLink: (endpointId) => createTeamIssueDeepLink(teamId, endpointId),
+            // The delete event takes slot 0 and a released Agent Run the next one.
+            firstSequence: AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM + 1,
+          },
         ),
         workItemDependencies.collections.prepareWorkItemReferenceCleanup?.(
           principal.directoryId,
@@ -1811,12 +1825,6 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           'This Work Item has too many relations and Collection references to delete in one step. Remove some of them first.',
         )
       }
-      const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
-        method: 'DELETE',
-        path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
-        query: { teamId },
-        body: { expectedRevision },
-      })
       const agentRunFences = await createAgentRunDeletionFences(
         principal,
         teamId,

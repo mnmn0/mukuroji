@@ -7,7 +7,6 @@ import type {
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import {
@@ -38,6 +37,7 @@ import {
 } from '../model/taskView'
 import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
+import { resolveCalendarScheduleError } from '../model/taskScheduleChangeError'
 import {
   TaskCalendarMonthNavigation,
   type TaskCalendarMonthNote,
@@ -90,7 +90,7 @@ type CanonicalCalendarModel = {
 }
 
 /** A Calendar preview waiting for confirmation. */
-type PendingCalendarScheduleChange = {
+export type PendingCalendarScheduleChange = {
   /** Task whose operation created the preview. */
   task: CanonicalWorkItem
   /** Exact canonical invocation controlling preview confirmation and cancellation. */
@@ -140,7 +140,7 @@ export type TaskCalendarViewProps = {
 }
 
 /** Props for the Calendar schedule-preview dialog. */
-type CalendarSchedulePreviewProps = {
+export type CalendarSchedulePreviewProps = {
   /** Preview and target task waiting for confirmation. */
   pending: PendingCalendarScheduleChange
   /** Whether the confirmed schedule is being persisted. */
@@ -724,12 +724,12 @@ function CalendarTaskCard({
 }
 
 /**
- * Renders direct and ripple schedule changes before Calendar persists them.
+ * Renders direct and ripple schedule changes before Calendar or a table persists them.
  *
  * @param props - Pending preview and confirm/cancel actions.
  * @returns An accessible modal schedule preview.
  */
-function CalendarSchedulePreview({
+export function CalendarSchedulePreview({
   isApplying,
   onCancel,
   onConfirm,
@@ -1001,28 +1001,6 @@ function findCalendarDirectPreviewSchedule(
     impact.teamId === task.teamId &&
     impact.workItemId === task.id
   )?.after
-}
-
-/**
- * Preserves permission and revision details exposed by the parent callback.
- *
- * @param error - Unknown callback failure.
- * @param t - Translator used for the generic fallback.
- * @returns A safe message for the Calendar alert.
- */
-function resolveCalendarScheduleError(error: unknown, t: TaskCalendarTranslator): string {
-  if (error instanceof TeamIssuesApiError) {
-    if (error.code === 'WorkItemRevisionConflict') {
-      return t('tasks.action.conflict')
-    }
-    if (error.status === 403) {
-      return t('tasks.action.permission')
-    }
-    if (error.status === 400) {
-      return t('tasks.schedule.invalid')
-    }
-  }
-  return t('tasks.action.updateError')
 }
 
 /**

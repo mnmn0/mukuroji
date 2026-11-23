@@ -1,3 +1,4 @@
+import { useSWRConfig } from 'swr'
 import type {
   TaskViewScope,
   WorkItemActionContext,
@@ -5,10 +6,18 @@ import type {
   WorkItemActionResult,
   WorkItemActionSelection,
   WorkspaceWorkItemListFilter,
+  WorkItemPriority,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
+import { MyTasksQuickCreate } from '../../workspace/ui/MyTasksQuickCreate'
+import type {
+  MyTasksQuickCreateDestination,
+  MyTasksQuickCreateInput,
+} from '../../workspace/model/myTasksQuickCreate'
+import { createMyTasksQuickCreateWorkItem } from '../../workspace/mutations/createMyTasksQuickCreateWorkItem'
 import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
@@ -88,6 +97,9 @@ import {
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
+import { createWorkItemListScheduleMutations } from '../../tasks/mutations/createWorkItemListScheduleMutations'
+import { startWorkItemListScheduleChange } from '../../task-views/model/workItemListScheduleChange'
+import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
   useWorkspaceCalendarSettings,
@@ -100,6 +112,7 @@ import {
 } from '../../workspace/ui/WorkspaceDataNotices'
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
 import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { useTeamWorkItemHierarchiesRefresh } from '../../work-items/mutations/useTeamWorkItemHierarchiesRefresh'
 import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
@@ -307,6 +320,10 @@ export function MyTasksPage() {
     myTasksOutlineTeamIds,
     workspace.canLoadWorkspaceData && isMyTasksOutlineShown,
   )
+  const refreshMyTasksHierarchies = useTeamWorkItemHierarchiesRefresh(
+    workspace.accessToken,
+    myTasksOutlineTeamIds,
+  )
   const [collapsedMyTasksOutlineKeys, toggleMyTasksOutlineKey] =
     useCollapsedWorkItemOutlineKeys('my-tasks')
   const myTasksGanttOutline = useMemo<TaskGanttOutline | undefined>(
@@ -448,6 +465,125 @@ export function MyTasksPage() {
     tasks: workItems.tasks,
   })
   const moveTaskStatus = statusMutation.moveTaskStatus
+  const updateTaskPriority = statusMutation.updateTaskPriority
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const { mutate: mutateCache } = useSWRConfig()
+  const scheduleMutations = useMemo(() => createWorkItemListScheduleMutations({
+    accessToken: workspace.accessToken,
+    guardEnterpriseSession: workspace.guardEnterpriseSession,
+    mutateCache,
+    mutationRequestRunner,
+    // A failed background read leaves the confirmed schedules in place; the next read retries.
+    onBackgroundRefreshError: () => undefined,
+    listScope: {
+      filter: myTasksWorkItemFilter,
+      includeArchived: includeArchivedWorkItems,
+      kind: 'workspace',
+    },
+    t,
+    // The Gantt outline rolls child dates up to summary rows, which only the hierarchy holds.
+    refreshHierarchy: () => refreshMyTasksHierarchies(workspace.guardEnterpriseSession),
+    tasksCacheKey: workItems.workItemsKey,
+  }), [
+    includeArchivedWorkItems,
+    mutateCache,
+    mutationRequestRunner,
+    refreshMyTasksHierarchies,
+    t,
+    workItems.workItemsKey,
+    workspace.accessToken,
+    workspace.guardEnterpriseSession,
+  ])
+
+  /** Checks whether the table, calendar, and Gantt chart may change one Work Item in place. */
+  const canEditMyTask = useCallback((task: (typeof visibleMyTasks)[number]) =>
+    task.archivedAt === undefined &&
+      canWriteTaskViewWorkItem({
+        writableProjectScopes: taskViewController.writableProjectScopes,
+        writableTeamIds: taskViewController.writableTeamIds,
+      }, task) &&
+      workItems.configurationsByTeam[task.teamId] !== undefined &&
+      !workItems.configurationFailedTeamIds.includes(task.teamId),
+  [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+    workItems.configurationFailedTeamIds,
+    workItems.configurationsByTeam,
+  ])
+
+  /** Starts a schedule change; the layout shows its preview and confirms it. */
+  const handleRequestMyTaskScheduleChange = useCallback((
+    task: (typeof visibleMyTasks)[number],
+    operation: WorkItemScheduleOperation,
+  ) => startWorkItemListScheduleChange(
+    'my-tasks',
+    task,
+    operation,
+    {
+      confirm: scheduleMutations.confirmScheduleChange,
+      preview: scheduleMutations.previewScheduleChange,
+    },
+    canEditMyTask(task),
+    t('tasks.action.permission'),
+  ), [canEditMyTask, scheduleMutations, t])
+
+  const quickCreateDestinations = useMemo<MyTasksQuickCreateDestination[]>(() => {
+    if (!workspace.userKey) return []
+    // Destinations come from the write capabilities, not from the Teams of the listed tasks, so a
+    // person with no task yet can still add one anywhere they may write.
+    return workspace.teams.flatMap((team) => {
+      const teamDestination = taskViewController.writableTeamIds.includes(team.id)
+        ? [{ key: team.id, label: team.name, teamId: team.id }]
+        : []
+      const projectDestinations = team.projects
+        .filter((project) => taskViewController.writableProjectScopes.some((scope) =>
+          scope.teamId === team.id && scope.projectId === project.id
+        ))
+        .map((project) => ({
+          key: `${team.id}/${project.id}`,
+          label: `${team.name} / ${project.name}`,
+          projectId: project.id,
+          teamId: team.id,
+        }))
+      return [...teamDestination, ...projectDestinations]
+    })
+  }, [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+    workspace.teams,
+    workspace.userKey,
+  ])
+
+  /**
+   * Creates a Work Item assigned to the current person and reads the list again.
+   *
+   * @param input - Title, destination, and optional due date from the quick create form.
+   */
+  const handleQuickCreate = useCallback(async (input: MyTasksQuickCreateInput) => {
+    const accessToken = workspace.accessToken
+    const assigneeUserId = workspace.userKey
+    if (!accessToken || !assigneeUserId) throw new Error(t('workspace.myTasks.quickCreate.error'))
+    await createMyTasksQuickCreateWorkItem({
+      accessToken,
+      assigneeUserId,
+      ...(workspaceCalendarPolicy ? { calendarPolicy: workspaceCalendarPolicy } : {}),
+      guardRequest: workspace.guardEnterpriseSession,
+      input,
+      mutationRequestRunner,
+      refreshWorkItems: workItems.mutateWorkItems,
+    })
+  }, [mutationRequestRunner, t, workItems.mutateWorkItems, workspace, workspaceCalendarPolicy])
+
+  /** Saves a priority chosen in the table. */
+  const handleUpdateMyTaskPriority = useCallback(async (
+    task: (typeof visibleMyTasks)[number],
+    priority: WorkItemPriority,
+  ) => {
+    if (!updateTaskPriority || !canEditMyTask(task)) {
+      throw new Error(t('tasks.action.permission'))
+    }
+    await updateTaskPriority(task, priority)
+  }, [canEditMyTask, t, updateTaskPriority])
 
   /** Opens one personal Work Item through the existing route action. */
   const executeMyTaskOpenAction = useCallback((
@@ -986,8 +1122,18 @@ export function MyTasksPage() {
             {taskActionErrorMessage}
           </p>
         ) : null}
+        <MyTasksQuickCreate
+          destinations={quickCreateDestinations}
+          onCreate={handleQuickCreate}
+          t={t}
+        />
         <MyTasksWorkspaceView
+          canEditTask={canEditMyTask}
           canMoveTaskStatus={canMoveMyTaskStatus}
+          onRequestScheduleChange={hasWritableWorkItemScope && workspace.accessToken
+            ? handleRequestMyTaskScheduleChange
+            : undefined}
+          onUpdatePriority={updateTaskPriority ? handleUpdateMyTaskPriority : undefined}
           configurationFailedTeamIds={workItems.configurationFailedTeamIds}
           configurationsByTeam={workItems.configurationsByTeam}
           locale={workspace.locale}

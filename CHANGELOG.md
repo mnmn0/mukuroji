@@ -60,6 +60,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
 
+### Fixed
+
+- server API: Workspace ID に `#` を含む環境（deploy の既定値 `workspace#production`、Floci の
+  `workspace#mukuroji-local`）で、**agent を接続** の表示と自分用 token の発行・認証が 400 で失敗していました。
+
 ## [1.0.0]
 
 最初の versioned release です。MCP API revision 1 を使います。

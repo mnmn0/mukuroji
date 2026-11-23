@@ -1,5 +1,13 @@
+import type { DirectoryArchiveImpactTarget } from '@mukuroji/contracts'
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
+import {
+  ArchiveImpactNotice,
+  isArchiveImpactConfirmDisabled,
+  type ArchiveImpactGateProps,
+  type ArchiveImpactLabels,
+  type ArchiveImpactState,
+} from '../archive-impact'
 import { BrandMark } from '../BrandMark'
 import { HandoffIcon, FormIcon } from '../icons'
 
@@ -222,7 +230,11 @@ export type SidebarArchiveLabels = {
    * 確認 dialog の実行ボタンです。
    */
   confirm: string
+  /** Labels of the archive impact counts; the counts are not shown without them. */
+  impact?: ArchiveImpactLabels
 }
+
+
 
 /**
  * サイドバーで使う表示文言です。
@@ -466,6 +478,8 @@ export type SidebarProps = {
    * プロジェクトをアーカイブするときに呼ばれます。
    */
   onArchiveProject?: (teamId: string, projectId: string) => void | Promise<void>
+  /** Reads what archiving a Team or Project affects while its confirmation is open. */
+  ArchiveImpactGate?: ComponentType<ArchiveImpactGateProps>
   /**
    * 主要ナビゲーションが選択されたときに呼ばれます。
    */
@@ -541,6 +555,22 @@ type SidebarArchiveTarget = {
    * プロジェクトを対象とする場合のプロジェクト ID です。
    */
   projectId?: string
+}
+
+/**
+ * Converts the open archive confirmation into the target whose impact is read.
+ *
+ * @param target - Open confirmation target, if any.
+ * @returns The Team or Project target, or undefined when nothing is confirmed.
+ */
+function toDirectoryArchiveImpactTarget(
+  target: SidebarArchiveTarget | undefined,
+): DirectoryArchiveImpactTarget | undefined {
+  if (!target) return undefined
+  if (target.kind === 'team') return { kind: 'team', teamId: target.teamId }
+  return target.projectId === undefined
+    ? undefined
+    : { kind: 'project', teamId: target.teamId, projectId: target.projectId }
 }
 
 /** Adapts the shared document outline to the sidebar's size classes. */
@@ -760,6 +790,7 @@ export function Sidebar({
   onCreateProject,
   onArchiveTeam,
   onArchiveProject,
+  ArchiveImpactGate,
   onSelectNav,
   onSelectTeamView,
   showFactoryBoard = true,
@@ -1348,6 +1379,7 @@ export function Sidebar({
       {archiveTarget ? (
         <SidebarArchiveConfirmationModal
           errorMessage={archiveErrorMessage}
+          ArchiveImpactGate={resolvedLabels.archive.impact ? ArchiveImpactGate : undefined}
           isBusy={Boolean(archivingItemKey)}
           labels={resolvedLabels.archive}
           fallbackFocusRef={sidebarRef}
@@ -1535,6 +1567,8 @@ type SidebarArchiveConfirmationModalProps = {
    * アーカイブ API を実行中かどうかです。
    */
   isBusy: boolean
+  /** Reads the archive impact of the target, when the viewer may read it. */
+  ArchiveImpactGate?: ComponentType<ArchiveImpactGateProps>
   /**
    * dialog 内で使う表示文言です。
    */
@@ -1558,6 +1592,7 @@ type SidebarArchiveConfirmationModalProps = {
 }
 
 function SidebarArchiveConfirmationModal({
+  ArchiveImpactGate,
   errorMessage,
   fallbackFocusRef,
   isBusy,
@@ -1571,6 +1606,45 @@ function SidebarArchiveConfirmationModal({
   const dialogId = useId()
   const dialogTitleId = `${dialogId}-title`
   const dialogDescriptionId = `${dialogId}-description`
+  const impactTarget = toDirectoryArchiveImpactTarget(target)
+
+  /**
+   * Renders the counts, the archive error, and the actions for one impact state.
+   *
+   * @param impact - Impact loading state, or undefined when no impact is read.
+   * @returns The dialog body below the description.
+   */
+  const renderBody = (impact?: ArchiveImpactState) => (
+    <>
+      {impact && labels.impact ? (
+        <ArchiveImpactNotice labels={labels.impact} state={impact} />
+      ) : null}
+      {errorMessage ? (
+        <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+      <div className="mt-6 flex justify-end gap-3">
+        <button
+          className="workbench-button-secondary min-h-10 px-4"
+          data-autofocus
+          disabled={isBusy}
+          onClick={onRequestClose}
+          type="button"
+        >
+          {labels.cancel}
+        </button>
+        <button
+          className="min-h-10 rounded-[7px] border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition-colors duration-150 hover:border-red-800 hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isBusy || isArchiveImpactConfirmDisabled(impact)}
+          onClick={() => void onConfirm()}
+          type="button"
+        >
+          {isBusy ? labels.archiving : labels.confirm}
+        </button>
+      </div>
+    </>
+  )
 
   useEffect(() => {
     const fallbackFocusElement = fallbackFocusRef.current
@@ -1640,7 +1714,7 @@ function SidebarArchiveConfirmationModal({
         aria-describedby={dialogDescriptionId}
         aria-labelledby={dialogTitleId}
         aria-modal="true"
-        className="workbench-panel w-full max-w-[440px] overflow-hidden shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
+        className="workbench-panel max-h-[calc(100svh-3rem)] w-full max-w-[440px] overflow-y-auto overscroll-contain shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}
@@ -1657,30 +1731,9 @@ function SidebarArchiveConfirmationModal({
               ? labels.confirmTeamDescription(target.name)
               : labels.confirmProjectDescription(target.name)}
           </p>
-          {errorMessage ? (
-            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
-              {errorMessage}
-            </p>
-          ) : null}
-          <div className="mt-6 flex justify-end gap-3">
-            <button
-              className="workbench-button-secondary min-h-10 px-4"
-              data-autofocus
-              disabled={isBusy}
-              onClick={onRequestClose}
-              type="button"
-            >
-              {labels.cancel}
-            </button>
-            <button
-              className="min-h-10 rounded-[7px] border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition-colors duration-150 hover:border-red-800 hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={isBusy}
-              onClick={() => void onConfirm()}
-              type="button"
-            >
-              {isBusy ? labels.archiving : labels.confirm}
-            </button>
-          </div>
+          {ArchiveImpactGate && impactTarget ? (
+            <ArchiveImpactGate target={impactTarget}>{renderBody}</ArchiveImpactGate>
+          ) : renderBody()}
         </div>
       </section>
     </div>

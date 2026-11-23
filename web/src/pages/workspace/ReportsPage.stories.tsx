@@ -50,6 +50,48 @@ const namedGroupMembers = [
   { id: 'kato@example.com', email: 'kato@example.com' },
 ]
 
+const priorityGroupWidgets = analyticsWidgetFixtures.map((widget) =>
+  widget.id === 'chart-cycle-time'
+    ? { ...widget, groupBy: { dimension: 'priority' as const } }
+    : widget)
+
+/** Priority groups keyed by the stored priority value. */
+const priorityGroupSnapshot = {
+  ...analyticsSnapshotFixture,
+  widgets: analyticsSnapshotFixture.widgets.map((result) =>
+    result.widgetId === 'chart-cycle-time'
+      ? {
+          ...result,
+          groups: [
+            { key: 'high', label: 'high', sampleSize: 6, value: 18.2 },
+            { key: 'medium', label: 'medium', sampleSize: 11, value: 27.4 },
+            { key: 'low', label: 'low', sampleSize: 5, value: 35.9 },
+          ],
+        }
+      : result),
+}
+
+const milestoneGroupWidgets = analyticsWidgetFixtures.map((widget) =>
+  widget.id === 'chart-cycle-time'
+    ? { ...widget, groupBy: { dimension: 'milestone' as const } }
+    : widget)
+
+/** Milestone groups carry the entity title; Work Items outside a readable Milestone are unset. */
+const milestoneGroupSnapshot = {
+  ...analyticsSnapshotFixture,
+  widgets: analyticsSnapshotFixture.widgets.map((result) =>
+    result.widgetId === 'chart-cycle-time'
+      ? {
+          ...result,
+          groups: [
+            { key: 'milestone-beta', label: 'β リリース', sampleSize: 8, value: 22.1 },
+            { key: 'milestone-ga', label: 'GA', sampleSize: 10, value: 29.6 },
+            { key: '', label: 'Unassigned', sampleSize: 3, value: 41.3 },
+          ],
+        }
+      : result),
+}
+
 const multipleFilters = {
   ...analyticsFilterFixture,
   assigneeUserIds: ['owner@example.com', 'reviewer@example.com'],
@@ -155,6 +197,57 @@ export const NamedAssigneeGroups: Story = {
     const widget = within(canvasElement).getByTestId('analytics-widget-chart-cycle-time')
     await expect(widget).toHaveTextContent('佐藤 花子')
     await expect(widget).toHaveTextContent('未設定')
+  },
+}
+
+/**
+ * 優先度で分けた chart と、その dimension を選んだ report builder です。優先度の値は画面の言語の名前で表示します。
+ */
+export const PriorityGroups: Story = {
+  args: {
+    builder: true,
+    snapshot: priorityGroupSnapshot,
+    widgets: priorityGroupWidgets,
+  },
+  play: async ({ canvasElement }) => {
+    const widget = within(canvasElement).getByTestId('analytics-widget-chart-cycle-time')
+    await expect(widget).toHaveTextContent('高')
+    await expect(widget).toHaveTextContent('低')
+  },
+}
+
+/**
+ * Milestone で分けた chart です。読める Milestone は名前で、どの Milestone にも属さない Work Item は
+ * 「未設定」で表示します。
+ */
+export const MilestoneGroups: Story = {
+  args: {
+    builder: true,
+    snapshot: milestoneGroupSnapshot,
+    widgets: milestoneGroupWidgets,
+  },
+  play: async ({ canvasElement }) => {
+    const widget = within(canvasElement).getByTestId('analytics-widget-chart-cycle-time')
+    await expect(widget).toHaveTextContent('β リリース')
+    await expect(widget).toHaveTextContent('未設定')
+  },
+}
+
+/**
+ * 担当者・カスタムフィールド・配信先を名前の一覧から選ぶ状態です。一覧にいない選択済みの担当者も
+ * 選択されたまま残ります。
+ */
+export const NamePickers: Story = {
+  args: {
+    builder: true,
+    customFields: [
+      { id: 'impact', label: '影響度' },
+      { id: 'launch-date', label: 'リリース日' },
+    ],
+    filter: multipleFilters,
+    initialScheduleOpen: true,
+    members: namedGroupMembers,
+    widgets: customFieldGroupingWidgets,
   },
 }
 
