@@ -38,6 +38,10 @@ export type MarkdownDescriptionFieldProps = {
    */
   artifacts?: FileArtifactsController
   /**
+   * Called when attachment uploads start and finish, so the owner can hold the save meanwhile.
+   */
+  onUploadingChange?: (isUploading: boolean) => void
+  /**
    * Translator.
    */
   t: (key: MessageKey) => string
@@ -59,6 +63,7 @@ export function MarkdownDescriptionField({
   form,
   label,
   name,
+  onUploadingChange,
   readOnly = false,
   t,
 }: MarkdownDescriptionFieldProps) {
@@ -82,6 +87,7 @@ export function MarkdownDescriptionField({
     controller: artifacts,
     disabled: disabled || readOnly,
     onInsert: insertAtCursor,
+    onUploadingChange,
   })
   const attachments = artifacts ? { controller: artifacts, t } : undefined
 

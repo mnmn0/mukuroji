@@ -1,4 +1,5 @@
-import Markdown from 'react-markdown'
+import { useMemo } from 'react'
+import Markdown, { type Components } from 'react-markdown'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import { markdownAttachmentScheme, readMarkdownAttachmentFileId } from '../../files/model/markdownAttachments'
@@ -48,6 +49,32 @@ const commentSanitizeSchema = {
  * 外部 URL の画像は読み込みません。
  */
 export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: SafeCommentBodyProps) {
+  const attachmentController = attachments?.controller
+  const attachmentTranslator = attachments?.t
+  // Stable renderers keep attachment components mounted across parent re-renders.
+  const components = useMemo<Components>(() => {
+    const context = attachmentController && attachmentTranslator
+      ? { controller: attachmentController, t: attachmentTranslator }
+      : undefined
+    return {
+      a: ({ children, href }) => {
+        const fileId = readMarkdownAttachmentFileId(href)
+        if (fileId) {
+          return <MarkdownAttachmentLink attachments={context} fileId={fileId}>{children}</MarkdownAttachmentLink>
+        }
+        return href ? (
+          <a href={href} rel="noreferrer noopener" target="_blank">
+            {children}
+          </a>
+        ) : <span>{children}</span>
+      },
+      img: ({ alt, src }) => {
+        const fileId = readMarkdownAttachmentFileId(typeof src === 'string' ? src : undefined)
+        return fileId ? <MarkdownAttachmentImage alt={alt} attachments={context} fileId={fileId} /> : null
+      },
+    }
+  }, [attachmentController, attachmentTranslator])
+
   return (
     <div
       className={`min-w-0 break-words text-sm font-medium leading-6 text-[var(--workbench-text)]
@@ -67,23 +94,7 @@ export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: S
         [&>*:first-child]:mt-0 ${className}`}
     >
       <Markdown
-        components={{
-          a: ({ children, href }) => {
-            const fileId = readMarkdownAttachmentFileId(href)
-            if (fileId) {
-              return <MarkdownAttachmentLink attachments={attachments} fileId={fileId}>{children}</MarkdownAttachmentLink>
-            }
-            return href ? (
-              <a href={href} rel="noreferrer noopener" target="_blank">
-                {children}
-              </a>
-            ) : <span>{children}</span>
-          },
-          img: ({ alt, src }) => {
-            const fileId = readMarkdownAttachmentFileId(typeof src === 'string' ? src : undefined)
-            return fileId ? <MarkdownAttachmentImage alt={alt} attachments={attachments} fileId={fileId} /> : null
-          },
-        }}
+        components={components}
         rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
         remarkPlugins={[remarkGfm, remarkWorkItemKeyLinks]}
         skipHtml

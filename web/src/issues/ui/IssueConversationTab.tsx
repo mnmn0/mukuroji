@@ -2055,14 +2055,28 @@ function CommentComposer({
   const currentBodyMarkdown = draft.bodyMarkdown
   const currentMentionMemberKeys = draft.mentionMemberKeys
   const latestDraftRef = useRef(draft)
+  const isMountedRef = useRef(false)
 
   useEffect(() => {
     latestDraftRef.current = draft
   }, [draft])
 
+  // Tracks whether this composer is still on screen, so an upload that finishes after the
+  // composer closed or moved to another comment does not write into another draft.
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+
+  // The draft lifetime this render belongs to; an upload started now only inserts into it.
+  const uploadDraftLifetimeId = draft.lifetimeId
+
   /** Inserts an uploaded file's reference at the cursor, reading the newest body text. */
   const insertAttachment = (markdown: string) => {
     const latest = latestDraftRef.current
+    if (!isMountedRef.current || latest.lifetimeId !== uploadDraftLifetimeId) return
     const body = latest.bodyMarkdown
     const textarea = textareaRef.current
     const start = Math.min(textarea?.selectionStart ?? body.length, body.length)

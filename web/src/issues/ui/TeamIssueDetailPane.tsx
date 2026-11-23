@@ -597,6 +597,8 @@ function IssueDetailContent({
     void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
   const editorFormId = useId()
+  // True while the description field is still inserting uploaded attachments; saving waits for it.
+  const [isDescriptionUploading, setIsDescriptionUploading] = useState(false)
   const editorIdentity = [issue.teamId, issue.id, draftRevision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
@@ -606,7 +608,7 @@ function IssueDetailContent({
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending || isDescriptionUploading) {
       return
     }
 
@@ -1006,6 +1008,7 @@ function IssueDetailContent({
               key={editorIdentity + ':description'}
               label={t('issues.create.description')}
               name="description"
+              onUploadingChange={setIsDescriptionUploading}
               readOnly={isIssueReadOnly}
               t={t}
             />
@@ -1286,7 +1289,7 @@ function IssueDetailContent({
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending || isDescriptionUploading}
           form={editorFormId}
           type="submit"
         >

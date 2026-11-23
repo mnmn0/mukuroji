@@ -22,6 +22,11 @@ export type UseMarkdownAttachmentUploadOptions = {
    * Blocks uploads, for example while the surrounding form is read-only.
    */
   disabled?: boolean
+  /**
+   * Tells the owner when uploads start and finish, so it can hold a save until every
+   * reference has been inserted.
+   */
+  onUploadingChange?: (isUploading: boolean) => void
 }
 
 /**
@@ -70,6 +75,7 @@ export function useMarkdownAttachmentUpload({
   controller,
   disabled = false,
   onInsert,
+  onUploadingChange,
 }: UseMarkdownAttachmentUploadOptions): MarkdownAttachmentUpload {
   const [isUploading, setIsUploading] = useState(false)
   const [errorKey, setErrorKey] = useState<MessageKey>()
@@ -90,6 +96,7 @@ export function useMarkdownAttachmentUpload({
     if (accepted.length === 0) return
 
     setIsUploading(true)
+    onUploadingChange?.(true)
     try {
       const succeeded = await controller.uploadFiles(accepted, {
         onUploaded: (file, version) => onInsert(createMarkdownAttachmentReference(file, version)),
@@ -97,8 +104,9 @@ export function useMarkdownAttachmentUpload({
       if (!succeeded) setErrorKey('files.error.upload')
     } finally {
       setIsUploading(false)
+      onUploadingChange?.(false)
     }
-  }, [canAttach, controller, isUploading, onInsert])
+  }, [canAttach, controller, isUploading, onInsert, onUploadingChange])
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files)

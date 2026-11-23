@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import type { FileAttachment } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { FileArtifactsController } from '../mutations/useFileArtifacts'
 import { findInlineImageVersion } from '../model/markdownAttachments'
+import { useFileVersionInlineUrl } from '../queries/useFileVersionInlineUrl'
 
 /**
  * What a Markdown body needs to resolve `attachment:` references for the current viewer.
@@ -47,29 +48,11 @@ export type MarkdownAttachmentImageProps = {
 export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAttachmentImageProps) {
   const file = attachments?.controller.files.find((candidate) => candidate.id === fileId)
   const version = file ? findInlineImageVersion(file) : undefined
-  const versionKey = file && version ? `${file.id}:${version.id}` : undefined
-  const [access, setAccess] = useState<{ key: string; url?: string; failed: boolean }>()
-  // Bumped once when a loaded URL stops working, for example a lazy image shown after the URL expired.
-  const [reloadCount, setReloadCount] = useState(0)
-  const getVersionAccess = attachments?.controller.getVersionAccess
-
-  useEffect(() => {
-    if (!file || !version || !versionKey || !getVersionAccess) return
-    let cancelled = false
-    void getVersionAccess(file, version, 'inline').then((result) => {
-      if (!cancelled) setAccess({ failed: !result, key: versionKey, url: result?.url })
-    }, () => {
-      if (!cancelled) setAccess({ failed: true, key: versionKey })
-    })
-    return () => {
-      cancelled = true
-    }
-    // The file object changes on every list refresh; the version key is what decides a new URL.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [versionKey, getVersionAccess, reloadCount])
+  // Bumped once when a loaded URL stops working, for example a lazy image shown after it expired.
+  const [attempt, setAttempt] = useState(0)
+  const access = useFileVersionInlineUrl(attachments?.controller, file, version, attempt)
 
   const t = attachments?.t
-  const currentAccess = access?.key === versionKey ? access : undefined
   if (!t) return <AttachmentPlaceholder>{alt || fileId}</AttachmentPlaceholder>
   if (!file || file.deletedAt || !file.capabilities.canDownload) {
     return <AttachmentPlaceholder>{t('files.markdown.unavailable')}</AttachmentPlaceholder>
@@ -77,11 +60,11 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
   if (!version) {
     return <AttachmentPlaceholder>{describeHiddenVersion(file, t)}</AttachmentPlaceholder>
   }
-  if (!currentAccess) {
-    return <AttachmentPlaceholder>{t('files.preview.loading')}</AttachmentPlaceholder>
-  }
-  if (currentAccess.failed || !currentAccess.url) {
+  if (access.failed) {
     return <AttachmentPlaceholder>{t('files.markdown.unavailable')}</AttachmentPlaceholder>
+  }
+  if (!access.url) {
+    return <AttachmentPlaceholder>{t('files.preview.loading')}</AttachmentPlaceholder>
   }
   return (
     <img
@@ -91,15 +74,10 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
       decoding="async"
       loading="lazy"
       onError={() => {
-        if (reloadCount > 0) {
-          setAccess({ failed: true, key: currentAccess.key })
-          return
-        }
-        setAccess(undefined)
-        setReloadCount(1)
+        if (attempt === 0) setAttempt(1)
       }}
       referrerPolicy="no-referrer"
-      src={currentAccess.url}
+      src={access.url}
     />
   )
 }

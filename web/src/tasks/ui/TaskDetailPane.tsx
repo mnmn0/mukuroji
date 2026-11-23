@@ -391,6 +391,8 @@ export function TaskDetailPane({
     collaborationRoute?.onCollaborationTabChange,
   )
   const editorFormId = useId()
+  // True while the description field is still inserting uploaded attachments; saving waits for it.
+  const [isDescriptionUploading, setIsDescriptionUploading] = useState(false)
   const scheduleFormId = useId()
   const {
     data: triageSourcesPages,
@@ -834,6 +836,7 @@ export function TaskDetailPane({
     if (
       isReadOnly ||
       !task.teamId ||
+      isDescriptionUploading ||
       isIssueSavingRef.current ||
       isAiPlanningOperationPendingRef.current ||
       isAiSummaryOperationPendingRef.current
@@ -1188,6 +1191,7 @@ export function TaskDetailPane({
               key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
               label={t('tasks.detail.description')}
               name="description"
+              onUploadingChange={setIsDescriptionUploading}
               readOnly={isReadOnly}
               t={t}
             />
@@ -1713,7 +1717,7 @@ export function TaskDetailPane({
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
           form={editorFormId}
-          disabled={isReadOnly || isWorkItemMutationPending}
+          disabled={isReadOnly || isWorkItemMutationPending || isDescriptionUploading}
           type="submit"
         >
           {t('issues.detail.save')}
