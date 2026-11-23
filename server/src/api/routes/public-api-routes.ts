@@ -131,6 +131,22 @@ import {
   type WorkItemImportWorkerDependencies,
 } from '../../modules/work-items/work-item-import'
 import { DocumentError } from '../../modules/documents'
+import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
+import {
+  applyWorkItemImportLink,
+  validateWorkItemImportLinks,
+  type WorkItemImportLinkRow,
+} from './work-item-import-links'
+import {
+  createWorkItemImportMemberMatcher,
+  matchWorkItemImportPeople,
+  namesImportMemberByDisplayName,
+  toWorkItemImportMemberError,
+} from './work-item-import-members'
+import {
+  readContributorAssignmentChange,
+  withContributorAssignmentChange,
+} from '../shared/work-item-contributors'
 import {
   developerPlatformDependencies,
   initializeLegacyTenantAdministration,
@@ -180,6 +196,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
+import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import {
@@ -279,11 +296,21 @@ async function requireWebhookTeamPermission(
   )
 }
 
-/** Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。 */
+/**
+ * Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。
+ *
+ * @param principal - Workspace principal reading the export.
+ * @param continuation - Store continuation of the previous page, if any.
+ * @param limit - Largest number of Work Items in the page.
+ * @param includeStructure - Whether rows keep contributors and acceptance criteria, as the
+ *   structured export endpoint returns them.
+ * @returns The page and the continuation of the next one.
+ */
 async function readAccessibleWorkItemExportPage(
   principal: ProjectPrincipal,
   continuation: string | undefined,
   limit: number,
+  includeStructure: boolean,
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
@@ -341,10 +368,13 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data, and acceptance criteria, remaining effort, and
-    // progress have their own endpoints because the public Work Item schema is closed, so all of
-    // them are excluded from export rows.
-    items: page.issues.map(omitWorkItemExportExcludedFields),
+    // The export lists only Work Items the administrator can view. The structured export keeps
+    // contributors and acceptance criteria for a re-import; the original export keeps its closed
+    // Work Item schema. Remaining effort and progress have their own endpoints and stay out of both.
+    items: page.issues.map((issue) => {
+      const exported = omitWorkItemExportExcludedFields(issue)
+      return includeStructure ? exported : omitWorkItemStructureFields(exported)
+    }),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
@@ -352,14 +382,11 @@ async function readAccessibleWorkItemExportPage(
 
 /** Work Item fields that export rows leave out. */
 type WorkItemExportExcludedField =
-  | 'contributorAssignments'
-  | 'acceptanceCriteria'
   | 'remainingEffortMinutes'
   | 'progressPercent'
 
 /**
- * Removes contributor assignments, acceptance criteria, remaining effort, and progress from a
- * Work Item export row.
+ * Removes remaining effort and progress from a Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
  * @returns The Work Item without the fields excluded from exports.
@@ -368,16 +395,32 @@ function omitWorkItemExportExcludedFields<
   T extends { readonly [Field in WorkItemExportExcludedField]?: unknown },
 >(workItem: T): Omit<T, WorkItemExportExcludedField> {
   const {
-    contributorAssignments: _contributorAssignments,
-    acceptanceCriteria: _acceptanceCriteria,
     remainingEffortMinutes: _remainingEffortMinutes,
     progressPercent: _progressPercent,
     ...exported
   } = workItem
-  void _contributorAssignments
-  void _acceptanceCriteria
   void _remainingEffortMinutes
   void _progressPercent
+  return exported
+}
+
+/**
+ * Removes contributor assignments and acceptance criteria from a Work Item export row, which the
+ * closed Work Item schema of the original export endpoint does not list.
+ *
+ * @param workItem - Export row.
+ * @returns The row without contributors and acceptance criteria.
+ */
+function omitWorkItemStructureFields<
+  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
+>(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  const {
+    contributorAssignments: _contributorAssignments,
+    acceptanceCriteria: _acceptanceCriteria,
+    ...exported
+  } = workItem
+  void _contributorAssignments
+  void _acceptanceCriteria
   return exported
 }
 
@@ -823,12 +866,20 @@ async function createCanonicalPublicWorkItem(
   )
   const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
+  // Only an import supplies contributors: the Public API create body does not accept them.
+  const contributorChange = await readContributorAssignmentChange(
+    principal.directoryId,
+    configuredBody,
+    resolvedConfiguration,
+    [],
+  )
   const response = await workItemDependencies.teamIssues.createTeamIssue(
     principal.directoryId,
     teamId,
     {
       ...configuredBody,
       assigneeUserId,
+      ...withContributorAssignmentChange(configuredBody, contributorChange),
       ...(idempotentCreate
         ? {
             idempotentIssueId: idempotentCreate.issueId,
@@ -1901,7 +1952,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       })
       requireWorkspaceBusinessWrite(principal)
       await requirePublicImportPermission(principal, input)
-      return (await validatePublicImport(principal, input)).report
+      return (await validatePublicImport(principal, input, undefined, { checkTeamLinkCapacity: true })).report
     },
 
     async commitImport(managementPrincipal, dryRunJobId, input, mutationContext) {
@@ -2061,7 +2112,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       return requireImportJob(principal.directoryId, job.id)
     },
 
-    async export(managementPrincipal, _format, continuation, limit) {
+    async export(managementPrincipal, _format, continuation, limit, includeStructure = false) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.read',
         evaluateProjectScopes: true,
@@ -2071,6 +2122,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal,
         continuation,
         limit,
+        includeStructure,
       )
     },
   }
@@ -2688,12 +2740,17 @@ async function requirePublicImportPermission(
  * @param calendarPolicy - Calendar policy for rows without one. A queued execution passes the
  *   policy it pinned, so a retry keeps each row's request digest; otherwise the current Workspace
  *   working calendar is read.
+ * @param options - Checks only a dry run makes.
+ * @param options.checkTeamLinkCapacity - Whether to count the links the Team already stores
+ *   against its limit. Only a dry run does: once the worker has applied some of the import's
+ *   links, the stored count already includes them, so a retry would count them twice.
  * @returns The dry-run report and the valid row inputs.
  */
 async function validatePublicImport(
   principal: WorkspacePrincipal,
   input: PublicImportSourceInput,
   calendarPolicy?: WorkItemScheduleCalendarPolicy,
+  options: { checkTeamLinkCapacity?: boolean } = {},
 ) {
   const permission = await requirePublicImportPermission(principal, input)
   const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -2711,14 +2768,27 @@ async function validatePublicImport(
   )
   const mappedByRow = new Map<number, Record<string, unknown>>()
   const validInputs: Array<{ row: number; input: CreateWorkItemInput }> = []
+  const linkRows = new Map<number, WorkItemImportLinkRow>()
   const assigneeValidations = new Map<
     string,
     ReturnType<typeof requireActiveWorkspaceAssignee>
   >()
+  // People may be written by e-mail address or display name, as MS Project resources are; the
+  // members are read only when a row uses a display name.
+  const matchMember = createWorkItemImportMemberMatcher(
+    preview.rows.some((row) => row.input !== undefined && namesImportMemberByDisplayName(row.input))
+      ? await workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId)
+      : undefined,
+  )
   for (const row of preview.rows) {
     if (!row.input) continue
+    const matched = matchWorkItemImportPeople(row.input, matchMember)
+    if ('mismatches' in matched) {
+      errorsByRow.get(row.row)?.push(...matched.mismatches.map((mismatch) => toWorkItemImportMemberError(row.row, mismatch)))
+      continue
+    }
     const candidate: CreateWorkItemInput = {
-      ...row.input,
+      ...matched.people,
       ...(row.input.assignedProjectId === undefined && input.assignedProjectId
         ? { assignedProjectId: input.assignedProjectId }
         : {}),
@@ -2748,12 +2818,31 @@ async function validatePublicImport(
         assigneeValidations.set(assigneeUserId, assigneeValidation)
       }
       await assigneeValidation
+      await readContributorAssignmentChange(principal.directoryId, configured, configuration, [])
+      linkRows.set(row.row, {
+        row: row.row,
+        workItemTypeId: typeof configured.workItemTypeId === 'string' ? configured.workItemTypeId : '',
+        ...(typeof configured.assignedProjectId === 'string' && configured.assignedProjectId
+          ? { assignedProjectId: configured.assignedProjectId }
+          : {}),
+        schedule: candidate.schedule,
+      })
       validInputs.push({ row: row.row, input: candidate })
     } catch (error) {
       const rowError = toImportRowError(error, row.row)
       if (!rowError) throw error
       errorsByRow.get(row.row)?.push(rowError)
     }
+  }
+  for (const error of await validateWorkItemImportLinks(
+    principal,
+    input.teamId,
+    configuration,
+    preview.links,
+    linkRows,
+    options.checkTeamLinkCapacity === true,
+  )) {
+    errorsByRow.get(error.row)?.push(error)
   }
   const errors = [...errorsByRow.values()].flat()
   const invalidRowIds = new Set(errors.map((error) => error.row))
@@ -2777,6 +2866,7 @@ async function validatePublicImport(
   return {
     report,
     validInputs: validInputs.filter((row) => !invalidRowIds.has(row.row)),
+    links: preview.links satisfies WorkItemImportLink[],
   }
 }
 
@@ -2951,6 +3041,9 @@ export function toWorkItemImportWorkerError(error: unknown): unknown {
     mapped.status === 409 &&
     (errorCode === 'WorkItemConfigurationRevisionConflict' ||
       errorCode === 'WorkItemAuthorizationChanged' ||
+      errorCode === 'WorkItemRevisionConflict' ||
+      errorCode === 'WorkItemRelationGraphConflict' ||
+      errorCode === 'PlanningRevisionConflict' ||
       errorCode === 'ConditionalCheckFailedException')
   ) {
     return new WorkItemImportError(
@@ -3056,7 +3149,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             : {}),
           mapping: execution.mapping,
         }, execution.defaultCalendarPolicy ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY)
-        return { report: validation.report, rows: validation.validInputs }
+        return { report: validation.report, rows: validation.validInputs, links: validation.links }
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
       }
@@ -3092,6 +3185,46 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
           },
           authorization.authorizationSnapshot,
         )
+      } catch (error) {
+        throw toWorkItemImportWorkerError(error)
+      }
+    },
+    /**
+     * Applies one link of an import after every row exists, as the importer currently may.
+     *
+     * @param request - Link, the execution it belongs to, and the Work Item ID of each row.
+     * @returns Nothing; a failure is mapped to retryable or terminal worker semantics.
+     */
+    async applyLink(request) {
+      try {
+        const authorization = await resolveStableWorkItemAuthorization(
+          request.execution.workspaceId,
+          async () => await resolveWorkItemImportPrincipal(request.execution),
+          async (principal) => {
+            await requireWorkItemImportExecutionAuthorization(principal, request.execution)
+          },
+        )
+        const idempotencyKey = `import-link-${request.linkIdentity.slice(0, 48)}`
+        await applyWorkItemImportLink({
+          principal: authorization.principal,
+          teamId: request.execution.teamId,
+          link: request.link,
+          workItemIdForRow: request.workItemIdForRow,
+          linkIdentity: request.linkIdentity,
+          authorizationSnapshot: authorization.authorizationSnapshot,
+          audit: createPublicMutationAuditContext(authorization.principal, {
+            requestId: `import-worker-${createHash('sha256')
+              .update(request.execution.jobId)
+              .digest('hex')
+              .slice(0, 20)}`,
+            idempotencyKey,
+            correlationId: request.execution.jobId,
+          }, {
+            method: 'POST',
+            path: '/api/developer/imports',
+            body: { teamId: request.execution.teamId, link: request.link },
+          }),
+        })
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
       }
@@ -3345,6 +3478,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
       documents: createCanonicalPublicDocumentService(),
+      directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()

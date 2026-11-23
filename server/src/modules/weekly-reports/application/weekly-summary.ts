@@ -1,15 +1,19 @@
 import {
   deriveWorkItemBaselineEndDelayDays,
   readWorkItemPlannedEndDate,
+  shiftSummaryMonth,
+  summaryMonthPeriod,
   weeklyReportWeekEnd,
   WEEKLY_SUMMARY_SECTION_ITEM_LIMIT,
   type CanonicalWorkItem,
   type ProjectScheduleBaseline,
   type ProjectScheduleBaselineEntry,
+  type TeamMonthlySummaryResponse,
   type TeamWeeklySummaryResponse,
   type WeeklySummaryItem,
   type WeeklySummaryScope,
   type WeeklySummarySectionName,
+  type WeeklySummaryTotals,
 } from '@mukuroji/contracts'
 
 /** Work Item fields the weekly summary reads. */
@@ -45,6 +49,32 @@ export type TeamWeeklySummaryInput<TWorkItem extends WeeklySummaryWorkItem> = {
   localToday: (workItem: TWorkItem) => string
 }
 
+/** Inputs of {@link buildTeamMonthlySummary}: the weekly inputs with a month instead of a week. */
+export type TeamMonthlySummaryInput<TWorkItem extends WeeklySummaryWorkItem> =
+  Omit<TeamWeeklySummaryInput<TWorkItem>, 'weekStart' | 'workItems'> & {
+    /** Calendar month as `YYYY-MM`. */
+    month: string
+    /** The Team's non-archived Work Items the reader may read; read twice, so not a one-shot iterator. */
+    workItems: readonly TWorkItem[]
+  }
+
+/** Inputs of {@link buildPeriodSummary}. */
+type PeriodSummaryInput<TWorkItem extends WeeklySummaryWorkItem> =
+  Omit<TeamWeeklySummaryInput<TWorkItem>, 'teamId' | 'weekStart'> & {
+    /** First day of the period as `YYYY-MM-DD`. */
+    periodStart: string
+    /** Last day of the period as `YYYY-MM-DD`. */
+    periodEnd: string
+  }
+
+/** Counted sections of a period. */
+type PeriodSummary = {
+  /** Counts across the scopes. */
+  totals: WeeklySummaryTotals
+  /** Readable scopes. */
+  scopes: WeeklySummaryScope[]
+}
+
 /** Matching Work Items of one section before they are cut to the listed limit. */
 type SectionAccumulator = {
   /** Number of matches. */
@@ -68,12 +98,7 @@ type ScopeAccumulator = {
 /**
  * Computes the weekly summary of a Team and each of its readable Projects: Work Items completed
  * in the week, delays against the Project schedule baseline, overdue Work Items, and Milestones
- * reached.
- *
- * "Open" means the Work Item's current status is neither completed nor canceled. A Work Item is
- * overdue when it is open and its planned end is before the day after the week, or before today
- * while the week is still running. A Work Item is delayed when it completed in the week after
- * its baseline end, or when it is open and its current planned end is after its baseline end.
+ * reached. The rules are those of {@link buildPeriodSummary}.
  *
  * @param input - Week, readable Projects, baselines, and readable Work Items.
  * @returns The summary.
@@ -81,8 +106,55 @@ type ScopeAccumulator = {
 export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
   input: TeamWeeklySummaryInput<TWorkItem>,
 ): TeamWeeklySummaryResponse {
-  const weekEnd = weeklyReportWeekEnd(input.weekStart)
-  const dayAfterWeek = addDays(weekEnd, 1)
+  const { teamId, weekStart, ...rest } = input
+  const weekEnd = weeklyReportWeekEnd(weekStart)
+  const { totals, scopes } = buildPeriodSummary({ ...rest, periodStart: weekStart, periodEnd: weekEnd })
+  return { teamId, weekStart, weekEnd, generatedAt: input.now.toISOString(), totals, scopes }
+}
+
+/**
+ * Computes the monthly summary of a Team and each of its readable Projects with the rules of the
+ * weekly summary, counted over a calendar month, and the totals of the month before so a report
+ * can show the change.
+ *
+ * @param input - Month, readable Projects, baselines, and readable Work Items.
+ * @returns The summary.
+ */
+export function buildTeamMonthlySummary<TWorkItem extends WeeklySummaryWorkItem>(
+  input: TeamMonthlySummaryInput<TWorkItem>,
+): TeamMonthlySummaryResponse {
+  const { teamId, month, ...rest } = input
+  const { periodStart, periodEnd } = summaryMonthPeriod(month)
+  const current = buildPeriodSummary({ ...rest, periodStart, periodEnd })
+  const previous = buildPeriodSummary({ ...rest, ...summaryMonthPeriod(shiftSummaryMonth(month, -1)) })
+  return {
+    teamId,
+    month,
+    periodStart,
+    periodEnd,
+    generatedAt: input.now.toISOString(),
+    totals: current.totals,
+    previousTotals: previous.totals,
+    scopes: current.scopes,
+  }
+}
+
+/**
+ * Counts the sections of a period for the Team and each readable Project.
+ *
+ * "Open" means the Work Item's current status is neither completed nor canceled. A Work Item is
+ * overdue when it is open and its planned end is before the day after the period, or before today
+ * while the period is still running. A Work Item is delayed when it completed in the period after
+ * its baseline end, or when it is open and its current planned end is after its baseline end.
+ *
+ * @param input - Period, readable Projects, baselines, and readable Work Items.
+ * @returns Totals and scopes.
+ */
+function buildPeriodSummary<TWorkItem extends WeeklySummaryWorkItem>(
+  input: PeriodSummaryInput<TWorkItem>,
+): PeriodSummary {
+  const periodEnd = input.periodEnd
+  const dayAfterPeriod = addDays(periodEnd, 1)
   const scopes = new Map<string, ScopeAccumulator>()
   for (const projectId of input.projectIds) {
     const baseline = input.baselines.get(projectId) ?? null
@@ -124,23 +196,23 @@ export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
       ...(baselineEndDate === undefined ? {} : { baselineEndDate }),
     }
     const open = workItem.statusCategory !== 'completed' && workItem.statusCategory !== 'canceled'
-    const completedInWeek = workItem.statusCategory === 'completed' &&
+    const completedInPeriod = workItem.statusCategory === 'completed' &&
       workItem.actualEndDate !== undefined &&
-      workItem.actualEndDate >= input.weekStart &&
-      workItem.actualEndDate <= weekEnd
+      workItem.actualEndDate >= input.periodStart &&
+      workItem.actualEndDate <= periodEnd
 
-    if (completedInWeek) {
+    if (completedInPeriod) {
       const completedOn = workItem.actualEndDate ?? ''
       add(scope.sections.completed, item, completedOn)
       if (workItem.schedule.mode === 'milestone') add(scope.sections.milestonesReached, item, completedOn)
     }
     if (open && plannedEndDate !== undefined) {
       const today = input.localToday(workItem)
-      const cutoff = today < dayAfterWeek ? today : dayAfterWeek
+      const cutoff = today < dayAfterPeriod ? today : dayAfterPeriod
       if (plannedEndDate < cutoff) add(scope.sections.overdue, item, plannedEndDate)
     }
-    // Same measure as the Gantt baseline overlay; a Work Item completed before the week is not listed.
-    const delayDays = baselineEntry !== undefined && (completedInWeek || open)
+    // Same measure as the Gantt baseline overlay; a Work Item completed before the period is not listed.
+    const delayDays = baselineEntry !== undefined && (completedInPeriod || open)
       ? deriveWorkItemBaselineEndDelayDays(baselineEntry, workItem)
       : undefined
     if (delayDays !== undefined && delayDays > 0) {
@@ -163,14 +235,7 @@ export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
     overdue: total('overdue'),
     milestonesReached: total('milestonesReached'),
   }
-  return {
-    teamId: input.teamId,
-    weekStart: input.weekStart,
-    weekEnd,
-    generatedAt: input.now.toISOString(),
-    totals,
-    scopes: orderedScopes,
-  }
+  return { totals, scopes: orderedScopes }
 }
 
 /**

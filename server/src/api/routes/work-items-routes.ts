@@ -225,7 +225,6 @@ import {
   canAccessAssignedProject,
   createApiMutationContext,
   createCuratedContextActorSnapshot,
-  getEffectiveProjectAccessList,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireProjectPermission,
@@ -268,6 +267,7 @@ import {
   type WorkItemsResponse,
 } from '../shared/work-item-access'
 import { readOpenWorkItemChildCount, readTeamWorkItemHierarchy } from '../shared/work-item-hierarchy'
+import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from '../shared/project-directory-visibility'
 import {
   readScopedWorkItemPage,
   readScopedWorkItemPageQuery,
@@ -3453,24 +3453,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         principal.directoryId,
         readLocale(c),
       )
-      if (principal.isSystemAdmin) return c.json(directory)
-      const readableProjectIds = new Set(
-        (await getEffectiveProjectAccessList(principal))
-          .filter((access) => projectAccessAllows(access, 'viewer'))
-          .map((access) => access.projectId),
-      )
-      const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
-      return c.json({
-        ...directory,
-        teams: directory.teams
-          .map((team) => ({
-            ...team,
-            projects: team.projects.filter((project) =>
-              readableProjectIds.has(project.id)
-            ),
-          }))
-          .filter((team) => authorizedTeamIds.has(team.id) || team.projects.length > 0),
-      })
+      return c.json(await filterReadableProjectDirectory(principal, directory))
     } catch (error) {
       if (error instanceof CognitoServiceError) {
         return toAuthErrorResponse(c, error)
@@ -4352,37 +4335,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
     }, 404)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      const location = await workItemDependencies.teamIssues.getWorkItemKeyLocation(
-        principal.directoryId,
-        c.req.param('key'),
-      )
+      const location = await resolveReadableWorkItemKey(principal, c.req.param('key'))
       if (!location) return notFound()
-      try {
-        const context = await requireTeamPermission(principal, location.teamId, 'viewer')
-        const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
-          principal.directoryId,
-          location.teamId,
-          location.workItemId,
-          { consistentIssueRead: true, includeEvents: false },
-        )
-        requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-        // A deleted Work Item keeps its key row, and a fixed ID can be created again with a new key,
-        // so the row only counts when the Work Item at that ID still carries this key.
-        if (detail.issue.key !== location.key) return notFound()
-      } catch (error) {
-        if (
-          isTeamIssueNotFoundError(error) ||
-          error instanceof ProjectDataError && (error.status === 403 || error.status === 404)
-        ) {
-          return notFound()
-        }
-        throw error
-      }
-      return c.json({
-        key: location.key,
-        teamId: location.teamId,
-        workItemId: location.workItemId,
-      } satisfies WorkItemKeyLookupResponse)
+      return c.json(location satisfies WorkItemKeyLookupResponse)
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }

@@ -134,6 +134,7 @@ export const auditLogMessages = {
   'auditLog.resource.time-budget': '工数の予算',
   'auditLog.resource.time-entry': '工数',
   'auditLog.resource.time-period': '工数の締め期間',
+  'auditLog.resource.time-rate-card': '工数の単価表',
   'auditLog.resource.timer': 'タイマー',
   'auditLog.resource.triage': 'トリアージ',
   'auditLog.resource.update-feed': '更新フィード',

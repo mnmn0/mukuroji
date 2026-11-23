@@ -8,6 +8,7 @@ import {
   buildTokenEnvironmentCommand,
   MCP_RELEASE_URL,
   type AgentConnectionClient,
+  type AgentConnectionProfile,
   type AgentConnectionShell,
 } from '../model/agentConnection'
 
@@ -69,6 +70,8 @@ export type AgentConnectionPanelProps = {
   hasLoadError: boolean
   /** Origin written into `MUKUROJI_MCP_URL`. */
   origin: string
+  /** MCP tool set configured: `workspace` when the deployment omits Software factory. */
+  profile: AgentConnectionProfile
   /** Teams the member can choose. */
   teams: readonly AgentConnectionTeamOption[]
   /** Current configuration choices. */
@@ -138,7 +141,9 @@ export function AgentConnectionPanel(props: AgentConnectionPanelProps) {
       <TokenStep {...props} overview={overview} />
       <ConfigurationStep {...props} overview={overview} />
       <Step number={4} title={t('agents.connect.verifyTitle')}>
-        <p className="text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.connect.verifyDescription')}</p>
+        <p className="text-sm leading-6 text-[var(--workbench-muted)]">
+          {t(props.profile === 'workspace' ? 'agents.connect.verifyWorkspaceDescription' : 'agents.connect.verifyDescription')}
+        </p>
       </Step>
     </div>
   )
@@ -401,9 +406,11 @@ function PersonalKeyRow(
  * @returns The configuration step.
  */
 function ConfigurationStep(props: AgentConnectionPanelProps & { overview: PersonalAgentCredentialOverview }) {
-  const { t, overview, choices, onChoicesChange, teams, origin } = props
+  const { t, overview, choices, onChoicesChange, teams, origin, profile } = props
   const pathInputId = useId()
+  const readsWorkspace = profile === 'workspace'
   const snippet = buildAgentConnectionSnippet({
+    profile,
     origin,
     teamId: choices.teamId || 'your-team-id',
     memberId: overview.memberId,
@@ -415,6 +422,11 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
   return (
     <Step number={3} title={t('agents.connect.configTitle')}>
       <p className="text-sm leading-6 text-[var(--workbench-muted)]">{t('agents.connect.configDescription')}</p>
+      {readsWorkspace ? (
+        <p className="text-sm leading-6 text-[var(--workbench-muted)]" data-testid="agent-connection-workspace-profile">
+          {t('agents.connect.workspaceProfileNote')}
+        </p>
+      ) : null}
       <fieldset className="flex flex-wrap gap-2">
         <legend className="mb-1.5 text-xs font-semibold text-[var(--workbench-muted)]">{t('agents.connect.clientLabel')}</legend>
         {AGENT_CONNECTION_CLIENTS.map((client) => (
@@ -438,22 +450,24 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
         ))}
       </fieldset>
       <div className="grid gap-3 min-[760px]:grid-cols-2">
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('agents.connect.teamLabel')}
-          {teams.length ? (
-            <select
-              className="workbench-input min-h-10 px-3 text-sm font-normal"
-              onChange={(event) => onChoicesChange({ ...choices, teamId: event.target.value })}
-              value={choices.teamId}
-            >
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>{team.name}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-sm font-normal text-[var(--workbench-text)]">{t('agents.connect.noTeams')}</span>
-          )}
-        </label>
+        {readsWorkspace ? null : (
+          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('agents.connect.teamLabel')}
+            {teams.length ? (
+              <select
+                className="workbench-input min-h-10 px-3 text-sm font-normal"
+                onChange={(event) => onChoicesChange({ ...choices, teamId: event.target.value })}
+                value={choices.teamId}
+              >
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>{team.name}</option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-sm font-normal text-[var(--workbench-text)]">{t('agents.connect.noTeams')}</span>
+            )}
+          </label>
+        )}
         <ShellPicker choices={choices} onChoicesChange={onChoicesChange} t={t} />
         <div className="grid gap-1.5 min-[760px]:col-span-2">
           <label className="text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={pathInputId}>
@@ -474,10 +488,12 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
           <dt className="font-semibold text-[var(--workbench-muted)]">{t('agents.connect.originLabel')}</dt>
           <dd className="mt-1 break-all font-mono text-[var(--workbench-text)]">{origin}</dd>
         </div>
-        <div className="min-w-0">
-          <dt className="font-semibold text-[var(--workbench-muted)]">{t('agents.connect.memberLabel')}</dt>
-          <dd className="mt-1 break-all font-mono text-[var(--workbench-text)]">{overview.memberId}</dd>
-        </div>
+        {readsWorkspace ? null : (
+          <div className="min-w-0">
+            <dt className="font-semibold text-[var(--workbench-muted)]">{t('agents.connect.memberLabel')}</dt>
+            <dd className="mt-1 break-all font-mono text-[var(--workbench-text)]">{overview.memberId}</dd>
+          </div>
+        )}
       </dl>
       <CopyBlock
         label={(runsCommand ? t('agents.connect.snippetRun') : t('agents.connect.snippetLabel'))

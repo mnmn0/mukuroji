@@ -37,6 +37,11 @@ export type TenantProfile = {
   calendar?: WorkspaceCalendarSettings
   /** When unsubmitted weekly reports are reminded; absent until an administrator chooses. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /**
+   * ISO 4217 currency for time costs, budgets, and rate cards; absent until an administrator
+   * chooses one, which means `DEFAULT_WORKSPACE_CURRENCY` (JPY).
+   */
+  defaultCurrency?: string
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -239,6 +244,8 @@ export type UpdateTenantProfileInput = {
   calendar?: WorkspaceCalendarSettings
   /** Weekly report reminder settings; omitted keeps the stored settings. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /** ISO 4217 currency for time costs and budgets; omitted keeps the stored currency. */
+  defaultCurrency?: string
   /** Revision read before editing the profile. */
   expectedRevision: number
 }
