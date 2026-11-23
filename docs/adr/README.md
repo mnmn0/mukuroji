@@ -54,7 +54,7 @@
 | [0026](0026-work-item-child-restore-guard-row.md) | 子の復元を親ごとの guard row で数え、親の archive を固定数の項目で fence する | 提案 |
 | [0027](0027-time-entry-visibility-and-team-time-managers.md) | Project なしの工数を Team の工数管理者が扱い、集計は一般メンバーには本人分だけ返す | 提案 |
 | [0028](0028-project-permission-team-qualified-match.md) | Project 単位の権限確認を Team と Project の組で照合し、Team を決められない旧形式の権限は効かせない | 提案 |
-| [0029](0029-software-factory-deploy-switch.md) | Software factory を deploy 時の任意 module にし、off のときは API の入口で断る | 提案 |
+| [0029](0029-software-factory-deploy-switch.md) | Software factory を deploy 時の任意 module にし、off のときは API の入口で断る | 一部を置き換え済み（0052） |
 | [0030](0030-weekly-report-storage-and-visibility.md) | 週報を Planning table に週ごとの行と提出版ごとの行で持ち、読む人の権限でタスクを絞る | 提案 |
 | [0031](0031-data-migration-lambda-and-operator-proof.md) | Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる | 提案 |
 | [0032](0032-japanese-public-holiday-monthly-sync.md) | 日本の祝日を内閣府の CSV から月に1回取り込み、tenant administration table の共有 row に置く | 提案 |
@@ -71,4 +71,7 @@
 | [0044](0044-runtime-control-switch-audit-events.md) | Runtime control の切り替えを operator script が Workspace の監査ログに開始・完了・失敗の 3 種類で書く | 提案 |
 | [0045](0045-relation-events-for-automation-and-webhooks.md) | Work Item relation の event を Automation trigger と webhook の event type に使い、webhook の event type は追加していく | 提案 |
 | [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |
+| [0052](0052-personal-tokens-without-software-factory.md) | Software factory が off でも本人用 token を発行でき、MCP は Workspace profile で読む | 提案 |
+| [0053](0053-reflect-work-item-completion-into-documents.md) | Work Item の完了を、宿題にした Document のチェック項目と付箋へ automation の audit worker で反映する | 提案 |
+| [0054](0054-team-time-rate-card.md) | 工数の単価表を Team ごとの `TIME_RATE_CARD` row で持ち、Workspace の既定通貨を tenant profile に置く | 提案 |
 | [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |

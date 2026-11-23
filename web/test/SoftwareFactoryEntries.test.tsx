@@ -8,7 +8,7 @@ import { WorkspaceSettingsView } from '../src/workspace/ui/WorkspaceSettingsView
 /**
  * Renders the personal settings view with or without the agent connection link.
  *
- * @param showAgentConnection - Whether the deployment serves Software factory.
+ * @param showAgentConnection - Whether to show the agent connection link.
  * @returns Static markup.
  */
 function renderPersonalSettings(showAgentConnection: boolean): string {
@@ -29,7 +29,7 @@ function renderPersonalSettings(showAgentConnection: boolean): string {
 }
 
 describe('Software factory entries in personal settings', () => {
-  test('links the agent connection page only when the deployment serves Software factory', () => {
+  test('links the agent connection page only when asked to', () => {
     expect(renderPersonalSettings(true)).toContain('data-testid="agent-connection-settings-link"')
     const hidden = renderPersonalSettings(false)
     expect(hidden).not.toContain('data-testid="agent-connection-settings-link"')

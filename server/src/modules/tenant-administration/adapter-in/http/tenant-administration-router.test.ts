@@ -728,6 +728,49 @@ test('keeps weekly report reminder settings behind administration and validates 
   expect(updates).toEqual([{ ...body, weeklyReportReminders: settings }])
 })
 
+test('accepts an ISO 4217 Workspace currency from an administrator only', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, defaultCurrency: 'USD' }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const defaultCurrency of [null, 'jpy', 'YEN!', 'JP', 'ZZZ', 392]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, defaultCurrency }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidTenantDefaultCurrency' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, defaultCurrency: 'USD' }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{ ...body, defaultCurrency: 'USD' }])
+})
+
 test('keeps calendar settings changes behind administration and validates them', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',
