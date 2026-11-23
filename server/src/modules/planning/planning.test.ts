@@ -6072,14 +6072,17 @@ describe('planning scoped reads', () => {
       () => NOW,
     )
 
+    const envelopes: PlanningReadEnvelope[] = []
     const snapshot = await client.getScoped(
       'workspace-1',
       { type: 'project', teamId: 'team-1', projectId: 'project-1' },
-      createReader([]),
+      createReader(envelopes),
     )
 
     expect(snapshot.revision).toBe(Number(meta.revision) + 1)
     expect(metaReads).toBe(4)
+    // The retry reuses the Work Items read before the first attempt.
+    expect(envelopes).toHaveLength(1)
   })
 
   test('narrows the in-memory graph the same way', async () => {

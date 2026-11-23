@@ -3699,10 +3699,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     readWorkItems: PlanningScopedWorkItemReader,
   ): Promise<PlanningScopedRead> {
     await this.ensureTable()
+    // Work Items are read once and outside the META barrier, as the Workspace read does, so a
+    // retry after a concurrent write does not re-read them and the barrier window stays short.
+    const readEnvelopeWorkItems = memoizePlanningScopedWorkItemReader(readWorkItems)
+    if (scope.type !== 'portfolio') {
+      await readEnvelopeWorkItems(resolvePlanningReadEnvelope([], scope))
+    }
     for (let attempt = 1; ; attempt += 1) {
       try {
-        const read = await this.readStableScopedState(workspaceId, scope, readWorkItems)
-        return read ?? await super.readScopedState(workspaceId, scope, readWorkItems)
+        const read = await this.readStableScopedState(workspaceId, scope, readEnvelopeWorkItems)
+        return read ?? await super.readScopedState(workspaceId, scope, readEnvelopeWorkItems)
       } catch (error) {
         if (
           attempt < PLANNING_STABLE_READ_ATTEMPT_LIMIT &&
@@ -3800,6 +3806,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     }
     const requested = new Set(uniqueKeys)
     const items: Record<string, unknown>[] = []
+    let bytes = 0
     for (let offset = 0; offset < uniqueKeys.length; offset += PLANNING_LINK_BATCH_GET_SIZE) {
       let pending: Record<string, unknown>[] = uniqueKeys
         .slice(offset, offset + PLANNING_LINK_BATCH_GET_SIZE)
@@ -3832,6 +3839,14 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
           }
           requested.delete(item.recordKey)
           items.push(item)
+          bytes += utf8ByteLength(JSON.stringify(item))
+          if (bytes > PLANNING_LIVE_GRAPH_READ_BYTE_LIMIT) {
+            throw new PlanningError(
+              413,
+              'PlanningReadLimitExceeded',
+              `Planning Workspace cannot be read beyond ${PLANNING_LIVE_ROW_READ_LIMIT} live rows.`,
+            )
+          }
         }
         pending = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
       }
@@ -10483,5 +10498,26 @@ function selectPlanningReadScopeState(
         ? entityIds.has(updateTarget.target.entityId)
         : isPlanningScopeInReadEnvelope(updateTarget.target, envelope)
     ),
+  }
+}
+
+/**
+ * Wraps a Work Item reader so each envelope is read at most once per scoped read.
+ *
+ * @param readWorkItems - Reader supplied by the route.
+ * @returns A reader that returns the first result for a repeated envelope.
+ */
+function memoizePlanningScopedWorkItemReader(
+  readWorkItems: PlanningScopedWorkItemReader,
+): PlanningScopedWorkItemReader {
+  const reads = new Map<string, Promise<PlanningWorkItemState>>()
+  return (envelope) => {
+    const key = JSON.stringify([envelope.teamId ?? null, envelope.projectId ?? null])
+    let read = reads.get(key)
+    if (read === undefined) {
+      read = readWorkItems(envelope)
+      reads.set(key, read)
+    }
+    return read
   }
 }

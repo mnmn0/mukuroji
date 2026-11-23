@@ -50,6 +50,7 @@ update target は人が作る分だけで少ない。また entity の親子は�
 ## 結果
 
 - 20,000 row 近い Workspace でも、Project 概要は Workspace 全体の link と Work Item を読まずに表示できる。
+  Project 概要は blocker の状態に同じ Team の別 Project の Work Item が要るため、Team 単位の読み取りを使う。
 - entity が数千件ある Workspace では、単位ごとの読み取りでも entity row は全体を読む。entity 側を絞る
   必要が出たら、scope を key に入れる変更を ADR と migration 付きで行う。
 - 単位ごとの読み取りの `capacity` は直近の Planning commit 時点の値で、通知 schedule worker が

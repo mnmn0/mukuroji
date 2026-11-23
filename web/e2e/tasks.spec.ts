@@ -1095,7 +1095,7 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  // The Project overview reads one Project with `?teamId=&projectId=`.
+  // The Project overview reads its Team with `?teamId=`.
   await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     expect(route.request().method()).toBe('GET')

@@ -3159,8 +3159,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
     }
 
     try {
-      const readScope = readPlanningReadScopeQuery(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const readScope = readPlanningReadScopeQuery(c)
       if (readScope === undefined) {
         const workItemState = await readPlanningWorkItemState(principal)
         return c.json(filterPlanningSnapshotForPrincipal(

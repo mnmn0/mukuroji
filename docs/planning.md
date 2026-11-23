@@ -84,7 +84,7 @@ DynamoDB の読み方は次のとおりです。Key 設計は変えていませ�
 - 前後の `META` 強整合 read で revision を挟み、間に revision が進んだ場合は最大3回まで読み直す契約は Workspace 全体の読み取りと同じです。Snapshot の `revision` はそのまま mutation の `expectedRevision` に使えます
 - `capacity` は Planning の commit が `META` に書いた `liveRowCount` / `liveByteCount` から返します。通知 schedule worker が `UPDATE_TARGET#` の due index 属性を書いた分の byte 差は、次の Planning commit まで反映されません。`META` に値がない場合（Planning 以外の writer が `META` を置き換えた直後など）と、Lambda の graph cache が当たる場合は、全体を読んで数えます
 
-Web の Project 概要はこの Project 単位の読み取りを使い、Workspace 全体を読みません。Planning 画面（timeline / roadmap / portfolio）と Work Item 画面は、従来どおり Workspace 全体の snapshot を読みます。退避済みの entity と参照は、どの読み取りでも計算に含めません。
+Web の Project 概要は Team 単位の読み取りを使い、Workspace 全体を読みません（未完了の blocker の件数に、同じ Team の別 Project の Work Item の状態が要るためです）。Planning 画面（timeline / roadmap / portfolio）と Work Item 画面は、従来どおり Workspace 全体の snapshot を読みます。退避済みの entity と参照は、どの読み取りでも計算に含めません。
 
 #### Entity ID の採番
 
