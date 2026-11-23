@@ -288,6 +288,8 @@ export const documentsMessages = {
   'documents.comments.placeholder': 'Type @ to mention someone by name, and leave a comment…',
   'documents.comments.mentionHint': 'Type @ and pick a person by name',
   'documents.comments.mentionSuggestions': 'Mention suggestions',
+  'documents.comments.mentionSuggestionsError': 'Could not load name suggestions. Typing `@email` mentions still works.',
+  'documents.comments.mentionSuggestionsRetry': 'Reload suggestions',
   'documents.comments.saving': 'Sending…',
   'documents.comments.submit': 'Comment',
   'documents.comments.showResolved': 'Show resolved',

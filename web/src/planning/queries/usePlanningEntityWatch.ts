@@ -8,7 +8,7 @@ import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
  *
  * @param accessToken - Planning API access token.
  * @param entityId - Milestone ID.
- * @returns The watch state, whether a change is saving, whether a read or change failed, and the toggle.
+ * @returns The watch state, whether a change is saving, whether a read or change failed, the toggle, and a retry.
  */
 export function usePlanningEntityWatch(accessToken: string, entityId: string) {
   const query = useSWR(
@@ -38,7 +38,13 @@ export function usePlanningEntityWatch(accessToken: string, entityId: string) {
       setIsPending(false)
     }
   }
+  /** Clears a failed change and reads the watch state again. */
+  const retry = async () => {
+    setHasMutationError(false)
+    await query.mutate()
+  }
   return {
+    retry,
     watch: query.data,
     hasError: Boolean(query.error) || hasMutationError,
     isPending,

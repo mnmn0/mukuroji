@@ -155,11 +155,22 @@ export function PlanningPage() {
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
   // Offered by display name in update comments; without it typed `@email` mentions still work.
-  const { data: workspaceAccess } = useWorkspaceAccess(
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+    mutate: reloadWorkspaceAccess,
+  } = useWorkspaceAccess(
     accessToken,
     Boolean(user && !currentUserError),
   )
   const mentionMembers = workspaceAccess?.members ?? emptyMentionMembers
+  const mentionSuggestionsFailure = workspaceAccessError && !workspaceAccess
+    ? {
+        message: t('planning.field.mentionSuggestionsError'),
+        retryLabel: t('planning.field.mentionSuggestionsRetry'),
+        onRetry: () => void reloadWorkspaceAccess(),
+      }
+    : undefined
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -614,6 +625,7 @@ export function PlanningPage() {
           ),
           isPending: isUpdateCollaborationPending,
           mentionMembers,
+          mentionSuggestionsFailure,
           onAddComment: canAnnotateSelectedUpdate
             ? submitPlanningUpdateComment
             : undefined,

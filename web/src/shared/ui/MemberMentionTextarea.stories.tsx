@@ -75,6 +75,48 @@ export const CaretLeavesMention: Story = {
   },
 }
 
+/** Clicking after a picked token keeps the list closed, so Enter types a newline. */
+export const CaretAfterPickedToken: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const textarea = canvas.getByRole('combobox', { name: 'コメント' })
+    await userEvent.type(textarea, '@山田')
+    await userEvent.keyboard('{Enter}')
+    await expect(textarea).toHaveValue('@山田 太郎 ')
+    await userEvent.click(textarea)
+    await expect(canvas.queryByRole('listbox', { name: 'メンションの候補' })).toBeNull()
+    await userEvent.keyboard('{Enter}')
+    await expect(textarea).toHaveValue('@山田 太郎 \n')
+  },
+}
+
+/** Escape closes the list without reaching a surrounding panel that also listens for Escape. */
+export const EscapeStaysInComposer: Story = {
+  render: () => {
+    /** Panel that records an Escape that escaped the composer. */
+    function EscapePanel() {
+      const [closedCount, setClosedCount] = useState(0)
+      return (
+        <div onKeyDown={(event) => { if (event.key === 'Escape') setClosedCount((count) => count + 1) }}>
+          <MentionComposerSample />
+          <p data-testid="panel-escapes">{closedCount}</p>
+        </div>
+      )
+    }
+    return <EscapePanel />
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const textarea = canvas.getByRole('combobox', { name: 'コメント' })
+    await userEvent.type(textarea, '@山田')
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.queryByRole('listbox', { name: 'メンションの候補' })).toBeNull()
+    await expect(canvas.getByTestId('panel-escapes')).toHaveTextContent('0')
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.getByTestId('panel-escapes')).toHaveTextContent('1')
+  },
+}
+
 /** Members with the same name are inserted with their email so the token stays unique. */
 export const DuplicateNames: Story = {
   play: async ({ canvasElement }) => {

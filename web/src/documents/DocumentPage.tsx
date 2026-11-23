@@ -53,7 +53,7 @@ import {
 } from '../shared/routing/paths'
 import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import { useWorkspaceAccess } from '../workspace/queries/useWorkspaceAccess'
-import type { MentionableMember } from '../shared/lib/memberMentions'
+import type { MentionableMember, MentionSuggestionsFailure } from '../shared/lib/memberMentions'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import {
   applyDocumentOperations,
@@ -462,6 +462,8 @@ export type DocumentScreenProps = {
   accessToken?: string
   /** Members offered by display name after `@` in comment composers. */
   mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
@@ -599,10 +601,21 @@ export function DocumentPage() {
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
   // Offered by display name in comments; without it typed `@member-key` mentions still work.
-  const { data: workspaceAccess } = useWorkspaceAccess(
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+    mutate: reloadWorkspaceAccess,
+  } = useWorkspaceAccess(
     accessToken,
     Boolean(user && !currentUserError),
   )
+  const mentionSuggestionsFailure = workspaceAccessError && !workspaceAccess
+    ? {
+        message: t('documents.comments.mentionSuggestionsError'),
+        retryLabel: t('documents.comments.mentionSuggestionsRetry'),
+        onRetry: () => void reloadWorkspaceAccess(),
+      }
+    : undefined
   const {
     data: teams = emptyTeams,
     error: directoryError,
@@ -1505,6 +1518,7 @@ export function DocumentPage() {
   return (
     <DocumentScreen
       mentionMembers={workspaceAccess?.members}
+      mentionSuggestionsFailure={mentionSuggestionsFailure}
       accessToken={accessToken}
       aiAssistanceAccessToken={(
         workspace.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
@@ -1613,6 +1627,7 @@ export function DocumentPage() {
 export function DocumentScreen({
   accessToken,
   mentionMembers,
+  mentionSuggestionsFailure,
   actions,
   aiAssistanceAccessToken,
   aiAssistanceEnabled = true,
@@ -2315,6 +2330,7 @@ export function DocumentScreen({
                 <DocumentContextPanel
                   linkAccessToken={accessToken}
                   mentionMembers={mentionMembers}
+                  mentionSuggestionsFailure={mentionSuggestionsFailure}
                   activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   aiAssistantSessionKey={mountedAiSessionKey}

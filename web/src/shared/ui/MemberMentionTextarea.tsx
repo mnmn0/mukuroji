@@ -4,6 +4,7 @@ import {
   formatMemberMentionLabel,
   readMentionAtCursor,
   type MentionableMember,
+  type MentionSuggestionsFailure,
 } from '../lib/memberMentions'
 
 /** Composer text together with the members picked from the suggestion list. */
@@ -38,6 +39,8 @@ export type MemberMentionTextareaProps = {
   placeholder?: string
   /** Whether a value is required. */
   required?: boolean
+  /** Set when the candidates failed to load, so the composer can say so and offer a retry. */
+  suggestionsFailure?: MentionSuggestionsFailure
 }
 
 /**
@@ -59,6 +62,7 @@ export function MemberMentionTextarea({
   onDraftChange,
   placeholder,
   required = false,
+  suggestionsFailure,
   suggestionsLabel,
 }: MemberMentionTextareaProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -133,6 +137,8 @@ export function MemberMentionTextarea({
       insertMention(activeSuggestion)
     } else if (event.key === 'Escape') {
       event.preventDefault()
+      // Closing the list must not also close a surrounding panel that listens for Escape.
+      event.stopPropagation()
       setMentionQuery(undefined)
     }
   }
@@ -194,6 +200,19 @@ export function MemberMentionTextarea({
             </li>
           ))}
         </ul>
+      ) : null}
+      {suggestionsFailure ? (
+        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-fg-red-700" role="alert">
+          {suggestionsFailure.message}
+          <button
+            className="workbench-button-secondary min-h-10 px-3"
+            disabled={disabled}
+            type="button"
+            onClick={suggestionsFailure.onRetry}
+          >
+            {suggestionsFailure.retryLabel}
+          </button>
+        </p>
       ) : null}
     </div>
   )

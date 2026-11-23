@@ -27,7 +27,7 @@ import type {
   DocumentVersion,
 } from '../api'
 import { resolveDocumentMentions } from '../model/comments'
-import type { MentionableMember } from '../../shared/lib/memberMentions'
+import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
 import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import {
   documentContextTabs,
@@ -174,6 +174,8 @@ export type DocumentContextPanelProps = {
   linkAccessToken?: string
   /** Members offered by display name after `@` in comment composers. */
   mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
 }
 
 /**
@@ -195,6 +197,7 @@ export function DocumentContextPanel({
   isOpen = true,
   linkAccessToken,
   mentionMembers,
+  mentionSuggestionsFailure,
   locale = 'en',
   modal = true,
   onClose,
@@ -380,6 +383,7 @@ export function DocumentContextPanel({
             hasMore={hasMoreComments}
             key={`${document.id}:${defaultAnchorId ?? 'document'}`}
             mentionMembers={mentionMembers ?? emptyMentionMembers}
+            mentionSuggestionsFailure={mentionSuggestionsFailure}
             t={t}
             onCreateComment={onCreateComment}
             onLoadMore={onLoadMoreComments}
@@ -482,11 +486,13 @@ function CommentsPanel({
   onLoadMore,
   onResolveComment,
   mentionMembers,
+  mentionSuggestionsFailure,
   t,
 }: {
   comments: DocumentComment[]
   defaultAnchorId?: string
   mentionMembers: readonly MentionableMember[]
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
   document: DocumentRecord
   focusedCommentId?: string
   hasMore: boolean
@@ -642,6 +648,7 @@ function CommentsPanel({
               draft={draft}
               members={mentionMembers}
               placeholder={t('documents.comments.placeholder')}
+              suggestionsFailure={mentionSuggestionsFailure}
               suggestionsLabel={t('documents.comments.mentionSuggestions')}
               onDraftChange={setDraft}
             />
@@ -727,7 +734,8 @@ function CommentsPanel({
                       draft={replyDraft}
                       members={mentionMembers}
                       placeholder={t('documents.comments.replyPlaceholder')}
-                      suggestionsLabel={t('documents.comments.mentionSuggestions')}
+                      suggestionsFailure={mentionSuggestionsFailure}
+              suggestionsLabel={t('documents.comments.mentionSuggestions')}
                       onDraftChange={setReplyDraft}
                     />
                   </label>

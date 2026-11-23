@@ -125,6 +125,8 @@ export const planningMessages = {
   'planning.field.reaction': 'リアクション',
   'planning.field.commentPlaceholder': 'この更新についてコメント（@ で名前から mention、@name@example.com も可）…',
   'planning.field.mentionSuggestions': 'mention の候補',
+  'planning.field.mentionSuggestionsError': '名前の候補を読み込めませんでした。`@メールアドレス` での mention はそのまま使えます。',
+  'planning.field.mentionSuggestionsRetry': '候補を再読み込み',
   'planning.field.watcherCount': '{count} 人がウォッチ',
   'planning.field.goalFramework': 'Goal / OKR の役割',
   'planning.type.cycle': 'Cycle',

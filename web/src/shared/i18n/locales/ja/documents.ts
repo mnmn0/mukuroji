@@ -288,6 +288,8 @@ export const documentsMessages = {
   'documents.comments.placeholder': '@ で名前からメンションしてコメント…',
   'documents.comments.mentionHint': '@ を入力すると名前から選んでメンションできます',
   'documents.comments.mentionSuggestions': 'メンションの候補',
+  'documents.comments.mentionSuggestionsError': '名前の候補を読み込めませんでした。`@メールアドレス` でのメンションはそのまま使えます。',
+  'documents.comments.mentionSuggestionsRetry': '候補を再読み込み',
   'documents.comments.saving': '送信中…',
   'documents.comments.submit': 'コメント',
   'documents.comments.showResolved': '解決済みを表示',

@@ -36,5 +36,5 @@ export const Watching: Story = {
 
 /** The watch state could not be read or changed. */
 export const Failed: Story = {
-  args: { watch: undefined, hasError: true },
+  args: { watch: undefined, hasError: true, onRetry: () => undefined },
 }

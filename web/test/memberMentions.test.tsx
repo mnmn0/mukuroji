@@ -60,6 +60,9 @@ describe('display-name mentions', () => {
   test('reads the query before the cursor and filters active members', () => {
     expect(readMentionAtCursor('hi @山田', 6)).toEqual({ query: '山田', start: 3 })
     expect(readMentionAtCursor('mail@example', 12)).toBeUndefined()
+    // The space after a finished token such as `@Ann ` closes the suggestions.
+    expect(readMentionAtCursor('@Ann ', 5)).toBeUndefined()
+    expect(readMentionAtCursor('@山田 太', 5)).toEqual({ query: '山田 太', start: 0 })
     expect(filterMentionSuggestions(members, 'ann').map((member) => member.memberKey))
       .toEqual(['ann@example.com', 'anna@example.com'])
     expect(filterMentionSuggestions(members, 'gone')).toEqual([])
@@ -104,5 +107,21 @@ describe('MemberMentionTextarea', () => {
     expect(withMembers).not.toContain('role="listbox"')
     const plain = renderToStaticMarkup(<MemberMentionTextarea {...props} members={[]} />)
     expect(plain).not.toContain('role="combobox"')
+  })
+
+  test('says when the candidates failed to load and offers a retry', () => {
+    const markup = renderToStaticMarkup(
+      <MemberMentionTextarea
+        ariaLabel="Comment"
+        draft={{ body: '', mentionMemberKeys: [] }}
+        members={[]}
+        suggestionsFailure={{ message: 'Could not load names', retryLabel: 'Reload', onRetry: () => undefined }}
+        suggestionsLabel="Mention suggestions"
+        onDraftChange={() => undefined}
+      />,
+    )
+    expect(markup).toContain('role="alert"')
+    expect(markup).toContain('Could not load names')
+    expect(markup).toContain('>Reload</button>')
   })
 })

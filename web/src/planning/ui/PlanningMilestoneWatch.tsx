@@ -13,6 +13,8 @@ export type PlanningMilestoneWatchLabels = {
   description: string
   /** Shown when the watch state cannot be read or changed. */
   error: string
+  /** Button text that reads the watch state again after a failure. */
+  retry: string
 }
 
 /** Props of {@link PlanningMilestoneWatchButton}. */
@@ -25,6 +27,8 @@ export type PlanningMilestoneWatchButtonProps = {
   hasError?: boolean
   /** Changes the watch state; absent when the viewer cannot watch. */
   onToggle?: () => void
+  /** Reads the watch state again after a failure. */
+  onRetry?: () => void
   /** Localized text. */
   labels: PlanningMilestoneWatchLabels
 }
@@ -39,6 +43,7 @@ export function PlanningMilestoneWatchButton({
   hasError = false,
   isPending = false,
   labels,
+  onRetry,
   onToggle,
   watch,
 }: PlanningMilestoneWatchButtonProps) {
@@ -60,7 +65,14 @@ export function PlanningMilestoneWatchButton({
       </button>
       <p className="text-xs text-[var(--workbench-muted)]">{labels.description}</p>
       {hasError ? (
-        <p className="text-xs font-semibold text-fg-red-700" role="alert">{labels.error}</p>
+        <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-fg-red-700" role="alert">
+          {labels.error}
+          {onRetry ? (
+            <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={onRetry}>
+              {labels.retry}
+            </button>
+          ) : null}
+        </p>
       ) : null}
     </div>
   )
@@ -90,13 +102,14 @@ export function PlanningMilestoneWatchContainer({
   entityId,
   labels,
 }: PlanningMilestoneWatchContainerProps) {
-  const { hasError, isPending, toggle, watch } = usePlanningEntityWatch(accessToken, entityId)
+  const { hasError, isPending, retry, toggle, watch } = usePlanningEntityWatch(accessToken, entityId)
   return (
     <PlanningMilestoneWatchButton
       hasError={hasError}
       isPending={isPending}
       labels={labels}
       watch={watch}
+      onRetry={() => void retry()}
       onToggle={canWatch ? () => void toggle() : undefined}
     />
   )

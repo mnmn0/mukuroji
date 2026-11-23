@@ -18,6 +18,7 @@ import { PLANNING_UPDATE_CONTENT_VERSION } from '@mukuroji/contracts'
 import {
   findMemberMentionRanges,
   type MentionableMember,
+  type MentionSuggestionsFailure,
 } from '../../shared/lib/memberMentions'
 import {
   createPlanningDependencyPath,
@@ -417,6 +418,8 @@ export type PlanningUpdateCollaborationController = {
   onExport?: () => void | Promise<void>
   /** Members offered by display name after `@` in the comment composer. */
   mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load, so the composer offers a retry. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
   /** Adds a comment to one immutable update with the members picked in the composer. */
   onAddComment?: (
     updateId: string,

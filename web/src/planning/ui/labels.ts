@@ -185,6 +185,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
         t('planning.milestoneWatch.watcherCount').replace('{count}', count.toLocaleString(locale)),
       description: t('planning.milestoneWatch.description'),
       error: t('planning.milestoneWatch.error'),
+      retry: t('planning.action.retry'),
     },
     cycleBaseline: {
       title: t('planning.cycle.baseline.title'),

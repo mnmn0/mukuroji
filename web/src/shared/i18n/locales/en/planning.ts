@@ -125,6 +125,8 @@ export const planningMessages = {
   'planning.field.reaction': 'Reaction',
   'planning.field.commentPlaceholder': 'Comment on this update. Type @ to mention someone by name, or @name@example.com…',
   'planning.field.mentionSuggestions': 'Mention suggestions',
+  'planning.field.mentionSuggestionsError': 'Could not load name suggestions. Typing `@email` mentions still works.',
+  'planning.field.mentionSuggestionsRetry': 'Reload suggestions',
   'planning.field.watcherCount': '{count} watching',
   'planning.field.goalFramework': 'Goal / OKR role',
   'planning.type.cycle': 'Cycle',

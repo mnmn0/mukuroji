@@ -12,6 +12,16 @@ export type MentionableMember = {
   status: string
 }
 
+/** Notice shown when the mention candidates could not be loaded. */
+export type MentionSuggestionsFailure = {
+  /** Explains that name suggestions are unavailable while typed mentions still work. */
+  message: string
+  /** Text of the button that loads the candidates again. */
+  retryLabel: string
+  /** Loads the candidates again. */
+  onRetry: () => void
+}
+
 /** One resolved mention token inside a comment body. */
 export type MemberMentionRange = {
   /** Mentioned member key. */
@@ -143,6 +153,8 @@ export function readMentionAtCursor(value: string, cursor: number): MentionAtCur
   const match = value.slice(0, cursor).match(/(?:^|[^\p{L}\p{N}_@])@([^@\n]*)$/u)
   if (!match) return undefined
   const query = match[1] ?? ''
+  // A space right before the caret follows a finished token such as `@Ann `, not a name being typed.
+  if (/\s$/u.test(query)) return undefined
   return { query, start: cursor - query.length - 1 }
 }
 

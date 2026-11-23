@@ -13,7 +13,7 @@ import {
   type AiPlanningStatusUpdateAdoptionContext,
 } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
-import type { MentionableMember } from '../../shared/lib/memberMentions'
+import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
 import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
@@ -1469,7 +1469,8 @@ export function PlanningStatusUpdateLedger({
   const collaborationIsLoading = collaboration?.isLoading ?? false
   const collaborationErrorMessage = collaboration?.errorMessage
   return (
-    <section className="workbench-panel overflow-hidden" data-testid="planning-status-update-history">
+    // Not clipped, so a comment composer's mention suggestions can extend below the last update.
+    <section className="workbench-panel" data-testid="planning-status-update-history">
       <div className="px-5 py-4">
         <h2 className="text-base font-semibold text-[var(--workbench-text)]">
           {labels.historyTitle}
@@ -1479,7 +1480,7 @@ export function PlanningStatusUpdateLedger({
         </p>
       </div>
       {errorMessage ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4" role="alert">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4 last:rounded-b-[7px]" role="alert">
           <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.historyError}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
@@ -1670,6 +1671,7 @@ export function PlanningStatusUpdateLedger({
                   }
                   labels={labels}
                   members={collaboration?.mentionMembers ?? []}
+                  suggestionsFailure={collaboration?.mentionSuggestionsFailure}
                   updateId={update.id}
                   onAddComment={onAddComment}
                 />
@@ -1843,6 +1845,8 @@ type PlanningUpdateCommentFormProps = {
   labels: Pick<PlanningUpdateLabels, 'addComment' | 'commentPlaceholder' | 'mentionSuggestions'>
   /** Members offered by display name after `@`. */
   members: readonly MentionableMember[]
+  /** Set when the candidates failed to load. */
+  suggestionsFailure?: MentionSuggestionsFailure
   /** Immutable update receiving the comment. */
   updateId: string
   /** Saves the comment with the members picked in the composer. */
@@ -1860,6 +1864,7 @@ function PlanningUpdateCommentForm({
   labels,
   members,
   onAddComment,
+  suggestionsFailure,
   updateId,
 }: PlanningUpdateCommentFormProps) {
   const [draft, setDraft] = useState<MemberMentionDraft>({ body: '', mentionMemberKeys: [] })
@@ -1888,6 +1893,7 @@ function PlanningUpdateCommentForm({
         name="comment"
         placeholder={labels.commentPlaceholder}
         required
+        suggestionsFailure={suggestionsFailure}
         suggestionsLabel={labels.mentionSuggestions}
         onDraftChange={setDraft}
       />
