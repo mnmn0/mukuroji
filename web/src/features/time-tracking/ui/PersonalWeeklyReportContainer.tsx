@@ -11,6 +11,7 @@ import { useWeeklyReport, useWeeklyReportHistory } from '../queries/useWeeklyRep
 import { PersonalWeeklyReport, type WeeklyReportActionResult } from './PersonalWeeklyReport'
 import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
+import { writeClipboardText } from './writeClipboardText'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
 
@@ -40,17 +41,6 @@ export type PersonalWeeklyReportContainerProps = {
   onOpenWeek: (weekStart: string) => void
   /** Retries the member's Work Item read. */
   onRetryWorkItems: () => void
-}
-
-/**
- * Writes text to the system clipboard.
- *
- * @param text - Text to copy.
- * @returns Resolves once copied; rejects when the clipboard is unavailable or refused.
- */
-async function writeClipboardText(text: string): Promise<void> {
-  if (!navigator.clipboard) throw new Error('Clipboard unavailable')
-  await navigator.clipboard.writeText(text)
 }
 
 /**
