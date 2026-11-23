@@ -306,6 +306,8 @@ export function TaskPage() {
   const focusedSourceKind: CuratedContextSourceKind | undefined =
     readIssueSourceKind(searchParams.get('sourceKind'))
   const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  // Links such as a Focus Project log entry open the permissions tab, where the log lives.
+  const requestedTaskTab = searchParams.get('tab') === 'permissions' ? 'permissions' : undefined
   const requestedCollaborationTab = searchParams.get('collaborationTab')
   const collaborationTab = resolveIssueCollaborationTab({
     requestedTab: requestedCollaborationTab,
@@ -2083,6 +2085,7 @@ export function TaskPage() {
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
       workspaceId={workspaceId}
+      initialTab={requestedTaskTab}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
       workspaceCalendarPolicy={workspaceCalendarPolicy}

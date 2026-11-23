@@ -21,7 +21,7 @@ import {
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import { getConfiguredDynamoDbEndpoint } from '../../modules/audit/audit'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
@@ -53,6 +53,7 @@ import {
   readFocusWorkItemWindow,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
+  type FocusProjectLogSource,
   type FocusRelationGraphSource,
   type FocusScheduleBaselineSource,
   type FocusSnoozeRecord,
@@ -123,6 +124,7 @@ import {
   createWorkItemScheduleIdempotencyWorkspaceId,
 } from '../shared/work-item-schedule'
 import { projectAccessAllows, type TeamPermissionContext } from '../shared/workspace-access'
+import { filterReadableProjectDirectory } from '../shared/project-directory-visibility'
 
 /** Maximum notification page size accepted by the durable Inbox port. */
 const FOCUS_NOTIFICATION_PAGE_LIMIT = 50
@@ -1532,6 +1534,7 @@ async function readFocusQueue(
   )
   const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
   const projectTitlesPromise = readFocusProjectTitlesByKey(principal)
+  const projectLogSourcesPromise = readFocusProjectLogSources(principal)
   const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
   const legacyUpdateTargetScopePromise = readFocusLegacyUpdateTargetScope(principal)
   const planningPromise = Promise.all([
@@ -1581,6 +1584,7 @@ async function readFocusQueue(
     state,
     projectTitlesByKey,
     scheduleBaselines,
+    projectLogSources,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1593,6 +1597,7 @@ async function readFocusQueue(
       statePromise,
       projectTitlesPromise,
       scheduleBaselinesPromise,
+      projectLogSourcesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
     now,
@@ -1601,6 +1606,7 @@ async function readFocusQueue(
     planning,
     projectTitlesByKey,
     initiativeTitlesById,
+    projectLogSources,
     relationGraphs,
     scheduleBaselines,
     reviewerApprovals,
@@ -2161,6 +2167,53 @@ async function readFocusLegacyUpdateTargetScope(
     )),
     workspaceReadable: principal.workspaceRole !== 'guest',
   }
+}
+
+/** Most Project logs one Focus read scans for entries the viewer owns. */
+const FOCUS_PROJECT_LOG_PROJECT_LIMIT = 100
+
+/**
+ * Reads the open Project log entries the viewer owns, from Projects the viewer can see and has a
+ * Project role in, since an owner must be a member of the Project.
+ *
+ * A log that cannot be read is left out, so one failing Project does not hide the rest of the
+ * Focus queue.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Owned open entries with their Team, Project, and Project name.
+ */
+async function readFocusProjectLogSources(
+  principal: WorkspacePrincipal,
+): Promise<FocusProjectLogSource[]> {
+  const directory = await filterReadableProjectDirectory(
+    principal,
+    await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja'),
+  )
+  const accesses = (await getEffectiveProjectAccessList(principal))
+    .filter((access) => projectAccessAllows(access, 'viewer'))
+  const projects = directory.teams.flatMap((team) => team.projects
+    .filter((project) => accesses.some((access) =>
+      access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
+    ))
+    .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+    .slice(0, FOCUS_PROJECT_LOG_PROJECT_LIMIT)
+  const sources = await Promise.all(projects.map(async (project) => {
+    try {
+      const entries = await workItemDependencies.projectRaidLogs.listOpenOwnedBy(
+        { workspaceId: principal.directoryId, teamId: project.teamId, projectId: project.projectId },
+        normalizeProjectMemberKey(principal.userKey),
+      )
+      return entries.map((entry) => ({ ...project, entry }))
+    } catch (error) {
+      console.warn('Focus could not read a Project log.', {
+        teamId: project.teamId,
+        projectId: project.projectId,
+        error,
+      })
+      return []
+    }
+  }))
+  return sources.flat()
 }
 
 /**

@@ -339,6 +339,7 @@ test('fences another owner once and adds no second fence when the caller owns th
   setTestAppDependencies({
     projectRaidLogs: {
       list: (scope) => store.list(scope),
+      listOpenOwnedBy: (scope, owner) => store.listOpenOwnedBy(scope, owner),
       get: (scope, entryId) => store.get(scope, entryId),
       async create(input) {
         recorded.push([...input.callerAuthorization])

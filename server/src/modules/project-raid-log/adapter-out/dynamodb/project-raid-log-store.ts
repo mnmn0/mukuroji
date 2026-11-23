@@ -126,6 +126,46 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
   }
 
   /**
+   * Reads the open entries one member owns, for the member's Focus queue. The read is eventually
+   * consistent and filters on the server, so only matching rows cross the network.
+   *
+   * @param scope - Team and Project.
+   * @param ownerMemberId - Owner member key as stored on entries.
+   * @returns The open entries the member owns.
+   */
+  async listOpenOwnedBy(scope: ProjectRaidLogScope, ownerMemberId: string): Promise<ProjectRaidEntry[]> {
+    const prefix = `${counterKey(scope)}#ENTRY#`
+    const entries: ProjectRaidEntry[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const page = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
+        FilterExpression: '#status = :open AND #owner = :owner',
+        ExpressionAttributeNames: {
+          '#workspaceId': 'workspaceId',
+          '#recordKey': 'recordKey',
+          '#status': 'status',
+          '#owner': 'ownerMemberId',
+        },
+        ExpressionAttributeValues: {
+          ':workspaceId': scope.workspaceId,
+          ':prefix': prefix,
+          ':open': 'open',
+          ':owner': ownerMemberId,
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      })).catch((error: unknown) => storageFailure(error))
+      for (const row of page.Items ?? []) {
+        entries.push(parseStoredEntry(row, scope))
+      }
+      exclusiveStartKey = page.LastEvaluatedKey
+      if (entries.length > PROJECT_RAID_LOG_MAX_ENTRIES) throw corruptLog()
+    } while (exclusiveStartKey)
+    return entries
+  }
+
+  /**
    * Reads one entry with a strongly consistent read.
    *
    * @param scope - Team and Project.
@@ -345,6 +385,17 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
    */
   async list(scope: ProjectRaidLogScope): Promise<ProjectRaidEntry[]> {
     return this.rowsOf(scope).map((row) => structuredClone(row.entry))
+  }
+
+  /**
+   * Reads copies of the open entries one member owns.
+   *
+   * @param scope - Team and Project.
+   * @param ownerMemberId - Owner member key as stored on entries.
+   * @returns The matching entries.
+   */
+  async listOpenOwnedBy(scope: ProjectRaidLogScope, ownerMemberId: string): Promise<ProjectRaidEntry[]> {
+    return (await this.list(scope)).filter((entry) => entry.status === 'open' && entry.ownerMemberId === ownerMemberId)
   }
 
   /**

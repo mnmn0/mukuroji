@@ -88,6 +88,14 @@ export type ProjectRaidLogStore<TCallerCheck, TAudit> = {
    */
   list(scope: ProjectRaidLogScope): Promise<ProjectRaidEntry[]>
   /**
+   * Reads the open entries one member owns, eventually consistent.
+   *
+   * @param scope - Team and Project.
+   * @param ownerMemberId - Owner member key as stored on entries.
+   * @returns The open entries the member owns, in any order.
+   */
+  listOpenOwnedBy(scope: ProjectRaidLogScope, ownerMemberId: string): Promise<ProjectRaidEntry[]>
+  /**
    * Reads one entry with a strongly consistent read.
    *
    * @param scope - Team and Project.

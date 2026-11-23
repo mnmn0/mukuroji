@@ -293,6 +293,58 @@ describe('Focus queue', () => {
     expect(html.indexOf('Overdue')).toBeLessThan(html.indexOf('Due soon'))
   })
 
+  test('lists owned Project log entries with what resolves each one', () => {
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      projectLogEntries: [
+        {
+          id: 'project-log:core-team:refero:cr-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          projectTitle: 'Refero',
+          entryId: 'cr-1',
+          kind: 'change-request',
+          title: 'Add CSV export',
+          severity: 'critical',
+          reason: 'decision-pending',
+          deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+        },
+        {
+          id: 'project-log:core-team:refero:risk-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          entryId: 'risk-1',
+          kind: 'risk',
+          title: 'Vendor delay',
+          severity: 'high',
+          reason: 'review-overdue',
+          reviewDueDate: '2026-08-01',
+          deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+        },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="ja"
+          onOpenItem={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('担当のリスク・課題・変更要求')
+    expect(html).toContain('判断待ち')
+    expect(html).toContain('承認か却下を決めて、クローズすると消えます')
+    expect(html).toContain('見直し期限切れ')
+    expect(html).toContain('見直して期限を今日以降に更新するか、クローズすると消えます')
+    expect(html).toContain('見直し 2026-08-01')
+    expect(html).toContain('href="/projects/refero/issues?teamId=core-team&amp;tab=permissions"')
+  })
+
   test('falls back from an inaccessible requested signal to another authorized source', () => {
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     const firstSignal = item?.signals[0]

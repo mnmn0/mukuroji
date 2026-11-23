@@ -29,6 +29,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemBaselineEndDelayDays,
   FOCUS_SCHEMA_VERSION,
+  toWorkspaceLocalDate,
 } from '@mukuroji/contracts'
 import { createHash } from 'node:crypto'
 import type { NotificationItem } from '../notifications'
@@ -41,6 +42,7 @@ import {
   isFocusSlaAnchor,
   normalizeFocusSlaWorkItemTypeIds,
 } from './focus-sla-policy'
+import { createFocusProjectLogEntries, type FocusProjectLogSource } from './focus-project-log'
 import type { FocusSnoozeRecord } from './focus-state'
 
 /** Stable separator used by caller-provided Work Item state maps. */
@@ -144,6 +146,11 @@ export type CreateFocusQueueInput = {
    * filter. Labels health update deadlines whose Initiative is not in the filtered entity list.
    */
   initiativeTitlesById?: ReadonlyMap<string, string>
+  /**
+   * Open Project log entries the viewer owns, read from Projects the viewer can see. Absent when
+   * the logs were not read, which leaves the Project log list empty.
+   */
+  projectLogSources?: readonly FocusProjectLogSource[]
   /**
    * Optional authoritative semantic relation graphs with source occurrence evidence.
    * Relation-only blockers are omitted when this evidence is unavailable.
@@ -416,6 +423,11 @@ export function createFocusQueue(input: CreateFocusQueueInput): FocusQueueRespon
       now,
       input.projectTitlesByKey,
       input.initiativeTitlesById,
+    ),
+    projectLogEntries: createFocusProjectLogEntries(
+      input.projectLogSources ?? [],
+      viewerMemberKey,
+      toWorkspaceLocalDate(now),
     ),
     effectivePolicies,
     teamPolicies,

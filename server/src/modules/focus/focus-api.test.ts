@@ -18,11 +18,14 @@ import {
   type FocusStateClient,
 } from './focus-state'
 import { createApiTestHarness } from '../../api/test-support/api-test-harness'
+import { createMutationAuditContext } from '../audit'
+import { InMemoryProjectRaidLogStore } from '../project-raid-log'
 import {
   createDefaultDueDateWorkItemSchedule,
   type ApprovalRequest,
   type EnterprisePermissionId,
   type PlanningUpdateTarget,
+  type ProjectRaidEntry,
 } from '@mukuroji/contracts'
 
 const {
@@ -2497,4 +2500,68 @@ test('fails closed when source permission is lost before a snooze write', async 
     memberKey: 'demo@example.com',
     teamIds: ['core-team'],
   })).snoozes).toEqual([])
+})
+
+test('lists overdue Project log entries the viewer owns only in Projects the viewer can see', async () => {
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const store = new InMemoryProjectRaidLogStore()
+  const workspaceId = 'user#demo@example.com'
+  const seed = async (teamId: string, projectId: string, id: string, overrides: Partial<ProjectRaidEntry>) => {
+    await store.create({
+      workspaceId,
+      teamId,
+      projectId,
+      now: '2026-01-01T00:00:00.000Z',
+      callerAuthorization: [{ ConditionCheck: { TableName: 'fence', Key: { k: 'v' }, ConditionExpression: 'attribute_exists(k)' } }],
+      auditContext: createMutationAuditContext({
+        workspaceId,
+        actor: { id: 'u', kind: 'user', displayName: 'U' },
+        idempotencyKey: id,
+        request: { method: 'POST', path: '/x', body: {} },
+        source: { kind: 'api' },
+      }),
+      creationFingerprint: id,
+      entry: {
+        id,
+        kind: 'risk',
+        title: id,
+        probability: 4,
+        impact: 4,
+        reviewDueDate: '2020-01-01',
+        ownerMemberId: 'sato@example.com',
+        status: 'open',
+        revision: 1,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        ...overrides,
+      },
+    })
+  }
+  await seed('core-team', 'refero', 'visible', {})
+  await seed('core-team', 'refero', 'someone-else', { ownerMemberId: 'other@example.com' })
+  await seed('hidden-team', 'hidden-project', 'hidden', {})
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(body.projectLogEntries).toEqual([{
+    id: 'project-log:core-team:refero:visible',
+    teamId: 'core-team',
+    projectId: 'refero',
+    projectTitle: expect.any(String),
+    entryId: 'visible',
+    kind: 'risk',
+    title: 'visible',
+    severity: 'high',
+    reason: 'review-overdue',
+    reviewDueDate: '2020-01-01',
+    deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+  }])
 })

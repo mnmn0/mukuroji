@@ -1,0 +1,79 @@
+import {
+  PROJECT_RAID_TEXT_MAX_LENGTH,
+  PROJECT_RAID_TITLE_MAX_LENGTH,
+  type CuratedContextItem,
+} from '@mukuroji/contracts'
+import { useCallback } from 'react'
+import { useSaveProjectRaidEntry } from './useSaveProjectRaidEntry'
+
+/** Work Item whose curated risks may be promoted to its Project's log. */
+export type ProjectRiskPromotionScope = {
+  /** Cognito access token. */
+  accessToken?: string
+  /** Team that owns the Work Item and its Project. */
+  teamId?: string
+  /** Project the Work Item is assigned to; promotion is unavailable without one. */
+  projectId?: string
+  /** Work Item the risk was recorded on, linked as related on the new entry. */
+  workItemId: string
+}
+
+/** Promotion bound to one Work Item, with the link to the Project log it writes to. */
+export type ProjectRiskPromotion = {
+  /**
+   * Adds the curated risk to the Project log as an open risk related to the Work Item.
+   *
+   * @param item - Curated risk item.
+   */
+  promote: (item: CuratedContextItem) => Promise<void>
+  /** Application path of the Project log, in the Project's permissions tab. */
+  logPath: string
+}
+
+/**
+ * Shortens text to a maximum length without splitting a surrogate pair.
+ *
+ * @param text - Text to shorten.
+ * @param maxLength - Longest allowed length in UTF-16 code units.
+ * @returns The text, cut at a character boundary when it is too long.
+ */
+function truncate(text: string, maxLength: number) {
+  if (text.length <= maxLength) return text
+  let end = maxLength
+  const last = text.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1
+  return text.slice(0, end)
+}
+
+/**
+ * Returns the promotion of a Work Item's curated risks to its Project's risk log.
+ *
+ * The new risk starts with medium probability and impact, so the owner rates it in the log. A
+ * retried failed promotion of the same item reuses its Idempotency-Key, so it is not added twice.
+ *
+ * @param scope - Session, Team, Project, and Work Item.
+ * @returns The promotion, or `undefined` when the Work Item has no Project or session.
+ */
+export function usePromoteProjectRisk({
+  accessToken,
+  teamId,
+  projectId,
+  workItemId,
+}: ProjectRiskPromotionScope): ProjectRiskPromotion | undefined {
+  const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId: projectId ?? '' })
+  const promote = useCallback(async (item: CuratedContextItem) => {
+    const description = item.body.trim()
+    await save(undefined, {
+      kind: 'risk',
+      title: truncate(item.title.trim(), PROJECT_RAID_TITLE_MAX_LENGTH),
+      ...(description ? { description: truncate(description, PROJECT_RAID_TEXT_MAX_LENGTH) } : {}),
+      probability: 3,
+      impact: 3,
+      relatedWorkItemIds: [workItemId],
+      status: 'open',
+    })
+  }, [save, workItemId])
+  if (!accessToken || !teamId || !projectId) return undefined
+  const search = new URLSearchParams({ teamId, tab: 'permissions' })
+  return { promote, logPath: `/projects/${encodeURIComponent(projectId)}/issues?${search.toString()}` }
+}

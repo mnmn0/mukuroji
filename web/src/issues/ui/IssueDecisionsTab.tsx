@@ -33,6 +33,8 @@ import {
   type DeepLinkTraversalState,
 } from '../model/deepLinkTraversal'
 import { SafeCommentBody } from './SafeCommentBody'
+import type { ProjectRiskPromotion } from '../../projects/mutations/usePromoteProjectRisk'
+import { Link } from 'react-router'
 
 const contextKinds: readonly CuratedContextItemKind[] = [
   'decision',
@@ -69,6 +71,8 @@ export type IssueDecisionsTabProps = {
   focusedContextItemId?: string
   /** Instance-specific tab ID used when restoring focus to the tablist. */
   decisionsTabId: string
+  /** Adds a risk item to the Work Item's Project log; absent when the Work Item has no Project. */
+  riskPromotion?: ProjectRiskPromotion
 }
 
 /**
@@ -126,8 +130,11 @@ export function IssueDecisionsTab({
   members,
   onDraftConsumed,
   onOpenSource,
+  riskPromotion,
 }: IssueDecisionsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  // Promotion outcome per item, kept for this session so a promoted risk is not added twice.
+  const [promotions, setPromotions] = useState<Record<string, 'pending' | 'done' | 'failed'>>({})
   const panelInstanceId = useId()
   const [editorRequest, setEditorRequest] = useState<ContextEditorState>()
   const createButtonRef = useRef<HTMLButtonElement>(null)
@@ -398,6 +405,37 @@ export function IssueDecisionsTab({
                   >
                     {t('collaboration.decisions.replace')}
                   </button>
+                ) : null}
+                {riskPromotion && item.kind === 'risk' && item.state !== 'superseded' ? (
+                  promotions[item.id] === 'done' ? (
+                    <span className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
+                      {t('collaboration.decisions.promoteRisk.done')}
+                      <Link className="text-[var(--workbench-primary-text)] underline underline-offset-2" to={riskPromotion.logPath}>
+                        {t('collaboration.decisions.promoteRisk.open')}
+                      </Link>
+                    </span>
+                  ) : (
+                    <button
+                      className="min-h-[44px] text-xs font-semibold text-[var(--workbench-muted)] underline underline-offset-2 disabled:opacity-60"
+                      data-testid="context-promote-risk"
+                      disabled={promotions[item.id] === 'pending'}
+                      onClick={() => {
+                        setPromotions((current) => ({ ...current, [item.id]: 'pending' }))
+                        riskPromotion.promote(item).then(
+                          () => setPromotions((current) => ({ ...current, [item.id]: 'done' })),
+                          () => setPromotions((current) => ({ ...current, [item.id]: 'failed' })),
+                        )
+                      }}
+                      type="button"
+                    >
+                      {t('collaboration.decisions.promoteRisk')}
+                    </button>
+                  )
+                ) : null}
+                {promotions[item.id] === 'failed' ? (
+                  <span className="text-xs font-semibold text-[var(--workbench-danger)]" role="alert">
+                    {t('collaboration.decisions.promoteRisk.failed')}
+                  </span>
                 ) : null}
                 {item.revision > 1 ? (
                   <button
