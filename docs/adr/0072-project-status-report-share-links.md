@@ -20,6 +20,8 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
 - 共有リンクを作ると、server は契約どおりの形・大きさかを厳密に検証し、共有範囲（section の選択、担当者名を出すか）で
   伏せたあとの snapshot を share row に保存する。公開側は保存した snapshot だけを返し、Project・Work Item・
   工数などの生データを読まない。このため、外したセクション、他の Project の情報、原価は公開側から辿れない。
+- 次のアクションは、読めなかった・読み取り対象外のドキュメントがあるとき `incomplete` を付け、出力に
+  「ほかにも未完了の項目があるかもしれません」と書く。読めなかったことを「なし」に見せない。
 - レポートには原価・予算の section を入れていない（予算の section は #345 の予算・EVM のあとで足す）。
   confidential cost を出すかの選択はその時点で加える。
 
@@ -33,8 +35,15 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
 - token は `base64url(workspaceId).secret` で、secret は 32 byte の乱数（base64url）。保存するのは
   `sha256("project-status-share-v1\0" + secret)` だけで、token は作成時の応答で一度だけ返す。
   公開 API は token の前半で Workspace を決め、token row を読み、share row の hash を定数時間で比べる。
-- 作成は share row・token row・呼び出し元の fence・audit event を 1 回の TransactWrite で書く。
+- 作成は share row・token row・Project の state row・呼び出し元の fence・audit event を 1 回の TransactWrite で書く。
   取り消しは share row に `revokedAt` を条件付きで書き、token row を消す。
+- 上限の確認と作成を直列化するため、Project ごとに `PROJECT_STATUS_SHARE_STATE#<teamId>#<projectId>` の
+  `revision` を置く。作成は一覧の前に revision を consistent read で読み、TransactWrite で revision が変わっていない
+  ことを条件に 1 進める。同時に作成した 2 件目は 409 になる。
+- 作成要求の応答が失われても同じリンクを取り戻せるよう、token の secret と share ID は、要求の idempotency key
+  の hash（Workspace と actor を含む）を server の secret で HMAC したものから導く。同じ key の再送は保存済みの
+  share を見つけ、内容が同じなら同じ URL を返し、違えば 409 にする。server の secret は Document の公開リンクと同じ
+  `DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET` を別の label で使い、新しい secret は足さない。
 
 ### 公開 API と無効化
 
@@ -46,11 +55,13 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
 
 ### 権限と監査
 
+- Enterprise の権限表では、PDF の出力（POST）と一覧を `projects.read`、作成と取り消しを `projects.write` にする。
+  Project 単位の grant でも使える。
 - PDF の出力は Project の viewer。リンクの一覧・作成・取り消しは Project に書き込めるメンバー（RAID log と同じ判定）。
   Customer を宛先にするには Customer の読み取り権限が要り、server は担当者がその Customer にいることを確かめる。
 - audit event は `project.status_share_created`・`project.status_share_revoked`・`project.status_share_viewed`。
   metadata は Team・Project・share ID・section・担当者名の有無・期限・宛先で、snapshot の本文は入れない。
-- 閲覧は 1 リンクにつき 1 分に 1 回だけ数える。`viewCount`/`lastViewedAt` の条件付き更新と audit event
+- 閲覧は 1 リンクにつき 1 分に 1 回だけ数える。公開 PDF の直接ダウンロードも閲覧として数える。`viewCount`/`lastViewedAt` の条件付き更新と audit event
   （actor は `project-status-share:<shareId>`、kind `system`）を 1 回の TransactWrite で書き、条件に外れた閲覧は記録しない。
 
 ### 出力形式

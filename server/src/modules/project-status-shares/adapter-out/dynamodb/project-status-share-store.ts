@@ -38,6 +38,8 @@ type RevokeInput = Parameters<ProjectStatusShareStore['revoke']>[0]
 
 /** Planning-table record type of one share. */
 const SHARE_TYPE = 'project-status-share'
+/** Planning-table record type of the row that serializes share creation in a Project. */
+const STATE_TYPE = 'project-status-share-state'
 /** Planning-table record type of the token lookup row of an open share. */
 const TOKEN_TYPE = 'project-status-share-token'
 /** Schema version of the share and token rows. */
@@ -64,6 +66,17 @@ function sharePrefix(scope: Pick<ProjectStatusShareScopeKey, 'teamId' | 'project
  */
 function shareKey(scope: Pick<ProjectStatusShareScopeKey, 'teamId' | 'projectId'>, shareId: string) {
   return `${sharePrefix(scope)}${encodeURIComponent(shareId)}`
+}
+
+/**
+ * Builds the record key of the row whose revision serializes share creation in a Project. It
+ * does not start with the share prefix, so listing shares never reads it.
+ *
+ * @param scope - Team and Project.
+ * @returns The record key.
+ */
+function stateKey(scope: Pick<ProjectStatusShareScopeKey, 'teamId' | 'projectId'>) {
+  return `PROJECT_STATUS_SHARE_STATE#${encodeURIComponent(scope.teamId)}#${encodeURIComponent(scope.projectId)}`
 }
 
 /**
@@ -170,7 +183,24 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
   }
 
   /**
-   * Stores the share and its token lookup row in one transaction with the caller fences.
+   * Reads the Project's share creation revision with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @returns The revision, 0 before the first share.
+   */
+  async readRevision(scope: ProjectStatusShareScopeKey): Promise<number> {
+    const row = await this.readItem(scope.workspaceId, stateKey(scope))
+    if (!row) return 0
+    if (row.entryType !== STATE_TYPE || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1) {
+      throw corruptShare()
+    }
+    return row.revision
+  }
+
+  /**
+   * Stores the share and its token lookup row in one transaction with the caller fences, and
+   * advances the Project's revision so that a concurrent creation checked against the same
+   * revision fails.
    *
    * @param input - Creation input.
    */
@@ -214,6 +244,33 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
             shareId: share.id,
           },
           ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { workspaceId: input.workspaceId, recordKey: stateKey(input) },
+          UpdateExpression: 'SET #type = :type, #schemaVersion = :schemaVersion, #teamId = :teamId, #projectId = :projectId, #revision = :next, #updatedAt = :now',
+          ConditionExpression: input.expectedRevision === 0
+            ? 'attribute_not_exists(recordKey)'
+            : '#type = :type AND #revision = :expected',
+          ExpressionAttributeNames: {
+            '#type': 'entryType',
+            '#schemaVersion': 'schemaVersion',
+            '#teamId': 'teamId',
+            '#projectId': 'projectId',
+            '#revision': 'revision',
+            '#updatedAt': 'updatedAt',
+          },
+          ExpressionAttributeValues: {
+            ':type': STATE_TYPE,
+            ':schemaVersion': SCHEMA_VERSION,
+            ':teamId': input.teamId,
+            ':projectId': input.projectId,
+            ':next': input.expectedRevision + 1,
+            ':now': input.now,
+            ...(input.expectedRevision === 0 ? {} : { ':expected': input.expectedRevision }),
+          },
         },
       },
       ...input.callerAuthorization,
@@ -356,6 +413,8 @@ export class InMemoryProjectStatusShareStore implements ProjectStatusShareStore 
   private readonly records = new Map<string, ProjectStatusShareRecord>()
   /** Token digests of open shares, keyed by Workspace and digest. */
   private readonly tokens = new Map<string, { teamId: string; projectId: string; shareId: string }>()
+  /** Share creation revisions keyed by Workspace, Team, and Project. */
+  private readonly revisions = new Map<string, number>()
   /** Audit events written by the store, for assertions. */
   readonly auditEvents: { action: string; shareId: string; metadata: Record<string, unknown> }[] = []
 
@@ -400,12 +459,27 @@ export class InMemoryProjectStatusShareStore implements ProjectStatusShareStore 
   }
 
   /**
-   * Stores a share.
+   * Reads a Project's share creation revision.
+   *
+   * @param scope - Team and Project.
+   * @returns The revision.
+   */
+  async readRevision(scope: ProjectStatusShareScopeKey): Promise<number> {
+    return this.revisions.get(JSON.stringify([scope.workspaceId, scope.teamId, scope.projectId])) ?? 0
+  }
+
+  /**
+   * Stores a share when the Project's revision is still the one the caller read.
    *
    * @param input - Creation input.
    */
   async create(input: CreateInput): Promise<void> {
     requireCallerAuthorization(input.callerAuthorization)
+    const revisionKey = JSON.stringify([input.workspaceId, input.teamId, input.projectId])
+    if ((this.revisions.get(revisionKey) ?? 0) !== input.expectedRevision) {
+      throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
+    }
+    this.revisions.set(revisionKey, input.expectedRevision + 1)
     this.records.set(memoryKey(input, input.record.share.id), structuredClone(input.record))
     this.tokens.set(JSON.stringify([input.workspaceId, input.record.tokenHash]), {
       teamId: input.teamId,

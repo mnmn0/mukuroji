@@ -143,6 +143,11 @@ export type ProjectStatusReportNextActions = {
   items: ProjectStatusReportActionItem[]
   /** Open items left out of the report. */
   hiddenCount: number
+  /**
+   * Whether some Documents could not be read or were not scanned, so open items may be missing
+   * beyond `hiddenCount`.
+   */
+  incomplete?: boolean
 }
 
 /**
@@ -372,6 +377,7 @@ export function redactProjectStatusReport(
       hiddenCount: report.nextActions.hiddenCount,
       items: report.nextActions.items.map(({ ownerName, ...item }) =>
         scope.showPeopleNames && ownerName !== undefined ? { ...item, ownerName } : item),
+      ...(report.nextActions.incomplete ? { incomplete: true } : {}),
     }
   }
   return redacted
@@ -418,6 +424,7 @@ type OutlineMessages = {
   response: (text: string) => string
   actionLine: (item: ProjectStatusReportActionItem) => string
   hidden: (count: number) => string
+  incompleteActions: string
   empty: string
 }
 
@@ -466,6 +473,7 @@ const OUTLINE_MESSAGES: Record<ProjectStatusReportLocale, OutlineMessages> = {
       `${item.text}${item.dueDate ? `（期限 ${item.dueDate}${item.overdue ? '・超過' : ''}）` : ''}` +
       `${item.ownerName ? ` 担当: ${item.ownerName}` : ''}`,
     hidden: (count) => `ほか ${count}件`,
+    incompleteActions: '一部のドキュメントを読めなかったため、ほかにも未完了の項目があるかもしれません。',
     empty: 'なし',
   },
   en: {
@@ -512,6 +520,7 @@ const OUTLINE_MESSAGES: Record<ProjectStatusReportLocale, OutlineMessages> = {
       `${item.text}${item.dueDate ? ` (due ${item.dueDate}${item.overdue ? ', overdue' : ''})` : ''}` +
       `${item.ownerName ? ` - ${item.ownerName}` : ''}`,
     hidden: (count) => `${count} more`,
+    incompleteActions: 'Some Documents could not be read, so other open items may be missing.',
     empty: 'None',
   },
 }
@@ -566,6 +575,7 @@ export function createProjectStatusReportOutline(report: ProjectStatusReport): P
     push('nextActions', [
       ...actions.items.map((item) => messages.actionLine(item)),
       ...(actions.hiddenCount > 0 ? [messages.hidden(actions.hiddenCount)] : []),
+      ...(actions.incomplete ? [messages.incompleteActions] : []),
     ])
   }
   return {
@@ -765,6 +775,7 @@ function readNextActions(value: unknown): ProjectStatusReportNextActions {
       }
     }),
     hiddenCount: readCount(record.hiddenCount, 'report.nextActions.hiddenCount'),
+    ...readIncomplete(record.incomplete),
   }
 }
 
@@ -991,4 +1002,17 @@ export function parsePublicProjectStatusReportResponse(value: unknown): PublicPr
   const expiresAt = value.expiresAt
   if (!report.ok || typeof expiresAt !== 'string' || !TIMESTAMP_PATTERN.test(expiresAt)) return undefined
   return { report: report.value, expiresAt }
+}
+
+/**
+ * Reads the optional flag that marks the next actions as possibly incomplete.
+ *
+ * @param value - Raw flag.
+ * @returns The flag to spread into the section, set only when true.
+ * @throws ReportShapeError when the flag is present but not a boolean.
+ */
+function readIncomplete(value: unknown): { incomplete?: true } {
+  if (value === undefined || value === false) return {}
+  if (value !== true) throw new ReportShapeError('report.nextActions.incomplete must be true or false.')
+  return { incomplete: true }
 }

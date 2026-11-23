@@ -78,12 +78,14 @@ const report: ProjectStatusReport = {
  * @param path - Request path.
  * @param method - HTTP method.
  * @param body - JSON body, if any.
+ * @param headers - Extra headers.
  * @returns The response.
  */
-function request(path: string, method = 'GET', body?: unknown) {
+function request(path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}) {
   return app.request(path, {
     method,
     headers: {
+      ...headers,
       Authorization: 'Bearer test-token',
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
     },
@@ -164,6 +166,57 @@ test('creates a redacted share, serves it publicly, counts the view, and stops a
   const gone = await app.request(`/api/public/project-status/${encodeURIComponent(token)}`)
   expect(gone.status).toBe(404)
   expect(store.auditEvents.map((event) => event.action)).toContain('status_share_revoked')
+})
+
+test('returns the same link when a creation is retried with its idempotency key', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/status-shares`
+  const body = { report, label: '顧客A', sections: ['health'], showPeopleNames: false, expiresInDays: 7 }
+  const headers = { 'Idempotency-Key': 'share-retry-1' }
+
+  const first = await request(path, 'POST', body, headers)
+  expect(first.status).toBe(201)
+  const retried = await request(path, 'POST', body, headers)
+  expect(retried.status).toBe(201)
+  const firstBody = await first.json() as CreateProjectStatusShareResponse
+  expect(await retried.json()).toEqual(firstBody)
+
+  const changed = await request(path, 'POST', { ...body, label: '顧客B' }, headers)
+  expect(changed.status).toBe(409)
+  const other = await request(path, 'POST', body, { 'Idempotency-Key': 'share-retry-2' })
+  expect(other.status).toBe(201)
+  expect((await other.json() as CreateProjectStatusShareResponse).url).not.toBe(firstBody.url)
+
+  const shares = (await (await request(path)).json() as ProjectStatusShareListResponse).shares
+  expect(shares).toHaveLength(2)
+})
+
+test('rejects a creation that checked the limits against a stale revision', async () => {
+  const store = new InMemoryProjectStatusShareStore()
+  const scope = { workspaceId: 'ws-1', teamId: 'team-1', projectId: 'project-1' }
+  const { createProjectStatusShareUseCase } = await import('../../application/project-status-share-use-cases')
+  const create = (requestSecret: string, target = store) => createProjectStatusShareUseCase(target, scope, {
+    report,
+    label: 'A',
+    sections: ['health'],
+    showPeopleNames: false,
+    expiresInDays: 7,
+  }, {
+    now: '2026-11-23T00:00:00.000Z',
+    callerAuthorization: [{ ConditionCheck: undefined }],
+    auditContext: undefined,
+    createdByMemberKey: 'member-1',
+    requestSecret,
+    checks: { verifyCustomerContact: async () => undefined },
+  })
+  await create('request-secret-one-0000000000000000000')
+  // A concurrent request read the revision before the first share was stored.
+  const stale: InMemoryProjectStatusShareStore = Object.assign(Object.create(store), {
+    readRevision: async () => 0,
+  })
+  await expect(create('request-secret-two-0000000000000000000', stale)).rejects.toMatchObject({ status: 409 })
+  expect(await store.list(scope)).toHaveLength(1)
 })
 
 test('answers the same 404 for malformed and unknown tokens', async () => {
@@ -271,6 +324,7 @@ test('hides an expired link, a closed Workspace, and an archived Project', async
     callerAuthorization: [{ ConditionCheck: undefined }],
     auditContext: undefined,
     createdByMemberKey: 'member-1',
+    requestSecret: 'request-secret-for-the-expiry-test-0000',
     checks: { verifyCustomerContact: async () => undefined },
   })
   const token = decodeURIComponent(url.slice('/share/project-status/'.length))

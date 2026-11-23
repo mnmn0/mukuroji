@@ -4,6 +4,7 @@ import {
   PROJECT_STATUS_REPORT_MAX_BYTES,
   type ProjectStatusReport,
 } from '@mukuroji/contracts'
+import { createHmac, randomBytes } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { createAnalyticsTextPdf } from '../../modules/analytics'
 import { ProjectDataError } from '../../modules/directory'
@@ -93,6 +94,9 @@ export function registerProjectStatusReportRoutes(routeApp: Hono): void {
       await requireShareManagement(principal, teamId, projectId)
       const body = await readJson<unknown>(c.req)
       const now = new Date().toISOString()
+      // The request body carries the whole report, so only the fields that identify the share
+      // request are fingerprinted for audit.
+      const auditContext = createApiMutationContext(c, principal, readAuditBody(body))
       const response = await createProjectStatusShareUseCase(
         workItemDependencies.projectStatusShares,
         { workspaceId: principal.directoryId, teamId, projectId },
@@ -105,10 +109,9 @@ export function registerProjectStatusReportRoutes(routeApp: Hono): void {
             projectId,
             'ProjectStatusShareAuthorizationUnavailable',
           ),
-          // The request body carries the whole report, so only the fields that identify the share
-          // request are fingerprinted for audit.
-          auditContext: createApiMutationContext(c, principal, readAuditBody(body)),
+          auditContext,
           createdByMemberKey: principal.userKey,
+          requestSecret: deriveShareRequestSecret(auditContext.idempotencyKeyHash),
           checks: { verifyCustomerContact: (customerId, contactId) => verifyCustomerContact(principal, customerId, contactId) },
         },
       )
@@ -166,7 +169,10 @@ export function registerProjectStatusReportRoutes(routeApp: Hono): void {
   /** Returns the report a share link publishes as a PDF, without sign-in. */
   routeApp.get('/api/public/project-status/:token/pdf', async (c) => {
     try {
-      const { response } = await readPublicReport(c)
+      const { response, lookup } = await readPublicReport(c)
+      // A direct download is a view too; the counting window keeps a page view and its
+      // download within a minute from being counted twice.
+      await recordView(lookup)
       const pdf = pdfResponse(response.report)
       pdf.headers.set('Referrer-Policy', 'no-referrer')
       return pdf
@@ -174,6 +180,44 @@ export function registerProjectStatusReportRoutes(routeApp: Hono): void {
       return toPublicErrorResponse(c, error)
     }
   })
+}
+
+/** Server secret that share request secrets are derived from, resolved on first use. */
+let shareRequestKey: string | undefined
+
+/**
+ * Derives the secret of one share creation request from its idempotency key hash, which
+ * already binds the Workspace and the actor. The token and share ID come from it, so a retry
+ * with the same key returns the same link, and nobody without the server secret can predict it.
+ *
+ * The deployment's public share secret is reused with its own label; without one, as in local
+ * runs, a random key lives for the process.
+ *
+ * @param idempotencyKeyHash - Hash of the request's idempotency key.
+ * @returns The request secret.
+ */
+function deriveShareRequestSecret(idempotencyKeyHash: string) {
+  shareRequestKey ??= resolveShareRequestKey(process.env.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET)
+  return createHmac('sha256', shareRequestKey)
+    .update('project-status-share-request-v1\0')
+    .update(idempotencyKeyHash)
+    .digest('base64url')
+}
+
+/**
+ * Validates the configured server secret, or makes a random one when none is configured.
+ *
+ * @param configured - Configured secret.
+ * @returns The key.
+ * @throws Error when the configured secret is shorter than 32 bytes.
+ */
+function resolveShareRequestKey(configured: string | undefined) {
+  if (configured === undefined) return randomBytes(32).toString('base64url')
+  const key = configured.trim()
+  if (Buffer.byteLength(key, 'utf8') < 32) {
+    throw new Error('DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET must contain at least 32 UTF-8 bytes.')
+  }
+  return key
 }
 
 /**

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   parseProjectStatusReport,
   parseProjectStatusShareScope,
@@ -84,13 +84,25 @@ export type ProjectStatusShareStore<TCallerCheck, TAudit> = {
    */
   findByTokenHash(workspaceId: string, tokenHash: string): Promise<ProjectStatusShareLookup | null>
   /**
-   * Stores a new share and its token lookup row.
+   * Reads the revision that serializes share creation in a Project, with a strongly
+   * consistent read.
    *
-   * @param input - Scope, mutation context, and the record to store.
+   * @param scope - Team and Project.
+   * @returns The revision, 0 before the first share.
+   */
+  readRevision(scope: ProjectStatusShareScopeKey): Promise<number>
+  /**
+   * Stores a new share and its token lookup row, and advances the Project's revision.
+   *
+   * @param input - Scope, mutation context, the record to store, and the revision read
+   *   before the limits were checked.
+   * @throws ProjectDataError 409 when another share was created after that revision was read.
    */
   create(input: ProjectStatusShareScopeKey & ProjectStatusShareMutation<TCallerCheck, TAudit> & {
     /** Record to store. */
     record: ProjectStatusShareRecord
+    /** Revision read before the limits were checked. */
+    expectedRevision: number
   }): Promise<void>
   /**
    * Revokes an open share and removes its token lookup row.
@@ -147,8 +159,6 @@ const PROJECT_STATUS_SHARE_MAX_STORED = 300
 const LABEL_MAX_LENGTH = 100
 /** Longest customer or contact ID accepted. */
 const REFERENCE_MAX_LENGTH = 200
-/** Bytes of randomness in a token secret. */
-const TOKEN_SECRET_BYTES = 32
 /** Length of a base64url-encoded token secret. */
 const TOKEN_SECRET_LENGTH = 43
 /** Longest Workspace ID a token may name. */
@@ -195,14 +205,27 @@ export async function createProjectStatusShareUseCase<TCallerCheck, TAudit>(
   mutation: ProjectStatusShareMutation<TCallerCheck, TAudit> & {
     /** Workspace member key of the creator. */
     createdByMemberKey: string
+    /**
+     * Secret, at least 32 bytes, the server derived from the request's idempotency key. The
+     * token secret and share ID come from it, so a retry after a lost response finds the share
+     * it created and returns the same link.
+     */
+    requestSecret: string
     /** Checks that read other modules. */
     checks: ProjectStatusShareCreateChecks
   },
 ): Promise<CreateProjectStatusShareResponse> {
   const input = readCreateInput(body)
+  const secret = deriveRequestValue(mutation.requestSecret, 'token')
+  const token = `${Buffer.from(scope.workspaceId, 'utf8').toString('base64url')}.${secret}`
+  const shareId = `pss_${deriveRequestValue(mutation.requestSecret, 'share', 'hex').slice(0, 32)}`
+  const replayed = await store.get(scope, shareId)
+  if (replayed) return replayCreate(replayed, input, secret, token)
   if (input.customerId !== undefined) {
     await mutation.checks.verifyCustomerContact(input.customerId, input.contactId)
   }
+  // The revision is read before the list, so a share created after either read fails the write.
+  const expectedRevision = await store.readRevision(scope)
   const existing = await store.list(scope)
   const nowTime = Date.parse(mutation.now)
   const open = existing.filter((share) => share.revokedAt === undefined && Date.parse(share.expiresAt) > nowTime)
@@ -217,11 +240,9 @@ export async function createProjectStatusShareUseCase<TCallerCheck, TAudit>(
   if (Buffer.byteLength(JSON.stringify(report), 'utf8') > PROJECT_STATUS_REPORT_MAX_BYTES) {
     throw new ProjectDataError(413, 'ProjectStatusReportTooLarge', 'The report is too large to share.')
   }
-  const secret = randomBytes(TOKEN_SECRET_BYTES).toString('base64url')
-  const token = `${Buffer.from(scope.workspaceId, 'utf8').toString('base64url')}.${secret}`
   const expiresAt = new Date(Date.parse(mutation.now) + input.expiresInDays * 86_400_000).toISOString()
   const share: ProjectStatusShare = {
-    id: `pss_${randomBytes(16).toString('hex')}`,
+    id: shareId,
     teamId: scope.teamId,
     projectId: scope.projectId,
     label: input.label,
@@ -241,6 +262,7 @@ export async function createProjectStatusShareUseCase<TCallerCheck, TAudit>(
     callerAuthorization: mutation.callerAuthorization,
     auditContext: mutation.auditContext,
     record: { share, report, tokenHash: hashTokenSecret(secret) },
+    expectedRevision,
   })
   return { share, url: `/share/project-status/${encodeURIComponent(token)}` }
 }
@@ -448,4 +470,54 @@ function readReference(value: unknown, name: string) {
  */
 function invalid(message: string) {
   return new ProjectDataError(400, 'InvalidProjectStatusShare', message)
+}
+
+/**
+ * Derives one value of a share creation from the request secret, separated by purpose.
+ *
+ * @param requestSecret - Secret derived from the request's idempotency key.
+ * @param purpose - What the value is for.
+ * @param encoding - Output encoding.
+ * @returns 32 bytes in the encoding.
+ */
+function deriveRequestValue(requestSecret: string, purpose: 'token' | 'share', encoding: 'base64url' | 'hex' = 'base64url') {
+  return createHmac('sha256', requestSecret).update(`project-status-share-${purpose}-v1`).digest(encoding)
+}
+
+/**
+ * Returns the share a retried creation request already created, when the retry asks for the
+ * same share; the token is derived again from the request, so the same link comes back.
+ *
+ * @param record - Share stored under the request's share ID.
+ * @param input - Validated retried request.
+ * @param secret - Token secret derived from the request.
+ * @param token - Public token derived from the request.
+ * @returns The original response.
+ * @throws ProjectDataError 409 when the stored share differs from the request or was revoked.
+ */
+function replayCreate(
+  record: ProjectStatusShareRecord,
+  input: ReturnType<typeof readCreateInput>,
+  secret: string,
+  token: string,
+): CreateProjectStatusShareResponse {
+  const { share } = record
+  const expiresInDays = Math.round((Date.parse(share.expiresAt) - Date.parse(share.createdAt)) / 86_400_000)
+  if (
+    !sameDigest(record.tokenHash, hashTokenSecret(secret)) ||
+    share.revokedAt !== undefined ||
+    share.label !== input.label ||
+    share.showPeopleNames !== input.scope.showPeopleNames ||
+    share.sections.join(',') !== input.scope.sections.join(',') ||
+    expiresInDays !== input.expiresInDays ||
+    share.customerId !== input.customerId ||
+    share.contactId !== input.contactId
+  ) {
+    throw new ProjectDataError(
+      409,
+      'ProjectStatusShareIdempotencyConflict',
+      'This request key was already used for another share link. Create the link again.',
+    )
+  }
+  return { share, url: `/share/project-status/${encodeURIComponent(token)}` }
 }

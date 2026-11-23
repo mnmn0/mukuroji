@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { parseProjectStatusReport } from '@mukuroji/contracts'
+import { createProjectStatusReportOutline, parseProjectStatusReport } from '@mukuroji/contracts'
 import { readZipArchive } from '../src/developer-platform/model/zipArchive'
 import {
   buildProjectStatusReport,
@@ -74,6 +74,18 @@ describe('buildProjectStatusReport', () => {
     expect(JSON.stringify(report)).not.toContain('example.com')
     expect(report.progress).toBeUndefined()
     expect(report.risks).toBeUndefined()
+  })
+
+  test('marks the next actions incomplete when Documents could not be read', () => {
+    if (!source.actionItems) throw new Error('The fixture has action items.')
+    const report = buildProjectStatusReport({
+      ...source,
+      actionItems: { ...source.actionItems, items: [], failedDocumentCount: 1 },
+    })
+    expect(report.nextActions).toEqual({ items: [], hiddenCount: 0, incomplete: true })
+    const lines = createProjectStatusReportOutline(report).sections.find((section) => section.section === 'nextActions')?.lines
+    expect(lines).toEqual(['一部のドキュメントを読めなかったため、ほかにも未完了の項目があるかもしれません。'])
+    expect(buildProjectStatusReport(source).nextActions?.incomplete).toBeUndefined()
   })
 })
 

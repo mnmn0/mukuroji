@@ -77,6 +77,14 @@ describe('share scope and redaction', () => {
   })
 })
 
+test('keeps the incomplete flag of the next actions and rejects a malformed one', () => {
+  const incomplete = { ...report, nextActions: { items: [], hiddenCount: 0, incomplete: true } }
+  expect(parseProjectStatusReport(incomplete)).toEqual({ ok: true, value: incomplete })
+  expect(redactProjectStatusReport(incomplete, { sections: ['nextActions'], showPeopleNames: false }).nextActions)
+    .toEqual({ items: [], hiddenCount: 0, incomplete: true })
+  expect(parseProjectStatusReport({ ...report, nextActions: { items: [], hiddenCount: 0, incomplete: 'yes' } }).ok).toBe(false)
+})
+
 test('renders Markdown with escaped report text', () => {
   const markdown = renderProjectStatusReportMarkdown(report)
   expect(markdown).toContain('# 基幹 \\*刷新\\* 進捗レポート')

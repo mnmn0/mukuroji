@@ -139,6 +139,8 @@ export function buildProjectStatusReport(source: ProjectStatusReportSource): Pro
         }
       }),
       hiddenCount: actions.hiddenCount + actions.items.length - rows.length,
+      // Unread Documents are not "no actions": the report says so instead of looking complete.
+      ...(actions.failedDocumentCount > 0 || actions.hasUnscannedDocuments ? { incomplete: true } : {}),
     }
   }
   return report
