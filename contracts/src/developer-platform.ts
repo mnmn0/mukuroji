@@ -1537,13 +1537,13 @@ export type CreatePublicWorkItemRequest = Omit<
    */
   teamId: string
   /**
-   * Work Item template to start from, listed in `PublicWorkItemTypeCatalog.templates`. Fields sent in
+   * Work Item template to start from, listed by `GET /api/v1/work-item-templates`. Fields sent in
    * the body win; the template fills an omitted description, Work Item Type, workflow status, and
    * priority, adds its custom field values under the sent ones, and gives the Work Item its
    * acceptance criteria as new unmet criteria.
    */
   templateId?: string
-  /** Priority of the Work Item; required unless `templateId` is sent, and `medium` when neither sets it. */
+  /** Priority of the Work Item; the template priority, else `medium`, when it is left out. */
   priority?: WorkItemPriority
   /**
    * Complete schedule with its calendar policy. When it is left out, the Work Item uses the
@@ -1627,6 +1627,12 @@ export type PublicWorkItemTypeCatalog = {
   configurationRevision: number
   /** Active Work Item Types available for creation. */
   workItemTypes: PublicWorkItemTypeSchema[]
+}
+
+/** Work Item templates a Team can create from, returned by `GET /api/v1/work-item-templates`. */
+export type PublicWorkItemTemplateList = {
+  /** Team the list is for. */
+  teamId: string
   /** Enabled Work Item templates that can create a Work Item in this Team, by name. */
   templates: PublicWorkItemTemplate[]
 }

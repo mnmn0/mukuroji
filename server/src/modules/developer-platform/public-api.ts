@@ -50,6 +50,7 @@ import {
   type ImportDryRunReport,
   type ImportJob,
   type ImportSource,
+  type PublicWorkItemTemplateList,
   type PublicWorkItemTypeCatalog,
   type PublicWorkItemTypeChangePreview,
   type PreviewPublicWorkItemTypeChangeRequest,
@@ -335,6 +336,17 @@ export interface PublicWorkItemService {
     teamId: string,
     assignedProjectId?: string,
   ): Promise<PublicWorkItemTypeCatalog>
+  /**
+   * Lists the Work Item templates a Team can create from after current RBAC checks.
+   *
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team the templates are listed for.
+   * @returns Enabled templates for the Team; empty for a principal that cannot read them.
+   */
+  listWorkItemTemplates(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+  ): Promise<PublicWorkItemTemplateList>
   /**
    * Calculates the impact of a Work Item Type change after current authorization and revision checks.
    *
@@ -1181,6 +1193,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId'),
+    ))
+  })
+
+  router.get('/v1/work-item-templates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.listWorkItemTemplates(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
     ))
   })
 
@@ -3603,8 +3623,8 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     // Without a schedule the server uses the Workspace working calendar.
     ...(body.schedule === undefined ? {} : { schedule: readPublicWorkItemSchedule(body.schedule) }),
     ...(body.dueDate === undefined ? {} : { dueDate: readIsoDate(body.dueDate, 'dueDate') }),
-    // A template may supply the priority, so it is optional only with a template.
-    ...(body.priority === undefined && templateId !== undefined ? {} : { priority: readPriority(body.priority) }),
+    // Left out, the template priority is used, else medium.
+    ...(body.priority === undefined ? {} : { priority: readPriority(body.priority) }),
     ...(templateId === undefined ? {} : { templateId }),
     ...(description !== undefined ? { description } : {}),
     ...(body.assignedProjectId !== undefined

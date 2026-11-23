@@ -151,7 +151,7 @@ test('rejects a disabled, other-Team, or non-Work-Item template before writing',
   expect(creates).toEqual([])
 })
 
-test('lists the enabled Work Item templates of a Team in the creation catalog', async () => {
+test('lists the enabled Work Item templates of a Team', async () => {
   configureTemplates([
     workItemTemplate({ id: 'z-check', name: 'Z check' }),
     workItemTemplate({ id: 'a-check', name: 'A check' }, { acceptanceCriteria: undefined }),
@@ -160,8 +160,9 @@ test('lists the enabled Work Item templates of a Team in the creation catalog', 
   ])
 
   const catalog = await runWithTestAppDependencies(() =>
-    createCanonicalPublicWorkItemService().listWorkItemTypes(credential, 'core-team'))
+    createCanonicalPublicWorkItemService().listWorkItemTemplates(credential, 'core-team'))
 
+  expect(catalog.teamId).toBe('core-team')
   expect(catalog.templates).toEqual([
     { id: 'a-check', version: 3, name: 'A check', title: 'Release check', description: 'Check the release.', priority: 'high', acceptanceCriteria: [] },
     { id: 'z-check', version: 3, name: 'Z check', title: 'Release check', description: 'Check the release.', priority: 'high', acceptanceCriteria: ['Tests pass', 'Docs updated'] },
@@ -173,7 +174,7 @@ test('keeps templates from guests, who cannot read Workspace business data', asy
   const creates = configureTemplates([workItemTemplate()], 'guest')
 
   const catalog = await runWithTestAppDependencies(() =>
-    createCanonicalPublicWorkItemService().listWorkItemTypes(credential, 'core-team'))
+    createCanonicalPublicWorkItemService().listWorkItemTemplates(credential, 'core-team'))
   expect(catalog.templates).toEqual([])
   await expect(createWorkItem({ templateId: 'release-check' }, 'template-guest')).rejects.toMatchObject({ status: 403 })
   expect(creates).toEqual([])

@@ -67,6 +67,9 @@ function startFakeApi() {
         { id: 'done', name: 'Done', category: 'completed', sortOrder: 2 },
       ] },
     }] })
+    if (url.pathname === '/api/v1/work-item-templates') return Response.json({ teamId: 'team', templates: [{
+      id: 'release-check', version: 2, name: 'Release check', title: 'Release', priority: 'high', acceptanceCriteria: ['Tests pass'],
+    }] })
     if (url.pathname === '/api/v1/agent-settings') {
       return Response.json({ schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
     }
@@ -350,6 +353,9 @@ test('create_task sends a template and leaves its priority to the server unless 
   let client: Client | undefined
   try {
     client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { catalog: { templates: [
+      { id: 'release-check', name: 'Release check', acceptanceCriteria: ['Tests pass'] },
+    ] } } })
     for (const input of [{ templateId: 'release-check' }, { templateId: 'release-check', priority: 'low' }, {}]) {
       const created = await call(client, 'create_task', { title: 'Release', idempotencyKey: crypto.randomUUID(), ...input })
       expect(created.isError).toBe(false)

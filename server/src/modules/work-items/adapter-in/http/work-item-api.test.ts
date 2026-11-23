@@ -604,13 +604,6 @@ test('lists active Work Item Type creation schemas without exposing formula expr
         return { configuration }
       },
     }),
-    // The catalog also lists the Workspace's Work Item templates; this Workspace has none.
-    ruleTemplates: new Proxy(getTestAppDependencies().automation.ruleTemplates, {
-      get(target, property, receiver) {
-        if (property === 'listTemplates') return async () => []
-        return Reflect.get(target, property, receiver)
-      },
-    }),
   })
   const service = createCanonicalPublicWorkItemService()
   const credential = {

@@ -1402,19 +1402,6 @@
       },
       "CreatePublicWorkItemRequest": {
         "additionalProperties": false,
-        "anyOf": [
-          {
-            "required": [
-              "priority"
-            ]
-          },
-          {
-            "required": [
-              "templateId"
-            ]
-          }
-        ],
-        "description": "Send priority, or a templateId whose template supplies the priority (medium when the template has none).",
         "properties": {
           "assignedProjectId": {
             "type": "string"
@@ -1434,7 +1421,7 @@
             "description": "Deadline for a Work Item created without schedule; it gets a due-date schedule under the Workspace working calendar. Cannot be combined with schedule."
           },
           "priority": {
-            "description": "Required unless templateId is sent; medium when neither the body nor the template sets it.",
+            "description": "Priority of the Work Item. When it is left out, the template priority is used, else medium.",
             "enum": [
               "high",
               "medium",
@@ -1454,7 +1441,7 @@
             "type": "string"
           },
           "templateId": {
-            "description": "Work Item template to start from, listed in the work-item-types catalog templates. Body fields win; the template fills an omitted description, workItemTypeId, workflowStatusId, and priority, adds its custom field values under the sent ones, and gives the Work Item its acceptance criteria as new unmet criteria. An unknown, disabled, or other-Team template returns 404.",
+            "description": "Work Item template to start from, listed by GET /api/v1/work-item-templates. Body fields win; the template fills an omitted description, workItemTypeId, workflowStatusId, and priority, adds its custom field values under the sent ones, and gives the Work Item its acceptance criteria as new unmet criteria. An unknown, disabled, or other-Team template returns 404.",
             "type": "string"
           },
           "title": {
@@ -2908,13 +2895,10 @@
         ],
         "type": "object"
       },
-      "PublicWorkItemTypeCatalog": {
+      "PublicWorkItemTemplateList": {
         "additionalProperties": false,
+        "description": "Work Item templates a Team can create from.",
         "properties": {
-          "configurationRevision": {
-            "minimum": 0,
-            "type": "integer"
-          },
           "teamId": {
             "type": "string"
           },
@@ -2924,6 +2908,23 @@
               "$ref": "#/components/schemas/PublicWorkItemTemplate"
             },
             "type": "array"
+          }
+        },
+        "required": [
+          "teamId",
+          "templates"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeCatalog": {
+        "additionalProperties": false,
+        "properties": {
+          "configurationRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
           },
           "workItemTypes": {
             "items": {
@@ -2935,8 +2936,7 @@
         "required": [
           "teamId",
           "configurationRevision",
-          "workItemTypes",
-          "templates"
+          "workItemTypes"
         ],
         "type": "object"
       },
@@ -10255,6 +10255,87 @@
         "summary": "Resolve a Work Item key",
         "tags": [
           "Directory"
+        ]
+      }
+    },
+    "/api/v1/work-item-templates": {
+      "get": {
+        "description": "指定 Team で使える有効な Work Item テンプレートを名前順に返します。Workspace の業務データを読めない主体（ゲストなど）には空の一覧を返します。",
+        "operationId": "listPublicWorkItemTemplates",
+        "parameters": [
+          {
+            "description": "テンプレートを取得する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTemplateList"
+                }
+              }
+            },
+            "description": "Work Item テンプレートの一覧です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Work Item 作成に使えるテンプレートを取得する",
+        "tags": [
+          "Work Items"
         ]
       }
     },

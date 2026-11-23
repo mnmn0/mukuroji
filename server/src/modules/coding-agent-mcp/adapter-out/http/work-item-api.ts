@@ -88,12 +88,17 @@ export const catalogSchema: z.ZodType<AgentCatalog> = z.object({
     }),
     customFields: z.array(z.record(z.string(), z.unknown())),
   })),
-  // Older servers do not list templates.
+  // Templates come from their own endpoint; the type catalog never lists them.
+  templates: z.array(z.never()).default([]),
+})
+/** Validates the Work Item templates a Team can create from. */
+export const templateListSchema = z.object({
+  teamId: identifier,
   templates: z.array(z.object({
     id: identifier, version: z.number().int().positive(), name: z.string(), title: z.string(),
     description: z.string().optional(), workItemTypeId: identifier.optional(), workflowStatusId: identifier.optional(),
     priority: z.enum(['high', 'medium', 'low']).optional(), acceptanceCriteria: z.array(z.string()),
-  })).default([]),
+  })),
 })
 /** Validates one Work Item comment. */
 export const commentSchema = z.object({
@@ -194,9 +199,18 @@ export function createAgentWorkItemApi(
   return {
     /** Reads and validates the current Team catalog. */
     async catalog(assignedProjectId) {
-      const catalog = await request('work-item-types', catalogSchema, 'GET', undefined, undefined, { assignedProjectId })
-      if (catalog.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned a mismatched catalog scope.')
-      return catalog
+      const [catalog, templateList] = await Promise.all([
+        request('work-item-types', catalogSchema, 'GET', undefined, undefined, { assignedProjectId }),
+        // A server older than template support has no such endpoint, so it offers no templates.
+        request('work-item-templates', templateListSchema).catch((error: unknown) => {
+          if (error instanceof AgentTaskError && error.code === 'not_found') return { teamId: config.teamId, templates: [] }
+          throw error
+        }),
+      ])
+      if (catalog.teamId !== config.teamId || templateList.teamId !== config.teamId) {
+        throw new AgentTaskError('invalid_response', 'The API returned a mismatched catalog scope.')
+      }
+      return { ...catalog, templates: templateList.templates }
     },
     /** Reads one Team-qualified task. */
     async get(id) { return scoped(await request(`work-items/${encodeURIComponent(id)}`, taskSchema), id) },

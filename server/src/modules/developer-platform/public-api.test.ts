@@ -157,8 +157,10 @@ function createDefaultWorkItemService(
         teamId,
         configurationRevision: 1,
         workItemTypes: [],
-        templates: [],
       }
+    },
+    async listWorkItemTemplates(_credential, teamId) {
+      return { teamId, templates: [] }
     },
     async previewTypeChange() {
       return {
@@ -904,7 +906,6 @@ describe('public API router', () => {
           options: [{ id: 'high', name: 'High', sortOrder: 0 }],
         }],
       }],
-      templates: [],
     } satisfies PublicWorkItemTypeCatalog
     const { platform, router } = createTestRouter({
       workItems: createDefaultWorkItemService({

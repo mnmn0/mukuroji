@@ -1061,7 +1061,6 @@ function createPublicWorkItemTypeCatalog(
   teamId: string,
   resolvedConfiguration: ResolvedWorkItemConfiguration,
   accessibleProjectIds: ReadonlySet<string> | undefined,
-  templates: PublicWorkItemTemplate[],
 ): PublicWorkItemTypeCatalog {
   const configuration = resolvedConfiguration.configuration
   const types = [...(configuration.workItemTypes ?? [])]
@@ -1101,7 +1100,6 @@ function createPublicWorkItemTypeCatalog(
           customFields,
         }
       }),
-    templates,
   }
 }
 
@@ -1665,8 +1663,17 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         teamId,
         resolvedConfiguration,
         accessibleProjectIds,
-        await listPublicWorkItemTemplates(principal, teamId),
       )
+    },
+
+    async listWorkItemTemplates(credential, teamId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      await requireTeamPermission(principal, teamId, 'viewer')
+      return { teamId, templates: await listPublicWorkItemTemplates(principal, teamId) }
     },
 
     /**
