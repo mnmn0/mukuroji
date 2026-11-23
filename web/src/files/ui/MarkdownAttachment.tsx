@@ -61,7 +61,19 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
     return <AttachmentPlaceholder>{describeHiddenVersion(file, t)}</AttachmentPlaceholder>
   }
   if (access.failed) {
-    return <AttachmentPlaceholder>{t('files.markdown.unavailable')}</AttachmentPlaceholder>
+    return (
+      <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
+        <AttachmentPlaceholder>{t('files.markdown.unavailable')}</AttachmentPlaceholder>
+        <button
+          className="min-h-7 rounded px-2 text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 hover:bg-[var(--workbench-surface-muted)]"
+          data-testid={`markdown-attachment-retry-${file.id}`}
+          onClick={access.retry}
+          type="button"
+        >
+          {t('files.markdown.retry')}
+        </button>
+      </span>
+    )
   }
   if (!access.url) {
     return <AttachmentPlaceholder>{t('files.preview.loading')}</AttachmentPlaceholder>

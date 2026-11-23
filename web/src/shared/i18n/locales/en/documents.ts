@@ -61,6 +61,7 @@ export const documentsMessages = {
   'files.markdown.tooLarge': 'Files attached to a body can be up to 25 MB.',
   'files.markdown.unavailable': 'Attachment not available',
   'files.markdown.empty': 'No description yet.',
+  'files.markdown.retry': 'Retry',
   'files.markdown.edit': 'Edit',
   'files.delete.confirm': 'Delete {name}? It will be physically removed after the retention period.',
   'documents.title': 'Documents',

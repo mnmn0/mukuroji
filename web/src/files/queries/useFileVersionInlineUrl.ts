@@ -26,6 +26,10 @@ export type FileVersionInlineUrlState = {
    * Whether the URL is still being requested.
    */
   isLoading: boolean
+  /**
+   * Requests the URL again after a failure.
+   */
+  retry: () => void
 }
 
 /**
@@ -50,7 +54,7 @@ export function useFileVersionInlineUrl(
   const key = controller && scope && file && version
     ? ['file-version-inline-url', scopeKey, file.id, version.id, attempt] as const
     : null
-  const { data, error, isLoading } = useSWR(
+  const { data, error, isLoading, mutate } = useSWR(
     key,
     async () => {
       if (!controller || !file || !version) return undefined
@@ -68,6 +72,9 @@ export function useFileVersionInlineUrl(
   return {
     failed: Boolean(error) || data === null,
     isLoading: Boolean(key) && isLoading,
+    retry: () => {
+      void mutate()
+    },
     url: data ?? undefined,
   }
 }

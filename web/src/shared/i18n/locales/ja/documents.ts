@@ -61,6 +61,7 @@ export const documentsMessages = {
   'files.markdown.tooLarge': '本文に添付できるのは 25 MB までのファイルです。',
   'files.markdown.unavailable': '表示できない添付です',
   'files.markdown.empty': '説明はまだありません。',
+  'files.markdown.retry': '再読み込み',
   'files.markdown.edit': '編集',
   'files.delete.confirm': '{name} を削除しますか？Retention 期間後に物理削除されます。',
   'documents.title': 'ドキュメント',

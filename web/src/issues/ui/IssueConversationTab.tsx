@@ -354,6 +354,30 @@ export function IssueConversationTab({
     }
   }
 
+  /**
+   * Inserts an uploaded attachment reference into one composer slot, only while that slot still
+   * holds the draft lifetime the upload started in.
+   *
+   * @param slot - Composer slot the upload belongs to.
+   * @param lifetimeId - Draft lifetime when the upload started.
+   * @param insertion - Markdown reference and the cursor range to replace.
+   */
+  function insertDraftAttachment(slot: CommentComposerSlot, lifetimeId: number, insertion: DraftAttachmentInsertion) {
+    const current = draftStateRef.current[slot]
+    if (!current || current.lifetimeId !== lifetimeId) return
+    const body = current.bodyMarkdown
+    const start = Math.min(insertion.selectionStart ?? body.length, body.length)
+    const end = Math.min(Math.max(insertion.selectionEnd ?? start, start), body.length)
+    const before = body.slice(0, start)
+    const prefix = before && !before.endsWith('\n') ? '\n' : ''
+    const next = {
+      bodyMarkdown: `${before}${prefix}${insertion.markdown}\n${body.slice(end)}`,
+      mentionMemberKeys: current.mentionMemberKeys,
+    }
+    if (slot === 'root') updateRootDraft(next)
+    else updateTargetedDraft(slot, next)
+  }
+
   /** Confirms and closes a reply slot when closing it would discard entered input. */
   function handleReplyingChange(
     commentId?: string,
@@ -658,6 +682,7 @@ export function IssueConversationTab({
           <CommentComposer
             artifacts={artifacts}
             key="root-comment-composer"
+            onInsertAttachment={(lifetimeId, insertion) => insertDraftAttachment('root', lifetimeId, insertion)}
             labelKey="collaboration.composer.label"
             members={members}
             onCancel={undefined}
@@ -979,6 +1004,7 @@ export function IssueConversationTab({
                 finishSlotSubmission={finishSlotSubmission}
                 readOnlyMessage={readOnlyMessage}
                 onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
+                onInsertDraftAttachment={insertDraftAttachment}
                 onEditConflictRetry={handleEditConflictRetry}
                 onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                 replyDraft={replyDraft?.commentId === thread.root.id ? replyDraft : undefined}
@@ -1011,6 +1037,7 @@ export function IssueConversationTab({
                       finishSlotSubmission={finishSlotSubmission}
                       readOnlyMessage={readOnlyMessage}
                       onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
+                      onInsertDraftAttachment={insertDraftAttachment}
                       onEditConflictRetry={handleEditConflictRetry}
                       onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                       replyDraft={replyDraft?.commentId === reply.id ? replyDraft : undefined}
@@ -1126,6 +1153,8 @@ type CommentCardProps = {
   finishSlotSubmission: (slot: CommentComposerSlot, lifetimeId: number) => void
   /** Retains raw edit text after a comment refresh or tab switch. */
   onEditDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
+  /** Inserts an uploaded attachment reference into the reply or edit slot it started in. */
+  onInsertDraftAttachment: (slot: 'edit' | 'reply', lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /** Explicitly adopts the displayed canonical revision for a conflict retry. */
   onEditConflictRetry: (commentId: string) => void
   /** Controlled reply draft for this comment, when its editor is open. */
@@ -1240,6 +1269,7 @@ function CommentCard({
   onDeleteConfirmationChange,
   onAcceptResolution,
   onEditDraftChange,
+  onInsertDraftAttachment,
   onEditConflictRetry,
   onEditingChange,
   onPromote,
@@ -1342,6 +1372,7 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={editDraft}
+                onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('edit', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.edit !== undefined}
                 key={`edit-${comment.id}`}
                 labelKey="collaboration.edit.label"
@@ -1531,6 +1562,7 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={replyDraft}
+                onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('reply', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.reply !== undefined}
                 key={`reply-${comment.id}`}
                 labelKey="collaboration.reply.label"
@@ -1984,6 +2016,16 @@ function CommentFileAttachments({
   ) : null
 }
 
+/** An uploaded attachment reference and where the composer cursor was when it finished. */
+type DraftAttachmentInsertion = {
+  /** Markdown reference of the uploaded file. */
+  markdown: string
+  /** Cursor start in the composer, when the composer is still on screen. */
+  selectionStart?: number
+  /** Cursor end in the composer, when the composer is still on screen. */
+  selectionEnd?: number
+}
+
 /**
  * CommentComposer の props です。
  */
@@ -1992,6 +2034,10 @@ type CommentComposerProps = {
    * File controller of the Work Item; pasted or dropped files are uploaded to it.
    */
   artifacts?: FileArtifactsController
+  /**
+   * Inserts an uploaded reference through the draft owner, checked against the draft lifetime.
+   */
+  onInsertAttachment?: (lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /**
    * textarea に表示する label key です。
    */
@@ -2037,6 +2083,7 @@ type CommentComposerProps = {
 function CommentComposer({
   artifacts,
   draft,
+  onInsertAttachment,
   externallySubmitting = false,
   labelKey,
   members,
@@ -2054,48 +2101,21 @@ function CommentComposer({
   const submitInFlightRef = useRef(false)
   const currentBodyMarkdown = draft.bodyMarkdown
   const currentMentionMemberKeys = draft.mentionMemberKeys
-  const latestDraftRef = useRef(draft)
-  const isMountedRef = useRef(false)
-
-  useEffect(() => {
-    latestDraftRef.current = draft
-  }, [draft])
-
-  // Tracks whether this composer is still on screen, so an upload that finishes after the
-  // composer closed or moved to another comment does not write into another draft.
-  useEffect(() => {
-    isMountedRef.current = true
-    return () => {
-      isMountedRef.current = false
-    }
-  }, [])
-
   // The draft lifetime this render belongs to; an upload started now only inserts into it.
   const uploadDraftLifetimeId = draft.lifetimeId
 
-  /** Inserts an uploaded file's reference at the cursor, reading the newest body text. */
+  /** Hands an uploaded file's reference to the draft owner with the current cursor range. */
   const insertAttachment = (markdown: string) => {
-    const latest = latestDraftRef.current
-    if (!isMountedRef.current || latest.lifetimeId !== uploadDraftLifetimeId) return
-    const body = latest.bodyMarkdown
     const textarea = textareaRef.current
-    const start = Math.min(textarea?.selectionStart ?? body.length, body.length)
-    const end = Math.min(textarea?.selectionEnd ?? start, body.length)
-    const before = body.slice(0, start)
-    const prefix = before && !before.endsWith('\n') ? '\n' : ''
-    const insertion = `${prefix}${markdown}\n`
-    const nextBody = `${before}${insertion}${body.slice(end)}`
-    const nextDraft = { ...latest, bodyMarkdown: nextBody }
-    latestDraftRef.current = nextDraft
-    onDraftChange({ bodyMarkdown: nextBody, mentionMemberKeys: latest.mentionMemberKeys })
-    onTyping()
-    requestAnimationFrame(() => {
-      const cursor = start + insertion.length
-      textarea?.setSelectionRange(cursor, cursor)
+    onInsertAttachment?.(uploadDraftLifetimeId, {
+      markdown,
+      selectionEnd: textarea?.selectionEnd,
+      selectionStart: textarea?.selectionStart,
     })
+    onTyping()
   }
   const attachmentUpload = useMarkdownAttachmentUpload({
-    controller: artifacts,
+    controller: onInsertAttachment ? artifacts : undefined,
     disabled: isSubmitting || externallySubmitting,
     onInsert: insertAttachment,
   })
