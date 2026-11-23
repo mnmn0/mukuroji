@@ -225,7 +225,9 @@ export async function previewWorkCalendarChange(
  * other calendar that moved on since then makes the rules stale, so nothing is rewritten and every
  * rewrite counts as a conflict. Before each further transaction and the retry, the calendar version
  * is read again; once a newer calendar change has been saved, this one stops and counts the rest as
- * conflicts, leaving them to the newer change. Work Items that still conflict are counted.
+ * conflicts, leaving them to the newer change. Work Items that still conflict are counted. Last,
+ * the Work Items are read again so that one created while the change ran, with the old rules, is
+ * rewritten too.
  *
  * @param rules - Which Work Items the change reaches and how.
  * @param ports - Work Item reads and writes.
@@ -238,7 +240,8 @@ export async function applyWorkCalendarChange(
   ports: WorkCalendarChangePorts,
   options: WorkCalendarChangeApplyOptions,
 ): Promise<WorkCalendarChangeResult> {
-  const plan = planWorkCalendarChange({ ...rules, workItems: await ports.readWorkItems() })
+  const enumerated = await ports.readWorkItems()
+  const plan = planWorkCalendarChange({ ...rules, workItems: enumerated })
   if (plan.updates.length > WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS) {
     throw new ProjectDataError(
       413,
@@ -296,7 +299,67 @@ export async function applyWorkCalendarChange(
       }
     }
   }
+  const late = await rewriteLateWorkItems(rules, ports, {
+    enumerated,
+    capacity: WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS - plan.updates.length,
+    batches,
+    superseded,
+  })
+  updatedCount += late.updatedCount
+  conflictCount += late.conflictCount
   return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
+}
+
+/** What the late sweep of a calendar change needs from the change that ran before it. */
+type LateWorkItemSweep = {
+  /** Work Items the change planned from. */
+  enumerated: readonly WorkCalendarChangeWorkItem[]
+  /** How many more Work Items the change may still rewrite. */
+  capacity: number
+  /** Transaction counter shared with the change. */
+  batches: BatchCounter
+  /** Reports whether a newer calendar change has been saved since this one. */
+  superseded: () => Promise<boolean>
+}
+
+/**
+ * Rewrites Work Items created while a calendar change ran.
+ *
+ * A Work Item created after the change read the Work Items, but before it saved the calendar,
+ * copied the old rules and is missing from the plan. The Work Items are read once more after the
+ * rewrites, so every creation that committed before then is found, and the ones that still follow
+ * the old rules are rewritten like the rest. Work Items beyond the write limit count as conflicts.
+ *
+ * @param rules - Which Work Items the change reaches and how.
+ * @param ports - Work Item reads and writes.
+ * @param sweep - The planned Work Items, the remaining write capacity, and the supersede check.
+ * @returns How many late Work Items were rewritten or skipped.
+ */
+async function rewriteLateWorkItems(
+  rules: WorkCalendarChangeRules,
+  ports: WorkCalendarChangePorts,
+  sweep: LateWorkItemSweep,
+): Promise<{ updatedCount: number; conflictCount: number }> {
+  if (await sweep.superseded()) return { updatedCount: 0, conflictCount: 0 }
+  const known = new Set(sweep.enumerated.map((workItem) => workItemKey(workItem.teamId, workItem.id)))
+  const fresh = await ports.readWorkItems()
+  const late = planWorkCalendarChange({
+    ...rules,
+    workItems: fresh.filter((workItem) => !known.has(workItemKey(workItem.teamId, workItem.id))),
+  })
+  let updatedCount = 0
+  let conflictCount = Math.max(0, late.updates.length - sweep.capacity)
+  const writable = late.updates.slice(0, Math.max(0, sweep.capacity))
+  for (const [index, update] of writable.entries()) {
+    // A newer change plans from the current Work Items, so it owns whatever is left.
+    if (await sweep.superseded()) {
+      conflictCount += writable.length - index
+      break
+    }
+    if (await writeOrConflict(ports, [update], sweep.batches.next++)) updatedCount += 1
+    else conflictCount += 1
+  }
+  return { updatedCount, conflictCount }
 }
 
 /**

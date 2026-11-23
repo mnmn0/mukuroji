@@ -73,6 +73,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   再開では変更前のカレンダーが分からないので、まだ取り込んでいない旧来の Work Item は取り込まない。
   他の更新と衝突した transaction は、読み直した Work Item で同じ変更前・変更後のカレンダーから1件ずつ計画し直して再試行する
   （取り込み中の旧来の Work Item も対象から外れない）。それでも衝突した Work Item は数だけ返す。
+  最後に Work Item をもう一度読み、変更の実行中に古いカレンダーで作られた Work Item も同じ規則で書き換える（書き換えの上限を超えた分は衝突として数える）。
 - Project のカレンダーの変更が書き換えるのは、その Project に割り当てられた Work Item だけ（Project manager が他の Project の日程を変えない）。
 - 計画と書き換えの手順は work-items module の use case（`application/use-cases/work-calendar-change.ts`）が持ち、
   route は入力の検証・認可・port の接続だけを行う。

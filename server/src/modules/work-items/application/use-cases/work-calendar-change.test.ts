@@ -207,3 +207,24 @@ test('stops a split transaction once a newer change has been saved', async () =>
   expect(written).toEqual([12])
   expect(applied).toMatchObject({ updatedCount: 12, conflictCount: 12 })
 })
+
+test('rewrites a Work Item created with the old rules while the change ran', async () => {
+  const written: WorkCalendarScheduleUpdate[][] = []
+  let reads = 0
+  const applied = await applyWorkCalendarChange(rules, {
+    async readWorkItems() {
+      reads += 1
+      // A member creates a fourth Work Item after the change read the Work Items.
+      return reads === 1 ? workItems(3) : workItems(4)
+    },
+    readCalendarVersion: async () => savedOnce,
+    async writeSchedules(updates) {
+      written.push([...updates])
+    },
+  }, { plannedVersion: unsaved, save: saveTeamCalendar })
+  expect(written.map((batch) => batch.map((update) => update.workItemId))).toEqual([
+    ['item-000', 'item-001', 'item-002'],
+    ['item-003'],
+  ])
+  expect(applied).toMatchObject({ updatedCount: 4, conflictCount: 0, impact: { followingCount: 3 } })
+})
