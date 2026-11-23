@@ -129,6 +129,7 @@ const meta = {
 
 export default meta
 
+/** Story shape for the portfolio dashboard view. */
 type Story = StoryObj<typeof meta>
 
 /** Projects of two Teams compared with last month, with hidden Projects and costs. */
