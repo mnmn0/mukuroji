@@ -15,6 +15,7 @@ import {
 import { ProjectDataError } from '../../modules/directory'
 import {
   InvalidStoredWorkCalendarError,
+  WorkCalendarAuthorizationChangedError,
   WorkCalendarRevisionConflictError,
   type StoredWorkCalendarScope,
   type WorkCalendarWrite,
@@ -45,7 +46,10 @@ import {
   requireWorkspaceBusinessWrite,
   type WorkspacePrincipal,
 } from '../shared/project-access'
-import { createPlanningFencedWorkItemAuthorizationSnapshot } from '../shared/planning-access'
+import {
+  createPlanningCallerAuthorizationConditionChecks,
+  createPlanningFencedWorkItemAuthorizationSnapshot,
+} from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { projectWorkItemMutationSearchDocumentBestEffort } from '../shared/search-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
@@ -238,6 +242,8 @@ async function saveOrResumeWorkCalendar(
       expectedRevision,
       principal.userKey,
       new Date().toISOString(),
+      // Fence the save on the member's authorization, as the schedule rewrites are.
+      createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
     )
   } catch (error) {
     if (!(error instanceof WorkCalendarRevisionConflictError)) throw error
@@ -704,6 +710,9 @@ function isWorkCalendarErrorCode(code: string): code is keyof typeof workCalenda
 function toWorkCalendarErrorResponse(c: Context, error: unknown) {
   if (error instanceof WorkCalendarRevisionConflictError) {
     return c.json({ code: 'WorkCalendarConflict', message: error.message }, 409)
+  }
+  if (error instanceof WorkCalendarAuthorizationChangedError) {
+    return c.json({ code: 'WorkCalendarAuthorizationChanged', message: error.message }, 409)
   }
   if (error instanceof InvalidStoredWorkCalendarError) {
     console.error(error)

@@ -46,8 +46,11 @@ export interface WorkCalendarStore {
    * @param expectedRevision - Revision read before the change; 0 when nothing was stored.
    * @param actorMemberKey - Member who saves the calendar.
    * @param now - Save time as an ISO timestamp.
+   * @param authorizationFences - Checks on the saving member's authorization, written in the same
+   *   transaction so a member whose access changed after the route authorized them saves nothing.
    * @returns The stored calendar.
    * @throws WorkCalendarRevisionConflictError when another save came first.
+   * @throws WorkCalendarAuthorizationChangedError when an authorization fence no longer holds.
    */
   save(
     workspaceId: string,
@@ -55,7 +58,34 @@ export interface WorkCalendarStore {
     expectedRevision: number,
     actorMemberKey: string,
     now: string,
+    authorizationFences?: readonly WorkCalendarAuthorizationFence[],
   ): Promise<WorkCalendar>
+}
+
+/** Read-only DynamoDB condition on one row the saving member's authorization comes from. */
+export type WorkCalendarAuthorizationFence = {
+  /** Condition check written in the calendar save transaction. */
+  ConditionCheck: {
+    /** Table of the authorization row. */
+    TableName: string | undefined
+    /** Key of the authorization row. */
+    Key: Record<string, unknown> | undefined
+    /** Condition the row must still meet. */
+    ConditionExpression: string | undefined
+    /** Attribute names the condition uses. */
+    ExpressionAttributeNames?: Record<string, string>
+    /** Attribute values the condition uses. */
+    ExpressionAttributeValues?: Record<string, unknown>
+  }
+}
+
+/** Raised when the saving member's authorization changed after it was checked. */
+export class WorkCalendarAuthorizationChangedError extends Error {
+  /** Creates the error. */
+  constructor() {
+    super('Your access changed while the calendar was being saved. Reload and try again.')
+    this.name = 'WorkCalendarAuthorizationChangedError'
+  }
 }
 
 /** Raised when a calendar changed after the caller read it. */

@@ -28,6 +28,8 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
 - 行は Workspace の設定への上書きだけを持つ（`workingWeekdays?`、`publicHolidays?`、`additionalHolidays`、最大 128 日）。
   省いた項目は継承する。解決順は Workspace → Team → Project で、稼働曜日と日本の祝日の有無は後の層が勝ち、会社の休日は足し合わせる。
 - 行は `revision` を持ち、保存は `expectedRevision` の条件付き Put にする（0 なら行がないこと）。古い revision は 409。
+  保存は変更者の認可（Workspace member の version、enterprise の CONTROL revision）の ConditionCheck と同じ transaction で書き、
+  認可が変わっていたら何も保存せず 409（`WorkCalendarAuthorizationChanged`）を返す。
 - Workspace partition に置くので、tenant export と Workspace の closure で一緒に扱われる。新しい table・GSI は作らない。
   行は payload ではなく属性で保存するので、closure の member 匿名化は行の `updatedBy` を直接仮名にする。
 

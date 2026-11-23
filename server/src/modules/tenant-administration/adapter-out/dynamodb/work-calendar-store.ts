@@ -2,11 +2,13 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import type { WorkCalendar } from '@mukuroji/contracts'
 import {
   InvalidStoredWorkCalendarError,
+  WorkCalendarAuthorizationChangedError,
   WorkCalendarRevisionConflictError,
   createStoredWorkCalendar,
   createTeamWorkCalendarRecordPrefix,
@@ -14,6 +16,7 @@ import {
   readStoredWorkCalendar,
   toStoredWorkCalendarFields,
   type StoredWorkCalendarScope,
+  type WorkCalendarAuthorizationFence,
   type WorkCalendarStore,
   type WorkCalendarWrite,
 } from '../../domain/work-calendars'
@@ -82,35 +85,71 @@ export class DynamoDbWorkCalendarStore implements WorkCalendarStore {
     expectedRevision: number,
     actorMemberKey: string,
     now: string,
+    authorizationFences: readonly WorkCalendarAuthorizationFence[] = [],
   ): Promise<WorkCalendar> {
     const calendar = createStoredWorkCalendar(write, expectedRevision + 1, actorMemberKey, now)
+    const put = {
+      TableName: this.tableName,
+      Item: {
+        workspaceId,
+        recordKey: createWorkCalendarRecordKey(write.scope),
+        entryType: ENTRY_TYPE,
+        ...toStoredWorkCalendarFields(calendar),
+      },
+      ...(expectedRevision === 0
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: 'entryType = :entryType AND revision = :expectedRevision',
+            ExpressionAttributeValues: {
+              ':entryType': ENTRY_TYPE,
+              ':expectedRevision': expectedRevision,
+            },
+          }),
+    }
+    if (authorizationFences.length === 0) {
+      try {
+        await this.documentClient.send(new PutCommand(put))
+      } catch (error) {
+        if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+          throw new WorkCalendarRevisionConflictError()
+        }
+        throw error
+      }
+      return calendar
+    }
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          workspaceId,
-          recordKey: createWorkCalendarRecordKey(write.scope),
-          entryType: ENTRY_TYPE,
-          ...toStoredWorkCalendarFields(calendar),
-        },
-        ...(expectedRevision === 0
-          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-          : {
-              ConditionExpression: 'entryType = :entryType AND revision = :expectedRevision',
-              ExpressionAttributeValues: {
-                ':entryType': ENTRY_TYPE,
-                ':expectedRevision': expectedRevision,
-              },
-            }),
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          { Put: put },
+          ...authorizationFences.map((fence) => ({ ConditionCheck: { ...fence.ConditionCheck } })),
+        ],
       }))
     } catch (error) {
-      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
-        throw new WorkCalendarRevisionConflictError()
-      }
-      throw error
+      throw readTransactionFailure(error)
     }
     return calendar
   }
+}
+
+/**
+ * Names the failure of a fenced calendar save.
+ *
+ * @param error - Error the transaction raised.
+ * @returns A revision conflict when the calendar row moved on, an authorization change when a
+ *   fence failed, or the error itself.
+ */
+function readTransactionFailure(error: unknown): unknown {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') return error
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(reasons)) return error
+  const failed = (index: number) => {
+    const reason: unknown = reasons[index]
+    return typeof reason === 'object' && reason !== null &&
+      Reflect.get(reason, 'Code') === 'ConditionalCheckFailed'
+  }
+  if (failed(0)) return new WorkCalendarRevisionConflictError()
+  if (reasons.some((_, index) => index > 0 && failed(index))) return new WorkCalendarAuthorizationChangedError()
+  return error
 }
 
 /**

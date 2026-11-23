@@ -83,6 +83,7 @@ export { createCabinetOfficeHolidaySource } from './adapter-out/http/cabinet-off
 export {
   InMemoryWorkCalendarStore,
   InvalidStoredWorkCalendarError,
+  WorkCalendarAuthorizationChangedError,
   WorkCalendarRevisionConflictError,
 } from './domain/work-calendars'
 export type {
