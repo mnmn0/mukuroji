@@ -91,6 +91,37 @@ type ProjectAccumulator = {
   nextMilestone?: PortfolioProjectMilestone
 }
 
+/** What decides whether a reader may save a Team's monthly portfolio snapshot. */
+export type PortfolioSnapshotCaptureAccess = {
+  /** Whether the reader is a system administrator. */
+  isSystemAdmin: boolean
+  /** Whether the reader has manager access to the Team at all. */
+  isTeamManager: boolean
+  /** Whether the manager access is granted on the Team itself rather than per Project. */
+  directTeamGrant: boolean
+  /** Every Project of the Team. */
+  projectIds: readonly string[]
+  /** Whether the reader may read a Project. */
+  canReadProject: (projectId: string) => boolean
+  /** Whether the reader may see a Project's budget and cost. */
+  canSeeCost: (projectId: string) => boolean
+}
+
+/**
+ * Decides whether a reader may save a Team's monthly snapshot. A save replaces the month for
+ * every later reader, so it must hold every Project with its cost: even a Team-wide grant saves
+ * only when it can read and see the cost of each Project. An empty Team needs the Team-wide grant.
+ *
+ * @param access - Reader access.
+ * @returns Whether the reader may save the snapshot.
+ */
+export function canCaptureTeamPortfolioSnapshot(access: PortfolioSnapshotCaptureAccess): boolean {
+  if (access.isSystemAdmin) return true
+  if (!access.isTeamManager) return false
+  if (access.projectIds.length === 0) return access.directTeamGrant
+  return access.projectIds.every((projectId) => access.canReadProject(projectId) && access.canSeeCost(projectId))
+}
+
 /**
  * Rejects a Team with more Projects than one portfolio response holds.
  *

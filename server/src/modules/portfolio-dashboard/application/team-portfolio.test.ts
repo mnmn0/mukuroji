@@ -7,6 +7,7 @@ import {
 import { InMemoryTimeTrackingRepository, TimeTrackingService } from '../../time-tracking'
 import {
   buildTeamPortfolioProjects,
+  canCaptureTeamPortfolioSnapshot,
   redactTeamPortfolioSnapshot,
   type PortfolioWorkItem,
 } from './team-portfolio'
@@ -175,5 +176,40 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     expect(budgets.get('alpha')).toMatchObject({ actualCostMinor: 12_000, hasOtherCurrencyCost: true })
 
     await expect(service.summarizeProjectBudgets({ ...input, entryLimit: 1 })).rejects.toMatchObject({ status: 413, code: 'PortfolioTooLarge' })
+  })
+})
+
+describe('canCaptureTeamPortfolioSnapshot', () => {
+  /** Manager access to a Team of two Projects that can read and cost both. */
+  const fullAccess = {
+    isSystemAdmin: false,
+    isTeamManager: true,
+    directTeamGrant: false,
+    projectIds: ['alpha', 'beta'],
+    canReadProject: () => true,
+    canSeeCost: () => true,
+  }
+
+  test('allows a manager who reads and costs every Project', () => {
+    expect(canCaptureTeamPortfolioSnapshot(fullAccess)).toBe(true)
+  })
+
+  test('rejects a Team-wide grant that cannot read one Project, so a save cannot drop it', () => {
+    expect(canCaptureTeamPortfolioSnapshot({
+      ...fullAccess,
+      directTeamGrant: true,
+      canReadProject: (projectId) => projectId !== 'beta',
+    })).toBe(false)
+  })
+
+  test('rejects a manager who cannot see one Project cost', () => {
+    expect(canCaptureTeamPortfolioSnapshot({ ...fullAccess, canSeeCost: (projectId) => projectId === 'alpha' })).toBe(false)
+  })
+
+  test('allows an empty Team only with a Team-wide grant, and always a system administrator', () => {
+    expect(canCaptureTeamPortfolioSnapshot({ ...fullAccess, projectIds: [] })).toBe(false)
+    expect(canCaptureTeamPortfolioSnapshot({ ...fullAccess, projectIds: [], directTeamGrant: true })).toBe(true)
+    expect(canCaptureTeamPortfolioSnapshot({ ...fullAccess, isTeamManager: false })).toBe(false)
+    expect(canCaptureTeamPortfolioSnapshot({ ...fullAccess, isTeamManager: false, isSystemAdmin: true })).toBe(true)
   })
 })

@@ -10,6 +10,7 @@ import type { Context, Hono } from 'hono'
 import { ProjectDataError } from '../../modules/directory'
 import {
   assertPortfolioProjectLimit,
+  canCaptureTeamPortfolioSnapshot,
   buildTeamPortfolioProjects,
   redactTeamPortfolioSnapshot,
   type PortfolioBudgetSource,
@@ -175,13 +176,14 @@ async function readPortfolioAccess(principal: WorkspacePrincipal, teamId: string
       readable.has(projectId) &&
       managerContext !== undefined &&
       (principal.isSystemAdmin || costProjectIds.has(projectId)),
-    // A snapshot must hold every Project of the Team with its costs, so only a reader who
-    // manages all of them may save one: a Team-wide grant, or a manager role on every Project.
-    managesWholeTeam: principal.isSystemAdmin ||
-      managerContext?.directTeamGrant === true ||
-      (context.team.projects.length > 0 &&
-        managerContext !== undefined &&
-        context.team.projects.every((project) => readable.has(project.id) && costProjectIds.has(project.id))),
+    managesWholeTeam: canCaptureTeamPortfolioSnapshot({
+      isSystemAdmin: principal.isSystemAdmin,
+      isTeamManager: managerContext !== undefined,
+      directTeamGrant: managerContext?.directTeamGrant === true,
+      projectIds: context.team.projects.map((project) => project.id),
+      canReadProject: (projectId) => readable.has(projectId),
+      canSeeCost: (projectId) => costProjectIds.has(projectId),
+    }),
   }
 }
 

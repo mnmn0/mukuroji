@@ -33,8 +33,10 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
   team-portfolio-snapshot`、`schemaVersion: 1`）で持つ。行には Project ごとの指標（費用を含む）を
   そのまま入れ、350,000 byte を超える場合は 413 で保存を断る。
 - 保存は `PUT /api/teams/:teamId/portfolio/snapshots/:month` で、`teams.manage` の操作として扱い、
-  Team 全体を管理している人（システム管理者、Team への直接の権限、または Team の全 Project を読めて
-  費用も見られる工数管理者）だけができる。保存できるのは閲覧者の timezone での今月だけで、同じ月に
+  Team 全体を管理している人だけができる。システム管理者か、Team の全 Project を読めて費用も見られる
+  工数管理者で、Team への直接の権限があっても読めない Project や費用の見えない Project が1つでもあれば
+  保存できない（保存した snapshot がその月の比較を全員分置き換えるので、一部だけの snapshot で
+  上書きさせない）。Project のない Team は Team への直接の管理権限で保存できる。保存できるのは閲覧者の timezone での今月だけで、同じ月に
   もう一度保存すると上書きする。書き込みは呼び出し元の権限 fence と監査イベント
   `team.portfolio_snapshot_saved`（月と Project 数だけを記録）を同じ transaction に入れる。
 - snapshot を読むときは、読む人の今の権限で Project と費用を伏せ直してから返す。保存した人の権限で

@@ -1,5 +1,6 @@
 export {
   assertPortfolioProjectLimit,
+  canCaptureTeamPortfolioSnapshot,
   buildTeamPortfolioProjects,
   redactTeamPortfolioSnapshot,
   type PortfolioBudgetSource,
