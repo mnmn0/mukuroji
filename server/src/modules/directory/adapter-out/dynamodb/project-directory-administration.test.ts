@@ -934,6 +934,16 @@ function lengthOf(value: unknown) {
 }
 
 /**
+ * Narrows an untrusted value to a plain record.
+ *
+ * @param value - Value to inspect.
+ * @returns Whether the value is a non-null object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+/**
  * Reads the items of a sent transaction.
  *
  * @param value - Transaction items as sent.
@@ -1088,6 +1098,51 @@ test('binds a Team-wide grant key to its input with a conditional receipt', asyn
       ExpressionAttributeValues: { ':requestFingerprint': 'member-request' },
     },
   }]])
+
+  // Against stored receipts, the first input wins: it may repeat, and another input is refused.
+  const receipts = new Map<string, string>()
+  /**
+   * Stores receipts and evaluates their write condition like DynamoDB does.
+   *
+   * @param command - Sent command; only receipt transactions are expected.
+   * @returns An empty response once the receipt is written.
+   */
+  const sendReceipt = async (command: SentCommand) => {
+    const [put] = listItems(command.input.TransactItems)
+    const item: unknown = isRecord(put) && isRecord(put.Put) ? put.Put.Item : undefined
+    if (!isRecord(item) || typeof item.entryKey !== 'string' || typeof item.requestFingerprint !== 'string') {
+      throw new Error('Expected a receipt Put.')
+    }
+    const stored = receipts.get(item.entryKey)
+    if (stored !== undefined && stored !== item.requestFingerprint) {
+      throw Object.assign(new Error('Transaction was canceled.'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+      })
+    }
+    receipts.set(item.entryKey, item.requestFingerprint)
+    return {}
+  }
+  const stateful = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    // The fake implements only `send`, the one method the receipt write calls.
+    { send: sendReceipt } as unknown as DynamoDBDocumentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+  await stateful.bindTeamGrantRequest(directoryId, grantRequest)
+  await expect(stateful.bindTeamGrantRequest(directoryId, grantRequest)).resolves.toBeUndefined()
+  await expect(stateful.bindTeamGrantRequest(
+    directoryId,
+    { idempotencyKeyHash: 'key-hash', requestFingerprint: 'other-member-request' },
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  await expect(stateful.bindTeamGrantRequest(
+    directoryId,
+    { idempotencyKeyHash: 'other-hash', requestFingerprint: 'other-member-request' },
+  )).resolves.toBeUndefined()
 
   // A receipt of the same key with another input fails the condition, also under concurrency.
   const reused = createClient([], false, {}, [], 0)
