@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
 import { createTimeTrackingRouter } from './time-tracking-router'
 import {
   InMemoryTimeTrackingRepository,
@@ -15,10 +16,19 @@ function toHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
  * Creates a router whose caller is `manager-1`, with a configurable management scope.
  *
  * @param scope - Whether the caller manages time at all, and whether it manages the whole Team.
+ * @param timeZone - Workspace time zone; the Workspace default when omitted.
  * @returns The router and its service.
  */
-function createFixture(scope: { canManage: boolean; wholeTeam: boolean }) {
+function createFixture(scope: { canManage: boolean; wholeTeam: boolean }, timeZone?: string) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+    ...(timeZone
+      ? {
+          categories: {
+            readCategories: async () => DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+            readTimeZone: async () => timeZone,
+          },
+        }
+      : {}),
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
       let id = 0
@@ -206,6 +216,16 @@ describe('time entry policy routes', () => {
     expect((await crossing.json()).warnings).toEqual([
       { code: 'TimeEntryDailyLimitExceeded', date: '2026-08-03', minutes: 60, limitMinutes: 59 },
     ])
+  })
+
+  test('counts days in the time zone the Workspace chose', async () => {
+    const { router } = createFixture({ canManage: true, wholeTeam: true }, 'UTC')
+    await savePolicy(router, { overlap: 'off', dailyLimit: 'reject', dailyLimitMinutes: 600, expectedRevision: 0 })
+    // Both are on 2026-08-03 in UTC, though in Tokyo they fall on two days.
+    expect((await record(router, '2026-08-03T08:00:00.000Z', '2026-08-03T14:00:00.000Z')).status).toBe(201)
+    const rejected = await record(router, '2026-08-03T16:00:00.000Z', '2026-08-03T22:00:00.000Z')
+    expect(rejected.status).toBe(409)
+    expect(await rejected.json()).toMatchObject({ code: 'TimeEntryDailyLimitExceeded' })
   })
 
   test("gives no warnings to a manager editing another member's time", async () => {

@@ -24,8 +24,8 @@
   Team 全体の管理者だけとし、ほかは `403 TimeEntryPolicyDenied`。
 - 確かめるのは工数の作成と更新（`POST` / `PATCH /api/teams/:teamId/time-entries`）。更新では `startAt`・`endAt` が
   変わるときだけ確かめるので、上限を下げた後も既存の記録のメモや区分は直せる。
-  比べる相手は同じ Team の同じメンバーの記録（下書きから承認済みまで全部）で、日付は Workspace のタイムゾーン
-  （いまは `Asia/Tokyo`）の暦日で数える。日をまたぐ記録はそれぞれの日に分けて足す。
+  比べる相手は同じ Team の同じメンバーの記録（下書きから承認済みまで全部）で、日付は Workspace のカレンダー設定の
+  タイムゾーン（決めていなければ `Asia/Tokyo`）の暦日で数える。日をまたぐ記録は集計と同じ配分でそれぞれの日に分けて足す。
 - 日付と時間数だけの記録（`durationOnly`、間接作業など）は時刻に意味がないので重複の対象にしないが、1日の合計には入る。
 - `reject` は `409 TimeEntryOverlap` / `409 TimeEntryDailyLimitExceeded` で保存しない。`warn` は保存したうえで
   応答に `warnings`（`TimeEntryOverlap { entryIds }`、`TimeEntryDailyLimitExceeded { date, minutes, limitMinutes }`）を付ける。
@@ -46,7 +46,7 @@
 ## 結果
 
 - 新しい table・index・queue はない。工数の作成と時刻を変える更新で、設定の GetItem 1回と、チェックが有効なら
-  日付 index の Query 1回が増える。
+  Workspace のタイムゾーンを読む tenant profile の GetItem 1回と日付 index の Query 1回が増える。
 - 日付 index は結果整合なので、ほぼ同時に保存した記録どうしの重複は見逃すことがある。
-- Workspace のタイムゾーン設定を持つようになったら、日付の区切りはそれに従う。
+- 日付の区切りは Workspace のタイムゾーン設定に従う。設定を変えると、それ以降の判定から新しい暦日で数える。
 - 更新した文書: `docs/time-tracking.md`、`docs/guide/pm.md`、`docs/guide/member.md`。

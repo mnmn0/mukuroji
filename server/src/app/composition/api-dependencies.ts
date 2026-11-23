@@ -20,6 +20,7 @@ import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
 } from '@mukuroji/contracts'
@@ -1826,6 +1827,9 @@ export function createProductionAppDependencies(): AppDependencies {
       readCategories: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
           DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readTimeZone: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
+          DEFAULT_WORKSPACE_TIME_ZONE,
     },
   )
   return {

@@ -392,6 +392,13 @@ export type TimeTrackingCategorySource = {
    * @returns The stored categories, or the defaults when the Workspace has not saved any.
    */
   readCategories(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings>
+  /**
+   * Reads the Workspace time zone, which decides the local dates the daily total is counted on.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns IANA time zone, or the Workspace default when the Workspace has not chosen one.
+   */
+  readTimeZone?(workspaceId: string): Promise<string>
 }
 
 /** A stored Team time entry policy. */
@@ -759,7 +766,7 @@ export class TimeTrackingService {
   private readonly idempotency?: TimeTrackingIdempotencyPort
   /** Read port for canonical Work Item estimates. */
   private readonly estimates?: TimeTrackingEstimateSource
-  /** Read port for Workspace work categories; the built-in categories when absent. */
+  /** Read port for Workspace work categories and time zone; the built-in ones when absent. */
   private readonly categories?: TimeTrackingCategorySource
 
   /** Creates a time tracking service. */
@@ -1880,7 +1887,7 @@ export class TimeTrackingService {
   private async checkEntryPolicy(entry: TimeEntry): Promise<TimeEntryPolicyWarning[]> {
     const policy = (await this.repository.getEntryPolicy(entry.workspaceId, entry.teamId)) ?? DEFAULT_TEAM_TIME_ENTRY_POLICY
     if (policy.overlap === 'off' && policy.dailyLimit === 'off') return []
-    const timeZone = DEFAULT_WORKSPACE_TIME_ZONE
+    const timeZone = await this.categories?.readTimeZone?.(entry.workspaceId) ?? DEFAULT_WORKSPACE_TIME_ZONE
     const start = Date.parse(entry.startAt)
     const end = Date.parse(entry.endAt)
     const firstDate = localDateAt(start, timeZone)
