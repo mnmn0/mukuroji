@@ -35,7 +35,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       collaboration: new DynamoDbCollaborationClient(),
       updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(planningTable, client),
       savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(planningTable, client),
-      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), agentRuns: unavailable(),
+      teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), agentRuns: unavailable(), agentRunUsage: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
       workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), cycleScheduleBaselines: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
       requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),

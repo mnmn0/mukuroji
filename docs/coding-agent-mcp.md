@@ -207,6 +207,51 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 設定の書式は各クライアントの更新で変わることがあります。登録後は `claude mcp get mukuroji-tasks`、
 `codex mcp list`、KiroのMCP一覧などで接続を確認し、`get_configuration` で `runtime` と担当者を確かめます。
 
+### トークン使用量の送信（Claude Code、OpenTelemetry）
+
+Claude Code が OpenTelemetry で出す request ごとのトークン数と推定費用を Mukuroji に送ると、MCP で着手した
+Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。受け口は
+`POST /api/v1/agent-telemetry/v1/logs` で、OTLP/HTTP の JSON だけを受け付けます。
+
+1. 送信には自分用 token の `work-items:write` を使います。MCP に設定している token をそのまま使えます。
+2. MCP の設定に `MUKUROJI_MCP_INSTANCE_ID` を明示し（例: `laptop-claude-1`）、同じ値を OpenTelemetry の resource
+   attribute `mukuroji.agent_instance` に入れます。Mukuroji は usage をこの値と時刻で Run に割り当てます。
+   既定の instance ID は MCP の中で作るため、指定しないと Run と結び付けられません。
+   Web の **agent を接続** で Claude Code を選び instance ID を入力すると、この手順 2・3 の設定がそのまま作られます。
+3. Claude Code の設定（`~/.claude/settings.json` など）に次を追加します。token は書かず、header は
+   `otelHeadersHelper` が `MUKUROJI_MCP_TOKEN` から作ります。
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "https://your-mukuroji.example.com/api/v1/agent-telemetry/v1/logs",
+    "OTEL_LOGS_EXPORT_INTERVAL": "60000",
+    "OTEL_RESOURCE_ATTRIBUTES": "mukuroji.agent_instance=laptop-claude-1"
+  },
+  "otelHeadersHelper": "printf '{\"Authorization\":\"Bearer %s\"}' \"$MUKUROJI_MCP_TOKEN\""
+}
+```
+
+- Claude Code は `otelHeadersHelper` の header を、logs だけでなく metrics・traces を含むすべての
+  OpenTelemetry の送信先に付けます。metrics や traces を別の collector に送っている環境でこの設定を足すと、
+  Mukuroji の token がその collector にも渡ります。その場合は設定しないでください。
+- `OTEL_LOGS_EXPORT_INTERVAL` を 60 秒にすると request 数が減ります（既定は 5 秒）。metrics の exporter は
+  設定しません。Mukuroji は logs の `claude_code.api_request` だけを読みます。
+- Mukuroji が読むのはトークン数、推定費用、model、時刻、`mukuroji.agent_instance` だけで、prompt や tool の
+  入力は受け取っても保存しません。`OTEL_LOG_USER_PROMPTS` などを有効にする必要はありません。
+- 同じ instance ID の session を同時に 2 つ動かし、それぞれ別のタスクに着手すると、その間の usage は両方の Run に
+  数えられます。同時に動かす session には別の instance ID を指定します（プロジェクトの
+  `.claude/settings.local.json` と `.mcp.json` で分けるなど）。
+- 推定費用は Claude Code の見積もりで、請求額とは一致しません。Web では Team manager にだけ表示されます。
+- Codex と Kiro には対応していません。Codex の OpenTelemetry は token 数を出しますが、resource attribute の指定方法、
+  header での環境変数の展開、event の attribute 名が公開資料の間で食い違っており、Run への割り当てと token を
+  設定ファイルに書かない運用を確かめられないためです（#729 に残します）。
+- 受け口は 1 回に 2,000 record まで、7 日より古い event と 5 分より先の event は断ります（`partialSuccess` で件数を返します）。
+  Software factory が off の deploy では `503` を返します。
+
 ## 操作
 
 | ツール | 用途 |

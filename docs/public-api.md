@@ -34,7 +34,7 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 | Scope | 許可する操作 |
 | --- | --- |
 | `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文、credential 所有者・Team・Project・Project メンバーの参照と Work Item key の解決 |
-| `work-items:write` | Work Item の作成と更新 |
+| `work-items:write` | Work Item の作成と更新、coding agent の OpenTelemetry logs（トークン使用量）の送信（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)） |
 | `work-items:delete` | Work Item の削除 |
 | `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
 | `integrations:read` / `integrations:write` | Connector と external link の参照 / 管理 |

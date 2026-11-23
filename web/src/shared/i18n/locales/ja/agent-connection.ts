@@ -66,4 +66,10 @@ export const agentConnectionMessages = {
   'agents.connect.workspaceProfileNote': 'Software factory が無効な環境なので、Workspace を読む設定（Workspace profile）だけを書きます。Team や Project、Work Item、コメントを読めますが、タスクの着手や Agent Run はできません。',
   'agents.connect.verifyWorkspaceDescription': 'クライアントを再起動し、MCP の一覧に mukuroji が出ることを確認します（claude mcp get mukuroji、codex mcp list、Kiro の MCP 一覧）。続けて agent に whoami を呼ばせ、あなたのメールが返れば、list_teams と list_issues で Workspace を読めます。',
   'agents.connect.windowsNote': 'Windows では node が PATH にあることを確認してください。パスの区切りは設定例のとおり \\ のままで構いません。',
+  'agents.connect.usageInstanceLabel': 'トークン使用量を送る instance ID（任意）',
+  'agents.connect.usageInstanceHint': '入力すると、MCP とトークン使用量の送信の両方にこの ID を設定し、タスクの Run にトークン数を表示します。同時に動かす session ごとに別の ID にしてください。ID を変える前に、着手中の Run は前の設定のまま閉じてください。',
+  'agents.connect.usageInstanceInvalid': '英数字・.・_・- の 64 文字以内で入力してください。',
+  'agents.connect.usageSnippetLabel': '{location} に追加するトークン使用量の送信設定',
+  'agents.connect.usageNote': 'token は書かず、otelHeadersHelper が MUKUROJI_MCP_TOKEN から header を作ります。送信に使う scope は token にすでにある work-items:write です。Claude Code はこの header を OpenTelemetry のすべての送信先に付けます。metrics や traces をすでに別の collector に送っている場合は、token がその collector にも渡るため、この設定を足さないでください。',
+  'agents.connect.usageWindowsNote': 'otelHeadersHelper は POSIX shell のコマンドです。Windows では WSL または Git Bash から Claude Code を起動してください。',
 } as const
