@@ -92,6 +92,42 @@ describe('parseProjectRaidEntry', () => {
   })
 })
 
+describe('change request schedule changes and decisions', () => {
+  const base = { kind: 'change-request', title: 'Move', impact: 3, relatedWorkItemIds: ['wi-1', 'wi-2'], status: 'open' }
+
+  test('accepts one move or resize per related Work Item of a change request', () => {
+    const parsed = parseProjectRaidEntryInput({
+      ...base,
+      scheduleChanges: [
+        { workItemId: ' wi-1 ', operation: { type: 'move', targetDate: '2026-12-10' } },
+        { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+      ],
+    })
+    expect(parsed.ok && parsed.value.scheduleChanges).toEqual([
+      { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } },
+      { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+    ])
+  })
+
+  test('rejects changes on other kinds, unrelated or repeated Work Items, and invalid dates', () => {
+    const move = { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } }
+    expect(parseProjectRaidEntryInput({ ...base, kind: 'issue', scheduleChanges: [move] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, workItemId: 'wi-9' }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [move, move] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '2026-02-30' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'replace' } }] }).ok).toBe(false)
+  })
+
+  test('keeps a decision only on a closed change request', () => {
+    const decision = { outcome: 'approved', decidedAt: '2026-11-20T00:00:00.000Z', decidedByMemberId: 'sato@example.com', baselineId: 'b-1' }
+    const closed = entry({ kind: 'change-request', probability: undefined, status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' })
+    expect(parseProjectRaidEntry({ ...closed, decision })?.decision).toEqual(decision)
+    expect(parseProjectRaidEntry({ ...closed, status: 'open', closedAt: undefined, decision })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry({ status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' }), decision })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...closed, decision: { ...decision, outcome: 'rejected' } })).toBeUndefined()
+  })
+})
+
 describe('deriveProjectRaidSeverity', () => {
   test('rates a risk by probability times impact', () => {
     expect(deriveProjectRaidSeverity({ kind: 'risk', probability: 2, impact: 2 })).toBe('low')

@@ -9339,6 +9339,75 @@ test.describe('authenticated task page', () => {
     expect((await download).suggestedFilename()).toMatch(/^project-raid-log-\d{4}-\d{2}-\d{2}\.csv$/)
   })
 
+  test('Issue #344: 変更要求を承認すると日程を反映してベースラインを差し替え、承認を記録する', async ({ page }) => {
+    const decisions: unknown[] = []
+    const captures: unknown[] = []
+    const request = {
+      id: 'cr-launch',
+      kind: 'change-request',
+      title: 'リリース日の延期',
+      impact: 4,
+      relatedWorkItemIds: ['wireframe'],
+      scheduleChanges: [{ workItemId: 'wireframe', operation: { type: 'move', targetDate: '2026-12-10' } }],
+      status: 'open',
+      revision: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    }
+    let entries: Record<string, unknown>[] = [request]
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries, viewer: { canEdit: true, canDecide: true } } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log\/entries\/cr-launch\/decision$/, async (route) => {
+      const body: unknown = route.request().postDataJSON()
+      decisions.push(body)
+      const entry = {
+        ...request,
+        status: 'closed',
+        revision: 2,
+        updatedAt: '2026-06-02T00:00:00.000Z',
+        closedAt: '2026-06-02T00:00:00.000Z',
+        decision: { outcome: 'approved', decidedAt: '2026-06-02T00:00:00.000Z', decidedByMemberId: 'demo@example.com', baselineId: 'baseline-cr' },
+      }
+      entries = [entry]
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entry } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/schedule-baseline$/, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      captures.push(route.request().postDataJSON())
+      await route.fulfill({
+        status: 201,
+        json: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          baseline: { id: 'baseline-cr', revision: 1, name: '変更要求: リリース日の延期', capturedAt: '2026-06-02T00:00:00.000Z', entries: [] },
+          activeBaselineId: 'baseline-cr',
+          savedBaselines: [{ id: 'baseline-cr', name: '変更要求: リリース日の延期', capturedAt: '2026-06-02T00:00:00.000Z', entryCount: 0 }],
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('tab', { name: '権限' }).click()
+    const panel = page.getByTestId('project-raid-log')
+    await expect(panel.getByTestId('project-raid-log-entry-schedule')).toContainText('2026-12-10 へ移動')
+    await panel.getByTestId('project-raid-log-approve').click()
+    await expect(panel.getByTestId('project-raid-log-decide-baseline')).toBeChecked()
+    await panel.getByTestId('project-raid-log-approve-confirm').click()
+
+    await expect.poll(() => decisions.length).toBe(1)
+    expect(requestCounts.scheduleConfirms).toBe(1)
+    expect(captures).toEqual([{ name: '変更要求: リリース日の延期' }])
+    expect(decisions).toEqual([{ expectedRevision: 1, outcome: 'approved', baselineId: 'baseline-cr' }])
+    await panel.getByLabel('クローズ済みも表示').check()
+    await expect(panel.getByTestId('project-raid-log-decision')).toContainText('承認')
+    await expect(panel.getByTestId('project-raid-log-decision')).toContainText('（ベースラインを差し替え）')
+  })
+
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')

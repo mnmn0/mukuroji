@@ -4,6 +4,7 @@ import type { Context, Hono } from 'hono'
 import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import {
   createProjectRaidEntryUseCase,
+  decideProjectRaidChangeRequestUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
   type ProjectRaidEntryReferences,
@@ -52,7 +53,10 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       )
       return c.json({
         ...log,
-        viewer: { canEdit: await canEditProjectRaidLog(principal, teamId, projectId) },
+        viewer: {
+          canEdit: await canEditProjectRaidLog(principal, teamId, projectId),
+          canDecide: await canDecideProjectChangeRequests(principal, teamId, projectId),
+        },
       } satisfies ProjectRaidLogResponse)
     } catch (error) {
       return toProjectRaidLogErrorResponse(c, error)
@@ -127,6 +131,96 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       return toProjectRaidLogErrorResponse(c, error)
     }
   })
+
+  /**
+   * Approves or rejects an open change request and closes it. The client applies the requested
+   * date changes and captures the baseline first (ADR 0078).
+   */
+  routeApp.post('/api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId/decision', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const { teamId, projectId } = readLogRoute(c)
+      const entryId = c.req.param('entryId')?.trim()
+      if (!entryId) throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Entry ID is required.')
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canDecideProjectChangeRequests(principal, teamId, projectId)) {
+        throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project manager can approve or reject a change request.')
+      }
+      const body = await readJson<unknown>(c.req)
+      const auditContext = createApiMutationContext(c, principal, body)
+      const response = await decideProjectRaidChangeRequestUseCase(
+        workItemDependencies.projectRaidLogs,
+        { workspaceId: principal.directoryId, teamId, projectId },
+        entryId,
+        body,
+        {
+          now: new Date().toISOString(),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
+          auditContext,
+          updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
+          updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
+          deciderMemberId: principal.userKey,
+          verifyBaseline: (baselineId) => verifyActiveBaseline(principal.directoryId, teamId, projectId, baselineId),
+        },
+      )
+      return c.json(response)
+    } catch (error) {
+      return toProjectRaidLogErrorResponse(c, error)
+    }
+  })
+}
+
+/**
+ * Tells whether the principal may approve or reject change requests: a Project member who also
+ * manages the Project, as capturing the baseline an approval replaces requires.
+ *
+ * A direct Team grant read at viewer level reports every Project role as viewer, so the roles
+ * are read again at manager level before refusing.
+ *
+ * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Whether the principal may decide.
+ */
+async function canDecideProjectChangeRequests(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  if (!await canEditProjectRaidLog(principal, teamId, projectId)) return false
+  const context = await requireTeamPermission(principal, teamId, 'viewer')
+  if (canAccessAssignedProject(principal, context, projectId, 'manager')) return true
+  let managerContext: TeamPermissionContext
+  try {
+    managerContext = await requireTeamPermission(principal, teamId, 'manager')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
+  return managerContext.directTeamGrant === true || canAccessAssignedProject(principal, managerContext, projectId, 'manager')
+}
+
+/**
+ * Requires a baseline named by an approval to be the Project's active baseline, which the
+ * approver captured just before deciding.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @param baselineId - Baseline named by the approval.
+ * @returns No commit-time checks; a later switch of the baseline does not change the record.
+ * @throws ProjectDataError 400 when the baseline is not the active one.
+ */
+async function verifyActiveBaseline(
+  directoryId: string,
+  teamId: string,
+  projectId: string,
+  baselineId: string,
+): Promise<ProjectRaidLogCallerAuthorizationCheck[]> {
+  const active = await workItemDependencies.scheduleBaselines.get(directoryId, teamId, projectId)
+  if (active?.id !== baselineId) {
+    throw new ProjectDataError(400, 'InvalidProjectRaidDecision', 'The baseline must be the active baseline of this Project.')
+  }
+  return []
 }
 
 /**
@@ -409,7 +503,7 @@ function createEntryId(teamId: string, projectId: string, actorId: string, idemp
 function toProjectRaidLogErrorResponse(c: Context, error: unknown) {
   if (
     error instanceof ProjectDataError &&
-    (error.code.startsWith('ProjectRaid') || error.code === 'InvalidProjectRaidEntry')
+    (error.code.startsWith('ProjectRaid') || error.code === 'InvalidProjectRaidEntry' || error.code === 'InvalidProjectRaidDecision')
   ) {
     const status = toProjectRaidLogStatus(error.status)
     if (status >= 500) {

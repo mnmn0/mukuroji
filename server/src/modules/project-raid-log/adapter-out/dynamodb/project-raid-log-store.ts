@@ -48,6 +48,8 @@ const AUDIT_FIELDS = [
   'reviewDueDate',
   'ownerMemberId',
   'relatedWorkItemIds',
+  'scheduleChanges',
+  'decision',
   'status',
   'revision',
 ]
@@ -518,9 +520,13 @@ function rowIdentity(scope: ProjectRaidLogScope, entryId: string) {
  *
  * @param previous - Entry before the change.
  * @param next - Entry after the change.
- * @returns `raid_entry_closed`, `raid_entry_reopened`, or `raid_entry_updated`.
+ * @returns `raid_change_request_approved` or `raid_change_request_rejected` for a decision, else
+ * `raid_entry_closed`, `raid_entry_reopened`, or `raid_entry_updated`.
  */
 function describeUpdateAction(previous: ProjectRaidEntry, next: ProjectRaidEntry) {
+  if (previous.decision === undefined && next.decision !== undefined) {
+    return next.decision.outcome === 'approved' ? 'raid_change_request_approved' : 'raid_change_request_rejected'
+  }
   if (previous.status === 'open' && next.status === 'closed') return 'raid_entry_closed'
   if (previous.status === 'closed' && next.status === 'open') return 'raid_entry_reopened'
   return 'raid_entry_updated'

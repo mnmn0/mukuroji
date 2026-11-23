@@ -1,5 +1,7 @@
 import {
+  PROJECT_RAID_BASELINE_ID_MAX_LENGTH,
   parseProjectRaidEntryInput,
+  type DecideProjectRaidChangeRequest,
   type ProjectRaidEntry,
   type ProjectRaidEntryResponse,
   type ProjectRaidLogResponse,
@@ -233,6 +235,9 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   if (previous.kind !== input.kind) {
     throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'The kind of a log entry cannot change.')
   }
+  if (previous.decision !== undefined) {
+    throw new ProjectDataError(409, 'ProjectRaidChangeRequestDecided', 'A decided change request cannot change.')
+  }
   const previousWorkItemIds = new Set(previous.relatedWorkItemIds ?? [])
   const referenceChecks = await mutation.verifyReferences({
     ...(input.ownerMemberId === undefined || input.ownerMemberId === previous.ownerMemberId
@@ -262,6 +267,121 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
     next,
   })
   return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
+}
+
+/** Decision mutation context: who decides, how a named baseline is verified, and the receipt. */
+export type ProjectRaidDecisionMutation<TCallerCheck, TAudit> = ProjectRaidLogMutation<TCallerCheck, TAudit> & {
+  /** Receipt of this decision request. */
+  updateReceipt: string
+  /** Key of this decision request without its content. */
+  updateKey: string
+  /** Member key of the person deciding. */
+  deciderMemberId: string
+  /**
+   * Checks that a named baseline is the Project's active baseline.
+   *
+   * @param baselineId - Baseline named by the approval.
+   * @returns Commit-time checks, possibly none.
+   * @throws ProjectDataError 400 when the baseline is not the active one.
+   */
+  verifyBaseline: (baselineId: string) => Promise<TCallerCheck[]>
+}
+
+/**
+ * Approves or rejects an open change request and closes it.
+ *
+ * The client applies the requested date changes and captures the baseline before deciding, with
+ * the Work Item and baseline endpoints and their own permission checks; this records the outcome
+ * last, so a failure on the way leaves the request open to try again (ADR 0078).
+ *
+ * @param store - Log persistence.
+ * @param scope - Authorized Team and Project.
+ * @param entryId - Change request to decide.
+ * @param body - Untrusted request body.
+ * @param mutation - Mutation time, caller fences, audit context, decider, and receipt.
+ * @returns The closed entry, or the current entry when this same request was already applied.
+ * @throws ProjectDataError 400 for an invalid body or an entry that is not a change request, 404
+ * for an unknown entry, and 409 for a stale revision or a request already decided.
+ */
+export async function decideProjectRaidChangeRequestUseCase<TCallerCheck, TAudit>(
+  store: ProjectRaidLogStore<TCallerCheck, TAudit>,
+  scope: ProjectRaidLogScope,
+  entryId: string,
+  body: unknown,
+  mutation: ProjectRaidDecisionMutation<TCallerCheck, TAudit>,
+): Promise<ProjectRaidEntryResponse> {
+  const request = readDecisionRequest(body)
+  const record = await store.get(scope, entryId)
+  if (!record) {
+    throw new ProjectDataError(404, 'ProjectRaidEntryNotFound', 'The log entry was not found.')
+  }
+  const previous = record.entry
+  if (
+    previous.revision === request.expectedRevision + 1 &&
+    record.lastUpdateReceipt === mutation.updateReceipt
+  ) {
+    return { teamId: scope.teamId, projectId: scope.projectId, entry: previous }
+  }
+  if (record.lastUpdateKey === mutation.updateKey && record.lastUpdateReceipt !== mutation.updateReceipt) {
+    throw new ProjectDataError(409, 'ProjectRaidEntryIdempotencyConflict', 'This Idempotency-Key was already used for another change.')
+  }
+  if (previous.revision !== request.expectedRevision) {
+    throw new ProjectDataError(409, 'ProjectRaidEntryConflict', 'The log entry changed. Reload and try again.')
+  }
+  if (previous.kind !== 'change-request') {
+    throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Only a change request can be approved or rejected.')
+  }
+  if (previous.decision !== undefined || previous.status !== 'open') {
+    throw new ProjectDataError(409, 'ProjectRaidChangeRequestDecided', 'Only an open change request can be decided.')
+  }
+  const baselineChecks = request.baselineId === undefined ? [] : await mutation.verifyBaseline(request.baselineId)
+  const next: ProjectRaidEntry = {
+    ...previous,
+    decision: {
+      outcome: request.outcome,
+      decidedAt: mutation.now,
+      decidedByMemberId: mutation.deciderMemberId,
+      ...(request.baselineId === undefined ? {} : { baselineId: request.baselineId }),
+    },
+    status: 'closed',
+    revision: previous.revision + 1,
+    updatedAt: mutation.now,
+    closedAt: mutation.now,
+  }
+  const stored = await store.update({
+    ...scope,
+    now: mutation.now,
+    callerAuthorization: [...mutation.callerAuthorization, ...baselineChecks],
+    auditContext: mutation.auditContext,
+    updateReceipt: mutation.updateReceipt,
+    updateKey: mutation.updateKey,
+    previous,
+    next,
+  })
+  return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
+}
+
+/**
+ * Validates an untrusted decision request.
+ *
+ * @param body - Request body.
+ * @returns The revision, outcome, and optional baseline.
+ * @throws ProjectDataError 400 when the body is invalid.
+ */
+function readDecisionRequest(body: unknown): DecideProjectRaidChangeRequest {
+  const invalid = (message: string) => new ProjectDataError(400, 'InvalidProjectRaidDecision', message)
+  if (!isRecord(body)) throw invalid('Request body must be an object.')
+  const { expectedRevision, outcome, baselineId } = body
+  if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw invalid('expectedRevision must be a positive integer.')
+  }
+  if (outcome !== 'approved' && outcome !== 'rejected') throw invalid('outcome must be approved or rejected.')
+  if (baselineId === undefined || baselineId === null) return { expectedRevision, outcome }
+  if (outcome !== 'approved') throw invalid('Only an approval names a baseline.')
+  if (typeof baselineId !== 'string' || baselineId.length === 0 || baselineId.length > PROJECT_RAID_BASELINE_ID_MAX_LENGTH) {
+    throw invalid(`baselineId must be text of at most ${PROJECT_RAID_BASELINE_ID_MAX_LENGTH} characters.`)
+  }
+  return { expectedRevision, outcome, baselineId }
 }
 
 /**

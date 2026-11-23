@@ -2,6 +2,8 @@ export {
   createProjectRaidEntryUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
+  decideProjectRaidChangeRequestUseCase,
+  type ProjectRaidDecisionMutation,
   type ProjectRaidEntryReferences,
   type ProjectRaidEntryReferenceVerifier,
   type ProjectRaidLogScope,

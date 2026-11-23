@@ -35,6 +35,8 @@ export const PROJECT_RAID_RELATED_WORK_ITEMS_MAX = 10
 export const PROJECT_RAID_WORK_ITEM_ID_MAX_LENGTH = 128
 /** Longest owner member key, the longest email address a member key can be. */
 export const PROJECT_RAID_OWNER_ID_MAX_LENGTH = 254
+/** Longest saved schedule baseline ID a decision may name. */
+export const PROJECT_RAID_BASELINE_ID_MAX_LENGTH = 128
 
 /** Pattern of a `YYYY-MM-DD` date. */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
@@ -49,6 +51,47 @@ const TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1
 const DISALLOWED_CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u
 /** A UTF-16 surrogate without its pair, which JSON also escapes to six bytes. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+/**
+ * Date change a change request asks for on one related Work Item, applied through the Work Item
+ * schedule cascade when the request is approved (ADR 0078).
+ */
+export type ProjectRaidScheduleChangeOperation =
+  | {
+      /** Moves the Work Item, keeping its schedule mode and duration. */
+      type: 'move'
+      /** New date of the deadline, milestone, or range start, in `YYYY-MM-DD`. */
+      targetDate: string
+    }
+  | {
+      /** Changes the inclusive end of a date-range Work Item. */
+      type: 'resize'
+      /** New end date in `YYYY-MM-DD`. */
+      endDate: string
+    }
+
+/** Requested date change of one Work Item the change request names as related. */
+export type ProjectRaidScheduleChange = {
+  /** Related Work Item whose dates change. */
+  workItemId: string
+  /** The change. */
+  operation: ProjectRaidScheduleChangeOperation
+}
+
+/** Outcome of deciding a change request. */
+export type ProjectRaidChangeDecisionOutcome = 'approved' | 'rejected'
+
+/** Recorded decision on a change request, which closes it. */
+export type ProjectRaidChangeDecision = {
+  /** Whether the request was approved or rejected. */
+  outcome: ProjectRaidChangeDecisionOutcome
+  /** ISO timestamp of the decision. */
+  decidedAt: string
+  /** Member who decided, by member key. */
+  decidedByMemberId: string
+  /** Schedule baseline captured on approval, when the baseline was replaced. */
+  baselineId?: string
+}
 
 /** One risk, issue, or change request recorded for a Project. */
 export type ProjectRaidEntry = {
@@ -72,6 +115,10 @@ export type ProjectRaidEntry = {
   ownerMemberId?: string
   /** Work Items of the Project the entry affects, without duplicates, in the order given. */
   relatedWorkItemIds?: string[]
+  /** Date changes a change request asks for, at most one per related Work Item. */
+  scheduleChanges?: ProjectRaidScheduleChange[]
+  /** Decision on a change request; set only by the decision endpoint. */
+  decision?: ProjectRaidChangeDecision
   /** Whether the entry is still open. */
   status: ProjectRaidEntryStatus
   /** Increments with every change to this entry. */
@@ -104,6 +151,11 @@ export type ProjectRaidEntryInput = {
   ownerMemberId?: string
   /** Work Items of the same Project the entry affects; the server checks each one exists there. */
   relatedWorkItemIds?: string[]
+  /**
+   * Date changes a change request asks for. Only a change request has them, each on a different
+   * Work Item among `relatedWorkItemIds`.
+   */
+  scheduleChanges?: ProjectRaidScheduleChange[]
   /** Whether the entry is still open. */
   status: ProjectRaidEntryStatus
 }
@@ -120,6 +172,20 @@ export type UpdateProjectRaidEntryRequest = {
   expectedRevision: number
   /** Next editable fields. Omitted optional fields are cleared. */
   entry: ProjectRaidEntryInput
+}
+
+/**
+ * Request body that approves or rejects an open change request and closes it. The client applies
+ * the requested date changes and captures the baseline first; the decision is recorded last, so
+ * a failure on the way leaves the request open (ADR 0078).
+ */
+export type DecideProjectRaidChangeRequest = {
+  /** Entry revision read before deciding. */
+  expectedRevision: number
+  /** Approve or reject. */
+  outcome: ProjectRaidChangeDecisionOutcome
+  /** Baseline captured for the approval; it must be the Project's active baseline. Approval only. */
+  baselineId?: string
 }
 
 /** Open entry counts and the most severe open entry of a Project log. */
@@ -148,6 +214,11 @@ export type ProjectRaidLogResponse = {
 export type ProjectRaidLogViewerCapabilities = {
   /** Whether the member may add, edit, close, and reopen entries. */
   canEdit: boolean
+  /**
+   * Whether the member may approve or reject change requests, which takes a Project manager
+   * because approval replaces the schedule baseline. Absent from servers that predate it.
+   */
+  canDecide?: boolean
 }
 
 /** Response of the create and update endpoints. */
@@ -297,7 +368,7 @@ function readRelatedWorkItemIds(value: unknown): string[] | undefined | null {
  */
 export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInputParseResult {
   if (!isRecord(value)) return { ok: false, message: 'Entry must be an object.' }
-  const { kind, title, description, probability, impact, response, reviewDueDate, ownerMemberId, relatedWorkItemIds, status } = value
+  const { kind, title, description, probability, impact, response, reviewDueDate, ownerMemberId, relatedWorkItemIds, scheduleChanges, status } = value
   if (!isProjectRaidEntryKind(kind)) return { ok: false, message: 'Entry kind must be risk, issue, or change-request.' }
   if (typeof title !== 'string' || title.trim().length === 0) {
     return { ok: false, message: 'Entry title is required.' }
@@ -337,6 +408,16 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
       message: `Related Work Items must be a list of at most ${PROJECT_RAID_RELATED_WORK_ITEMS_MAX} Work Item IDs of at most ${PROJECT_RAID_WORK_ITEM_ID_MAX_LENGTH} characters.`,
     }
   }
+  const normalizedScheduleChanges = readScheduleChanges(scheduleChanges, normalizedRelated ?? [])
+  if (normalizedScheduleChanges === null) {
+    return {
+      ok: false,
+      message: 'Schedule changes must each move or resize a different related Work Item to a date in YYYY-MM-DD.',
+    }
+  }
+  if (normalizedScheduleChanges !== undefined && kind !== 'change-request') {
+    return { ok: false, message: 'Only a change request has schedule changes.' }
+  }
   if (!isProjectRaidEntryStatus(status)) return { ok: false, message: 'Entry status must be open or closed.' }
   return {
     ok: true,
@@ -350,9 +431,84 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
       ...(isCalendarDate(reviewDueDate) ? { reviewDueDate } : {}),
       ...(normalizedOwner === undefined ? {} : { ownerMemberId: normalizedOwner }),
       ...(normalizedRelated === undefined ? {} : { relatedWorkItemIds: normalizedRelated }),
+      ...(normalizedScheduleChanges === undefined ? {} : { scheduleChanges: normalizedScheduleChanges }),
       status,
     },
   }
+}
+
+/**
+ * Reads the requested date changes of a change request.
+ *
+ * @param value - Raw field value.
+ * @param relatedWorkItemIds - Normalized related Work Items; each change must name one of them.
+ * @returns The changes in the order given, `undefined` when absent or empty, or `null` when invalid.
+ */
+function readScheduleChanges(
+  value: unknown,
+  relatedWorkItemIds: readonly string[],
+): ProjectRaidScheduleChange[] | undefined | null {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) return null
+  const changes: ProjectRaidScheduleChange[] = []
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.workItemId !== 'string') return null
+    const workItemId = item.workItemId.trim()
+    if (!relatedWorkItemIds.includes(workItemId)) return null
+    if (changes.some((change) => change.workItemId === workItemId)) return null
+    const operation = readScheduleChangeOperation(item.operation)
+    if (!operation) return null
+    changes.push({ workItemId, operation })
+  }
+  return changes.length === 0 ? undefined : changes
+}
+
+/**
+ * Reads one requested date change.
+ *
+ * @param value - Raw operation.
+ * @returns The operation, or `undefined` when invalid.
+ */
+function readScheduleChangeOperation(value: unknown): ProjectRaidScheduleChangeOperation | undefined {
+  if (!isRecord(value)) return undefined
+  if (value.type === 'move' && isCalendarDate(value.targetDate)) return { type: 'move', targetDate: value.targetDate }
+  if (value.type === 'resize' && isCalendarDate(value.endDate)) return { type: 'resize', endDate: value.endDate }
+  return undefined
+}
+
+/**
+ * Reads a stored change request decision.
+ *
+ * @param value - Raw decision.
+ * @returns The decision, `undefined` when absent, or `null` when malformed.
+ */
+function readDecision(value: unknown): ProjectRaidChangeDecision | undefined | null {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) return null
+  const { outcome, decidedAt, decidedByMemberId, baselineId } = value
+  if (outcome !== 'approved' && outcome !== 'rejected') return null
+  if (!isTimestamp(decidedAt)) return null
+  if (typeof decidedByMemberId !== 'string' || decidedByMemberId.length === 0 || decidedByMemberId.length > PROJECT_RAID_OWNER_ID_MAX_LENGTH) {
+    return null
+  }
+  if (baselineId !== undefined && (outcome !== 'approved' || typeof baselineId !== 'string' ||
+    baselineId.length === 0 || baselineId.length > PROJECT_RAID_BASELINE_ID_MAX_LENGTH)) {
+    return null
+  }
+  return { outcome, decidedAt, decidedByMemberId, ...(typeof baselineId === 'string' ? { baselineId } : {}) }
+}
+
+/**
+ * Tells whether a stored schedule change list equals its normalized form.
+ *
+ * @param normalized - Normalized changes, or `undefined` when there are none.
+ * @param raw - Changes as stored or received.
+ * @returns Whether both hold the same changes in the same order.
+ */
+function sameScheduleChanges(normalized: readonly ProjectRaidScheduleChange[] | undefined, raw: unknown) {
+  if (normalized === undefined) return raw === undefined
+  return Array.isArray(raw) && raw.length === normalized.length &&
+    normalized.every((change, index) => JSON.stringify(change) === JSON.stringify(raw[index]))
 }
 
 /**
@@ -364,6 +520,8 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
 export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefined {
   if (!isRecord(value)) return undefined
   const { id, revision, createdAt, updatedAt, closedAt } = value
+  const decision = readDecision(value.decision)
+  if (decision === null) return undefined
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return undefined
   if (!isTimestamp(createdAt) || !isTimestamp(updatedAt)) return undefined
@@ -378,13 +536,17 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
     input.value.response !== value.response ||
     input.value.reviewDueDate !== value.reviewDueDate ||
     input.value.ownerMemberId !== value.ownerMemberId ||
-    !sameIds(input.value.relatedWorkItemIds, value.relatedWorkItemIds)
+    !sameIds(input.value.relatedWorkItemIds, value.relatedWorkItemIds) ||
+    !sameScheduleChanges(input.value.scheduleChanges, value.scheduleChanges)
   ) {
     return undefined
   }
+  // Only a closed change request carries a decision.
+  if (decision !== undefined && (input.value.kind !== 'change-request' || input.value.status !== 'closed')) return undefined
   return {
     id,
     ...input.value,
+    ...(decision === undefined ? {} : { decision }),
     revision,
     createdAt,
     updatedAt,
@@ -488,12 +650,23 @@ export function parseProjectRaidLogResponse(value: unknown): ProjectRaidLogRespo
     entries.push(entry)
   }
   const { viewer } = value
-  if (viewer !== undefined && (!isRecord(viewer) || typeof viewer.canEdit !== 'boolean')) return undefined
+  if (viewer !== undefined && (
+    !isRecord(viewer) ||
+    typeof viewer.canEdit !== 'boolean' ||
+    (viewer.canDecide !== undefined && typeof viewer.canDecide !== 'boolean')
+  )) return undefined
   return {
     teamId: value.teamId,
     projectId: value.projectId,
     entries,
-    ...(isRecord(viewer) && typeof viewer.canEdit === 'boolean' ? { viewer: { canEdit: viewer.canEdit } } : {}),
+    ...(isRecord(viewer) && typeof viewer.canEdit === 'boolean'
+      ? {
+          viewer: {
+            canEdit: viewer.canEdit,
+            ...(typeof viewer.canDecide === 'boolean' ? { canDecide: viewer.canDecide } : {}),
+          },
+        }
+      : {}),
   }
 }
 

@@ -1,6 +1,7 @@
 import {
   parseProjectRaidEntryResponse,
   parseProjectRaidLogResponse,
+  type DecideProjectRaidChangeRequest,
   type ProjectRaidEntryInput,
   type ProjectRaidEntryResponse,
   type ProjectRaidLogResponse,
@@ -92,6 +93,34 @@ export async function updateProjectRaidEntry(
     accessToken,
     'PUT',
     { expectedRevision, entry },
+    mutationContext,
+  )
+}
+
+/**
+ * Approves or rejects an open change request, which closes it.
+ *
+ * @param accessToken - Bearer token of the current session.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project identifier.
+ * @param entryId - Change request identifier.
+ * @param request - Revision that was read, outcome, and the baseline captured for an approval.
+ * @param mutationContext - Idempotency and correlation identifiers.
+ * @returns The closed entry.
+ */
+export async function decideProjectRaidChangeRequest(
+  accessToken: string,
+  teamId: string,
+  projectId: string,
+  entryId: string,
+  request: DecideProjectRaidChangeRequest,
+  mutationContext: MutationRequestContext,
+): Promise<ProjectRaidEntryResponse> {
+  return await sendEntryMutation(
+    `${createLogPath(teamId, projectId)}/entries/${encodeURIComponent(entryId)}/decision`,
+    accessToken,
+    'POST',
+    request,
     mutationContext,
   )
 }
