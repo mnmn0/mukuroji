@@ -21,6 +21,13 @@ Check:
   retryable failure, partial batch failure, lease expiry, and duplicate delivery.
 - Backfills support dry-run, bounded scope, checkpoint/resume, safe rerun, unknown
   row handling, and audit of the operator and target scope.
+- A change that raises the stored schema version of a persisted row, or adds rows
+  derived from existing rows, follows `docs/data-migration.md` in the same change:
+  a registered migration definition, tests from an old-version fixture including
+  an `unknown` row, a dual-read reader for both versions until `verify` passes,
+  and Floci dry-run, `--apply`, and `verify` evidence. A strict reader that would
+  reject rows already stored in a deployed environment without such a migration is
+  at least P1.
 
 Treat data loss, duplicate mutation, orphaned projection, or authorization based on
 stale state as at least P1; raise to P0 when recovery or tenant isolation is at risk.

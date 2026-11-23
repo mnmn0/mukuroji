@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
+import { NOTIFICATION_BULK_MAXIMUM } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
+  bulkUpdateNotifications,
   markAllNotificationsRead,
   NotificationsApiError,
   type InboxNotification,
@@ -17,6 +19,7 @@ import {
 } from '../queries/useNotificationUnreadCount'
 import { useNotificationInboxPages } from '../queries/useNotificationInbox'
 import {
+  chunkNotificationIds,
   notificationBulkActionConcurrency,
   settleWithConcurrency,
 } from '../model/selection'
@@ -378,30 +381,38 @@ export function useNotificationInbox(
     setBulkFailedCount(0)
 
     try {
+      const chunks = chunkNotificationIds(
+        requests.map((notification) => notification.id),
+        NOTIFICATION_BULK_MAXIMUM,
+      )
       const results = await settleWithConcurrency(
-        requests,
+        chunks,
         notificationBulkActionConcurrency,
-        (notification) => mutationRunner.run(
-          `notification:${action}:${notification.id}`,
-          JSON.stringify({ action }),
-          (context) => updateNotification(notification.id, accessToken, { action }, context),
+        (ids) => mutationRunner.run(
+          `notification-bulk:${action}:${ids.join(',')}`,
+          JSON.stringify({ action, notificationIds: ids }),
+          (context) => bulkUpdateNotifications(accessToken, action, ids, context),
         ),
       )
-      const failures = results.flatMap((result, index) =>
-        result.status === 'rejected' ? [{ notification: requests[index], reason: result.reason }] : [],
-      )
+      // A rejected request fails its whole chunk; otherwise only the IDs the server reported.
+      const failedIds = new Set(results.flatMap((result, index) => result.status === 'rejected'
+        ? chunks[index] ?? []
+        : result.value.failures.map((failure) => failure.id)))
+      const rejection = results.find((result) => result.status === 'rejected')
+      const serverFailure = results.flatMap((result) => result.status === 'fulfilled' ? result.value.failures : [])[0]
 
-      if (failures.length > 0) {
-        console.error('Bulk notification action failed:', failures.map((failure) => failure.reason))
-        setMutationError(failures[0]?.reason)
+      if (failedIds.size > 0) {
+        console.error('Bulk notification action failed:', rejection?.reason ?? serverFailure)
+        setMutationError(rejection?.reason ?? (serverFailure
+          ? new NotificationsApiError(serverFailure.status, 'Some notifications could not be updated.', serverFailure.code)
+          : undefined))
       }
-      setBulkFailedCount(failures.length)
+      setBulkFailedCount(failedIds.size)
       await Promise.allSettled([
         refresh(),
         mutateGlobal(['focus-queue', accessToken]),
       ])
 
-      const failedIds = new Set(failures.map((failure) => failure.notification.id))
       return {
         failedIds: targets.flatMap((notification) =>
           failedIds.has(notification.id) ? [notification.id] : []),

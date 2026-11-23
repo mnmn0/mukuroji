@@ -8,6 +8,7 @@ import type {
 } from '../api'
 import type { NotificationPreferencesController } from '../mutations/useNotifications'
 import { createReminderDaysDraft, readReminderDaysDraft } from '../model/reminderDays'
+import { NotificationRoutingFields, type NotificationMuteTeam } from './NotificationRoutingFields'
 import { ReminderDaysFields } from './ReminderDaysFields'
 
 const notificationChannelKeys = ['inApp', 'email', 'push', 'slack'] as const satisfies readonly (keyof NotificationChannels)[]
@@ -25,6 +26,8 @@ export type NotificationSettingsPanelProps = {
    * 保存済み設定と保存 action をまとめた controller です。
    */
   controller: NotificationPreferencesController
+  /** Teams and Projects the member can mute; omitted while unknown. */
+  muteTargets?: readonly NotificationMuteTeam[]
 }
 
 /**
@@ -33,6 +36,7 @@ export type NotificationSettingsPanelProps = {
 export function NotificationSettingsPanel({
   controller,
   locale,
+  muteTargets,
 }: NotificationSettingsPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [draft, setDraft] = useState<NotificationPreferences | undefined>(
@@ -144,6 +148,13 @@ export function NotificationSettingsPanel({
             ))}
           </div>
         </fieldset>
+
+        <NotificationRoutingFields
+          draft={draft}
+          muteTargets={muteTargets}
+          t={t}
+          onChange={(update) => setDraft((current) => current ? update(current) : current)}
+        />
 
         <label className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
           <span className="min-w-0 max-w-[640px]">
@@ -287,6 +298,8 @@ function clonePreferences(preferences: NotificationPreferences): NotificationPre
     channels: { ...preferences.channels },
     quietHours: { ...preferences.quietHours },
     ...(preferences.reminderDays ? { reminderDays: { ...preferences.reminderDays } } : {}),
+    ...(preferences.categoryChannels ? { categoryChannels: structuredClone(preferences.categoryChannels) } : {}),
+    ...(preferences.mutes ? { mutes: structuredClone(preferences.mutes) } : {}),
   }
 }
 

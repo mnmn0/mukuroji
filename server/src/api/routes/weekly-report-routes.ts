@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { readWorkItemPlannedEndDate, type WeeklyReportStoredItem } from '@mukuroji/contracts'
+import { isSummaryMonth, readWorkItemPlannedEndDate, shiftSummaryMonth, type WeeklyReportStoredItem } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
 import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import {
+  buildTeamMonthlySummary,
   buildTeamWeeklySummary,
   listWeeklyReportHistoryUseCase,
   readTeamWeeklyReportStatusUseCase,
@@ -91,6 +92,35 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
       return c.json(buildTeamWeeklySummary({
         teamId,
         weekStart,
+        now,
+        projectIds,
+        baselines,
+        workItems,
+        localToday: (workItem) => readLocalToday(now, workItem),
+      }))
+    })
+  })
+
+  /**
+   * Summarizes a calendar month of the Team and of each Project the reader may read, with the
+   * sections and access rules of the weekly summary, and the totals of the month before.
+   */
+  routeApp.get('/api/teams/:teamId/monthly-summary', async (c) => {
+    return await withPrincipal(c, async (principal) => {
+      requireWorkspaceBusinessRead(principal)
+      const teamId = readTeamId(c)
+      const month = readSummaryMonth(c.req.query('month'), today())
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      const canReadProject = createProjectReadCheck(principal, context)
+      const projectIds = context.team.projects.map((project) => project.id).filter((projectId) => canReadProject(projectId))
+      const [workItems, baselines] = await Promise.all([
+        readSummaryWorkItems(principal, context, canReadProject),
+        readProjectBaselines(principal.directoryId, teamId, projectIds),
+      ])
+      const now = new Date()
+      return c.json(buildTeamMonthlySummary({
+        teamId,
+        month,
         now,
         projectIds,
         baselines,
@@ -217,6 +247,25 @@ function readTeamId(c: Context) {
   const teamId = c.req.param('teamId')?.trim()
   if (!teamId) throw new ProjectDataError(400, 'InvalidWeeklyReport', 'Team ID is required.')
   return teamId
+}
+
+/**
+ * Reads the month of a monthly summary.
+ *
+ * @param month - `month` query value.
+ * @param todayDate - Today's UTC date as `YYYY-MM-DD`.
+ * @returns The month as `YYYY-MM`.
+ * @throws ProjectDataError when it is not a month, or is after the next month.
+ */
+function readSummaryMonth(month: string | undefined, todayDate: string) {
+  if (!isSummaryMonth(month)) {
+    throw new ProjectDataError(400, 'InvalidWeeklyReport', 'The month must be a YYYY-MM month.')
+  }
+  // A summary describes a month that has started; one more month covers time zones ahead of UTC.
+  if (month > shiftSummaryMonth(todayDate.slice(0, 7), 1)) {
+    throw new ProjectDataError(400, 'InvalidWeeklyReport', 'A monthly summary cannot be read for a future month.')
+  }
+  return month
 }
 
 /**

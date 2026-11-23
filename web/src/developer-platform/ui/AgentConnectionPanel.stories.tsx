@@ -65,6 +65,7 @@ const meta = {
     hasLoadError: false,
     hasOperationError: false,
     origin: 'https://mukuroji.example.com',
+    profile: 'tasks',
     teams: [
       { id: 'team-core', name: 'Core' },
       { id: 'team-web', name: 'Web' },
@@ -127,5 +128,12 @@ export const EnglishKiro: Story = {
   args: {
     t: createTranslator('en'),
     choices: { client: 'kiro', teamId: 'team-core', shell: 'posix', mcpPath: '/Users/taro/mukuroji/mcp.mjs' },
+  },
+}
+
+/** A deployment without Software factory configures the read-only Workspace profile. */
+export const WorkspaceProfile: Story = {
+  args: {
+    profile: 'workspace',
   },
 }
