@@ -194,10 +194,16 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
     options: ProjectChangeRequestDecisionOptions,
   ) => {
     if (!accessToken || !teamId) return
+    const changedWorkItemIds = new Set((entry.scheduleChanges ?? []).map((change) => change.workItemId))
     /** Revalidates the views the decision may have changed. */
     const refresh = () => Promise.all([
       mutate(projectRaidLogKey(accessToken, teamId, projectId)),
       mutate((key: unknown) => Array.isArray(key) && (
+        // Dependency conflicts and the critical path come from the Planning snapshot.
+        (key[0] === 'planning-snapshot' && key[1] === accessToken) ||
+        // Open details of the Work Items whose dates the approval changed.
+        ((key[0] === 'project-issue-detail' || key[0] === 'team-issue-detail') &&
+          key[2] === teamId && typeof key[3] === 'string' && changedWorkItemIds.has(key[3])) ||
         (key[0] === 'project-issues' && key[2] === projectId) ||
         (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId) ||
         // Baseline comparisons across Projects, such as the table's baseline delay column.
