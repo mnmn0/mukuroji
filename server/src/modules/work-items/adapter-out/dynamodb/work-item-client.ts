@@ -5823,7 +5823,8 @@ function isMatchingIdempotentWorkItemCreate(
     ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
-    issue.dueDate === expected.dueDate &&
+    // The due date of a shared date range is its end date, which the calendar may move (see below).
+    (followsSharedCalendarRange(expected.schedule) || issue.dueDate === expected.dueDate) &&
     idempotentCreateSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
@@ -5893,12 +5894,23 @@ function idempotentCreateSchedulesEqual(stored: WorkItemSchedule, requested: Wor
 }
 
 /**
+ * Checks whether a schedule is a date range that follows the shared calendar.
+ *
+ * @param schedule - Schedule of a create request.
+ * @returns Whether the calendar in force when it is created places its end date.
+ */
+function followsSharedCalendarRange(schedule: WorkItemSchedule): boolean {
+  return schedule.mode === 'date-range' && schedule.calendarPolicy.calendarSource === 'shared'
+}
+
+/**
  * Reduces a schedule to what identifies an idempotent create.
  *
  * A schedule that follows the shared calendar takes its rules, and the working days counted on
  * them, from the calendar saved when it is created (ADR 0058). A retry after that calendar changed
- * resolves other rules for the same request, so for such a schedule only the mode, the dates and
- * the planned effort identify it.
+ * resolves other rules for the same request, and a date range whose working days ran out keeps
+ * its duration, so its end date moves. For such a schedule only the mode, the start date (or the
+ * fixed deadline or milestone dates) and the planned effort identify it.
  *
  * @param schedule - Normalized schedule.
  * @returns The schedule, or its identifying fields when it follows the shared calendar.
@@ -5909,9 +5921,8 @@ function toComparableWorkItemSchedule(schedule: WorkItemSchedule): unknown {
     mode: schedule.mode,
     calendarSource: 'shared',
     ...(schedule.mode === 'due-date' ? { dueDate: schedule.dueDate } : {}),
-    ...(schedule.mode === 'date-range' || schedule.mode === 'milestone'
-      ? { startDate: schedule.startDate, endDate: schedule.endDate }
-      : {}),
+    ...(schedule.mode === 'date-range' ? { startDate: schedule.startDate } : {}),
+    ...(schedule.mode === 'milestone' ? { startDate: schedule.startDate, endDate: schedule.endDate } : {}),
     ...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes }),
   }
 }

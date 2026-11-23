@@ -1989,6 +1989,46 @@ test('DynamoDB idempotent Work Item create replays a shared-calendar schedule af
   )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
 })
 
+test('DynamoDB idempotent Work Item create replays a shared date range whose end date the calendar moved', async () => {
+  const client = createIdempotentReplayClient()
+  /**
+   * Builds a one-day shared date-range create.
+   *
+   * @param startDate - First day of the range.
+   * @param endDate - Last day the shared calendar placed for this attempt.
+   * @param holidays - Days off the shared calendar resolved for this attempt.
+   * @returns A create request bound to one caller-selected resource ID.
+   */
+  const body = (startDate: string, endDate: string, holidays: string[]) => ({
+    ...createIdempotentContributorCreateBody([]),
+    dueDate: endDate,
+    schedule: {
+      mode: 'date-range',
+      startDate,
+      endDate,
+      durationDays: 1,
+      calendarPolicy: { ...createDueDateSchedule('2026-08-14').calendarPolicy, holidays, calendarSource: 'shared' },
+    },
+  })
+  const created = await client.createTeamIssue('workspace-1', 'core-team', body('2026-08-10', '2026-08-10', []), 'demo@example.com')
+
+  // Monday became a day off before the retry, so keeping the duration moved the end date (ADR 0058).
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body('2026-08-10', '2026-08-11', ['2026-08-10']),
+    'demo@example.com',
+  )
+
+  expect(replay).toEqual(created)
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body('2026-08-11', '2026-08-11', []),
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
 test('DynamoDB Work Item persists and re-reads explicit schedule replacements', async () => {
   let persistedItem: Record<string, unknown> | undefined
   const documentClient = {
