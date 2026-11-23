@@ -34,12 +34,11 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 | Scope | 許可する操作 |
 | --- | --- |
 | `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文、credential 所有者・Team・Project・Project メンバーの参照と Work Item key の解決 |
-| `work-items:write` | Work Item の作成と更新 |
+| `work-items:write` | Work Item の作成と更新、coding agent の OpenTelemetry logs（トークン使用量）の送信（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)） |
 | `work-items:delete` | Work Item の削除 |
 | `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
 | `integrations:read` / `integrations:write` | Connector と external link の参照 / 管理 |
 | `imports:read` / `imports:write` | Import record/report と export の参照 / dry-run・実行 |
-| `agent-telemetry:write` | coding agent の OpenTelemetry logs（トークン使用量）の送信。本人用 token の既定に含まれる |
 
 `DELETE /api/v1/work-items/{workItemId}?teamId={teamId}` は Work Item を取り消せない形で削除する（Web には削除がなく、archive だけを出す）。子を持つ Work Item は `409 conflict` で削除しない（子を先に削除するか、別の親へ移す）。削除は Work Item の relation（相手側の row と `relationIds` を含む）と Collection の参照を同じ transaction で消し、準備の後に relation や Collection が変わった場合は `409 conflict` でやり直しを求める。relation と Collection 参照を合わせて 80 件を超える掃除は 1 transaction に収まらないため `409 conflict` で拒否し、先に一部を外してもらう。詳しくは [Work Items](work-items.md#削除と参照の掃除633)。
 

@@ -18,7 +18,7 @@ export const agentConnectionMessages = {
   'agents.connect.checksumLabel': 'Command that verifies the checksum',
   'agents.connect.checksumPosixNote': 'On Linux, sha256sum -c mcp.mjs.sha256 works as well.',
   'agents.connect.tokenTitle': 'Issue your token',
-  'agents.connect.tokenDescription': 'The token only has work-items:read, work-items:write, and agent-telemetry:write for sending token usage, and acts as you. An expiry is required, at most {days} days ahead. The token is shown once, right after you issue it.',
+  'agents.connect.tokenDescription': 'The token only has work-items:read and work-items:write and acts as you. An expiry is required, at most {days} days ahead. The token is shown once, right after you issue it.',
   'agents.connect.blockedGuest': 'Guests cannot issue tokens. Ask a Workspace administrator.',
   'agents.connect.blockedPermission': 'Your role cannot edit work items, so you cannot issue tokens. Ask a Workspace administrator. You can still revoke tokens you issued.',
   'agents.connect.blockedPolicy': 'An administrator has turned off member-issued tokens in this Workspace. You can still revoke tokens you issued.',
@@ -70,6 +70,6 @@ export const agentConnectionMessages = {
   'agents.connect.usageInstanceHint': 'When set, the MCP server and the usage export both carry this ID, and the runs of the task show their tokens. Use a different ID for each session you run at the same time. Close any run in progress with the old settings before you change the ID.',
   'agents.connect.usageInstanceInvalid': 'Use up to 64 letters, digits, ., _, or -.',
   'agents.connect.usageSnippetLabel': 'Token usage settings to add to {location}',
-  'agents.connect.usageNote': 'The token is not written here; otelHeadersHelper builds the header from MUKUROJI_MCP_TOKEN. The token needs agent-telemetry:write, so reissue an older token that lacks it.',
+  'agents.connect.usageNote': 'The token is not written here; otelHeadersHelper builds the header from MUKUROJI_MCP_TOKEN. Sending usage needs work-items:write, which the token already has.',
   'agents.connect.usageWindowsNote': 'otelHeadersHelper is a POSIX shell command. On Windows, start Claude Code from WSL or Git Bash.',
 } as const

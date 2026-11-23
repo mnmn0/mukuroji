@@ -30,7 +30,6 @@ export type ApiScope =
   | 'integrations:write'
   | 'imports:read'
   | 'imports:write'
-  | 'agent-telemetry:write'
 
 /**
  * Public API が返す安定した machine-readable error code です。
@@ -189,7 +188,6 @@ export type ApiKeyIssuance = 'workspace' | 'personal'
 export const PERSONAL_API_KEY_SCOPES = [
   'work-items:read',
   'work-items:write',
-  'agent-telemetry:write',
 ] as const satisfies readonly ApiScope[]
 
 /**

@@ -11,5 +11,4 @@ export const API_SCOPES = [
   'integrations:write',
   'imports:read',
   'imports:write',
-  'agent-telemetry:write',
 ] as const satisfies readonly ApiScope[]

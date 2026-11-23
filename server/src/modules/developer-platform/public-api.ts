@@ -1499,7 +1499,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   })
 
   router.post('/v1/agent-telemetry/v1/logs', async (c) => {
-    const credential = await authenticatePublicRequest(c, dependencies, ['agent-telemetry:write'])
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
     const contentType = (c.req.header('Content-Type') ?? '').split(';')[0]?.trim().toLowerCase()
     if (contentType !== 'application/json') {
       // OTLP/HTTP exporters send protobuf by default; only the JSON encoding is accepted.
@@ -3002,7 +3002,6 @@ function toManagementCredential(
       'integrations:write',
       'imports:read',
       'imports:write',
-      'agent-telemetry:write',
     ],
   }
 }
@@ -4654,7 +4653,6 @@ function readApiScopes(value: unknown, label: string, allowEmpty = false): ApiSc
     'integrations:write',
     'imports:read',
     'imports:write',
-    'agent-telemetry:write',
   ])
   if (!scopes.every((scope) => allowed.has(scope as ApiScope))) {
     throw new PublicApiServiceError(400, 'validation_failed', `${label} contains an invalid scope.`)

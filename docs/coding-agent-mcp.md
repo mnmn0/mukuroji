@@ -213,8 +213,7 @@ Claude Code が OpenTelemetry で出す request ごとのトークン数と推�
 Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。受け口は
 `POST /api/v1/agent-telemetry/v1/logs` で、OTLP/HTTP の JSON だけを受け付けます。
 
-1. 自分用 token に `agent-telemetry:write` が必要です。2026-11-22 より前に発行した token には付いていないので、
-   設定の「agent を接続」で発行し直します。
+1. 送信には自分用 token の `work-items:write` を使います。MCP に設定している token をそのまま使えます。
 2. MCP の設定に `MUKUROJI_MCP_INSTANCE_ID` を明示し（例: `laptop-claude-1`）、同じ値を OpenTelemetry の resource
    attribute `mukuroji.agent_instance` に入れます。Mukuroji は usage をこの値と時刻で Run に割り当てます。
    既定の instance ID は MCP の中で作るため、指定しないと Run と結び付けられません。

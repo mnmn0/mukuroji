@@ -932,8 +932,7 @@
           "integrations:read",
           "integrations:write",
           "imports:read",
-          "imports:write",
-          "agent-telemetry:write"
+          "imports:write"
         ],
         "type": "string"
       },
@@ -4560,7 +4559,6 @@
         "flows": {
           "clientCredentials": {
             "scopes": {
-              "agent-telemetry:write": "agent-telemetry:write",
               "imports:read": "imports:read",
               "imports:write": "imports:write",
               "integrations:read": "integrations:read",
@@ -9864,7 +9862,7 @@
           },
           {
             "OAuth2": [
-              "agent-telemetry:write"
+              "work-items:write"
             ]
           }
         ],

@@ -18,7 +18,7 @@ export const agentConnectionMessages = {
   'agents.connect.checksumLabel': 'checksum を確認するコマンド',
   'agents.connect.checksumPosixNote': 'Linux では sha256sum -c mcp.mjs.sha256 でも確認できます。',
   'agents.connect.tokenTitle': '自分用の token を発行',
-  'agents.connect.tokenDescription': 'token の権限は work-items:read / work-items:write と、トークン使用量を送る agent-telemetry:write だけで、あなた自身として動きます。有効期限は必須で、最長 {days} 日です。token は発行直後に一度だけ表示されます。',
+  'agents.connect.tokenDescription': 'token の権限は work-items:read / work-items:write だけで、あなた自身として動きます。有効期限は必須で、最長 {days} 日です。token は発行直後に一度だけ表示されます。',
   'agents.connect.blockedGuest': 'ゲストは token を発行できません。Workspace の管理者に相談してください。',
   'agents.connect.blockedPermission': 'あなたの role には作業項目を編集する権限がないため、token を発行できません。Workspace の管理者に相談してください。発行済みの token の失効はできます。',
   'agents.connect.blockedPolicy': 'この Workspace では、管理者がメンバーによる token の発行を停止しています。発行済みの token の失効はできます。',
@@ -70,6 +70,6 @@ export const agentConnectionMessages = {
   'agents.connect.usageInstanceHint': '入力すると、MCP とトークン使用量の送信の両方にこの ID を設定し、タスクの Run にトークン数を表示します。同時に動かす session ごとに別の ID にしてください。ID を変える前に、着手中の Run は前の設定のまま閉じてください。',
   'agents.connect.usageInstanceInvalid': '英数字・.・_・- の 64 文字以内で入力してください。',
   'agents.connect.usageSnippetLabel': '{location} に追加するトークン使用量の送信設定',
-  'agents.connect.usageNote': 'token は書かず、otelHeadersHelper が MUKUROJI_MCP_TOKEN から header を作ります。token に agent-telemetry:write が必要なので、この scope がない古い token は発行し直してください。',
+  'agents.connect.usageNote': 'token は書かず、otelHeadersHelper が MUKUROJI_MCP_TOKEN から header を作ります。送信に使う scope は token にすでにある work-items:write です。',
   'agents.connect.usageWindowsNote': 'otelHeadersHelper は POSIX shell のコマンドです。Windows では WSL または Git Bash から Claude Code を起動してください。',
 } as const

@@ -2847,12 +2847,11 @@ describe('Agent telemetry usage', () => {
     setTestAppDependencies({ agentRunUsage: usage })
     const telemetry = createCanonicalPublicAgentTelemetryService()
     const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
-    const telemetryCredential = { ...credential, scopes: [...credential.scopes, 'agent-telemetry:write' as const] }
-    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
     // A retried export adds nothing.
-    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: true })
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: true })
     // Usage of another instance of the same member is not this run's.
-    await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, usageExport(new Date(Date.now() - 20_000), 'desktop')))
+    await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, usageExport(new Date(Date.now() - 20_000), 'desktop')))
 
     const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
     expect(history.status).toBe(200)
@@ -2881,11 +2880,10 @@ describe('Agent telemetry usage', () => {
     const old = usageExport(new Date(clock.getTime() - 7 * 86_400_000 + 1_000), 'laptop')
     const fresh = usageExport(new Date(clock.getTime() - 20_000), 'laptop')
     const body = { resourceLogs: [...readResourceLogs(old), ...readResourceLogs(fresh)] }
-    const telemetryCredential = { ...credential, scopes: [...credential.scopes, 'agent-telemetry:write' as const] }
-    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
     // The response was lost and the exporter retries after the old event left the 7-day window.
     clock = new Date(clock.getTime() + 5_000)
-    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 1, duplicate: true })
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 1, duplicate: true })
     expect([...usage.buckets.values()].reduce((sum, bucket) => sum + bucket.inputTokens, 0)).toBe(200)
   })
 

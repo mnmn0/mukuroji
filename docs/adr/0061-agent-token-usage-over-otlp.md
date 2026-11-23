@@ -25,9 +25,11 @@ Shinji の方針は「なるべく安く」。
   （`Content-Type: application/json`）だけを受け、protobuf は `415` で断る。応答は OTLP の
   `ExportLogsServiceResponse` で、不正な usage record の件数を `partialSuccess.rejectedLogRecords` で返す。
   Software factory が off の deploy では、Agent Run の route と同じく `503` で断る。
-- **認証**：新しい scope `agent-telemetry:write` を追加し、本人用 token の既定の scope に含める。既存の本人用
-  token には付かないので、使う人は token を発行し直す。Workspace の API key にも付けられる。usage は
-  credential の持ち主の member に記録する。read-only maintenance 中は書き込みとして断る。
+- **認証**：既存の scope `work-items:write` で受ける。本人用 token はこの scope を持つので、発行し直さずに送れる。
+  専用の scope（`agent-telemetry:write`）は採らない。Public API の互換性検査は response の enum の拡大を破壊的変更として
+  扱い、scope を足すと API key・OAuth app・webhook・本人用 token の response にある `scopes` がすべて該当するため。
+  そのため `work-items:write` を持つ Workspace の API key や OAuth app からも、その credential の持ち主の usage を
+  送れる。usage は credential の持ち主の member に記録し、他の member の usage は書けない。read-only maintenance 中は書き込みとして断る。
 - **読む値**：`claude_code.api_request`（`event.name` が `api_request`）の record だけを読み、読む attribute は
   トークン数 4 種、推定費用、model、時刻、`mukuroji.agent_instance` に限る。prompt、tool の入力、そのほかの
   attribute は読まずに捨てる。1 回の export は 2,000 record まで、7 日より古い event と 5 分より先の event は断る。
