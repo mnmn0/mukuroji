@@ -1,3 +1,4 @@
+import type { EnterprisePermissionId } from '@mukuroji/contracts'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 const {
   app,
@@ -157,14 +158,30 @@ test('lets a Project viewer read the log but not change it', async () => {
 /**
  * Grants the demo user one Enterprise role on the `refero` Project only.
  *
- * @param roleId - Built-in Project role to assign.
+ * @param roleId - Built-in Project role, or the custom role defined by `customPermissions`.
+ * @param customPermissions - Permissions of the custom role.
  */
-function grantEnterpriseProjectRole(roleId: 'project:member' | 'project:viewer') {
+function grantEnterpriseProjectRole(
+  roleId: 'project:member' | 'project:viewer' | 'custom:raid-writer',
+  customPermissions: EnterprisePermissionId[] = [],
+) {
   const workspaceId = 'user#demo@example.com'
   const identity = new InMemoryEnterpriseIdentityClient()
   const readSnapshot = identity.getSnapshot.bind(identity)
   identity.getSnapshot = async (currentWorkspaceId) => ({
     ...await readSnapshot(currentWorkspaceId),
+    customRoles: roleId === 'custom:raid-writer'
+      ? [{
+          workspaceId,
+          roleId,
+          name: 'RAID writer',
+          permissions: customPermissions,
+          guestAssignable: false,
+          revision: 1,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }]
+      : [],
     roleAssignments: [{
       workspaceId,
       assignmentId: 'refero-grant',
@@ -223,6 +240,33 @@ test('reports edit access to an Enterprise member granted only on the Project', 
       entry: { kind: 'issue', title: 'A', impact: 3, status: 'open' },
     })
     expect(created.status).toBe(201)
+  })
+})
+
+test('refuses related Work Items from an Enterprise writer without Work Item read access', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    const { issues } = await getTestAppDependencies().workItems.teamIssues.getTeamIssues(
+      'user#demo@example.com',
+      'core-team',
+    )
+    const referoWorkItem = issues.find((issue) => issue.assignedProjectId === 'refero')
+    if (!referoWorkItem) throw new Error('The fake Team has no refero Work Item.')
+    const path = '/api/teams/core-team/projects/refero/raid-log/entries'
+    const entry = { kind: 'issue', title: 'A', impact: 3, status: 'open', relatedWorkItemIds: [referoWorkItem.id] }
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write'])
+    const refused = await requestAsEnterprise(path, 'POST', { entry })
+    expect(refused.status).toBe(400)
+    expect(await refused.json()).toMatchObject({ code: 'InvalidProjectRaidEntry' })
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write', 'work-items.read'])
+    const accepted = await requestAsEnterprise(path, 'POST', { entry })
+    expect(accepted.status).toBe(201)
   })
 })
 

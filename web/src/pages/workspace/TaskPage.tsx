@@ -1079,6 +1079,15 @@ export function TaskPage() {
     setSearchParams(nextSearchParams, { replace: true })
   }, [isCreateTaskRequested, searchParams, setSearchParams])
 
+  // A requested tab is consumed once the screen has switched to it, so a later link asking for
+  // the same tab switches again after the user has moved to another tab.
+  useEffect(() => {
+    if (requestedTaskTab === undefined) return
+    const nextSearchParams = new URLSearchParams(searchParams)
+    nextSearchParams.delete('tab')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [requestedTaskTab, searchParams, setSearchParams])
+
   useEffect(() => {
     if (!hasAmbiguousIssueSelection) {
       return
