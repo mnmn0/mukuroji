@@ -233,6 +233,17 @@ export function getAllowedOrigins() {
 }
 
 /**
+ * Reads the origins a same-origin browser request may carry: the deployed Web app origins and
+ * the CORS origins.
+ *
+ * @returns Web app origins followed by the CORS origins.
+ */
+export function getSameOriginBrowserOrigins(): readonly string[] {
+  const config = loadServerConfig()
+  return [...config.webAppOrigins, ...config.allowedOrigins]
+}
+
+/**
  * Normalizes a Lambda HTTP event path to the canonical `/api` route prefix.
  *
  * @param event - API Gateway or Lambda Function URL event.
