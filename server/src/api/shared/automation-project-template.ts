@@ -794,14 +794,21 @@ export async function createProjectTemplatePlanningEntities(
     await requirePlanningActiveOwner(principal, principal.userKey)
     const workItemState = await readPlanningWorkItemState(scopedPrincipal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
-    // Entities an earlier attempt created that someone archived since; their Milestones are left out.
+    // Entities an earlier attempt created that someone archived or moved since; their Milestones are left out.
     const archivedIndexes = new Set<number>()
     for (const entity of planningEntities) {
       const id = createProjectTemplatePlanningEntityId(application, entity.index)
       const existing = snapshot.entities.find((candidate) => candidate.id === id)
       if (existing) {
-        // An archive whose compaction failed stays in the live graph with archivedAt set.
-        if (existing.archivedAt !== undefined) archivedIndexes.add(entity.index)
+        // An archive whose compaction failed stays in the live graph with archivedAt set. A Phase
+        // someone moved to another scope is theirs now; its missing Milestones are left out too.
+        if (
+          existing.archivedAt !== undefined ||
+          existing.teamId !== scope.teamId ||
+          existing.projectId !== scope.projectId
+        ) {
+          archivedIndexes.add(entity.index)
+        }
         continue
       }
       if (entity.parentIndex !== undefined && archivedIndexes.has(entity.parentIndex)) {
