@@ -655,7 +655,8 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
    * @param templateId - Template to apply.
    * @param target - Where the template is applied.
    * @param idempotencyKey - Client idempotency key.
-   * @param readCalendarPolicy - Reads the Workspace calendar for a new Project template receipt.
+   * @param readCalendarPolicy - Reads the Workspace calendar for a new Project template receipt of
+   *   the given template version; nothing is written when it throws.
    * @returns The new or existing receipt.
    */
   async reserveTemplateApplication(
@@ -664,7 +665,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     templateId: string,
     target: AutomationTemplateApplicationTarget,
     idempotencyKey: string,
-    readCalendarPolicy?: () => Promise<WorkItemScheduleCalendarPolicy>,
+    readCalendarPolicy?: (templateVersion: number) => Promise<WorkItemScheduleCalendarPolicy>,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -705,7 +706,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (target.kind !== template.kind) {
       throw invalidInput('Template application target does not match the template kind.')
     }
-    const calendarPolicy = template.kind === 'project' ? await readCalendarPolicy?.() : undefined
+    const calendarPolicy = template.kind === 'project' ? await readCalendarPolicy?.(template.version) : undefined
     const now = new Date().toISOString()
     const application: AutomationTemplateApplication = {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
