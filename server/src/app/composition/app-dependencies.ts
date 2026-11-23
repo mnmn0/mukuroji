@@ -83,6 +83,7 @@ import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
   ApiAccessObservation,
   ApiErrorObservation,
+  ClientErrorObservation,
 } from '../../infrastructure/observability/api-observability'
 import type { ReadinessProbe } from '../../infrastructure/observability/readiness'
 import type {
@@ -325,6 +326,12 @@ export interface OperationalDependencies {
    * @param observation - Redacted unexpected-error metadata.
    */
   recordError(observation: ApiErrorObservation): void
+  /**
+   * Emits one validated browser error report.
+   *
+   * @param observation - Validated report without client-identifying data.
+   */
+  recordClientError(observation: ClientErrorObservation): void
 }
 
 /** Domain dependency bundles bound to one HTTP application instance. */
