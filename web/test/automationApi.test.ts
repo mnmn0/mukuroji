@@ -18,6 +18,7 @@ import {
   getAutomationInboundWebhookEndpoint,
   getAutomationInboundWebhookEndpoints,
   getAutomationRules,
+  previewAutomationTemplateApplication,
   getAutomationTemplateApplication,
   getAutomationTemplates,
   getRecurringWork,
@@ -365,6 +366,37 @@ describe('automation API', () => {
       code: 'InvalidAutomationResponse',
       status: 502,
     })
+  })
+
+  test('validates a Project template preview response before the screen reads it', async () => {
+    const valid = {
+      kind: 'project',
+      teamId: 'core-team',
+      name: 'Launch',
+      templateVersion: 2,
+      calendarFingerprint: 'calendar',
+      workItems: [{ wbsNumber: '1', title: 'Design', startDate: '2026-12-07', endDate: '2026-12-08' }],
+      planningEntities: [],
+      dependencyCount: 0,
+      errors: [],
+    }
+    let body: unknown = valid
+    globalThis.fetch = (async () => new Response(JSON.stringify(body), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 200,
+    })) as typeof fetch
+    const input = { target: { kind: 'project' as const, teamId: 'core-team' } }
+
+    expect(await previewAutomationTemplateApplication('access-token', 'template-1', input)).toEqual(valid)
+    // A response carrying only part of a preview is refused rather than drawn.
+    body = { templateVersion: 2 }
+    let failure: unknown
+    try {
+      await previewAutomationTemplateApplication('access-token', 'template-1', input)
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toMatchObject({ code: 'InvalidAutomationResponse', status: 502 })
   })
 
   test('rejects malformed non-empty JSON', async () => {
