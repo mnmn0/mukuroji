@@ -14,6 +14,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  isKnownCurrencyCode,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
@@ -355,6 +356,7 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readTenantWeeklyReportReminderInput(body.weeklyReportReminders) }),
+    ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -397,6 +399,20 @@ function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportRemind
     )
   }
   return settings
+}
+
+/**
+ * Validates the Workspace currency of a profile update.
+ *
+ * @param value - Untrusted `defaultCurrency` field of the request body.
+ * @returns The ISO 4217 code.
+ * @throws TenantAdministrationError When the value is not a known upper-case ISO 4217 code.
+ */
+function readTenantDefaultCurrencyInput(value: unknown): string {
+  if (!isKnownCurrencyCode(value)) {
+    throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
+  }
+  return value
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

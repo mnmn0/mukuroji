@@ -35,8 +35,11 @@ Workspace profile（下の「Workspace 全体を読む」）になります。on
 3. **クライアントに登録**: 「クライアント」「Team」「OS」「mcp.mjs の絶対パス」を選ぶと、
    接続先（`MUKUROJI_MCP_URL`）と自分の member ID（`MUKUROJI_MCP_ASSIGNEE_ID`）を埋めた設定例が表示されるので、
    クライアントの設定に貼り付ける。
-4. **接続を確認**: クライアントを再起動し、agent から `get_configuration` を呼べることを確認する。
-   `mcp.serverCompatibility.status` が `compatible` 以外なら、`message` に従って Mukuroji か `mcp.mjs` を更新する。
+4. **接続を確認**: クライアントを再起動し、agent から確認する。確認に使うツールは profile で違います。
+   - tasks profile（既定）: `get_configuration` を呼べることを確認する。
+     `mcp.serverCompatibility.status` が `compatible` 以外なら、`message` に従って Mukuroji か `mcp.mjs` を更新する。
+   - Workspace profile: `get_configuration` はありません。代わりに `whoami` を呼び、自分の member ID と email が返ることを確認する（名前は未設定なら省かれます）。
+
    `node mcp.mjs --version` で手元の `mcp.mjs` の version を確認できます。
 
 token の期限が近づいたら「発行済みの token」から **期限を更新して再発行**、不要になったら **失効** します。
@@ -57,7 +60,10 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 ### Workspace 全体を読む（Workspace profile）
 
 担当タスクを進めるのではなく、Linear の MCP のように Team・Project・メンバー・タスクを調べて整理したいときは、
-`MUKUROJI_MCP_PROFILE=workspace` を足して別のサーバー名（例: `mukuroji`）で登録します。必要なのは
+`MUKUROJI_MCP_PROFILE=workspace` を足して別のサーバー名（例: `mukuroji`）で登録します。
+Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使えます。`1.0.0` 以前の `mcp.mjs` は
+`MUKUROJI_MCP_PROFILE` を知らず、Team ID と member ID がないため起動しません。対応版が GitHub Release に
+出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
 ように頼むと、`get_issue` や `list_issues` で読みます。今は読み取りだけで、タスクの作成・更新は後続の変更で追加します。
 読める範囲は token の持ち主が Web で見られる範囲と同じです。Software factory が off の環境では、

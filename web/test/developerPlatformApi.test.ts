@@ -36,6 +36,7 @@ import {
   updateDeveloperExternalLink,
 } from '../src/developer-platform/api'
 import { exportDeveloperWorkItems } from '../src/developer-platform/queries/developerExport'
+import { planningSnapshotFixture } from '../src/planning/fixtures'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
@@ -90,6 +91,9 @@ describe('Developer Platform API', () => {
     expect(
       paths['/api/developer/exports'].get.operationId,
     ).toBe('listManagedWorkItemExportPage')
+    expect(
+      paths['/api/developer/work-item-exports'].get.responses['200'].content['application/json'].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemExportPage' })
   })
 
   test('gets the aggregate resource with Bearer authorization', async () => {
@@ -526,8 +530,11 @@ describe('Developer Platform API', () => {
         init,
       })
 
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
       if (url.endsWith('/work-item-hierarchy')) {
-        // Only the first Work Item is in the read tree; the second keeps an empty WBS cell.
+        // The Team's own WBS number is not exported; the export numbers its outline itself.
         return new Response(JSON.stringify({
           schemaVersion: 1,
           teamId: 'team-product',
@@ -566,12 +573,14 @@ describe('Developer Platform API', () => {
     ).toEqual([
       '/api/developer/imports/dry-run',
       '/api/developer/imports',
-      '/api/developer/exports?format=csv&limit=100',
-      '/api/developer/exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/developer/work-item-exports?format=csv&limit=100',
+      '/api/developer/work-item-exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
-      '/api/developer/exports?format=json&limit=100',
-      '/api/developer/exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/planning',
+      '/api/developer/work-item-exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
+      '/api/planning',
     ])
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(
       importInput,
@@ -588,12 +597,12 @@ describe('Developer Platform API', () => {
     expect(new Uint8Array(await csvExport.blob.arrayBuffer()).slice(0, 3))
       .toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
     expect(await csvExport.blob.text()).toContain(
-      'id,teamId,wbsNumber,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,schedule,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
+      'id,teamId,wbsNumber,outlineLevel,parentId,title,description,assignedProjectId,assigneeUserId,workItemTypeId,workflowStatusId,statusCategory,dueDate,schedule,priority,dependencies,relations,contributors,acceptanceCriteria,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
     expect(await csvExport.blob.text()).toContain(
-      'work-item-1,team-product,2.1,"\'=HYPERLINK(""https://example.com"")"',
+      'work-item-1,team-product,1,1,,"\'=HYPERLINK(""https://example.com"")"',
     )
-    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,,Ship API,')
+    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,2,1,,Ship API,')
     expect(jsonExport.fileName).toMatch(
       /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.json$/u,
     )
@@ -602,7 +611,7 @@ describe('Developer Platform API', () => {
       workItems: [
         {
           id: 'work-item-1',
-          wbsNumber: '2.1',
+          wbsNumber: '1',
           customFieldValues: { risk: 'high' },
           schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
         },
@@ -624,6 +633,17 @@ describe('Developer Platform API', () => {
           ? input.toString()
           : input.url
       urls.push(url)
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/work-item-hierarchy')) {
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          teamId: 'team-product',
+          graphRevision: 1,
+          nodes: [],
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }
       if (urls.length === 1) {
         return new Response(JSON.stringify({
           code: 'rate_limited',
@@ -647,13 +667,45 @@ describe('Developer Platform API', () => {
 
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
-    // The hierarchy read gets an export page back, which is not a hierarchy; the export still
-    // succeeds without WBS numbers.
     expect(urls).toEqual([
-      '/api/developer/exports?format=json&limit=100',
-      '/api/developer/exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100',
       '/api/teams/team-product/work-item-hierarchy',
+      '/api/planning',
     ])
+  })
+
+  test('fails the export when the dependencies cannot be read', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify({ code: 'unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ items: [createExportWorkItem({ id: 'work-item-1' })], hasMore: false }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    // A file with empty dependency cells would drop the dependencies when it is imported again.
+    await expect(exportDeveloperWorkItems('access-token', 'csv')).rejects.toThrow()
+  })
+
+  test('fails the export when a Team hierarchy cannot be read', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/work-item-hierarchy')) {
+        return new Response(JSON.stringify({ code: 'unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ items: [createExportWorkItem({ id: 'work-item-1' })], hasMore: false }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    // A file without parents would flatten the hierarchy when it is imported again.
+    await expect(exportDeveloperWorkItems('access-token', 'json')).rejects.toThrow()
   })
 
   test('preserves stable API status and error code', async () => {

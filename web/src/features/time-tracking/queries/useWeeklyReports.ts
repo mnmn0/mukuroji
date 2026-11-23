@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getTeamWeeklyReportStatus, getTeamWeeklySummary, getWeeklyReport, listWeeklyReportHistory } from '../api/weeklyReports'
+import { getTeamMonthlySummary, getTeamWeeklyReportStatus, getTeamWeeklySummary, getWeeklyReport, listWeeklyReportHistory } from '../api/weeklyReports'
 import { timeTrackingQueryConfig, timeTrackingQueryKeyRoot } from './timeTrackingQueryKeys'
 
 /**
@@ -62,4 +62,17 @@ export function useTeamWeeklyReportStatus(accessToken: string | undefined, teamI
 export function useTeamWeeklySummary(accessToken: string | undefined, teamId: string, weekStart: string) {
   const key = accessToken ? [timeTrackingQueryKeyRoot, 'team-weekly-summary', accessToken, teamId, weekStart] as const : null
   return useSWR(key, ([, , token, team, week]) => getTeamWeeklySummary(token, team, week), timeTrackingQueryConfig)
+}
+
+/**
+ * Loads a calendar month of the Team and of each Project the signed-in member may read.
+ *
+ * @param accessToken - Bearer token, or undefined while signed out.
+ * @param teamId - Team ID.
+ * @param month - Month as `YYYY-MM`.
+ * @returns SWR state of the summary.
+ */
+export function useTeamMonthlySummary(accessToken: string | undefined, teamId: string, month: string) {
+  const key = accessToken ? [timeTrackingQueryKeyRoot, 'team-monthly-summary', accessToken, teamId, month] as const : null
+  return useSWR(key, ([, , token, team, value]) => getTeamMonthlySummary(token, team, value), timeTrackingQueryConfig)
 }

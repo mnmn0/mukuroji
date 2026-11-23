@@ -445,6 +445,7 @@ export interface PublicWorkItemService {
     format: 'csv' | 'json',
     continuation: string | undefined,
     limit: number,
+    includeStructure?: boolean,
   ): Promise<{
     /** Export page に含まれる Work Items です。 */
     items: CanonicalWorkItem[]
@@ -1173,7 +1174,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await requireDirectoryService(dependencies).lookupWorkItemKey(
       credential,
-      readRouteId(c.req.param('key'), 'Work Item key'),
+      readWorkItemKeyParam(c.req.param('key')),
     ))
   })
 
@@ -2838,6 +2839,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ))
   })
 
+  // The original export keeps its closed Work Item schema; this one also carries contributors and
+  // acceptance criteria, which a re-import of the export needs.
+  router.get('/developer/work-item-exports', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canExport')
+    const format = readExportFormat(c.req.query('format'))
+    return c.json(await createSignedContinuationPage(
+      c,
+      dependencies,
+      managementCursorScope(principal, '/developer/work-item-exports', { format }),
+      (continuation, limit) =>
+        dependencies.workItems.export(principal, format, continuation, limit, true),
+      (item) => item.updatedAt,
+    ))
+  })
+
   return router
 }
 
@@ -3535,6 +3551,19 @@ function readRouteId(value: string, label: string) {
     throw new PublicApiServiceError(400, 'invalid_request', `${label} is invalid.`)
   }
   return result
+}
+
+/**
+ * Reads the key route parameter. Text that cannot be a key answers the same 404 as an unused key,
+ * as the contract promises, so callers cannot tell malformed text from a key they may not read.
+ * @param value - Raw route parameter.
+ * @returns The key text for the directory service.
+ */
+function readWorkItemKeyParam(value: string) {
+  if (!value || value.trim() !== value || value.length > 256 || containsAsciiControl(value, false)) {
+    throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
+  }
+  return value
 }
 
 function readRequiredString(value: unknown, label: string) {

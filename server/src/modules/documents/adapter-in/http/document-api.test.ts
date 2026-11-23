@@ -1780,6 +1780,7 @@ test('projects every public document kind without internal metadata', async () =
     id: 'note-1',
     type: 'note',
     text: 'Public note',
+    done: true,
     bounds: { x: 220, y: 20, width: 160, height: 96 },
     zIndex: 2,
   } satisfies Extract<WhiteboardObject, { type: 'note' }>
@@ -1901,6 +1902,7 @@ test('projects every public document kind without internal metadata', async () =
               id: 'note-1',
               type: 'note',
               text: 'Public note',
+              done: true,
               bounds: { x: 220, y: 20, width: 160, height: 96 },
               zIndex: 2,
             },
