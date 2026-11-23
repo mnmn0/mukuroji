@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createProjectStatusReportOutline, parseProjectStatusReport } from '@mukuroji/contracts'
-import { readZipArchive } from '../src/developer-platform/model/zipArchive'
+import { readZipArchive } from '../src/shared/lib/zipArchive'
 import {
   buildProjectStatusReport,
   createProjectStatusReportFileName,

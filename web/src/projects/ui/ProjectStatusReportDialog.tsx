@@ -10,11 +10,11 @@ import type { MessageKey } from '../../shared/i18n/locales/ja'
 import { CustomerApiError } from '../../customers/api'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { ProjectDirectoryApiError } from '../api/errors'
-import { exportProjectStatusReportPdf } from '../api/statusReports'
 import {
   createProjectStatusReportFileName,
   createProjectStatusReportSlides,
 } from '../model/projectStatusReport'
+import { useProjectStatusReportPdf } from '../mutations/useProjectStatusReportPdf'
 import { useProjectStatusShareActions } from '../mutations/useProjectStatusShareActions'
 import { useProjectStatusShareRecipients, useProjectStatusShares } from '../queries/useProjectStatusShares'
 import { ProjectStatusReportDocument } from './ProjectStatusReportDocument'
@@ -77,6 +77,7 @@ export function ProjectStatusReportDialog({
   const { print, portal } = useProjectStatusReportPrint()
   const [exporting, setExporting] = useState<ExportFormat>()
   const [exportError, setExportError] = useState(false)
+  const pdf = useProjectStatusReportPdf(accessToken, teamId, projectId)
 
   const runExport = async (format: ExportFormat) => {
     if (!report) return
@@ -84,9 +85,8 @@ export function ProjectStatusReportDialog({
     setExportError(false)
     try {
       if (format === 'pdf') {
-        if (!accessToken) throw new Error('The session is not ready.')
         saveProjectStatusReportFile(
-          await exportProjectStatusReportPdf(accessToken, teamId, projectId, report),
+          await pdf.download(report),
           createProjectStatusReportFileName(report, 'pdf'),
         )
       } else if (format === 'markdown') {

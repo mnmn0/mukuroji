@@ -8,7 +8,7 @@ import {
   type ProjectStatusReport,
   type ProjectStatusReportScheduleType,
 } from '@mukuroji/contracts'
-import { createZipArchive } from '../../developer-platform/model/zipArchive'
+import { createZipArchive } from '../../shared/lib/zipArchive'
 import type { ProjectMember } from '../api/members'
 import type {
   ProjectOverviewActionItems,
