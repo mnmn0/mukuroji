@@ -3,7 +3,7 @@ import {
   PROJECT_RAID_TITLE_MAX_LENGTH,
   type CuratedContextItem,
 } from '@mukuroji/contracts'
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { useSaveProjectRaidEntry } from './useSaveProjectRaidEntry'
 
@@ -30,8 +30,8 @@ export type ProjectRiskPromotion = {
   /** Application path of the Project log, in the Project's permissions tab. */
   logPath: string
   /**
-   * Curated risks already added to the log while this Work Item stays open. It outlives the
-   * decisions tab, so switching collaboration tabs does not offer the same risk again.
+   * Curated risks already added to this Project's log while the Work Item stays open. It outlives
+   * the decisions tab, so switching collaboration tabs does not offer the same risk again.
    */
   promotedItemIds: ReadonlySet<string>
 }
@@ -52,17 +52,29 @@ function truncate(text: string, maxLength: number) {
 }
 
 /**
+ * Identifies one curated risk promoted to one Project log.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose log received the risk.
+ * @param itemId - Curated risk item.
+ * @returns A key unique to the destination and the item.
+ */
+function promotionKey(teamId: string, projectId: string, itemId: string) {
+  return JSON.stringify([teamId, projectId, itemId])
+}
+
+/**
  * Returns the promotion of a Work Item's curated risks to its Project's risk log.
  *
- * The new risk starts with medium probability and impact, so the owner rates it in the log. A
- * retried failed promotion of the same item reuses its Idempotency-Key, so it is not added twice,
- * and a promoted item is remembered for as long as the hook's owner stays mounted.
- *
- * @param scope - Session, Team, Project, and Work Item.
+ * The new risk starts with medium probability and impact, so the owner rates it in the log. Each
+ * curated risk keeps its own Idempotency-Key, so a retried promotion is not added twice, even when
+ * two risks have the same text. A promoted risk is remembered per destination Project for as long
+ * as the hook's owner stays mounted, so moving the Work Item to another Project offers it again.
  * Promotion is offered only when the server says the viewer may edit the Project log, so a
  * Project viewer or a member without Enterprise `projects.write` is not shown a button that
  * always fails.
  *
+ * @param scope - Session, Team, Project, and Work Item.
  * @returns The promotion, or `undefined` when the Work Item has no Project or session, or the
  * viewer may not edit the Project log.
  */
@@ -73,9 +85,13 @@ export function usePromoteProjectRisk({
   workItemId,
 }: ProjectRiskPromotionScope): ProjectRiskPromotion | undefined {
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId: projectId ?? '' })
-  const [promotedItemIds, setPromotedItemIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [promotedKeys, setPromotedKeys] = useState<ReadonlySet<string>>(() => new Set())
   const log = useProjectRaidLog(accessToken, teamId, projectId ?? '', projectId !== undefined)
   const promote = useCallback(async (item: CuratedContextItem) => {
+    if (!teamId || !projectId) return
+    // The destination is fixed when the promotion starts, so one finishing after the Work Item
+    // moved to another Project is remembered for the Project that received it.
+    const key = promotionKey(teamId, projectId, item.id)
     const description = item.body.trim()
     await save(undefined, {
       kind: 'risk',
@@ -85,9 +101,20 @@ export function usePromoteProjectRisk({
       impact: 3,
       relatedWorkItemIds: [workItemId],
       status: 'open',
-    })
-    setPromotedItemIds((current) => new Set(current).add(item.id))
-  }, [save, workItemId])
+    }, `promote-risk:${item.id}`)
+    setPromotedKeys((current) => new Set(current).add(key))
+  }, [projectId, save, teamId, workItemId])
+  const promotedItemIds = useMemo(() => {
+    const ids = new Set<string>()
+    if (!teamId || !projectId) return ids
+    for (const key of promotedKeys) {
+      const parsed: unknown = JSON.parse(key)
+      if (Array.isArray(parsed) && parsed[0] === teamId && parsed[1] === projectId && typeof parsed[2] === 'string') {
+        ids.add(parsed[2])
+      }
+    }
+    return ids
+  }, [projectId, promotedKeys, teamId])
   if (!accessToken || !teamId || !projectId || log.data?.viewer?.canEdit !== true) return undefined
   const search = new URLSearchParams({ teamId, tab: 'permissions' })
   return {

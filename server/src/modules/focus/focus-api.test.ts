@@ -2567,6 +2567,49 @@ test('lists overdue Project log entries the viewer owns only in Projects the vie
   expect(body.projectLogIncomplete).toBeUndefined()
 })
 
+test('lists Project log entries in Focus only with Enterprise Project read permission', async () => {
+  await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources()
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const store = new InMemoryProjectRaidLogStore()
+    const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+    let logReads = 0
+    store.listOpenOwnedBy = async (...args) => {
+      logReads += 1
+      return listOpenOwnedBy(...args)
+    }
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+
+    for (const [permissions, expectedReads] of [
+      [['work-items.read'], 0],
+      [['work-items.read', 'projects.read'], 1],
+    ] as const) {
+      logReads = 0
+      setTestAppDependencies({
+        enterpriseIdentity: await createFocusEnterpriseIdentity('project', permissions),
+        projectRaidLogs: store,
+      })
+      const response = await app.request('/api/focus', { headers: { Authorization: authorization } })
+
+      expect(response.status).toBe(200)
+      expect(logReads).toBe(expectedReads)
+    }
+  })
+})
+
 test('reports an incomplete Project log list instead of an empty one when a log cannot be read', async () => {
   configureFocusSources('member', undefined, 0)
   configureFakeAuthenticatedUser({

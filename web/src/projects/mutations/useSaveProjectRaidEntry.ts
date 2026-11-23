@@ -22,7 +22,9 @@ export type ProjectRaidEntrySaveScope = {
  * A failed save keeps its request context, so saving the same input again reuses its
  * Idempotency-Key and the server returns the result of an attempt whose response was lost. Each
  * different input keeps its own context, so saving something else in between does not lose it.
- * A context is dropped once the server answers, with success or a client error. A conflict also
+ * A context is dropped once the server answers, with success or a client error. A caller whose
+ * distinct operations may send the same input, such as promoting two risks with the same text,
+ * passes an `operationKey` so each keeps its own Idempotency-Key. A conflict also
  * reloads the log, so the form can move onto the latest revision.
  *
  * @param scope - Session, Team, and Project.
@@ -31,10 +33,21 @@ export type ProjectRaidEntrySaveScope = {
 export function useSaveProjectRaidEntry({ accessToken, teamId, projectId }: ProjectRaidEntrySaveScope) {
   const { mutate } = useSWRConfig()
   const pendingSaves = useRef(new Map<string, MutationRequestContext>())
-  return useCallback(async (entry: ProjectRaidEntry | undefined, input: ProjectRaidEntryInput) => {
+  return useCallback(async (
+    entry: ProjectRaidEntry | undefined,
+    input: ProjectRaidEntryInput,
+    operationKey?: string,
+  ) => {
     if (!accessToken || !teamId) return
     const key = projectRaidLogKey(accessToken, teamId, projectId)
-    const fingerprint = JSON.stringify([teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
+    const fingerprint = JSON.stringify([
+      teamId,
+      projectId,
+      entry?.id ?? null,
+      entry?.revision ?? null,
+      operationKey ?? null,
+      input,
+    ])
     const context = pendingSaves.current.get(fingerprint) ?? createMutationRequestContext()
     pendingSaves.current.set(fingerprint, context)
     /** Drops this save's context, but not one that a later save of the same input started. */

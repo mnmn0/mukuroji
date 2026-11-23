@@ -133,9 +133,9 @@ export function IssueDecisionsTab({
   riskPromotion,
 }: IssueDecisionsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  // Pending and failed promotions shown in this tab. Promoted risks are also kept by the
-  // promotion itself, which outlives the tab, so they stay marked after a tab switch.
-  const [promotions, setPromotions] = useState<Record<string, 'pending' | 'done' | 'failed'>>({})
+  // Pending and failed promotions shown in this tab. Promoted risks are kept by the promotion
+  // itself, per destination Project, so they stay marked after a tab switch.
+  const [promotions, setPromotions] = useState<Record<string, 'pending' | 'failed'>>({})
   const panelInstanceId = useId()
   const [editorRequest, setEditorRequest] = useState<ContextEditorState>()
   const createButtonRef = useRef<HTMLButtonElement>(null)
@@ -408,7 +408,7 @@ export function IssueDecisionsTab({
                   </button>
                 ) : null}
                 {riskPromotion && item.kind === 'risk' && item.state !== 'superseded' ? (
-                  promotions[item.id] === 'done' || riskPromotion.promotedItemIds.has(item.id) ? (
+                  riskPromotion.promotedItemIds.has(item.id) ? (
                     <span className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
                       {t('collaboration.decisions.promoteRisk.done')}
                       <Link className="text-[var(--workbench-primary-text)] underline underline-offset-2" to={riskPromotion.logPath}>
@@ -423,7 +423,10 @@ export function IssueDecisionsTab({
                       onClick={() => {
                         setPromotions((current) => ({ ...current, [item.id]: 'pending' }))
                         riskPromotion.promote(item).then(
-                          () => setPromotions((current) => ({ ...current, [item.id]: 'done' })),
+                          () => setPromotions((current) => {
+                            const { [item.id]: _settled, ...rest } = current
+                            return rest
+                          }),
                           () => setPromotions((current) => ({ ...current, [item.id]: 'failed' })),
                         )
                       }}

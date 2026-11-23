@@ -1101,6 +1101,32 @@ const riskPromotionController = {
 const withRouter = (Story: () => React.JSX.Element) => <MemoryRouter><Story /></MemoryRouter>
 
 /**
+ * Renders the panel with a promotion that remembers what it registered, as the detail pane's
+ * promotion does.
+ *
+ * @param props - Panel props, with the promotion to wrap.
+ * @returns The panel.
+ */
+function PanelWithRememberedPromotions(props: ComponentProps<typeof IssueCollaborationPanel>) {
+  const [promotedItemIds, setPromotedItemIds] = useState<ReadonlySet<string>>(() => new Set())
+  const { riskPromotion } = props
+  if (!riskPromotion) return <IssueCollaborationPanel {...props} />
+  return (
+    <IssueCollaborationPanel
+      {...props}
+      riskPromotion={{
+        ...riskPromotion,
+        promotedItemIds,
+        promote: async (item) => {
+          await riskPromotion.promote(item)
+          setPromotedItemIds((current) => new Set(current).add(item.id))
+        },
+      }}
+    />
+  )
+}
+
+/**
  * A risk on a Work Item assigned to a Project can be registered in the Project log; once it is,
  * the row links to the log.
  */
@@ -1111,6 +1137,7 @@ export const RiskPromotion: Story = {
     riskPromotion: { promote: fn(async () => undefined), logPath: '/projects/refero/issues?teamId=core-team&tab=permissions', promotedItemIds: new Set<string>() },
   },
   decorators: [withRouter],
+  render: (args) => <PanelWithRememberedPromotions {...args} />,
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
     const buttons = canvas.getAllByRole('button', { name: 'Project のリスクに登録' })
