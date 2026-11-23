@@ -45,6 +45,7 @@ import {
   createWorkItemAuthorizationChangedError,
 } from '../../../work-items'
 import { InMemoryPlanningClient } from '../../../planning/planning'
+import { ambientAutomationActionExecutorDependencies } from '../../../../api/shared/app-dependencies'
 import {
   createActiveAgentRun,
   InMemoryAgentRunStore,
@@ -695,6 +696,43 @@ test('refuses a bulk reassignment to the same member and fails items the member 
   expect(await notInvolved.json()).toMatchObject({
     canApply: false,
     items: [{ status: 'failed', errorCode: 'BulkReassignMemberNotInvolved' }],
+  })
+})
+
+test('checks a successor whose existing share absorbs the handed-over share', async () => {
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const preview = async (inactiveWorkspaceMemberKeys: string[]) => {
+    configureFakeProjectClients(true, {
+      inactiveWorkspaceMemberKeys,
+      issueContributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+        { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', status: 'done' },
+      ],
+    })
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake().client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request('/api/bulk-operations/preview', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' },
+        items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+      }),
+    })
+    expect(response.status).toBe(200)
+    return response.json()
+  }
+
+  expect(await preview([])).toMatchObject({ canApply: true, items: [{ status: 'ready' }] })
+  // The membership failure is reported as a generic action failure, like any other item.
+  expect(await preview(['successor@example.com'])).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', retryable: false }],
   })
 })
 
@@ -2652,6 +2690,49 @@ test('fails closed when automation targets a Project outside the owner Team', as
   )).rejects.toMatchObject({ code: 'InvalidProjectWrite', status: 400 })
   expect(calls.issueUpdates).toHaveLength(0)
   expect(calls.issueCreates).toHaveLength(0)
+})
+
+test('checks template contributors with the worker dependencies outside a request', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-contributor-create',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-contributor-create:action:0000',
+  } satisfies AutomationActionExecutionContext
+  // Workers pass explicit dependencies and bind no request context.
+  const dependencies = runWithTestAppDependencies(() => ({ ...ambientAutomationActionExecutorDependencies }))
+
+  await expect(createAutomationActionExecutor(dependencies).execute({
+    type: 'create',
+    values: {
+      teamId: 'core-team',
+      title: 'Release review',
+      assigneeUserId: 'demo@example.com',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
+      contributorAssignments: [{ memberUserId: 'sato@example.com', plannedEffortMinutes: 60 }],
+    },
+  }, context)).resolves.toBeUndefined()
+  expect(calls.issueCreates).toHaveLength(1)
 })
 
 test('fails closed before an automation comment targets a removed Team', async () => {

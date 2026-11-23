@@ -10,16 +10,12 @@ import {
   type BulkOperationItemResult,
   type BulkOperationPreview,
   type BulkOperationRequest,
-  type BulkReassignMemberAction,
   type CreateWebhookTriageEntryInput,
   type UpdateAutomationRuleInput,
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
   type WorkItemConfiguration,
-  type WorkItemContributorAssignment,
-  type WorkItemContributorAssignmentInput,
   type WorkflowStatusCategory,
-  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -68,7 +64,12 @@ import {
   AutomationEngine,
   AutomationError,
   applyBulkOperation,
+  createBulkReassignMemberPatch,
+  createBulkReassignMemberUndoPayload,
   deliverAutomationWebhook,
+  isBulkReassignMemberApplied,
+  isBulkReassignMemberUndoApplied,
+  restoreBulkReassignMemberUndoIds,
   createAutomationCommentId,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
@@ -1037,6 +1038,8 @@ function createApiBulkOperationAdapter(
               preparedBody,
               configuration,
               loaded.detail.issue.contributorAssignments ?? [],
+              // The successor is checked even when their existing share absorbs the moved one.
+              { fencedMembers: [action.toMemberUserId] },
             ),
           ),
         }
@@ -1146,10 +1149,13 @@ function createApiBulkOperationAdapter(
     const resultingRevision = item.resultingRevision + 1
     if (
       loaded.detail.issue.revision !== resultingRevision ||
-      !isAutomationPatchApplied(
-        loaded.detail.issue,
-        withoutBulkUndoActualDates(item.undoPayload),
-      )
+      !(operation.action.type === 'reassign-member'
+        // A restored merged share gets a new assignment ID, so contributors compare by value.
+        ? isBulkReassignMemberUndoApplied(loaded.detail.issue, item.undoPayload)
+        : isAutomationPatchApplied(
+            loaded.detail.issue,
+            withoutBulkUndoActualDates(item.undoPayload),
+          ))
     ) return undefined
     const metadata = {
       bulkOperationId: operation.id,
@@ -1280,7 +1286,9 @@ function createApiBulkOperationAdapter(
         throw error
       }
       const undoInput: Record<string, unknown> = {
-        ...restoreBulkUndoContributorIds(item.undoPayload, loaded.detail.issue),
+        ...(operation.action.type === 'reassign-member'
+          ? restoreBulkReassignMemberUndoIds(item.undoPayload, loaded.detail.issue)
+          : item.undoPayload),
         expectedRevision: item.resultingRevision,
       }
       const actualDateRequest = readWorkItemActualDateCorrection(undoInput)
@@ -1609,12 +1617,7 @@ function createBulkUndoPayload(
   action: BulkOperationRequest['action'],
   issue: TeamIssueResponseItem,
 ): Record<string, AutomationValue> {
-  if (action.type === 'reassign-member') {
-    return {
-      assigneeUserId: issue.assigneeUserId,
-      contributorAssignments: (issue.contributorAssignments ?? []).map(toAutomationContributorAssignment),
-    }
-  }
+  if (action.type === 'reassign-member') return createBulkReassignMemberUndoPayload(issue)
   if (action.type === 'move') {
     return { assignedProjectId: issue.assignedProjectId ?? null }
   }
@@ -1652,119 +1655,12 @@ function withoutBulkUndoActualDates(
   return fields
 }
 
-/**
- * Builds the owner and contributor changes that hand a member's open work to another member.
- *
- * The owner moves when it is the source member. Each contributor share of the source member that
- * is not `done` moves to the target member; when the target member already contributes, the
- * moved share is merged into theirs (planned effort added, capped at the contributor limit) so
- * the same person never holds two shares. A `done` share stays as the record of who did it.
- *
- * @param issue - Current Work Item.
- * @param action - Normalized reassignment action.
- * @returns The update fields to apply.
- * @throws AutomationError when the source member holds nothing open on the Work Item.
- */
-export function createBulkReassignMemberPatch(
-  issue: Pick<TeamIssueResponseItem, 'assigneeUserId' | 'contributorAssignments'>,
-  action: Pick<BulkReassignMemberAction, 'fromMemberUserId' | 'toMemberUserId'>,
-): { assigneeUserId?: string, contributorAssignments?: WorkItemContributorAssignmentInput[] } {
-  const from = action.fromMemberUserId
-  const to = action.toMemberUserId
-  const movesOwner = issue.assigneeUserId.trim().toLowerCase() === from
-  const current = issue.contributorAssignments ?? []
-  const moving = current.filter((assignment) => assignment.memberUserId === from && assignment.status !== 'done')
-  if (!movesOwner && moving.length === 0) {
-    throw new AutomationError(
-      'conflict',
-      'BulkReassignMemberNotInvolved',
-      'The member no longer owns or contributes to this Work Item.',
-    )
-  }
-  if (moving.length === 0) return { assigneeUserId: to }
-  const target = current.find((assignment) => assignment.memberUserId === to)
-  const contributorAssignments: WorkItemContributorAssignmentInput[] = []
-  for (const assignment of current) {
-    if (assignment.memberUserId === from && assignment.status !== 'done') {
-      if (target === undefined) contributorAssignments.push({ ...assignment, memberUserId: to })
-      continue
-    }
-    if (target !== undefined && assignment.assignmentId === target.assignmentId) {
-      const movedEffort = moving.reduce((total, share) => total + (share.plannedEffortMinutes ?? 0), 0)
-      const plannedEffortMinutes = Math.min(
-        (assignment.plannedEffortMinutes ?? 0) + movedEffort,
-        WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
-      )
-      contributorAssignments.push({
-        ...assignment,
-        ...(assignment.plannedEffortMinutes === undefined && movedEffort === 0 ? {} : { plannedEffortMinutes }),
-        // Taking over unfinished work reopens a share its holder had already finished.
-        ...(assignment.status === 'done' ? { status: 'in-progress' } : {}),
-      })
-      continue
-    }
-    contributorAssignments.push({ ...assignment })
-  }
-  return {
-    ...(movesOwner ? { assigneeUserId: to } : {}),
-    contributorAssignments,
-  }
-}
-
-/**
- * Converts a stored contributor assignment into an Automation value for a Bulk undo payload.
- *
- * @param assignment - Stored contributor assignment.
- * @returns The same fields as a plain Automation record.
- */
-function toAutomationContributorAssignment(assignment: WorkItemContributorAssignment): Record<string, AutomationValue> {
-  return {
-    assignmentId: assignment.assignmentId,
-    status: assignment.status,
-    ...(assignment.memberUserId === undefined ? {} : { memberUserId: assignment.memberUserId }),
-    ...(assignment.jobRoleId === undefined ? {} : { jobRoleId: assignment.jobRoleId }),
-    ...(assignment.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: assignment.plannedEffortMinutes }),
-  }
-}
-
-/**
- * Drops assignment IDs that no longer exist from a Bulk undo payload's contributors.
- *
- * A reassignment that merged a share into the target member's removed that share's ID, and an
- * update must not name an unknown ID, so the restored share is submitted as a new assignment.
- *
- * @param payload - Stored Bulk undo payload.
- * @param issue - Current Work Item.
- * @returns The payload with only current assignment IDs kept.
- */
-function restoreBulkUndoContributorIds(
-  payload: Record<string, AutomationValue>,
-  issue: Pick<TeamIssueResponseItem, 'contributorAssignments'>,
-): Record<string, AutomationValue> {
-  const contributors = payload.contributorAssignments
-  if (!Array.isArray(contributors)) return payload
-  const currentIds = new Set((issue.contributorAssignments ?? []).map((assignment) => assignment.assignmentId))
-  return {
-    ...payload,
-    contributorAssignments: contributors.map((assignment) => {
-      if (!isRecord(assignment) || typeof assignment.assignmentId !== 'string' ||
-        currentIds.has(assignment.assignmentId)) return assignment
-      const { assignmentId: _removed, ...rest } = assignment
-      return rest
-    }),
-  }
-}
-
 function isBulkActionApplied(
   issue: TeamIssueResponseItem,
   action: BulkOperationRequest['action'],
 ) {
   if (action.type === 'edit') return isAutomationPatchApplied(issue, action.patch)
-  if (action.type === 'reassign-member') {
-    return issue.assigneeUserId.trim().toLowerCase() !== action.fromMemberUserId &&
-      !(issue.contributorAssignments ?? []).some((assignment) =>
-        assignment.memberUserId === action.fromMemberUserId && assignment.status !== 'done')
-  }
+  if (action.type === 'reassign-member') return isBulkReassignMemberApplied(issue, action)
   if (action.type === 'move') {
     return automationValuesEqual(issue.assignedProjectId ?? null, action.targetProjectId)
   }
@@ -2155,6 +2051,7 @@ async function executeAutomationWorkItemCreate(
     configuredBody,
     configuration,
     [],
+    { dependencies },
   )
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,

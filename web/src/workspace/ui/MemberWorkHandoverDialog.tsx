@@ -1,23 +1,25 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useId, useState } from 'react'
 import type { BulkOperation, BulkOperationPreview, BulkOperationRequest } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
-import { loadWorkspaceWorkItems } from '../../issues/queries/workspaceWorkItemLoader'
-import { createBulkOperationHandlers } from '../../bulk-operations/mutations/createBulkOperationHandlers'
+import type { BulkOperationHandlers } from '../../bulk-operations/mutations/createBulkOperationHandlers'
 import { BulkOperationResultPanel } from '../../bulk-operations/ui/BulkOperationResultPanel'
 import type { WorkspaceMember } from '../api/access'
 import {
   MEMBER_WORK_HANDOVER_BATCH_LIMIT,
   createMemberWorkHandoverRequest,
-  listMemberWorkHandoverItems,
   type MemberWorkHandoverItem,
 } from '../model/memberWorkHandover'
+import type { MemberWorkHandoverLoadState } from '../mutations/useMemberWorkHandover'
 
 /** Props of {@link MemberWorkHandoverDialog}. */
 export type MemberWorkHandoverDialogProps = {
-  /** Access token for the Work Item and bulk operation APIs. */
-  accessToken: string
+  /** The member's open Work Items, or whether they are still loading or failed. */
+  loadState: MemberWorkHandoverLoadState
+  /** Reads the member's open Work Items again. */
+  onReload: () => void
+  /** Preview, apply, retry, and undo of the handover bulk operation. */
+  handlers: Pick<BulkOperationHandlers, 'preview' | 'apply' | 'retry' | 'undo'>
   /** Workspace that scopes the bulk request. */
   workspaceId: string
   /** Member whose open work is handed over. */
@@ -30,12 +32,6 @@ export type MemberWorkHandoverDialogProps = {
   onClose: () => void
 }
 
-/** What the dialog is loading or showing. */
-type HandoverLoadState =
-  | { status: 'loading' }
-  | { status: 'failed' }
-  | { status: 'loaded', items: MemberWorkHandoverItem[] }
-
 /**
  * Lists a member's open Work Items and hands the selected ones to another member.
  *
@@ -43,11 +39,13 @@ type HandoverLoadState =
  * keep only one Team's Work Items selected. The handover is a bulk operation, so it previews
  * every Work Item first, checks each revision, and can be retried or undone.
  *
- * @param props - Session, member, candidates, and close callback.
+ * @param props - Loaded Work Items, bulk handlers, member, candidates, and close callback.
  * @returns The dialog.
  */
 export function MemberWorkHandoverDialog({
-  accessToken,
+  loadState,
+  onReload,
+  handlers,
   workspaceId,
   member,
   members,
@@ -55,7 +53,6 @@ export function MemberWorkHandoverDialog({
   onClose,
 }: MemberWorkHandoverDialogProps) {
   const titleId = useId()
-  const [loadState, setLoadState] = useState<HandoverLoadState>({ status: 'loading' })
   const [deselected, setDeselected] = useState<ReadonlySet<string>>(() => new Set())
   const [successorKey, setSuccessorKey] = useState('')
   const [request, setRequest] = useState<BulkOperationRequest>()
@@ -72,39 +69,6 @@ export function MemberWorkHandoverDialog({
     candidate.status === 'active' &&
     candidate.role !== 'guest'
   )
-
-  const [loadCount, setLoadCount] = useState(0)
-
-  useEffect(() => {
-    let current = true
-    loadWorkspaceWorkItems(accessToken, false, { memberUserId: member.memberKey, openOnly: true }).then(
-      (workItems) => {
-        if (current) setLoadState({ status: 'loaded', items: listMemberWorkHandoverItems(workItems, member.memberKey) })
-      },
-      () => {
-        if (current) setLoadState({ status: 'failed' })
-      },
-    )
-    return () => {
-      current = false
-    }
-  }, [accessToken, member.memberKey, loadCount])
-
-  /** Reads the member's Work Items again, as after a handover changed them. */
-  const reload = useCallback(() => {
-    setLoadState({ status: 'loading' })
-    setLoadCount((count) => count + 1)
-  }, [])
-
-  const handlers = useMemo(() => createBulkOperationHandlers({
-    accessToken,
-    guardRequest: (pending) => pending,
-    mutationRequestRunner: createMutationRequestRunner(),
-    // The server checks write permission on every Work Item during preview and apply.
-    requireWriteScopes: () => undefined,
-    revalidate: async () => reload(),
-    t,
-  }), [accessToken, reload, t])
 
   const items = loadState.status === 'loaded' ? loadState.items : []
   const selectedItems = items.filter((item) => !deselected.has(itemKey(item)))
@@ -170,7 +134,7 @@ export function MemberWorkHandoverDialog({
           ) : loadState.status === 'failed' ? (
             <div className="flex flex-wrap items-center gap-3">
               <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('workspace.access.handover.loadError')}</p>
-              <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={reload}>
+              <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={onReload}>
                 {t('workspace.access.handover.retry')}
               </button>
             </div>

@@ -290,6 +290,28 @@ describe('capacity planning calculations', () => {
     expect(observedFrom).toBe('2026-07-31T00:00:00.000Z')
     expect(observedTo).toBe('2026-08-12T00:00:00.000Z')
   })
+
+  test('widens the snapshot time-entry query to scheduled contributor shares', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    let observedFrom: string | undefined
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async (input) => {
+        observedFrom = input.from
+        return []
+      },
+      listEstimates: async () => [{
+        workItemId: 'work-item-1',
+        window: { fromDate: '2026-07-20', toDate: '2026-08-14' },
+        contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 600 }],
+      }],
+    })
+
+    await service.getSnapshot(createInput({ fromDate: '2026-08-10', toDate: '2026-08-10' }))
+
+    // Time logged since the share started still counts against its remaining effort.
+    expect(observedFrom).toBe('2026-07-19T00:00:00.000Z')
+  })
 })
 
 describe('capacity planning mutations', () => {

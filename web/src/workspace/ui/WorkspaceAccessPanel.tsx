@@ -51,7 +51,7 @@ import {
   type WorkspaceMemberFilter,
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
-import { MemberWorkHandoverDialog } from './MemberWorkHandoverDialog'
+import { MemberWorkHandoverDialogContainer } from './MemberWorkHandoverDialogContainer'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -815,7 +815,7 @@ export function WorkspaceAccessPanel({
           {...(memberHandover ? { onOpenHandover: setHandoverMember } : {})}
         />
         {memberHandover && handoverMember ? (
-          <MemberWorkHandoverDialog
+          <MemberWorkHandoverDialogContainer
             accessToken={memberHandover.accessToken}
             member={handoverMember}
             members={access.members}

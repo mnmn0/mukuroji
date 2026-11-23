@@ -1,7 +1,13 @@
 import { expect, test } from 'bun:test'
 import type { WorkItemContributorAssignment } from '@mukuroji/contracts'
-import { createBulkReassignMemberPatch } from './automation-routes'
-import { AutomationError } from '../../modules/automation'
+import { AutomationError } from './automation-error'
+import {
+  createBulkReassignMemberPatch,
+  createBulkReassignMemberUndoPayload,
+  isBulkReassignMemberApplied,
+  isBulkReassignMemberUndoApplied,
+  restoreBulkReassignMemberUndoIds,
+} from './bulk-reassign-member'
 
 const action = { fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' }
 
@@ -69,4 +75,46 @@ test('rejects a Work Item the member no longer owns or contributes to', () => {
     expect(error).toBeInstanceOf(AutomationError)
     expect(error).toMatchObject({ code: 'BulkReassignMemberNotInvolved' })
   }
+})
+
+test('tells when a handover has taken effect', () => {
+  expect(isBulkReassignMemberApplied({
+    assigneeUserId: 'successor@example.com',
+    contributorAssignments: [share('a1', { memberUserId: 'leaver@example.com', status: 'done' })],
+  }, action)).toBe(true)
+  expect(isBulkReassignMemberApplied({
+    assigneeUserId: 'successor@example.com',
+    contributorAssignments: [share('a1', { memberUserId: 'leaver@example.com' })],
+  }, action)).toBe(false)
+})
+
+test('recognizes an undone merge whose restored share got a new assignment ID', () => {
+  const before = {
+    assigneeUserId: 'owner@example.com',
+    contributorAssignments: [
+      share('a1', { memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 }),
+      share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 30 }),
+    ],
+  }
+  const payload = createBulkReassignMemberUndoPayload(before)
+  const afterMerge = { contributorAssignments: [share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 90 })] }
+  expect(restoreBulkReassignMemberUndoIds(payload, afterMerge)).toEqual({
+    assigneeUserId: 'owner@example.com',
+    contributorAssignments: [
+      { status: 'planned', memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 },
+      { assignmentId: 'a2', status: 'planned', memberUserId: 'successor@example.com', plannedEffortMinutes: 30 },
+    ],
+  })
+  const undone = {
+    assigneeUserId: 'owner@example.com',
+    contributorAssignments: [
+      share('new', { memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 }),
+      share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 30 }),
+    ],
+  }
+  expect(isBulkReassignMemberUndoApplied(undone, payload)).toBe(true)
+  expect(isBulkReassignMemberUndoApplied({ ...undone, assigneeUserId: 'successor@example.com' }, payload)).toBe(false)
+  expect(isBulkReassignMemberUndoApplied(before, payload)).toBe(true)
+  expect(isBulkReassignMemberUndoApplied({ ...before, contributorAssignments: before.contributorAssignments.slice(1) }, payload))
+    .toBe(false)
 })

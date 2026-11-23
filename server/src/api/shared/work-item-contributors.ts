@@ -11,7 +11,10 @@ import {
   normalizeContributorAssignments,
 } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
-import { workspaceDependencies } from './app-dependencies'
+import {
+  ambientAutomationActionExecutorDependencies,
+  type AutomationActionExecutorDependencies,
+} from './app-dependencies'
 import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from './constants'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
 
@@ -38,6 +41,20 @@ export type ContributorAssignmentWriteFields = {
   authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
+/** Membership lookups used to validate and fence contributors. */
+export type ContributorMemberDependencies = Pick<AutomationActionExecutorDependencies, 'cognito' | 'workspaceAccess'>
+
+/** Optional inputs for {@link readContributorAssignmentChange}. */
+export type ContributorAssignmentChangeOptions = {
+  /**
+   * Members that must be checked and fenced whenever they hold a share after the change, even
+   * when their share already existed, such as the successor of a member handover.
+   */
+  readonly fencedMembers?: readonly string[]
+  /** Membership lookups; defaults to the current request's dependencies. */
+  readonly dependencies?: ContributorMemberDependencies
+}
+
 /**
  * Reads and normalizes `contributorAssignments` from a Work Item create or update body.
  *
@@ -54,6 +71,7 @@ export type ContributorAssignmentWriteFields = {
  * @param body - Configured create or update body.
  * @param resolvedConfiguration - Configuration that defines the available job roles.
  * @param existing - Contributors currently stored on the Work Item.
+ * @param options - Extra members to fence and the membership lookups to use.
  * @returns The normalized replacement and its membership fences, or undefined when the body omits the field.
  * @throws ProjectDataError when the contributor list is invalid.
  * @throws WorkspaceAccessError when an added member is not an active non-guest member.
@@ -63,6 +81,7 @@ export async function readContributorAssignmentChange(
   body: { contributorAssignments?: unknown },
   resolvedConfiguration: ResolvedWorkItemConfiguration,
   existing: readonly WorkItemContributorAssignment[],
+  options: ContributorAssignmentChangeOptions = {},
 ): Promise<ContributorAssignmentChange | undefined> {
   if (!('contributorAssignments' in body)) {
     return undefined
@@ -81,12 +100,20 @@ export async function readContributorAssignmentChange(
     throw error
   }
   // Members are independent, so they are checked a few at a time instead of one by one.
-  const addedMembers = listAddedContributorMembers(contributorAssignments, existing)
+  const fencedMembers = new Set((options.fencedMembers ?? []).map((member) => member.trim().toLowerCase()))
+  const addedMembers = [...new Set([
+    ...listAddedContributorMembers(contributorAssignments, existing),
+    ...contributorAssignments.flatMap((assignment) =>
+      assignment.memberUserId !== undefined && fencedMembers.has(assignment.memberUserId.toLowerCase())
+        ? [assignment.memberUserId]
+        : []),
+  ])]
+  const dependencies = options.dependencies ?? ambientAutomationActionExecutorDependencies
   const memberConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = []
   for (let start = 0; start < addedMembers.length; start += CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY) {
     memberConditionChecks.push(...await Promise.all(
       addedMembers.slice(start, start + CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY)
-        .map((memberUserId) => createContributorMemberConditionCheck(directoryId, memberUserId)),
+        .map((memberUserId) => createContributorMemberConditionCheck(directoryId, memberUserId, dependencies)),
     ))
   }
   return { contributorAssignments, memberConditionChecks }
@@ -125,6 +152,7 @@ export function withContributorAssignmentChange(
  *
  * @param directoryId - Workspace directory ID.
  * @param memberUserId - Member being added as a contributor.
+ * @param dependencies - Membership lookups to use.
  * @returns A ConditionCheck requiring the member to stay active, non-guest, and unchanged.
  * @throws WorkspaceAccessError when the member is not an active non-guest member.
  * @throws ProjectDataError when membership fencing is unavailable.
@@ -132,9 +160,10 @@ export function withContributorAssignmentChange(
 async function createContributorMemberConditionCheck(
   directoryId: string,
   memberUserId: string,
+  dependencies: ContributorMemberDependencies,
 ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]> {
-  await requireActiveWorkspaceAssignee(directoryId, memberUserId)
-  const workspaceAccess = workspaceDependencies.workspaceAccess
+  await requireActiveWorkspaceAssignee(directoryId, memberUserId, dependencies)
+  const workspaceAccess = dependencies.workspaceAccess
   const createMemberCheck = workspaceAccess.createActiveMemberConditionCheck
   if (!createMemberCheck) {
     throw new ProjectDataError(

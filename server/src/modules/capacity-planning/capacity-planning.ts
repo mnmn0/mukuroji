@@ -379,11 +379,23 @@ function isAssignmentVisible(
     (!assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId)
 }
 
-/** Builds the smallest time-entry window needed for the visible workload range. */
+/**
+ * Builds the smallest time-entry window needed for the visible workload range.
+ *
+ * The window covers the visible resource assignments and the scheduled contributor shares,
+ * so time logged before the displayed range still reduces their remaining effort.
+ *
+ * @param state - Stored capacity planning state.
+ * @param input - Snapshot scope and visibility.
+ * @param range - Displayed date range.
+ * @param estimates - Canonical Work Item estimates with their contributor shares.
+ * @returns The ISO time-entry query bounds.
+ */
 function getTimeEntryQueryRange(
   state: CapacityPlanningState,
   input: WorkloadSnapshotInput,
   range: { fromDate: string; toDate: string },
+  estimates: readonly WorkloadEstimate[],
 ): { from: string; to: string } {
   const profiles = state.profiles.filter((profile) =>
     input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
@@ -391,9 +403,12 @@ function getTimeEntryQueryRange(
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const isProjectVisible = (projectId: string | undefined): boolean =>
     input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
-  const relevantAssignments = state.assignments.filter((assignment) =>
-    assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
-  )
+  const relevantAssignments: Array<{ fromDate: string; toDate: string }> = [
+    ...state.assignments.filter((assignment) =>
+      assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
+    ),
+    ...listWorkloadContributorShares(estimates, state.assignments, profileByMemberId, isProjectVisible),
+  ]
   const fromDate = relevantAssignments.reduce(
     (earliest, assignment) => assignment.fromDate < earliest ? assignment.fromDate : earliest,
     range.fromDate,
@@ -435,16 +450,7 @@ export class CapacityPlanningService {
   async getSnapshot(input: WorkloadSnapshotInput): Promise<WorkloadSnapshot> {
     const range = validateDateRange(input.fromDate, input.toDate)
     const state = await this.repository.getState(input.workspaceId, input.teamId)
-    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
-    const [entries, estimates] = await Promise.all([
-      this.dataSource.listTimeEntries({
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        from: timeEntryRange.from,
-        to: timeEntryRange.to,
-      }),
-      this.dataSource.listEstimates(input.workspaceId, input.teamId),
-    ])
+    const { entries, estimates } = await this.readWorkloadSources(state, input, range)
     return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
   }
 
@@ -783,17 +789,34 @@ export class CapacityPlanningService {
         }
     if (current) replaceById(state.assignments, preview, 'id')
     else state.assignments.push(preview)
-    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
-    const [entries, estimates] = await Promise.all([
-      this.dataSource.listTimeEntries({
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        from: timeEntryRange.from,
-        to: timeEntryRange.to,
-      }),
-      this.dataSource.listEstimates(input.workspaceId, input.teamId),
-    ])
+    const { entries, estimates } = await this.readWorkloadSources(state, input, range)
     return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
+  }
+
+  /**
+   * Reads the estimates and the time entries a workload snapshot needs.
+   *
+   * Estimates are read first because their contributor shares widen the time-entry window.
+   *
+   * @param state - Capacity planning state the snapshot is built from.
+   * @param input - Snapshot scope and visibility.
+   * @param range - Displayed date range.
+   * @returns The time entries and estimates.
+   */
+  private async readWorkloadSources(
+    state: CapacityPlanningState,
+    input: WorkloadSnapshotInput,
+    range: { fromDate: string; toDate: string },
+  ): Promise<{ entries: Awaited<ReturnType<CapacityPlanningDataSource['listTimeEntries']>>, estimates: WorkloadEstimate[] }> {
+    const estimates = await this.dataSource.listEstimates(input.workspaceId, input.teamId)
+    const timeEntryRange = getTimeEntryQueryRange(state, input, range, estimates)
+    const entries = await this.dataSource.listTimeEntries({
+      workspaceId: input.workspaceId,
+      teamId: input.teamId,
+      from: timeEntryRange.from,
+      to: timeEntryRange.to,
+    })
+    return { entries, estimates }
   }
 
   /** Applies one state mutation with a Team-wide optimistic concurrency check. */

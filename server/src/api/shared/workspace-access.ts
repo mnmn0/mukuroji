@@ -265,7 +265,7 @@ function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
 export async function requireActiveWorkspaceAssignee(
   directoryId: string,
   userId: string,
-  dependencies: AutomationActionExecutorDependencies =
+  dependencies: Pick<AutomationActionExecutorDependencies, 'cognito' | 'workspaceAccess'> =
     ambientAutomationActionExecutorDependencies,
 ) {
   const member = await dependencies.workspaceAccess.getActiveMember(directoryId, userId)
