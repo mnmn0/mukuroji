@@ -1,13 +1,9 @@
 import { MEMBER_DISPLAY_NAME_MAX_LENGTH, readMemberDisplayName } from '@mukuroji/contracts'
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { useSWRConfig } from 'swr'
+import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import {
-  createMutationRequestRunner,
-} from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from '../api/errors'
-import { updateMemberProfile, type MemberProfile } from '../api/memberProfile'
-import { useMemberProfile } from '../queries/useMemberProfile'
+import type { MemberProfile } from '../api/memberProfile'
+import { useMemberProfileController } from '../mutations/useMemberProfileController'
 
 /** Inputs for the signed-in member's profile section. */
 export type MemberProfileSectionProps = {
@@ -49,6 +45,9 @@ function resolveSaveErrorKey(error: unknown): MessageKey {
 /**
  * Renders the signed-in member's profile: the display name others see, and the email address.
  *
+ * The name form starts again from the saved name whenever the saved profile changes (a save, or a
+ * reload after a conflict), because it is keyed by the member version.
+ *
  * @param props - Profile state, save action, and message resolver.
  * @returns The profile section.
  */
@@ -60,35 +59,7 @@ export function MemberProfileSection({
   t,
   userLabel,
 }: MemberProfileSectionProps) {
-  const savedName = profile?.name ?? ''
-  const [draft, setDraft] = useState(savedName)
-  const [saving, setSaving] = useState(false)
-  const [errorKey, setErrorKey] = useState<MessageKey>()
-  const [saved, setSaved] = useState(false)
-
-  useEffect(() => {
-    setDraft(savedName)
-  }, [savedName])
-
-  const parsed = readMemberDisplayName(draft)
-  const changed = parsed.ok && (parsed.name ?? '') !== savedName
-  const editable = profile?.nameEditable === true && onSave !== undefined
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!profile || !onSave || !parsed.ok || !changed) return
-    setSaving(true)
-    setErrorKey(undefined)
-    setSaved(false)
-    try {
-      await onSave(parsed.name, profile.version)
-      setSaved(true)
-    } catch (error) {
-      setErrorKey(resolveSaveErrorKey(error))
-    } finally {
-      setSaving(false)
-    }
-  }
+  const [notice, setNotice] = useState<{ kind: 'saved' } | { kind: 'error'; key: MessageKey }>()
 
   return (
     <section className="workbench-panel p-5" data-testid="settings-profile">
@@ -115,59 +86,117 @@ export function MemberProfileSection({
         </div>
       ) : null}
       {profile ? (
-        <form className="mt-4 grid max-w-[560px] gap-2" onSubmit={(event) => void submit(event)}>
-          <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-            {t('workspace.settings.profile.nameLabel')}
-            <input
-              aria-describedby="settings-profile-name-help"
-              aria-invalid={!parsed.ok}
-              className="workbench-input min-h-10 px-3 text-sm disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
-              data-testid="settings-profile-name"
-              disabled={!editable || saving}
-              maxLength={MEMBER_DISPLAY_NAME_MAX_LENGTH}
-              placeholder={profile.email}
-              value={draft}
-              onChange={(event) => {
-                setDraft(event.target.value)
-                setSaved(false)
-                setErrorKey(undefined)
-              }}
-            />
-          </label>
-          <p
-            className="text-sm font-medium leading-6 text-[var(--workbench-muted)]"
-            id="settings-profile-name-help"
-          >
-            {t(profile.nameEditable
-              ? 'workspace.settings.profile.nameHelp'
-              : 'workspace.settings.profile.directoryManaged')}
-          </p>
-          {errorKey ? (
-            <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
-              {t(errorKey)}
-            </p>
-          ) : !parsed.ok ? (
-            <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
-              {t('workspace.settings.profile.invalid')}
-            </p>
-          ) : saved ? (
-            <p className="text-sm font-semibold text-[var(--workbench-success)]" role="status">
-              {t('workspace.settings.profile.saved')}
-            </p>
-          ) : null}
-          {editable ? (
-            <button
-              className="workbench-button-primary min-h-10 w-fit px-4"
-              data-testid="settings-profile-save"
-              disabled={!changed || saving}
-              type="submit"
-            >
-              {t(saving ? 'workspace.settings.profile.saving' : 'workspace.settings.profile.save')}
-            </button>
-          ) : null}
-        </form>
+        <MemberProfileNameForm
+          key={`${profile.version}:${profile.name ?? ''}`}
+          notice={notice}
+          profile={profile}
+          t={t}
+          onEdit={() => setNotice(undefined)}
+          onSave={onSave === undefined ? undefined : async (name) => {
+            setNotice(undefined)
+            try {
+              await onSave(name, profile.version)
+              setNotice({ kind: 'saved' })
+            } catch (error) {
+              setNotice({ kind: 'error', key: resolveSaveErrorKey(error) })
+            }
+          }}
+        />
       ) : null}
     </section>
+  )
+}
+
+/** Inputs for the display name form of one saved profile. */
+type MemberProfileNameFormProps = {
+  /** Saved profile the form starts from. */
+  profile: MemberProfile
+  /** Result of the last save, shown under the field. */
+  notice?: { kind: 'saved' } | { kind: 'error'; key: MessageKey }
+  /** Clears the last result when the member edits the name. */
+  onEdit: () => void
+  /** Saves the name; undefined removes it. Resolves after the result is recorded. */
+  onSave?: (name: string | undefined) => Promise<void>
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the editable display name of one saved profile.
+ *
+ * @param props - Saved profile, last result, and save action.
+ * @returns The name form.
+ */
+function MemberProfileNameForm({ notice, onEdit, onSave, profile, t }: MemberProfileNameFormProps) {
+  const savedName = profile.name ?? ''
+  const [draft, setDraft] = useState(savedName)
+  const [saving, setSaving] = useState(false)
+  const parsed = readMemberDisplayName(draft)
+  const changed = parsed.ok && (parsed.name ?? '') !== savedName
+  const editable = profile.nameEditable && onSave !== undefined
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!onSave || !parsed.ok || !changed) return
+    setSaving(true)
+    try {
+      await onSave(parsed.name)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form className="mt-4 grid max-w-[560px] gap-2" onSubmit={(event) => void submit(event)}>
+      <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+        {t('workspace.settings.profile.nameLabel')}
+        <input
+          aria-describedby="settings-profile-name-help"
+          aria-invalid={!parsed.ok}
+          className="workbench-input min-h-10 px-3 text-sm disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
+          data-testid="settings-profile-name"
+          disabled={!editable || saving}
+          maxLength={MEMBER_DISPLAY_NAME_MAX_LENGTH}
+          placeholder={profile.email}
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value)
+            onEdit()
+          }}
+        />
+      </label>
+      <p
+        className="text-sm font-medium leading-6 text-[var(--workbench-muted)]"
+        id="settings-profile-name-help"
+      >
+        {t(profile.nameEditable
+          ? 'workspace.settings.profile.nameHelp'
+          : 'workspace.settings.profile.directoryManaged')}
+      </p>
+      {!parsed.ok ? (
+        <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
+          {t('workspace.settings.profile.invalid')}
+        </p>
+      ) : notice?.kind === 'error' ? (
+        <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
+          {t(notice.key)}
+        </p>
+      ) : notice?.kind === 'saved' ? (
+        <p className="text-sm font-semibold text-[var(--workbench-success)]" role="status">
+          {t('workspace.settings.profile.saved')}
+        </p>
+      ) : null}
+      {editable ? (
+        <button
+          className="workbench-button-primary min-h-10 w-fit px-4"
+          data-testid="settings-profile-save"
+          disabled={!changed || saving}
+          type="submit"
+        >
+          {t(saving ? 'workspace.settings.profile.saving' : 'workspace.settings.profile.save')}
+        </button>
+      ) : null}
+    </form>
   )
 }
 
@@ -182,7 +211,7 @@ export type MemberProfileSectionContainerProps = {
 }
 
 /**
- * Loads the signed-in member's profile and saves display name changes.
+ * Connects the profile controller to the profile section.
  *
  * @param props - Access token, message resolver, and fallback label.
  * @returns The connected profile section.
@@ -192,39 +221,16 @@ export function MemberProfileSectionContainer({
   t,
   userLabel,
 }: MemberProfileSectionContainerProps) {
-  const { data, error, mutate } = useMemberProfile(accessToken)
-  const { mutate: mutateCache } = useSWRConfig()
-  const runner = useMemo(() => createMutationRequestRunner(), [])
+  const controller = useMemberProfileController(accessToken)
 
   return (
     <MemberProfileSection
-      loadFailed={Boolean(error) && !data}
-      profile={data}
+      loadFailed={controller.loadFailed}
+      profile={controller.profile}
       t={t}
       userLabel={userLabel}
-      onRetry={() => void mutate()}
-      onSave={async (name, expectedVersion) => {
-        const input = { name: name ?? null, expectedVersion }
-        try {
-          const profile = await runner.run(
-            'member-profile:name',
-            JSON.stringify(input),
-            (context) => updateMemberProfile(accessToken, input, context),
-            (failure) => !(failure instanceof WorkspaceAccessApiError),
-          )
-          await mutate(profile, { revalidate: false })
-          // The member list on the Workspace settings shows this name too.
-          void mutateCache(
-            (key) => Array.isArray(key) && key[0] === 'workspace-access',
-            undefined,
-            { revalidate: true },
-          )
-        } catch (failure) {
-          // A conflict means the member changed elsewhere; show the latest name.
-          if (failure instanceof WorkspaceAccessApiError && failure.status === 409) void mutate()
-          throw failure
-        }
-      }}
+      onRetry={controller.retry}
+      onSave={controller.saveName}
     />
   )
 }

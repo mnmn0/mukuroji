@@ -263,3 +263,35 @@ describe('weekly report reminder adapters', () => {
     expect((await readWeeklyReportReminderFence(event, undefined)).current).toBe(false)
   })
 })
+
+test('replaces Project member names in the rosters with the current Workspace member names', async () => {
+  const reader = createWeeklyReportReader({
+    store: { getWeeks: async () => new Map() },
+    readProfile: async () => undefined,
+    readTeamRosters: async (workspaceId) => [{
+      workspaceId,
+      teamId: 'team-1',
+      projects: [{
+        projectId: 'platform',
+        writers: [
+          { memberKey: 'Renamed@example.com', displayName: 'Old name' },
+          { memberKey: 'cleared@example.com', displayName: 'Old name' },
+          { memberKey: 'former@example.com', displayName: 'Former' },
+        ],
+        managerMemberKeys: [],
+      }],
+    }],
+    readMemberNames: async () => new Map([
+      ['renamed@example.com', 'New name'],
+      ['cleared@example.com', undefined],
+    ]),
+  })
+
+  const [roster] = await reader.readTeamRosters('workspace-1')
+  expect(roster?.projects[0]?.writers).toEqual([
+    { memberKey: 'Renamed@example.com', displayName: 'New name' },
+    { memberKey: 'cleared@example.com' },
+    // A member missing from the Workspace list keeps the Project name.
+    { memberKey: 'former@example.com', displayName: 'Former' },
+  ])
+})

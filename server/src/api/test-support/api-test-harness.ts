@@ -1903,7 +1903,8 @@ function configureFakeProjectClients(
     id: memberKey,
     memberKey,
     email: memberKey,
-    name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
+    // Members start with the Cognito name they signed up with, as reconciliation copies it.
+    name: createFakeCognitoProfile(memberKey).name,
     role: memberKey === 'demo@example.com'
       ? workspaceRole
       : options.guestWorkspaceMemberKeys?.includes(memberKey)

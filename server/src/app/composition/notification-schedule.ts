@@ -5,6 +5,7 @@ import {
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
 import { DynamoDbTenantAdministrationClient } from '../../modules/tenant-administration'
+import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWeeklyReportStore } from '../../modules/weekly-reports'
 import { createWeeklyReportReader } from './weekly-report-reminders'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
@@ -72,6 +73,10 @@ export function createProductionNotificationScheduleHandler() {
   const tenantAdministrationTableName = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
   if (!tenantAdministrationTableName) throw new Error('TENANT_ADMINISTRATION_TABLE_NAME is required.')
   const tenantAdministration = new DynamoDbTenantAdministrationClient(tenantAdministrationTableName, documentClient)
+  const workspaceAccessTableName = environment.WORKSPACE_ACCESS_TABLE_NAME?.trim()
+  if (!workspaceAccessTableName) throw new Error('WORKSPACE_ACCESS_TABLE_NAME is required.')
+  // Read-only: the schedule lists active members for their current display names (ADR 0074).
+  const workspaceAccess = new DynamoDbWorkspaceAccessClient(workspaceAccessTableName, documentClient)
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
     createDynamoDbScheduledWorkItemSource({
@@ -100,6 +105,12 @@ export function createProductionNotificationScheduleHandler() {
         documentClient,
         tableName: projectDirectoryTableName,
       }),
+      readMemberNames: async (workspaceId) => new Map(
+        (await workspaceAccess.listActiveMembers(workspaceId)).map((member) => [
+          member.memberKey.trim().toLowerCase(),
+          member.name?.trim() || undefined,
+        ]),
+      ),
     }),
   )
   return createRetentionAwareNotificationScheduleHandler(

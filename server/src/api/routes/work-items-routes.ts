@@ -2361,12 +2361,15 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.id)
 
+    // The Workspace member row holds the name a member or administrator set (ADR 0074); Cognito
+    // keeps the name from sign-up.
+    const name = workspaceMember ? workspaceMember.name?.trim() || undefined : profile.name
     return {
       ...member,
       id: profile.id,
       email: profile.email,
       username: profile.username,
-      name: profile.name,
+      name,
       enabled: profile.enabled,
       status: profile.status,
       workspaceStatus: workspaceMember?.status ?? 'deactivated',
@@ -2375,6 +2378,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     if (isCognitoUserNotFoundError(error)) {
       return {
         ...member,
+        ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
         workspaceStatus: workspaceMember?.status ?? 'deactivated',
       }
     }
@@ -2382,6 +2386,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     console.warn('Failed to hydrate project member from Cognito:', error)
     return {
       ...member,
+      ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
       workspaceStatus: workspaceMember?.status ?? 'deactivated',
     }
   }

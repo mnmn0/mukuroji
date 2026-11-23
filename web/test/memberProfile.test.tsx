@@ -146,11 +146,13 @@ describe('settings panel links', () => {
 })
 
 describe('quiet hours time zone', () => {
-  test('uses the member time zone when quiet hours are first turned on', async () => {
+  test('uses the member time zone only before notification settings are saved', async () => {
     const { resolveQuietHoursTimeZone } = await import('../src/notifications/ui/NotificationSettingsPanel')
-    expect(resolveQuietHoursTimeZone('UTC', true, 'Asia/Tokyo')).toBe('Asia/Tokyo')
-    expect(resolveQuietHoursTimeZone('Europe/Paris', true, 'Asia/Tokyo')).toBe('Europe/Paris')
-    expect(resolveQuietHoursTimeZone('UTC', false, 'Asia/Tokyo')).toBe('UTC')
-    expect(resolveQuietHoursTimeZone('UTC', true, undefined)).toBe('UTC')
+    expect(resolveQuietHoursTimeZone('UTC', true, 'Asia/Tokyo', true)).toBe('Asia/Tokyo')
+    expect(resolveQuietHoursTimeZone('Europe/Paris', true, 'Asia/Tokyo', true)).toBe('Europe/Paris')
+    expect(resolveQuietHoursTimeZone('UTC', false, 'Asia/Tokyo', true)).toBe('UTC')
+    expect(resolveQuietHoursTimeZone('UTC', true, undefined, true)).toBe('UTC')
+    // A saved UTC may be the member's choice, so it stays.
+    expect(resolveQuietHoursTimeZone('UTC', true, 'Asia/Tokyo', false)).toBe('UTC')
   })
 })

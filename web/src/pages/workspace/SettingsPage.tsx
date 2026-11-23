@@ -40,7 +40,7 @@ export function SettingsPage() {
   const appInstall = useAppInstallPrompt()
   const badgePermission = useAppBadgePermission()
   const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed' | 'failed'>()
-  useSettingsPanelScroll(location.hash)
+  useSettingsPanelScroll(location.hash, location.key)
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'

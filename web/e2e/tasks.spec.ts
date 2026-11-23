@@ -12917,6 +12917,12 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('settings-panel-link-members').click()
     await expect(page).toHaveURL('/settings/workspace#settings-members')
     await expect(page.locator('#settings-members')).toBeInViewport()
+
+    // Following the same link again scrolls back to the panel.
+    await page.locator('#settings-audit-log, #settings-automation').last().scrollIntoViewIfNeeded()
+    await expect(page.locator('#settings-members')).not.toBeInViewport()
+    await page.getByTestId('settings-panel-link-members').click()
+    await expect(page.locator('#settings-members')).toBeInViewport()
   })
 
   test('設定画面で通知 channel・種類ごとの配信先・ミュート・frequency・quiet hours を保存できる', async ({ page }) => {

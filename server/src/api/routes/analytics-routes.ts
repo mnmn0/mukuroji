@@ -84,7 +84,11 @@ import {
 import { createWorkspaceSearchContext } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceCalendarSettingsOf } from '../shared/workspace-calendar'
-import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+import {
+  projectAccessAllows,
+  readWorkspaceMemberNames,
+  toWorkspaceAccessErrorResponse,
+} from '../shared/workspace-access'
 
 /** Analytics が一つの entity query で読む audit event page size です。 */
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
@@ -282,8 +286,18 @@ async function readAnalyticsExportMemberNames(
     team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
   )
   const names = new Map<string, string>()
+  // Renamed members keep their old name on Project rows, so the Workspace member row comes first.
+  const resolved = new Set<string>()
+  const workspaceNames = await readWorkspaceMemberNames(principal.directoryId)
+  for (const memberKey of memberKeys) {
+    const normalizedKey = memberKey.trim().toLowerCase()
+    if (!workspaceNames.has(normalizedKey)) continue
+    resolved.add(memberKey)
+    const name = workspaceNames.get(normalizedKey)
+    if (name) names.set(memberKey, name)
+  }
   for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
-    if ([...memberKeys].every((key) => names.has(key))) break
+    if ([...memberKeys].every((key) => resolved.has(key) || names.has(key))) break
     const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
     const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
       workspaceDependencies.projectDirectory.getProjectMembers(
@@ -296,7 +310,9 @@ async function readAnalyticsExportMemberNames(
       if (response.status !== 'fulfilled') continue
       for (const member of response.value.members) {
         const name = member.name?.trim()
-        if (name && memberKeys.has(member.id) && !names.has(member.id)) names.set(member.id, name)
+        if (name && memberKeys.has(member.id) && !resolved.has(member.id) && !names.has(member.id)) {
+          names.set(member.id, name)
+        }
       }
     }
   }

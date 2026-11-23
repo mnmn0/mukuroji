@@ -16,8 +16,11 @@ directory（SCIM）連携の member は、reconcile のたびに directory の�
 
 ## 決定
 
-- 表示名は引き続き member row の `name` に置く。名前を読む既存の経路（担当者の一覧、コメント、
-  週報、通知、export）はすべてこの値を読むので、変えた名前がそのまま反映される。
+- 表示名は引き続き member row の `name` に置き、名前の正本とする。担当者の一覧・コメント・通知など
+  多くの経路は既にこの値を読む。Project member row の `name` と Cognito の `name` は書かれた時点の
+  値のままなので、それを読んでいた経路（Project メンバー一覧、週報の提出状況と未提出リマインダー、
+  Analytics の export）は Workspace member row の名前を優先し、member row にない人だけ従来の値を使う。
+  通知 schedule は名前を読むため Workspace Access table の `Query` 権限を足す。
 - 本人は `PUT /api/me/profile`、管理者は `PUT /api/workspace/members/:memberKey/name` で変える。
   `GET /api/me/profile` は本人の表示名・メール・`nameEditable`・`version` を返す。
 - 権限は role 変更と同じ: 本人は自分、owner は全員、admin は member と guest。

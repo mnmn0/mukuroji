@@ -1,5 +1,5 @@
 import { MEMBER_DISPLAY_NAME_MAX_LENGTH, readMemberDisplayName } from '@mukuroji/contracts'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../api/access'
 
@@ -28,19 +28,12 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
   const [failed, setFailed] = useState(false)
   const parsed = readMemberDisplayName(draft)
   const renameButtonRef = useRef<HTMLButtonElement>(null)
-  const returnFocusRef = useRef(false)
-
-  useEffect(() => {
-    // Closing the form removes the focused field, so focus goes back to the button that opened it.
-    if (!editing && returnFocusRef.current) {
-      returnFocusRef.current = false
-      renameButtonRef.current?.focus()
-    }
-  }, [editing])
 
   const close = () => {
-    returnFocusRef.current = true
     setEditing(false)
+    // Closing the form removes the focused field, so focus goes back to the button that opened it
+    // once it renders again.
+    window.requestAnimationFrame(() => renameButtonRef.current?.focus())
   }
 
   if (!editing) {

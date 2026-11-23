@@ -32,11 +32,13 @@ const PANEL_POLL_MS = 100
  * Scrolls to the settings panel a URL fragment names, once that panel is on the page.
  *
  * Panels render after their permissions and data load, so the browser's own fragment scroll
- * often runs before the panel exists. This keeps looking for a short while.
+ * often runs before the panel exists, and following the same in-page link again does not scroll
+ * at all. This scrolls on every navigation to a panel fragment, waiting a short while for it.
  *
  * @param hash - Current URL fragment, with the leading `#`.
+ * @param navigationKey - Key of the current navigation, so following the same link again scrolls again.
  */
-export function useSettingsPanelScroll(hash: string) {
+export function useSettingsPanelScroll(hash: string, navigationKey: string) {
   useEffect(() => {
     if (!hash.startsWith('#settings-')) return
     let id: string
@@ -56,5 +58,5 @@ export function useSettingsPanelScroll(hash: string) {
       }
     }, PANEL_POLL_MS)
     return () => window.clearInterval(timer)
-  }, [hash])
+  }, [hash, navigationKey])
 }

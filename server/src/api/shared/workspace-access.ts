@@ -280,3 +280,23 @@ export async function requireActiveWorkspaceAssignee(
 
   return dependencies.cognito.getUserProfile(userId)
 }
+
+/**
+ * Reads the display names of a Workspace's active members, keyed by lower-cased member key.
+ *
+ * Members rename themselves on their Workspace member row (ADR 0074), so Project member rows and
+ * Cognito keep the name they had when they were written. Readers that show names prefer this map
+ * and fall back to their own value only for a member missing from it.
+ *
+ * @param directoryId - Workspace ID.
+ * @returns Name per member; undefined means the member has no name and is shown by email.
+ */
+export async function readWorkspaceMemberNames(
+  directoryId: string,
+): Promise<Map<string, string | undefined>> {
+  const members = await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)
+  return new Map(members.map((member) => [
+    member.memberKey.trim().toLowerCase(),
+    member.name?.trim() || undefined,
+  ]))
+}

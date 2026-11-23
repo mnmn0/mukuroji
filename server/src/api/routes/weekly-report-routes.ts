@@ -39,7 +39,7 @@ import {
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { forEachTeamPartitionPage } from '../shared/work-item-aggregate-read'
 import { createWorkItemListLimitExceededError } from '../shared/work-item-access'
-import type { TeamPermissionContext } from '../shared/workspace-access'
+import { readWorkspaceMemberNames, type TeamPermissionContext } from '../shared/workspace-access'
 
 /** Most Work Items read at once while a report is submitted or read. */
 const RESOLVE_CONCURRENCY = 8
@@ -369,13 +369,20 @@ async function readManagedRoster(principal: WorkspacePrincipal, teamId: string) 
   const { context, wholeTeam } = access
   const projects = context.team.projects.filter((project) =>
     wholeTeam || canAccessAssignedProject(principal, context, project.id, 'manager'))
-  const responses = await Promise.all(projects.map(async (project) =>
-    await workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, project.id, teamId)))
+  const [responses, workspaceNames] = await Promise.all([
+    Promise.all(projects.map(async (project) =>
+      await workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, project.id, teamId))),
+    readWorkspaceMemberNames(principal.directoryId),
+  ])
   const roster = new Map<string, { memberKey: string; displayName?: string }>()
   for (const response of responses) {
     for (const member of response.members) {
       const memberKey = normalizeProjectMemberKey(member.id)
-      const displayName = member.name?.trim()
+      // A renamed member's Project row keeps the old name, so the Workspace member row wins.
+      const workspaceKey = memberKey.trim().toLowerCase()
+      const displayName = workspaceNames.has(workspaceKey)
+        ? workspaceNames.get(workspaceKey)
+        : member.name?.trim()
       const existing = roster.get(memberKey)
       if (existing?.displayName !== undefined) continue
       roster.set(memberKey, { memberKey, ...(displayName ? { displayName } : {}) })
