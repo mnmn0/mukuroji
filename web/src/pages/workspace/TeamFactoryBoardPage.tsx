@@ -93,6 +93,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           onPeriodDaysChange={setAnalyticsDays}
           onRetry={() => { void analytics.mutate() }}
           periodDays={analyticsDays}
+          projectNames={projectNames}
         />
         <FactoryBoard
           board={board.data}

@@ -4,6 +4,7 @@ export {
   COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
   CollaborationError,
   createProjectCollaborationEntityKey,
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
   createWorkItemCollaborationEntityKey,

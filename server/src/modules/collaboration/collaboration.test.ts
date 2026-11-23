@@ -8,6 +8,7 @@ import {
   CollaborationError,
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
+  createPlanningEntityCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   deriveAuditedCommentId,
   DynamoDbCollaborationClient,
@@ -440,6 +441,25 @@ test('includes caller authorization guards in watcher transactions', async () =>
       ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
     }),
   ]))
+  // DynamoDB rejects a transaction that names one item twice.
+  const readItems = (value: Record<string, unknown> | undefined): unknown[] =>
+    Array.isArray(value?.TransactItems) ? value.TransactItems : []
+  const items = readItems(transaction)
+  expect(items.filter((item) => JSON.stringify(item) === JSON.stringify(authorizationCheck))).toHaveLength(1)
+  for (const method of ['subscribe', 'unsubscribe'] as const) {
+    transaction = undefined
+    await client[method]({
+      authorizationConditionChecks: [authorizationCheck],
+      entityKey: createPlanningEntityCollaborationEntityKey('workspace#one', 'milestone-1'),
+      expectedSubscribed: method === 'unsubscribe',
+      memberKey: 'member@example.com',
+      planningEntityId: 'milestone-1',
+      workspaceId: 'workspace#one',
+    })
+    const planningItems = readItems(transaction)
+    expect(planningItems[0]).toEqual(authorizationCheck)
+    expect(planningItems.filter((item) => JSON.stringify(item) === JSON.stringify(authorizationCheck))).toHaveLength(1)
+  }
 })
 
 test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {

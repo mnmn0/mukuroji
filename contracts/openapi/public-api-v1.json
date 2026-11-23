@@ -737,6 +737,36 @@
         ],
         "type": "object"
       },
+      "AgentTelemetryExportLogsRequest": {
+        "description": "OpenTelemetry `ExportLogsServiceRequest` in the OTLP/HTTP JSON encoding.",
+        "properties": {
+          "resourceLogs": {
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 2000,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AgentTelemetryExportLogsResponse": {
+        "description": "OpenTelemetry `ExportLogsServiceResponse`.",
+        "properties": {
+          "partialSuccess": {
+            "properties": {
+              "errorMessage": {
+                "type": "string"
+              },
+              "rejectedLogRecords": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "ApiKeyOneTimeSecretOutput": {
         "additionalProperties": false,
         "properties": {
@@ -9975,6 +10005,83 @@
           }
         ],
         "summary": "Read the Team Agent settings that govern runs",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/agent-telemetry/v1/logs": {
+      "post": {
+        "description": "OTLP/HTTP JSON logs receiver for coding agent telemetry. Point `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` at this path. Only `claude_code.api_request` records are read, and only their token counts, estimated cost, model, time, and the `mukuroji.agent_instance` attribute; every other attribute, including prompts, is dropped. Usage is attributed to the credential owner's Agent Runs by time when read.",
+        "operationId": "exportPublicAgentTelemetryLogs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTelemetryExportLogsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTelemetryExportLogsResponse"
+                }
+              }
+            },
+            "description": "Usage added. `partialSuccess` counts usage records the receiver refused; a retried export adds nothing.",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "description": "The body is not OTLP/HTTP JSON (`Content-Type: application/json`)."
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Receive coding agent token usage as OpenTelemetry logs",
         "tags": [
           "Agent Runs"
         ]

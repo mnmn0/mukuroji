@@ -793,6 +793,7 @@ async function mockAuthenticatedTaskPage(
         capabilities: {
           canManageSharedViews: true,
           canSetTeamDefault: true,
+          canSetProjectDefault: false,
           canWrite: true,
           writableProjectScopes: projectDirectory.flatMap((team) => team.projects.map((project) => ({
             projectId: project.id,
@@ -1075,6 +1076,13 @@ async function mockAuthenticatedTaskPage(
   })
 
   await page.route('**/api/work-items**', async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/work-items/key-prefixes')) {
+      const keys = [...Object.values(taskResponsesByProject).flat(), ...Object.values(teamIssuesByTeam).flat()]
+        .map((issue) => issue.key)
+        .filter((key): key is string => typeof key === 'string')
+      await route.fulfill({ json: { prefixes: [...new Set(keys.map((key) => key.replace(/-\d+$/u, '')))].sort() } })
+      return
+    }
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -2684,6 +2692,10 @@ async function mockAnalyticsReportsPage(
     },
   )
 
+  await page.route(/.*\/api\/analytics\/deliveries(?:\?.*)?$/, async (route) => {
+    await route.fulfill({ json: { deliveries: [] } })
+  })
+
   await page.route(
     /.*\/api\/analytics\/reports\/[^/]+\/snapshots(?:\?.*)?$/,
     async (route) => {
@@ -4253,7 +4265,7 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/teams/core-team/factory')
     await expect(page).toHaveURL('/teams/core-team/issues')
-    // Personal tokens stay available for the Workspace MCP profile, which only reads.
+    // Personal tokens stay available for the Workspace MCP profile.
     await page.route('**/api/developer/me/agent-connection', async (route) => {
       await route.fulfill({
         json: {
@@ -5598,6 +5610,19 @@ test.describe('authenticated task page', () => {
       }
       await route.fulfill({
         json: { fiscalYearStartMonth: 1, weekStartDay: 1, workingWeekdays: ['monday'], holidays: [] },
+      })
+    })
+    // The Team and Project calendar reads succeed, so the notice is about the Workspace calendar.
+    const policy = { workingWeekdays: ['monday'], holidays: [], timeZone: 'Asia/Tokyo', calendarSource: 'shared' }
+    await page.route((url) => /^\/api\/teams\/[^/]+\/work-calendar$/.test(url.pathname), async (route) => {
+      await route.fulfill({
+        json: {
+          scope: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+          changeAdjustment: 'keep-duration',
+          resolvedPolicy: policy,
+          inheritedPolicy: policy,
+          canManage: false,
+        },
       })
     })
     await setScheduleFixtureClock(page)
@@ -15345,6 +15370,7 @@ test.describe('authenticated task page', () => {
           capabilities: {
             canManageSharedViews: false,
             canSetTeamDefault: false,
+            canSetProjectDefault: false,
             canWrite: false,
             writableProjectScopes: [],
             writableTeamIds: [],

@@ -239,7 +239,7 @@ describe('offline page theme', () => {
     const head = offlineHtml.slice(0, offlineHtml.indexOf('</head>'))
     expect(head).toContain('<script src="/offline.js"></script>')
     expect(head).toContain('media="(prefers-color-scheme: dark)" content="#0e1412"')
-    expect(offlineHtml).not.toMatch(/<script>/u)
+    expect(offlineHtml.toLowerCase()).not.toContain('<script>')
   })
 
   test('applies the saved preference and theme-color like the application', () => {
