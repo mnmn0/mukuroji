@@ -90,6 +90,10 @@ const taskViewFilterFields = [
   'dueDatePreset',
   'includeArchived',
   'workItemTypeIds',
+  'projectScopes',
+  'involvement',
+  'contributorUserIds',
+  'contributorJobRoles',
 ]
 
 /**
@@ -302,6 +306,7 @@ function readSavedTaskViewsResponse(value: unknown): SavedTaskViewsResponse {
     capabilities: {
       canManageSharedViews: value.capabilities.canManageSharedViews,
       canSetTeamDefault: value.capabilities.canSetTeamDefault,
+      canSetProjectDefault: value.capabilities.canSetProjectDefault,
       canWrite: value.capabilities.canWrite,
       writableProjectScopes: dedupeTaskViewWritableProjectScopes(
         value.capabilities.writableProjectScopes,
@@ -320,12 +325,14 @@ function isSavedTaskViewCapabilities(value: unknown): value is SavedTaskViewCapa
       'canWrite',
       'canManageSharedViews',
       'canSetTeamDefault',
+      'canSetProjectDefault',
       'writableProjectScopes',
       'writableTeamIds',
     ]) &&
     typeof value.canWrite === 'boolean' &&
     typeof value.canManageSharedViews === 'boolean' &&
     typeof value.canSetTeamDefault === 'boolean' &&
+    typeof value.canSetProjectDefault === 'boolean' &&
     Array.isArray(value.writableProjectScopes) &&
     value.writableProjectScopes.every(isTaskViewWritableProjectScope) &&
     isStringArray(value.writableTeamIds)
@@ -374,6 +381,7 @@ function intersectSavedTaskViewCapabilities(
   return {
     canManageSharedViews: current.canManageSharedViews && next.canManageSharedViews,
     canSetTeamDefault: current.canSetTeamDefault && next.canSetTeamDefault,
+    canSetProjectDefault: current.canSetProjectDefault && next.canSetProjectDefault,
     canWrite: current.canWrite && next.canWrite,
     writableProjectScopes: current.writableProjectScopes.filter((scope) =>
       next.writableProjectScopes.some((candidate) =>
@@ -466,6 +474,10 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
     return false
   }
   if (value.includeArchived !== undefined && typeof value.includeArchived !== 'boolean') return false
+  if (!hasOptionalTeamQualifiedArray(value.projectScopes, 'projectId')) return false
+  if (value.involvement !== undefined && value.involvement !== 'mine') return false
+  if (!hasOptionalStringArray(value.contributorUserIds)) return false
+  if (!hasOptionalTeamQualifiedArray(value.contributorJobRoles, 'jobRoleId')) return false
   if (value.workflowStatuses !== undefined && (
     !Array.isArray(value.workflowStatuses) ||
     !value.workflowStatuses.every((entry) =>
@@ -538,6 +550,25 @@ function isTaskViewGrouping(value: unknown): value is TaskViewGrouping {
     includesString(sortDirections, value.direction)
 }
 
+/**
+ * Returns whether an optional value is a list of complete Team-qualified identifiers.
+ *
+ * @param value - Candidate list from the HTTP boundary.
+ * @param idKey - Property holding the Team-local identifier.
+ * @returns Whether every entry has exactly a Team ID and the identifier.
+ */
+function hasOptionalTeamQualifiedArray(value: unknown, idKey: 'projectId' | 'jobRoleId') {
+  return value === undefined || (
+    Array.isArray(value) &&
+    value.every((entry) =>
+      isRecord(entry) &&
+      hasOnlyFields(entry, ['teamId', idKey]) &&
+      typeof entry.teamId === 'string' &&
+      typeof entry[idKey] === 'string'
+    )
+  )
+}
+
 /** Returns whether display options contain only optional booleans and a supported Gantt scale. */
 function isTaskViewDisplayOptions(value: unknown): value is TaskViewDisplayOptions {
   if (!isRecord(value)) return false
@@ -565,13 +596,16 @@ function isSavedTaskViewPreference(value: unknown): value is SavedTaskViewPrefer
       'isDefault',
       'isPersonalDefault',
       'isTeamDefault',
+      'isProjectDefault',
       'defaultSource',
     ]) ||
     typeof value.favorite !== 'boolean' ||
     typeof value.pinned !== 'boolean' ||
     typeof value.isDefault !== 'boolean' ||
     typeof value.isPersonalDefault !== 'boolean' ||
-    typeof value.isTeamDefault !== 'boolean'
+    typeof value.isTeamDefault !== 'boolean' ||
+    typeof value.isProjectDefault !== 'boolean' ||
+    (value.isTeamDefault && value.isProjectDefault)
   ) return false
 
   if (!value.isDefault) {
@@ -583,6 +617,9 @@ function isSavedTaskViewPreference(value: unknown): value is SavedTaskViewPrefer
   }
   if (value.defaultSource === 'team') {
     return value.isTeamDefault && !value.isPersonalDefault
+  }
+  if (value.defaultSource === 'project') {
+    return value.isProjectDefault && !value.isPersonalDefault
   }
   return false
 }
