@@ -11,6 +11,8 @@ import { useWeeklyReport, useWeeklyReportHistory } from '../queries/useWeeklyRep
 import { PersonalWeeklyReport, type WeeklyReportActionResult } from './PersonalWeeklyReport'
 import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
+import { writeClipboardText } from './writeClipboardText'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
 
@@ -40,17 +42,6 @@ export type PersonalWeeklyReportContainerProps = {
   onOpenWeek: (weekStart: string) => void
   /** Retries the member's Work Item read. */
   onRetryWorkItems: () => void
-}
-
-/**
- * Writes text to the system clipboard.
- *
- * @param text - Text to copy.
- * @returns Resolves once copied; rejects when the clipboard is unavailable or refused.
- */
-async function writeClipboardText(text: string): Promise<void> {
-  if (!navigator.clipboard) throw new Error('Clipboard unavailable')
-  await navigator.clipboard.writeText(text)
 }
 
 /**
@@ -103,6 +94,7 @@ export function PersonalWeeklyReportContainer({
   workItems,
 }: PersonalWeeklyReportContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const categories = useTimeEntryCategories()
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
   const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
   const today = useLocalToday()
@@ -117,8 +109,8 @@ export function PersonalWeeklyReportContainer({
     workItems: workItems ?? emptyWorkItems,
     entries: entries.data?.entries ?? [],
     workItemTitles,
-    indirectTitle: (category) => describeTimeEntrySubject(t, category ? { category } : {}, {}),
-  }), [entries.data?.entries, t, today, week.days, workItemTitles, workItems])
+    indirectTitle: (category) => describeTimeEntrySubject(t, category ? { category } : {}, {}, categories),
+  }), [categories, entries.data?.entries, t, today, week.days, workItemTitles, workItems])
 
   return (
     <PersonalWeeklyReport

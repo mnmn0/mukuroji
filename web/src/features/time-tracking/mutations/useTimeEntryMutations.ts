@@ -10,6 +10,7 @@ import {
   updateIndirectTimeEntry,
   updateTimeEntry,
   type IndirectTimeEntryInput,
+  type SavedTimeEntry,
   type TimeEntryDraftInput,
   type TimeEntryTransitionAction,
   type TimesheetTransitionResult,
@@ -20,13 +21,13 @@ import { useRefreshTimeTrackingQueries } from './refreshTimeTrackingQueries'
 /** Time entry mutations bound to the signed-in member. */
 export type TimeEntryMutations = {
   /** Creates a manual draft. */
-  create: (teamId: string, input: TimeEntryDraftInput) => Promise<TimeEntry>
+  create: (teamId: string, input: TimeEntryDraftInput) => Promise<SavedTimeEntry>
   /** Edits a draft or rejected entry. */
-  update: (entry: TimeEntry, input: TimeEntryDraftInput) => Promise<TimeEntry>
+  update: (entry: TimeEntry, input: TimeEntryDraftInput) => Promise<SavedTimeEntry>
   /** Records indirect work without a Work Item. */
-  createIndirect: (teamId: string, input: IndirectTimeEntryInput) => Promise<TimeEntry>
+  createIndirect: (teamId: string, input: IndirectTimeEntryInput) => Promise<SavedTimeEntry>
   /** Edits a draft or rejected indirect-work entry. */
-  updateIndirect: (entry: TimeEntry, input: IndirectTimeEntryInput) => Promise<TimeEntry>
+  updateIndirect: (entry: TimeEntry, input: IndirectTimeEntryInput) => Promise<SavedTimeEntry>
   /** Deletes the member's own draft or rejected entry. */
   remove: (entry: TimeEntry) => Promise<void>
   /** Applies one lifecycle action to one entry. */

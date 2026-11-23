@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import type { TimeEntry, TimeEntryStatus } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS, type TimeEntry, type TimeEntryStatus } from '@mukuroji/contracts'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
 /** Canonical Work Items the member can record time on. */
@@ -91,11 +91,13 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
     canWrite: state.writableProjectIds.length > 0,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: state.writableProjectIds.length > 0 ? ['core-team'] : [],
     writableProjectScopes: state.writableProjectIds.map((projectId) => ({ teamId: 'core-team', projectId })),
   } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
   await page.route((url) => url.pathname === '/api/workspace/calendar-settings', (route) => route.fulfill({ json: { fiscalYearStartMonth: 4, weekStartDay: state.weekStartDay } }))
+  await page.route((url) => url.pathname === '/api/workspace/time-entry-categories', (route) => route.fulfill({ json: DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS }))
   await page.route((url) => url.pathname.startsWith('/api/teams/core-team/weekly-reports'), async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -337,6 +339,27 @@ test.describe('Time tracking', () => {
     await alert.getByRole('button', { name: 'Reload settings' }).click()
     await expect(alert).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Add manually' })).toBeVisible()
+  })
+
+  test('offers no indirect work until the Workspace categories load, and recovers on retry', async ({ page }) => {
+    await mockTimeTracking(page)
+    let failures = 1
+    await page.route((url) => url.pathname === '/api/workspace/time-entry-categories', async (route) => {
+      if (failures > 0) {
+        failures -= 1
+        await route.fulfill({ status: 503, json: { message: 'Unavailable' } })
+        return
+      }
+      await route.fallback()
+    })
+    await page.goto('/teams/core-team/timesheet')
+    const alert = page.getByRole('alert').filter({ hasText: 'The Workspace work categories could not be loaded.' })
+    await expect(alert).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add manually' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add indirect work' })).toBeDisabled()
+    await alert.getByRole('button', { name: 'Reload settings' }).click()
+    await expect(alert).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add indirect work' })).toBeEnabled()
   })
 
   test('does not offer manual entry to a Project viewer', async ({ page }) => {

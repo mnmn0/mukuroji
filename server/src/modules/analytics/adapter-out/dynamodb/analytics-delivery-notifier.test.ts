@@ -86,6 +86,15 @@ test('carries the Team of a Team report so external delivery re-checks Team acce
   expect(event.metadata).toMatchObject({ teamId: 'core-team' })
 })
 
+test('carries the Team and Project of a Project report so external delivery re-checks Project access', () => {
+  const event = createAnalyticsDeliveryAuditEvent(
+    createDelivery({ visibility: 'project', teamId: 'core-team', projectId: 'refero' }),
+    30,
+  )
+
+  expect(event.metadata).toMatchObject({ teamId: 'core-team', projectId: 'refero' })
+})
+
 test('derives one stable event ID per occurrence and recipient', () => {
   const first = createAnalyticsDeliveryAuditEvent(createDelivery(), 30)
   const retried = createAnalyticsDeliveryAuditEvent(

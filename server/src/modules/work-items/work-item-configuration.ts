@@ -48,6 +48,7 @@ import {
   type WorkItemRelationsResponse,
   type WorkItemRelationEventType,
   type WorkItemRelationType,
+  createNotificationMessage,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -204,6 +205,7 @@ function createRelationNotificationMetadata(
   return {
     deepLink: endpoint.deepLink,
     notificationTitle: endpoint.title,
+    notificationMessage: createNotificationMessage('work-item.blocker-removed'),
     notificationCandidates: endpoint.assigneeMemberKey.trim() === ''
       ? []
       : [{ memberKey: endpoint.assigneeMemberKey, reason: 'assignee' }],
@@ -884,6 +886,14 @@ export type WorkItemConfigurationClient = {
    * @returns Current positive revision, or zero before graph metadata exists.
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
+  /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  countRelationLinks?(workspaceId: string, teamId: string): Promise<number>
   /**
    * Reads how many times a child of the parent Work Item has been restored.
    *
@@ -3083,6 +3093,19 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       throw storedConfigurationInvalid()
     }
     return item.generation
+  }
+
+  /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  async countRelationLinks(workspaceId: string, teamId: string): Promise<number> {
+    await this.ensureTable()
+    const { edgeCount } = await this.readRelationGraphState(workspaceId, teamId)
+    return Math.floor(edgeCount / 2)
   }
 
   /**

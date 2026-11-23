@@ -4,7 +4,9 @@ import {
 } from 'react'
 import {
   DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_CURRENCY,
   isWorkspaceWeekStartDay,
   type TenantOperation,
   type TenantProfile,
@@ -17,6 +19,8 @@ import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields'
 import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
+import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
+import { TimeEntryCategoryFields } from './TimeEntryCategoryFields'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
@@ -281,6 +285,7 @@ export function TenantAdministrationPanel({
   const tenantLifecycleLocked = profile.status !== 'active'
   const calendar = profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
   const weeklyReportReminders = profile.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
+  const timeEntryCategories = profile.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
   return (
@@ -367,6 +372,23 @@ export function TenantAdministrationPanel({
               </select>
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.tenantAdministration.defaultCurrency')}
+              <select
+                className="workbench-input"
+                data-testid="tenant-default-currency"
+                disabled={isSaving || tenantLifecycleLocked}
+                onChange={(event) => onChangeProfile({ ...profile, defaultCurrency: event.target.value })}
+                value={profile.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
+              >
+                {listCurrencyOptions(profile.defaultCurrency).map((currency) => (
+                  <option key={currency} value={currency}>{currency}</option>
+                ))}
+              </select>
+              <span className="text-xs font-normal text-[var(--workbench-muted)]">
+                {t('workspace.tenantAdministration.defaultCurrencyHint')}
+              </span>
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.fiscalYearStartMonth')}
               <select
                 className="workbench-input"
@@ -419,9 +441,16 @@ export function TenantAdministrationPanel({
             settings={weeklyReportReminders}
             t={t}
           />
+          <TimeEntryCategoryFields
+            disabled={tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, timeEntryCategories: next })}
+            settings={timeEntryCategories}
+            t={t}
+          />
           <button
             className="workbench-button-primary mt-5"
-            disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders)}
+            disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders) ||
+              hasTimeEntryCategoryProblem(timeEntryCategories)}
             onClick={onSaveProfile}
             type="button"
           >
@@ -569,6 +598,20 @@ export function TenantAdministrationPanel({
       </div>
     </section>
   )
+}
+
+/** Currencies offered for the Workspace currency, before any other stored one. */
+const WORKSPACE_CURRENCY_OPTIONS = ['JPY', 'USD', 'EUR'] as const
+
+/**
+ * Lists the currencies the Workspace currency select offers.
+ *
+ * @param stored - Currency saved on the profile, kept as an option when it is not a common one.
+ * @returns ISO 4217 codes in display order.
+ */
+function listCurrencyOptions(stored: string | undefined): string[] {
+  const options: string[] = [...WORKSPACE_CURRENCY_OPTIONS]
+  return stored && !options.includes(stored) ? [...options, stored] : options
 }
 
 /** Formats one audited lifecycle timestamp for the active tenant locale. */

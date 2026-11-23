@@ -1,10 +1,15 @@
 import { Hono, type Context } from 'hono'
 import {
-  TIME_ENTRY_CATEGORIES,
+  DEFAULT_WORKSPACE_CURRENCY,
+  readTeamTimeEntryPolicy,
+  readTimeEntryCategoryKey,
+  type TimeEntryPolicyWarning,
   type TimeEntry,
   type TimeEntryCategory,
   type TimeEntryStatus,
+  type TimeRateCardResponse,
   type TimeTrackingGroupBy,
+  type TimeTrackingTeamSettingsResponse,
 } from '@mukuroji/contracts'
 import {
   TimeTrackingError,
@@ -43,6 +48,11 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  /**
+   * Reads the Workspace currency used when a request names none; absent means
+   * `DEFAULT_WORKSPACE_CURRENCY`.
+   */
+  readDefaultCurrency?(principal: Principal): Promise<string>
   /** Verifies Project-level access for a Team operation. */
   verifyProject(principal: Principal, teamId: string, projectId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Verifies that a referenced Work Item belongs to the selected Team. */
@@ -89,7 +99,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           body.hourlyRateMinor === undefined ? 'member' : 'manager',
         )
       }
-      const entry = await dependencies.getTimeTracking().createEntry({
+      const { entry, warnings } = await dependencies.getTimeTracking().createEntryWithWarnings({
         workspaceId: principal.directoryId,
         teamId,
         ...(workItemId ? { workItemId } : {}),
@@ -99,13 +109,13 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
         billable: readRequiredBoolean(body.billable, 'Billable'),
-        currency: readOptionalString(body.currency) ?? 'USD',
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         source: 'manual',
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       }, canManage)
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
-      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) }, 201)
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds), ...withWarnings(warnings) }, 201)
     })
   })
 
@@ -179,7 +189,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const canManageEntry = canManage &&
         canManageProject(managedProjectIds, current.projectId) &&
         canManageProject(managedProjectIds, nextProjectId)
-      const entry = await dependencies.getTimeTracking().updateEntry({
+      const { entry, warnings } = await dependencies.getTimeTracking().updateEntryWithWarnings({
         workspaceId: principal.directoryId,
         teamId,
         entryId: readRequiredString(context.req.param('entryId'), 'Time entry ID'),
@@ -197,7 +207,12 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
+      // Warnings compare the entry with all of its owner's time in the Team, which a manager of only
+      // some Projects may not see, so only the owner editing their own time receives them.
+      return context.json({
+        entry: redactEntry(entry, canManage, managedProjectIds),
+        ...(current.userId === principal.userKey ? withWarnings(warnings) : {}),
+      })
     })
   })
 
@@ -314,6 +329,37 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   }
 
+  router.get('/api/teams/:teamId/time-entry-policy', async (context) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
+      const policy = await dependencies.getTimeTracking().getEntryPolicy(principal.directoryId, teamId)
+      const canEdit = canManage && await dependencies.canManageWholeTeam(principal, teamId)
+      return context.json({ policy, canEdit })
+    })
+  })
+
+  router.put('/api/teams/:teamId/time-entry-policy', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      // The policy applies to every Project of the Team, so a manager of only some Projects cannot change it.
+      if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+        throw new TimeTrackingError(403, 'TimeEntryPolicyDenied', 'Only a manager of the whole Team may change its time entry checks.')
+      }
+      const body = asRecord(await dependencies.readJson(context.req))
+      const policy = readTeamTimeEntryPolicy(body)
+      if (!policy) {
+        throw new TimeTrackingError(400, 'InvalidTimeEntryPolicy', 'overlap and dailyLimit must be off, warn, or reject, and dailyLimitMinutes 1 to 1440.')
+      }
+      const saved = await dependencies.getTimeTracking().saveEntryPolicy({
+        workspaceId: principal.directoryId,
+        teamId,
+        policy,
+        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        actorUserId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ policy: saved, canEdit: true })
+    })
+  })
+
   router.get('/api/teams/:teamId/time-periods', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
       const closedPeriods = await dependencies.getTimeTracking().listClosedPeriods(principal.directoryId, teamId)
@@ -421,7 +467,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         timerId: timer.id,
         userId: principal.userKey,
         ...(body.endedAt === undefined ? {} : { endedAt: readRequiredString(body.endedAt, 'End time') }),
-        currency: readOptionalString(body.currency) ?? 'USD',
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         canManageRates: canManage,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -487,6 +533,48 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
+  router.get('/api/teams/:teamId/time-tracking/settings', async (context) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
+      const response: TimeTrackingTeamSettingsResponse = {
+        defaultCurrency: await readDefaultCurrency(dependencies, principal),
+        canManageRateCard: canManage && await dependencies.canManageWholeTeam(principal, teamId),
+      }
+      return context.json(response)
+    })
+  })
+
+  router.get('/api/teams/:teamId/time-rate-card', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireRateCardManager(dependencies, principal, teamId, canManage)
+      const rateCard = await dependencies.getTimeTracking().getRateCard(
+        principal.directoryId,
+        teamId,
+        await readDefaultCurrency(dependencies, principal),
+      )
+      const response: TimeRateCardResponse = { rateCard }
+      return context.json(response)
+    })
+  })
+
+  router.put('/api/teams/:teamId/time-rate-card', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireRateCardManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const rateCard = await dependencies.getTimeTracking().saveRateCard({
+        workspaceId: principal.directoryId,
+        teamId,
+        currency: readRequiredString(body.currency, 'Currency'),
+        memberRates: readRateCardRows(body.memberRates, 'Member rates'),
+        jobRoleRates: readRateCardRows(body.jobRoleRates, 'Job role rates'),
+        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        updatedBy: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      const response: TimeRateCardResponse = { rateCard }
+      return context.json(response)
+    })
+  })
+
   router.put('/api/teams/:teamId/time-budget', async (context) => {
     return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
       const body = asRecord(await dependencies.readJson(context.req))
@@ -496,7 +584,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         scopeType: 'team',
         scopeId: teamId,
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
-        currency: readOptionalString(body.currency) ?? 'USD',
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
@@ -522,7 +610,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         scopeType: 'project',
         scopeId: readRequiredString(context.req.param('projectId'), 'Project ID'),
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
-        currency: readOptionalString(body.currency) ?? 'USD',
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
@@ -569,6 +657,17 @@ async function withTeam<Principal extends TimeTrackingPrincipal>(
 }
 
 /**
+ * Adds the warnings of a saved entry to its response only when there are any, so responses of
+ * Teams without checks keep their shape.
+ *
+ * @param warnings - Checks the entry broke in a Team that only warns.
+ * @returns `{ warnings }` or an empty object.
+ */
+function withWarnings(warnings: readonly TimeEntryPolicyWarning[]): { warnings?: readonly TimeEntryPolicyWarning[] } {
+  return warnings.length > 0 ? { warnings } : {}
+}
+
+/**
  * Requires a manager of every Project in the Team, because a month close applies to all of its time.
  *
  * @param dependencies - Router dependencies used to read the Team management scope.
@@ -586,6 +685,74 @@ async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
   if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
     throw new TimeTrackingError(403, 'TimePeriodCloseDenied', 'Only a manager of the whole Team may close or reopen a month.')
   }
+}
+
+/**
+ * Requires a manager of every Project in the Team, because the rate card holds every member's
+ * confidential rate.
+ *
+ * @param dependencies - Router dependencies used to read the Team management scope.
+ * @param principal - Authenticated caller.
+ * @param teamId - Team whose rate card is read or changed.
+ * @param canManage - Whether the caller manages time in the Team at all.
+ * @throws TimeTrackingError with `TimeRateCardDenied` when the caller manages only some Projects.
+ */
+async function requireRateCardManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+  canManage: boolean,
+): Promise<void> {
+  if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+    throw new TimeTrackingError(403, 'TimeRateCardDenied', 'Only a manager of the whole Team may read or change its rate card.')
+  }
+}
+
+/**
+ * Reads the currency a request names, or the Workspace default with a flag that keeps the default
+ * out of the request fingerprint.
+ *
+ * @param dependencies - Router dependencies.
+ * @param principal - Caller.
+ * @param value - Currency from the request body.
+ * @returns Input fields for the currency.
+ */
+async function readRequestCurrency<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  value: unknown,
+): Promise<{ currency: string, currencyFromWorkspaceDefault?: true }> {
+  const requested = readOptionalString(value)
+  return requested === undefined
+    ? { currency: await readDefaultCurrency(dependencies, principal), currencyFromWorkspaceDefault: true }
+    : { currency: requested }
+}
+
+/**
+ * Reads the Workspace currency used when a request names none.
+ *
+ * @param dependencies - Router dependencies that may read the Workspace setting.
+ * @param principal - Authenticated caller whose Workspace is read.
+ * @returns The Workspace currency, or `DEFAULT_WORKSPACE_CURRENCY`.
+ */
+async function readDefaultCurrency<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+): Promise<string> {
+  return await dependencies.readDefaultCurrency?.(principal) ?? DEFAULT_WORKSPACE_CURRENCY
+}
+
+/**
+ * Reads the rows of a rate card request; the service validates each row.
+ *
+ * @param value - Untrusted rows.
+ * @param label - Field name used in the error.
+ * @returns The rows.
+ * @throws TimeTrackingError with `InvalidTimeRateCard` when the value is not an array.
+ */
+function readRateCardRows(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) throw new TimeTrackingError(400, 'InvalidTimeRateCard', `${label} must be an array.`)
+  return value
 }
 
 /** Reads a report query into an application input. */
@@ -857,9 +1024,9 @@ function readExpectedRevisionQuery(value: string | undefined): number {
 
 /** Reads a work category from a request body. */
 function readCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) {
-    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'category must be a work category key.')
   }
   return category
 }

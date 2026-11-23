@@ -62,8 +62,14 @@ import {
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  changeTeamWorkItemKeyPrefix,
+  listWorkItemKeyPrefixes,
+  readTeamWorkItemKeyPrefixState,
   readWorkItemKeyLocation,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './work-item-key-registry'
 import {
   deriveWorkItemScheduleDueDate,
@@ -106,6 +112,9 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   WORK_ITEM_TITLE_MAX_LENGTH,
+  createNotificationMessage,
+  formatNotificationMessage,
+  type NotificationMessage,
   type ParsedWorkItemKey,
 } from '@mukuroji/contracts'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
@@ -190,6 +199,55 @@ function createPlanningRevisionIncrementTransactionItem(
         ':increment': 1,
       },
     },
+  }
+}
+
+/**
+ * Adds a Planning authorization fence to the Planning revision increment of the same transaction.
+ *
+ * DynamoDB allows one operation per item in a transaction, so the fence cannot stay a separate
+ * ConditionCheck on the row that the increment updates. Both conditions must hold for the write.
+ *
+ * @param increment - Planning revision increment, when Planning is configured.
+ * @param fence - Planning fence observed during authorization, if any.
+ * @returns The increment, guarded by the fence when one is given.
+ */
+function withPlanningFenceCondition(
+  increment: NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined,
+  fence: WorkItemAuthorizationConditionEntry | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+  const update = increment?.Update
+  const check = fence?.transactWriteItem.ConditionCheck
+  if (!update || !check) return increment
+  return {
+    Update: {
+      ...update,
+      ConditionExpression: `(${update.ConditionExpression}) AND (${check.ConditionExpression})`,
+      ExpressionAttributeNames: { ...update.ExpressionAttributeNames, ...check.ExpressionAttributeNames },
+      ExpressionAttributeValues: { ...update.ExpressionAttributeValues, ...check.ExpressionAttributeValues },
+    },
+  }
+}
+
+/**
+ * Takes the Planning fence out of the authorization checks of a transaction that also increments
+ * the Planning revision, so that it can join the increment through {@link withPlanningFenceCondition}.
+ *
+ * @param entries - Named authorization checks of the transaction.
+ * @param planningTableName - Planning table the increment writes, when Planning is configured.
+ * @returns The Planning fence on that table, if any, and the remaining checks.
+ */
+function separatePlanningFenceEntry(
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+  planningTableName: string | undefined,
+): { planningFenceEntry?: WorkItemAuthorizationConditionEntry; otherEntries: WorkItemAuthorizationConditionEntry[] } {
+  const planningFenceEntry = planningTableName
+    ? entries.find((entry) =>
+      entry.kind === 'planning' && entry.transactWriteItem.ConditionCheck?.TableName === planningTableName)
+    : undefined
+  return {
+    ...(planningFenceEntry ? { planningFenceEntry } : {}),
+    otherEntries: entries.filter((entry) => entry !== planningFenceEntry),
   }
 }
 
@@ -1370,6 +1428,28 @@ export type TeamIssuesClient = {
     directoryId: string,
     key: string,
   ): Promise<WorkItemKeyLocation | undefined>
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]>
+  /**
+   * Reads a Team's current key prefix and earlier prefixes, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Sets the key prefix of a Team's new Work Items; the caller authorizes the Team first.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -2445,15 +2525,22 @@ export class DynamoDbTeamIssuesClient {
     const newWorkItemProjectRowKey = newWorkItemProjectConditionCheck
       ? readConditionCheckRowKey({ kind: 'workspace-member', transactWriteItem: newWorkItemProjectConditionCheck })
       : undefined
-    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+    const fencedAuthorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
     ).filter((entry) =>
       newWorkItemProjectRowKey === undefined || readConditionCheckRowKey(entry) !== newWorkItemProjectRowKey
     )
+    // Creation increments the Planning revision row, and DynamoDB rejects a second operation on
+    // that row, so a Planning fence moves into the increment's condition instead.
+    const {
+      planningFenceEntry,
+      otherEntries: authorizationConditionEntries,
+    } = separatePlanningFenceEntry(fencedAuthorizationConditionEntries, this.planningTableName)
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
+    let requestConversionItemCount = 0
 
     try {
       const sourceRequestIssueId = sourceRequestId
@@ -2543,6 +2630,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was created.',
         createdAt: now,
       })
+      const createdMessage = createNotificationMessage('work-item.created-assigned')
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.created',
@@ -2550,7 +2638,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'created',
         occurredAt: now,
-        summary: 'Work Item was created and assigned.',
+        summary: formatNotificationMessage(createdMessage, 'en'),
         changes: createAuditFieldChanges(undefined, item, [
           'key',
           'title',
@@ -2580,6 +2668,7 @@ export class DynamoDbTeamIssuesClient {
           sourceTriageEntryId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
+          notificationMessage: createdMessage,
           notificationCandidates: [
             { memberKey: assigneeUserId, reason: 'assignment' },
           ],
@@ -2595,10 +2684,14 @@ export class DynamoDbTeamIssuesClient {
             now,
           )
         : []
-      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-        this.planningTableName,
-        directoryId,
-        now,
+      requestConversionItemCount = requestConversionItems.length
+      const planningRevisionMutation = withPlanningFenceCondition(
+        createPlanningRevisionIncrementTransactionItem(
+          this.planningTableName,
+          directoryId,
+          now,
+        ),
+        planningFenceEntry,
       )
       await this.documentClient.send(
         new TransactWriteCommand({
@@ -2666,6 +2759,14 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      const planningRevisionMutationIndex =
+        authorizationConditionStartIndex +
+        authorizationConditionEntries.length +
+        (newWorkItemProjectConditionCheck ? 1 : 0) +
+        requestConversionItemCount
+      if (planningFenceEntry && isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)) {
+        throwAuthorizationConditionFailureIfPresent(error, planningRevisionMutationIndex, [planningFenceEntry])
+      }
       if (
         newWorkItemProjectConditionCheck &&
         !isTransactionConditionalFailureAt(error, 0) &&
@@ -2871,6 +2972,8 @@ export class DynamoDbTeamIssuesClient {
         afterIssue,
         baselineReads,
       )
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.schedule-cascade-updated',
@@ -2879,8 +2982,7 @@ export class DynamoDbTeamIssuesClient {
         action: 'schedule-cascade-updated',
         sequence,
         occurredAt,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
         metadata: {
           adapter: 'canonical-work-item',
@@ -2890,6 +2992,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -2911,9 +3014,13 @@ export class DynamoDbTeamIssuesClient {
         baselineFence,
       }
     }))
-    const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
+    // The cascade increments the Planning revision row, so a Planning fence joins that increment.
+    const {
+      planningFenceEntry,
+      otherEntries: authorizationConditionEntries,
+    } = separatePlanningFenceEntry(createAuthorizationSnapshotConditionEntries(
       authorizationSnapshot,
-    )
+    ), this.planningTableName)
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -3037,11 +3144,15 @@ export class DynamoDbTeamIssuesClient {
     if (idempotencyCompletion) {
       transactItems.push(idempotencyCompletion.transactWriteItem)
     }
-    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-      this.planningTableName,
-      directoryId,
-      occurredAt,
+    const planningRevisionMutation = withPlanningFenceCondition(
+      createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        occurredAt,
+      ),
+      planningFenceEntry,
     )
+    const planningRevisionMutationIndex = transactItems.length
     if (planningRevisionMutation) transactItems.push(planningRevisionMutation)
     const planningRevisionFenceBarrierItems = planningRevisionMutation === undefined ? 0 : 1
     if (transactItems.length + planningRevisionFenceBarrierItems > 100) {
@@ -3060,6 +3171,9 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      if (planningFenceEntry && isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)) {
+        throwAuthorizationConditionFailureIfPresent(error, planningRevisionMutationIndex, [planningFenceEntry])
+      }
       if (updateConditionIndexes.some((index) => isTransactionConditionalFailureAt(error, index))) {
         throw createWorkItemRevisionConflictError()
       }
@@ -3130,13 +3244,19 @@ export class DynamoDbTeamIssuesClient {
     const agentRunTransactItems = input.agentRunTransactItems ?? []
     let agentRunFenceStartIndex: number | undefined
     let baselineFence: WorkItemBaselineSlipRead['fence']
-    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+    // The update increments the Planning revision row, and DynamoDB rejects a second operation on
+    // that row, so a Planning fence moves into the increment's condition instead.
+    const {
+      planningFenceEntry,
+      otherEntries: authorizationConditionEntries,
+    } = separatePlanningFenceEntry(mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       [
         ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
         ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
       ],
-    )
+    ), this.planningTableName)
+    let planningRevisionMutationIndex: number | undefined
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -3470,6 +3590,8 @@ export class DynamoDbTeamIssuesClient {
       )
       const baselineSlip = baselineRead.slip
       baselineFence = baselineRead.fence
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3477,8 +3599,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
@@ -3508,6 +3629,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -3524,14 +3646,17 @@ export class DynamoDbTeamIssuesClient {
         status: 200,
         body: toTeamIssueResponseItem(afterIssue),
       })
-      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-        this.planningTableName,
-        directoryId,
-        updatedAt,
+      const planningRevisionMutation = withPlanningFenceCondition(
+        createPlanningRevisionIncrementTransactionItem(
+          this.planningTableName,
+          directoryId,
+          updatedAt,
+        ),
+        planningFenceEntry,
       )
-      agentRunFenceStartIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
-        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0) +
-        (planningRevisionMutation ? 1 : 0)
+      planningRevisionMutationIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
+        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0)
+      agentRunFenceStartIndex = planningRevisionMutationIndex + (planningRevisionMutation ? 1 : 0)
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -3622,6 +3747,13 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      if (
+        planningFenceEntry &&
+        planningRevisionMutationIndex !== undefined &&
+        isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)
+      ) {
+        throwAuthorizationConditionFailureIfPresent(error, planningRevisionMutationIndex, [planningFenceEntry])
+      }
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -3726,14 +3858,25 @@ export class DynamoDbTeamIssuesClient {
       status: 204,
       body: null,
     })
-    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+    // The delete increments the Planning revision row, so a Planning fence joins that increment.
+    const {
+      planningFenceEntry,
+      otherEntries: snapshotConditionEntries,
+    } = separatePlanningFenceEntry(
+      createAuthorizationSnapshotConditionEntries(authorizationSnapshot),
       this.planningTableName,
-      directoryId,
-      occurredAt,
+    )
+    const planningRevisionMutation = withPlanningFenceCondition(
+      createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        occurredAt,
+      ),
+      planningFenceEntry,
     )
     const effectiveAuthorizationConditionChecks = [
       ...authorizationConditionChecks,
-      ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
+      ...snapshotConditionEntries.map((entry) => entry.transactWriteItem),
     ]
 
     const deletionItems: WorkItemTransactWriteItem[] = [
@@ -3786,9 +3929,14 @@ export class DynamoDbTeamIssuesClient {
     } catch (error) {
       const authorizationConditionStartIndex =
         1 + deletionFences.length + (auditPut === undefined ? 0 : 1)
-      if (effectiveAuthorizationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-      )) {
+      const planningRevisionMutationIndex = authorizationConditionStartIndex +
+        effectiveAuthorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0)
+      if (
+        effectiveAuthorizationConditionChecks.some((_, index) =>
+          isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
+        ) ||
+        (planningFenceEntry && isTransactionConditionalFailureAt(error, planningRevisionMutationIndex))
+      ) {
         throw createWorkItemAuthorizationChangedError()
       }
 
@@ -3920,6 +4068,57 @@ export class DynamoDbTeamIssuesClient {
         directoryId,
         parsed.key,
       )
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams.
+   *
+   * The caller must keep only the Teams it may reveal before returning the prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  async listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]> {
+    await this.ensureLocalTables()
+    try {
+      return await listWorkItemKeyPrefixes(this.documentClient, this.issueTableName, directoryId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads a Team's current key prefix and earlier prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  async getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await readTeamWorkItemKeyPrefixState(this.documentClient, this.issueTableName, directoryId, teamId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Sets the key prefix of a Team's new Work Items.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  async changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await changeTeamWorkItemKeyPrefix(this.documentClient, this.issueTableName, input)
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
@@ -5633,8 +5832,9 @@ function isMatchingIdempotentWorkItemCreate(
     ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
-    issue.dueDate === expected.dueDate &&
-    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
+    // The due date of a shared date range is its end date, which the calendar may move (see below).
+    (followsSharedCalendarRange(expected.schedule) || issue.dueDate === expected.dueDate) &&
+    idempotentCreateSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
@@ -5688,6 +5888,52 @@ function workItemSchedulesEqual(
 ): boolean {
   return JSON.stringify(normalizeWorkItemSchedule(left)) ===
     JSON.stringify(normalizeWorkItemSchedule(right))
+}
+
+/**
+ * Compares the schedules of an idempotent create and its stored Work Item.
+ *
+ * @param stored - Schedule of the stored Work Item.
+ * @param requested - Schedule of the create request being retried.
+ * @returns Whether both identify the same create.
+ */
+function idempotentCreateSchedulesEqual(stored: WorkItemSchedule, requested: WorkItemSchedule): boolean {
+  return JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(stored))) ===
+    JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(requested)))
+}
+
+/**
+ * Checks whether a schedule is a date range that follows the shared calendar.
+ *
+ * @param schedule - Schedule of a create request.
+ * @returns Whether the calendar in force when it is created places its end date.
+ */
+function followsSharedCalendarRange(schedule: WorkItemSchedule): boolean {
+  return schedule.mode === 'date-range' && schedule.calendarPolicy.calendarSource === 'shared'
+}
+
+/**
+ * Reduces a schedule to what identifies an idempotent create.
+ *
+ * A schedule that follows the shared calendar takes its rules, and the working days counted on
+ * them, from the calendar saved when it is created (ADR 0058). A retry after that calendar changed
+ * resolves other rules for the same request, and a date range whose working days ran out keeps
+ * its duration, so its end date moves. For such a schedule only the mode, the start date (or the
+ * fixed deadline or milestone dates) and the planned effort identify it.
+ *
+ * @param schedule - Normalized schedule.
+ * @returns The schedule, or its identifying fields when it follows the shared calendar.
+ */
+function toComparableWorkItemSchedule(schedule: WorkItemSchedule): unknown {
+  if (schedule.calendarPolicy.calendarSource !== 'shared') return schedule
+  return {
+    mode: schedule.mode,
+    calendarSource: 'shared',
+    ...(schedule.mode === 'due-date' ? { dueDate: schedule.dueDate } : {}),
+    ...(schedule.mode === 'date-range' ? { startDate: schedule.startDate } : {}),
+    ...(schedule.mode === 'milestone' ? { startDate: schedule.startDate, endDate: schedule.endDate } : {}),
+    ...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes }),
+  }
 }
 
 function readOptionalString(value: unknown, message: string) {
@@ -6005,38 +6251,42 @@ function createWorkItemBaselineSlipCandidates(
  * @param slip - Slip recorded for the change, if any.
  * @returns The summary, or `undefined` when the change did not cross the threshold.
  */
-function createWorkItemBaselineSlipSummary(slip: WorkItemBaselineSlipChange | undefined): string | undefined {
+function createWorkItemBaselineSlipMessage(slip: WorkItemBaselineSlipChange | undefined): NotificationMessage | undefined {
   if (!slip || !crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) {
     return undefined
   }
-  return `Work Item now ends ${slip.delayDays} days after its schedule baseline.`
+  return createNotificationMessage('work-item.baseline-slip', { delayDays: slip.delayDays })
 }
 
 /**
- * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
+ * Chooses the most specific text for a Work Item update notification and activity entry.
+ *
+ * @param before - Work Item before the update.
+ * @param after - Work Item after the update.
+ * @returns The notification message; its English text is the audit summary.
  */
-function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+function createWorkItemNotificationMessage(before: TeamIssueItem, after: TeamIssueItem): NotificationMessage {
   if (before.archivedAt !== after.archivedAt) {
-    return after.archivedAt ? 'Work Item was archived.' : 'Work Item was restored.'
+    return createNotificationMessage(after.archivedAt ? 'work-item.archived' : 'work-item.restored')
   }
 
   if (before.assigneeUserId !== after.assigneeUserId) {
-    return 'Work Item assignment changed.'
+    return createNotificationMessage('work-item.assignment-changed')
   }
 
   if (before.statusCategory !== 'completed' && after.statusCategory === 'completed') {
-    return 'Work Item was completed.'
+    return createNotificationMessage('work-item.completed')
   }
 
   if (before.workflowStatusId !== after.workflowStatusId) {
-    return 'Work Item status changed.'
+    return createNotificationMessage('work-item.status-changed')
   }
 
   if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
-    return 'Work Item schedule changed.'
+    return createNotificationMessage('work-item.schedule-changed')
   }
 
-  return 'Work Item was updated.'
+  return createNotificationMessage('work-item.updated')
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {

@@ -11,11 +11,15 @@ import type {
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceCalendarSettingsResponse,
+  WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  isKnownCurrencyCode,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
+  readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -143,6 +147,19 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       return context.json(await readWorkspaceCalendar(principal, dependencies))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member picks a work category when recording time, so only authentication is required.
+  router.get('/api/workspace/time-entry-categories', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      const profile = await dependencies.client.getProfile(principal.directoryId)
+      const settings: WorkspaceTimeEntryCategorySettings =
+        profile?.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+      return context.json(settings)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -355,6 +372,10 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readTenantWeeklyReportReminderInput(body.weeklyReportReminders) }),
+    ...(body.timeEntryCategories === undefined
+      ? {}
+      : { timeEntryCategories: readTenantTimeEntryCategoryInput(body.timeEntryCategories) }),
+    ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -373,7 +394,7 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     throw new TenantAdministrationError(
       400,
       'InvalidTenantCalendarSettings',
-      'Fiscal year start month, week start day, working weekdays, or holidays are invalid.',
+      'Fiscal year start month, week start day, working weekdays, holidays, or time zone are invalid.',
     )
   }
   return calendar
@@ -397,6 +418,40 @@ function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportRemind
     )
   }
   return settings
+}
+
+/**
+ * Validates the work category settings of a profile update.
+ *
+ * @param value - Untrusted `timeEntryCategories` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a key, name, or flag is invalid, a key repeats, there are
+ *   too many categories, or none is active.
+ */
+function readTenantTimeEntryCategoryInput(value: unknown): WorkspaceTimeEntryCategorySettings {
+  const settings = readWorkspaceTimeEntryCategorySettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTimeEntryCategorySettings',
+      'Work category keys, names, or flags are invalid, a key repeats, or no category is active.',
+    )
+  }
+  return settings
+}
+
+/**
+ * Validates the Workspace currency of a profile update.
+ *
+ * @param value - Untrusted `defaultCurrency` field of the request body.
+ * @returns The ISO 4217 code.
+ * @throws TenantAdministrationError When the value is not a known upper-case ISO 4217 code.
+ */
+function readTenantDefaultCurrencyInput(value: unknown): string {
+  if (!isKnownCurrencyCode(value)) {
+    throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
+  }
+  return value
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

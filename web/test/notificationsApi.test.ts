@@ -38,6 +38,32 @@ describe('notifications API', () => {
     })
   })
 
+  test('keeps only summary messages this client can read', async () => {
+    const notification = (id: string, message: unknown) => ({
+      id, eventType: 'work-item.overdue', reasons: ['assignee'], occurredAt: '2026-07-12T00:00:00.000Z',
+      state: 'unread', summary: 'Work Item "Release" is overdue.', message,
+    })
+    installFetchRecorder({
+      notifications: [
+        notification('known', { code: 'work-item.overdue', params: { title: 'Release' } }),
+        notification('unknown', { code: 'work-item.future' }),
+        notification('malformed', { code: 'work-item.overdue', params: { title: { nested: true } } }),
+      ],
+      unreadCount: 3,
+    })
+
+    const page = await getNotifications('access-token')
+
+    expect(page.notifications[0]?.message).toEqual({ code: 'work-item.overdue', params: { title: 'Release' } })
+    expect(page.notifications[1]).not.toHaveProperty('message')
+    expect(page.notifications[2]).not.toHaveProperty('message')
+    expect(page.notifications[1]?.summary).toBe('Work Item "Release" is overdue.')
+
+    installFetchRecorder(notification('updated', { code: 'toString' }))
+    expect(await updateNotification('updated', 'access-token', { action: 'read' }, mutationContext))
+      .not.toHaveProperty('message')
+  })
+
   test('loads the global unread count from the lightweight endpoint', async () => {
     const requests = installFetchRecorder({ unreadCount: 7 })
 

@@ -1,6 +1,6 @@
 # 0029. Software factory を deploy 時の任意 module にし、off のときは API の入口で断る
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（[0052](0052-personal-tokens-without-software-factory.md)、本人用 token の扱い）
 - 日付: 2026-11-20
 - 関連: Issue #632, Tracker #625, Issue #448（tenantLifecycle の任意 module）
 
