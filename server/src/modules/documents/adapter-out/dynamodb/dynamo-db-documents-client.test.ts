@@ -2328,6 +2328,580 @@ test('hides an archived folder subtree from active and includeArchived detail re
   })).toMatchObject({ id: child.id, title: 'Child' })
 })
 
+test('checks the checklist items and notes turned into a completed Work Item', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [
+        { id: 'linked', text: 'Send the estimate', checked: false },
+        { id: 'other', text: 'Book the room', checked: false },
+      ],
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'upsert-relation',
+          operationId: 'link-item',
+          relation: {
+            id: 'checklist-item:actions:linked',
+            source: { kind: 'block', blockId: 'actions' },
+            target: { kind: 'work-item', workItemId },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        },
+        {
+          type: 'upsert-relation',
+          operationId: 'plain-link',
+          relation: {
+            id: 'plain-link',
+            source: { kind: 'block', blockId: 'actions' },
+            target: { kind: 'work-item', workItemId: 'team/team-a/issue/work-item-2' },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        },
+      ],
+    },
+  })
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: {
+      objects: [{
+        id: 'note-1',
+        type: 'note',
+        text: 'Fix the flaky test',
+        bounds: { x: 0, y: 0, width: 200, height: 100 },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: whiteboard.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-note',
+        relation: {
+          id: 'whiteboard-note:note-1',
+          source: { kind: 'whiteboard-object', objectId: 'note-1' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+
+  const reflected = await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })
+
+  expect(reflected.updatedDocumentIds.toSorted()).toEqual([page.id, whiteboard.id].toSorted())
+  const updatedPage = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(updatedPage).toMatchObject({
+    revision: page.revision + 2,
+    updatedByUserId: 'system:work-item-completion',
+    blocks: [{
+      id: 'actions',
+      items: [
+        { id: 'linked', checked: true },
+        { id: 'other', checked: false },
+      ],
+    }],
+  })
+  const updatedWhiteboard = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(updatedWhiteboard).toMatchObject({
+    whiteboard: { objects: [{ id: 'note-1', done: true }] },
+  })
+
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId: 'team/team-a/issue/work-item-2',
+    eventId: 'event-2',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+})
+
+test('keeps an edit made after a completion when the same event is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [{ id: 'linked', text: 'Send the estimate', checked: false }],
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-item',
+        relation: {
+          id: 'checklist-item:actions:linked',
+          source: { kind: 'block', blockId: 'actions' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: `event-${'e'.repeat(48)}`,
+    actorId: 'system:work-item-completion',
+  }
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [page.id] })
+  const completed = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  if (completed.kind !== 'page') throw new Error('Expected a page.')
+  const checklist = completed.blocks[0]
+  if (checklist?.type !== 'checklist') throw new Error('Expected a checklist.')
+  const reopened = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: completed.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'uncheck-item',
+        blockId: 'actions',
+        block: { ...checklist, items: checklist.items.map((item) => ({ ...item, checked: false })) },
+      }],
+    },
+  })
+
+  // The stream retries the same event: the editor's uncheck stays.
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const afterRetry = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(afterRetry.revision).toBe(reopened.revision)
+
+  // A later completion of the same Work Item is a new event and applies.
+  expect(await client.reflectWorkItemCompletion({ ...completion, eventId: 'event-2' }))
+    .toEqual({ updatedDocumentIds: [page.id] })
+})
+
+test('remembers an already-done note when the same completion event is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const note = {
+    id: 'note-1',
+    type: 'note' as const,
+    text: 'Fix the flaky test',
+    done: true,
+    bounds: { x: 0, y: 0, width: 200, height: 100 },
+    zIndex: 1,
+  }
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: { objects: [note], connectors: [], frames: [] },
+  })
+  const linked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: whiteboard.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-note',
+        relation: {
+          id: 'whiteboard-note:note-1',
+          source: { kind: 'whiteboard-object', objectId: 'note-1' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  }
+  // The note is already done, so the first attempt changes nothing.
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const reopened = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: linked.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-object',
+        operationId: 'reopen-note',
+        objectId: 'note-1',
+        object: { ...note, done: false },
+      }],
+    },
+  })
+
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const afterRetry = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(afterRetry.revision).toBe(reopened.revision)
+  expect(await client.reflectWorkItemCompletion({ ...completion, eventId: 'event-2' }))
+    .toEqual({ updatedDocumentIds: [whiteboard.id] })
+})
+
+test('checks only the items the first attempt planned when a retry rewrites the block', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [
+        { id: 'open', text: 'Send the estimate', checked: false },
+        { id: 'done', text: 'Book the room', checked: true },
+      ],
+    }],
+  })
+  const linked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: ['open', 'done'].map((itemId) => ({
+        type: 'upsert-relation' as const,
+        operationId: `link-${itemId}`,
+        relation: {
+          id: `checklist-item:actions:${itemId}`,
+          source: { kind: 'block' as const, blockId: 'actions' },
+          target: { kind: 'work-item' as const, workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      })),
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  }
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [page.id] })
+  // Model a first attempt that recorded its scope but whose block change
+  // has no receipt, so the retry plans the block again.
+  for (const receipt of memory.items().filter((item) =>
+    item.entryType === 'document-operation' &&
+    typeof item.operationId === 'string' &&
+    item.operationId.startsWith('work-item-completion:'))) {
+    memory.remove(String(receipt.workspaceId), String(receipt.recordKey))
+  }
+  const completed = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  if (completed.kind !== 'page') throw new Error('Expected a page.')
+  const checklist = completed.blocks[0]
+  if (checklist?.type !== 'checklist') throw new Error('Expected a checklist.')
+  expect(completed.revision).toBe(linked.revision + 1)
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: completed.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'uncheck-all',
+        blockId: 'actions',
+        block: { ...checklist, items: checklist.items.map((item) => ({ ...item, checked: false })) },
+      }],
+    },
+  })
+
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [page.id] })
+  const afterRetry = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  if (afterRetry.kind !== 'page') throw new Error('Expected a page.')
+  expect(afterRetry.blocks[0]).toMatchObject({
+    items: [
+      { id: 'open', checked: true },
+      // Already checked at the first attempt, then unchecked by the editor.
+      { id: 'done', checked: false },
+    ],
+  })
+})
+
+test('fails a completion whose stored scope is damaged', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: {
+      objects: [{
+        id: 'note-1',
+        type: 'note',
+        text: 'Fix the flaky test',
+        done: true,
+        bounds: { x: 0, y: 0, width: 200, height: 100 },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: whiteboard.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-note',
+        relation: {
+          id: 'whiteboard-note:note-1',
+          source: { kind: 'whiteboard-object', objectId: 'note-1' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  }
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const scope = memory.items().find((item) => item.entryType === 'work-item-completion-scope')
+  if (scope === undefined) throw new Error('Expected a stored completion scope.')
+  expect(scope.elementKeys).toEqual([])
+  for (const damaged of [
+    { ...scope, elementKeys: ['object:note-1', 7] },
+    { ...scope, documentId: 'other-document' },
+    { ...scope, workItemId: 'team/team-a/issue/work-item-2' },
+  ]) {
+    memory.put(damaged)
+
+    await expect(client.reflectWorkItemCompletion(completion)).rejects.toMatchObject({
+      status: 503,
+      code: 'InvalidStoredDocumentData',
+    })
+  }
+})
+
+test('completes more linked notes than one operation batch holds', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const noteIds = ['n1', 'n2', 'n3', 'n4', 'n5', 'n6']
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: {
+      objects: noteIds.map((id, index) => ({
+        id,
+        type: 'note' as const,
+        text: `Note ${id}`,
+        bounds: { x: index * 220, y: 0, width: 200, height: 100 },
+        zIndex: index + 1,
+      })),
+      connectors: [],
+      frames: [],
+    },
+  })
+  let linkedRevision = whiteboard.revision
+  for (const batch of [noteIds.slice(0, 4), noteIds.slice(4)]) {
+    const applied = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: whiteboard.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: linkedRevision,
+        clientId: 'editor-1',
+        operations: batch.map((objectId) => ({
+          type: 'upsert-relation' as const,
+          operationId: `link-${objectId}`,
+          relation: {
+            id: `whiteboard-note:${objectId}`,
+            source: { kind: 'whiteboard-object' as const, objectId },
+            target: { kind: 'work-item' as const, workItemId },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        })),
+      },
+    })
+    linkedRevision = applied.revision
+  }
+
+  const reflected = await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })
+
+  expect(reflected.updatedDocumentIds).toEqual([whiteboard.id])
+  const updated = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(updated.revision).toBe(linkedRevision + 2)
+  if (updated.kind !== 'whiteboard') throw new Error('Expected a Whiteboard.')
+  expect(updated.whiteboard.objects.map((object) => object.type === 'note' && object.done === true))
+    .toEqual(noteIds.map(() => true))
+})
+
+test('leaves Documents beneath an archived folder unchanged on completion', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Old meetings',
+  })
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: folder.id,
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [{ id: 'linked', text: 'Send the estimate', checked: false }],
+    }],
+  })
+  const linked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-item',
+        relation: {
+          id: 'checklist-item:actions:linked',
+          source: { kind: 'block', blockId: 'actions' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    expectedRevision: folder.revision,
+    access: ownerAccess,
+  })
+
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+  await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    expectedRevision: folder.revision + 1,
+    access: ownerAccess,
+  })
+  const restored = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(restored.revision).toBe(linked.revision)
+
+  // Once the folder is back, the same completion goes through with the
+  // folder's revision checked in the transaction.
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [page.id] })
+})
+
 test('indexes Whiteboard work-item cards as transactional backlinks', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
