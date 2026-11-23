@@ -1287,6 +1287,16 @@ async function notifyCommittedDelivery(
   now: Date,
   dependencies: AnalyticsScheduleDependencies,
 ) {
+  // The recipient index lists the delivery for the recipient (ADR 0064). It is written before the
+  // notification on every attempt, so a retry after a failure leaves both in place.
+  await dependencies.repository.putRecipientDelivery({
+    workspaceId: receipt.workspaceId,
+    recipientMemberKey,
+    reportId: receipt.reportId,
+    snapshotId: receipt.snapshotId,
+    format: receipt.format,
+    deliveredAt: receipt.createdAt,
+  })
   await dependencies.notifyDelivery({
     report,
     snapshotId: receipt.snapshotId,

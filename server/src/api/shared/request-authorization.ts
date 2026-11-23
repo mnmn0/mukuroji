@@ -209,6 +209,7 @@ const enterpriseRoutePermissionRules = [
   { method: 'POST', pathPattern: '/api/analytics/evidence', permission: 'work-items.read' },
   { method: 'POST', pathPattern: '/api/analytics/export', permission: 'work-items.read' },
   { method: 'GET', pathPattern: '/api/analytics/reports', permission: 'work-items.read' },
+  { method: 'GET', pathPattern: '/api/analytics/deliveries', permission: 'work-items.read' },
   {
     method: 'GET',
     pathPattern: '/api/analytics/reports/:reportId/snapshots',

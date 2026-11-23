@@ -2692,6 +2692,10 @@ async function mockAnalyticsReportsPage(
     },
   )
 
+  await page.route(/.*\/api\/analytics\/deliveries(?:\?.*)?$/, async (route) => {
+    await route.fulfill({ json: { deliveries: [] } })
+  })
+
   await page.route(
     /.*\/api\/analytics\/reports\/[^/]+\/snapshots(?:\?.*)?$/,
     async (route) => {

@@ -3,6 +3,8 @@ import {
   DEFAULT_WORK_ITEM_TYPE,
   createAnalyticsProjectNames,
   createSearchWorkItemTypeKey,
+  type AnalyticsDelivery,
+  type AnalyticsDeliveryListResponse,
   type AnalyticsExportLocale,
   type AnalyticsQueryInput,
   type AnalyticsReport,
@@ -38,6 +40,7 @@ import {
   analyticsSnapshotReadMilestones,
   analyticsQueryReadsPlanningGroups,
   analyticsSnapshotReadPlanningGroups,
+  MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -359,6 +362,73 @@ async function readAnalyticsExportConfigurationNames(
     )
   }
   return { workItemTypes, customFields }
+}
+
+/**
+ * Lists the scheduled deliveries to the authenticated principal, newest first (ADR 0064).
+ *
+ * Each delivery is kept only while the caller can read its report now, with the same rule as the
+ * report list, and shows the report's current name. Opening the snapshot checks its permission
+ * scope again, so a delivery whose scope changed still cannot be read.
+ *
+ * @param principal - Authenticated principal; only its own deliveries are read.
+ * @param limit - Page size, 1 to 50; 20 when omitted.
+ * @param cursor - Cursor of a previous page.
+ * @returns The deliveries and the next cursor.
+ */
+async function listAnalyticsHttpDeliveries(
+  principal: WorkspacePrincipal,
+  limit: string | undefined,
+  cursor: string | undefined,
+): Promise<AnalyticsDeliveryListResponse> {
+  const page = await workItemDependencies.analytics.listRecipientDeliveries(
+    principal.directoryId,
+    principal.userKey,
+    readAnalyticsDeliveryListLimit(limit),
+    readAnalyticsReportListCursor(cursor),
+  )
+  const context = await createWorkspaceSearchContext(principal)
+  const reports = new Map<string, Promise<AnalyticsReport | undefined>>()
+  const deliveries: AnalyticsDelivery[] = []
+  for (const delivery of page.deliveries) {
+    let report = reports.get(delivery.reportId)
+    if (report === undefined) {
+      report = workItemDependencies.analytics.getReport(principal.directoryId, delivery.reportId)
+      reports.set(delivery.reportId, report)
+    }
+    const current = await report
+    if (current === undefined || !canReadAnalyticsReport(principal, context, current)) continue
+    deliveries.push({
+      reportId: delivery.reportId,
+      reportName: current.name,
+      snapshotId: delivery.snapshotId,
+      format: delivery.format,
+      deliveredAt: delivery.deliveredAt,
+    })
+  }
+  return {
+    deliveries,
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+  }
+}
+
+/**
+ * Reads the page size of the delivery list.
+ *
+ * @param value - `limit` query parameter.
+ * @returns The page size.
+ */
+function readAnalyticsDeliveryListLimit(value: string | undefined) {
+  if (value === undefined) return 20
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      `Analytics delivery list limit must be an integer between 1 and ${MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE}.`,
+    )
+  }
+  return parsed
 }
 
 /** Lists Analytics reports visible to the authenticated principal. */
@@ -1623,6 +1693,7 @@ export function registerAnalyticsRoutes(routeApp: Hono): void {
     executeEvidence: executeAnalyticsHttpEvidence,
     createExport: createAnalyticsHttpExport,
     listReports: listAnalyticsHttpReports,
+    listDeliveries: listAnalyticsHttpDeliveries,
     createReport: createAnalyticsHttpReport,
     updateReport: updateAnalyticsHttpReport,
     deleteReport: deleteAnalyticsHttpReport,

@@ -493,6 +493,28 @@ export type AnalyticsSnapshotListResponse = {
   nextCursor?: string
 }
 
+/** A scheduled delivery to the caller, in `GET /api/analytics/deliveries`. */
+export type AnalyticsDelivery = {
+  /** Delivered report ID. */
+  reportId: string
+  /** Current report name. */
+  reportName: string
+  /** Snapshot created for the caller, opened at `/reports?v=1&report=<id>&snapshot=<id>`. */
+  snapshotId: string
+  /** Artifact format of the delivery. */
+  format: 'csv' | 'pdf'
+  /** Scheduled occurrence instant of the delivery. */
+  deliveredAt: string
+}
+
+/** One page of the caller's deliveries, newest first. */
+export type AnalyticsDeliveryListResponse = {
+  /** Deliveries of reports the caller can read now; a page can be shorter than the limit. */
+  deliveries: AnalyticsDelivery[]
+  /** Cursor of the next page. */
+  nextCursor?: string
+}
+
 /** Metric から辿る Work Item/event evidence です。 */
 export type AnalyticsEvidenceItem = {
   /** Evidence を識別する stable ID です。 */

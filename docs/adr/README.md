@@ -83,3 +83,4 @@
 | [0059](0059-cycle-schedule-baselines.md) | Cycle ごとの名前付き schedule baseline を、一覧の行と baseline ごとの行で Planning table に置く | 提案 |
 | [0060](0060-project-default-task-view.md) | Project の既定ビューを、その Project の管理者だけが設定できる共有の既定として持つ | 提案 |
 | [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |
+| [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |

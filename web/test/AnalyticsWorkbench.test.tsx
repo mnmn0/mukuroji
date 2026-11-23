@@ -35,6 +35,26 @@ describe('AnalyticsWorkbench', () => {
     ).toEqual(['urgent', 'blocked'])
   })
 
+  test('lists the deliveries to the user and marks the open one', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[{
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        }]}
+        selectedReportId="weekly"
+        selectedSnapshotId="snapshot-1"
+      />,
+    )
+    expect(html).toContain('Delivered to me')
+    expect(html).toMatch(/<option value="snapshot-1" selected="">Weekly delivery · /u)
+    expect(renderToStaticMarkup(<AnalyticsWorkbench {...baseProps} />)).not.toContain('Delivered to me')
+  })
+
   test('enables the period presets only once the Workspace calendar settings are loaded', () => {
     const withoutSettings = renderToStaticMarkup(
       <AnalyticsWorkbench {...baseProps} onFilterChange={() => undefined} />,
@@ -659,6 +679,66 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('未設定')
     expect(html).toContain('進行中')
     expect(html).not.toContain('>sato@example.com<')
+  })
+
+  test('shows a delivery-list failure with a retry instead of an empty list', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench {...baseProps} deliveriesFailed onRetryDeliveries={() => undefined} />,
+    )
+    expect(html).toContain('data-testid="analytics-deliveries-error"')
+    expect(html).toContain('Your deliveries could not be loaded.')
+    expect(html).toContain('Retry')
+  })
+
+  test('keeps the delivery error and retry when earlier deliveries are still shown', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[{
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        }]}
+        deliveriesFailed
+        onRetryDeliveries={() => undefined}
+      />,
+    )
+    expect(html).toContain('data-testid="analytics-delivery-selector"')
+    expect(html).toContain('data-testid="analytics-deliveries-error"')
+  })
+
+  test('offers to read earlier deliveries while more remain', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[]}
+        hasMoreDeliveries
+        onLoadMoreDeliveries={() => undefined}
+      />,
+    )
+    expect(html).toContain('data-testid="analytics-deliveries-more"')
+    expect(html).toContain('Load earlier deliveries')
+    expect(renderToStaticMarkup(<AnalyticsWorkbench {...baseProps} deliveries={[]} />))
+      .not.toContain('analytics-deliveries-more')
+  })
+
+  test('shows a delivery-list failure with a retry on the empty state too', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveriesFailed
+        reports={[]}
+        selectedReportId={undefined}
+        snapshot={undefined}
+        widgets={[]}
+        onRetryDeliveries={() => undefined}
+      />,
+    )
+    expect(html).toContain('Create your first report')
+    expect(html).toContain('data-testid="analytics-deliveries-error"')
+    expect(html).toContain('Retry')
   })
 
   test('keeps an empty assignee selection apart from all assignees', () => {
