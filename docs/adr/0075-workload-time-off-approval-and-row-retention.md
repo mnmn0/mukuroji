@@ -68,3 +68,5 @@ manager が「空いていない」と判断した後に休暇が取り消され
   data migration は行わない（状態はそのまま正しい意味で読める）。
 - `WorkloadCell` と `WorkloadMemberSummary` に必須の field が増える。Web と server は同じ deploy で更新する。
 - 30 日を過ぎた取消済みの依頼は一覧から消える。
+- `rejected` の休暇を保存した後に server をこの変更より前へ戻すと、古い reader は `rejected` を知らないため、その Team の
+  要員計画が `500 InvalidCapacityPlanningState` になる。戻す場合は Web と一緒に戻し、却下済みの休暇を `canceled` に書き換えてから戻す。

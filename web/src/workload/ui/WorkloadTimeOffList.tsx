@@ -56,6 +56,7 @@ export function WorkloadTimeOffList({ isSaving, memberNames, onReview, snapshot,
         {rows.map(({ memberId, timeOff }) => {
           const isOwn = memberId === viewerMemberId
           const review = (status: WorkloadTimeOffStatus) => { void onReview(memberId, timeOff, status) }
+          const period = timeOff.fromDate === timeOff.toDate ? timeOff.fromDate : `${timeOff.fromDate} – ${timeOff.toDate}`
           return (
             <li
               className={`grid min-w-0 gap-2 border px-3 py-2 ${timeOff.status === 'planned' ? 'border-dashed border-tone-c9d8f0' : 'border-[var(--workbench-border)]'} ${timeOff.status === 'rejected' ? 'opacity-60' : ''}`}
@@ -67,7 +68,7 @@ export function WorkloadTimeOffList({ isSaving, memberNames, onReview, snapshot,
                   <p className="break-words text-sm font-semibold text-[var(--workbench-text)]">{memberNames.get(memberId) ?? memberId}</p>
                   <p className="text-xs leading-5 text-[var(--workbench-muted)]">
                     {[
-                      timeOff.fromDate === timeOff.toDate ? timeOff.fromDate : `${timeOff.fromDate} – ${timeOff.toDate}`,
+                      period,
                       timeOff.minutesPerDay === undefined ? t('workload.controls.timeOffList.fullDay') : formatHours(timeOff.minutesPerDay),
                       timeOff.reason,
                     ].filter(Boolean).join(' · ')}
@@ -77,7 +78,7 @@ export function WorkloadTimeOffList({ isSaving, memberNames, onReview, snapshot,
                   {t(`workload.controls.timeOffList.status.${timeOff.status}`)}
                 </span>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div aria-label={`${memberNames.get(memberId) ?? memberId} ${period}`} className="flex flex-wrap gap-2" role="group">
                 {canManage && timeOff.status === 'planned' ? (
                   <>
                     <button className={buttonClass} disabled={isSaving} type="button" onClick={() => review('approved')}>{t('workload.controls.timeOffList.approve')}</button>
