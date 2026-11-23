@@ -6,7 +6,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 
 `PlanningTable` は `workspaceId` / `recordKey` を primary key とし、次の row を保存します。
 
-- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version、Workspace graph revision、Work Item による revision 前進を数える counter（`sourceRevisionCount`、`structureRevision`、`structureSourceRevisionCount`）
+- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version、Workspace graph revision、Work Item による revision 前進を数える counter（`sourceRevisionCount`、`structureRevision`、`structureSourceRevisionCount`）、直近の Planning commit が測った live graph の row 数と byte 数（`liveRowCount`、`liveByteCount`。下の「単位ごとの読み取り」）
 - `ENTITY#<id>`: planning entity
 - `DEPENDENCY#<id>`: directed scheduling dependency
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
@@ -56,7 +56,35 @@ DynamoDB client は、デコード済みの graph を META の `revision` と `u
 4. 不要な entity dependency と Work Item schedule dependency を解除します
 5. 容量超過中も row を増やさない変更は保存できるため、上の操作は `full` の状態でも実行できます
 
-Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の live graph から計算します。退避済みの entity と参照は計算に含めません。
+### 単位ごとの読み取り
+
+`GET /api/planning` は query を付けると、Workspace 全体ではなく 1 つの Team / Project / Portfolio だけの snapshot を返します（Issue #641、[ADR 0070](adr/0070-planning-scoped-reads.md)）。Response の `readScope` が読んだ範囲を示し、query がなければ従来どおり Workspace 全体です。
+
+| Query | `readScope` | Entity | Work Item と link |
+| --- | --- | --- | --- |
+| `teamId` | `{ type: 'team', teamId }` | Workspace scope、その Team scope、その Team の全 Project scope | その Team の Work Item と link |
+| `teamId` + `projectId` | `{ type: 'project', teamId, projectId }` | Workspace scope、その Team scope、その Project scope | その Project の Work Item と、その Work Item の link |
+| `portfolioId` | `{ type: 'portfolio', portfolioId }` | その Portfolio と子孫 | Portfolio の scope（Project / Team / Workspace）の Work Item と link |
+
+- 子の scope は親の scope 以下なので、Team / Project の読み取りには entity の祖先がすべて入ります。Workspace scope の entity（Portfolio、Roadmap、戦略 Goal など）は常に含みます
+- Entity dependency は両端が読み取り範囲にある edge だけを返します。別 Project の entity との dependency（cross-Project dependency）は Project の読み取りには含めず、両方の Project を含む Team の読み取りか、Workspace 全体の読み取りで返します
+- Work Item schedule dependency は、従来どおり両端の Work Item が snapshot にある edge だけを返します。Project の読み取りでは両端がその Project の Work Item の edge だけです
+- Link は範囲外の entity への参照（`cycleId` / `milestoneId` / `goalIds`）を外し、参照が残らない link は返しません
+- Critical path と roll-up（progress、`linkedWorkItemCount`、`rollupHealth`）は範囲内の entity・dependency・link・Work Item だけで計算します。Project の読み取りでは、Project の entity の roll-up は Workspace 全体の読み取りと同じ値になり、Workspace / Team scope の entity（祖先や Team の Cycle）の roll-up はその Project の Work Item の分だけになります
+- Update target は、Project target が範囲の Team / Project に入るもの、Initiative target が範囲の entity のものです
+- `capacity` は範囲にかかわらず Workspace 全体の使用量です
+- 呼び出し元の権限による絞り込み（`filterPlanningSnapshotForPrincipal`）は Workspace 全体の読み取りと同じです。読めない Portfolio と存在しない Portfolio は、どちらも `404 PlanningEntityNotFound` です。Portfolio 以外の entity ID を `portfolioId` に渡した場合も同じです
+- `projectId` だけの指定、同じ query の重複、`portfolioId` と `teamId` / `projectId` の同時指定は `400 PlanningReadScopeInvalid` です
+
+DynamoDB の読み方は次のとおりです。Key 設計は変えていません。
+
+- `ENTITY#`・`DEPENDENCY#`・`WORK_ITEM_DEPENDENCY#`・`UPDATE_TARGET#` は全体を強整合 Query します。階層の検証と祖先・Portfolio の scope の解決に要るためで、量は人が作る分に限られます
+- Link は Team なら `LINK#<teamId>#` の prefix Query、Project ならその Project の Work Item の key だけを `BatchGetItem`（ConsistentRead、100 key ずつ、未処理の key は最大 5 回まで再要求）で読みます。Workspace scope の Portfolio は配下が Team をまたぐため、`LINK#` 全体を読みます
+- Work Item は範囲の Team / Project だけを読みます
+- 前後の `META` 強整合 read で revision を挟み、間に revision が進んだ場合は最大3回まで読み直す契約は Workspace 全体の読み取りと同じです。Snapshot の `revision` はそのまま mutation の `expectedRevision` に使えます
+- `capacity` は Planning の commit が `META` に書いた `liveRowCount` / `liveByteCount` から返します。通知 schedule worker が `UPDATE_TARGET#` の due index 属性を書いた分の byte 差は、次の Planning commit まで反映されません。`META` に値がない場合（Planning 以外の writer が `META` を置き換えた直後など）と、Lambda の graph cache が当たる場合は、全体を読んで数えます
+
+Web の Project 概要はこの Project 単位の読み取りを使い、Workspace 全体を読みません。Planning 画面（timeline / roadmap / portfolio）と Work Item 画面は、従来どおり Workspace 全体の snapshot を読みます。退避済みの entity と参照は、どの読み取りでも計算に含めません。
 
 #### Entity ID の採番
 

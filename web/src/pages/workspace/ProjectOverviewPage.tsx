@@ -54,7 +54,14 @@ export function ProjectOverviewPage() {
   const project = team?.projects.find((candidate) => candidate.id === projectId)
   const canRead = workspace.canLoadWorkspaceData && Boolean(team && project)
   const workItems = useProjectIssues(workspace.accessToken, projectId, canRead)
-  const planning = usePlanningSnapshot(workspace.accessToken, canRead)
+  // The overview reads only this Project's Planning, not the whole Workspace graph.
+  const planningScope = useMemo(
+    () => team && projectId
+      ? { type: 'project' as const, teamId: team.id, projectId }
+      : undefined,
+    [projectId, team],
+  )
+  const planning = usePlanningSnapshot(workspace.accessToken, canRead, planningScope)
   const members = useProjectMembers(workspace.accessToken, projectId, canRead, team?.id)
   const raidLog = useProjectRaidLog(workspace.accessToken, team?.id, projectId ?? '', canRead && Boolean(projectId))
   const documentBacklinks = useDocumentBacklinks(

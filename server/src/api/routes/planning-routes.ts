@@ -16,6 +16,7 @@ import {
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type PlanningEntity,
+  type PlanningReadScope,
   type PlanningRevisionInput,
   type PlanningSnapshot,
   type PlanningUpdateCadence,
@@ -3109,6 +3110,42 @@ function createPlanningRevisionConditionCheck(
 }
 
 /**
+ * Reads the optional `teamId` / `projectId` / `portfolioId` scope of `GET /api/planning`.
+ *
+ * @param c - Request context.
+ * @returns The requested scope, or undefined for the whole Workspace.
+ */
+function readPlanningReadScopeQuery(c: Context): PlanningReadScope | undefined {
+  if (['teamId', 'projectId', 'portfolioId'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
+    throw new PlanningError(
+      400,
+      'PlanningReadScopeInvalid',
+      'Planning read scope parameters must occur at most once.',
+    )
+  }
+  const teamId = c.req.query('teamId')
+  const projectId = c.req.query('projectId')
+  const portfolioId = c.req.query('portfolioId')
+  if (portfolioId !== undefined) {
+    if (teamId !== undefined || projectId !== undefined) {
+      throw new PlanningError(
+        400,
+        'PlanningReadScopeInvalid',
+        'A Portfolio read cannot also name a Team or Project.',
+      )
+    }
+    return { type: 'portfolio', portfolioId }
+  }
+  if (projectId !== undefined) {
+    if (teamId === undefined) {
+      throw new PlanningError(400, 'PlanningReadScopeInvalid', 'A Project read needs its Team ID.')
+    }
+    return { type: 'project', teamId, projectId }
+  }
+  return teamId === undefined ? undefined : { type: 'team', teamId }
+}
+
+/**
  * Registers the planning HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -3122,12 +3159,34 @@ export function registerPlanningRoutes(routeApp: Hono): void {
     }
 
     try {
+      const readScope = readPlanningReadScopeQuery(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      const workItemState = await readPlanningWorkItemState(principal)
-      return c.json(filterPlanningSnapshotForPrincipal(
+      if (readScope === undefined) {
+        const workItemState = await readPlanningWorkItemState(principal)
+        return c.json(filterPlanningSnapshotForPrincipal(
+          principal,
+          await workItemDependencies.planning.get(principal.directoryId, workItemState),
+        ))
+      }
+      const snapshot = filterPlanningSnapshotForPrincipal(
         principal,
-        await workItemDependencies.planning.get(principal.directoryId, workItemState),
-      ))
+        await workItemDependencies.planning.getScoped(
+          principal.directoryId,
+          readScope,
+          (envelope) => readPlanningWorkItemState(principal, envelope),
+        ),
+      )
+      // An unreadable Portfolio answers like a missing one, so its existence does not leak.
+      if (
+        readScope.type === 'portfolio' &&
+        !snapshot.entities.some((entity) => entity.id === readScope.portfolioId)
+      ) {
+        return c.json({
+          code: 'PlanningEntityNotFound',
+          message: `Portfolio "${readScope.portfolioId}" was not found.`,
+        }, 404)
+      }
+      return c.json(snapshot)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }

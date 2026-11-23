@@ -622,8 +622,10 @@ export function buildApiRuntime(
   // The Planning, Analytics, and Work Item configuration statements have the same actions and
   // each sit in a different policy, so CDK does not merge them and each table keeps a
   // statement of its own.
+  // BatchGetItem reads the Work Item links of one Project for a Project-scoped Planning read.
   apiTableDataPolicy.addStatements(new iam.PolicyStatement({
     actions: [
+      'dynamodb:BatchGetItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',

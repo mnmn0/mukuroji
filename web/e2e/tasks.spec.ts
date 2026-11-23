@@ -1095,7 +1095,8 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/planning', async (route) => {
+  // The Project overview reads one Project with `?teamId=&projectId=`.
+  await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     expect(route.request().method()).toBe('GET')
 
@@ -1111,14 +1112,26 @@ async function mockAuthenticatedTaskPage(
       return
     }
 
+    const query = new URL(route.request().url()).searchParams
+    const teamId = query.get('teamId')
+    const projectId = query.get('projectId')
     await route.fulfill({
-      json: createMockPlanningSnapshot(
-        taskResponsesByProject,
-        teamIssuesByTeam,
-        workItemScheduleDependencies,
-        workItemScheduleDependencyConflicts,
-        planningRevision,
-      ),
+      json: {
+        ...createMockPlanningSnapshot(
+          taskResponsesByProject,
+          teamIssuesByTeam,
+          workItemScheduleDependencies,
+          workItemScheduleDependencyConflicts,
+          planningRevision,
+        ),
+        ...(teamId === null
+          ? {}
+          : {
+              readScope: projectId === null
+                ? { type: 'team', teamId }
+                : { type: 'project', teamId, projectId },
+            }),
+      },
     })
   })
 
