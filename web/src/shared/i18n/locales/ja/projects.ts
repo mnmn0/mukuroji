@@ -271,6 +271,8 @@ export const projectsMessages = {
   'projects.teamProfile.leader': 'リーダー',
   'projects.teamProfile.noLeader': 'なし',
   'projects.teamProfile.saved': '保存しました。',
+  'projects.teamProfile.changedElsewhere': '編集中に、ほかの管理者がこのチームを更新しました。このまま保存すると拒否されます。',
+  'projects.teamProfile.discardEdits': '編集を破棄して最新の内容を表示',
   'projects.teamProfile.members': 'メンバー（いずれかのプロジェクトに参加している人）',
   'projects.teamProfile.membersLoading': 'メンバーを読み込んでいます…',
   'projects.teamProfile.membersEmpty': 'まだどのプロジェクトにもメンバーはいません。',

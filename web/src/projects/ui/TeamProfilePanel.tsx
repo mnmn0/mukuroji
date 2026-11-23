@@ -239,8 +239,8 @@ export function TeamProfilePanel({
             </div>
           ) : null}
           <TeamProfileForm
-            // A new Team or a saved profile starts the form from the stored values.
-            key={`${team.id}\u0000${team.profileRevision ?? 0}\u0000${team.description ?? ''}\u0000${team.leaderMemberKey ?? ''}`}
+            // Only another Team starts a new form; a reload of the same Team keeps unsaved edits.
+            key={`profile:${team.id}`}
             pending={pending}
             saved={savedTeamId === team.id}
             t={t}
@@ -256,7 +256,7 @@ export function TeamProfilePanel({
             }}
           />
           <TeamProfileMembers
-            key={team.id}
+            key={`members:${team.id}`}
             members={members}
             membersLoading={membersLoading}
             membersPartial={membersPartial}
@@ -312,8 +312,19 @@ function TeamProfileForm({
   onEdit,
   onSave,
 }: TeamProfileFormProps) {
-  const [description, setDescription] = useState(team.description ?? '')
-  const [leaderMemberKey, setLeaderMemberKey] = useState(team.leaderMemberKey ?? '')
+  const stored = readStoredTeamProfile(team)
+  // The stored values the fields started from; a save is checked against this revision.
+  const [loaded, setLoaded] = useState(stored)
+  const [description, setDescription] = useState(stored.description)
+  const [leaderMemberKey, setLeaderMemberKey] = useState(stored.leaderMemberKey)
+  const [dirty, setDirty] = useState(false)
+  const changedElsewhere = !isSameStoredTeamProfile(loaded, stored)
+  if (changedElsewhere && !dirty) {
+    // A background reload without unsaved edits shows the newer values right away.
+    setLoaded(stored)
+    setDescription(stored.description)
+    setLeaderMemberKey(stored.leaderMemberKey)
+  }
   // Until the list loads, the stored leader is shown as is and cannot be changed.
   const leaderMissing = leaderMemberKey !== '' &&
     !workspaceMembers.some((member) => member.memberKey === leaderMemberKey)
@@ -325,12 +336,26 @@ function TeamProfileForm({
    */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    await onSave({
+    const succeeded = await onSave({
       description,
       leaderMemberKey: leaderMemberKey === '' ? null : leaderMemberKey,
       // The stored revision this form was loaded from; a newer one refuses the save.
-      expectedProfileRevision: team.profileRevision ?? 0,
+      expectedProfileRevision: loaded.revision,
     })
+    if (!succeeded) return // A refused save keeps the edits.
+    // A save that changed something is the next revision, so its own reload is not taken for
+    // another administrator's; an unchanged profile is not written and keeps its revision.
+    const unchanged = description === loaded.description && leaderMemberKey === loaded.leaderMemberKey
+    if (!unchanged) setLoaded({ revision: loaded.revision + 1, description, leaderMemberKey })
+    setDirty(false)
+  }
+
+  /** Drops the unsaved edits and shows the stored values. */
+  const discard = () => {
+    setDirty(false)
+    setLoaded(stored)
+    setDescription(stored.description)
+    setLeaderMemberKey(stored.leaderMemberKey)
   }
 
   return (
@@ -342,6 +367,7 @@ function TeamProfileForm({
           maxLength={DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH}
           onChange={(event) => {
             onEdit()
+            setDirty(true)
             setDescription(event.target.value)
           }}
           value={description}
@@ -354,6 +380,7 @@ function TeamProfileForm({
           disabled={!workspaceMembersReady}
           onChange={(event) => {
             onEdit()
+            setDirty(true)
             setLeaderMemberKey(event.target.value)
           }}
           value={leaderMemberKey}
@@ -368,6 +395,18 @@ function TeamProfileForm({
           ))}
         </select>
       </label>
+      {changedElsewhere && dirty ? (
+        <div
+          className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--workbench-border)] px-4 py-3"
+          data-testid="team-profile-changed-elsewhere"
+          role="status"
+        >
+          <span className="text-sm">{t('projects.teamProfile.changedElsewhere')}</span>
+          <button className="workbench-button-secondary min-h-10 px-4" onClick={discard} type="button">
+            {t('projects.teamProfile.discardEdits')}
+          </button>
+        </div>
+      ) : null}
       <div className="flex items-center gap-3">
         <button className="workbench-button-primary min-h-10 px-4" disabled={pending} type="submit">
           {t('projects.administration.save')}
@@ -380,6 +419,43 @@ function TeamProfileForm({
       </div>
     </form>
   )
+}
+
+/** Stored profile values of a Team, as the form starts from them. */
+type StoredTeamProfile = {
+  /** Profile revision the values belong to. */
+  revision: number
+  /** Stored description, empty when none. */
+  description: string
+  /** Stored leader member key, empty when none. */
+  leaderMemberKey: string
+}
+
+/**
+ * Reads the stored profile values of a Team.
+ *
+ * @param team - Team as last loaded.
+ * @returns Its revision, description, and leader.
+ */
+function readStoredTeamProfile(team: DirectoryAdministrationTeam): StoredTeamProfile {
+  return {
+    revision: team.profileRevision ?? 0,
+    description: team.description ?? '',
+    leaderMemberKey: team.leaderMemberKey ?? '',
+  }
+}
+
+/**
+ * Tells whether two stored profiles are the same.
+ *
+ * @param left - One stored profile.
+ * @param right - Another stored profile.
+ * @returns Whether the revision and both values match.
+ */
+function isSameStoredTeamProfile(left: StoredTeamProfile, right: StoredTeamProfile) {
+  return left.revision === right.revision &&
+    left.description === right.description &&
+    left.leaderMemberKey === right.leaderMemberKey
 }
 
 /** Props of {@link TeamProfileMembers}. */

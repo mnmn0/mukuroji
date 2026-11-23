@@ -273,6 +273,8 @@ export const projectsMessages = {
   'projects.teamProfile.leader': 'Leader',
   'projects.teamProfile.noLeader': 'None',
   'projects.teamProfile.saved': 'Saved.',
+  'projects.teamProfile.changedElsewhere': 'Another administrator updated this Team while you were editing. Saving now will be refused.',
+  'projects.teamProfile.discardEdits': 'Discard edits and show the latest',
   'projects.teamProfile.members': 'Members (people in any of its Projects)',
   'projects.teamProfile.membersLoading': 'Loading members…',
   'projects.teamProfile.membersEmpty': 'No Project of this Team has members yet.',

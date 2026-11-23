@@ -163,3 +163,52 @@ export const SavedAfterReload: Story = {
     await expect(canvas.getByLabelText('説明')).toHaveValue('新しい説明')
   },
 }
+
+/**
+ * Lets the story stand in for another administrator who saves the Team in the background.
+ *
+ * @param props - Story args of the panel.
+ * @returns The panel with a control that reloads a newer Team.
+ */
+function ConcurrentlyUpdatedTeamProfilePanel(props: TeamProfilePanelProps) {
+  const [current, setCurrent] = useState(team)
+  const updateElsewhere = () => setCurrent((previous) => ({
+    ...previous,
+    description: '別の管理者の説明',
+    profileRevision: (previous.profileRevision ?? 0) + 1,
+  }))
+  return (
+    <>
+      <button onClick={updateElsewhere} type="button">別の管理者が更新</button>
+      <TeamProfilePanel {...props} team={current} teams={[current, designTeam]} />
+    </>
+  )
+}
+
+/** A background reload keeps unsaved edits and offers to discard them for the newer values. */
+export const UpdatedWhileEditing: Story = {
+  render: (args) => <ConcurrentlyUpdatedTeamProfilePanel {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const description = canvas.getByLabelText('説明')
+    await userEvent.clear(description)
+    await userEvent.type(description, '編集中の説明')
+    await userEvent.click(canvas.getByRole('button', { name: '別の管理者が更新' }))
+    await expect(canvas.getByLabelText('説明')).toHaveValue('編集中の説明')
+    await expect(canvas.getByTestId('team-profile-changed-elsewhere')).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '編集を破棄して最新の内容を表示' }))
+    await expect(canvas.getByLabelText('説明')).toHaveValue('別の管理者の説明')
+    await expect(canvas.queryByTestId('team-profile-changed-elsewhere')).toBeNull()
+  },
+}
+
+/** A background reload without unsaved edits shows the newer values right away. */
+export const UpdatedWithoutEdits: Story = {
+  render: (args) => <ConcurrentlyUpdatedTeamProfilePanel {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '別の管理者が更新' }))
+    await expect(canvas.getByLabelText('説明')).toHaveValue('別の管理者の説明')
+    await expect(canvas.queryByTestId('team-profile-changed-elsewhere')).toBeNull()
+  },
+}
