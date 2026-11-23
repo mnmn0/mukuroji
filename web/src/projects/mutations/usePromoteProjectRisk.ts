@@ -4,6 +4,7 @@ import {
   type CuratedContextItem,
 } from '@mukuroji/contracts'
 import { useCallback, useState } from 'react'
+import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { useSaveProjectRaidEntry } from './useSaveProjectRaidEntry'
 
 /** Work Item whose curated risks may be promoted to its Project's log. */
@@ -58,7 +59,12 @@ function truncate(text: string, maxLength: number) {
  * and a promoted item is remembered for as long as the hook's owner stays mounted.
  *
  * @param scope - Session, Team, Project, and Work Item.
- * @returns The promotion, or `undefined` when the Work Item has no Project or session.
+ * Promotion is offered only when the server says the viewer may edit the Project log, so a
+ * Project viewer or a member without Enterprise `projects.write` is not shown a button that
+ * always fails.
+ *
+ * @returns The promotion, or `undefined` when the Work Item has no Project or session, or the
+ * viewer may not edit the Project log.
  */
 export function usePromoteProjectRisk({
   accessToken,
@@ -68,6 +74,7 @@ export function usePromoteProjectRisk({
 }: ProjectRiskPromotionScope): ProjectRiskPromotion | undefined {
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId: projectId ?? '' })
   const [promotedItemIds, setPromotedItemIds] = useState<ReadonlySet<string>>(() => new Set())
+  const log = useProjectRaidLog(accessToken, teamId, projectId ?? '', projectId !== undefined)
   const promote = useCallback(async (item: CuratedContextItem) => {
     const description = item.body.trim()
     await save(undefined, {
@@ -81,7 +88,7 @@ export function usePromoteProjectRisk({
     })
     setPromotedItemIds((current) => new Set(current).add(item.id))
   }, [save, workItemId])
-  if (!accessToken || !teamId || !projectId) return undefined
+  if (!accessToken || !teamId || !projectId || log.data?.viewer?.canEdit !== true) return undefined
   const search = new URLSearchParams({ teamId, tab: 'permissions' })
   return {
     promote,

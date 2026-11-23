@@ -1162,9 +1162,17 @@ export function TaskPage() {
     const shouldBlockCreate = createTaskDirtyRef.current &&
       createTaskDirtyScopeRef.current === taskScopeKey && changesCreateScope
     const retainedCommentOwner = commentDraftOwnerRef.current
+    // A link that opens the permissions tab, such as the Project log link of a promoted risk,
+    // hides the detail pane like selecting that tab does, so it needs the same confirmation.
+    const opensPermissionsTab = nextSearchParams.get('tab') === 'permissions' &&
+      new URLSearchParams(currentLocation.search).get('tab') !== 'permissions'
     const shouldBlockComment = commentDraftDirtyRef.current &&
       retainedCommentOwner?.taskScopeKey === taskScopeKey &&
-      (pathChanged || JSON.stringify([retainedCommentOwner.teamId, retainedCommentOwner.issueId]) !== nextOwnerKey)
+      (
+        pathChanged ||
+        opensPermissionsTab ||
+        JSON.stringify([retainedCommentOwner.teamId, retainedCommentOwner.issueId]) !== nextOwnerKey
+      )
     blockedDirtyOwnersRef.current = {
       create: shouldBlockCreate,
       comment: shouldBlockComment,

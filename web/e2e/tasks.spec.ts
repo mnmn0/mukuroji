@@ -12234,6 +12234,49 @@ test.describe('authenticated task page', () => {
     await expect(brandNotification).toBeVisible()
   })
 
+  test('Issue #344: 登録簿を編集できない人には Work Item のリスクの登録を出さない', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/issues\/wireframe\/context-items(?:\?.*)?$/, async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({
+        json: {
+          schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+          items: [{
+            schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+            id: 'context-risk',
+            teamId: 'core-team',
+            workItemId: 'wireframe',
+            kind: 'risk',
+            state: 'active',
+            title: 'デザイン確認が遅れる',
+            body: '',
+            mentionMemberKeys: [],
+            createdBy: { id: 'demo@example.com', displayName: 'Demo User' },
+            createdAt: '2026-08-09T01:20:00.000Z',
+            updatedBy: { id: 'demo@example.com', displayName: 'Demo User' },
+            updatedAt: '2026-08-09T01:20:00.000Z',
+            revision: 1,
+          } satisfies CuratedContextItem],
+          capabilities: { canCreate: true, canEdit: true, canReplace: true, canAcceptResolution: true },
+        },
+      })
+    })
+    let logReads = 0
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      logReads += 1
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [], viewer: { canEdit: false } } })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const panel = page.getByTestId('issue-collaboration-panel')
+    await panel.getByRole('tab', { name: /判断/ }).click()
+    await expect(panel.getByText('デザイン確認が遅れる')).toBeVisible()
+    await expect.poll(() => logReads).toBeGreaterThan(0)
+    await expect(panel.getByTestId('context-promote-risk')).toHaveCount(0)
+  })
+
   test('Issue #344: Work Item のリスクを Project のリスクに登録し、登録簿を開ける', async ({ page }) => {
     const riskItem = {
       schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
@@ -12295,7 +12338,27 @@ test.describe('authenticated task page', () => {
       },
     }])
 
-    await panel.getByRole('link', { name: '登録簿を開く' }).click()
+    // The log link hides the detail pane like the permissions tab, so an unsent comment asks first.
+    await panel.getByRole('tab', { name: /会話/ }).click()
+    await page.locator('textarea[name="body"]').fill('登録簿へ移る前のコメント下書き')
+    await panel.getByRole('tab', { name: /判断/ }).click()
+    const declined = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([panel.getByRole('link', { name: '登録簿を開く' }).click(), declined])
+    await expect(page).not.toHaveURL(/tab=permissions/)
+    await expect(panel).toBeVisible()
+    const accepted = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([panel.getByRole('link', { name: '登録簿を開く' }).click(), accepted])
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&tab=permissions')
     await expect(page.getByTestId('project-raid-log-entry')).toContainText('デザイン確認が遅れる')
   })
