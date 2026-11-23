@@ -212,6 +212,11 @@ export function TeamTimeTrackingPage() {
         {view === 'report' ? (
           <TimeReportContainer
             accessToken={accessToken}
+            fiscalYearStartMonth={calendarSettings.settings?.fiscalYearStartMonth}
+            // Budgets can still take dates when the fiscal year cannot be read; only a failure
+            // before any successful read hides the fiscal years.
+            hasFiscalYearError={Boolean(calendarSettings.error) && !calendarSettings.settings}
+            onRetryFiscalYear={calendarSettings.retry}
             groupBy={reportGroupBy}
             hasJobRoleError={Boolean(workItemConfiguration.error)}
             {...(jobRoles ? { jobRoles } : {})}
