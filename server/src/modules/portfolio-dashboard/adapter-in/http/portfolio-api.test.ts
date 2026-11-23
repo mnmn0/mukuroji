@@ -11,6 +11,7 @@ const {
   app,
   configureFakeProjectClients,
   createAccessToken,
+  getTestAppDependencies,
   resetTestApp,
 } = createApiTestHarness()
 
@@ -158,4 +159,40 @@ test('shows costs only for the Projects a partial manager manages and refuses th
   expect(portfolio.viewer.canCaptureSnapshot).toBe(false)
   const denied = await request(`/api/teams/core-team/portfolio/snapshots/${currentMonth}?timeZone=UTC`, 'PUT', {})
   expect(denied.status).toBe(403)
+})
+
+/**
+ * Saves the current month's snapshot with an explicit Idempotency-Key.
+ *
+ * @param key - Idempotency-Key header.
+ * @param timeZone - Timezone the save computes in.
+ * @returns The response.
+ */
+function saveWithKey(key: string, timeZone: string) {
+  return app.request(`/api/teams/core-team/portfolio/snapshots/${currentMonth}?timeZone=${encodeURIComponent(timeZone)}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${createAccessToken()}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': key,
+    },
+    body: '{}',
+  })
+}
+
+test('treats a retry with another timezone as a different request', async () => {
+  configureFakeProjectClients(true)
+  expect((await saveWithKey('portfolio-tz-key', 'UTC')).status).toBe(200)
+  expect((await saveWithKey('portfolio-tz-key', 'UTC')).status).toBe(200)
+  const changed = await saveWithKey('portfolio-tz-key', 'Africa/Abidjan')
+  expect(changed.status).toBe(409)
+  expect(await changed.json()).toMatchObject({ code: 'PortfolioSnapshotIdempotencyConflict' })
+})
+
+test('refuses to save when the Team cannot be fenced as active', async () => {
+  configureFakeProjectClients(true)
+  getTestAppDependencies().workspace.projectDirectory.createActiveReferenceConditionChecks = async () => []
+  const response = await saveWithKey('portfolio-fence-key', 'UTC')
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({ code: 'PortfolioTeamFenceUnavailable' })
 })

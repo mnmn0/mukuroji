@@ -118,9 +118,6 @@ export function PortfolioDashboardPage() {
     accessToken: workspace.accessToken,
     timeZone,
     resolveCurrentMonth: () => readLocalCalendar(new Date(), timeZone).month,
-    onSaved: (month) => {
-      if (compareMonth === month) void snapshots.mutate()
-    },
   })
   const teamName = (teamId: string) => workspace.teams.find((team) => team.id === teamId)?.name ?? teamId
   const snapshotResult = snapshotSave.result

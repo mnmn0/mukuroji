@@ -8,6 +8,7 @@ import {
   evaluatePortfolioDashboardAttention,
   listPortfolioDashboardErrors,
 } from '../src/features/portfolio-dashboard/model/portfolioDashboard'
+import { isPortfolioSnapshotsKeyOfMonth } from '../src/features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../src/features/portfolio-dashboard/ui/PortfolioDashboardView'
 import type { ProjectDirectoryTeam } from '../src/projects/api'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -174,4 +175,11 @@ describe('listPortfolioDashboardErrors', () => {
       [{ teamId: 'a', failed: true, error: snapshotFailure }, { teamId: 'b', snapshot: null, failed: false }],
     )).toEqual([expired, boardDenied, snapshotFailure])
   })
+})
+
+test('matches the saved snapshot reads of a month whichever month the page compares', () => {
+  expect(isPortfolioSnapshotsKeyOfMonth(['portfolio-snapshots', 'token', 'a\nb', '2026-11'], '2026-11')).toBe(true)
+  expect(isPortfolioSnapshotsKeyOfMonth(['portfolio-snapshots', 'token', 'a\nb', '2026-10'], '2026-11')).toBe(false)
+  expect(isPortfolioSnapshotsKeyOfMonth(['portfolio-team', 'token', 'a', '2026-11'], '2026-11')).toBe(false)
+  expect(isPortfolioSnapshotsKeyOfMonth('portfolio-snapshots', '2026-11')).toBe(false)
 })

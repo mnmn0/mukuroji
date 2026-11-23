@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { useSWRConfig } from 'swr'
 import { createMutationRequestContext } from '../../../shared/api/mutationHeaders'
 import { saveTeamPortfolioSnapshot } from '../api/portfolio'
+import { isPortfolioSnapshotsKeyOfMonth } from '../queries/usePortfolioDashboard'
 
 /** Outcome of the last save of this month's snapshots. */
 export type TeamPortfolioSnapshotSaveResult = {
@@ -20,19 +22,20 @@ export type SaveTeamPortfolioSnapshotsOptions = {
   timeZone: string
   /** Resolves the current month as `YYYY-MM` when the save starts. */
   resolveCurrentMonth: () => string
-  /** Revalidates the compared snapshots after a save of the given month. */
-  onSaved: (month: string) => void
 }
 
 /**
  * Saves this month's portfolio snapshot of each Team the reader manages as a whole, one Team
  * at a time, and keeps the failures so the page can name the Teams and forward session failures.
+ * Every cached read of the saved month is revalidated afterwards, so a comparison the reader
+ * switched to during the save does not keep the older snapshot.
  *
- * @param options - Token, timezone, month resolver, and revalidation callback.
+ * @param options - Token, timezone, and month resolver.
  * @returns The save state and the action.
  */
 export function useSaveTeamPortfolioSnapshots(options: SaveTeamPortfolioSnapshotsOptions) {
-  const { accessToken, timeZone, resolveCurrentMonth, onSaved } = options
+  const { accessToken, timeZone, resolveCurrentMonth } = options
+  const { mutate } = useSWRConfig()
   const [isSaving, setIsSaving] = useState(false)
   const [result, setResult] = useState<TeamPortfolioSnapshotSaveResult>()
   const [errors, setErrors] = useState<readonly unknown[]>([])
@@ -63,7 +66,10 @@ export function useSaveTeamPortfolioSnapshots(options: SaveTeamPortfolioSnapshot
     setIsSaving(false)
     setErrors(failures)
     setResult({ month, savedTeamIds, failedTeamIds })
-    if (savedTeamIds.length > 0) onSaved(month)
+    if (savedTeamIds.length > 0) {
+      await mutate((key) => isPortfolioSnapshotsKeyOfMonth(key, month))
+        .catch(() => undefined)
+    }
   }
 
   return { isSaving, result, errors, save }

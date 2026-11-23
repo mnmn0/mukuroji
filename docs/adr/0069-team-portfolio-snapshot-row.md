@@ -44,7 +44,9 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
   工数管理者で、Team への直接の権限があっても読めない Project や費用の見えない Project が1つでもあれば
   保存できない（保存した snapshot がその月の比較を全員分置き換えるので、一部だけの snapshot で
   上書きさせない）。Project のない Team は Team への直接の管理権限で保存できる。保存できるのは閲覧者の timezone での今月だけで、同じ月に
-  もう一度保存すると上書きする。書き込みは呼び出し元の権限 fence と監査イベント
+  もう一度保存すると上書きする。受領行の照合には月と timezone を含め、同じ key で timezone だけ
+  変えた要求も別の要求として 409 にする。書き込みは呼び出し元の権限 fence、Team が archive されて
+  いないことの条件、監査イベント
   `team.portfolio_snapshot_saved`（月と Project 数だけを記録）を同じ transaction に入れる。
 - snapshot を読むときは、読む人の今の権限で Project と費用を伏せ直してから返す。保存した人の権限で
   見えていた Project や費用は、読む人に権限がなければ返さない。

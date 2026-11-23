@@ -16,6 +16,7 @@ import {
   redactTeamPortfolioSnapshot,
   type PortfolioBudgetSource,
 } from '../../modules/portfolio-dashboard'
+import type { PlanningCallerAuthorizationConditionCheck } from '../../modules/planning'
 import { readProjectRaidLogUseCase } from '../../modules/project-raid-log'
 import { TimeTrackingError } from '../../modules/time-tracking'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
@@ -118,7 +119,9 @@ export function registerPortfolioRoutes(routeApp: Hono): void {
       const timeZone = readTimeZone(c)
       const access = await readPortfolioAccess(principal, teamId)
       const now = new Date()
-      const auditContext = createApiMutationContext(c, principal, { month })
+      // The timezone sets the budget periods the capture reads, so a retry must repeat it.
+      const auditContext = createApiMutationContext(c, principal, { month, timeZone })
+      const teamFences = await createActiveTeamFences(principal.directoryId, teamId)
       const stored = await captureTeamPortfolioSnapshot(
         {
           store: workItemDependencies.portfolioSnapshots,
@@ -131,11 +134,14 @@ export function registerPortfolioRoutes(routeApp: Hono): void {
           currentMonth: currentMonth(now, timeZone),
           now,
           canCapture: access.managesWholeTeam,
-          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
-            principal,
-            [],
-            principal.principalKind !== 'service-account',
-          ),
+          callerAuthorization: [
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              [],
+              principal.principalKind !== 'service-account',
+            ),
+            ...teamFences,
+          ],
           auditContext,
           idempotencyKeyHash: auditContext.idempotencyKeyHash,
           requestFingerprint: auditContext.requestFingerprint,
@@ -147,6 +153,32 @@ export function registerPortfolioRoutes(routeApp: Hono): void {
       } satisfies TeamPortfolioSnapshotResponse)
     })
   })
+}
+
+/**
+ * Builds the checks that keep the Team active until the snapshot commits, so a Team archived
+ * during the capture cannot receive a snapshot.
+ *
+ * @param workspaceId - Workspace ID.
+ * @param teamId - Team ID.
+ * @returns Condition checks on the Team's directory row.
+ * @throws ProjectDataError 503 when the directory cannot fence the Team, and 404 when the Team
+ *   is no longer active.
+ */
+async function createActiveTeamFences(
+  workspaceId: string,
+  teamId: string,
+): Promise<PlanningCallerAuthorizationConditionCheck[]> {
+  const projectDirectory = requireAppDependencies().workspace.projectDirectory
+  if (!projectDirectory.createActiveReferenceConditionChecks) {
+    throw new ProjectDataError(503, 'PortfolioTeamFenceUnavailable', 'The Team cannot be fenced for the snapshot.')
+  }
+  const checks = await projectDirectory.createActiveReferenceConditionChecks(workspaceId, teamId)
+  const fences = checks.flatMap((check) => check.ConditionCheck === undefined ? [] : [{ ConditionCheck: check.ConditionCheck }])
+  if (fences.length === 0) {
+    throw new ProjectDataError(503, 'PortfolioTeamFenceUnavailable', 'The Team cannot be fenced for the snapshot.')
+  }
+  return fences
 }
 
 /**
@@ -330,6 +362,7 @@ const PORTFOLIO_ERROR_CODES = new Set([
   'PortfolioSnapshotStorageFailure',
   'PortfolioSnapshotRetryable',
   'PortfolioSnapshotAuthorizationUnavailable',
+  'PortfolioTeamFenceUnavailable',
 ])
 
 /**
@@ -405,11 +438,10 @@ function readMonth(c: Context) {
 function readTimeZone(c: Context) {
   const timeZone = c.req.query('timeZone') ?? 'UTC'
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone }).format()
+    return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone
   } catch {
     throw new ProjectDataError(400, 'InvalidPortfolioRequest', 'timeZone must be a valid IANA timezone identifier.')
   }
-  return timeZone
 }
 
 /**

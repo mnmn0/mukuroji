@@ -76,6 +76,21 @@ export function usePortfolioDashboard(
   )
 }
 
+/** First element of the cache key of the saved snapshot reads. */
+const PORTFOLIO_SNAPSHOTS_KEY = 'portfolio-snapshots'
+
+/**
+ * Tells whether an SWR cache key reads the saved snapshots of a month, whichever selection
+ * the page shows now.
+ *
+ * @param key - SWR cache key.
+ * @param month - Month as `YYYY-MM`.
+ * @returns Whether the key reads that month's snapshots.
+ */
+export function isPortfolioSnapshotsKeyOfMonth(key: unknown, month: string): boolean {
+  return Array.isArray(key) && key[0] === PORTFOLIO_SNAPSHOTS_KEY && key[3] === month
+}
+
 /**
  * Reads every Team's saved snapshot of one month.
  *
@@ -91,7 +106,7 @@ export function usePortfolioSnapshots(
 ) {
   return useSWR(
     accessToken && month && teamIds.length <= PORTFOLIO_WORKSPACE_TEAM_LIMIT
-      ? ['portfolio-snapshots', accessToken, teamIds.join('\n'), month] as const
+      ? [PORTFOLIO_SNAPSHOTS_KEY, accessToken, teamIds.join('\n'), month] as const
       : null,
     async ([, token, , currentMonth]): Promise<TeamPortfolioSnapshotRead[]> =>
       await mapWithConcurrency(teamIds, async (teamId) => {
