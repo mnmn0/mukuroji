@@ -3202,7 +3202,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param input - Untrusted request body with the description and leader.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @returns The Team identifier and its stored profile.
+   * @returns The Team identifier, its stored profile, and the stored profile revision.
    */
   async updateTeamProfile(
     directoryId: string,
@@ -3221,11 +3221,18 @@ export class DynamoDbProjectDirectoryClient {
     if (!team) {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
-    const response: UpdateDirectoryTeamProfileResponse = {
+    /**
+     * Builds the response for the stored profile.
+     *
+     * @param profileRevision - Profile revision now stored.
+     * @returns The Team identifier, its stored profile, and that revision.
+     */
+    const respond = (profileRevision: number): UpdateDirectoryTeamProfileResponse => ({
       teamId,
       ...(profile.description === undefined ? {} : { description: profile.description }),
       ...(profile.leaderMemberKey === undefined ? {} : { leaderMemberKey: profile.leaderMemberKey }),
-    }
+      profileRevision,
+    })
     const requestKey = auditContext
       ? `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`
       : undefined
@@ -3244,7 +3251,7 @@ export class DynamoDbProjectDirectoryClient {
       team.profileRequestKey === requestKey &&
       team.profileRevision === profile.expectedProfileRevision + 1
     ) {
-      return response
+      return respond(team.profileRevision)
     }
     // The editor's form must show the stored profile, so a save from a stale form cannot
     // silently restore a field another administrator changed.
@@ -3260,7 +3267,8 @@ export class DynamoDbProjectDirectoryClient {
       team.description === profile.description &&
       team.leaderMemberKey === profile.leaderMemberKey
     ) {
-      return response
+      // Nothing is written, so the revision stays as it is.
+      return respond(profile.expectedProfileRevision)
     }
 
     const setClauses = ['#profileRevision = :profileRevision']
@@ -3316,13 +3324,13 @@ export class DynamoDbProjectDirectoryClient {
           latest?.profileRequestKey === requestKey &&
           latest.profileRevision === profile.expectedProfileRevision + 1
         ) {
-          return response
+          return respond(latest.profileRevision)
         }
       }
       throw error
     }
 
-    return response
+    return respond(profile.expectedProfileRevision + 1)
   }
 
   /**

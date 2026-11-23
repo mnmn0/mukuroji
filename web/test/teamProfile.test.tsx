@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import type { DirectoryAdministrationTeam } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { updateDirectoryTeamProfile } from '../src/projects/api/directoryAdministration'
 import {
   listTeamProfileProjects,
   summarizeTeamProfileMembers,
@@ -173,5 +174,37 @@ describe('TeamProfilePanel', () => {
     expect(markup).toContain(t('projects.administration.retry'))
     // Leader and member choices stay disabled until the list loads.
     expect(markup.match(/<select[^>]*disabled=""/g)).toHaveLength(2)
+  })
+})
+
+describe('Team profile API', () => {
+  const originalFetch = globalThis.fetch
+  const mutationContext = { correlationId: 'correlation-1', idempotencyKey: 'idempotency-1' }
+  const input = { description: '説明 ', leaderMemberKey: null, expectedProfileRevision: 2 }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  /**
+   * Replaces fetch with a fake that answers with one JSON body.
+   *
+   * @param body - Response body.
+   */
+  function answerWith(body: unknown) {
+    const fakeFetch: typeof fetch = async () => Response.json(body)
+    globalThis.fetch = fakeFetch
+  }
+
+  test('returns the stored profile and the revision the server reports', async () => {
+    answerWith({ teamId: 'core', description: '説明', profileRevision: 2 })
+    await expect(updateDirectoryTeamProfile('token', 'core', input, mutationContext))
+      .resolves.toEqual({ teamId: 'core', description: '説明', profileRevision: 2 })
+  })
+
+  test('refuses a response without a stored revision', async () => {
+    answerWith({ teamId: 'core', description: '説明' })
+    await expect(updateDirectoryTeamProfile('token', 'core', input, mutationContext))
+      .rejects.toMatchObject({ status: 502 })
   })
 })

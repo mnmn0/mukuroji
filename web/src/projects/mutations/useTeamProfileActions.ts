@@ -4,6 +4,7 @@ import type {
   AddDirectoryTeamMemberInput,
   AddDirectoryTeamMemberResponse,
   UpdateDirectoryTeamProfileInput,
+  UpdateDirectoryTeamProfileResponse,
 } from '@mukuroji/contracts'
 import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -17,8 +18,11 @@ export type TeamProfileActions = {
   pending: boolean
   /** Message of the last failed change. */
   errorMessageKey?: MessageKey
-  /** Saves the description and leader; resolves to whether it succeeded. */
-  saveProfile: (teamId: string, input: UpdateDirectoryTeamProfileInput) => Promise<boolean>
+  /** Saves the description and leader; resolves to the stored profile, or undefined on failure. */
+  saveProfile: (
+    teamId: string,
+    input: UpdateDirectoryTeamProfileInput,
+  ) => Promise<UpdateDirectoryTeamProfileResponse | undefined>
   /** Adds a member to every active Project of the Team; resolves to the result, or undefined. */
   addMember: (
     teamId: string,
@@ -71,13 +75,9 @@ export function useTeamProfileActions(accessToken: string): TeamProfileActions {
   return {
     pending,
     errorMessageKey,
-    saveProfile: async (teamId, input) => {
-      const saved = await run(async () => {
-        await updateDirectoryTeamProfile(accessToken, teamId, input, createMutationRequestContext())
-        return true
-      })
-      return saved === true
-    },
+    saveProfile: (teamId, input) => run(
+      () => updateDirectoryTeamProfile(accessToken, teamId, input, createMutationRequestContext()),
+    ),
     addMember: (teamId, input) => run(
       () => addDirectoryTeamMember(accessToken, teamId, input, createMutationRequestContext()),
     ),

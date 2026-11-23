@@ -2582,7 +2582,7 @@ function configureFakeProjectClients(
       async updateTeamProfile(directoryId, teamId, input) {
         calls.directoryAdministration.push({ method: 'updateTeamProfile', directoryId, teamId, input })
 
-        return { teamId, description: '説明', leaderMemberKey: 'leader-user' }
+        return { teamId, description: '説明', leaderMemberKey: 'leader-user', profileRevision: 1 }
       },
       async renameProject(directoryId, teamId, projectId, input) {
         calls.directoryAdministration.push({

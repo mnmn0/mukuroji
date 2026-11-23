@@ -95,6 +95,11 @@ export type UpdateDirectoryTeamProfileResponse = {
   description?: string
   /** Stored leader, when one is set. */
   leaderMemberKey?: string
+  /**
+   * Profile revision now stored. An unchanged profile keeps its revision, so the editor sends
+   * this value, not a guess, as the expected revision of its next save.
+   */
+  profileRevision: number
 }
 
 /** Request body that adds one Workspace member to every active Project of a Team. */
@@ -345,7 +350,9 @@ export function isUpdateDirectoryTeamProfileResponse(
   return isObject(value) &&
     typeof value.teamId === 'string' &&
     (value.description === undefined || typeof value.description === 'string') &&
-    (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string')
+    (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+    Number.isSafeInteger(value.profileRevision) &&
+    Number(value.profileRevision) >= 0
 }
 
 /**

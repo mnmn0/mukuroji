@@ -1,7 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
-import type { DirectoryAdministrationTeam, UpdateDirectoryTeamProfileInput } from '@mukuroji/contracts'
+import type {
+  DirectoryAdministrationTeam,
+  UpdateDirectoryTeamProfileInput,
+  UpdateDirectoryTeamProfileResponse,
+} from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { ProjectMember } from '../api/members'
 import { listTeamProfileProjects, summarizeTeamProfileMembers } from '../model/teamProfile'
@@ -24,6 +28,25 @@ const designTeam: DirectoryAdministrationTeam = {
   nameJa: 'デザイン',
   nameEn: 'Design',
   projects: [],
+}
+
+/**
+ * Answers a profile save as the server does when it stores a change.
+ *
+ * @param teamId - Saved Team.
+ * @param input - Submitted description and leader.
+ * @returns The stored profile with the next revision.
+ */
+async function storeTeamProfile(
+  teamId: string,
+  input: UpdateDirectoryTeamProfileInput,
+): Promise<UpdateDirectoryTeamProfileResponse> {
+  return {
+    teamId,
+    ...(input.description === '' ? {} : { description: input.description }),
+    ...(input.leaderMemberKey === null ? {} : { leaderMemberKey: input.leaderMemberKey }),
+    profileRevision: input.expectedProfileRevision + 1,
+  }
 }
 
 /** Fields every stored Project member row has. */
@@ -80,7 +103,7 @@ const meta = {
     locale: 'ja',
     t: createTranslator('ja'),
     onSelectTeam: () => undefined,
-    onSaveProfile: async () => true,
+    onSaveProfile: storeTeamProfile,
     onAddMember: async (teamId) => ({
       teamId,
       memberKey: 'suzuki@example.com',
@@ -138,7 +161,7 @@ export const InactiveMember: Story = {
  */
 function SavingTeamProfilePanel(props: TeamProfilePanelProps) {
   const [current, setCurrent] = useState(team)
-  const save = async (_teamId: string, input: UpdateDirectoryTeamProfileInput) => {
+  const save = async (teamId: string, input: UpdateDirectoryTeamProfileInput) => {
     setCurrent((previous) => {
       const next = {
         ...previous,
@@ -149,7 +172,7 @@ function SavingTeamProfilePanel(props: TeamProfilePanelProps) {
       delete next.leaderMemberKey
       return input.leaderMemberKey === null ? next : { ...next, leaderMemberKey: input.leaderMemberKey }
     })
-    return true
+    return await storeTeamProfile(teamId, input)
   }
   return <TeamProfilePanel {...props} team={current} teams={[current, designTeam]} onSaveProfile={save} />
 }
@@ -198,7 +221,7 @@ export const ChangedLeaderAfterReload: Story = {
  */
 export const SavedWhileReloadFails: Story = {
   // The Team prop never changes, as when the directory could not be read again after the save.
-  args: { onSaveProfile: fn(async (): Promise<true> => true) },
+  args: { onSaveProfile: fn(storeTeamProfile) },
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
     const description = canvas.getByLabelText('説明')
@@ -214,6 +237,35 @@ export const SavedWhileReloadFails: Story = {
       description: '保存した説明追記',
       leaderMemberKey: 'sato@example.com',
       expectedProfileRevision: 1,
+    })
+  },
+}
+
+/**
+ * A save the server finds unchanged after trimming keeps the stored revision, so the next save
+ * still expects it and the field shows the value as stored.
+ */
+export const SavedUnchangedAfterTrim: Story = {
+  args: {
+    onSaveProfile: fn(async (teamId: string): Promise<UpdateDirectoryTeamProfileResponse> => ({
+      teamId,
+      description: team.description ?? '',
+      leaderMemberKey: 'sato@example.com',
+      profileRevision: 0,
+    })),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('説明'), ' ')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(await canvas.findByText('保存しました。')).toBeVisible()
+    await expect(canvas.getByLabelText('説明')).toHaveValue(team.description)
+    await userEvent.type(canvas.getByLabelText('説明'), '追記')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(args.onSaveProfile).toHaveBeenLastCalledWith('core-team', {
+      description: `${team.description}追記`,
+      leaderMemberKey: 'sato@example.com',
+      expectedProfileRevision: 0,
     })
   },
 }

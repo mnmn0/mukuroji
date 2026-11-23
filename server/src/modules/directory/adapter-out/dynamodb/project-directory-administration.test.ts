@@ -834,12 +834,17 @@ test('sets a Team description and leader, guarding the revision and the active l
     description: ' 1行目\r\n\t2行目 ',
     leaderMemberKey: 'Leader-User',
     expectedProfileRevision: 0,
-  })).resolves.toEqual({ teamId: 'alpha', description: '1行目\n\t2行目', leaderMemberKey: 'leader-user' })
+  })).resolves.toEqual({
+    teamId: 'alpha',
+    description: '1行目\n\t2行目',
+    leaderMemberKey: 'leader-user',
+    profileRevision: 1,
+  })
   await expect(client.updateTeamProfile(directoryId, 'beta', {
     description: '',
     leaderMemberKey: null,
     expectedProfileRevision: 2,
-  })).resolves.toEqual({ teamId: 'beta' })
+  })).resolves.toEqual({ teamId: 'beta', profileRevision: 3 })
 
   expect(transactions()).toEqual([
     [
@@ -887,7 +892,7 @@ test('skips an unchanged Team profile and rejects an invalid one', async () => {
     description: '説明',
     leaderMemberKey: null,
     expectedProfileRevision: 0,
-  })).resolves.toEqual({ teamId: 'alpha', description: '説明' })
+  })).resolves.toEqual({ teamId: 'alpha', description: '説明', profileRevision: 0 })
   expect(transactions()).toEqual([])
 
   // A form loaded before another administrator's save is refused instead of overwriting it.
@@ -1208,7 +1213,7 @@ test('answers a retried profile save as its success and refuses another stale re
 
   // The first save committed but its response was lost; the same request is answered again.
   await expect(client.updateTeamProfile(directoryId, 'alpha', input, saved))
-    .resolves.toEqual({ teamId: 'alpha', description: '説明' })
+    .resolves.toEqual({ teamId: 'alpha', description: '説明', profileRevision: 1 })
   await expect(client.updateTeamProfile(
     directoryId,
     'alpha',
@@ -1231,7 +1236,7 @@ test('answers the same profile save sent twice at once as one success', async ()
     })
   })
   await expect(raced.client.updateTeamProfile(directoryId, 'alpha', input, context))
-    .resolves.toEqual({ teamId: 'alpha', description: '新しい説明' })
+    .resolves.toEqual({ teamId: 'alpha', description: '新しい説明', profileRevision: 1 })
 
   // Another request losing the same race is still refused.
   rows[0] = createTeamRow('alpha', 10)

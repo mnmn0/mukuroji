@@ -2,9 +2,11 @@ import {
   isAddDirectoryTeamMemberResponse,
   isDirectoryAdministrationResponse,
   isDirectoryArchiveImpactResponse,
+  isUpdateDirectoryTeamProfileResponse,
   type AddDirectoryTeamMemberInput,
   type AddDirectoryTeamMemberResponse,
   type UpdateDirectoryTeamProfileInput,
+  type UpdateDirectoryTeamProfileResponse,
   type DirectoryAdministrationTeam,
   type DirectoryArchiveImpactResponse,
   type DirectoryArchiveImpactTarget,
@@ -94,19 +96,26 @@ export async function renameDirectoryTeam(
  * @param teamId - Team to update.
  * @param input - New description and leader.
  * @param mutationContext - Idempotency context of the mutation.
+ * @returns The stored profile and its revision.
  */
 export async function updateDirectoryTeamProfile(
   accessToken: string,
   teamId: string,
   input: UpdateDirectoryTeamProfileInput,
   mutationContext: MutationRequestContext,
-) {
-  await sendDirectoryAdministrationRequest(
+): Promise<UpdateDirectoryTeamProfileResponse> {
+  const data = await sendDirectoryAdministrationRequest(
     `/teams/${encodeURIComponent(teamId)}/profile`,
     accessToken,
     { method: 'PATCH', body: JSON.stringify(input) },
     mutationContext,
   )
+
+  if (!isUpdateDirectoryTeamProfileResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
 }
 
 /**

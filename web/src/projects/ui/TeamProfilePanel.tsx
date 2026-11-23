@@ -7,6 +7,7 @@ import {
   type DirectoryAdministrationTeam,
   type DirectoryTeamMemberRole,
   type UpdateDirectoryTeamProfileInput,
+  type UpdateDirectoryTeamProfileResponse,
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
@@ -176,8 +177,11 @@ export type TeamProfilePanelProps = {
   t: (key: MessageKey) => string
   /** Chooses the Team to edit. */
   onSelectTeam: (teamId: string) => void
-  /** Saves the description and leader; resolves to whether it succeeded. */
-  onSaveProfile: (teamId: string, input: UpdateDirectoryTeamProfileInput) => Promise<boolean>
+  /** Saves the description and leader; resolves to the stored profile, or undefined on failure. */
+  onSaveProfile: (
+    teamId: string,
+    input: UpdateDirectoryTeamProfileInput,
+  ) => Promise<UpdateDirectoryTeamProfileResponse | undefined>
   /** Adds a member to every active Project of the Team. */
   onAddMember: (
     teamId: string,
@@ -270,9 +274,9 @@ export function TeamProfilePanel({
             onEdit={() => setSavedTeamId(undefined)}
             onSave={async (input) => {
               setSavedTeamId(undefined)
-              const succeeded = await onSaveProfile(team.id, input)
-              if (succeeded) setSavedTeamId(team.id)
-              return succeeded
+              const stored = await onSaveProfile(team.id, input)
+              if (stored) setSavedTeamId(team.id)
+              return stored
             }}
           />
           <TeamProfileMembers
@@ -312,8 +316,8 @@ type TeamProfileFormProps = {
   t: (key: MessageKey) => string
   /** Reports that a field was edited, so an earlier confirmation no longer applies. */
   onEdit: () => void
-  /** Saves the description and leader. */
-  onSave: (input: UpdateDirectoryTeamProfileInput) => Promise<boolean>
+  /** Saves the description and leader; resolves to the stored profile, or undefined on failure. */
+  onSave: (input: UpdateDirectoryTeamProfileInput) => Promise<UpdateDirectoryTeamProfileResponse | undefined>
 }
 
 /**
@@ -358,17 +362,23 @@ function TeamProfileForm({
    */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const succeeded = await onSave({
+    const saved = await onSave({
       description,
       leaderMemberKey: leaderMemberKey === '' ? null : leaderMemberKey,
       // The stored revision this form was loaded from; a newer one refuses the save.
       expectedProfileRevision: loaded.revision,
     })
-    if (!succeeded) return // A refused save keeps the edits.
-    // A save that changed something is the next revision, so its own reload is not taken for
-    // another administrator's; an unchanged profile is not written and keeps its revision.
-    const unchanged = description === loaded.description && leaderMemberKey === loaded.leaderMemberKey
-    if (!unchanged) setLoaded({ revision: loaded.revision + 1, description, leaderMemberKey })
+    if (!saved) return // A refused save keeps the edits.
+    // The server tells the stored values and revision, so its own reload is not taken for another
+    // administrator's, and an unchanged or normalized profile keeps the revision it really has.
+    const committed: StoredTeamProfile = {
+      revision: saved.profileRevision,
+      description: saved.description ?? '',
+      leaderMemberKey: saved.leaderMemberKey ?? '',
+    }
+    setLoaded(committed)
+    setDescription(committed.description)
+    setLeaderMemberKey(committed.leaderMemberKey)
     setDirty(false)
   }
 
