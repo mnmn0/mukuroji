@@ -38,6 +38,11 @@ export interface ServerConfig {
    * points at an API host other than the Web app. Absent when both share one origin.
    */
   readonly connectorOAuthWebOrigin?: string
+  /**
+   * Origins the deployed Web app is served from. The API shares these origins, so same-origin
+   * requests such as browser error reports come from them without being listed for CORS.
+   */
+  readonly webAppOrigins: readonly string[]
   /** Port used by the local Bun HTTP server. */
   readonly port: number
   /** Whether workspace-search projections should be maintained. */
@@ -94,6 +99,7 @@ const serverEnvironmentSchema = z.object({
   AWS_DEFAULT_REGION: optionalEnvironmentText,
   ALLOWED_ORIGINS: optionalEnvironmentText,
   CONNECTOR_OAUTH_WEB_ORIGIN: optionalEnvironmentText,
+  WEB_APP_ORIGINS: optionalEnvironmentText,
   DYNAMODB_ENDPOINT: optionalEnvironmentText,
   AWS_ENDPOINT_URL_DYNAMODB: optionalEnvironmentText,
   AWS_ENDPOINT_URL: optionalEnvironmentText,
@@ -201,6 +207,19 @@ function deriveServerConfigValues(
     return z.NEVER
   }
 
+  const webAppOrigins = (environment.WEB_APP_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .map(readConnectorOAuthWebOrigin)
+  if (webAppOrigins.some((origin) => origin === null)) {
+    context.addIssue({
+      code: 'custom',
+      message: 'WEB_APP_ORIGINS must list https origins, or http origins on localhost.',
+    })
+    return z.NEVER
+  }
+
   const cognitoEndpoint = environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
   return {
     awsRegion,
@@ -223,6 +242,7 @@ function deriveServerConfigValues(
       configuredOrigins.length > 0 ? configuredOrigins : [...DEFAULT_ALLOWED_ORIGINS],
     ),
     ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
+    webAppOrigins: Object.freeze(webAppOrigins.filter((origin): origin is string => origin !== null)),
     port: Number(environment.PORT ?? 3000),
     workspaceSearchProjectionEnabled: environment.NODE_ENV !== 'test' || Boolean(
       environment.WORKSPACE_SEARCH_TABLE_NAME,
@@ -234,7 +254,7 @@ function deriveServerConfigValues(
 }
 
 /**
- * Validates the Web app origin used for the connector OAuth callback hand-off.
+ * Validates one Web app origin, such as the connector OAuth callback hand-off target.
  *
  * @param value - Trimmed configured origin, optionally with one trailing slash.
  * @returns The normalized origin, or `null` when it is not a bare https (or local http) origin.
