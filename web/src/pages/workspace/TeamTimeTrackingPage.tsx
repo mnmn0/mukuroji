@@ -18,6 +18,7 @@ import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
 import { useSavedTaskViews } from '../../task-views/queries/useSavedTaskViews'
+import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -154,6 +155,15 @@ export function TeamTimeTrackingPage() {
     () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
     [teamProjects],
   )
+  // The rate card offers the Team's job roles; archived ones stay readable only on rows that use them.
+  const workItemConfiguration = useWorkItemConfiguration(accessToken, teamId, enabled && view === 'report')
+  // Absent until read, so a failed or pending read is not shown as a Team without job roles.
+  const jobRoles = useMemo(
+    () => workItemConfiguration.data && (workItemConfiguration.data.configuration.jobRoles ?? [])
+      .filter((jobRole) => !jobRole.archived)
+      .map((jobRole) => ({ id: jobRole.id, name: jobRole.name })),
+    [workItemConfiguration.data],
+  )
   const reportLabels = useMemo(() => ({
     members: memberNames,
     projects: projectNames,
@@ -209,7 +219,7 @@ export function TeamTimeTrackingPage() {
   }
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, monthlySummary.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, monthlySummary.error, workItemConfiguration.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={tabHref}
@@ -232,13 +242,21 @@ export function TeamTimeTrackingPage() {
         {view === 'report' ? (
           <TimeReportContainer
             accessToken={accessToken}
+            fiscalYearStartMonth={calendarSettings.settings?.fiscalYearStartMonth}
+            // Budgets can still take dates when the fiscal year cannot be read; only a failure
+            // before any successful read hides the fiscal years.
+            hasFiscalYearError={Boolean(calendarSettings.error) && !calendarSettings.settings}
+            onRetryFiscalYear={calendarSettings.retry}
             groupBy={reportGroupBy}
+            hasJobRoleError={Boolean(workItemConfiguration.error)}
+            {...(jobRoles ? { jobRoles } : {})}
             key={`${teamId}:report`}
             labels={reportLabels}
             locale={workspace.locale}
             onChange={(range, groupBy) => {
               void navigate(createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy }), { replace: true })
             }}
+            onRetryJobRoles={() => { void workItemConfiguration.mutate().catch(() => undefined) }}
             projects={teamProjects}
             range={reportRange}
             teamId={teamId}
