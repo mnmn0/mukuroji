@@ -137,6 +137,16 @@ Automation は呼び出し元の権限なしで `/next` と rollover を実行�
 
 Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
 
+## Cycle の schedule baseline
+
+設計の判断は [ADR 0059](adr/0059-cycle-schedule-baselines.md) にあります（Project の baseline は [ADR 0043](adr/0043-named-schedule-baselines.md)）。
+
+`POST /api/planning/cycles/:cycleId/schedule-baselines`（body は任意の `{ name }`、Cycle の manager 権限）は、呼び出した人の Planning snapshot でその Cycle に link されている Work Item の、今の予定開始日・予定終了日・予定工数を名前付きの baseline として保存し、`201` で `{ cycleId, revision, baseline, savedBaselines }` を返します。名前は前後の空白を除いて 80 文字までで、制御文字は `400` です。1 baseline は 1000 件までで、超えると `413 CycleScheduleBaselineTooLarge` です。Cycle ごとに新しい順に 10 件残り、11 件目を保存すると最も古いものが消えます。保存は一覧の行の revision・権限の ConditionCheck・audit event `cycle.schedule_baseline_captured` と同じ transaction で書き、Work Item を読む前に Planning の revision を読んで固定し、読み終えた graph の revision が違えば保存せず、固定した revision を同じ transaction で確かめるので（Work Item の書き込みも revision を進めるため、古い予定と新しい graph の組み合わせは保存されない）、その間に Cycle の移動などで Planning が変わった場合も含め、競合や権限の変化は `409 CycleScheduleBaselineConflict` です。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい baseline になります（Web は自動再送しません）。
+
+`GET` 同じ path（`?baselineId=` で古いもの）は、読む人に Cycle が見えるときだけ最新の baseline と一覧を返し（見えない・Cycle でない・無い ID は `404`）、entries は読む人に見える Work Item だけに絞ります。`entryCount` は見えない分も数えます。
+
+追加・除外・終了予定の遅れ・予定工数の増減は、Web の Cycle の計画が今の snapshot と比べて出します（`web/src/planning/model/cycleBaselines.ts`）。
+
 ## Project / Initiative health update
 
 ### Update Feed read model (Issue #241, first slice)
