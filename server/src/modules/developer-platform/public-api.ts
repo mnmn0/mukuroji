@@ -445,6 +445,7 @@ export interface PublicWorkItemService {
     format: 'csv' | 'json',
     continuation: string | undefined,
     limit: number,
+    includeStructure?: boolean,
   ): Promise<{
     /** Export page に含まれる Work Items です。 */
     items: CanonicalWorkItem[]
@@ -2793,6 +2794,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       managementCursorScope(principal, '/developer/exports', { format }),
       (continuation, limit) =>
         dependencies.workItems.export(principal, format, continuation, limit),
+      (item) => item.updatedAt,
+    ))
+  })
+
+  // The original export keeps its closed Work Item schema; this one also carries contributors and
+  // acceptance criteria, which a re-import of the export needs.
+  router.get('/developer/work-item-exports', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canExport')
+    const format = readExportFormat(c.req.query('format'))
+    return c.json(await createSignedContinuationPage(
+      c,
+      dependencies,
+      managementCursorScope(principal, '/developer/work-item-exports', { format }),
+      (continuation, limit) =>
+        dependencies.workItems.export(principal, format, continuation, limit, true),
       (item) => item.updatedAt,
     ))
   })
