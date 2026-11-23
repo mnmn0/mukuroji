@@ -3,6 +3,7 @@ import type {
   TenantAdministrationSnapshot,
   TenantOperation,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
 import { createDefaultTenantAdministrationSnapshot } from '../../domain/tenant-administration'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
 import type { TenantAdministrationClient } from '../../application/ports/tenant-administration-port'
@@ -880,4 +881,84 @@ test('keeps calendar settings changes behind administration and validates them',
       timeZone: 'Asia/Tokyo',
     },
   })
+})
+
+test('lets every member read the work categories and keeps changes behind administration', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getProfile = async () => undefined
+  const defaults = await createCalendarRouter(client).request('/api/workspace/time-entry-categories', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(defaults.status).toBe(200)
+  expect(await defaults.json()).toEqual(DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS)
+
+  const settings = {
+    categories: [
+      { key: 'meeting', label: '打ち合わせ', active: true },
+      { key: 'custom-sales', label: '営業支援', active: true },
+      { key: 'leave', active: false },
+    ],
+  }
+  client.getProfile = async () => ({ ...snapshot.profile, timeEntryCategories: settings })
+  const stored = await createCalendarRouter(client).request('/api/workspace/time-entry-categories', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(await stored.json()).toEqual(settings)
+
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, timeEntryCategories: settings }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const categories of [
+    [],
+    [{ key: 'custom-sales', active: true }],
+    [{ key: 'custom-sales', label: '   ', active: true }],
+    [{ key: 'custom-sales', label: 'x'.repeat(61), active: true }],
+    [{ key: 'Sales', label: '営業', active: true }],
+    [{ key: 'uncategorized', label: '未分類', active: true }],
+    [{ key: 'meeting', active: false }],
+    [{ key: 'meeting', active: true }, { key: 'meeting', active: false }],
+    Array.from({ length: 51 }, (_, index) => ({ key: `custom-${index}`, label: `${index}`, active: true })),
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, timeEntryCategories: { categories } }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidTimeEntryCategorySettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({
+      ...body,
+      timeEntryCategories: { categories: [{ key: 'custom-sales', label: ' 営業支援 ', active: true }] },
+    }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{
+    ...body,
+    timeEntryCategories: { categories: [{ key: 'custom-sales', label: '営業支援', active: true }] },
+  }])
 })

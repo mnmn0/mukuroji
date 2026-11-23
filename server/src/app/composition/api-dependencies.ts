@@ -19,6 +19,8 @@ import {
 import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
 } from '@mukuroji/contracts'
@@ -197,6 +199,7 @@ import {
   DynamoDbTimeTrackingRepository,
   InMemoryTimeTrackingRepository,
   TimeTrackingService,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
 import {
@@ -360,9 +363,13 @@ export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
  * Creates the configured durable time tracking service.
  *
  * @param idempotency - Optional shared receipt store used for mutation replay.
+ * @param categories - Optional Workspace work category reader; the built-in categories when omitted.
  * @returns A configured time tracking service.
  */
-export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyPort): TimeTrackingService {
+export function createTimeTrackingService(
+  idempotency?: TimeTrackingIdempotencyPort,
+  categories?: TimeTrackingCategorySource,
+): TimeTrackingService {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
   const tableName = config.environment.ANALYTICS_TABLE_NAME
@@ -384,6 +391,7 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
         retentionDays: getConfiguredAuditRetentionDays(),
       },
       ...(idempotency ? { idempotency } : {}),
+      ...(categories ? { categories } : {}),
       estimates: {
         async listPlannedEffort(workspaceId, teamId) {
           // Archived Work Items keep their estimate, because their recorded time still counts in reports.
@@ -1808,13 +1816,22 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  */
 export function createProductionAppDependencies(): AppDependencies {
   const developerPlatform = createProductionDeveloperPlatformDependencies()
+  const workspace = createProductionWorkspaceDependencies()
   const timeTrackingService = createTimeTrackingService(
     createTimeTrackingIdempotencyPort(
       developerPlatform.idempotency,
       developerPlatform.transactions,
     ),
+    {
+      // Only a missing profile means the defaults; any other read failure propagates.
+      readCategories: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
+          DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readTimeZone: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
+          DEFAULT_WORKSPACE_TIME_ZONE,
+    },
   )
-  const workspace = createProductionWorkspaceDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),

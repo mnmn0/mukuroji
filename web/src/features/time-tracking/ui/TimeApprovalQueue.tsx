@@ -12,6 +12,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of the manager's approval queue. */
 export type TimeApprovalQueueProps = {
@@ -72,6 +73,7 @@ export function TimeApprovalQueue({
   workItemTitles,
 }: TimeApprovalQueueProps) {
   const id = useId()
+  const categories = useTimeEntryCategories()
   const [pendingKey, setPendingKey] = useState<string>()
   const [rejectingEntryId, setRejectingEntryId] = useState<string>()
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
@@ -163,7 +165,7 @@ export function TimeApprovalQueue({
     [
       formatters.day(toLocalDateKey(entry.startAt)),
       formatTimeEntryRange(formatters, entry),
-      describeTimeEntrySubject(t, entry, workItemTitles),
+      describeTimeEntrySubject(t, entry, workItemTitles, categories),
     ].filter(Boolean).join(' ')
 
   /**
@@ -177,7 +179,7 @@ export function TimeApprovalQueue({
     [
       formatters.day(toLocalDateKey(entry.startAt)),
       formatTimeEntryRange(formatters, entry) || formatMinutes(entry.durationMinutes),
-      describeTimeEntrySubject(t, entry, workItemTitles),
+      describeTimeEntrySubject(t, entry, workItemTitles, categories),
     ].filter(Boolean).join(' ')
 
   /**
