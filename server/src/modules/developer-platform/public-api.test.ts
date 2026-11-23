@@ -829,6 +829,8 @@ describe('public API router', () => {
     const membersWithoutTeam = await router.request('http://localhost/v1/projects/project-1/members', { headers })
     const key = await router.request('http://localhost/v1/work-item-keys/ABC-1', { headers })
     const hiddenKey = await router.request('http://localhost/v1/work-item-keys/ABC-2', { headers })
+    const paddedKey = await router.request('http://localhost/v1/work-item-keys/%20ABC-1', { headers })
+    const longKey = await router.request(`http://localhost/v1/work-item-keys/${'A'.repeat(257)}`, { headers })
     const denied = await router.request('http://localhost/v1/teams', {
       headers: { Authorization: `Bearer ${writer.secret}` },
     })
@@ -852,6 +854,8 @@ describe('public API router', () => {
     expect(key.status).toBe(200)
     expect(await key.json()).toEqual({ schemaVersion: 1, key: 'ABC-1', teamId: 'team-1', workItemId: 'work-item-1' })
     expect(hiddenKey.status).toBe(404)
+    expect(paddedKey.status).toBe(404)
+    expect(longKey.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(calls.filter((call) => !call.startsWith('me:'))).toEqual([
       'teams:en', 'members:team-1/project-1', 'key:ABC-1', 'key:ABC-2',

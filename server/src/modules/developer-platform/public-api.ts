@@ -1153,7 +1153,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await requireDirectoryService(dependencies).lookupWorkItemKey(
       credential,
-      readRouteId(c.req.param('key'), 'Work Item key'),
+      readWorkItemKeyParam(c.req.param('key')),
     ))
   })
 
@@ -3509,6 +3509,19 @@ function readRouteId(value: string, label: string) {
     throw new PublicApiServiceError(400, 'invalid_request', `${label} is invalid.`)
   }
   return result
+}
+
+/**
+ * Reads the key route parameter. Text that cannot be a key answers the same 404 as an unused key,
+ * as the contract promises, so callers cannot tell malformed text from a key they may not read.
+ * @param value - Raw route parameter.
+ * @returns The key text for the directory service.
+ */
+function readWorkItemKeyParam(value: string) {
+  if (!value || value.trim() !== value || value.length > 256 || containsAsciiControl(value, false)) {
+    throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
+  }
+  return value
 }
 
 function readRequiredString(value: unknown, label: string) {

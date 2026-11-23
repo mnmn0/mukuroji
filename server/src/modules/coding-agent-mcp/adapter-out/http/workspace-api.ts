@@ -84,8 +84,11 @@ export function createWorkspaceApi(
   }
 
   return {
+    /** Reads the credential owner from `GET me`; see {@link WorkspaceApi.me}. */
     me: () => request('me', ownerSchema),
+    /** Lists readable Teams and Projects from `GET teams`; see {@link WorkspaceApi.teams}. */
     teams: () => request('teams', teamsSchema),
+    /** Lists Project members and rejects a response for another Team or Project; see {@link WorkspaceApi.projectMembers}. */
     async projectMembers(teamId, projectId) {
       const members = await request(`projects/${encodeURIComponent(id(projectId, 'projectId'))}/members`, membersSchema, 'GET', undefined, undefined, { teamId: id(teamId, 'teamId') })
       if (members.teamId !== teamId || members.projectId !== projectId) {
@@ -93,11 +96,13 @@ export function createWorkspaceApi(
       }
       return members
     },
+    /** Resolves a key and rejects a response that names another key; see {@link WorkspaceApi.lookupKey}. */
     async lookupKey(key) {
       const found = await request(`work-item-keys/${encodeURIComponent(key)}`, keyLookupSchema)
       if (found.key !== key) throw new AgentTaskError('invalid_response', 'The API resolved another key.')
       return found
     },
+    /** Reads the Team's Work Item types and statuses, checking the Team; see {@link WorkspaceApi.catalog}. */
     async catalog(teamId, assignedProjectId) {
       const catalog = await request('work-item-types', catalogSchema, 'GET', undefined, undefined, {
         teamId: id(teamId, 'teamId'),
@@ -106,17 +111,20 @@ export function createWorkspaceApi(
       if (catalog.teamId !== teamId) throw new AgentTaskError('invalid_response', 'The API returned the catalog of another Team.')
       return catalog
     },
+    /** Lists one page of the Team's Work Items, checking each item's Team; see {@link WorkspaceApi.listIssues}. */
     async listIssues(teamId, filters, cursor, limit = 50) {
       const page = await request('work-items', pageSchema(taskSchema), 'GET', undefined, undefined, {
         teamId: id(teamId, 'teamId'), ...filters, cursor, limit,
       })
       return { ...page, items: page.items.map((item) => scoped(item, teamId)) }
     },
+    /** Reads one Work Item and checks its Team and ID; see {@link WorkspaceApi.getIssue}. */
     async getIssue(teamId, workItemId) {
       return scoped(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}`, taskSchema, 'GET', undefined, undefined, {
         teamId: id(teamId, 'teamId'),
       }), teamId, workItemId)
     },
+    /** Reads a Work Item's key, or undefined when the server predates keys (404); see {@link WorkspaceApi.getKey}. */
     async getKey(teamId, workItemId) {
       let found
       try {
@@ -133,6 +141,7 @@ export function createWorkspaceApi(
       }
       return found.key
     },
+    /** Lists one page of a Work Item's comments; see {@link WorkspaceApi.comments}. */
     comments(teamId, workItemId, cursor, limit = 50) {
       return request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/comments`, pageSchema(commentSchema), 'GET', undefined, undefined, {
         teamId: id(teamId, 'teamId'), cursor, limit,

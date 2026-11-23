@@ -62,7 +62,13 @@ async function readProblem(response: Response) {
   }
 }
 
-/** Creates a validated page schema that rejects missing or contradictory cursors. */
+/**
+ * Creates a validated page schema for list responses.
+ * The page holds at most 100 items, and `nextCursor` must be present exactly when `hasMore` is true,
+ * so a page that claims more results without a cursor, or a cursor without more results, is rejected.
+ * @param item - Schema for each item in the page.
+ * @returns Schema for a page of those items.
+ */
 export function pageSchema<T>(item: z.ZodType<T>): z.ZodType<AgentPage<T>> {
   return z.object({ items: z.array(item).max(100), hasMore: z.boolean(), nextCursor: z.string().min(1).optional() })
     .refine((page) => page.hasMore === (page.nextCursor !== undefined))
@@ -78,7 +84,17 @@ export type PublicApiConnection = {
   teamId?: string
 }
 
-/** Sends one validated public API request and returns its parsed body. */
+/**
+ * Sends one validated public API request and returns its parsed body.
+ * Parameters, in order:
+ * - `path`: path under `/api/v1/`, with route values already URL-encoded.
+ * - `schema`: schema the response body must match; a mismatch is an `invalid_response` error.
+ * - `method`: HTTP method, `GET` when omitted.
+ * - `body`: JSON body for mutations; omitted for reads.
+ * - `key`: `Idempotency-Key` header value, required by the API for mutations.
+ * - `query`: query parameters; `undefined` values are left out.
+ * Returns the parsed response body, typed by `schema`.
+ */
 export type PublicApiRequest = <T>(
   path: string,
   schema: z.ZodType<T>,
