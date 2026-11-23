@@ -511,7 +511,9 @@ function replayCreate(
     share.sections.join(',') !== input.scope.sections.join(',') ||
     expiresInDays !== input.expiresInDays ||
     share.customerId !== input.customerId ||
-    share.contactId !== input.contactId
+    share.contactId !== input.contactId ||
+    // The stored snapshot was redacted the same way, so an unchanged report serializes the same.
+    JSON.stringify(record.report) !== JSON.stringify(redactProjectStatusReport(input.report, input.scope))
   ) {
     throw new ProjectDataError(
       409,

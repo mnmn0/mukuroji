@@ -13,6 +13,12 @@ export type SharedProjectStatusReportScreenProps = {
   isLoading?: boolean
   /** Whether the link is invalid, revoked, or expired. */
   isUnavailable?: boolean
+  /** Whether the report could not be read for a temporary reason, such as a network error. */
+  hasFailed?: boolean
+  /** Whether a retry is running. */
+  isRetrying?: boolean
+  /** Reads the report again after a temporary failure. */
+  onRetry?: () => void
   /** Language of the page chrome. */
   locale: Locale
   /** Changes the language of the page chrome. */
@@ -31,6 +37,9 @@ export function SharedProjectStatusReportScreen({
   published,
   isLoading = false,
   isUnavailable = false,
+  hasFailed = false,
+  isRetrying = false,
+  onRetry,
   locale,
   onLocaleChange,
   onDownloadPdf,
@@ -105,6 +114,17 @@ export function SharedProjectStatusReportScreen({
       {isLoading ? (
         <main className="grid min-h-[calc(100svh-65px)] place-items-center px-6 text-sm font-semibold text-[var(--workbench-muted)]" role="status">
           {t('projects.statusReport.public.loading')}
+        </main>
+      ) : hasFailed ? (
+        <main className="mx-auto grid min-h-[calc(100svh-65px)] max-w-[720px] place-items-center px-6 py-16">
+          <section className="workbench-panel grid w-full justify-items-center gap-4 p-8 text-center" data-testid="shared-project-status-failed" role="alert">
+            <h1 className="text-xl font-semibold text-[var(--workbench-text)]">{t('projects.statusReport.public.failed')}</h1>
+            {onRetry ? (
+              <button className="workbench-button-secondary min-h-10 px-4" disabled={isRetrying} onClick={onRetry} type="button">
+                {t('projects.statusReport.public.retry')}
+              </button>
+            ) : null}
+          </section>
         </main>
       ) : isUnavailable || !published ? (
         <main className="mx-auto grid min-h-[calc(100svh-65px)] max-w-[720px] place-items-center px-6 py-16">

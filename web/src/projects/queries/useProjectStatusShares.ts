@@ -1,13 +1,6 @@
-import type { CreateProjectStatusShareRequest } from '@mukuroji/contracts'
-import { useCallback } from 'react'
-import useSWR, { useSWRConfig } from 'swr'
+import useSWR from 'swr'
 import { getCustomer, getCustomers } from '../../customers/api'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
-import {
-  createProjectStatusShare,
-  listProjectStatusShares,
-  revokeProjectStatusShare,
-} from '../api/statusReports'
+import { listProjectStatusShares } from '../api/statusReports'
 
 /**
  * Builds the SWR key of a Project's share links.
@@ -17,18 +10,18 @@ import {
  * @param projectId - Project ID.
  * @returns The scope-bound cache key.
  */
-function projectStatusSharesKey(accessToken: string, teamId: string, projectId: string) {
+export function projectStatusSharesKey(accessToken: string, teamId: string, projectId: string) {
   return ['project-status-shares', accessToken, teamId, projectId] as const
 }
 
 /**
- * Reads a Project's share links and returns the actions that create and revoke them.
+ * Reads a Project's share links.
  *
  * @param accessToken - Session access token; nothing is read without it.
  * @param teamId - Team that owns the Project.
  * @param projectId - Project ID.
  * @param enabled - Whether the list should be read, such as while the dialog is open.
- * @returns SWR state of the list, and the create and revoke actions, which reload it.
+ * @returns SWR state of the list.
  */
 export function useProjectStatusShares(
   accessToken: string | undefined,
@@ -36,27 +29,11 @@ export function useProjectStatusShares(
   projectId: string | undefined,
   enabled: boolean,
 ) {
-  const { mutate } = useSWRConfig()
-  const key = accessToken && teamId && projectId && enabled
-    ? projectStatusSharesKey(accessToken, teamId, projectId)
-    : null
-  const list = useSWR(
-    key,
+  return useSWR(
+    accessToken && teamId && projectId && enabled ? projectStatusSharesKey(accessToken, teamId, projectId) : null,
     ([, token, currentTeamId, currentProjectId]) => listProjectStatusShares(token, currentTeamId, currentProjectId),
     { shouldRetryOnError: false },
   )
-  const create = useCallback(async (request: CreateProjectStatusShareRequest) => {
-    if (!accessToken || !teamId || !projectId) throw new Error('The session is not ready.')
-    const created = await createProjectStatusShare(accessToken, teamId, projectId, request, createMutationRequestContext())
-    await mutate(projectStatusSharesKey(accessToken, teamId, projectId))
-    return created
-  }, [accessToken, mutate, projectId, teamId])
-  const revoke = useCallback(async (shareId: string) => {
-    if (!accessToken || !teamId || !projectId) return
-    await revokeProjectStatusShare(accessToken, teamId, projectId, shareId, createMutationRequestContext())
-    await mutate(projectStatusSharesKey(accessToken, teamId, projectId))
-  }, [accessToken, mutate, projectId, teamId])
-  return { list, create, revoke }
 }
 
 /** Most customers offered as share recipients. */

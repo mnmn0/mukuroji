@@ -316,6 +316,8 @@ export const projectsMessages = {
   'projects.statusReport.error.tooLarge': 'The report is too large to share. Include fewer sections.',
   'projects.statusReport.public.readOnly': 'Read only',
   'projects.statusReport.public.loading': 'Loading…',
+  'projects.statusReport.public.failed': 'The report could not be loaded. Try again in a moment.',
+  'projects.statusReport.public.retry': 'Retry',
   'projects.statusReport.public.unavailable': 'This link is invalid or has expired.',
   'projects.statusReport.public.expiresAt': 'This link expires {expiresAt}',
   'projects.statusReport.public.download': 'Download PDF',

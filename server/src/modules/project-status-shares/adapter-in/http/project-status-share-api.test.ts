@@ -184,6 +184,11 @@ test('returns the same link when a creation is retried with its idempotency key'
 
   const changed = await request(path, 'POST', { ...body, label: '顧客B' }, headers)
   expect(changed.status).toBe(409)
+  const changedReport = await request(path, 'POST', {
+    ...body,
+    report: { ...report, health: report.health ? { ...report.health, summary: '訂正後の要約' } : undefined },
+  }, headers)
+  expect(changedReport.status).toBe(409)
   const other = await request(path, 'POST', body, { 'Idempotency-Key': 'share-retry-2' })
   expect(other.status).toBe(201)
   expect((await other.json() as CreateProjectStatusShareResponse).url).not.toBe(firstBody.url)

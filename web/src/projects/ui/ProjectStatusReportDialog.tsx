@@ -14,6 +14,7 @@ import {
   createProjectStatusReportFileName,
   createProjectStatusReportSlides,
 } from '../model/projectStatusReport'
+import { useProjectStatusShareActions } from '../mutations/useProjectStatusShareActions'
 import { useProjectStatusShareRecipients, useProjectStatusShares } from '../queries/useProjectStatusShares'
 import {
   ProjectStatusReportDocument,
@@ -175,7 +176,8 @@ type ShareLinksProps = Pick<ProjectStatusReportDialogProps, 'accessToken' | 'tea
  * @returns The share panel.
  */
 function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksProps) {
-  const { list, create, revoke } = useProjectStatusShares(accessToken, teamId, projectId, true)
+  const list = useProjectStatusShares(accessToken, teamId, projectId, true)
+  const { create, revoke } = useProjectStatusShareActions(accessToken, teamId, projectId)
   const forbidden = list.error instanceof ProjectDirectoryApiError && list.error.status === 403
   const [label, setLabel] = useState('')
   const [sections, setSections] = useState<ProjectStatusReportSection[]>(['health', 'schedule', 'progress'])

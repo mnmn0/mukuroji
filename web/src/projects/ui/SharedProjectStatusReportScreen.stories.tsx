@@ -47,6 +47,14 @@ export const Unavailable: Story = {
   },
 }
 
+/** A temporary failure, such as a network error, offers a retry instead of calling the link invalid. */
+export const Failed: Story = {
+  args: { hasFailed: true, published: undefined, onRetry: () => undefined },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByRole('button', { name: '再読み込み' })).toBeEnabled()
+  },
+}
+
 /** A failed PDF download says so and points to printing. */
 export const DownloadFailed: Story = {
   args: {

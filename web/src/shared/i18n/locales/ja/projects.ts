@@ -314,6 +314,8 @@ export const projectsMessages = {
   'projects.statusReport.error.tooLarge': 'レポートが大きすぎて共有できません。含める項目を減らしてください。',
   'projects.statusReport.public.readOnly': '読み取り専用',
   'projects.statusReport.public.loading': '読み込み中…',
+  'projects.statusReport.public.failed': 'レポートを読み込めませんでした。時間をおいてもう一度お試しください。',
+  'projects.statusReport.public.retry': '再読み込み',
   'projects.statusReport.public.unavailable': 'このリンクは無効か、有効期限が切れています。',
   'projects.statusReport.public.expiresAt': 'このリンクの有効期限: {expiresAt}',
   'projects.statusReport.public.download': 'PDF をダウンロード',

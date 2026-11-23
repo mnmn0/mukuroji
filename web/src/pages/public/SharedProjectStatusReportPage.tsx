@@ -15,10 +15,12 @@ import { getInitialLocale, setLocalePreference, type Locale } from '../../shared
 export function SharedProjectStatusReportPage() {
   const token = useParams().shareToken ?? ''
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
-  const { published, isLoading, isUnavailable } = usePublicProjectStatusReport(token)
+  const { published, isLoading, isUnavailable, hasFailed, isRetrying, retry } = usePublicProjectStatusReport(token)
   return (
     <SharedProjectStatusReportScreen
+      hasFailed={hasFailed}
       isLoading={isLoading}
+      isRetrying={isRetrying}
       isUnavailable={isUnavailable}
       locale={locale}
       onDownloadPdf={async () => {
@@ -28,6 +30,7 @@ export function SharedProjectStatusReportPage() {
           createProjectStatusReportFileName(published.report, 'pdf'),
         )
       }}
+      onRetry={retry}
       onLocaleChange={(nextLocale) => {
         setLocale(nextLocale)
         setLocalePreference(nextLocale)
