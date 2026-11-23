@@ -318,6 +318,28 @@ describe('Document components', () => {
     }
   })
 
+  test('names a done note as done to assistive technology', () => {
+    const html = renderToStaticMarkup(
+      <WhiteboardCanvas
+        content={{
+          objects: [{
+            id: 'note-done',
+            type: 'note',
+            text: 'Fix the flaky test',
+            done: true,
+            bounds: { x: 0, y: 0, width: 200, height: 100 },
+            zIndex: 1,
+          }],
+          connectors: [],
+          frames: [],
+        }}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('aria-label="Done: Fix the flaky test"')
+  })
+
   test('colors the whiteboard grid, frames, and connectors with theme-aware variables', () => {
     if (whiteboardRecordFixture.kind !== 'whiteboard') {
       throw new Error('Expected a whiteboard fixture.')

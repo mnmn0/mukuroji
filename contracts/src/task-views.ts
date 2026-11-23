@@ -1,5 +1,6 @@
 import type { SavedViewVisibility, WorkspaceSearchFilters } from './search'
 import type { WorkflowStatusCategory } from './work-item-configuration'
+import type { WorkspaceWorkItemInvolvement } from './work-item-lists'
 import type { WorkItemPriority } from './work-items'
 
 /** Current schema version for persisted task view definitions. */
@@ -19,6 +20,7 @@ export type TaskViewSurface =
   | 'my-tasks'
   | 'focus'
   | 'triage'
+  | 'work-items'
 
 /** Stable ordered list of product surfaces that support task views. */
 export const TASK_VIEW_SURFACES: readonly TaskViewSurface[] = [
@@ -28,6 +30,7 @@ export const TASK_VIEW_SURFACES: readonly TaskViewSurface[] = [
   'my-tasks',
   'focus',
   'triage',
+  'work-items',
 ]
 
 /** Workspace-wide scope for a task view. */
@@ -77,6 +80,22 @@ export type TaskViewWorkflowStatusFilter = {
   statusId: string
 }
 
+/** Team-qualified Project referenced by a cross-Project task filter. */
+export type TaskViewProjectScopeFilter = {
+  /** Team that owns the Project. */
+  teamId: string
+  /** Team-local Project identifier. */
+  projectId: string
+}
+
+/** Team-qualified job role that a contributor assignment must carry. */
+export type TaskViewContributorJobRoleFilter = {
+  /** Team whose Work Item configuration defines the job role. */
+  teamId: string
+  /** Job role identifier within that Team configuration. */
+  jobRoleId: string
+}
+
 /**
  * Relative due-date buckets supported by task surfaces. `completed-late` and `started-late`
  * compare the recorded actual dates with the plan.
@@ -108,6 +127,17 @@ export type TaskViewFilters = Omit<WorkspaceSearchFilters, 'statuses'> & {
   includeArchived?: boolean
   /** Team-qualified Work Item Type keys (`teamId\0workItemTypeId`) retained by the view. */
   workItemTypeIds?: string[]
+  /**
+   * Team-qualified Projects retained by a `work-items` view. Project IDs can repeat across
+   * Teams, so the cross-Project list keys them by Team.
+   */
+  projectScopes?: TaskViewProjectScopeFilter[]
+  /** `mine` retains Work Items whose owner or a contributor is the current viewer. */
+  involvement?: WorkspaceWorkItemInvolvement
+  /** Workspace user IDs at least one of which must appear as a contributor. */
+  contributorUserIds?: string[]
+  /** Team-qualified job roles at least one of which must appear on a contributor assignment. */
+  contributorJobRoles?: TaskViewContributorJobRoleFilter[]
 }
 
 /** Layout modes supported by task-oriented product surfaces. */
@@ -218,11 +248,15 @@ export type TaskViewDefinition = {
 /** Visibility of a persisted task view definition. */
 export type SavedTaskViewVisibility = SavedViewVisibility
 
-/** Source that supplied the effective default for a task view surface and scope. */
-export type TaskViewDefaultSource = 'personal' | 'team' | 'built-in'
+/**
+ * Source that supplied the effective default for a task view surface and scope.
+ *
+ * `team` applies to a Team scope and `project` to a Team-qualified Project scope.
+ */
+export type TaskViewDefaultSource = 'personal' | 'team' | 'project' | 'built-in'
 
 /** Default sources that a saved view mutation may explicitly configure. */
-export type SavedTaskViewDefaultSource = 'personal' | 'team'
+export type SavedTaskViewDefaultSource = 'personal' | 'team' | 'project'
 
 /** Viewer-specific preference and resolved default state for a saved task view. */
 export type SavedTaskViewPreference = {
@@ -236,15 +270,20 @@ export type SavedTaskViewPreference = {
   isPersonalDefault: boolean
   /** Whether this view is the underlying Team default, even when a personal default wins. */
   isTeamDefault: boolean
+  /**
+   * Whether this view is the underlying Project default, even when a personal default wins.
+   * Only views on a Team-qualified Project scope can be one.
+   */
+  isProjectDefault: boolean
   /** Source that made this view the effective default. */
   defaultSource?: TaskViewDefaultSource
 }
 
-/** Effective default selected after applying personal, Team, and built-in precedence. */
+/** Effective default selected after applying personal, then Team or Project, then built-in precedence. */
 export type TaskViewDefaultSelection = {
   /** Source that supplied the effective default. */
   source: TaskViewDefaultSource
-  /** Saved view identifier for a personal or Team default. */
+  /** Saved view identifier for a personal, Team, or Project default. */
   viewId?: string
 }
 
@@ -340,6 +379,8 @@ export type SavedTaskViewCapabilities = {
   canManageSharedViews: boolean
   /** Whether the current viewer may assign a Team default for this scope. */
   canSetTeamDefault: boolean
+  /** Whether the current viewer may assign a Project default for this Team-qualified Project scope. */
+  canSetProjectDefault: boolean
   /**
    * Readable Team scopes with authoritative write access for unassigned Work Items.
    *
@@ -388,7 +429,7 @@ export type CreateSavedTaskViewInput = {
   favorite?: boolean
   /** Whether the current viewer should pin the new view. */
   pinned?: boolean
-  /** Optional personal or Team default assignment applied atomically with creation. */
+  /** Optional personal, Team, or Project default assignment applied atomically with creation. */
   defaultSource?: SavedTaskViewDefaultSource
 }
 
@@ -410,9 +451,9 @@ export type UpdateSavedTaskViewInput = {
   favorite?: boolean
   /** Replacement pin preference for the current viewer. */
   pinned?: boolean
-  /** Personal or Team default assignment, or null to clear the applicable assignment. */
+  /** Personal, Team, or Project default assignment, or null to clear the applicable assignment. */
   defaultSource?: SavedTaskViewDefaultSource | null
-  /** Explicit default marker to clear when personal and Team defaults coexist. */
+  /** Explicit default marker to clear when a personal and a shared default coexist. */
   clearDefaultSource?: SavedTaskViewDefaultSource
 }
 
@@ -430,7 +471,7 @@ export type DuplicateSavedTaskViewInput = {
   favorite?: boolean
   /** Whether the current viewer should pin the duplicate. */
   pinned?: boolean
-  /** Optional personal or Team default assignment for the duplicate. */
+  /** Optional personal, Team, or Project default assignment for the duplicate. */
   defaultSource?: SavedTaskViewDefaultSource
 }
 
