@@ -332,3 +332,22 @@ test('rejects capacity request creation when Team teams.manage access is missing
     })
   })
 })
+
+test('shows the Team work calendar as read-only to a teams.read grant without teams.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+
+    const read = await app.request('/api/teams/core-team/work-calendar', {
+      headers: { Authorization: authorization },
+    })
+    const preview = await app.request('/api/teams/core-team/work-calendar/preview', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overrides: { additionalHolidays: [] }, adjustment: 'keep-duration' }),
+    })
+
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ canManage: false })
+    expect(preview.status).toBe(403)
+  })
+})

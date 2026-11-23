@@ -506,6 +506,11 @@ async function canManageCalendar(
   context: TeamPermissionContext,
   scope: StoredWorkCalendarScope,
 ): Promise<boolean> {
+  // An Enterprise caller's route authorization on GET proves only `teams.read`; the change routes
+  // also require `teams.manage`, so without it the calendar is read-only whatever else holds.
+  if (principal.enterprisePermissions !== undefined && !principal.enterprisePermissions.includes('teams.manage')) {
+    return false
+  }
   try {
     await requireCalendarManager(principal, context, scope)
     return true
