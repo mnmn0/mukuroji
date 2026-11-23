@@ -7,6 +7,8 @@ export type WeeklyReportWorkspaceSettings = {
   weekStartDay: WorkspaceWeekStartDay
   /** Whether and when reminders and escalations go out. */
   reminders: WeeklyReportReminderSettings
+  /** IANA time zone the reminder hours are read in; Japan time when omitted. */
+  timeZone?: string
 }
 
 /** Reads what weekly report reminders are built from. */

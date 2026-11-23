@@ -332,3 +332,42 @@ test('rejects capacity request creation when Team teams.manage access is missing
     })
   })
 })
+
+test('lets a Team teams.manage grant change the Work Item key prefix without teams.write', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.manage'])
+
+    const settings = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      headers: { Authorization: authorization },
+    })
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toMatchObject({ teamId: 'core-team', canManage: true })
+
+    const response = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      method: 'PUT',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyPrefix: 'CORE', expectedKeyPrefix: null }),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ teamId: 'core-team', keyPrefix: 'CORE', canManage: true })
+  })
+})
+
+test('does not offer or allow a Work Item key prefix change without Team teams.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.write'])
+
+    const settings = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      headers: { Authorization: authorization },
+    })
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toMatchObject({ canManage: false })
+
+    const response = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      method: 'PUT',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyPrefix: 'CORE', expectedKeyPrefix: null }),
+    })
+    expect(response.status).toBe(403)
+  })
+})

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS } from '@mukuroji/contracts'
 import {
   evaluateWeeklyReportReminders,
-  resolveWeeklyReportReminderRun,
+  resolveWeeklyReportReminderRuns,
   toWeeklyReportReminderTiming,
   weeklyReportWeekStart,
   type WeeklyReportTeamRoster,
@@ -44,23 +44,43 @@ describe('weekly report reminder timing', () => {
       reminder: { weekday: 5, hour: 17 },
     })
     expect(toWeeklyReportReminderTiming({ ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, enabled: false })).toBeUndefined()
+    // A Workspace that chose another time zone is reminded in its own hours.
+    expect(toWeeklyReportReminderTiming(DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, 'America/New_York')?.timeZone)
+      .toBe('America/New_York')
   })
 
   test('acts only in the configured local hours and points the escalation at the reminded week', () => {
     const timing = toWeeklyReportReminderTiming()
     if (!timing) throw new Error('Expected the default timing.')
     // Friday 2026-11-20 17:00 in Japan is 08:00 UTC.
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T08:00:00.000Z'), timing)).toEqual({ kind: 'reminder', date: '2026-11-20' })
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T08:59:59.000Z'), timing)).toEqual({ kind: 'reminder', date: '2026-11-20' })
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T09:00:00.000Z'), timing)).toBeUndefined()
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T17:00:00.000Z'), timing)).toBeUndefined()
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-20T08:00:00.000Z'), timing)).toEqual([{ kind: 'reminder', date: '2026-11-20' }])
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-20T08:59:59.000Z'), timing)).toEqual([{ kind: 'reminder', date: '2026-11-20' }])
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-20T09:00:00.000Z'), timing)).toEqual([])
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-20T17:00:00.000Z'), timing)).toEqual([])
     // Monday 2026-11-23 10:00 in Japan is 01:00 UTC; the week reminded on Friday the 20th.
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-23T01:00:00.000Z'), timing)).toEqual({ kind: 'escalation', date: '2026-11-20' })
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-23T01:00:00.000Z'), timing)).toEqual([{ kind: 'escalation', date: '2026-11-20' }])
     // Same weekday: a later hour is the same day, an earlier one is a week later.
     const sameDayLater = { timeZone: 'UTC', reminder: { weekday: 5, hour: 9 }, escalation: { weekday: 5, hour: 18 } }
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T18:00:00.000Z'), sameDayLater)).toEqual({ kind: 'escalation', date: '2026-11-20' })
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-20T18:00:00.000Z'), sameDayLater)).toEqual([{ kind: 'escalation', date: '2026-11-20' }])
     const sameDayEarlier = { timeZone: 'UTC', reminder: { weekday: 5, hour: 18 }, escalation: { weekday: 5, hour: 9 } }
-    expect(resolveWeeklyReportReminderRun(new Date('2026-11-27T09:00:00.000Z'), sameDayEarlier)).toEqual({ kind: 'escalation', date: '2026-11-20' })
+    expect(resolveWeeklyReportReminderRuns(new Date('2026-11-27T09:00:00.000Z'), sameDayEarlier)).toEqual([{ kind: 'escalation', date: '2026-11-20' }])
+  })
+
+  test('acts in the first hour after daylight saving time skips the slot hour', () => {
+    const timing = { timeZone: 'America/New_York', reminder: { weekday: 0, hour: 2 } }
+    // Sunday 2027-03-14 goes from 01:59 EST (06:59 UTC) straight to 03:00 EDT (07:00 UTC).
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-14T06:00:00.000Z'), timing)).toEqual([])
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-14T07:00:00.000Z'), timing)).toEqual([{ kind: 'reminder', date: '2027-03-14' }])
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-14T08:00:00.000Z'), timing)).toEqual([])
+    // A normal Sunday still acts at 02:00 EST (07:00 UTC) only.
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-07T07:00:00.000Z'), timing)).toEqual([{ kind: 'reminder', date: '2027-03-07' }])
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-07T08:00:00.000Z'), timing)).toEqual([])
+    // An escalation at 03:00 is due in the same run as the skipped 02:00 reminder; both are sent.
+    const withEscalation = { ...timing, escalation: { weekday: 0, hour: 3 } }
+    expect(resolveWeeklyReportReminderRuns(new Date('2027-03-14T07:00:00.000Z'), withEscalation)).toEqual([
+      { kind: 'reminder', date: '2027-03-14' },
+      { kind: 'escalation', date: '2027-03-14' },
+    ])
   })
 
   test('maps the date to the Workspace week', () => {

@@ -5,6 +5,7 @@ import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infras
 import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications } from '../../modules/notifications'
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
@@ -29,13 +30,17 @@ export function createProductionSlackNotificationHandler() {
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
     planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
+  // Without an origin (local runs), messages keep their text and omit links.
+  const appOrigin = environment.NOTIFICATION_SLACK_APP_ORIGIN?.trim()
+    ? parseNotificationAppOrigin(environment.NOTIFICATION_SLACK_APP_ORIGIN, 'NOTIFICATION_SLACK_APP_ORIGIN')
+    : undefined
   const secrets = createSecretsManagerClient()
   const send = createSlackNotificationSender(async (secretId) => {
     const response = await secrets.send(new GetSecretValueCommand({ SecretId: secretId }), {
       abortSignal: AbortSignal.timeout(5_000),
     })
     return response.SecretString
-  })
+  }, fetch, appOrigin)
   return () => {
     return deliverDueSlackNotifications({
       store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(), isAuthorized,

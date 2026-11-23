@@ -284,6 +284,7 @@ export const workItemsMessages = {
   'tasks.calendar.day.sun': 'Sun',
   'tasks.calendar.week': 'Week of {from} – {to}',
   'tasks.calendar.empty': 'No schedule',
+  'tasks.calendar.nonWorking': 'Day off',
   'tasks.calendar.previousMonth': 'Previous month',
   'tasks.calendar.currentMonth': 'This month',
   'tasks.calendar.nextMonth': 'Next month',

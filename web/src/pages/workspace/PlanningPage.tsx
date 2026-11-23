@@ -102,6 +102,7 @@ import {
 import { createPlanningLabels } from '../../planning/ui/labels'
 import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
 import { PlanningMilestoneWatchContainer } from '../../planning/ui/PlanningMilestoneWatch'
+import { CycleScheduleBaselineContainer } from '../../planning/ui/CycleScheduleBaselinePanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -682,6 +683,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBaseline={accessToken && snapshot
+            ? (cycle, canManageCycle) => (
+                <CycleScheduleBaselineContainer
+                  accessToken={accessToken}
+                  canCapture={canManagePlanning && canManageCycle}
+                  cycle={cycle}
+                  key={cycle.id}
+                  labels={labels.cycleBaseline}
+                  snapshot={snapshot}
+                  onCaptured={() => void mutatePlanning()}
+                />
+              )
+            : undefined}
           renderCycleBurndown={accessToken && snapshot
             ? (cycle) => (
                 <CycleBurndown

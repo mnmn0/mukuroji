@@ -485,6 +485,14 @@ function NotificationRow({
               </time>
             </span>
             <span className={`mt-1 block truncate text-sm text-[var(--workbench-text)] ${isUnread ? 'font-bold' : 'font-semibold'}`}>
+              {notification.workItemKey ? (
+                <span
+                  className="mr-1.5 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
+                  data-testid={`notification-key-${createNotificationTestToken(notification.id)}`}
+                >
+                  {notification.workItemKey}
+                </span>
+              ) : null}
               {title}
             </span>
             <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">

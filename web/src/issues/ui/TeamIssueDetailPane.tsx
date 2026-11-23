@@ -49,6 +49,7 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
@@ -363,6 +364,7 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
@@ -875,7 +877,7 @@ function IssueDetailContent({
   )
 
   // Keys written in the saved description, as links, because the description is edited as plain text.
-  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '').map((match) => match.key))]
+  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '', workItemKeyPrefixes).map((match) => match.key))]
     .filter((key) => key !== issue.key)
   /**
    * Lists the Work Item keys written in the saved description, each opening its key URL in a new tab.
