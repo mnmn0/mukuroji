@@ -238,6 +238,37 @@ X-Ray console の filter expression `annotation.correlation_id = "<correlation I
 unsampled request には subsegment がないため、その場合は上記の log 起点の調査を使います。
 subsegment は X-Ray daemon への UDP 送信で、送信失敗は API response に影響しません。
 
+### ブラウザの error
+
+Web は deploy 済みの build（commit SHA を埋め込んだ build）だけ、画面の error を
+`POST /api/client-errors` に送ります。対象は route の error（`errorElement` に来たもの）、同じ origin の
+script の未処理 error、未処理の promise rejection です。送る内容は次だけで、error message、stack、
+URL の実 path・query、画面の内容、入力値は送りません。
+
+- `reportId`: browser が作る UUID。Route error の画面に「エラー ID」として出るので、利用者からの問い合わせはこの ID で探します。
+- `kind`（`error` / `unhandledrejection` / `route-error`）、`route`（`/teams/:teamId` のような route の pattern）
+- `webCommitSha`、`errorName`（`TypeError` などの constructor 名）、route error の HTTP `status`
+
+API は認証なしで受けますが、次を満たさない report を記録しません。
+
+- `Origin` が API の許可 origin に含まれ、`Content-Type` が `application/json`、body が 1,024 byte 以下
+- 上の項目以外の key がなく、各値が固定の形式（UUID、route pattern、40 文字の SHA など）に合う
+- 信頼できる送信元 address（CloudFront 経由なら viewer address）ごとに 10 分で 10 件、全体で 1 時間に 600 件まで。
+  counter は sign-in の試行制限と同じ DynamoDB の rate limit store にあり、address は SHA-256 の digest でだけ key に入ります。
+  超えると `429` と `Retry-After` を返します。
+
+Web は 1 回の page load で同じ error を 1 回、合計 5 件までしか送りません。Read-only の maintenance 中も受け付けます。
+
+記録は API Lambda の log group に `event = "web.client.error"` として残り、EMF の namespace `Mukuroji/Web`、
+dimension `Service=mukuroji-web` の `ClientErrorCount` が増えます。送信元 address と server が受け取った
+header は記録しません。
+
+```text
+fields @timestamp, reportId, kind, route, errorName, status, webCommitSha, correlationId
+| filter event = "web.client.error"
+| sort @timestamp desc
+```
+
 ## Severity、acknowledge、escalation
 
 | Severity | 例 | Ack target | Escalation / update |
