@@ -51,7 +51,12 @@ import {
   isCancelledTeamIssueUpdate,
   type CancelledTeamIssueUpdate,
 } from '../../issues/model/teamIssueUpdateOutcome'
-import { createWorkItemDuplicateDraft } from '../../issues/model/workItemDuplicate'
+import {
+  createWorkItemDuplicateDraft,
+  createWorkItemTemplateDraft,
+  listWorkItemTemplatesForTeam,
+} from '../../issues/model/workItemDuplicate'
+import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -766,6 +771,12 @@ export function TaskScreen({
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
+  const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateTaskOpen && Boolean(onCreateTask))
+  const createTemplateTeamId = createTaskContext?.teamId ?? activeProjectTeamId
+  const teamCreateTemplates = useMemo(
+    () => listWorkItemTemplatesForTeam(createTemplates.templates, createTemplateTeamId),
+    [createTemplates.templates, createTemplateTeamId],
+  )
   const [createTaskError, setCreateTaskError] = useState<string>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [taskAction, setTaskAction] = useState<TaskActionState>()
@@ -3710,7 +3721,19 @@ export function TaskScreen({
                 isSubmissionDisabled={!onCreateTask}
                 isSubmitting={isCreatingTask}
                 locale={locale}
+                onApplyTemplate={(template) => {
+                  setCreateTaskError(undefined)
+                  setCreateTaskContext((current) => {
+                    if (!current) return current
+                    const context = { ...current }
+                    // A template draft replaces the previous draft; no template clears it.
+                    delete context.duplicate
+                    return template ? { ...context, duplicate: createWorkItemTemplateDraft(template) } : context
+                  })
+                }}
                 onDirtyChange={reportCreateTaskDirty}
+                templateLoadFailed={createTemplates.hasLoadError}
+                templates={teamCreateTemplates}
                 onCancel={() => {
                   if (!confirmCreateTaskDiscard()) return
                   taskActionCompletion.cancel('create')

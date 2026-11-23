@@ -25,7 +25,18 @@ import {
   resolveWorkItemTypeWorkflow,
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
-import { pickDuplicatedCustomFieldValues } from '../../issues/model/workItemDuplicate'
+import {
+  draftCustomFieldValuesApply,
+  pickDuplicatedCustomFieldValues,
+  type WorkItemTemplate,
+} from '../../issues/model/workItemDuplicate'
+import { WorkItemTemplatePicker } from '../../issues/ui/WorkItemTemplatePicker'
+import {
+  createNewAcceptanceCriterionDraftRows,
+  readAcceptanceCriteriaDraftSubmission,
+} from '../../work-items/model/acceptanceCriteria'
+import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import type { AcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import {
   resolveTaskPriority,
   taskPriorities,
@@ -73,6 +84,11 @@ export type CreateTaskPanelProps = {
   isSubmissionDisabled?: boolean
   /** Locale used by custom field editors and validation messages. */
   locale: Locale
+  /**
+   * Restarts the panel from a Work Item template, or from an empty form when undefined. Without
+   * it, the template picker is hidden.
+   */
+  onApplyTemplate?: (template: WorkItemTemplate | undefined) => void
   /** Closes the creation panel without submitting. */
   onCancel: () => void
   /** Reports whether user-entered values need an explicit discard decision. */
@@ -87,6 +103,10 @@ export type CreateTaskPanelProps = {
   teamName?: string
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
+  /** Whether the Work Item templates could not be loaded. */
+  templateLoadFailed?: boolean
+  /** Enabled Work Item templates of the destination Team. */
+  templates?: readonly WorkItemTemplate[]
   /** Workspace members used by person custom fields. */
   workspaceMembers: WorkspaceMember[]
 }
@@ -110,6 +130,7 @@ export function CreateTaskPanel({
   isSubmitting,
   isSubmissionDisabled = false,
   locale,
+  onApplyTemplate,
   onCancel,
   onDirtyChange,
   onSubmit,
@@ -117,9 +138,16 @@ export function CreateTaskPanel({
   projectName,
   teamName,
   t,
+  templateLoadFailed = false,
+  templates = [],
   workspaceMembers,
 }: CreateTaskPanelProps) {
   const duplicateDraft = context?.duplicate
+  const draftCriteria = duplicateDraft?.acceptanceCriteria ?? []
+  const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState<AcceptanceCriteriaDraft>(() =>
+    draftCriteria.length > 0
+      ? { rows: createNewAcceptanceCriterionDraftRows(draftCriteria), nextRowNumber: draftCriteria.length + 1 }
+      : { nextRowNumber: 1 })
   const duplicatedContributors = duplicateDraft?.contributorAssignments ?? []
   const [carriesContributors, setCarriesContributors] = useState(true)
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
@@ -133,10 +161,11 @@ export function CreateTaskPanel({
   const hasLoadedWorkItemConfiguration = configuration !== undefined
   const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
     creatableWorkItemTypes.length > 0
-  const contextualWorkItemTypeId = context?.workItemTypeId && creatableWorkItemTypes.some((type) =>
-    type.id === context.workItemTypeId,
+  const requestedWorkItemTypeId = context?.workItemTypeId ?? duplicateDraft?.workItemTypeId
+  const contextualWorkItemTypeId = requestedWorkItemTypeId && creatableWorkItemTypes.some((type) =>
+    type.id === requestedWorkItemTypeId,
   )
-    ? context.workItemTypeId
+    ? requestedWorkItemTypeId
     : undefined
   const initialWorkItemTypeId = contextualWorkItemTypeId ??
     creatableWorkItemTypes[0]?.id ??
@@ -176,7 +205,7 @@ export function CreateTaskPanel({
       (!quickCaptureAllowed || hasDetailedScheduleContext || duplicateDraft)
     ? 'detailed'
     : mode
-  const explicitContextAssigneeUserId = context?.assigneeUserId?.trim() ?? ''
+  const explicitContextAssigneeUserId = (context?.assigneeUserId ?? duplicateDraft?.assigneeUserId)?.trim() ?? ''
   const contextualAssignee = explicitContextAssigneeUserId
     ? assigneeOptions.find((member) => member.id === explicitContextAssigneeUserId)
     : undefined
@@ -223,7 +252,7 @@ export function CreateTaskPanel({
   const defaultCustomFieldValues = configuration
     ? {
         ...createDefaultCustomFieldValues(customFieldDefinitions, projectId),
-        ...(duplicateDraft && duplicateDraft.workItemTypeId === effectiveWorkItemTypeId
+        ...(duplicateDraft && draftCustomFieldValuesApply(duplicateDraft, effectiveWorkItemTypeId)
           ? pickDuplicatedCustomFieldValues(duplicateDraft, customFieldDefinitions)
           : {}),
       }
@@ -346,6 +375,19 @@ export function CreateTaskPanel({
           const description = duplicateDraft
             ? String(formData.get('description') ?? '').trim()
             : ''
+          const acceptanceCriteria = effectiveMode === 'detailed'
+            ? readAcceptanceCriteriaDraftSubmission(formData)
+            : undefined
+          if (acceptanceCriteria && 'error' in acceptanceCriteria) {
+            setAcceptanceCriteriaDraft((current) => ({
+              ...current,
+              submitError: {
+                error: acceptanceCriteria.error,
+                ...(acceptanceCriteria.rowKey ? { rowKey: acceptanceCriteria.rowKey } : {}),
+              },
+            }))
+            return
+          }
 
           setFieldErrors({})
           submissionInFlightRef.current = true
@@ -363,6 +405,9 @@ export function CreateTaskPanel({
             ...(effectiveMode === 'detailed' && carriesContributors &&
               duplicatedContributors.length > 0
               ? { contributorAssignments: duplicatedContributors }
+              : {}),
+            ...(acceptanceCriteria && acceptanceCriteria.criteria.length > 0
+              ? { acceptanceCriteria: acceptanceCriteria.criteria.map(({ text, satisfied }) => ({ text, satisfied })) }
               : {}),
           }).catch((error: unknown) => {
             setFieldErrors({
@@ -425,9 +470,22 @@ export function CreateTaskPanel({
             </p>
           ) : null}
         </div>
+        {onApplyTemplate && !(duplicateDraft && !duplicateDraft.sourceTemplate) ? (
+          <WorkItemTemplatePicker
+            disabled={isSubmitPending || isSubmissionDisabled}
+            hasLoadError={templateLoadFailed}
+            onSelect={onApplyTemplate}
+            selectedTemplateId={duplicateDraft?.sourceTemplate?.id}
+            t={t}
+            templates={templates}
+            testId="create-task-template"
+          />
+        ) : null}
         {duplicateDraft ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-task-duplicate-note">
-            {t('issues.duplicate.note')}
+            {duplicateDraft.sourceTemplate
+              ? t('issues.template.note').replace('{name}', duplicateDraft.sourceTemplate.name)
+              : t('issues.duplicate.note')}
           </p>
         ) : null}
         {configuration ? (
@@ -683,6 +741,14 @@ export function CreateTaskPanel({
               String(duplicatedContributors.length),
             )}
           </label>
+        ) : null}
+        {effectiveMode === 'detailed' ? (
+          <WorkItemAcceptanceCriteriaEditor
+            criteria={undefined}
+            draftState={{ draft: acceptanceCriteriaDraft, setDraft: setAcceptanceCriteriaDraft }}
+            formId="create-task-form"
+            locale={locale}
+          />
         ) : null}
         <fieldset
           className={`workbench-panel-muted grid gap-3 p-4 ${effectiveMode === 'quick' ? 'hidden' : ''}`}

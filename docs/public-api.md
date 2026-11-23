@@ -77,6 +77,19 @@ Work Item を作ります。Web で作る Work Item と同じ日で稼働日数�
 全Project共通のfieldと指定Projectに適用されるfieldだけを返します。
 この追加制約は管理者にも適用し、他Projectだけのfield名・選択肢・既定値・必須条件は返しません。
 
+`templates` には、その Team で使える有効な Work Item template（`teamId` のないものとその Team 用のもの）を名前順に返します。
+各要素は `id`・`version`・`name`・`title` と、作成時に埋める `description`・`workItemTypeId`・`workflowStatusId`・`priority`・
+`acceptanceCriteria`（文言の配列）です。template の担当者・Project・日程は作成 body が決めるので返しません。
+
+## Template からの Work Item 作成
+
+`POST /api/v1/work-items` に `templateId` を送ると、その template から作ります。body に書いた値が優先で、template は
+省略された説明・Type・状態・優先度を埋め、custom field は template の値の上に body の値を重ね、受け入れ条件は未達成の
+新しい条件として付けます。`priority` は `templateId` があれば省略でき、どちらにもなければ `medium` です。
+template が無い・停止中・別 Team 用・Work Item template ではない場合は `404 not_found` で、何も作りません。
+同じ `Idempotency-Key` の再送は、送った body（`templateId` を含む）で同じ request と判断するので、途中で template を
+変えても二重に作られません。
+
 ## Cursor pagination
 
 ### Work Item comments

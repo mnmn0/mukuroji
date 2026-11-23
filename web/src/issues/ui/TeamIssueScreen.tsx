@@ -99,6 +99,8 @@ import { isCancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
 import {
   createWorkItemDuplicateDraft,
+  createWorkItemTemplateDraft,
+  listWorkItemTemplatesForTeam,
   type WorkItemDuplicateDraft,
 } from '../model/workItemDuplicate'
 import { IssueBoard } from './TeamIssueBoard'
@@ -142,6 +144,7 @@ import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
+import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
 
 /** Message shown when a hierarchy move cannot be made. */
@@ -265,6 +268,11 @@ export function TeamIssueScreen({
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
+  const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateOpen && Boolean(onCreateIssue))
+  const teamCreateTemplates = useMemo(
+    () => listWorkItemTemplatesForTeam(createTemplates.templates, teamId),
+    [createTemplates.templates, teamId],
+  )
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
     createTaskViewSelectionState,
@@ -1599,6 +1607,12 @@ export function TeamIssueScreen({
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
                     errorMessage={createErrorMessage}
+                    onApplyTemplate={(template) => {
+                      setCreateErrorMessage(undefined)
+                      setCreateDuplicateDraft(template ? createWorkItemTemplateDraft(template) : undefined)
+                    }}
+                    templateLoadFailed={createTemplates.hasLoadError}
+                    templates={teamCreateTemplates}
                     workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}
                     locale={locale}

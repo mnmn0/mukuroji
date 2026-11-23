@@ -1,5 +1,5 @@
 import type { WorkItemConfiguration, WorkItemScheduleCalendarPolicy } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput } from '../api'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
@@ -31,9 +31,18 @@ import {
   resolveIssuePriority,
 } from '../model/teamIssueDisplay'
 import {
+  draftCustomFieldValuesApply,
   pickDuplicatedCustomFieldValues,
   type WorkItemDuplicateDraft,
+  type WorkItemTemplate,
 } from '../model/workItemDuplicate'
+import {
+  createNewAcceptanceCriterionDraftRows,
+  readAcceptanceCriteriaDraftSubmission,
+} from '../../work-items/model/acceptanceCriteria'
+import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
+import type { AcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
+import { WorkItemTemplatePicker } from './WorkItemTemplatePicker'
 
 /**
  * Renders the panel that creates a Work Item in the active Team.
@@ -49,10 +58,13 @@ export function CreateIssuePanel({
   duplicateDraft,
   errorMessage,
   locale,
+  onApplyTemplate,
   onCancel,
   onSubmit,
   projects,
   t,
+  templateLoadFailed = false,
+  templates = [],
   workItemTypeId,
   workflowStatusId,
   workspaceMembers,
@@ -67,16 +79,31 @@ export function CreateIssuePanel({
   duplicateDraft?: WorkItemDuplicateDraft
   errorMessage?: string
   locale: Locale
+  /**
+   * Restarts the panel from a Work Item template, or from an empty form when undefined. Without
+   * it, the template picker is hidden.
+   */
+  onApplyTemplate?: (template: WorkItemTemplate | undefined) => void
   onCancel: () => void
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
+  /** Whether the Work Item templates could not be loaded. */
+  templateLoadFailed?: boolean
+  /** Enabled Work Item templates of the Team. */
+  templates?: readonly WorkItemTemplate[]
   /** Initial Work Item Type inherited from a Board column. */
   workItemTypeId?: string
   workflowStatusId?: string
   workspaceMembers: WorkspaceMember[]
 }) {
   const today = formatLocalDateInputValue()
+  const formId = useId()
+  const draftCriteria = duplicateDraft?.acceptanceCriteria ?? []
+  const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState<AcceptanceCriteriaDraft>(() =>
+    draftCriteria.length > 0
+      ? { rows: createNewAcceptanceCriterionDraftRows(draftCriteria), nextRowNumber: draftCriteria.length + 1 }
+      : { nextRowNumber: 1 })
   const [selectedProjectId, setSelectedProjectId] = useState(
     resolveInitialProjectId(projects, canCreateUnassignedIssue, duplicateDraft?.assignedProjectId),
   )
@@ -118,7 +145,7 @@ export function CreateIssuePanel({
   const defaultCustomFieldValues = configuration
     ? {
         ...createDefaultCustomFieldValues(customFieldDefinitions, selectedProjectId || undefined),
-        ...(duplicateDraft && duplicateDraft.workItemTypeId === effectiveWorkItemTypeId
+        ...(duplicateDraft && draftCustomFieldValuesApply(duplicateDraft, effectiveWorkItemTypeId)
           ? pickDuplicatedCustomFieldValues(duplicateDraft, customFieldDefinitions)
           : {}),
       }
@@ -136,6 +163,7 @@ export function CreateIssuePanel({
       <form
         className="grid min-w-0 gap-4"
         data-testid="create-issue-form"
+        id={formId}
         onSubmit={(event) => {
           event.preventDefault()
           if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
@@ -162,6 +190,18 @@ export function CreateIssuePanel({
               })
             : { errors: [], values: {} }
 
+          const acceptanceCriteria = readAcceptanceCriteriaDraftSubmission(formData)
+          if (acceptanceCriteria && 'error' in acceptanceCriteria) {
+            setAcceptanceCriteriaDraft((current) => ({
+              ...current,
+              submitError: {
+                error: acceptanceCriteria.error,
+                ...(acceptanceCriteria.rowKey ? { rowKey: acceptanceCriteria.rowKey } : {}),
+              },
+            }))
+            return
+          }
+
           if (!workflowStatus || parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
@@ -186,12 +226,27 @@ export function CreateIssuePanel({
             ...(carriesContributors && duplicatedContributors.length > 0
               ? { contributorAssignments: duplicatedContributors }
               : {}),
+            ...(acceptanceCriteria && acceptanceCriteria.criteria.length > 0
+              ? { acceptanceCriteria: acceptanceCriteria.criteria.map(({ text, satisfied }) => ({ text, satisfied })) }
+              : {}),
           })
         }}
       >
+        {onApplyTemplate && !(duplicateDraft && !duplicateDraft.sourceTemplate) ? (
+          <WorkItemTemplatePicker
+            hasLoadError={templateLoadFailed}
+            onSelect={onApplyTemplate}
+            selectedTemplateId={duplicateDraft?.sourceTemplate?.id}
+            t={t}
+            templates={templates}
+            testId="create-issue-template"
+          />
+        ) : null}
         {duplicateDraft ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-issue-duplicate-note">
-            {t('issues.duplicate.note')}
+            {duplicateDraft.sourceTemplate
+              ? t('issues.template.note').replace('{name}', duplicateDraft.sourceTemplate.name)
+              : t('issues.duplicate.note')}
           </p>
         ) : null}
         <div className="grid grid-cols-1 gap-3 min-[1180px]:grid-cols-2">
@@ -272,7 +327,7 @@ export function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={duplicateDraft ? duplicateDraft.dueDate : today} name="dueDate" type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={duplicateDraft?.dueDate ?? today} name="dueDate" type="date" />
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}
@@ -321,6 +376,12 @@ export function CreateIssuePanel({
             />
           </div>
         ) : null}
+        <WorkItemAcceptanceCriteriaEditor
+          criteria={undefined}
+          draftState={{ draft: acceptanceCriteriaDraft, setDraft: setAcceptanceCriteriaDraft }}
+          formId={formId}
+          locale={locale}
+        />
         {duplicatedContributors.length > 0 ? (
           <label className="flex min-w-0 items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             <input
