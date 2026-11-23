@@ -111,30 +111,32 @@ export type WeeklyReportReminderCandidate = {
  *
  * The reminder is about the week that contains the reminder day. The escalation is about the same
  * week: the most recent reminder day at or before the escalation (a week back when both fall on
- * the same weekday and the escalation hour is not later).
+ * the same weekday and the escalation hour is not later). Both can be due in one run when daylight
+ * saving time skips the earlier slot onto the later one; the reminder then comes first.
  *
  * @param now - Schedule execution instant.
  * @param timing - Reminder timing.
- * @returns The run, or undefined when this hour is neither slot.
+ * @returns The due runs, empty when this hour is neither slot.
  */
-export function resolveWeeklyReportReminderRun(
+export function resolveWeeklyReportReminderRuns(
   now: Date,
   timing: WeeklyReportReminderTiming,
-): WeeklyReportReminderRun | undefined {
+): WeeklyReportReminderRun[] {
   const date = toWorkspaceLocalDate(now, timing.timeZone)
   const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay()
   const hour = readLocalHour(now, timing.timeZone)
   const previousHour = readLocalHour(new Date(now.getTime() - hourMilliseconds), timing.timeZone)
+  const runs: WeeklyReportReminderRun[] = []
   if (weekday === timing.reminder.weekday && isSlotHour(timing.reminder.hour, hour, previousHour)) {
-    return { kind: 'reminder', date }
+    runs.push({ kind: 'reminder', date })
   }
   const escalation = timing.escalation
-  if (!escalation || weekday !== escalation.weekday || !isSlotHour(escalation.hour, hour, previousHour)) {
-    return undefined
+  if (escalation && weekday === escalation.weekday && isSlotHour(escalation.hour, hour, previousHour)) {
+    let daysBack = (escalation.weekday - timing.reminder.weekday + 7) % 7
+    if (daysBack === 0 && escalation.hour <= timing.reminder.hour) daysBack = 7
+    runs.push({ kind: 'escalation', date: addDays(date, -daysBack) })
   }
-  let daysBack = (escalation.weekday - timing.reminder.weekday + 7) % 7
-  if (daysBack === 0 && escalation.hour <= timing.reminder.hour) daysBack = 7
-  return { kind: 'escalation', date: addDays(date, -daysBack) }
+  return runs
 }
 
 /**
