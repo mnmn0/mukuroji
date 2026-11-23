@@ -9,7 +9,17 @@ import {
   type UpdateNotificationPreferencesInput,
   type NotificationPreferences,
 } from '../../notifications'
+import {
+  NOTIFICATION_BULK_ACTIONS,
+  NOTIFICATION_BULK_MAXIMUM,
+  type NotificationBulkAction,
+} from '@mukuroji/contracts'
+import { updateNotificationsInBulk } from '../../application/bulk-notification-update'
 import { normalizePersonalReminderDays } from '../../domain/reminder-days'
+import {
+  normalizeNotificationCategoryChannels,
+  normalizeNotificationMutes,
+} from '../../domain/notification-routing'
 
 /**
  * Notification route が参照する認証済み principal の最小表現です。
@@ -133,6 +143,28 @@ export function createNotificationRouter<
         isVisible,
       })
       return context.json({ updatedCount, unreadCount })
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  router.post('/api/notifications/bulk', async (context) => {
+    const accessToken = readBearerAccessToken(context)
+    if (!accessToken) {
+      return context.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await dependencies.authenticate(accessToken, context)
+      const value = await dependencies.readJson(context.req)
+      const request = readNotificationBulkRequest(isRecord(value) ? value : {})
+      const result = await updateNotificationsInBulk(dependencies.getNotifications(), {
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        ...request,
+        isVisible: await dependencies.createVisibilityFilter(principal),
+      })
+      return context.json({ ...result, notifications: result.notifications.map(toPublicNotification) })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -282,8 +314,48 @@ function readNotificationPreferencesInput(
     ...(value.reminderDays === undefined
       ? {}
       : { reminderDays: normalizePersonalReminderDays(value.reminderDays) }),
+    ...(value.categoryChannels === undefined
+      ? {}
+      : { categoryChannels: normalizeNotificationCategoryChannels(value.categoryChannels) }),
+    ...(value.mutes === undefined ? {} : { mutes: normalizeNotificationMutes(value.mutes) }),
   }
 }
+
+/** A validated bulk Inbox request. */
+type NotificationBulkRequest = {
+  /** Action applied to every notification. */
+  action: NotificationBulkAction
+  /** Unique opaque notification IDs, in request order. */
+  notificationIds: string[]
+}
+
+/**
+ * Validates a bulk Inbox request body.
+ * @param value - Untrusted request body.
+ * @returns The action and unique notification IDs.
+ * @throws NotificationError (400) for an unknown action or a missing, oversized, or malformed ID list.
+ */
+function readNotificationBulkRequest(value: Record<string, unknown>): NotificationBulkRequest {
+  const action = NOTIFICATION_BULK_ACTIONS.find((item) => item === value.action)
+  if (!action) {
+    throw new NotificationError(400, 'InvalidNotificationAction', 'Notification action is invalid.')
+  }
+  const ids = value.notificationIds
+  if (
+    !Array.isArray(ids) ||
+    ids.length === 0 ||
+    ids.length > NOTIFICATION_BULK_MAXIMUM ||
+    !ids.every((id): id is string => typeof id === 'string' && id.trim().length > 0 && id.length <= 1_024)
+  ) {
+    throw new NotificationError(
+      400,
+      'InvalidNotificationBulkRequest',
+      `Notification IDs must be a list of 1 to ${NOTIFICATION_BULK_MAXIMUM} IDs.`,
+    )
+  }
+  return { action, notificationIds: [...new Set(ids.map((id) => id.trim()))] }
+}
+
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

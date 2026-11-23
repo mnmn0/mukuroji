@@ -53,11 +53,12 @@ describe('Email notification delivery application', () => {
     expect(f.finishes).toEqual([{ status: 'suppressed', code: 'EmailRecipientUnverified' }])
     expect(f.failures).toEqual([])
   })
-  test('suppresses events from before the current Email opt-in and after Email is turned off', async () => {
+  test('suppresses events from before the current Email opt-in, after Email is turned off, or after their category is turned off for Email', async () => {
     for (const preferences of [
       { ...emailOn, emailEnabledAt: '2026-09-26T11:30:00.000Z' },
       { ...emailOn, channels: { inApp: true, email: false, push: false } },
-    ]) {
+      { ...emailOn, categoryChannels: { mention: { email: false } } },
+    ] satisfies NotificationPreferences[]) {
       const f = fixture({ succeeded: true, retryable: false }, preferences)
       expect(await deliverDueEmailNotifications(f.dependencies)).toBe(0)
       expect(f.sends()).toBe(0)
