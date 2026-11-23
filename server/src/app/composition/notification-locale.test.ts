@@ -35,5 +35,10 @@ test('rejects a read still pending when the caller deadline passes', async () =>
   const pending = reader(recipient, deadline.signal)
   deadline.abort(new Error('deadline'))
   await expect(pending).rejects.toThrow('deadline')
-  await expect(reader(recipient, deadline.signal)).rejects.toThrow('deadline')
+  let reads = 0
+  const counting = createMemberNotificationLocaleReader({
+    async getMemberPreferences() { reads += 1; return { revision: 0 } },
+  })
+  await expect(counting(recipient, deadline.signal)).rejects.toThrow('deadline')
+  expect(reads).toBe(0)
 })

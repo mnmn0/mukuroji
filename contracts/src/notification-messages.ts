@@ -185,15 +185,15 @@ export function isNotificationMessageCode(value: unknown): value is Notification
  * Reads a notification message from a stored row or an API response.
  *
  * @param value - Untrusted value.
- * @returns The message, or undefined when the value is absent, malformed, or has an unknown code,
- *   so the reader falls back to the stored summary text.
+ * @returns The message, or undefined when the value is absent, malformed, has an unknown code, or
+ *   lacks a value its template needs, so the reader falls back to the stored summary text.
  */
 export function parseNotificationMessage(value: unknown): NotificationMessage | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const code: unknown = Reflect.get(value, 'code')
   if (!isNotificationMessageCode(code)) return undefined
-  const params: unknown = Reflect.get(value, 'params')
-  if (params === undefined) return { code }
+  const storedParams: unknown = Reflect.get(value, 'params')
+  const params: unknown = storedParams === undefined ? {} : storedParams
   if (typeof params !== 'object' || params === null || Array.isArray(params)) return undefined
   const entries = Object.entries(params)
   if (entries.length > NOTIFICATION_MESSAGE_PARAMS_MAXIMUM) return undefined
@@ -204,6 +204,11 @@ export function parseNotificationMessage(value: unknown): NotificationMessage | 
       return undefined
     }
     parsed[name] = param
+  }
+  // A template value that is missing would show its placeholder, so the stored text is better.
+  const template: string = NOTIFICATION_MESSAGE_TEMPLATES[code].en
+  for (const match of template.matchAll(/\{([A-Za-z]+)\}/g)) {
+    if (match[1] === undefined || !Object.hasOwn(parsed, match[1])) return undefined
   }
   return createNotificationMessage(code, parsed)
 }

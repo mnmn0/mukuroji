@@ -26,6 +26,8 @@ export type MemberPreferencesReader = {
 export function createMemberNotificationLocaleReader(directory: MemberPreferencesReader): NotificationLocaleReader {
   return async (recipient, signal) => {
     try {
+      // An expired deadline never starts a read whose later failure nobody would handle.
+      signal?.throwIfAborted()
       const preferences = await untilAborted(directory.getMemberPreferences(recipient.workspaceId, recipient.memberKey), signal)
       return preferences.locale === 'en' ? 'en' : 'ja'
     } catch (error) {
