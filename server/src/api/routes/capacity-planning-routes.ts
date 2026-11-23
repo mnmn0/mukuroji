@@ -12,6 +12,7 @@ import { requireAppDependencies, workspaceDependencies } from '../shared/app-dep
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
+  createWorkspaceMutationContext,
   requireTeamPermission,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -44,6 +45,25 @@ async function readWorkloadProjectMemberIds(
     }
   }
   return memberIds
+}
+
+/**
+ * Reports whether the principal manages the Team's workload: a Workspace owner, admin, or system
+ * admin, or a Team manager.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team identifier.
+ * @returns Whether the principal may approve time off and confirm assignments.
+ */
+async function canManageWorkloadTeam(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
+  if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true
+  try {
+    await requireTeamPermission(principal, teamId, 'manager')
+    return true
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
 }
 
 /** Converts capacity-planning failures to safe API responses. */
@@ -128,16 +148,11 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
       }
     },
     canManageMember: async (principal, teamId, memberId) => {
-      if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true
       if (principal.userKey === memberId) return true
-      try {
-        await requireTeamPermission(principal, teamId, 'manager')
-        return true
-      } catch (error) {
-        if (error instanceof ProjectDataError && error.status === 403) return false
-        throw error
-      }
+      return await canManageWorkloadTeam(principal, teamId)
     },
+    canManageTeam: canManageWorkloadTeam,
+    createAuditContext: (c, principal, body) => createWorkspaceMutationContext(c, principal, body),
     verifyProject: async (principal, teamId, projectId, minimum) => {
       const context = await requireTeamPermission(principal, teamId, minimum)
       if (

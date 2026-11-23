@@ -50,11 +50,21 @@ export type WorkloadTimeOff = {
   minutesPerDay?: number
   /** Optional explanation that may be hidden from non-managers. */
   reason?: string
-  /** Approval state used by capacity calculations. */
-  status: 'planned' | 'approved' | 'canceled'
+  /**
+   * Approval state. Only `approved` absences reduce available minutes; `planned` absences are
+   * pending review and shown separately, and `rejected` or `canceled` absences are ignored.
+   */
+  status: WorkloadTimeOffStatus
+  /** Member who last approved or rejected the absence. */
+  reviewedBy?: string
+  /** Timestamp of the last approval or rejection. */
+  reviewedAt?: string
   /** Optimistic concurrency revision for this absence. */
   revision: number
 }
+
+/** Review state of a member's absence. */
+export type WorkloadTimeOffStatus = 'planned' | 'approved' | 'rejected' | 'canceled'
 
 /** Working availability and skills for one Team member. */
 export type WorkloadMemberProfile = {
@@ -178,10 +188,14 @@ export type WorkloadCell = {
   toDate: string
   /** Stable localized display label source date. */
   label: string
-  /** Available minutes after schedule, holiday, and time-off rules. */
+  /** Available minutes after schedule, holiday, and approved time-off rules. */
   capacityMinutes: number
+  /** Time off still waiting for approval; it is not subtracted from `capacityMinutes`. */
+  pendingTimeOffMinutes: number
   /** Minutes reserved by visible assignments. */
   allocatedMinutes: number
+  /** Part of `allocatedMinutes` reserved by tentative (not yet confirmed) assignments. */
+  tentativeAllocatedMinutes: number
   /** Planned Work Item effort in the bucket. */
   plannedEffortMinutes: number
   /** Actual submitted, approved, or locked time in the bucket. */
@@ -214,6 +228,11 @@ export type WorkloadMemberSummary = {
   holidays: WorkloadHoliday[]
   /** Revision of the persisted availability profile used by mutations. */
   profileRevision: number
+  /**
+   * Planned, approved, and rejected absences that end on or after the snapshot start, ordered by
+   * start date. The reason is omitted unless the viewer is the member or may see confidential rows.
+   */
+  timeOff: WorkloadTimeOff[]
   /** Daily, weekly, or monthly cells. */
   cells: WorkloadCell[]
   /** Total capacity across the selected range. */
@@ -258,6 +277,16 @@ export type WorkloadSnapshot = {
   revision: number
   /** Snapshot creation timestamp. */
   generatedAt: string
+  /** What the viewer may do with this snapshot, when the API knows the viewer. */
+  viewer?: WorkloadSnapshotViewer
+}
+
+/** The caller of a workload snapshot and the review actions they may take. */
+export type WorkloadSnapshotViewer = {
+  /** The viewer's Workspace member identifier. */
+  memberId: string
+  /** Whether the viewer is a Team manager who may approve time off and confirm assignments. */
+  canManage: boolean
 }
 
 /** Input for saving a member's working availability. */
@@ -307,12 +336,32 @@ export type SaveWorkloadTimeOffInput = {
   /** Optional reason. */
   reason?: string
   /** Approval state. */
-  status: WorkloadTimeOff['status']
+  status: WorkloadTimeOffStatus
   /** Expected profile revision. */
   expectedRevision: number
   /** Expected Team workload revision. */
   expectedTeamRevision: number
   /** Actor performing the mutation. */
+  actorMemberId: string
+}
+
+/** Input for approving, rejecting, reopening, or canceling one absence without changing its dates. */
+export type ReviewWorkloadTimeOffInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Member whose absence is reviewed. */
+  memberId: string
+  /** Time-off identifier. */
+  timeOffId: string
+  /** New review state. */
+  status: WorkloadTimeOffStatus
+  /** Expected revision of the absence itself. */
+  expectedRevision: number
+  /** Expected Team workload revision. */
+  expectedTeamRevision: number
+  /** Actor performing the review. */
   actorMemberId: string
 }
 
@@ -368,6 +417,8 @@ export type UpdateResourceRequestInput = {
   confidential?: boolean
   /** Set to `canceled` to withdraw the request; fill states are derived from assignments. */
   status?: Extract<ResourceRequestStatus, 'canceled'>
+  /** With `status: "canceled"`, also cancel every assignment that still fills the request. */
+  cancelAssignments?: boolean
   /** Expected request revision. */
   expectedRevision: number
   /** Expected Team workload revision. */

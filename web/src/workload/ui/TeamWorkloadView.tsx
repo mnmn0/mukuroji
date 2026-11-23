@@ -1,4 +1,4 @@
-import type { CapacityPlanningGranularity, ResourceAssignment, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
+import type { CapacityPlanningGranularity, ResourceAssignment, ResourceAssignmentStatus, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
 /** Props for the Team workload heatmap. */
@@ -21,6 +21,8 @@ export type TeamWorkloadViewProps = {
   onMoveAssignment?: (assignmentId: string, memberId: string, targetDate: string) => void
   /** Whether an assignment mutation is currently in flight. */
   isAssignmentMutationPending?: boolean
+  /** Confirms, returns to tentative, or cancels an assignment; shown only to Team managers. */
+  onChangeAssignmentStatus?: (assignmentId: string, status: ResourceAssignmentStatus) => void
 }
 
 /** Renders a capacity-aware workload heatmap with an accessible tabular fallback. */
@@ -31,10 +33,12 @@ export function TeamWorkloadView({
   onGranularityChange,
   onRetry,
   onMoveAssignment,
+  onChangeAssignmentStatus,
   isAssignmentMutationPending = false,
   snapshot,
   t,
 }: TeamWorkloadViewProps) {
+  const canChangeStatus = Boolean(onChangeAssignmentStatus) && snapshot?.viewer?.canManage !== false
   const members = snapshot?.members ?? []
   const totalCapacity = members.reduce((sum, member) => sum + member.capacityMinutes, 0)
   const totalAllocated = members.reduce((sum, member) => sum + member.allocatedMinutes, 0)
@@ -112,6 +116,8 @@ export function TeamWorkloadView({
               <Legend color="bg-tone-f8e2ab" label={t('workload.legend.balanced')} />
               <Legend color="bg-tone-f3c5c5" label={t('workload.legend.over')} />
               <Legend color="bg-slate-100" label={t('workload.legend.unavailable')} />
+              <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm border border-dashed border-fg-526381" aria-hidden="true" />{t('workload.legend.tentative')}</span>
+              <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-tone-c9d8f0" aria-hidden="true" />{t('workload.legend.pendingTimeOff')}</span>
             </div>
             {snapshot && snapshot.redactedAssignmentCount > 0 ? (
               <span className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -159,18 +165,46 @@ export function TeamWorkloadView({
                           <span className="mt-1 block text-[11px] font-semibold text-fg-526381">
                             {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                           </span>
+                          {cell.tentativeAllocatedMinutes > 0 ? (
+                            <span className="mt-1 block text-[10px] font-semibold text-fg-526381" data-testid="workload-cell-tentative">
+                              {t('workload.cell.tentative').replace('{minutes}', formatMinutes(cell.tentativeAllocatedMinutes))}
+                            </span>
+                          ) : null}
+                          {cell.pendingTimeOffMinutes > 0 ? (
+                            <span className="mt-1 block rounded bg-tone-f5f8ff px-1 text-[10px] font-semibold text-fg-526381" data-testid="workload-cell-pending-time-off">
+                              {t('workload.cell.pendingTimeOff').replace('{minutes}', formatMinutes(cell.pendingTimeOffMinutes))}
+                            </span>
+                          ) : null}
                           {onMoveAssignment ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
                               <details className="mt-2 max-w-full text-[10px] font-bold text-fg-526381" key={assignment.id}>
                                 <summary
-                                  className="max-w-full cursor-grab truncate rounded bg-surface/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
+                                  className={`max-w-full cursor-grab truncate rounded px-1.5 py-1 shadow-sm disabled:opacity-50 ${assignment.status === 'tentative' ? 'border border-dashed border-fg-526381 bg-surface/60' : 'bg-surface/80'}`}
+                                  data-status={assignment.status}
                                   draggable={!isAssignmentMutationPending}
-                                  title={assignment.workItemId ?? assignment.id}
+                                  title={`${assignment.workItemId ?? assignment.id} · ${t(`workload.assignment.status.${assignment.status}`)}`}
                                   onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
                                 >
+                                  {assignment.status === 'tentative' ? `${t('workload.assignment.status.tentative')} · ` : ''}
                                   {assignment.workItemId ?? assignment.id}
                                 </summary>
+                                {canChangeStatus ? (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {assignment.status === 'tentative' ? (
+                                      <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'confirmed')}>
+                                        {t('workload.assignment.confirm')}
+                                      </button>
+                                    ) : (
+                                      <button className="rounded border border-slate-200 bg-surface px-2 py-1 text-[10px] font-bold disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'tentative')}>
+                                        {t('workload.assignment.unconfirm')}
+                                      </button>
+                                    )}
+                                    <button className="rounded border border-tone-d99696 bg-surface px-2 py-1 text-[10px] font-bold text-fg-9f3f3f disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'canceled')}>
+                                      {t('workload.assignment.cancel')}
+                                    </button>
+                                  </div>
+                                ) : null}
                                 <form
                                   className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
                                   onSubmit={(event) => {
@@ -265,7 +299,13 @@ function formatMinutes(minutes: number): string {
 
 /** Creates an accessible cell summary. */
 function formatCellTitle(cell: WorkloadCell, t: (key: MessageKey) => string): string {
-  return `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')} · ${cell.utilizationPercent}%`
+  return [
+    `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')}`,
+    `${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')}`,
+    `${cell.utilizationPercent}%`,
+    ...(cell.tentativeAllocatedMinutes > 0 ? [t('workload.cell.tentative').replace('{minutes}', formatMinutes(cell.tentativeAllocatedMinutes))] : []),
+    ...(cell.pendingTimeOffMinutes > 0 ? [t('workload.cell.pendingTimeOff').replace('{minutes}', formatMinutes(cell.pendingTimeOffMinutes))] : []),
+  ].join(' · ')
 }
 
 /** Checks whether an assignment intersects a displayed member and date bucket. */

@@ -74,3 +74,4 @@
 | [0052](0052-personal-tokens-without-software-factory.md) | Software factory が off でも本人用 token を発行でき、MCP は Workspace profile で読む | 提案 |
 | [0054](0054-team-time-rate-card.md) | 工数の単価表を Team ごとの `TIME_RATE_CARD` row で持ち、Workspace の既定通貨を tenant profile に置く | 提案 |
 | [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |
+| [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |

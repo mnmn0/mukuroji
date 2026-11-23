@@ -5,6 +5,8 @@ import {
   type WorkloadMemberSummary,
   type WorkloadHoliday,
   type WorkloadSnapshot,
+  type WorkloadTimeOff,
+  type WorkloadTimeOffStatus,
   type WorkingSchedule,
 } from '@mukuroji/contracts'
 import { isRecord } from '../shared/api/jsonValidation'
@@ -54,8 +56,18 @@ export type SaveWorkloadTimeOffRequest = {
   /** Optional explanation. */
   reason?: string
   /** Approval state. */
-  status: 'planned' | 'approved' | 'canceled'
+  status: WorkloadTimeOffStatus
   /** Expected profile revision. */
+  expectedRevision: number
+  /** Expected Team workload revision. */
+  expectedTeamRevision: number
+}
+
+/** Input sent when a manager approves or rejects time off, or a member withdraws their own. */
+export type ReviewWorkloadTimeOffRequest = {
+  /** New review state. */
+  status: WorkloadTimeOffStatus
+  /** Expected revision of the time off itself. */
   expectedRevision: number
   /** Expected Team workload revision. */
   expectedTeamRevision: number
@@ -101,6 +113,8 @@ export type UpdateWorkloadRequestRequest = {
   confidential?: boolean
   /** Set to `canceled` to withdraw the request. */
   status?: 'canceled'
+  /** With `status: "canceled"`, also cancel the assignments that still fill the request. */
+  cancelAssignments?: boolean
   /** Expected request revision. */
   expectedRevision: number
   /** Expected Team workload revision. */
@@ -270,6 +284,30 @@ export async function saveWorkloadTimeOff(
 }
 
 /**
+ * Approves, rejects, reopens, or withdraws one member's time off without changing its dates.
+ *
+ * @param accessToken - Authenticated Workspace access token.
+ * @param teamId - Team containing the member.
+ * @param memberId - Member whose time off is reviewed.
+ * @param timeOffId - Time-off identifier.
+ * @param input - New status and optimistic-concurrency values.
+ */
+export async function reviewWorkloadTimeOff(
+  accessToken: string,
+  teamId: string,
+  memberId: string,
+  timeOffId: string,
+  input: ReviewWorkloadTimeOffRequest,
+): Promise<void> {
+  await sendWorkloadMutation(
+    accessToken,
+    `/teams/${encodeURIComponent(teamId)}/workload/profiles/${encodeURIComponent(memberId)}/time-off/${encodeURIComponent(timeOffId)}`,
+    input,
+    'PATCH',
+  )
+}
+
+/**
  * Creates a resource request for a Team.
  *
  * @param accessToken - Authenticated Workspace access token.
@@ -420,6 +458,7 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
     Array.isArray(member.holidays) && member.holidays.every(isWorkloadHoliday) &&
     typeof member.profileRevision === 'number' &&
     Number.isSafeInteger(member.profileRevision) && member.profileRevision >= 0 &&
+    Array.isArray(member.timeOff) && member.timeOff.every(isWorkloadTimeOff) &&
     Array.isArray(member.cells) && member.cells.every(isWorkloadCell) &&
     isNonNegativeSafeInteger(member.capacityMinutes) &&
     isNonNegativeSafeInteger(member.allocatedMinutes) &&
@@ -427,7 +466,22 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
     isNonNegativeSafeInteger(member.actualMinutes) &&
     isNonNegativeSafeInteger(member.remainingEffortMinutes) &&
     typeof member.overloaded === 'boolean') &&
-    value.requests.every(isResourceRequest) && value.assignments.every(isResourceAssignment)
+    value.requests.every(isResourceRequest) && value.assignments.every(isResourceAssignment) &&
+    (value.viewer === undefined || (isRecord(value.viewer) &&
+      typeof value.viewer.memberId === 'string' && typeof value.viewer.canManage === 'boolean'))
+}
+
+/** Checks one time-off row returned in a member summary. */
+function isWorkloadTimeOff(value: unknown): value is WorkloadTimeOff {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && isIsoDate(value.fromDate) && isIsoDate(value.toDate) &&
+    value.fromDate <= value.toDate &&
+    (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
+    (value.reason === undefined || typeof value.reason === 'string') &&
+    (value.status === 'planned' || value.status === 'approved' || value.status === 'rejected' || value.status === 'canceled') &&
+    (value.reviewedBy === undefined || typeof value.reviewedBy === 'string') &&
+    (value.reviewedAt === undefined || typeof value.reviewedAt === 'string') &&
+    isPositiveSafeInteger(value.revision)
 }
 
 /** Checks the required numeric and date fields of one workload cell. */
@@ -436,7 +490,9 @@ function isWorkloadCell(value: unknown): boolean {
   return isIsoDate(value.fromDate) && isIsoDate(value.toDate) && value.fromDate <= value.toDate &&
     typeof value.label === 'string' &&
     isNonNegativeSafeInteger(value.capacityMinutes) &&
+    isNonNegativeSafeInteger(value.pendingTimeOffMinutes) &&
     isNonNegativeSafeInteger(value.allocatedMinutes) &&
+    isNonNegativeSafeInteger(value.tentativeAllocatedMinutes) &&
     isNonNegativeSafeInteger(value.plannedEffortMinutes) &&
     isNonNegativeSafeInteger(value.actualMinutes) &&
     isNonNegativeSafeInteger(value.remainingEffortMinutes) &&

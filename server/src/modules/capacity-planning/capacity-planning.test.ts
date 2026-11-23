@@ -9,9 +9,11 @@ import {
   CapacityPlanningService,
   createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
+  pruneCapacityPlanningState,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
+import type { MutationAuditContext } from '../audit'
 
 const profile = createProfile('member-1', 'UTC')
 
@@ -678,6 +680,156 @@ describe('capacity planning mutations', () => {
     expect((await repository.getState('workspace-1', 'team-1')).profiles).toEqual([])
   })
 })
+
+
+describe('capacity planning reviews and retention', () => {
+  test('subtracts only approved time off and reports pending time off and tentative allocation', () => {
+    const member = {
+      ...profile,
+      timeOff: [
+        { id: 'approved', fromDate: '2026-08-03', toDate: '2026-08-03', minutesPerDay: 240, reason: 'Clinic', status: 'approved' as const, revision: 1 },
+        { id: 'pending', fromDate: '2026-08-03', toDate: '2026-08-04', reason: 'Trip', status: 'planned' as const, revision: 1 },
+        { id: 'rejected', fromDate: '2026-08-04', toDate: '2026-08-04', status: 'rejected' as const, revision: 2 },
+        { id: 'canceled', fromDate: '2026-08-04', toDate: '2026-08-04', status: 'canceled' as const, revision: 2 },
+      ],
+    }
+    const tentative = { ...createAssignment('tentative', false, '2026-08-04'), status: 'tentative' as const, allocationMinutes: 120 }
+    const state = createState([member], [createAssignment('confirmed', false, '2026-08-04', '2026-08-04', 60), tentative])
+    const managerView = buildWorkloadSnapshot(state, [], [], createInput({ toDate: '2026-08-04' }))
+    const otherView = buildWorkloadSnapshot(state, [], [], createInput({ toDate: '2026-08-04', canViewConfidential: false, viewerMemberId: 'member-2' }))
+    const [first, second] = managerView.members[0].cells
+
+    expect(first).toMatchObject({ capacityMinutes: 240, pendingTimeOffMinutes: 240, tentativeAllocatedMinutes: 0 })
+    expect(second).toMatchObject({ capacityMinutes: 480, pendingTimeOffMinutes: 480, allocatedMinutes: 180, tentativeAllocatedMinutes: 120 })
+    expect(managerView.members[0].timeOff.map((timeOff) => [timeOff.id, timeOff.reason])).toEqual([
+      ['approved', 'Clinic'],
+      ['pending', 'Trip'],
+      ['rejected', undefined],
+    ])
+    expect(otherView.members[0].timeOff.every((timeOff) => timeOff.reason === undefined)).toBe(true)
+  })
+
+  test('reviews time off at its own revision and records who reviewed it', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    await service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-1', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'planned', expectedRevision: 1, expectedTeamRevision: 1,
+    }, { auditContext })
+    const review = { workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', timeOffId: 'pto-1', actorMemberId: 'manager-1' }
+
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 9, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'WorkloadTimeOffRevisionConflict', status: 409 })
+    const approved = await service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }, { auditContext })
+    const reopened = await service.reviewTimeOff({ ...review, status: 'planned', expectedRevision: 2, expectedTeamRevision: 3 })
+
+    expect(approved).toMatchObject({ status: 'approved', reviewedBy: 'manager-1', reviewedAt: '2026-08-01T00:00:00.000Z', revision: 2 })
+    expect(reopened.reviewedBy).toBeUndefined()
+    expect(repository.auditLog.map((audit) => audit.events[0].eventType)).toEqual([
+      'workload.time-off.requested',
+      'workload.time-off.approved',
+    ])
+    expect(repository.auditLog[0].events[0].metadata).not.toHaveProperty('notificationCandidates')
+    expect(repository.auditLog[1].events[0].metadata).toMatchObject({
+      teamId: 'team-1',
+      notificationCandidates: [{ memberKey: 'member-2', reason: 'time-off-review' }],
+    })
+  })
+
+  test('cancels a request together with its assignments and notifies each assigned member', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Release', skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03',
+      requestedMinutes: 480, confidential: false, expectedTeamRevision: 1, actorMemberId: 'manager-1',
+    })
+    await service.createAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, memberId: 'member-2', skillIds: [],
+      fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 480, plannedEffortMinutes: 480, confidential: false,
+      status: 'tentative', expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    })
+
+    const canceled = await service.updateRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
+      expectedRevision: 2, expectedTeamRevision: 3, actorMemberId: 'manager-1',
+    }, { canViewConfidential: true }, { auditContext })
+    const state = await repository.getState('workspace-1', 'team-1')
+
+    expect(canceled.status).toBe('canceled')
+    expect(state.assignments.map((assignment) => assignment.status)).toEqual(['canceled'])
+    expect(repository.auditLog.at(-1)?.events.map((event) => [event.eventType, event.metadata?.notificationCandidates])).toEqual([
+      ['workload.assignment.canceled', [{ memberKey: 'member-2', reason: 'workload-assignment' }]],
+      ['workload.request.canceled', undefined],
+    ])
+  })
+
+  test('prunes closed rows after 30 days and any row after 400 days, keeping referenced requests', () => {
+    const request = (id: string, toDate: string, status: 'open' | 'canceled') => ({
+      id, workspaceId: 'workspace-1', teamId: 'team-1', title: id, skillIds: [], fromDate: toDate, toDate,
+      requestedMinutes: 60, confidential: false, status, revision: 1,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    })
+    const state: CapacityPlanningState = {
+      revision: 3,
+      profiles: [{
+        ...profile,
+        timeOff: [
+          { id: 'recent-rejected', fromDate: '2026-07-10', toDate: '2026-07-10', status: 'rejected', revision: 1 },
+          { id: 'old-rejected', fromDate: '2026-06-01', toDate: '2026-06-01', status: 'rejected', revision: 1 },
+          { id: 'old-approved', fromDate: '2025-06-01', toDate: '2025-06-01', status: 'approved', revision: 1 },
+          { id: 'approved', fromDate: '2026-06-01', toDate: '2026-06-01', status: 'approved', revision: 1 },
+        ],
+      }],
+      requests: [
+        request('old-canceled', '2026-06-01', 'canceled'),
+        request('referenced-canceled', '2026-06-01', 'canceled'),
+        request('ancient-open', '2025-06-01', 'open'),
+        request('open', '2026-06-01', 'open'),
+      ],
+      assignments: [
+        { ...createAssignment('old-canceled', false, '2026-06-01'), status: 'canceled' },
+        { ...createAssignment('kept', false, '2026-06-01'), requestId: 'referenced-canceled' },
+        createAssignment('ancient', false, '2025-06-01'),
+      ],
+    }
+
+    pruneCapacityPlanningState(state, '2026-08-01')
+
+    expect(state.profiles[0].timeOff.map((timeOff) => timeOff.id)).toEqual(['recent-rejected', 'approved'])
+    expect(state.requests.map((value) => value.id)).toEqual(['referenced-canceled', 'open'])
+    expect(state.assignments.map((value) => value.id)).toEqual(['kept'])
+  })
+})
+
+const auditContext: MutationAuditContext = {
+  workspaceId: 'workspace-1',
+  actor: { id: 'actor-1', kind: 'user' },
+  source: { kind: 'api' },
+  idempotencyKeyHash: 'hash-1',
+  requestFingerprint: 'fingerprint-1',
+  correlationId: 'correlation-1',
+  occurredAt: '2026-08-01T00:00:00.000Z',
+}
+
+/** Creates a service with a fixed clock and sequential identifiers. */
+function createReviewService(repository: InMemoryCapacityPlanningRepository): CapacityPlanningService {
+  let sequence = 0
+  return new CapacityPlanningService(
+    repository,
+    { listTimeEntries: async () => [], listEstimates: async () => [] },
+    { now: () => new Date('2026-08-01T00:00:00.000Z'), createId: () => `generated-${++sequence}` },
+  )
+}
+
+/** Saves a default profile for one member as the first Team write. */
+async function seedMember(service: CapacityPlanningService, memberId: string): Promise<void> {
+  await service.saveMemberProfile({
+    workspaceId: 'workspace-1', teamId: 'team-1', memberId, skills: [], timeZone: 'UTC',
+    schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 0, actorMemberId: memberId,
+  })
+}
 
 /** Creates a deterministic member profile fixture. */
 function createProfile(memberId: string, timeZone: string): WorkloadMemberProfile {

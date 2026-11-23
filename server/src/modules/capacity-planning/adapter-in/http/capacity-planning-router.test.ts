@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import type { MutationAuditContext } from '../../../audit'
 import {
   CapacityPlanningError,
   CapacityPlanningService,
+  createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../capacity-planning'
@@ -20,6 +22,16 @@ type TestPrincipal = {
 
 const principal: TestPrincipal = { directoryId: 'workspace-1', userKey: 'member-1' }
 
+const auditContext: MutationAuditContext = {
+  workspaceId: 'workspace-1',
+  actor: { id: 'actor-1', kind: 'user' },
+  source: { kind: 'api' },
+  idempotencyKeyHash: 'hash-1',
+  requestFingerprint: 'fingerprint-1',
+  correlationId: 'correlation-1',
+  occurredAt: '2026-08-02T12:00:00.000Z',
+}
+
 const emptyDataSource: CapacityPlanningDataSource = {
   listTimeEntries: async () => [],
   listEstimates: async () => [],
@@ -28,8 +40,9 @@ const emptyDataSource: CapacityPlanningDataSource = {
 /** Creates a router with deterministic authentication and an in-memory service. */
 function createFixture(options: { allowManager?: boolean; canViewConfidential?: boolean } = {}) {
   const calls: string[] = []
+  const repository = new InMemoryCapacityPlanningRepository()
   const service = new CapacityPlanningService(
-    new InMemoryCapacityPlanningRepository(),
+    repository,
     emptyDataSource,
     { now: () => new Date('2026-08-02T12:00:00.000Z'), createId: () => 'capacity-id-1' },
   )
@@ -49,6 +62,11 @@ function createFixture(options: { allowManager?: boolean; canViewConfidential?: 
     getWorkloadVisibility: async () => ({ canViewConfidential: options.canViewConfidential ?? false }),
     verifyMember: async () => undefined,
     canManageMember: async (_value, _teamId, memberId) => memberId === principal.userKey,
+    canManageTeam: async (_value, teamId) => {
+      calls.push(`manageTeam:${teamId}`)
+      return options.allowManager !== false
+    },
+    createAuditContext: () => auditContext,
     verifyProject: async (_value, teamId, projectId, minimum) => {
       calls.push(`project:${teamId}:${projectId}:${minimum}`)
     },
@@ -59,7 +77,7 @@ function createFixture(options: { allowManager?: boolean; canViewConfidential?: 
       code: error instanceof CapacityPlanningError ? error.code : 'mapped',
     }, 503),
   }
-  return { calls, router: createCapacityPlanningRouter(dependencies), service }
+  return { calls, repository, router: createCapacityPlanningRouter(dependencies), service }
 }
 
 /** Creates one resource request through the service so routes can change it. */
@@ -82,6 +100,30 @@ async function seedRequest(
   })
 }
 
+/** Creates a profile and one planned absence for a member through the service. */
+async function seedTimeOff(service: CapacityPlanningService, memberId = principal.userKey) {
+  const scope = { workspaceId: principal.directoryId, teamId: 'team-1', memberId, actorMemberId: memberId }
+  const profile = await service.saveMemberProfile({
+    ...scope,
+    skills: [],
+    timeZone: 'UTC',
+    schedule: createDefaultWorkingSchedule(),
+    holidays: [],
+    expectedRevision: 0,
+    expectedTeamRevision: 0,
+  })
+  const timeOff = await service.saveTimeOff({
+    ...scope,
+    id: 'time-off-1',
+    fromDate: '2026-08-03',
+    toDate: '2026-08-03',
+    status: 'planned',
+    expectedRevision: profile.revision,
+    expectedTeamRevision: 1,
+  })
+  return { profile, timeOff }
+}
+
 describe('createCapacityPlanningRouter', () => {
   test('requires a bearer token and applies viewer permission to workload reads', async () => {
     const { calls, router } = createFixture()
@@ -92,7 +134,8 @@ describe('createCapacityPlanningRouter', () => {
 
     expect(unauthorized.status).toBe(401)
     expect(authorized.status).toBe(200)
-    expect(calls).toEqual(['authenticate:workload-token', 'permission:team-1:viewer'])
+    expect(await authorized.json()).toMatchObject({ viewer: { memberId: 'member-1', canManage: true } })
+    expect(calls).toEqual(['authenticate:workload-token', 'permission:team-1:viewer', 'manageTeam:team-1'])
   })
 
   test('requires manager permission for resource requests', async () => {
@@ -141,12 +184,52 @@ describe('createCapacityPlanningRouter', () => {
       }),
     })
 
-    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({ code: 'WorkloadTimeOffReviewDenied' })
     expect(calls).toEqual([
       'authenticate:workload-token',
       'permission:team-1:member',
-      'permission:team-1:manager',
+      'manageTeam:team-1',
     ])
+  })
+
+  test('lets only a Team manager approve or reject time off, and lets a member withdraw their own', async () => {
+    const member = createFixture({ allowManager: false })
+    const saved = await seedTimeOff(member.service)
+    const send = async (router: typeof member.router, memberId: string, body: Record<string, unknown>) =>
+      await router.request(`/api/teams/team-1/workload/profiles/${memberId}/time-off/${saved.timeOff.id}`, {
+        method: 'PATCH',
+        headers: { Authorization: 'Bearer workload-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const approvedByMember = await send(member.router, 'member-1', { status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 })
+    const rejectedByMember = await send(member.router, 'member-1', { status: 'rejected', expectedRevision: 1, expectedTeamRevision: 2 })
+    const withdrawn = await send(member.router, 'member-1', { status: 'canceled', expectedRevision: 1, expectedTeamRevision: 2 })
+
+    expect(await approvedByMember.json()).toEqual({ code: 'WorkloadTimeOffReviewDenied' })
+    expect(await rejectedByMember.json()).toEqual({ code: 'WorkloadTimeOffReviewDenied' })
+    expect(await withdrawn.json()).toMatchObject({ timeOff: { status: 'canceled', revision: 2 } })
+
+    const manager = createFixture()
+    const reviewed = await seedTimeOff(manager.service, 'member-2')
+    const approved = await send(manager.router, 'member-2', { status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 })
+    expect(approved.status).toBe(200)
+    expect(await approved.json()).toMatchObject({ timeOff: { id: reviewed.timeOff.id, status: 'approved', reviewedBy: 'member-1' } })
+    expect(manager.repository.auditLog.at(-1)?.events[0]).toMatchObject({
+      eventType: 'workload.time-off.approved',
+      metadata: { notificationCandidates: [{ memberKey: 'member-2', reason: 'time-off-review' }] },
+    })
+  })
+
+  test('does not let a member change another member\'s time off status', async () => {
+    const { router, service } = createFixture({ allowManager: false })
+    const saved = await seedTimeOff(service, 'member-2')
+    const response = await router.request(`/api/teams/team-1/workload/profiles/member-2/time-off/${saved.timeOff.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer workload-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'canceled', expectedRevision: 1, expectedTeamRevision: 2 }),
+    })
+
+    expect(await response.json()).toEqual({ code: 'WorkloadTimeOffReviewDenied' })
   })
 
   test('lets a Project manager change and cancel a resource request', async () => {
