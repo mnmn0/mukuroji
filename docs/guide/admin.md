@@ -379,6 +379,14 @@ export 権限（`audit.export`。組み込みロールでは owner だけ）が�
 切れたらもう一度発行します。依頼（`audit.export-requested`）とリンクの発行（`audit.export-downloaded`）も監査ログに残ります。
 export の依頼とリンクの発行は、セキュリティポリシーの「重要操作の再認証」の対象です。
 
+監査ログに残る主な操作は次のとおりです（一覧は [`docs/event-audit.md`](../event-audit.md#監査ログに残る操作)）。
+
+- Work Item・コメント・メンバー・招待・ロール・Project・ファイル・承認などの変更
+- 計画（Milestone などの Planning の項目）の作成・更新（日付の変更を含む）・移動・archive・復元と、計画どうしの依存関係の追加・削除
+- Document の作成・タイトルの変更・移動・権限の変更・archive・復元・版の復元・公開 link の作成と失効・export（本文の編集は Document の版の履歴で確認します）
+- API キー・OAuth app・Webhook の送信先の作成・secret の差し替え・変更・失効
+- セキュリティポリシー・ID プロバイダー・データ governance などの管理設定
+
 API（`/api/audit/events`、`/api/audit/exports`）からも取得できます。仕様は [`docs/event-audit.md`](../event-audit.md) を参照してください。
 
 ## メンテナンスに切り替える

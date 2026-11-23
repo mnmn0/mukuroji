@@ -104,6 +104,24 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 
 これらの event type は Automation の `relation` trigger（[Automation](./automation.md#rule-model)）と webhook の event type（[Public API の Signed webhook](./public-api.md#signed-webhook)）でも使う。判断の経緯は [ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)。
 
+### 監査ログに残る操作
+
+#430 で、監査ログに出ていなかった次の操作を、変更と同じ DynamoDB transaction で記録するようにした。どの event も secret、token、Webhook の URL、Document の本文を含まない。
+
+| event type | 記録する操作 | entity / target | 主な `changes` / `metadata` |
+| --- | --- | --- | --- |
+| `planning-entity.dependency-added` / `planning-entity.dependency-removed` | 計画どうしの依存関係の追加・削除 | 先行と後続の両方の `planning-entity` に 1 件ずつ（sequence 0, 1）。target は `planning-dependency` | `changes` は `type`・`lagDays`・`constraint`。`metadata` は `dependencyId`、`dependencyRole`（`predecessor` / `successor`）、`relatedEntityId`、記録した側の `teamId` / `projectId` |
+| `document.created` | Document の作成（テンプレートからの作成を含む） | `document` | `title`・`parentId`・`scope`・`permission`。テンプレートからは `metadata.sourceTemplateId` |
+| `document.updated` / `document.moved` / `document.permission.updated` | タイトル・位置の変更 / 親や scope の変更 / 権限の変更（メンバーへの共有と解除を含む） | `document` | 変わった項目の前後。権限と移動を同時に変えた場合は `document.permission.updated` 1 件にまとめる |
+| `document.archived` / `document.restored` | archive と archive からの復元 | `document` | `archivedAt` |
+| `document.version.restored` | 過去の版への復元 | `document`、target は `document-version` | `metadata.versionId` |
+| `document.public-link.created` / `document.public-link.revoked` | 公開 link の作成と失効 | `document`、target は `document-public-link` | `metadata.shareId`、作成時は `expiresAt`・`allowExport`。token は含まない |
+| `document.exported` | Document の export | `document` | `metadata.format`。読み取りだけの操作なので event だけを書き、書けないときは export を返さない |
+| `oauth-app.created` / `oauth-app.rotated` / `oauth-app.revoked` | OAuth app の登録・client secret の差し替え・失効 | `oauth-app` | `metadata` は `ownerUserId`、`name`、`clientId`、`grantTypes`、`scopes`、`expiresAt` |
+| `webhook-subscription.created` / `webhook-subscription.rotated` / `webhook-subscription.updated` / `webhook-subscription.deleted` | Webhook の送信先の作成・署名 secret の差し替え・変更・削除（無効化） | `webhook-subscription` | 変更は `name`・`status`・`eventTypes`・`scopes` の前後。URL は受信側の token を含みうるので記録せず、変わったときだけ `metadata.urlChanged: true` |
+
+Document の event は通知の候補（`notificationCandidates`）を持たないので、通知は増えない。本文の編集は Document の版（`/api/documents/:documentId/versions`）が記録するので audit event にはしない。Planning の依存関係の event は計画の活動（`/api/planning/entities/:entityId/activity`）にも出て、相手の計画が閲覧者に見えないときは `relatedEntityId` を返さない。API キーの発行・差し替え・失効は以前から `api-key.*` として記録している。
+
 ### Runtime control の切り替え event
 
 operator が `bun run runtime-control:*`（GitHub Actions の deploy workflow を含む）で runtime control を切り替えると、

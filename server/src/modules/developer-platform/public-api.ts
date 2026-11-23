@@ -1951,6 +1951,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.oauthCredentials.rotateOAuthClientSecret({
           workspaceId: principal.workspaceId,
           oauthAppId,
+          actorUserId: principal.userId,
           idempotency,
         }),
       }),
@@ -1970,6 +1971,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.oauthCredentials.revokeOAuthApp({
           workspaceId: principal.workspaceId,
           oauthAppId,
+          actorUserId: principal.userId,
         }),
       }),
     )
@@ -2054,6 +2056,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.webhookSubscriptions.updateWebhookSubscription({
           workspaceId: principal.workspaceId,
           subscriptionId,
+          actorUserId: principal.userId,
           input,
           idempotency,
         }),
@@ -2079,6 +2082,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         const result = await dependencies.webhookSubscriptions.rotateWebhookSecret({
           workspaceId: principal.workspaceId,
           subscriptionId,
+          actorUserId: principal.userId,
           idempotency,
         })
         return {
@@ -2111,6 +2115,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         await dependencies.webhookSubscriptions.setWebhookSubscriptionStatus({
           workspaceId: principal.workspaceId,
           subscriptionId,
+          actorUserId: principal.userId,
           status: 'disabled',
           idempotency,
           idempotencyResponse: response,

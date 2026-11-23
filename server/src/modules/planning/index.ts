@@ -13,6 +13,8 @@ export {
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningClient,
   type PlanningEntityAuthorizationReference,
+  type PlanningDependencyChangeAction,
+  type PlanningDependencyTransactionResult,
   type PlanningEntityCreation,
   type PlanningEntityChangeAction,
   type PlanningEntityDuplication,

@@ -385,6 +385,27 @@ export type PlanningEntityTransactionResult = {
   movedDescendantCount?: number
 }
 
+/** Change of one dependency between Planning entities recorded by its audit events. */
+export type PlanningDependencyChangeAction = 'created' | 'deleted'
+
+/** Minimal result exposed while preparing the audit events of one Planning dependency change. */
+export type PlanningDependencyTransactionResult = {
+  /** Identifies a dependency change between Planning entities. */
+  kind: 'dependency'
+  /** Planning revision produced by the change. */
+  revision: number
+  /** Dependency change committed by the mutation. */
+  action: PlanningDependencyChangeAction
+  /** Dependency added or removed by the mutation. */
+  dependency: PlanningDependency
+  /** Predecessor entity as stored when the change committed. */
+  predecessor: PlanningEntityTransactionSnapshot
+  /** Successor entity as stored when the change committed. */
+  successor: PlanningEntityTransactionSnapshot
+  /** Time the mutation committed. */
+  occurredAt: string
+}
+
 /** Minimal Planning mutation result accepted by a durable receipt contribution. */
 export type PlanningMutationTransactionResult =
   | PlanningWorkItemDependencyTransactionResult
@@ -392,6 +413,7 @@ export type PlanningMutationTransactionResult =
   | PlanningUpdateCadenceTransactionResult
   | PlanningUpdatePublishTransactionResult
   | PlanningEntityTransactionResult
+  | PlanningDependencyTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
 type PlanningMutationTransactionContribution = {
@@ -655,6 +677,7 @@ export type PlanningClient = {
     workspaceId: string,
     input: CreatePlanningDependencyInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Planning dependency を削除します。 */
   deleteDependency(
@@ -662,6 +685,7 @@ export type PlanningClient = {
     dependencyId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /**
    * Creates one canonical schedule dependency between Work Items.
@@ -879,6 +903,8 @@ type PlanningMutationResult = {
   archiveChanges?: PlanningArchiveChange[]
   /** Entity lifecycle change exposed to an audit contribution. */
   entityTransactionSource?: Omit<PlanningEntityTransactionResult, 'kind' | 'revision'>
+  /** Dependency change between entities exposed to an audit contribution. */
+  dependencyTransactionSource?: Omit<PlanningDependencyTransactionResult, 'kind' | 'revision'>
 }
 
 /** One archive row write that commits with a Planning revision. */
@@ -2184,6 +2210,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     input: CreatePlanningDependencyInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const id = readIdentifier(input.id, 'Dependency ID')
@@ -2201,12 +2228,21 @@ abstract class BasePlanningClient implements PlanningClient {
           : { constraint: readDependencyConstraint(input.constraint) }),
         createdAt: now,
       }
-      requireActiveEntity(state, dependency.predecessorId)
-      requireActiveEntity(state, dependency.successorId)
+      const predecessor = requireActiveEntity(state, dependency.predecessorId)
+      const successor = requireActiveEntity(state, dependency.successorId)
       const next = { ...state, dependencies: [...state.dependencies, dependency] }
       validatePlanningState(next)
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        dependencyTransactionSource: {
+          action: 'created',
+          dependency: structuredClone(dependency),
+          predecessor: structuredClone(predecessor),
+          successor: structuredClone(successor),
+          occurredAt: now,
+        },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning dependency を削除します。 */
@@ -2215,19 +2251,36 @@ abstract class BasePlanningClient implements PlanningClient {
     dependencyId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ) {
-    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state) => {
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const id = readIdentifier(dependencyId, 'Dependency ID')
-      if (!state.dependencies.some((dependency) => dependency.id === id)) {
+      const removed = state.dependencies.find((dependency) => dependency.id === id)
+      if (!removed) {
         throw notFound('PlanningDependencyNotFound', `Dependency "${id}" was not found.`)
       }
-      return {
+      // An archived endpoint can keep its edges until the archive finishes moving them out.
+      const predecessor = findEntity(state, removed.predecessorId)
+      const successor = findEntity(state, removed.successorId)
+      const result: PlanningMutationResult = {
         state: {
           ...state,
           dependencies: state.dependencies.filter((dependency) => dependency.id !== id),
         },
+        ...(predecessor === undefined || successor === undefined
+          ? {}
+          : {
+              dependencyTransactionSource: {
+                action: 'deleted',
+                dependency: structuredClone(removed),
+                predecessor: structuredClone(predecessor),
+                successor: structuredClone(successor),
+                occurredAt: now,
+              },
+            }),
       }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return result
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -2935,6 +2988,8 @@ abstract class BasePlanningClient implements PlanningClient {
     const transactionResult: PlanningMutationTransactionResult | undefined =
       result.entityTransactionSource !== undefined
         ? { ...result.entityTransactionSource, kind: 'entity', revision: after.revision }
+        : result.dependencyTransactionSource !== undefined
+        ? { ...result.dependencyTransactionSource, kind: 'dependency', revision: after.revision }
         : result.publishedUpdate === undefined
         ? cadenceTarget === undefined
           ? result.workItemDependencyTransactionSource === undefined

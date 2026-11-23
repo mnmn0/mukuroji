@@ -198,6 +198,8 @@ export type CreateDocumentRequest = {
    * Private ACL の member validation 前に読み込んだ authorization generation です。
    */
   expectedAuthorizationRevision?: number
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -226,6 +228,8 @@ export type UpdateDocumentRequest = {
    * Private ACL の member validation 前に読み込んだ authorization generation です。
    */
   expectedAuthorizationRevision?: number
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -305,6 +309,8 @@ export type RestoreDocumentVersionRequest = {
     | readonly DocumentAuthorizationFenceSnapshot[]
     | void
   >
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -367,6 +373,8 @@ export type ChangeDocumentArchiveStateRequest = {
   parentId?: string | null
   /** Relation target 検証を source revision へ束縛する transaction guards です。 */
   relationTargetAuthorizationSnapshots?: readonly DocumentAuthorizationFenceSnapshot[]
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -395,6 +403,8 @@ export type InstantiateDocumentTemplateRequest = {
   expectedAuthorizationRevision?: number
   /** Client retry を同じ page へ束縛する key です。 */
   idempotencyKey?: string
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -539,6 +549,8 @@ export type CreateDocumentPublicShareRequest = {
   allowExport?: boolean
   /** Response loss 後も同じ share/token を復元する idempotency key です。 */
   idempotencyKey?: string
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -563,6 +575,8 @@ export type DocumentPublicShareRequest = {
   access: DocumentAccessContext
   /** Revoke 対象 share ID です。 */
   shareId?: string
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**
@@ -650,6 +664,8 @@ export type ExportDocumentRequest = {
   access: DocumentAccessContext
   /** 出力 format です。 */
   format: DocumentExportFormat
+  /** Audit context that records the change in the same transaction; absent without audit. */
+  auditContext?: MutationAuditContext
 }
 
 /**

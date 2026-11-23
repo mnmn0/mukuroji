@@ -48,6 +48,8 @@ export type RotateWebhookSecretRequest = IdempotentDomainMutationRequest & {
   workspaceId: string
   /** Subscription whose secret is rotated. */
   subscriptionId: string
+  /** User performing the mutation, recorded in the audit event. */
+  actorUserId?: string
 }
 
 /** Request used to update Webhook subscription status. */

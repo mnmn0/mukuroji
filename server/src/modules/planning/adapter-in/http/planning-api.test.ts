@@ -1213,6 +1213,91 @@ test('records Planning entity changes in audit and returns them as entity activi
   })
 })
 
+test('records a dependency change on both Planning entities in the same transaction', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const events: AuditEventV1[] = []
+    /** Stores both audit writes a route-supplied dependency transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown>; rebaseSafe?: boolean } | undefined) => {
+      expect(transaction?.rebaseSafe).toBe(true)
+      return transaction && {
+        rebaseSafe: transaction.rebaseSafe,
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          const items = isRecord(contribution)
+            ? [contribution.transactWriteItem, ...(Array.isArray(contribution.additionalTransactWriteItems)
+                ? contribution.additionalTransactWriteItems
+                : [])]
+            : []
+          for (const item of items) {
+            if (isRecord(item) && isRecord(item.Put)) {
+              expect(item.Put.TableName).toBe('AuditEventsTable')
+              events.push(normalizeAuditEvent(item.Put.Item))
+            }
+          }
+          return contribution
+        },
+      }
+    }
+    const createDependency = planning.createDependency.bind(planning)
+    planning.createDependency = (workspaceId, input, state, transaction) =>
+      createDependency(workspaceId, input, state, record(transaction))
+    const deleteDependency = planning.deleteDependency.bind(planning)
+    planning.deleteDependency = (workspaceId, dependencyId, input, state, transaction) =>
+      deleteDependency(workspaceId, dependencyId, input, state, record(transaction))
+    setTestAppDependencies({ planning })
+
+    for (const [index, id] of ['audited-a', 'audited-b'].entries()) {
+      expect((await planningApiRequest('/api/planning/entities', 'POST', {
+        ...createServerAssignedPortfolioInput(index, id),
+        id,
+      })).status).toBe(201)
+    }
+    expect((await planningApiRequest('/api/planning/dependencies', 'POST', {
+      id: 'audited-dependency',
+      predecessorId: 'audited-a',
+      successorId: 'audited-b',
+      type: 'finish-to-start',
+      lagDays: 2,
+      expectedRevision: 2,
+    })).status).toBe(201)
+    expect((await planningApiRequest('/api/planning/dependencies/audited-dependency', 'DELETE', {
+      expectedRevision: 3,
+    })).status).toBe(200)
+
+    expect(events.map((event) => [event.eventType, event.entity.id])).toEqual([
+      ['planning-entity.dependency-added', 'audited-a'],
+      ['planning-entity.dependency-added', 'audited-b'],
+      ['planning-entity.dependency-removed', 'audited-a'],
+      ['planning-entity.dependency-removed', 'audited-b'],
+    ])
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(4)
+    expect(events[0]).toMatchObject({
+      action: 'dependency-added',
+      target: { type: 'planning-dependency', id: 'audited-dependency' },
+      summary: 'Added a successor dependency on portfolio: audited-a',
+      changes: [
+        { field: 'lagDays', after: 2 },
+        { field: 'type', after: 'finish-to-start' },
+      ],
+      metadata: {
+        actorMemberKey: 'demo@example.com',
+        dependencyRole: 'predecessor',
+        relatedEntityId: 'audited-b',
+        planningRevision: 3,
+      },
+    })
+    expect(events[3]).toMatchObject({
+      changes: [
+        { field: 'lagDays', before: 2 },
+        { field: 'type', before: 'finish-to-start' },
+      ],
+      metadata: { dependencyRole: 'successor', relatedEntityId: 'audited-a', planningRevision: 4 },
+    })
+  })
+})
+
 test('shows Workspace-scoped entity history to an Enterprise Workspace grant after a move into a Project', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
   const workspaceId = 'user#demo@example.com'
