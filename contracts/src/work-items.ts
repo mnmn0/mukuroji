@@ -129,7 +129,8 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * The policy uses the Workspace time zone, the Workspace working weekdays, and every Workspace day
  * off: company holidays plus the national holidays when the Workspace uses them.
  *
- * @param settings - Workspace working weekdays, company holidays, and national holiday choice.
+ * @param settings - Workspace time zone, working weekdays, company holidays, and national holiday
+ *   choice; a missing time zone means Japan time.
  * @param nationalHolidayDates - National holiday dates synced from the Cabinet Office; the bundled
  *   national holidays are used when omitted.
  * @param referenceDate - Date the kept days off are nearest to when there are too many; today in
@@ -137,12 +138,13 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * @returns A new policy that shares no arrays with the settings.
  */
 export function createWorkspaceWorkItemCalendarPolicy(
-  settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'>,
+  settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'> &
+    Partial<Pick<WorkspaceCalendarSettings, 'timeZone'>>,
   nationalHolidayDates?: readonly string[],
   referenceDate?: string,
 ): WorkItemScheduleCalendarPolicy {
   return {
-    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+    timeZone: settings.timeZone ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
     workingWeekdays: [...settings.workingWeekdays],
     holidays: listWorkspaceDaysOff(settings, nationalHolidayDates, referenceDate),
   }

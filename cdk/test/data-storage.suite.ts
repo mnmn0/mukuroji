@@ -677,13 +677,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
     ]],
   };
-  const webOrigins = {
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      [{ 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] }, distributionOrigin],
-      [distributionOrigin],
-    ],
-  };
+  const webOrigins = [distributionOrigin];
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {
