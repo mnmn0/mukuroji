@@ -563,6 +563,32 @@ export type TimeTrackingReportInput = {
   budgetScopeId?: string
 }
 
+/** Input of {@link TimeTrackingService.summarizeProjectBudgets}. */
+export type ProjectBudgetConsumptionInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team that owns the Projects. */
+  teamId: string
+  /** Projects whose budgets and costs are read; the caller already checked cost visibility. */
+  projectIds: readonly string[]
+  /** IANA timezone that bounds the local budget periods. */
+  timeZone: string
+  /** Instant the cost is totalled up to. */
+  now: Date
+  /** Most entries the read may total before it fails closed. */
+  entryLimit: number
+}
+
+/** Budget of one Project and the billable cost recorded against it. */
+export type ProjectBudgetConsumption = {
+  /** Stored budget. */
+  budget: TimeBudget
+  /** Billable cost in the budget currency within the period up to now, in minor units. */
+  actualCostMinor: number
+  /** Whether billable cost was recorded in another currency. */
+  hasOtherCurrencyCost: boolean
+}
+
 /**
  * Caller of a report, used to decide whose entries the report may total.
  *
@@ -1676,6 +1702,81 @@ export class TimeTrackingService {
       costsRedacted: !input.includeCosts,
       canManageTeam: input.viewer?.canManage ?? true,
     }
+  }
+
+  /**
+   * Reads the budget of each Project and totals the billable cost recorded against it within its
+   * period up to now, with one bounded read of the Team's time entries.
+   *
+   * The caller decides which Projects' costs the reader may see; this method totals every
+   * member's billable entries in the given Projects, as a Project budget report does for a
+   * manager of those Projects.
+   *
+   * @param input - Team, Projects, calendar, clock, and entry read limit.
+   * @returns Budget and cost of each Project that has a budget, keyed by Project ID.
+   * @throws TimeTrackingError 413 when the budget periods hold more entries than the limit.
+   */
+  async summarizeProjectBudgets(input: ProjectBudgetConsumptionInput): Promise<Map<string, ProjectBudgetConsumption>> {
+    validateTimeZone(input.timeZone)
+    const budgets = new Map<string, TimeBudget>()
+    for (const projectId of input.projectIds) {
+      const budget = await this.repository.getBudget(input.workspaceId, 'project', projectId)
+      if (budget) budgets.set(projectId, budget)
+    }
+    const result = new Map<string, ProjectBudgetConsumption>()
+    if (budgets.size === 0) return result
+    const nowInstant = input.now.toISOString()
+    const periods = new Map<string, { from?: string; to: string }>()
+    for (const [projectId, budget] of budgets) {
+      const from = budget.periodFrom === undefined
+        ? undefined
+        : new Date(resolveLocalDateStart(budget.periodFrom, input.timeZone)).toISOString()
+      const periodEnd = budget.periodTo === undefined
+        ? nowInstant
+        : new Date(resolveLocalDateStart(addCalendarDays(budget.periodTo, 1), input.timeZone)).toISOString()
+      const to = periodEnd < nowInstant ? periodEnd : nowInstant
+      periods.set(projectId, { ...(from === undefined ? {} : { from }), to })
+    }
+    const starts = [...periods.values()].map((period) => period.from)
+    // A budget without a start reads every entry; otherwise the read starts at the earliest start.
+    const earliest = starts.includes(undefined)
+      ? undefined
+      : starts.flatMap((start) => start === undefined ? [] : [start]).sort()[0]
+    const readable = [...periods.values()].some((period) => period.from === undefined || period.from < period.to)
+    const entries = !readable
+      ? []
+      : await this.listAllEntries({
+          workspaceId: input.workspaceId,
+          teamId: input.teamId,
+          ...(earliest === undefined ? {} : { from: earliest }),
+          to: nowInstant,
+          projectIds: new Set(budgets.keys()),
+          limit: input.entryLimit + 1,
+        })
+    if (entries.length > input.entryLimit) {
+      throw new TimeTrackingError(
+        413,
+        'PortfolioTooLarge',
+        `This Team has more than ${input.entryLimit} time entries in its Project budget periods.`,
+      )
+    }
+    for (const [projectId, budget] of budgets) {
+      const period = periods.get(projectId)
+      let actualCostMinor = 0
+      let hasOtherCurrencyCost = false
+      if (period && (period.from === undefined || period.from < period.to)) {
+        const from = period.from ?? new Date(0).toISOString()
+        for (const entry of entries) {
+          if (entry.projectId !== projectId) continue
+          const cost = costForEntry(entry, clippedEntryMinutes(entry, from, period.to), true)
+          if (cost === undefined) continue
+          if (entry.currency === budget.currency) actualCostMinor += cost
+          else hasOtherCurrencyCost = true
+        }
+      }
+      result.set(projectId, { budget, actualCostMinor, hasOtherCurrencyCost })
+    }
+    return result
   }
 
   /** Builds daily and weekly timesheet rows with DST-aware local boundaries. */

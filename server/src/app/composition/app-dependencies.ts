@@ -63,6 +63,7 @@ import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-tick
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
+import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
 import type { WeeklyReportStore } from '../../modules/weekly-reports'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
@@ -213,6 +214,8 @@ export interface WorkItemDependencies {
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
+  /** Provides each Team's monthly portfolio snapshots. */
+  portfolioSnapshots: TeamPortfolioSnapshotStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */

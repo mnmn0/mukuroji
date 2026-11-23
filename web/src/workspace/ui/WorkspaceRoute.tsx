@@ -73,6 +73,12 @@ const dashboardRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.dashboard.title',
   descriptionKey: 'workspace.dashboard.description',
 }
+const portfolioDashboardRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'dashboard',
+  eyebrowKey: 'portfolioDashboard.eyebrow',
+  titleKey: 'portfolioDashboard.title',
+  descriptionKey: 'portfolioDashboard.description',
+}
 const homeRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'home',
   eyebrowKey: 'workspace.home.eyebrow',
@@ -729,6 +735,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/dashboard', pathname)) {
     return dashboardRouteMetadata
+  }
+
+  if (matchPath('/dashboard/portfolio', pathname)) {
+    return portfolioDashboardRouteMetadata
   }
 
   if (matchPath('/home', pathname)) {

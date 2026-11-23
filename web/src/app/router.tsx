@@ -62,6 +62,10 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/DashboardPage')).DashboardPage),
                   },
                   {
+                    path: '/dashboard/portfolio',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/PortfolioDashboardPage')).PortfolioDashboardPage),
+                  },
+                  {
                     path: '/home',
                     lazy: lazyPage(async () => (await import('../pages/workspace/HomePage')).HomePage),
                   },

@@ -127,6 +127,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get scheduleBaselines() {
     return requireAppDependencies().workItems.scheduleBaselines
   },
+  get portfolioSnapshots() {
+    return requireAppDependencies().workItems.portfolioSnapshots
+  },
   get collections() {
     return requireAppDependencies().workItems.collections
   },

@@ -8,6 +8,8 @@ export {
   type CloseTimePeriodInput,
   type CreateTimeEntryInput,
   type ListTimeEntriesInput,
+  type ProjectBudgetConsumption,
+  type ProjectBudgetConsumptionInput,
   type ReopenTimePeriodInput,
   type SaveTimeBudgetInput,
   type TimeTrackingEstimateSource,
