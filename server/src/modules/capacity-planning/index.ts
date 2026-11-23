@@ -6,6 +6,7 @@ export {
   createDefaultWorkingSchedule,
   DynamoDbCapacityPlanningRepository,
   InMemoryCapacityPlanningRepository,
+  type CapacityPlanningAuditWrite,
   type CapacityPlanningDataSource,
   type CapacityPlanningRepository,
   type CapacityPlanningState,

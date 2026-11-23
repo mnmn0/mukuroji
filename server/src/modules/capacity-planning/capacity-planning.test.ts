@@ -4,11 +4,13 @@ import {
   type ResourceAssignment,
   type WorkloadMemberProfile,
 } from '@mukuroji/contracts'
+import { createMutationAuditContext } from '../audit'
 import {
   buildWorkloadSnapshot,
   CapacityPlanningService,
   createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
+  type CapacityPlanningAuditWrite,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
@@ -678,6 +680,169 @@ describe('capacity planning mutations', () => {
     expect((await repository.getState('workspace-1', 'team-1')).profiles).toEqual([])
   })
 })
+
+describe('capacity planning audit', () => {
+  test('passes one audit event per workload change to the repository write', async () => {
+    const writes: CapacityPlanningAuditWrite[] = []
+    const repository = new RecordingCapacityPlanningRepository(writes)
+    let sequence = 0
+    const service = new CapacityPlanningService(
+      repository,
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => new Date('2026-08-01T00:00:00.000Z'), createId: () => `generated-${++sequence}` },
+    )
+    const audit = createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'actor-1', kind: 'user' },
+      idempotencyKey: 'capacity-request',
+      request: { method: 'POST', path: '/api/teams/team-1/workload' },
+      source: { kind: 'api' },
+    })
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: ['typescript'],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    }, audit)
+    await service.saveTimeOff({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      id: 'time-off-1',
+      fromDate: '2026-08-10',
+      toDate: '2026-08-11',
+      reason: 'Hospital visit',
+      status: 'approved',
+      expectedRevision: 1,
+      expectedTeamRevision: 1,
+      actorMemberId: 'member-1',
+    }, audit)
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: 'Confidential acquisition',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 480,
+      confidential: true,
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    }, audit)
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 240,
+      plannedEffortMinutes: 240,
+      confidential: false,
+      status: 'tentative',
+      expectedTeamRevision: 3,
+      actorMemberId: 'member-1',
+    }, audit)
+    await service.updateAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      assignmentId: assignment.id,
+      status: 'canceled',
+      expectedRevision: 1,
+      expectedTeamRevision: 4,
+      actorMemberId: 'member-1',
+    }, audit)
+    await service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      status: 'canceled',
+      expectedRevision: 3,
+      expectedTeamRevision: 5,
+      actorMemberId: 'member-1',
+    }, { canViewConfidential: true }, audit)
+
+    expect(writes.map((write) => write.event.eventType)).toEqual([
+      'workload-profile.created',
+      'workload-time-off.created',
+      'resource-request.created',
+      'resource-assignment.created',
+      'resource-assignment.updated',
+      'resource-request.cancelled',
+    ])
+    expect(writes.every((write) => write.context === audit)).toBe(true)
+    const serialized = JSON.stringify(writes.map((write) => write.event))
+    expect(serialized).not.toContain('Hospital visit')
+    expect(serialized).not.toContain('Confidential acquisition')
+    expect(writes[0]?.event).toMatchObject({
+      entityType: 'workload-profile',
+      entityId: 'team/team-1/member/member-1',
+      metadata: { teamId: 'team-1', memberId: 'member-1' },
+    })
+  })
+
+  test('writes without an audit event when no audit context is given', async () => {
+    const writes: CapacityPlanningAuditWrite[] = []
+    const service = new CapacityPlanningService(
+      new RecordingCapacityPlanningRepository(writes),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+    )
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })
+    expect(writes).toEqual([])
+  })
+})
+
+/** In-memory repository that records the audit event handed to each write. */
+class RecordingCapacityPlanningRepository extends InMemoryCapacityPlanningRepository {
+  /** Audit writes received, in order. */
+  private readonly writes: CapacityPlanningAuditWrite[]
+
+  /**
+   * @param writes - Array that receives every audit write.
+   */
+  constructor(writes: CapacityPlanningAuditWrite[]) {
+    super()
+    this.writes = writes
+  }
+
+  /**
+   * Records the audit write, then saves the state in memory.
+   *
+   * @param workspaceId - Workspace ID.
+   * @param teamId - Team ID.
+   * @param state - Next state.
+   * @param expectedRevision - Expected Team revision.
+   * @param audit - Audit write for the change.
+   */
+  override async saveState(
+    workspaceId: string,
+    teamId: string,
+    state: CapacityPlanningState,
+    expectedRevision: number,
+    audit?: CapacityPlanningAuditWrite,
+  ): Promise<void> {
+    await super.saveState(workspaceId, teamId, state, expectedRevision)
+    if (audit) this.writes.push(audit)
+  }
+}
 
 /** Creates a deterministic member profile fixture. */
 function createProfile(memberId: string, timeZone: string): WorkloadMemberProfile {

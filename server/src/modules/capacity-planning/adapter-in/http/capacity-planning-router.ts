@@ -6,6 +6,7 @@ import type {
   WorkingSchedule,
   WorkingScheduleDay,
 } from '@mukuroji/contracts'
+import type { MutationAuditContext } from '../../../audit'
 import {
   CapacityPlanningError,
   type CapacityPlanningService,
@@ -59,6 +60,8 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
   verifyWorkItem(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<string | undefined>
   /** Returns the service bound to the current app. */
   getCapacityPlanning(): CapacityPlanningService
+  /** Builds the audit context recorded with a workload mutation; omitted when audit is not wired. */
+  createAuditContext?(context: Context, principal: Principal, body: unknown): MutationAuditContext
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps authentication, authorization, validation, and persistence failures to HTTP. */
@@ -114,7 +117,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected profile revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ profile: result })
     })
   })
@@ -147,7 +150,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected profile revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ timeOff: result })
     })
   })
@@ -170,7 +173,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         confidential: readRequiredBoolean(body.confidential, 'Confidential'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ request: result }, 201)
     })
   })
@@ -201,7 +204,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      }, access)
+      }, access, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ request: result })
     })
   })
@@ -246,7 +249,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         status: readAssignmentStatus(body.status),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ assignment: result }, 201)
     })
   })
@@ -273,7 +276,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected assignment revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, dependencies.createAuditContext?.(context, principal, body))
       return context.json({ assignment: result })
     })
   })

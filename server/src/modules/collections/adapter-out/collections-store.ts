@@ -8,8 +8,9 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { COLLECTION_LIMIT, type WorkItemCollection } from '@mukuroji/contracts'
+import { createMutationAuditEventPut, getConfiguredAuditTableName } from '../../audit'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
-import type { CollectionsStore, CollectionWorkItemFence } from '../application/collections'
+import type { CollectionAuditWrite, CollectionsStore, CollectionWorkItemFence } from '../application/collections'
 import {
   CollectionError,
   isCollectionCreateFingerprint,
@@ -157,6 +158,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   private readonly workItemFenceCheck: CollectionWorkItemFenceCheck | undefined
   /** Builds the request caller's Project membership condition, when bound. */
   private readonly projectAccessCheck: CollectionProjectAccessCheck | undefined
+  /** Audit event table that receives each change's event in the same transaction, when configured. */
+  private readonly auditTableName: string | undefined
 
   /**
    * Creates the adapter.
@@ -166,6 +169,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * @param checks - Request-local caller conditions.
    * @param workItemFenceCheck - Builds the Work Item revision condition for reference changes.
    * @param projectAccessCheck - Request-local Project membership condition builder.
+   * @param auditTableName - Audit event table; defaults to the configured one.
    */
   constructor(
     tableName: string,
@@ -173,12 +177,14 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     checks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     workItemFenceCheck?: CollectionWorkItemFenceCheck,
     projectAccessCheck?: CollectionProjectAccessCheck,
+    auditTableName: string | undefined = getConfiguredAuditTableName(),
   ) {
     this.tableName = tableName
     this.client = client
     this.checks = structuredClone(checks)
     this.workItemFenceCheck = workItemFenceCheck
     this.projectAccessCheck = projectAccessCheck
+    this.auditTableName = auditTableName
   }
 
   /**
@@ -192,7 +198,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     checks: readonly PlanningCallerAuthorizationConditionCheck[],
     projectAccessCheck?: CollectionProjectAccessCheck,
   ): CollectionsStore {
-    return new DynamoDbCollectionsStore(this.tableName, this.client, checks, this.workItemFenceCheck, projectAccessCheck)
+    return new DynamoDbCollectionsStore(this.tableName, this.client, checks, this.workItemFenceCheck, projectAccessCheck, this.auditTableName)
   }
 
   /**
@@ -416,10 +422,18 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * @param collection - Complete next state.
    * @param expectedRevision - Stored revision, or 0 to create.
    * @param workItemFence - Work Item whose readability authorized the change.
+   * @param audit - Audit event committed in the same transaction, when audit is configured.
    */
-  async put(workspaceId: string, collection: StoredCollection, expectedRevision: number, workItemFence?: CollectionWorkItemFence): Promise<void> {
+  async put(
+    workspaceId: string,
+    collection: StoredCollection,
+    expectedRevision: number,
+    workItemFence?: CollectionWorkItemFence,
+    audit?: CollectionAuditWrite,
+  ): Promise<void> {
     this.requireChecks()
     const fence = workItemFence ? await this.workItemChecks(workspaceId, workItemFence) : []
+    const auditItems = this.auditItems(audit)
     // A counter that disappears after verification is rebuilt once and the creation retried;
     // a second miss is unexpected.
     for (let attempt = 1; ; attempt += 1) {
@@ -440,7 +454,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
           },
           ...revisionCondition(expectedRevision),
         },
-      }, ...counter, ...fence, ...this.checks]
+      }, ...counter, ...fence, ...this.checks, ...auditItems]
       const transactionSize = transactItems.length
       try {
         await this.client.send(new TransactWriteCommand({ TransactItems: transactItems }))
@@ -457,7 +471,13 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         if (fence.some((_, offset) => isOnlyConditionFailure(error, transactionSize, 1 + counter.length + offset))) {
           throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
         }
-        storageFailure(error, transactionSize, 1 + counter.length + fence.length, expectedRevision === 0 ? 'create' : 'update')
+        storageFailure(
+          error,
+          transactionSize,
+          1 + counter.length + fence.length,
+          expectedRevision === 0 ? 'create' : 'update',
+          transactionSize - auditItems.length,
+        )
       }
     }
   }
@@ -469,9 +489,17 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
    * @param deletion - Creation details kept in the deletion marker.
+   * @param audit - Audit event committed in the same transaction, when audit is configured.
    */
-  async delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void> {
+  async delete(
+    workspaceId: string,
+    collectionId: string,
+    expectedRevision: number,
+    deletion: CollectionDeletion,
+    audit?: CollectionAuditWrite,
+  ): Promise<void> {
     this.requireChecks()
+    const auditItems = this.auditItems(audit)
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [{
@@ -494,11 +522,22 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
             // An existing marker next to a live row is contradictory state; never overwrite it.
             ConditionExpression: 'attribute_not_exists(recordKey)',
           },
-        }, ...this.checks],
+        }, ...this.checks, ...auditItems],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 3, 3, 'delete')
+      storageFailure(error, this.checks.length + 3 + auditItems.length, 3, 'delete', this.checks.length + 3)
     }
+  }
+
+  /**
+   * Builds the audit event write of one change.
+   *
+   * @param audit - Audit event of the change, if any.
+   * @returns The audit Put, or nothing when audit is not configured or not requested.
+   */
+  private auditItems(audit: CollectionAuditWrite | undefined): CollectionTransactItem[] {
+    const put = audit && createMutationAuditEventPut(this.auditTableName, audit.context, audit.event)
+    return put ? [put] : []
   }
 
   /**
@@ -707,6 +746,8 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
   private readonly collections = new Map<string, StoredCollection>()
   /** Deletion markers keyed by Workspace and Collection. */
   private readonly deleted = new Map<string, CollectionDeletion>()
+  /** Audit events handed to committed writes, in order, so tests can inspect them. */
+  readonly auditWrites: CollectionAuditWrite[] = []
   /** Current canonical Work Item revision, or undefined when it no longer exists. */
   private readonly readWorkItemRevision: ((teamId: string, issueId: string) => number | undefined) | undefined
 
@@ -738,13 +779,13 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       listSummaries: (workspaceId) => this.listSummaries(workspaceId),
       get: (workspaceId, collectionId) => this.get(workspaceId, collectionId),
       readDeletion: (workspaceId, collectionId) => this.readDeletion(workspaceId, collectionId),
-      delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
-      put: async (workspaceId, collection, expectedRevision, workItemFence) => {
+      delete: (workspaceId, collectionId, expectedRevision, deletion, audit) => this.delete(workspaceId, collectionId, expectedRevision, deletion, audit),
+      put: async (workspaceId, collection, expectedRevision, workItemFence, audit) => {
         const projectId = workItemFence?.accessProjectId ?? workItemFence?.activeProjectId
         if (workItemFence && (projectId !== undefined || workItemFence.activeTeamOnly === true)) {
           await projectAccessCheck(workspaceId, workItemFence.teamId, projectId, workItemFence.accessProjectId !== undefined)
         }
-        await this.put(workspaceId, collection, expectedRevision, workItemFence)
+        await this.put(workspaceId, collection, expectedRevision, workItemFence, audit)
       },
     }
   }
@@ -793,8 +834,15 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
    * @param collection - Complete next state.
    * @param expectedRevision - Stored revision, or 0 to create.
    * @param workItemFence - Work Item whose observed revision must still be current.
+   * @param audit - Audit event recorded with the write.
    */
-  async put(workspaceId: string, collection: StoredCollection, expectedRevision: number, workItemFence?: CollectionWorkItemFence): Promise<void> {
+  async put(
+    workspaceId: string,
+    collection: StoredCollection,
+    expectedRevision: number,
+    workItemFence?: CollectionWorkItemFence,
+    audit?: CollectionAuditWrite,
+  ): Promise<void> {
     const key = memoryKey(workspaceId, collection.collectionId)
     if ((this.collections.get(key)?.revision ?? 0) !== expectedRevision || (expectedRevision === 0 && this.deleted.has(key))) throw conflict()
     if (expectedRevision === 0 && (await this.listSummaries(workspaceId)).length >= COLLECTION_LIMIT) throw limitReached()
@@ -805,6 +853,7 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
       throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
     }
     this.collections.set(key, structuredClone(collection))
+    if (audit) this.auditWrites.push(audit)
   }
 
   /**
@@ -814,12 +863,20 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
    * @param deletion - Creation details kept in the deletion marker.
+   * @param audit - Audit event recorded with the deletion.
    */
-  async delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void> {
+  async delete(
+    workspaceId: string,
+    collectionId: string,
+    expectedRevision: number,
+    deletion: CollectionDeletion,
+    audit?: CollectionAuditWrite,
+  ): Promise<void> {
     const key = memoryKey(workspaceId, collectionId)
     if (this.collections.get(key)?.revision !== expectedRevision) throw conflict()
     this.collections.delete(key)
     this.deleted.set(key, { ...deletion })
+    if (audit) this.auditWrites.push(audit)
   }
 }
 
@@ -937,6 +994,8 @@ function conflict(): CollectionError {
  * @param authorizationStart - Index of the first caller authorization condition check.
  * @param operation - Write kind; it decides what a failed item after the main row means.
  *   A creation's counter failure is classified by the caller before this runs.
+ * @param authorizationEnd - Index after the last caller authorization check; the audit event
+ *   write follows it and its failure is reported as a conflict, not an access change.
  * @returns Never; always throws a Collection error.
  */
 function storageFailure(
@@ -944,11 +1003,12 @@ function storageFailure(
   transactionSize = 0,
   authorizationStart = transactionSize,
   operation: 'create' | 'update' | 'delete' = 'update',
+  authorizationEnd = transactionSize,
 ): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
   if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
     const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
-    if (codes.length === transactionSize && codes.slice(authorizationStart).includes('ConditionalCheckFailed')) {
+    if (codes.length === transactionSize && codes.slice(authorizationStart, authorizationEnd).includes('ConditionalCheckFailed')) {
       throw new CollectionError(403, 'CollectionAuthorizationChanged', 'Your Workspace access changed. Sign in again or ask an administrator.')
     }
     /**

@@ -12,6 +12,7 @@ import { requireAppDependencies, workspaceDependencies } from '../shared/app-dep
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
+  createApiMutationContext,
   requireTeamPermission,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -157,6 +158,7 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
     },
     verifyWorkItem: async (principal, teamId, workItemId, minimum) =>
       (await loadAuthorizedTeamIssue(principal, teamId, workItemId, minimum)).detail.issue.assignedProjectId ?? undefined,
+    createAuditContext: (context, principal, body) => createApiMutationContext(context, principal, body),
     getCapacityPlanning: () => capacityPlanningDependencies.capacityPlanningService,
     readJson,
     mapError: toCapacityPlanningErrorResponse,

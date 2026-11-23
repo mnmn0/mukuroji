@@ -1,8 +1,16 @@
 import {
   GetCommand,
   PutCommand,
+  TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  getConfiguredAuditTableName,
+  type MutationAuditContext,
+  type MutationAuditEventInput,
+} from '../audit'
 import type {
   CapacityPlanningGranularity,
   ResourceAssignment,
@@ -92,7 +100,34 @@ export interface CapacityPlanningRepository {
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAuditWrite,
   ): Promise<void>
+}
+
+/** Audit event committed in the same write as one capacity planning change. */
+export type CapacityPlanningAuditWrite = {
+  /** Request audit context of the change. */
+  context: MutationAuditContext
+  /** Event describing the change. */
+  event: MutationAuditEventInput
+}
+
+/** Change of one capacity planning record, before it becomes an audit event. */
+type CapacityPlanningAuditChange = {
+  /** Audit event type, such as `resource-request.created`. */
+  eventType: string
+  /** Audit entity type. */
+  entityType: string
+  /** Workspace-unique entity ID, prefixed by its Team. */
+  entityId: string
+  /** Audit action code. */
+  action: string
+  /** Allowlisted fields before the change; absent for a created record. */
+  before?: Record<string, unknown>
+  /** Allowlisted fields after the change. */
+  after: Record<string, unknown>
+  /** Additional metadata. */
+  metadata?: Record<string, unknown>
 }
 
 /** Storage shape kept private to the capacity-planning module. */
@@ -342,7 +377,10 @@ export class CapacityPlanningService {
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
-  async saveMemberProfile(input: SaveWorkloadMemberProfileInput): Promise<WorkloadMemberProfile> {
+  async saveMemberProfile(
+    input: SaveWorkloadMemberProfileInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkloadMemberProfile> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.memberId, 'Member ID')
@@ -351,8 +389,10 @@ export class CapacityPlanningService {
     validateSchedule(input.schedule)
     const skills = normalizeStringList(input.skills, 'Skills', MAX_SKILLS)
     const holidays = normalizeHolidays(input.holidays)
+    let previous: WorkloadMemberProfile | undefined
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       const current = state.profiles.find((profile) => profile.memberId === input.memberId)
+      previous = current && clone(current)
       if ((current?.revision ?? 0) !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'WorkloadProfileRevisionConflict', 'The workload profile was changed by another request.')
       }
@@ -374,11 +414,19 @@ export class CapacityPlanningService {
       }
       replaceById(state.profiles, profile, 'memberId')
       return profile
-    })
+    }, auditContext, (profile) => ({
+      eventType: previous === undefined ? 'workload-profile.created' : 'workload-profile.updated',
+      entityType: 'workload-profile',
+      entityId: memberAuditEntityId(profile.teamId, profile.memberId),
+      action: previous === undefined ? 'created' : 'updated',
+      ...(previous === undefined ? {} : { before: auditedProfileFields(previous) }),
+      after: auditedProfileFields(profile),
+      metadata: { memberId: profile.memberId },
+    }))
   }
 
   /** Saves or replaces one member's planned absence. */
-  async saveTimeOff(input: SaveWorkloadTimeOffInput): Promise<WorkloadTimeOff> {
+  async saveTimeOff(input: SaveWorkloadTimeOffInput, auditContext?: MutationAuditContext): Promise<WorkloadTimeOff> {
     validateIdentifier(input.memberId, 'Member ID')
     validateDateRange(input.fromDate, input.toDate)
     if (input.minutesPerDay !== undefined) validateNonNegativeInteger(input.minutesPerDay, 'Time-off minutes')
@@ -392,22 +440,32 @@ export class CapacityPlanningService {
       status: input.status,
       revision: 1,
     }
+    let previousTimeOff: WorkloadTimeOff | undefined
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       const profile = requireProfile(state, input.memberId)
       if (profile.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'WorkloadProfileRevisionConflict', 'The workload profile was changed by another request.')
       }
       const previous = profile.timeOff.find((timeOff) => timeOff.id === nextTimeOff.id)
+      previousTimeOff = previous && clone(previous)
       const saved: WorkloadTimeOff = { ...nextTimeOff, revision: (previous?.revision ?? 0) + 1 }
       profile.timeOff = [...profile.timeOff.filter((timeOff) => timeOff.id !== saved.id), saved]
       profile.revision += 1
       profile.updatedAt = this.now().toISOString()
       return saved
-    })
+    }, auditContext, (saved) => ({
+      eventType: previousTimeOff === undefined ? 'workload-time-off.created' : 'workload-time-off.updated',
+      entityType: 'workload-profile',
+      entityId: memberAuditEntityId(input.teamId, input.memberId),
+      action: previousTimeOff === undefined ? 'created' : 'updated',
+      ...(previousTimeOff === undefined ? {} : { before: auditedTimeOffFields(previousTimeOff) }),
+      after: auditedTimeOffFields(saved),
+      metadata: { memberId: input.memberId, timeOffId: saved.id },
+    }))
   }
 
   /** Creates a resource request. */
-  async createRequest(input: CreateResourceRequestInput): Promise<ResourceRequest> {
+  async createRequest(input: CreateResourceRequestInput, auditContext?: MutationAuditContext): Promise<ResourceRequest> {
     validateRequestFields(input)
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       if (state.requests.length >= MAX_REQUESTS) {
@@ -433,7 +491,14 @@ export class CapacityPlanningService {
       }
       state.requests.push(request)
       return request
-    })
+    }, auditContext, (request) => ({
+      eventType: 'resource-request.created',
+      entityType: 'resource-request',
+      entityId: `team/${request.teamId}/request/${request.id}`,
+      action: 'created',
+      after: auditedRequestFields(request),
+      metadata: requestAuditMetadata(request),
+    }))
   }
 
   /** Reads one Team resource request for transport-layer authorization. */
@@ -453,6 +518,7 @@ export class CapacityPlanningService {
    *
    * @param input - Changed request fields, an optional cancel status, and expected revisions.
    * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
+   * @param auditContext - Request audit context recorded with the change, when audit is configured.
    * @returns The saved request.
    */
   async updateRequest(
@@ -461,12 +527,15 @@ export class CapacityPlanningService {
       /** Whether the actor may read and change confidential requests. */
       canViewConfidential: boolean
     },
+    auditContext?: MutationAuditContext,
   ): Promise<ResourceRequest> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.requestId, 'Request ID')
+    let previousRequest: ResourceRequest | undefined
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       const current = requireRequest(state, input.requestId)
+      previousRequest = clone(current)
       if (current.confidential && !access.canViewConfidential) {
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
       }
@@ -513,11 +582,24 @@ export class CapacityPlanningService {
       replaceById(state.requests, next, 'id')
       refreshRequestStatuses(state, timestamp)
       return clone(requireRequest(state, next.id))
-    })
+    }, auditContext, (request) => ({
+      eventType: request.status === 'canceled' && previousRequest?.status !== 'canceled'
+        ? 'resource-request.cancelled'
+        : 'resource-request.updated',
+      entityType: 'resource-request',
+      entityId: `team/${request.teamId}/request/${request.id}`,
+      action: request.status === 'canceled' && previousRequest?.status !== 'canceled' ? 'cancelled' : 'updated',
+      ...(previousRequest === undefined ? {} : { before: auditedRequestFields(previousRequest) }),
+      after: auditedRequestFields(request),
+      metadata: requestAuditMetadata(request),
+    }))
   }
 
   /** Creates an assignment for a profile and optionally fulfills a request. */
-  async createAssignment(input: CreateResourceAssignmentInput): Promise<ResourceAssignment> {
+  async createAssignment(
+    input: CreateResourceAssignmentInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       if (state.assignments.length >= MAX_ASSIGNMENTS) {
@@ -558,7 +640,14 @@ export class CapacityPlanningService {
       state.assignments.push(assignment)
       refreshRequestStatuses(state, timestamp)
       return assignment
-    })
+    }, auditContext, (assignment) => ({
+      eventType: 'resource-assignment.created',
+      entityType: 'resource-assignment',
+      entityId: `team/${assignment.teamId}/assignment/${assignment.id}`,
+      action: 'created',
+      after: auditedAssignmentFields(assignment),
+      metadata: assignmentAuditMetadata(assignment),
+    }))
   }
 
   /** Reads one Team assignment for transport-layer authorization. */
@@ -573,10 +662,15 @@ export class CapacityPlanningService {
   }
 
   /** Moves, reassigns, or resizes an assignment using optimistic concurrency. */
-  async updateAssignment(input: UpdateResourceAssignmentInput): Promise<ResourceAssignment> {
+  async updateAssignment(
+    input: UpdateResourceAssignmentInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<ResourceAssignment> {
+    let previousAssignment: ResourceAssignment | undefined
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       const current = state.assignments.find((assignment) => assignment.id === input.assignmentId)
       if (!current) throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
+      previousAssignment = clone(current)
       if (current.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'ResourceAssignmentRevisionConflict', 'The resource assignment was changed by another request.')
       }
@@ -612,7 +706,15 @@ export class CapacityPlanningService {
       replaceById(state.assignments, next, 'id')
       refreshRequestStatuses(state, timestamp)
       return next
-    })
+    }, auditContext, (assignment) => ({
+      eventType: 'resource-assignment.updated',
+      entityType: 'resource-assignment',
+      entityId: `team/${assignment.teamId}/assignment/${assignment.id}`,
+      action: 'updated',
+      ...(previousAssignment === undefined ? {} : { before: auditedAssignmentFields(previousAssignment) }),
+      after: auditedAssignmentFields(assignment),
+      metadata: assignmentAuditMetadata(assignment),
+    }))
   }
 
   /** Calculates a proposed reschedule or reassignment without persisting it. */
@@ -689,12 +791,24 @@ export class CapacityPlanningService {
     return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
   }
 
-  /** Applies one state mutation with a Team-wide optimistic concurrency check. */
+  /**
+   * Applies one state mutation with a Team-wide optimistic concurrency check.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param expectedRevision - Team revision the caller read.
+   * @param mutate - Changes the state and returns the saved record.
+   * @param auditContext - Request audit context; with it the change's audit event commits in the same write.
+   * @param describe - Describes the saved record's change for its audit event.
+   * @returns The saved record.
+   */
   private async mutateState<T>(
     workspaceId: string,
     teamId: string,
     expectedRevision: number,
     mutate: (state: CapacityPlanningState) => T,
+    auditContext?: MutationAuditContext,
+    describe?: (result: T) => CapacityPlanningAuditChange,
   ): Promise<T> {
     const current = await this.repository.getState(workspaceId, teamId)
     if (current.revision !== expectedRevision) {
@@ -707,8 +821,143 @@ export class CapacityPlanningService {
     if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
       throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team workload plan is too large to save.')
     }
-    await this.repository.saveState(workspaceId, teamId, next, current.revision)
+    const change = auditContext && describe ? describe(result) : undefined
+    await this.repository.saveState(
+      workspaceId,
+      teamId,
+      next,
+      current.revision,
+      auditContext && change
+        ? {
+            context: auditContext,
+            event: {
+              directoryId: workspaceId,
+              eventType: change.eventType,
+              entityType: change.entityType,
+              entityId: change.entityId,
+              action: change.action,
+              occurredAt: next.updatedAt,
+              changes: createAuditFieldChanges(change.before, change.after),
+              metadata: {
+                teamId,
+                teamRevision: next.revision,
+                ...change.metadata,
+              },
+            },
+          }
+        : undefined,
+    )
     return result
+  }
+}
+
+/**
+ * Builds the audit entity ID of one member's workload profile in a Team.
+ *
+ * @param teamId - Team identifier.
+ * @param memberId - Member key of the profile.
+ * @returns The Team-scoped profile ID.
+ */
+function memberAuditEntityId(teamId: string, memberId: string) {
+  return `team/${teamId}/member/${memberId}`
+}
+
+/**
+ * Returns the profile fields compared by its audit event.
+ *
+ * @param profile - Workload profile.
+ * @returns Role, skills, time zone, schedule, and holidays; the display name and time off are left out.
+ */
+function auditedProfileFields(profile: WorkloadMemberProfile): Record<string, unknown> {
+  return {
+    ...(profile.role === undefined ? {} : { role: profile.role }),
+    skills: [...profile.skills],
+    timeZone: profile.timeZone,
+    schedule: clone(profile.schedule),
+    holidays: profile.holidays.map(clone),
+  }
+}
+
+/**
+ * Returns the time-off fields compared by its audit event.
+ *
+ * @param timeOff - Planned absence.
+ * @returns Dates, daily minutes, and status; the free-text reason is personal and left out.
+ */
+function auditedTimeOffFields(timeOff: WorkloadTimeOff): Record<string, unknown> {
+  return {
+    fromDate: timeOff.fromDate,
+    toDate: timeOff.toDate,
+    ...(timeOff.minutesPerDay === undefined ? {} : { minutesPerDay: timeOff.minutesPerDay }),
+    status: timeOff.status,
+  }
+}
+
+/**
+ * Returns the resource request fields compared by its audit event.
+ *
+ * A confidential request keeps its title out of the audit log.
+ *
+ * @param request - Resource request.
+ * @returns Allowlisted request fields.
+ */
+function auditedRequestFields(request: ResourceRequest): Record<string, unknown> {
+  return {
+    ...(request.confidential ? {} : { title: request.title }),
+    ...(request.role === undefined ? {} : { role: request.role }),
+    skillIds: [...request.skillIds],
+    fromDate: request.fromDate,
+    toDate: request.toDate,
+    requestedMinutes: request.requestedMinutes,
+    confidential: request.confidential,
+    status: request.status,
+  }
+}
+
+/**
+ * Returns the metadata of a resource request audit event.
+ *
+ * @param request - Resource request.
+ * @returns The request's Project, when any.
+ */
+function requestAuditMetadata(request: ResourceRequest): Record<string, unknown> {
+  return {
+    requestId: request.id,
+    ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+  }
+}
+
+/**
+ * Returns the resource assignment fields compared by its audit event.
+ *
+ * @param assignment - Resource assignment.
+ * @returns Allowlisted assignment fields.
+ */
+function auditedAssignmentFields(assignment: ResourceAssignment): Record<string, unknown> {
+  return {
+    memberId: assignment.memberId,
+    ...(assignment.role === undefined ? {} : { role: assignment.role }),
+    fromDate: assignment.fromDate,
+    toDate: assignment.toDate,
+    allocationMinutes: assignment.allocationMinutes,
+    plannedEffortMinutes: assignment.plannedEffortMinutes,
+    confidential: assignment.confidential,
+    status: assignment.status,
+  }
+}
+
+/**
+ * Returns the metadata of a resource assignment audit event.
+ *
+ * @param assignment - Resource assignment.
+ * @returns The assignment's request, Project, and Work Item, when any.
+ */
+function assignmentAuditMetadata(assignment: ResourceAssignment): Record<string, unknown> {
+  return {
+    assignmentId: assignment.id,
+    ...(assignment.requestId === undefined ? {} : { requestId: assignment.requestId }),
+    ...(assignment.projectId === undefined ? {} : { projectId: assignment.projectId }),
+    ...(assignment.workItemId === undefined ? {} : { workItemId: assignment.workItemId }),
   }
 }
 
@@ -728,6 +977,7 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    _audit?: CapacityPlanningAuditWrite,
   ): Promise<void> {
     const key = stateKey(workspaceId, teamId)
     const current = this.states.get(key)
@@ -745,10 +995,24 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
   /** Configured DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
 
-  /** Creates a DynamoDB-backed capacity planning repository. */
-  constructor(tableName: string, documentClient: DynamoDBDocumentClient) {
+  /** Audit table that receives change events, when configured. */
+  private readonly auditTableName: string | undefined
+
+  /**
+   * Creates a DynamoDB-backed capacity planning repository.
+   *
+   * @param tableName - Capacity planning table name.
+   * @param documentClient - Configured DocumentClient.
+   * @param auditTableName - Audit table name; defaults to the configured one.
+   */
+  constructor(
+    tableName: string,
+    documentClient: DynamoDBDocumentClient,
+    auditTableName: string | undefined = getConfiguredAuditTableName(),
+  ) {
     this.tableName = validateIdentifier(tableName, 'Capacity planning table name')
     this.documentClient = documentClient
+    this.auditTableName = auditTableName
   }
 
   /** Reads a Team state from the shared Workspace partition. */
@@ -762,28 +1026,48 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
     return readState(response.Item, workspaceId, teamId)
   }
 
-  /** Writes a Team state using a revision condition. */
+  /**
+   * Writes a Team state using a revision condition.
+   *
+   * With an audit event and a configured audit table, the state and the event commit in one
+   * transaction.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param state - Next Team state.
+   * @param expectedRevision - Team revision the change was based on.
+   * @param audit - Audit event of the change, when recorded.
+   */
   async saveState(
     workspaceId: string,
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAuditWrite,
   ): Promise<void> {
+    const statePut = {
+      TableName: this.tableName,
+      Item: {
+        workspaceId,
+        recordKey: stateRecordKey(teamId),
+        ...state,
+      },
+      ...(expectedRevision === 0
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+          }),
+    }
+    const auditPut = audit && createMutationAuditEventPut(this.auditTableName, audit.context, audit.event)
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          workspaceId,
-          recordKey: stateRecordKey(teamId),
-          ...state,
-        },
-        ...(expectedRevision === 0
-          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-          : {
-              ConditionExpression: 'revision = :expectedRevision',
-              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-            }),
-      }))
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [{ Put: statePut }, auditPut],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(statePut))
+      }
     } catch (error) {
       if (isConditionalFailure(error)) {
         throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
@@ -1520,9 +1804,20 @@ function isResourceAssignmentStatus(value: unknown): value is ResourceAssignment
   return value === 'tentative' || value === 'confirmed' || value === 'canceled'
 }
 
-/** Detects a DynamoDB conditional failure without importing service-specific exceptions. */
+/**
+ * Detects a DynamoDB conditional failure without importing service-specific exceptions.
+ * A transaction that carries the audit event reports the state condition as a cancellation reason.
+ *
+ * @param error - Error thrown by the DynamoDB document client.
+ * @returns Whether the write failed because a condition did not hold.
+ */
 function isConditionalFailure(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'ConditionalCheckFailedException'
+  if (typeof error !== 'object' || error === null || !('name' in error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException' || !('CancellationReasons' in error)) return false
+  const reasons: unknown = error.CancellationReasons
+  return Array.isArray(reasons) && reasons.some((reason: unknown) =>
+    typeof reason === 'object' && reason !== null && 'Code' in reason && reason.Code === 'ConditionalCheckFailed')
 }
 
 /** Clones a value at the repository boundary. */
