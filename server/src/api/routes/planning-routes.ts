@@ -3447,6 +3447,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         input.target,
         'manager',
       )
+      const cadenceReviewerMemberKey = resolvePlanningUpdateReviewerMemberKey(input.cadence ?? undefined)
       const cadenceRecipientMembers = input.cadence
         ? await Promise.all([
           requirePlanningCadenceRecipientTargetPermission(
@@ -3466,12 +3467,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
               )]
             : []),
           // The reviewer acknowledges with an update comment, which needs member access.
-          ...(input.cadence.reviewerMemberKey
+          // Without an explicit reviewer the escalation recipient reviews, so check that member too.
+          ...(cadenceReviewerMemberKey
             ? [requirePlanningCadenceRecipientTargetPermission(
                 principal,
                 visibleSnapshot,
                 input.target,
-                input.cadence.reviewerMemberKey,
+                cadenceReviewerMemberKey,
                 'member',
               )]
             : []),

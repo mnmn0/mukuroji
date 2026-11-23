@@ -202,6 +202,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     noDueDate: t('planning.updateState.noDueDate'),
     projectTarget: t('planning.type.project'),
     initiativeTarget: t('planning.type.initiative'),
+    teamTarget: t('planning.field.team'),
     freshnessValues: {
       'not-configured': t('planning.updateState.not-configured'),
       missing: t('planning.updateState.missing'),
@@ -232,6 +233,8 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     formInvalid: t('planning.form.invalid'),
     requiredFieldsMissing: (fields) => t('planning.updateComposer.requiredFieldsMissing').replace('{fields}', fields),
     requiredField: (label) => t('planning.updateComposer.requiredField').replace('{label}', label),
+    templateLoading: t('planning.updateComposer.templateLoading'),
+    templateLoadFailed: t('planning.updateComposer.templateLoadFailed'),
     summary: t('planning.field.summary'),
     progressSnapshot: t('planning.field.progressSnapshot'),
     riskSummary: t('planning.field.riskUpdate'),

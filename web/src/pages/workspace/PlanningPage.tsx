@@ -1105,6 +1105,13 @@ export function PlanningPage() {
               }
             : undefined}
           updateTemplate={updateTemplate.data}
+          updateTemplateLoadState={updateTemplate.data !== undefined
+            ? undefined
+            : updateTemplate.error !== undefined
+            ? { status: 'error', onRetry: () => void updateTemplate.mutate() }
+            : updateTemplate.isLoading
+            ? { status: 'loading' }
+            : undefined}
           onPublishUpdate={canMutatePlanningContent && snapshot && accessToken
             ? (target, draft) => {
                 const input = {

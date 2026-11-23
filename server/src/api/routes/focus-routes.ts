@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import {
   type ApprovalRequest,
   type CanonicalWorkItem,
+  type PlanningEntity,
   type PlanningSnapshot,
+  type PlanningUpdateTargetSummary,
   type PlanningWorkItemSummary,
   type FocusEffectivePolicy,
   type FocusItem,
@@ -2079,7 +2081,7 @@ function filterFocusPlanningSnapshotForPrincipal(
     }
     if (entity.teamId !== undefined) return legacyUpdateTargetScope.teamIds.has(entity.teamId)
     return legacyUpdateTargetScope.workspaceReadable
-  })
+  }).map((summary) => withholdFocusMovedLatestUpdate(summary, snapshot.entities))
   return {
     ...snapshot,
     entities: scopedEntities,
@@ -2104,6 +2106,41 @@ function filterFocusPlanningSnapshotForPrincipal(
       workItemLinks,
     ),
   }
+}
+
+/**
+ * Drops the latest update when it was published under a scope other than the target's current one.
+ *
+ * Moving an Initiative keeps its update target and the scope captured at publish time. The
+ * target filter authorizes the current scope only, so content captured elsewhere stays hidden,
+ * as in the Planning snapshot and Update Feed readers.
+ *
+ * @param summary - Update target summary already authorized through its current scope.
+ * @param entities - Unfiltered Planning entities used to resolve an Initiative's current scope.
+ * @returns The summary, without its latest update when the captured scope differs.
+ */
+function withholdFocusMovedLatestUpdate(
+  summary: PlanningUpdateTargetSummary,
+  entities: readonly PlanningEntity[],
+): PlanningUpdateTargetSummary {
+  const latest = summary.latestUpdate
+  if (latest === undefined) return summary
+  const target = summary.target
+  const currentScope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined =
+    target.type === 'initiative'
+      ? entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative')
+      : target.type === 'project'
+      ? { teamId: target.teamId, projectId: target.projectId }
+      : { teamId: target.teamId }
+  const captured = latest.capturedScope
+  if (
+    currentScope !== undefined && captured !== undefined &&
+    captured.teamId === currentScope.teamId && captured.projectId === currentScope.projectId
+  ) {
+    return summary
+  }
+  const { latestUpdate: _withheld, ...withoutLatestUpdate } = summary
+  return withoutLatestUpdate
 }
 
 /**

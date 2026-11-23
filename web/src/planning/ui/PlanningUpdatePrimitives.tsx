@@ -50,6 +50,8 @@ export type PlanningUpdateLabels = {
   projectTarget: string
   /** Initiative update-target label. */
   initiativeTarget: string
+  /** Team update-target label. */
+  teamTarget: string
   /** Next deadline label. */
   nextDueAt: string
   /** Label shown when no update has been published. */
@@ -102,6 +104,10 @@ export type PlanningUpdateLabels = {
   requiredFieldsMissing?: (fields: string) => string
   /** Marks a field label as required by the Workspace. */
   requiredField?: (label: string) => string
+  /** Note shown while the Workspace required fields and template load. */
+  templateLoading?: string
+  /** Error shown when the Workspace required fields and template cannot be read. */
+  templateLoadFailed?: string
   /** Health field label. */
   health: string
   /** Localized planning-health values. */
@@ -317,6 +323,8 @@ export type PlanningUpdateDetailPaneProps = {
   baselineDelays?: PlanningBaselineDelaysView
   /** Workspace required fields and template for new updates. */
   template?: PlanningUpdateTemplateSettings
+  /** Set while the Workspace settings load or after they fail to load. */
+  templateLoadState?: PlanningUpdateTemplateLoadState
 }
 
 /**
@@ -342,6 +350,7 @@ export function PlanningUpdateDetailPane({
   summary,
   updateView,
   template,
+  templateLoadState,
 }: PlanningUpdateDetailPaneProps) {
   const collaborationIsPending = collaboration?.isPending ?? false
   const collaborationIsLoading = collaboration?.isLoading ?? false
@@ -354,7 +363,11 @@ export function PlanningUpdateDetailPane({
     >
       <header className="border-b border-[var(--workbench-border)] px-5 py-5">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
-          {summary.target.type === 'project' ? labels.projectTarget : labels.initiativeTarget}
+          {summary.target.type === 'project'
+            ? labels.projectTarget
+            : summary.target.type === 'team'
+            ? labels.teamTarget
+            : labels.initiativeTarget}
         </p>
         <h2 className="mt-1 text-lg font-semibold text-[var(--workbench-text)]">
           {summary.title}
@@ -438,6 +451,7 @@ export function PlanningUpdateDetailPane({
           onPublish={onPublish}
           progress={summary.progress}
           template={template}
+          templateLoadState={templateLoadState}
         />
         <PlanningStatusUpdateLedger
           errorMessage={historyErrorMessage}
@@ -741,7 +755,22 @@ export type PlanningStatusUpdateComposerProps = {
   onPublish?: (draft: PlanningStatusUpdateDraft) => void | Promise<void>
   /** Workspace required fields and the text a new update starts from. */
   template?: PlanningUpdateTemplateSettings
+  /** Set while the Workspace settings load or after they fail to load. */
+  templateLoadState?: PlanningUpdateTemplateLoadState
 }
+
+/** Loading state of the Workspace required fields and template, when they are not ready. */
+export type PlanningUpdateTemplateLoadState =
+  | {
+      /** The settings are still loading; the composer waits so typed text is never replaced. */
+      status: 'loading'
+    }
+  | {
+      /** The settings could not be read; the server still enforces the required fields. */
+      status: 'error'
+      /** Reads the settings again. */
+      onRetry: () => void
+    }
 
 /** Composer label of each field a Workspace may make required. */
 const planningUpdateFieldLabelKeys = {
@@ -851,6 +880,7 @@ export function PlanningStatusUpdateComposer({
   onPublish,
   progress,
   template,
+  templateLoadState,
 }: PlanningStatusUpdateComposerProps) {
   const requiredFields = new Set(template?.requiredFields ?? [])
   /**
@@ -886,12 +916,19 @@ export function PlanningStatusUpdateComposer({
     draft: initialDraft,
     revision: 0,
   })
+  // The template seeds the form once, and only while nothing has been typed, so a late or
+  // retried load never replaces the author's text. Required marks always follow the live value.
+  const [seededTemplate, setSeededTemplate] = useState(template)
+  if (template !== undefined && seededTemplate === undefined && !isFormDirty) {
+    setSeededTemplate(template)
+  }
   // A form seeded by a draft (AI or story) keeps that draft; a fresh form starts from the template.
   const startingText: Partial<Record<PlanningUpdateTemplateTextField, string>> | undefined =
-    formSeed.draft ?? template?.template
+    formSeed.draft ?? seededTemplate?.template
   const formDisabled =
     !onPublish ||
     isPublishing ||
+    templateLoadState?.status === 'loading' ||
     aiAssistance?.isAiOperationPending === true
   const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
   const aiAssistantSessionKey = aiAssistance
@@ -1030,10 +1067,28 @@ export function PlanningStatusUpdateComposer({
       <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]">
         {labels.composerRequiredHint}
       </p>
+      {templateLoadState?.status === 'loading' && labels.templateLoading ? (
+        <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
+          {labels.templateLoading}
+        </p>
+      ) : templateLoadState?.status === 'error' ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2" role="alert">
+          <p className="text-xs font-semibold text-fg-red-800">
+            {labels.templateLoadFailed ?? labels.formInvalid}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-9 px-3"
+            onClick={templateLoadState.onRetry}
+            type="button"
+          >
+            {labels.retryHistory}
+          </button>
+        </div>
+      ) : null}
       <form
         className="mt-4 grid gap-3"
-        // The template arrives after the first render; remount so the fields pick up its text.
-        key={`planning-status-update-form-${formSeed.revision}-${template ? 'template' : 'plain'}`}
+        // Remounts only when the untouched form first receives the template (see seededTemplate).
+        key={`planning-status-update-form-${formSeed.revision}-${seededTemplate ? 'template' : 'plain'}`}
         noValidate
         onChange={() => {
           isFormDirtyRef.current = true

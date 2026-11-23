@@ -525,7 +525,7 @@ export function createPlanningTargetUpdateView(
 }
 
 /**
- * Compares canonical Project or Initiative target identities.
+ * Compares canonical Project, Team, or Initiative target identities.
  *
  * @param left - First target identity.
  * @param right - Second target identity.
@@ -541,6 +541,9 @@ export function planningUpdateTargetsAreEqual(
   }
   if (left.type === 'project' && right.type === 'project') {
     return left.teamId === right.teamId && left.projectId === right.projectId
+  }
+  if (left.type === 'team' && right.type === 'team') {
+    return left.teamId === right.teamId
   }
   return false
 }

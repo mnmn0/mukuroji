@@ -2165,6 +2165,77 @@ test('does not fall back to legacy ACLs for an Enterprise-managed recipient', as
   })
 })
 
+test('requires member access for the escalation recipient when it is the fallback reviewer', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }],
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const scope: EnterpriseRoleAssignment['scope'] = {
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    targetId: 'refero',
+  }
+  const assignments: EnterpriseRoleAssignment[] = [
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'owner-project-member',
+      principalKind: 'member',
+      principalId: 'owner@example.com',
+      roleId: 'project:member',
+      scope,
+      source: 'direct',
+    },
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'escalation-project-viewer',
+      principalKind: 'member',
+      principalId: 'escalation@example.com',
+      roleId: 'project:viewer',
+      scope,
+      source: 'direct',
+    },
+  ]
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => ({
+    ...(await readSnapshot(workspaceId)),
+    roleAssignments: assignments,
+  })
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+  })
+  const cadence = {
+    updateOwnerMemberKey: 'owner@example.com',
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'UTC',
+    nextDueAt: '2026-08-10T00:00:00.000Z',
+    reminderHoursBefore: 24,
+    escalationHoursAfter: 4,
+    escalationMemberKey: 'escalation@example.com',
+  }
+  const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+
+  const fallbackDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence,
+    expectedRevision: 0,
+  })
+  expect(fallbackDenied.status).toBe(409)
+  expect(await fallbackDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+
+  // A viewer may still receive escalations once a member reviews the updates.
+  const explicitReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, reviewerMemberKey: 'owner@example.com' },
+    expectedRevision: 0,
+  })
+  expect(explicitReviewer.status).toBe(200)
+})
+
 test('rejects guest recipients for Workspace-scoped Initiative cadence', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
   const planning = new InMemoryPlanningClient()

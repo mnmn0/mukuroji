@@ -211,6 +211,8 @@ export const planningMessages = {
   'planning.updateComposer.requiredFieldsMissing': 'This Workspace requires: {fields}',
   'planning.updateComposer.requiredField': '{label} (required)',
   'planning.updateComposer.requiredFieldsChanged': 'This update misses a field the Workspace requires. Reload to see the current required fields.',
+  'planning.updateComposer.templateLoading': 'Loading the Workspace required fields and template…',
+  'planning.updateComposer.templateLoadFailed': 'The Workspace required fields and template could not be loaded. You can still publish; the server checks the required fields.',
   'planning.updateComposer.requiredHint': 'Enter a summary, health, and next action.',
   'planning.form.invalid': 'Check the highlighted fields before submitting.',
   'planning.updateCadence.disabled': 'You do not have permission to change the update schedule.',

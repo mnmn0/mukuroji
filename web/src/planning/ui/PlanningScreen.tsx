@@ -91,6 +91,7 @@ import {
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
   type PlanningUpdateLabels,
+  type PlanningUpdateTemplateLoadState,
   type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
 
@@ -455,6 +456,8 @@ export type PlanningScreenProps = {
   ) => void | Promise<void>
   /** Workspace の health update 必須項目とテンプレートです。 */
   updateTemplate?: PlanningUpdateTemplateSettings
+  /** 必須項目とテンプレートの読み込み中、または読み込み失敗の状態です。 */
+  updateTemplateLoadState?: PlanningUpdateTemplateLoadState
   /** Project または Initiative の structured manual update を公開する callback です。 */
   onPublishUpdate?: (
     target: PlanningUpdateTargetView,
@@ -551,6 +554,7 @@ export function PlanningScreen({
   onOpenWorkItem,
   onPublishUpdate,
   updateTemplate,
+  updateTemplateLoadState,
   onSaveUpdateCadence,
   onSaveWorkItemLink,
   onSelectUpdateTarget,
@@ -970,6 +974,7 @@ export function PlanningScreen({
                   : undefined}
                 onRetryHistory={onRetryUpdateHistory}
                 template={updateTemplate}
+                templateLoadState={updateTemplateLoadState}
               />
             ) : null}
           </div>

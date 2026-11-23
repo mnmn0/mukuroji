@@ -15,6 +15,7 @@ import {
   derivePlanningUpdateAcknowledgement,
   createPlanningUpdateWorkItemEvidenceValue,
   extractPlanningUpdateCommentMentions,
+  planningUpdateTargetsAreEqual,
   readPlanningEvidenceHttpsUrl,
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
@@ -72,6 +73,36 @@ describe('Planning update evidence composer', () => {
     expect(html).toContain('Evidence links (required)')
     expect(html).toContain('name="riskSummary" required=""')
     expect(html).not.toContain('Decision (required)')
+  })
+
+  test('waits for the Workspace settings before the author can type', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={{ ...labels, templateLoading: 'Loading required fields' }}
+        onPublish={() => undefined}
+        progress={40}
+        templateLoadState={{ status: 'loading' }}
+      />,
+    )
+    expect(html).toContain('role="status">Loading required fields</p>')
+    expect(html).toMatch(/<textarea[^>]*disabled=""[^>]*name="summary"/)
+  })
+
+  test('keeps the form usable and offers a retry when the Workspace settings fail to load', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={{ ...labels, templateLoadFailed: 'Required fields could not be loaded' }}
+        onPublish={() => undefined}
+        progress={40}
+        templateLoadState={{ status: 'error', onRetry: () => undefined }}
+      />,
+    )
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('Required fields could not be loaded')
+    expect(html).toContain(`>${labels.retryHistory}</button>`)
+    expect(html).not.toMatch(/<textarea[^>]*disabled=""[^>]*name="summary"/)
   })
 
   test('keeps an AI or saved draft instead of the template', () => {
@@ -295,6 +326,23 @@ describe('Planning update evidence composer', () => {
     expect(extractPlanningUpdateCommentMentions(
       `@${'a'.repeat(321)}@example.com and @dev@example.com`,
     )).toEqual(['dev@example.com'])
+  })
+})
+
+describe('Planning update target identity', () => {
+  test('matches Team targets by Team and never across target kinds', () => {
+    expect(
+      planningUpdateTargetsAreEqual({ type: 'team', teamId: 'team-a' }, { type: 'team', teamId: 'team-a' }),
+    ).toBe(true)
+    expect(
+      planningUpdateTargetsAreEqual({ type: 'team', teamId: 'team-a' }, { type: 'team', teamId: 'team-b' }),
+    ).toBe(false)
+    expect(
+      planningUpdateTargetsAreEqual(
+        { type: 'team', teamId: 'team-a' },
+        { type: 'project', teamId: 'team-a', projectId: 'project-a' },
+      ),
+    ).toBe(false)
   })
 })
 

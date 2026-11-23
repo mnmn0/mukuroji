@@ -211,6 +211,8 @@ export const planningMessages = {
   'planning.updateComposer.requiredFieldsMissing': 'この Workspace では次の項目が必須です: {fields}',
   'planning.updateComposer.requiredField': '{label}（必須）',
   'planning.updateComposer.requiredFieldsChanged': 'Workspace の必須項目を満たしていません。画面を再読み込みして必須項目を確認してください。',
+  'planning.updateComposer.templateLoading': 'Workspace の必須項目とテンプレートを読み込んでいます…',
+  'planning.updateComposer.templateLoadFailed': 'Workspace の必須項目とテンプレートを読み込めませんでした。このまま公開もできます。必須項目はサーバーで確認します。',
   'planning.updateComposer.requiredHint': '要約、健全性、次のアクションを入力してください。',
   'planning.form.invalid': '入力内容を確認してから送信してください。',
   'planning.updateCadence.disabled': '更新スケジュールを変更する権限がありません。',
