@@ -177,6 +177,22 @@ export type WorkspaceIssueStatus = {
  */
 export function createWorkspaceIssues(api: WorkspaceApi) {
   /**
+   * Reads a Work Item's key after a write has already succeeded. A failed read must not hide the
+   * saved Work Item, because the caller would otherwise retry a write that already happened.
+   * @param teamId - Team of the saved Work Item.
+   * @param workItemId - Saved Work Item ID.
+   * @returns The key, nothing when the Work Item has none, or a warning when the read failed.
+   */
+  async function keyAfterWrite(teamId: string, workItemId: string): Promise<{ key?: string, warning?: string }> {
+    try {
+      const key = await api.getKey(teamId, workItemId)
+      return key === undefined ? {} : { key }
+    } catch {
+      return { warning: 'The Work Item was saved, but its key could not be read. Read it again with get_issue.' }
+    }
+  }
+
+  /**
    * Resolves a key such as `ABC-123`, or a Work Item ID with its Team, to the Work Item.
    * With a Team the reference is always an ID, because an older Work Item ID such as `task-1`
    * can look like a key of another Work Item.
@@ -317,8 +333,7 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
           // Without a schedule the server uses the Workspace working calendar, as the Web does.
           ...(input.dueDate === undefined ? {} : { dueDate: input.dueDate }),
         }, input.idempotencyKey)
-        const key = await api.getKey(created.teamId, created.id)
-        return { ...created, ...(key === undefined ? {} : { key }) }
+        return { ...created, ...await keyAfterWrite(created.teamId, created.id) }
       }
       if (input.expectedRevision === undefined) {
         throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_issue first.')
@@ -344,11 +359,8 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       if (Object.keys(patch).length === 1) {
         throw new AgentTaskError('invalid_request', 'Pass at least one field to change.')
       }
-      const [updated, key] = await Promise.all([
-        api.updateIssue(resolved.teamId, resolved.workItemId, patch, input.idempotencyKey),
-        api.getKey(resolved.teamId, resolved.workItemId),
-      ])
-      return { ...updated, ...(key === undefined ? {} : { key }) }
+      const updated = await api.updateIssue(resolved.teamId, resolved.workItemId, patch, input.idempotencyKey)
+      return { ...updated, ...await keyAfterWrite(resolved.teamId, resolved.workItemId) }
     },
     /**
      * Adds a comment to a Work Item by key or ID.
