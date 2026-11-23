@@ -1041,6 +1041,30 @@ test('keeps a Project role granted concurrently and refuses a revoked caller', a
   )).rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
 })
 
+test('fences each Team-wide grant on its Team and Project still being active', async () => {
+  const rows = [createTeamRow('alpha', 10), createProjectRow('alpha', 10, 'refero', 1)]
+  const { client, transactions } = createClient(rows)
+  await client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', { role: 'viewer', email: 'sato@example.com' }, 3,
+  )
+
+  // An archive that commits after the read fails these checks, so the grant is not written.
+  expect(listItems(transactions()[0])).toEqual(expect.arrayContaining([
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+        ConditionExpression: '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+      }),
+    },
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000001#PROJECT#refero' },
+        ConditionExpression: '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+      }),
+    },
+  ]))
+})
+
 test('binds a Team-wide grant key to its input with a conditional receipt', async () => {
   const { client, transactions } = createClient([])
   const grantRequest = { idempotencyKeyHash: 'key-hash', requestFingerprint: 'member-request' }

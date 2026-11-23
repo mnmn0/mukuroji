@@ -75,7 +75,9 @@ export function TeamProfilePanelContainer({ accessToken, locale }: TeamProfilePa
     )
   }
 
-  if (directory.error || !directory.data) {
+  // A failed background refresh keeps the editor and its unsaved edits; only a first load that
+  // failed has nothing to show.
+  if (!directory.data) {
     return (
       <section className="workbench-panel p-5" data-testid="team-profile-error">
         <SectionHeader meta={t('projects.administration.loadError')} title={t('projects.teamProfile.title')} />
@@ -91,25 +93,43 @@ export function TeamProfilePanelContainer({ accessToken, locale }: TeamProfilePa
   }
 
   return (
-    <TeamProfilePanel
-      errorMessage={actions.errorMessageKey ? t(actions.errorMessageKey) : undefined}
-      locale={locale}
-      members={members}
-      membersLoading={projectMembers.isLoading}
-      membersPartial={(projectMembers.data?.failedProjectIds.length ?? 0) > 0 || Boolean(projectMembers.error)}
-      pending={actions.pending}
-      projectCount={projects.length}
-      t={t}
-      team={team}
-      teams={teams}
-      workspaceMembers={workspaceMembers}
-      workspaceMembersStatus={workspaceMembersStatus}
-      onAddMember={actions.addMember}
-      onRetryWorkspaceMembers={() => void access.mutate()}
-      onRetryMembers={() => void projectMembers.mutate()}
-      onSaveProfile={actions.saveProfile}
-      onSelectTeam={setSelectedTeamId}
-    />
+    <>
+      {directory.error ? (
+        <div
+          className="workbench-panel mb-3 flex flex-wrap items-center gap-3 p-3 text-sm"
+          data-testid="team-profile-refresh-error"
+          role="status"
+        >
+          <span>{t('projects.administration.loadError')}</span>
+          <button
+            className="workbench-button-secondary min-h-10 px-4"
+            onClick={() => void directory.mutate()}
+            type="button"
+          >
+            {t('projects.administration.retry')}
+          </button>
+        </div>
+      ) : null}
+      <TeamProfilePanel
+        errorMessage={actions.errorMessageKey ? t(actions.errorMessageKey) : undefined}
+        locale={locale}
+        members={members}
+        membersLoading={projectMembers.isLoading}
+        membersPartial={(projectMembers.data?.failedProjectIds.length ?? 0) > 0 || Boolean(projectMembers.error)}
+        pending={actions.pending}
+        projectCount={projects.length}
+        t={t}
+        team={team}
+        teams={teams}
+        workspaceMembers={workspaceMembers}
+        workspaceMembersStatus={workspaceMembersStatus}
+        onAddMember={actions.addMember}
+        onRetryWorkspaceMembers={() => void access.mutate()}
+        onRetryMembers={() => void projectMembers.mutate()}
+        onSaveProfile={actions.saveProfile}
+        onSelectTeam={setSelectedTeamId}
+      />
+    </>
   )
 }
 
