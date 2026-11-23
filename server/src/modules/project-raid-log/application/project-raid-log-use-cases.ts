@@ -26,6 +26,26 @@ export type ProjectRaidLogMutation<TCallerCheck, TAudit> = {
   auditContext: TAudit
 }
 
+/** Member and Work Item references an entry gains in one change, which the route must verify. */
+export type ProjectRaidEntryReferences = {
+  /** New owner, present only when the change sets or replaces the owner. */
+  ownerMemberId?: string
+  /** Related Work Items the change adds; ones the entry already names are not checked again. */
+  addedWorkItemIds: string[]
+}
+
+/**
+ * Verifies the references an entry gains, so an entry cannot name someone outside the Project or
+ * a Work Item of another Project.
+ *
+ * @param references - Owner and added Work Items to verify.
+ * @returns Extra commit-time fences, such as one proving the owner is still active.
+ * @throws ProjectDataError 400 when a reference is not allowed.
+ */
+export type ProjectRaidEntryReferenceVerifier<TCallerCheck> = (
+  references: ProjectRaidEntryReferences,
+) => Promise<readonly TCallerCheck[]>
+
 /** Input of one entry creation, as the persistence port receives it. */
 export type CreateProjectRaidEntryStoreInput<TCallerCheck, TAudit> = ProjectRaidLogScope &
   ProjectRaidLogMutation<TCallerCheck, TAudit> & {
@@ -122,9 +142,21 @@ export async function createProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   store: ProjectRaidLogStore<TCallerCheck, TAudit>,
   scope: ProjectRaidLogScope,
   body: unknown,
-  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & { entryId: string; creationFingerprint: string },
+  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & {
+    entryId: string
+    creationFingerprint: string
+    verifyReferences: ProjectRaidEntryReferenceVerifier<TCallerCheck>
+  },
 ): Promise<ProjectRaidEntryResponse> {
   const input = readEntryInput(isRecord(body) ? body.entry : undefined)
+  // A retry of a committed creation is answered by the store from the stored entry, so its
+  // references are not verified again; an owner deactivated since then must not turn the retry
+  // into an error.
+  const alreadyCreated = await store.get(scope, mutation.entryId) !== null
+  const referenceChecks = alreadyCreated ? [] : await mutation.verifyReferences({
+    ...(input.ownerMemberId === undefined ? {} : { ownerMemberId: input.ownerMemberId }),
+    addedWorkItemIds: input.relatedWorkItemIds ?? [],
+  })
   const entry: ProjectRaidEntry = {
     id: mutation.entryId,
     ...input,
@@ -136,7 +168,7 @@ export async function createProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   const stored = await store.create({
     ...scope,
     now: mutation.now,
-    callerAuthorization: mutation.callerAuthorization,
+    callerAuthorization: [...mutation.callerAuthorization, ...referenceChecks],
     auditContext: mutation.auditContext,
     entry,
     creationFingerprint: mutation.creationFingerprint,
@@ -160,7 +192,11 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   scope: ProjectRaidLogScope,
   entryId: string,
   body: unknown,
-  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & { updateReceipt: string; updateKey: string },
+  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & {
+    updateReceipt: string
+    updateKey: string
+    verifyReferences: ProjectRaidEntryReferenceVerifier<TCallerCheck>
+  },
 ): Promise<ProjectRaidEntryResponse> {
   const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
   if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
@@ -189,6 +225,13 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   if (previous.kind !== input.kind) {
     throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'The kind of a log entry cannot change.')
   }
+  const previousWorkItemIds = new Set(previous.relatedWorkItemIds ?? [])
+  const referenceChecks = await mutation.verifyReferences({
+    ...(input.ownerMemberId === undefined || input.ownerMemberId === previous.ownerMemberId
+      ? {}
+      : { ownerMemberId: input.ownerMemberId }),
+    addedWorkItemIds: (input.relatedWorkItemIds ?? []).filter((id) => !previousWorkItemIds.has(id)),
+  })
   const closedAt = input.status === 'closed'
     ? (previous.status === 'closed' ? previous.closedAt : mutation.now)
     : undefined
@@ -200,7 +243,16 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
     updatedAt: mutation.now,
     ...(closedAt === undefined ? {} : { closedAt }),
   }
-  const stored = await store.update({ ...scope, ...mutation, previous, next })
+  const stored = await store.update({
+    ...scope,
+    now: mutation.now,
+    callerAuthorization: [...mutation.callerAuthorization, ...referenceChecks],
+    auditContext: mutation.auditContext,
+    updateReceipt: mutation.updateReceipt,
+    updateKey: mutation.updateKey,
+    previous,
+    next,
+  })
   return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
 }
 

@@ -9240,6 +9240,62 @@ test.describe('authenticated task page', () => {
     })
   }
 
+  test('Issue #344: 権限タブで担当者と関連 Work Item を付けて登録し、CSV を書き出せる', async ({ page }) => {
+    const created: unknown[] = []
+    let entries: Record<string, unknown>[] = []
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log(\/entries)?$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        const body = route.request().postDataJSON() as { entry: Record<string, unknown> }
+        created.push(body)
+        const entry = {
+          ...body.entry,
+          id: 'issue-build',
+          revision: 1,
+          createdAt: '2026-06-01T00:00:00.000Z',
+          updatedAt: '2026-06-01T00:00:00.000Z',
+        }
+        entries = [entry]
+        await route.fulfill({ status: 201, json: { teamId: 'core-team', projectId: 'refero', entry } })
+        return
+      }
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries, viewer: { canEdit: true } } })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team')
+    await page.getByRole('tab', { name: '権限' }).click()
+    const panel = page.getByTestId('project-raid-log')
+    await panel.getByTestId('project-raid-log-add').click()
+    await panel.getByTestId('project-raid-log-kind').selectOption('issue')
+    await panel.getByTestId('project-raid-log-title-input').fill('ビルドサーバー停止')
+    const owner = panel.getByTestId('project-raid-log-owner')
+    const ownerValue = await owner.locator('option').nth(1).getAttribute('value')
+    const ownerLabel = (await owner.locator('option').nth(1).textContent()) ?? ''
+    await owner.selectOption(ownerValue ?? '')
+    const related = panel.getByTestId('project-raid-log-related-add')
+    const relatedValue = await related.locator('option').nth(1).getAttribute('value')
+    const relatedLabel = (await related.locator('option').nth(1).textContent()) ?? ''
+    await related.selectOption(relatedValue ?? '')
+    await expect(panel.getByTestId('project-raid-log-related-selected')).toContainText(relatedLabel)
+    await panel.getByTestId('project-raid-log-save').click()
+
+    await expect(panel.getByTestId('project-raid-log-entry-owner')).toHaveText(`担当: ${ownerLabel}`)
+    await expect(panel.getByTestId('project-raid-log-entry-work-items')).toHaveText(`関連: ${relatedLabel}`)
+    expect(created).toEqual([{
+      entry: {
+        kind: 'issue',
+        title: 'ビルドサーバー停止',
+        impact: 3,
+        ownerMemberId: ownerValue,
+        relatedWorkItemIds: [relatedValue],
+        status: 'open',
+      },
+    }])
+
+    const download = page.waitForEvent('download')
+    await panel.getByTestId('project-raid-log-export').click()
+    expect((await download).suggestedFilename()).toMatch(/^project-raid-log-\d{4}-\d{2}-\d{2}\.csv$/)
+  })
+
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')

@@ -9,6 +9,7 @@ const {
   withTestEnvironment,
 } = createApiTestHarness()
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
+import { InMemoryProjectRaidLogStore } from '../../adapter-out/dynamodb/project-raid-log-store'
 import type { ProjectRaidEntryResponse, ProjectRaidLogResponse } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 
@@ -256,4 +257,144 @@ test('refuses a change by a member without Project access', async () => {
 test('requires a bearer token', async () => {
   const response = await app.request('/api/teams/core-team/projects/p/raid-log')
   expect(response.status).toBe(401)
+})
+
+test('accepts a Project member as owner and Work Items of the same Project only', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/raid-log`
+  const dependencies = getTestAppDependencies()
+  const { members } = await dependencies.workspace.projectDirectory.getProjectMembers(
+    'user#demo@example.com',
+    projectId,
+    'core-team',
+  )
+  const ownerMemberId = members[0]?.id
+  if (!ownerMemberId) throw new Error('The fake Project has no member.')
+  const { issues } = await dependencies.workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
+  const sameProject = issues.find((issue) => issue.assignedProjectId === projectId)
+  const otherProject = issues.find((issue) => issue.assignedProjectId !== projectId)
+  if (!sameProject) throw new Error('The fake Project has no Work Item.')
+
+  const created = await request(`${path}/entries`, 'POST', {
+    entry: {
+      kind: 'issue',
+      title: 'Build server down',
+      impact: 3,
+      ownerMemberId,
+      relatedWorkItemIds: [sameProject.id, ` ${sameProject.id} `],
+      status: 'open',
+    },
+  }, 'refs-1')
+  expect(created.status).toBe(201)
+  const entry = (await created.json() as ProjectRaidEntryResponse).entry
+  expect(entry).toMatchObject({ ownerMemberId, relatedWorkItemIds: [sameProject.id] })
+
+  const outsider = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Outsider', impact: 3, ownerMemberId: 'nobody@example.com', status: 'open' },
+  }, 'refs-2')
+  expect(outsider.status).toBe(400)
+  expect(await outsider.json()).toMatchObject({ code: 'InvalidProjectRaidEntry' })
+
+  const missing = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Missing', impact: 3, relatedWorkItemIds: ['wireframe'], status: 'open' },
+  }, 'refs-3')
+  expect(missing.status).toBe(400)
+
+  if (otherProject) {
+    const foreign = await request(`${path}/entries/${entry.id}`, 'PUT', {
+      expectedRevision: 1,
+      entry: { kind: 'issue', title: 'Build server down', impact: 3, relatedWorkItemIds: [sameProject.id, otherProject.id], status: 'open' },
+    }, 'refs-4')
+    expect(foreign.status).toBe(400)
+  }
+
+  const cleared = await request(`${path}/entries/${entry.id}`, 'PUT', {
+    expectedRevision: 1,
+    entry: { kind: 'issue', title: 'Build server down', impact: 3, status: 'open' },
+  }, 'refs-5')
+  expect(cleared.status).toBe(200)
+  const clearedEntry = (await cleared.json() as ProjectRaidEntryResponse).entry
+  expect(clearedEntry.ownerMemberId).toBeUndefined()
+  expect(clearedEntry.relatedWorkItemIds).toBeUndefined()
+
+  const tooMany = await request(`${path}/entries`, 'POST', {
+    entry: {
+      kind: 'issue',
+      title: 'Too many',
+      impact: 3,
+      relatedWorkItemIds: Array.from({ length: 11 }, (_, index) => `item-${index}`),
+      status: 'open',
+    },
+  }, 'refs-6')
+  expect(tooMany.status).toBe(400)
+})
+
+test('fences another owner once and adds no second fence when the caller owns the entry', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/raid-log`
+  const store = new InMemoryProjectRaidLogStore()
+  const recorded: unknown[][] = []
+  setTestAppDependencies({
+    projectRaidLogs: {
+      list: (scope) => store.list(scope),
+      get: (scope, entryId) => store.get(scope, entryId),
+      async create(input) {
+        recorded.push([...input.callerAuthorization])
+        return await store.create(input)
+      },
+      async update(input) {
+        recorded.push([...input.callerAuthorization])
+        return await store.update(input)
+      },
+    },
+  })
+  const dependencies = getTestAppDependencies()
+  const fences: string[] = []
+  const workspaceAccess = dependencies.workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      getMember: workspaceAccess.getMember.bind(workspaceAccess),
+      getActiveMember: workspaceAccess.getActiveMember.bind(workspaceAccess),
+      async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
+        fences.push(memberKey)
+        return { ConditionCheck: { TableName: 'access', Key: { workspaceId, recordKey: `MEMBER#${memberKey}` }, ConditionExpression: 'attribute_exists(workspaceId)' } }
+      },
+    },
+  })
+  const projectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const listMembers = projectDirectory.getProjectMembers.bind(projectDirectory)
+  setTestAppDependencies({
+    projectDirectory: new Proxy(projectDirectory, {
+      get(target, property, receiver) {
+        if (property !== 'getProjectMembers') return Reflect.get(target, property, receiver)
+        return async (workspaceId: string, requestedProjectId: string, teamId?: string) => {
+          const response = await listMembers(workspaceId, requestedProjectId, teamId)
+          const first = response.members[0]
+          if (!first) throw new Error('The fake Project has no member.')
+          return { ...response, members: [...response.members, { ...first, id: 'sato@example.com', email: 'sato@example.com' }] }
+        }
+      },
+    }),
+  })
+  const self = { id: 'demo@example.com' }
+  const other = { id: 'sato@example.com' }
+
+  const own = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Mine', impact: 2, ownerMemberId: self.id, status: 'open' },
+  }, 'own-1')
+  expect(own.status).toBe(201)
+  expect(fences).toEqual([])
+  const theirs = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Theirs', impact: 2, ownerMemberId: other.id, status: 'open' },
+  }, 'own-2')
+  expect(theirs.status).toBe(201)
+  expect(fences).toEqual([other.id])
+  expect(recorded).toHaveLength(2)
+  for (const checks of recorded) {
+    const keys = checks.map((check) => JSON.stringify(check))
+    expect(new Set(keys).size).toBe(keys.length)
+  }
 })

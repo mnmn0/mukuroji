@@ -1,4 +1,5 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
+import type { ProjectRaidReferenceOption } from '../model/projectRaidLogExport'
 import { useSaveProjectRaidEntry } from '../mutations/useSaveProjectRaidEntry'
 import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from './ProjectRaidLogPanel'
@@ -17,6 +18,10 @@ export type ProjectRaidLogSectionProps = {
   canMutate: boolean
   /** Fallback edit permission used until the server states the viewer's capabilities. */
   canEdit: boolean
+  /** Project members who may own an entry. */
+  ownerOptions?: readonly ProjectRaidReferenceOption[]
+  /** Work Items of the Project an entry may name as related. */
+  workItemOptions?: readonly ProjectRaidReferenceOption[]
   /** Translator for every label. */
   t: (key: MessageKey) => string
   /**
@@ -51,6 +56,8 @@ export function ProjectRaidLogSection({
   enabled,
   canMutate,
   canEdit,
+  ownerOptions,
+  workItemOptions,
   t,
   onSessionError,
 }: ProjectRaidLogSectionProps) {
@@ -66,8 +73,10 @@ export function ProjectRaidLogSection({
       entries={log.data?.entries}
       hasLoadError={Boolean(log.error)}
       isLoading={log.isLoading}
+      ownerOptions={ownerOptions}
       t={t}
       today={toLocalDate(new Date())}
+      workItemOptions={workItemOptions}
       onReload={() => void mutate()}
       onSave={save}
     />

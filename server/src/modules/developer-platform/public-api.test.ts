@@ -811,6 +811,10 @@ describe('public API router', () => {
           calls.push(`members:${teamId}/${projectId}`)
           return { schemaVersion: 1, teamId, projectId, items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }] }
         },
+        async listProjectRaidLog(_credential, teamId, projectId) {
+          calls.push(`raid:${teamId}/${projectId}`)
+          return { schemaVersion: 1, teamId, projectId, items: [] }
+        },
         async lookupWorkItemKey(_credential, key) {
           calls.push(`key:${key}`)
           if (key !== 'ABC-1') throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
@@ -827,6 +831,8 @@ describe('public API router', () => {
     const badLocale = await router.request('http://localhost/v1/teams?locale=fr', { headers })
     const members = await router.request('http://localhost/v1/projects/project-1/members?teamId=team-1', { headers })
     const membersWithoutTeam = await router.request('http://localhost/v1/projects/project-1/members', { headers })
+    const raidLog = await router.request('http://localhost/v1/projects/project-1/raid-log?teamId=team-1', { headers })
+    const raidLogWithoutTeam = await router.request('http://localhost/v1/projects/project-1/raid-log', { headers })
     const key = await router.request('http://localhost/v1/work-item-keys/ABC-1', { headers })
     const hiddenKey = await router.request('http://localhost/v1/work-item-keys/ABC-2', { headers })
     const paddedKey = await router.request('http://localhost/v1/work-item-keys/%20ABC-1', { headers })
@@ -851,6 +857,10 @@ describe('public API router', () => {
       items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }],
     })
     expect(membersWithoutTeam.status).toBe(400)
+    expect(raidLog.status).toBe(200)
+    expect(raidLog.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await raidLog.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', projectId: 'project-1', items: [] })
+    expect(raidLogWithoutTeam.status).toBe(400)
     expect(key.status).toBe(200)
     expect(await key.json()).toEqual({ schemaVersion: 1, key: 'ABC-1', teamId: 'team-1', workItemId: 'work-item-1' })
     expect(hiddenKey.status).toBe(404)
@@ -858,7 +868,7 @@ describe('public API router', () => {
     expect(longKey.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(calls.filter((call) => !call.startsWith('me:'))).toEqual([
-      'teams:en', 'members:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
+      'teams:en', 'members:team-1/project-1', 'raid:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
     ])
   })
 

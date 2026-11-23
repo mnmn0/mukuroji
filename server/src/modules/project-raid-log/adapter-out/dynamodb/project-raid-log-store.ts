@@ -38,7 +38,19 @@ const COUNTER_TYPE = 'project-raid-log'
 /** Schema version of the counter and entry rows. */
 const SCHEMA_VERSION = 1
 /** Fields whose values are recorded in audit changes. */
-const AUDIT_FIELDS = ['kind', 'title', 'description', 'probability', 'impact', 'response', 'reviewDueDate', 'status', 'revision']
+const AUDIT_FIELDS = [
+  'kind',
+  'title',
+  'description',
+  'probability',
+  'impact',
+  'response',
+  'reviewDueDate',
+  'ownerMemberId',
+  'relatedWorkItemIds',
+  'status',
+  'revision',
+]
 /** Free-text fields whose values are redacted in audit changes. */
 const AUDIT_REDACTED_FIELDS = ['title', 'description', 'response']
 
