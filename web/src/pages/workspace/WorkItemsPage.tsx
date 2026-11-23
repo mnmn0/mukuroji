@@ -79,7 +79,7 @@ export function WorkItemsPage() {
     searchParams,
     surface: 'work-items',
   })
-  const { effectiveDefinition, setEffectiveDefinition } = taskViewController
+  const { effectiveDefinition, isLoading: isTaskViewLoading, setEffectiveDefinition } = taskViewController
   // A link from before saved views carries the list state in its own parameters. Whenever the URL
   // has them, the list renders that state, and the parameters are rewritten into a temporary change
   // of the current view so the URL keeps one source of truth.
@@ -97,13 +97,15 @@ export function WorkItemsPage() {
       convertedLegacySearch.current = undefined
       return
     }
+    // The rewrite waits for the saved views, so it layers over the default view the viewer gets.
+    if (isTaskViewLoading) return
     const search = searchParams.toString()
     if (convertedLegacySearch.current === search) return
     convertedLegacySearch.current = search
     setEffectiveDefinition(
       crossProjectWorkItemStateToTaskViewDefinition(legacyState, effectiveDefinition),
     )
-  }, [effectiveDefinition, legacyState, searchParams, setEffectiveDefinition])
+  }, [effectiveDefinition, isTaskViewLoading, legacyState, searchParams, setEffectiveDefinition])
   const serverFilter = useMemo(() => createCrossProjectWorkItemServerFilter(state), [state])
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,

@@ -52,7 +52,7 @@ export function createCrossProjectWorkItemBuiltInDefinition(): TaskViewDefinitio
 /**
  * Reads the list state from a saved or temporary task view definition.
  *
- * Only the first contributor and job role are used, because the list filters by one of each.
+ * The server accepts at most one contributor and one job role on this surface, matching the list.
  *
  * @param definition - Effective definition after the viewer's permissions were applied.
  * @returns The list state that drives the filters, grouping, and layout.
@@ -65,6 +65,9 @@ export function taskViewDefinitionToCrossProjectWorkItemState(
   const contributorJobRole = filters.contributorJobRoles?.[0]
   return {
     projects: (filters.projectScopes ?? []).map(({ teamId, projectId }) => ({ teamId, projectId })),
+    // The server removes Projects the viewer cannot read and keeps the emptied list, which is not
+    // the same as a view without a Project condition.
+    ...(filters.projectScopes?.length === 0 ? { projectsUnavailable: true } : {}),
     openOnly: layout.displayOptions.showCompleted !== true,
     mine: filters.involvement === 'mine',
     ...(contributorMemberId ? { contributorMemberId } : {}),
@@ -87,10 +90,21 @@ export function crossProjectWorkItemStateToTaskViewDefinition(
   state: CrossProjectWorkItemListState,
   base: TaskViewDefinition,
 ): TaskViewDefinition {
+  // The list owns these four filters. Any other filter of the definition is kept as it is.
+  const {
+    projectScopes: _projectScopes,
+    involvement: _involvement,
+    contributorUserIds: _contributorUserIds,
+    contributorJobRoles: _contributorJobRoles,
+    ...otherFilters
+  } = base.filters
   const filters: TaskViewFilters = {
+    ...otherFilters,
     ...(state.projects.length > 0
       ? { projectScopes: state.projects.map(({ teamId, projectId }) => ({ teamId, projectId })) }
-      : {}),
+      : state.projectsUnavailable
+        ? { projectScopes: [] }
+        : {}),
     ...(state.mine ? { involvement: 'mine' as const } : {}),
     ...(state.contributorMemberId ? { contributorUserIds: [state.contributorMemberId] } : {}),
     ...(state.contributorJobRole

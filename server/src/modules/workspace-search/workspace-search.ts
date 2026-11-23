@@ -3014,6 +3014,23 @@ export class DynamoDbWorkspaceSearchClient {
         previousDefault?.viewId === viewId &&
         previousDefault.recordKey !== nextDefaultRecordKey
       ) {
+        // Moving a view out of its shared context removes the shared default that points at it, so
+        // the actor must be allowed to clear that default, as when clearing it explicitly.
+        if (
+          previousDefault.ownerType === 'team' &&
+          (!previousDefault.teamId ||
+            !canManageTaskViewSharedDefault(
+              current.definition.scope,
+              previousDefault.teamId,
+              request.access,
+            ))
+        ) {
+          throw new WorkspaceSearchError(
+            403,
+            'TaskViewAccessDenied',
+            'Team task view default management is denied.',
+          )
+        }
         transactItems.push(createTaskViewDefaultGuardTransactionItem(
           this.tableName,
           workspaceId,
@@ -5425,6 +5442,14 @@ function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
     )
   ) {
     invalidTaskView('Cross-Project task view filters need the work-items surface.')
+  }
+  // The Work Item list filters by one contributor and one job role, so a view never keeps values
+  // the list would not apply.
+  if (
+    (filters.contributorUserIds?.length ?? 0) > 1 ||
+    (filters.contributorJobRoles?.length ?? 0) > 1
+  ) {
+    invalidTaskView('Task view contributor filters accept one value each.')
   }
   return {
     surface,

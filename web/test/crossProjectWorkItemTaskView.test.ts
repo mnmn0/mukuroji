@@ -8,6 +8,7 @@ import {
 } from '../src/features/cross-project-work-items/model/crossProjectWorkItemTaskView'
 import {
   defaultCrossProjectWorkItemListState,
+  filterCrossProjectWorkItems,
   type CrossProjectWorkItemListState,
 } from '../src/features/cross-project-work-items/model/crossProjectWorkItems'
 
@@ -49,6 +50,34 @@ describe('cross-Project Work Item task view', () => {
       contributorJobRoles: [{ teamId: 'core-team', jobRoleId: 'designer' }],
     })
     expect(taskViewDefinitionToCrossProjectWorkItemState(definition)).toEqual(state)
+  })
+
+  test('shows nothing when a saved view chose only Projects the viewer cannot read', () => {
+    const builtIn = createCrossProjectWorkItemBuiltInDefinition()
+    // The server keeps the emptied list after removing the Projects this viewer cannot read.
+    const redacted = { ...builtIn, filters: { projectScopes: [] } }
+    const state = taskViewDefinitionToCrossProjectWorkItemState(redacted)
+    expect(state).toMatchObject({ projects: [], projectsUnavailable: true })
+    expect(filterCrossProjectWorkItems([], state, [])).toEqual([])
+    // Changing another setting keeps the Project condition instead of widening it.
+    const changed = crossProjectWorkItemStateToTaskViewDefinition({ ...state, layout: 'board' }, redacted)
+    expect(changed.filters.projectScopes).toEqual([])
+    // Picking Projects again, or clearing them, replaces it.
+    const cleared = crossProjectWorkItemStateToTaskViewDefinition(
+      { ...state, projectsUnavailable: false },
+      redacted,
+    )
+    expect(cleared.filters.projectScopes).toBeUndefined()
+  })
+
+  test('keeps filters that the list does not edit', () => {
+    const builtIn = createCrossProjectWorkItemBuiltInDefinition()
+    const base = { ...builtIn, filters: { priorities: ['high' as const], involvement: 'mine' as const } }
+    const next = crossProjectWorkItemStateToTaskViewDefinition(
+      { ...defaultCrossProjectWorkItemListState, layout: 'board' },
+      base,
+    )
+    expect(next.filters).toEqual({ priorities: ['high'] })
   })
 
   test('falls back to the table for a layout the list does not render', () => {

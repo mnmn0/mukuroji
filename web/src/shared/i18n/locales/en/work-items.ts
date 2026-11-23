@@ -839,6 +839,7 @@ export const workItemsMessages = {
   'workItems.crossProject.filters': 'Work item list filters',
   'workItems.crossProject.projects.label': 'Projects',
   'workItems.crossProject.projects.all': 'All',
+  'workItems.crossProject.projects.unavailable': 'Projects you cannot read',
   'workItems.crossProject.projects.selected': '{count} selected',
   'workItems.crossProject.projects.empty': 'No Projects you can read.',
   'workItems.crossProject.projects.clear': 'Clear selection',

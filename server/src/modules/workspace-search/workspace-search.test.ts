@@ -5206,6 +5206,28 @@ test('saves cross-Project work-items views and narrows shared filters to each vi
       },
     },
   })).rejects.toMatchObject({ status: 400 })
+
+  // The list filters by one contributor, so a view cannot keep more than it applies.
+  await expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'Two contributors',
+      visibility: 'personal',
+      definition: {
+        surface: 'work-items',
+        scope: { kind: 'workspace' },
+        filters: { contributorUserIds: ['dev@example.com', 'pm@example.com'] },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })).rejects.toMatchObject({ status: 400 })
 })
 
 test('lets only managers of that exact Project set its Project default', async () => {
@@ -5307,6 +5329,37 @@ test('lets only managers of that exact Project set its Project default', async (
     access: managerAccess,
     input: projectViewInput('alpha', 'team'),
   })).rejects.toMatchObject({ status: 400 })
+
+  // Moving the beta default out of its Team removes the default, which only a beta manager may do,
+  // even though the alpha manager may edit the Team view itself.
+  const betaManagerAccess = {
+    ...managerAccess,
+    viewerUserId: 'beta-manager@example.com',
+    manageableProjectScopeKeys: new Set(['core\0beta']),
+  }
+  const betaDefault = await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: betaView.id,
+    access: betaManagerAccess,
+    input: { expectedRevision: betaView.revision, defaultSource: 'project' },
+  })
+  expect(betaDefault.preference).toMatchObject({ isProjectDefault: true })
+  await expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: betaView.id,
+    access: managerAccess,
+    input: { expectedRevision: betaDefault.revision, visibility: 'personal', teamId: null },
+  })).rejects.toMatchObject({ status: 403 })
+  const betaPage = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'beta', teamId: 'core' },
+    access: memberAccess,
+  })
+  expect(betaPage.views.find((view) => view.id === betaView.id)?.preference).toMatchObject({
+    isDefault: true,
+    defaultSource: 'project',
+  })
 
   // The Project manager can clear the default again.
   const cleared = await client.updateTaskView({

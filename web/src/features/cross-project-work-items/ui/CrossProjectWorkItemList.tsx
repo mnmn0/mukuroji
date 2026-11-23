@@ -111,6 +111,7 @@ export function CrossProjectWorkItemList({
       projects: selectedProjectKeys.has(option.key)
         ? state.projects.filter((ref) => createCrossProjectWorkItemProjectKey(ref) !== option.key)
         : [...state.projects, { teamId: option.teamId, projectId: option.projectId }],
+      projectsUnavailable: false,
     })
   }
   const ganttGroup = useMemo(
@@ -121,7 +122,10 @@ export function CrossProjectWorkItemList({
     [state.grouping, t, teams],
   )
   const ganttWorkItems = useMemo(() => groups.flatMap((group) => group.workItems), [groups])
-  const projectSummary = state.projects.length === 0
+  const projectsUnavailable = Boolean(state.projectsUnavailable) && state.projects.length === 0
+  const projectSummary = projectsUnavailable
+    ? t('workItems.crossProject.projects.unavailable')
+    : state.projects.length === 0
     ? t('workItems.crossProject.projects.all')
     : t('workItems.crossProject.projects.selected').replace('{count}', String(state.projects.length))
 
@@ -150,10 +154,10 @@ export function CrossProjectWorkItemList({
                 <span className="text-xs text-[var(--workbench-muted)]">{option.teamName}</span>
               </label>
             ))}
-            {state.projects.length > 0 ? (
+            {state.projects.length > 0 || projectsUnavailable ? (
               <button
                 className="workbench-button-secondary mt-1 min-h-8 px-2 text-xs"
-                onClick={() => update({ projects: [] })}
+                onClick={() => update({ projects: [], projectsUnavailable: false })}
                 type="button"
               >
                 {t('workItems.crossProject.projects.clear')}

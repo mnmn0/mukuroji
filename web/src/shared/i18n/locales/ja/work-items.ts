@@ -839,6 +839,7 @@ export const workItemsMessages = {
   'workItems.crossProject.filters': 'Work Item 一覧の絞り込み',
   'workItems.crossProject.projects.label': 'Project',
   'workItems.crossProject.projects.all': 'すべて',
+  'workItems.crossProject.projects.unavailable': '閲覧できない Project',
   'workItems.crossProject.projects.selected': '{count} 件',
   'workItems.crossProject.projects.empty': '閲覧できる Project はありません。',
   'workItems.crossProject.projects.clear': '選択を解除',
