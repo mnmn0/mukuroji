@@ -1,6 +1,6 @@
 import useSWR from 'swr'
 import type { CapacityPlanningGranularity } from '@mukuroji/contracts'
-import { getWorkspaceWorkload } from '../api'
+import { getWorkspaceWorkload } from '../api/workspaceWorkload'
 import { createWorkloadDateRange } from '../model/dateRange'
 
 const workspaceWorkloadQueryConfig = {

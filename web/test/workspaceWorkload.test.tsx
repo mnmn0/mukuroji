@@ -4,7 +4,7 @@ import { CAPACITY_PLANNING_SCHEMA_VERSION, type WorkloadSnapshot, type Workspace
 import { getMyTimesheet, submitMyTimesheet } from '../src/features/time-tracking/api/myTimesheet'
 import { MyTimesheetPanel } from '../src/features/time-tracking/ui/MyTimesheetPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
-import { getWorkspaceWorkload } from '../src/workload/api'
+import { getWorkspaceWorkload } from '../src/workload/api/workspaceWorkload'
 import { TeamWorkloadView } from '../src/workload/ui/TeamWorkloadView'
 import { WorkspaceWorkloadView } from '../src/workload/ui/WorkspaceWorkloadView'
 
