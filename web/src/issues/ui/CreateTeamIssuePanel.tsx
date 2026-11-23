@@ -58,6 +58,7 @@ export function CreateIssuePanel({
   configuration,
   duplicateDraft,
   errorMessage,
+  initialDueDate,
   locale,
   onApplyTemplate,
   onCancel,
@@ -79,6 +80,8 @@ export function CreateIssuePanel({
   /** Values copied from an existing Work Item; the member can edit them before saving. */
   duplicateDraft?: WorkItemDuplicateDraft
   errorMessage?: string
+  /** Due date the form starts with, such as one kept across a template change; today when absent. */
+  initialDueDate?: string
   locale: Locale
   /**
    * Restarts the panel from a Work Item template, or from an empty form when undefined. The due
@@ -334,7 +337,7 @@ export function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={duplicateDraft?.dueDate ?? today} name="dueDate" type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={initialDueDate ?? duplicateDraft?.dueDate ?? today} name="dueDate" type="date" />
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}

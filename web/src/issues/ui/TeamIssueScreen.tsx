@@ -267,6 +267,8 @@ export function TeamIssueScreen({
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
+  // Due date entered before a template was picked or cleared, so the restarted form keeps it.
+  const [createKeptDueDate, setCreateKeptDueDate] = useState<string>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateOpen && Boolean(onCreateIssue))
   const teamCreateTemplates = useMemo(
@@ -436,6 +438,7 @@ export function TeamIssueScreen({
     setCreateWorkflowStatusId(undefined)
     setCreateWorkItemTypeId(undefined)
     setCreateDuplicateDraft(undefined)
+    setCreateKeptDueDate(undefined)
     setIsCreateOpen(false)
   }, [])
 
@@ -445,6 +448,7 @@ export function TeamIssueScreen({
     setCreateWorkflowStatusId(context?.workflowStatusId)
     setCreateWorkItemTypeId(context?.workItemTypeId)
     setCreateDuplicateDraft(context?.duplicateDraft)
+    setCreateKeptDueDate(undefined)
     setIsCreateOpen(true)
   }, [])
 
@@ -1606,11 +1610,13 @@ export function TeamIssueScreen({
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
+                    initialDueDate={createKeptDueDate}
                     errorMessage={createErrorMessage}
                     onApplyTemplate={(template, dueDate) => {
                       setCreateErrorMessage(undefined)
-                      // The restarted form keeps the due date the member entered.
-                      setCreateDuplicateDraft(template ? { ...createWorkItemTemplateDraft(template), dueDate } : undefined)
+                      // The restarted form keeps the due date the member entered, with or without a template.
+                      setCreateKeptDueDate(dueDate)
+                      setCreateDuplicateDraft(template ? createWorkItemTemplateDraft(template) : undefined)
                     }}
                     templateLoadFailed={createTemplates.hasLoadError}
                     templates={teamCreateTemplates}
