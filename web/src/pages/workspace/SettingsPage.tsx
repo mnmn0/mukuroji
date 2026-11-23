@@ -111,6 +111,7 @@ export function SettingsPage() {
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
                 guardRequest={workspace.guardEnterpriseSession}
+                muteTargets={workspace.teams}
                 onSessionError={workspace.reportNotificationPreferencesError}
               />
             ) : undefined}
