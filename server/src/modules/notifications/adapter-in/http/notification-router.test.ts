@@ -32,6 +32,51 @@ describe('createNotificationRouter', () => {
       expect(await response.json()).not.toHaveProperty('slackEnabledAt')
     }
   })
+  test('applies a bulk action to each notification of the recipient and reports the ones that failed', async () => {
+    const dependencies = createDependencies(1)
+    const updated: string[] = []
+    const notifications: NotificationClient = {
+      ...dependencies.getNotifications(),
+      async update(input) {
+        expect(input.workspaceId).toBe('workspace-token')
+        expect(input.memberKey).toBe('member-token')
+        expect(input.action).toBe('archive')
+        expect(input.isVisible).toBeDefined()
+        if (input.notificationId === 'gone') throw new NotificationError(404, 'NotificationNotFound', 'Notification was not found.')
+        updated.push(input.notificationId)
+        return {
+          id: input.notificationId, eventId: `event-${input.notificationId}`, eventType: 'comment.created', reasons: [],
+          occurredAt: '2026-11-22T00:00:00.000Z', state: 'archived', planningTargetRecordKey: 'internal',
+        } satisfies NotificationItem
+      },
+    }
+    const router = createNotificationRouter({ ...dependencies, getNotifications: () => notifications })
+    const response = await router.request('/api/notifications/bulk', {
+      method: 'POST', headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'archive', notificationIds: ['a', 'gone', 'b', 'a'] }),
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(updated.sort()).toEqual(['a', 'b'])
+    expect(body.notifications.map((notification: { id: string }) => notification.id)).toEqual(['a', 'b'])
+    expect(body.notifications[0]).not.toHaveProperty('planningTargetRecordKey')
+    expect(body.failures).toEqual([{ id: 'gone', status: 404, code: 'NotificationNotFound' }])
+    expect(body.unreadCount).toBe(1)
+
+    for (const invalid of [
+      { action: 'snooze', notificationIds: ['a'] },
+      { action: 'archive', notificationIds: [] },
+      { action: 'archive', notificationIds: Array.from({ length: 51 }, (_, index) => `n-${index}`) },
+      { action: 'archive', notificationIds: [1] },
+    ]) {
+      const rejected = await router.request('/api/notifications/bulk', {
+        method: 'POST', headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+        body: JSON.stringify(invalid),
+      })
+      expect(rejected.status).toBe(400)
+    }
+    expect((await router.request('/api/notifications/bulk', { method: 'POST' })).status).toBe(401)
+  })
   test('omits internal Slack activation metadata from preference reads', async () => {
     const dependencies = createDependencies(1)
     const router = createNotificationRouter({ ...dependencies, getNotifications: () => ({
