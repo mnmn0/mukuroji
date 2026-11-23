@@ -24,9 +24,6 @@ const SOFTWARE_FACTORY_REQUESTS: readonly (readonly [method: string, path: strin
   ['POST', '/api/v1/agent-runs/run-1/reports'],
   ['GET', '/api/v1/agent-settings'],
   ['GET', '/api/v1/agent-context'],
-  ['GET', '/api/developer/me/agent-connection'],
-  ['POST', '/api/developer/me/api-keys'],
-  ['POST', '/api/developer/me/api-keys/key-1/rotate'],
 ]
 
 /** Requests that stay open without Software factory. */
@@ -34,6 +31,13 @@ const WBS_REQUESTS: readonly (readonly [method: string, path: string])[] = [
   ['GET', '/api/v1/work-items'],
   ['GET', '/api/v1/work-items/item-1'],
   ['GET', '/api/v1/work-items/item-1/actual-dates'],
+  ['GET', '/api/v1/me'],
+  ['GET', '/api/v1/teams'],
+  ['GET', '/api/v1/projects/project-1/members'],
+  ['GET', '/api/v1/work-item-keys/ABC-1'],
+  ['GET', '/api/developer/me/agent-connection'],
+  ['POST', '/api/developer/me/api-keys'],
+  ['POST', '/api/developer/me/api-keys/key-1/rotate'],
   ['DELETE', '/api/developer/me/api-keys/key-1'],
   ['GET', '/api/developer/api-keys'],
   ['GET', '/api/teams/team-1/work-items/item-1'],
@@ -78,7 +82,7 @@ test('answers Public API clients with a non-retryable problem document', async (
   })
 })
 
-test('keeps WBS reads, credential revocation, and preflight open without the module', async () => {
+test('keeps WBS reads, personal credentials, and preflight open without the module', async () => {
   const app = createGatedApp(false)
 
   for (const [method, path] of WBS_REQUESTS) {

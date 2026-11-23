@@ -310,6 +310,20 @@ export function createDeveloperPlatformLabels(
           : 'Required Work Item title.',
       },
       {
+        value: 'assigneeUserId',
+        label: ja ? '責任者' : 'Owner',
+        description: ja
+          ? '必須。Workspace member の user ID です。'
+          : 'Required Workspace member user ID.',
+      },
+      {
+        value: 'schedule',
+        label: ja ? 'スケジュール' : 'Schedule',
+        description: ja
+          ? '必須。canonical schedule の JSON です。'
+          : 'Required canonical schedule JSON.',
+      },
+      {
         value: 'description',
         label: ja ? '説明' : 'Description',
         description: ja
@@ -317,25 +331,88 @@ export function createDeveloperPlatformLabels(
           : 'Markdown Work Item description.',
       },
       {
-        value: 'status',
+        value: 'workItemTypeId',
+        label: 'Work Item Type',
+        description: ja
+          ? 'Work Item Type の ID です。'
+          : 'Work Item Type ID.',
+      },
+      {
+        value: 'workflowStatusId',
         label: ja ? 'ステータス' : 'Status',
         description: ja
-          ? '設定済み workflow の状態です。'
-          : 'Configured workflow state.',
+          ? '設定済み workflow の status ID です。'
+          : 'Configured workflow status ID.',
       },
       {
         value: 'priority',
         label: ja ? '優先度' : 'Priority',
         description: ja
-          ? '設定済みの優先度です。'
-          : 'Configured priority value.',
+          ? 'high、medium、low のいずれかです。'
+          : 'high, medium, or low.',
       },
       {
-        value: 'assignee',
-        label: ja ? '担当者' : 'Assignee',
+        value: 'assignedProjectId',
+        label: 'Project',
         description: ja
-          ? 'Workspace member の識別子です。'
-          : 'Workspace member identifier.',
+          ? '割り当てる Project の ID です。'
+          : 'ID of the Project to assign.',
+      },
+      {
+        value: 'importKey',
+        label: 'Import key',
+        description: ja
+          ? '他の行が親や依存の参照に使うこの行の key です。'
+          : 'Key other rows use to name this row as a parent or predecessor.',
+      },
+      {
+        value: 'parentKey',
+        label: ja ? '親' : 'Parent',
+        description: ja
+          ? '親の行の import key か WBS 番号です。'
+          : 'Import key or WBS number of the parent row.',
+      },
+      {
+        value: 'wbsNumber',
+        label: ja ? 'WBS 番号' : 'WBS number',
+        description: ja
+          ? '1.2.3 のような番号です。親の列がなければ親を決めます。'
+          : 'Number such as 1.2.3; it decides the parent when no parent column is mapped.',
+      },
+      {
+        value: 'outlineLevel',
+        label: ja ? '階層レベル' : 'Outline level',
+        description: ja
+          ? '1 から始まる階層の深さです。'
+          : 'Outline depth starting at 1.',
+      },
+      {
+        value: 'dependencies',
+        label: ja ? '先行タスク' : 'Predecessors',
+        description: ja
+          ? '「key FS +2」のように種類と lag を付けた先行行です。'
+          : 'Predecessor rows with a type and lag, such as "key FS +2".',
+      },
+      {
+        value: 'relations',
+        label: ja ? '関連' : 'Relations',
+        description: ja
+          ? '「blocks:key」のように種類を付けた関連する行です。'
+          : 'Related rows with a type, such as "blocks:key".',
+      },
+      {
+        value: 'contributors',
+        label: ja ? 'Contributor' : 'Contributors',
+        description: ja
+          ? '「member:ID effort:2h」のように書いた Contributor です。'
+          : 'Contributors written like "member:ID effort:2h".',
+      },
+      {
+        value: 'acceptanceCriteria',
+        label: ja ? '受け入れ条件' : 'Acceptance criteria',
+        description: ja
+          ? '1 行に 1 条件。「[x]」で始まる行は達成済みです。'
+          : 'One condition per line; a line starting with "[x]" is met.',
       },
     ],
     tableHeaders: {
@@ -375,6 +452,8 @@ export function createDeveloperPlatformLabels(
       dryRun: ja ? '検証を実行' : 'Run validation',
       'export-csv': ja ? 'CSV を export' : 'Export CSV',
       'export-json': ja ? 'JSON を export' : 'Export JSON',
+      'export-msproject': ja ? 'MS Project XML を export' : 'Export MS Project XML',
+      'export-xlsx': ja ? 'Excel を export' : 'Export Excel',
       'use-local': ja ? 'mukuroji を採用' : 'Keep mukuroji',
       'use-external': ja ? 'Provider を採用' : 'Keep provider',
       ignore: ja ? 'この競合を無視' : 'Ignore this conflict',
@@ -460,6 +539,8 @@ export function createDeveloperPlatformLabels(
       oauthAppsEmpty: ja ? 'OAuth app はまだありません' : 'No OAuth apps yet',
       'source-csv': 'CSV file',
       'source-json': 'JSON file',
+      'source-msproject': 'MS Project XML',
+      'source-xlsx': ja ? 'Excel (.xlsx)' : 'Excel (.xlsx)',
       syncConflicts: ja ? '同期競合' : 'Sync conflicts',
       syncConflictsEmpty: ja ? '未解決の同期競合はありません' : 'No sync conflicts',
       webhooks: ja ? 'Webhook 購読' : 'Webhook subscriptions',
@@ -572,6 +653,12 @@ export function createDeveloperPlatformLabels(
       'source-json': ja
         ? '入れ子の data や構造化 custom field に適しています。'
         : 'Best for nested source data and structured custom fields.',
+      'source-msproject': ja
+        ? 'MS Project で XML として保存した計画の階層・先行タスク・割り当てを取り込みます。'
+        : 'Brings in the outline, predecessors, and assignments of a plan saved as XML from MS Project.',
+      'source-xlsx': ja
+        ? '最初の sheet の表を読みます。mukuroji の export はそのまま取り込めます。'
+        : 'Reads the table on the first sheet; a mukuroji export imports as it is.',
       syncConflicts: ja
         ? 'mukuroji と Provider の値を比較し、競合 ID ごとに安全な復旧方法を選びます。'
         : 'Compare mukuroji and provider values, then choose a recovery for each conflict ID.',

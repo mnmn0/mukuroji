@@ -6193,6 +6193,28 @@ export function createPlanningWorkItemDependencySummary(
 }
 
 /**
+ * Finds the conflicts of one schedule dependency between two Work Items.
+ *
+ * Creating a dependency is rejected while it has a conflict, so an import checks its dependencies
+ * against the schedules it is about to create.
+ *
+ * @param dependency - Candidate dependency between the two Work Items.
+ * @param predecessor - Predecessor summary; its identity must match the dependency.
+ * @param successor - Successor summary; its identity must match the dependency.
+ * @returns Conflicts of the dependency, empty when the schedules satisfy it.
+ */
+export function findWorkItemDependencyScheduleConflicts(
+  dependency: WorkItemScheduleDependency,
+  predecessor: PlanningWorkItemSummary,
+  successor: PlanningWorkItemSummary,
+): WorkItemScheduleDependencyConflict[] {
+  return calculateWorkItemDependencyConflicts([dependency], new Map([
+    [createWorkItemKey(predecessor.teamId, predecessor.id), predecessor],
+    [createWorkItemKey(successor.teamId, successor.id), successor],
+  ]))
+}
+
+/**
  * Calculates stable lower-bound and explicit-constraint conflicts for visible dependencies.
  *
  * @param dependencies - Dependencies whose endpoints may be inspected.
