@@ -9,6 +9,7 @@ import {
   type ProjectRaidEntryReferences,
   type ProjectRaidLogCallerAuthorizationCheck,
 } from '../../modules/project-raid-log'
+import { createWorkItemProjectAssignmentConditionCheck } from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
@@ -228,7 +229,13 @@ async function verifyEntryReferences(
         `Related Work Item "${workItemId}" is not a Work Item of this Project.`,
       )
     }
-    workItemFences.push(createRelatedWorkItemConditionCheck(principal.directoryId, teamId, projectId, workItemId))
+    workItemFences.push(createWorkItemProjectAssignmentConditionCheck(
+      getTeamIssuesTableName(),
+      principal.directoryId,
+      teamId,
+      workItemId,
+      projectId,
+    ))
   }
   const { ownerMemberId } = references
   if (ownerMemberId === undefined) return workItemFences
@@ -263,32 +270,6 @@ async function verifyEntryReferences(
   )
   if (!members.some((member) => member.id === ownerMemberId)) throw notMember()
   return fence ? [...workItemFences, fence] : workItemFences
-}
-
-/**
- * Builds the commit-time check that a related Work Item still exists in this Project.
- *
- * @param directoryId - Workspace that owns the Work Item.
- * @param teamId - Team that owns the Work Item.
- * @param projectId - Project the Work Item must belong to.
- * @param workItemId - Related Work Item.
- * @returns A condition check on the Work Item row.
- */
-function createRelatedWorkItemConditionCheck(
-  directoryId: string,
-  teamId: string,
-  projectId: string,
-  workItemId: string,
-): ProjectRaidLogCallerAuthorizationCheck {
-  return {
-    ConditionCheck: {
-      TableName: getTeamIssuesTableName(),
-      Key: { directoryTeamId: `${directoryId}#team#${teamId}`, issueId: workItemId },
-      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
-      ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
-      ExpressionAttributeValues: { ':projectId': projectId },
-    },
-  }
 }
 
 /**

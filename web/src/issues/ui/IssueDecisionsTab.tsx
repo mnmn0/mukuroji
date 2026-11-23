@@ -133,7 +133,8 @@ export function IssueDecisionsTab({
   riskPromotion,
 }: IssueDecisionsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  // Promotion outcome per item, kept for this session so a promoted risk is not added twice.
+  // Pending and failed promotions shown in this tab. Promoted risks are also kept by the
+  // promotion itself, which outlives the tab, so they stay marked after a tab switch.
   const [promotions, setPromotions] = useState<Record<string, 'pending' | 'done' | 'failed'>>({})
   const panelInstanceId = useId()
   const [editorRequest, setEditorRequest] = useState<ContextEditorState>()
@@ -407,7 +408,7 @@ export function IssueDecisionsTab({
                   </button>
                 ) : null}
                 {riskPromotion && item.kind === 'risk' && item.state !== 'superseded' ? (
-                  promotions[item.id] === 'done' ? (
+                  promotions[item.id] === 'done' || riskPromotion.promotedItemIds.has(item.id) ? (
                     <span className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
                       {t('collaboration.decisions.promoteRisk.done')}
                       <Link className="text-[var(--workbench-primary-text)] underline underline-offset-2" to={riskPromotion.logPath}>
