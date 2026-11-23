@@ -56,6 +56,7 @@ import type { TeamReminderSettingsStore } from '../../modules/notifications/appl
 import type { AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CycleScheduleBaselineStore } from '../../modules/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
 import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
@@ -216,6 +217,8 @@ export interface WorkItemDependencies {
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
+  /** Provides the named schedule baselines of each Cycle. */
+  cycleScheduleBaselines: CycleScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */

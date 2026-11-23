@@ -130,6 +130,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get scheduleBaselines() {
     return requireAppDependencies().workItems.scheduleBaselines
   },
+  get cycleScheduleBaselines() {
+    return requireAppDependencies().workItems.cycleScheduleBaselines
+  },
   get collections() {
     return requireAppDependencies().workItems.collections
   },

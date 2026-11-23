@@ -110,4 +110,30 @@ describe('Slack transport', () => {
     secretSpy.mockRejectedValue(new Error(url))
     expect(await createSlackNotificationSender(secretSpy)(delivery)).toEqual({ succeeded: false, retryable: true, code: 'SlackDestinationUnavailable' })
   })
+  test('prefixes the Work Item key and links its key page and the deep link when an origin is set', async () => {
+    secretSpy.mockResolvedValue(url)
+    let payload: { text: string; blocks: Array<{ type: string; elements?: Array<{ type: string; text: string }> }> } | undefined
+    const keyed: SlackDelivery = {
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'CORE-12', deepLink: '/teams/core/issues/i-1?x=a|b&y=<z>' },
+    }
+    await createSlackNotificationSender(secretSpy, async (_endpoint, request) => {
+      payload = JSON.parse(String(request.body))
+      return new Response('ok', { status: 200 })
+    }, 'https://app.example.test')(keyed)
+    expect(payload?.text.split('\n')[0]).toBe('CORE-12 Review')
+    expect(payload?.blocks[1]?.type).toBe('context')
+    const links = payload?.blocks[1]?.elements?.[0]?.text ?? ''
+    expect(links).toContain('<https://app.example.test/browse/CORE-12|CORE-12>')
+    expect(links).toContain('<https://app.example.test/teams/core/issues/i-1?x=a%7Cb&amp;y=%3Cz%3E|Open in mukuroji>')
+  })
+  test('omits link blocks without an application origin', async () => {
+    secretSpy.mockResolvedValue(url)
+    let blocks: unknown[] = []
+    await createSlackNotificationSender(secretSpy, async (_endpoint, request) => {
+      blocks = JSON.parse(String(request.body)).blocks
+      return new Response('ok', { status: 200 })
+    })({ ...delivery, notification: { ...delivery.notification, workItemKey: 'CORE-12' } })
+    expect(blocks).toHaveLength(1)
+  })
 })
