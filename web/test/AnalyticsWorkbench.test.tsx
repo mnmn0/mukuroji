@@ -690,6 +690,25 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Retry')
   })
 
+  test('keeps the delivery error and retry when earlier deliveries are still shown', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[{
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        }]}
+        deliveriesFailed
+        onRetryDeliveries={() => undefined}
+      />,
+    )
+    expect(html).toContain('data-testid="analytics-delivery-selector"')
+    expect(html).toContain('data-testid="analytics-deliveries-error"')
+  })
+
   test('offers to read earlier deliveries while more remain', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench

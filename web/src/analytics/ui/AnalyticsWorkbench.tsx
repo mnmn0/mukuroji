@@ -648,7 +648,7 @@ export function AnalyticsWorkbench({
               {t('analytics.deliveries.loadMore')}
             </button>
           ) : null}
-          {deliveriesFailed && deliveries.length === 0 ? (
+          {deliveriesFailed ? (
             <span className="flex flex-wrap items-center gap-2 self-end pb-2 text-xs font-medium text-fg-red-800" data-testid="analytics-deliveries-error" role="alert">
               {t('analytics.deliveries.error')}
               {onRetryDeliveries ? (
