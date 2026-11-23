@@ -331,6 +331,22 @@ function normalizeTaskViewFilters(
     ...(filters.includeArchived !== undefined
       ? { includeArchived: filters.includeArchived }
       : {}),
+    ...(filters.projectScopes ? {
+      projectScopes: filters.projectScopes.map((projectScope) => ({
+        teamId: projectScope.teamId,
+        projectId: projectScope.projectId,
+      })),
+    } : {}),
+    ...(filters.involvement !== undefined ? { involvement: filters.involvement } : {}),
+    ...(filters.contributorUserIds
+      ? { contributorUserIds: [...filters.contributorUserIds] }
+      : {}),
+    ...(filters.contributorJobRoles ? {
+      contributorJobRoles: filters.contributorJobRoles.map((jobRole) => ({
+        teamId: jobRole.teamId,
+        jobRoleId: jobRole.jobRoleId,
+      })),
+    } : {}),
   }
 }
 
