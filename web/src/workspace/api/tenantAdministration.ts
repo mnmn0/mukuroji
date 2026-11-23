@@ -14,6 +14,7 @@ import type {
   WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
+  isCurrencyCode,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceNationalHolidayDates,
@@ -357,6 +358,7 @@ function isTenantProfile(value: unknown): value is TenantProfile {
       readWeeklyReportReminderSettings(value.weeklyReportReminders) !== undefined) &&
     (value.timeEntryCategories === undefined ||
       readWorkspaceTimeEntryCategorySettings(value.timeEntryCategories) !== undefined) &&
+    (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
     (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&

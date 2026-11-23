@@ -3,11 +3,14 @@ import { GetCommand, QueryCommand, TransactWriteCommand, type DynamoDBDocumentCl
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { digestStorageFailure } from './digest-storage-failure'
-import { createNotificationRecipientKey, NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences } from '../../notifications'
+import { createNotificationRecipientKey, isNotificationRoutedToChannel, NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences } from '../../notifications'
 import { emptyDigestState, parseDigestState } from '../application/digest'
 import { inboxDigestInterval, type InboxDigestCandidate, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestRetry, type InboxDigestStore } from '../application/inbox-digest'
 import { createInboxDigestNotification } from './inbox-digest-notification'
 import { digestSavedFeedsFence } from './saved-feeds-store'
+
+/** Category and scope the routing settings see for an update-feed digest row. */
+const INBOX_DIGEST_ROUTING_SUBJECT = { eventType: 'update-feed.digest', reasons: ['digest'] }
 
 /** Undeployed sparse GSI schema; activation requires separate infrastructure review. */
 export const INBOX_DIGEST_INDEX = { name: 'InboxDigestDueIndex', partitionKey: 'inboxDigestShard', sortKey: 'inboxDigestDueAt', shards: 16 } as const
@@ -121,7 +124,9 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       } },
     ]
     guards.push(...digestSavedFeedsFence(this.planningTable, recipient.workspaceId, recipient.memberKey, savedFeedsRevision))
-    return this.write(recipient, state, guards, message, before.leaseUntil)
+    // The fenced preference version keeps this category decision consistent with the write.
+    const archived = !isNotificationRoutedToChannel(preferences, INBOX_DIGEST_ROUTING_SUBJECT, 'inApp')
+    return this.write(recipient, state, guards, message, before.leaseUntil, archived)
   }
 
   /** Backs off denied discovery for one hour without changing consent or delivery history.
@@ -174,8 +179,17 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     return { recipients, cursor: page.LastEvaluatedKey }
   }
 
-  /** Writes only delivery metadata and optional Inbox row under one transaction. */
-  private async write(recipient: InboxDigestRecipient, state: UpdateFeedDigestState, guards: readonly PlanningCallerAuthorizationConditionCheck[], message?: InboxDigestMessage, leaseUntil?: number): Promise<UpdateFeedDigestState> {
+  /**
+   * Writes only delivery metadata and optional Inbox row under one transaction.
+   * @param recipient - Server-resolved recipient.
+   * @param state - Digest state read before the write.
+   * @param guards - Authorization and preference fences committed with the write.
+   * @param message - Inbox row to insert, when the digest found updates.
+   * @param leaseUntil - Claim expiry that must not have passed.
+   * @param archived - Whether the member's category settings keep the row out of the unread Inbox.
+   * @returns The saved digest state.
+   */
+  private async write(recipient: InboxDigestRecipient, state: UpdateFeedDigestState, guards: readonly PlanningCallerAuthorizationConditionCheck[], message?: InboxDigestMessage, leaseUntil?: number, archived = false): Promise<UpdateFeedDigestState> {
     if (this.checks.length === 0) throw new PlanningError(503, 'UpdateFeedDigestAuthorizationUnavailable', 'Recipient authorization is unavailable.')
     if (leaseUntil !== undefined && leaseUntil <= this.now()) throw conflict()
     const result = { ...state, revision: state.revision + 1 }
@@ -183,7 +197,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       Item: { ...key(recipient), memberKey: recipient.memberKey, entryType: 'update-feed-inbox-digest', schemaVersion: 1, ...result, ...dueFields(recipient, result, this.now()) },
       ConditionExpression: state.revision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :revision AND #type = :type AND #schema = :schema',
       ...(state.revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType', '#schema': 'schemaVersion' }, ExpressionAttributeValues: { ':revision': state.revision, ':type': 'update-feed-inbox-digest', ':schema': 1 } }),
-    } }, ...this.checks, ...guards, ...(message ? [{ Put: { TableName: this.notificationsTable, Item: createInboxDigestNotification(recipient, message, this.locale), ConditionExpression: 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)' } }] : [])]
+    } }, ...this.checks, ...guards, ...(message ? [{ Put: { TableName: this.notificationsTable, Item: createInboxDigestNotification(recipient, message, this.locale, archived), ConditionExpression: 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)' } }] : [])]
     try { await this.client.send(new TransactWriteCommand({ TransactItems: items })) }
     catch (error) { return digestStorageFailure(error, items.length) }
     return result

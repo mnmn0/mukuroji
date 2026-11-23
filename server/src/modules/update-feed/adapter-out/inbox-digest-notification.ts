@@ -6,17 +6,20 @@ import type { InboxDigestMessage, InboxDigestRecipient } from '../application/in
  * @param recipient - Server-resolved recipient.
  * @param message - Deterministic content-free delivery.
  * @param locale - Recipient language resolved by composition.
+ * @param archived - Whether the member's category settings keep the row out of the unread Inbox.
  * @returns An ordinary Inbox row, readable by the existing Notification client.
  */
-export function createInboxDigestNotification(recipient: InboxDigestRecipient, message: InboxDigestMessage, locale: 'ja' | 'en' = 'en') {
+export function createInboxDigestNotification(recipient: InboxDigestRecipient, message: InboxDigestMessage, locale: 'ja' | 'en' = 'en', archived = false) {
   const recipientKey = createNotificationRecipientKey(recipient.workspaceId, recipient.memberKey)
+  const inboxState = archived ? 'archived' : 'unread'
   return {
     recipientKey,
     notificationKey: `${message.occurredAt}#${message.id}`,
-    recipientStatusKey: `${recipientKey}#unread`,
+    recipientStatusKey: `${recipientKey}#${inboxState}`,
     itemType: 'notification',
     version: 1,
-    inboxState: 'unread',
+    inboxState,
+    ...(archived ? { archivedAt: message.occurredAt } : {}),
     inAppVisible: true,
     eventId: message.id,
     eventType: 'update-feed.digest',
@@ -27,7 +30,7 @@ export function createInboxDigestNotification(recipient: InboxDigestRecipient, m
     title: locale === 'ja' ? '更新ダイジェストを確認できます' : 'Update digest available',
     deepLink: message.deepLink,
     reasons: ['digest'],
-    deliveryChannels: ['inApp'],
+    deliveryChannels: archived ? [] : ['inApp'],
     expiresAt: Math.floor(Date.parse(message.occurredAt) / 1000) + 365 * 86_400,
   }
 }

@@ -1,0 +1,23 @@
+/** Japanese copy for the Developer Platform panel, starting with the Work Item relation webhook events. */
+export const developerPlatformMessages = {
+  'developerPlatform.webhookEvents.parentChanged.label': '親の変更',
+  'developerPlatform.webhookEvents.parentChanged.description': 'Work Item の親が設定・変更・解除されたとき（子の側）。',
+  'developerPlatform.webhookEvents.childAdded.label': '子の追加',
+  'developerPlatform.webhookEvents.childAdded.description': 'Work Item に子が加わったとき（親の側）。',
+  'developerPlatform.webhookEvents.childRemoved.label': '子の削除',
+  'developerPlatform.webhookEvents.childRemoved.description': 'Work Item から子が外れたとき（親の側）。',
+  'developerPlatform.webhookEvents.blockerAdded.label': 'blocker の追加',
+  'developerPlatform.webhookEvents.blockerAdded.description': 'Work Item を block する Work Item が加わったとき。',
+  'developerPlatform.webhookEvents.blockerRemoved.label': 'blocker の解除',
+  'developerPlatform.webhookEvents.blockerRemoved.description': 'Work Item を block していた Work Item が外れたとき。',
+  'developerPlatform.webhookEvents.blockingAdded.label': 'block 先の追加',
+  'developerPlatform.webhookEvents.blockingAdded.description': 'Work Item が別の Work Item を block し始めたとき。',
+  'developerPlatform.webhookEvents.blockingRemoved.label': 'block 先の解除',
+  'developerPlatform.webhookEvents.blockingRemoved.description': 'Work Item が別の Work Item を block しなくなったとき。',
+  'developerPlatform.webhookEvents.relationAdded.label': '関連の追加',
+  'developerPlatform.webhookEvents.relationAdded.description': '関連または重複の link が加わったとき。',
+  'developerPlatform.webhookEvents.relationRemoved.label': '関連の削除',
+  'developerPlatform.webhookEvents.relationRemoved.description': '関連または重複の link が外れたとき。',
+  'developerPlatform.webhookEvents.siblingOrderChanged.label': '並び順の変更',
+  'developerPlatform.webhookEvents.siblingOrderChanged.description': '同じ親の中で Work Item の並び順が変わったとき。',
+} as const

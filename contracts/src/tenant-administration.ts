@@ -40,6 +40,11 @@ export type TenantProfile = {
   weeklyReportReminders?: WeeklyReportReminderSettings
   /** Work categories offered for time entries; absent until an administrator chooses them. */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
+  /**
+   * ISO 4217 currency for time costs, budgets, and rate cards; absent until an administrator
+   * chooses one, which means `DEFAULT_WORKSPACE_CURRENCY` (JPY).
+   */
+  defaultCurrency?: string
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -247,6 +252,8 @@ export type UpdateTenantProfileInput = {
    * offered may be retired but not removed.
    */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
+  /** ISO 4217 currency for time costs and budgets; omitted keeps the stored currency. */
+  defaultCurrency?: string
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

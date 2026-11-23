@@ -73,6 +73,12 @@ jobs:
       - name: Exercise local workers
         run: bun run workers:once
 
+      - name: Rehearse data migration
+        env:
+          DYNAMODB_ENDPOINT: http://localhost:4566
+          MUKUROJI_LOCAL_AWS_RUNTIME: floci
+        run: bun run data:migrate:rehearsal
+
       - name: Exercise local S3 and SQS
         run: docker compose exec -T floci sh < floci/check-services.sh
 

@@ -18,6 +18,13 @@ export type AnalyticsDisplayNames = {
   workItemTypes: ReadonlyMap<string, string>
 }
 
+/** Work Item priorities whose labels the Work Item messages define. */
+const PRIORITY_MESSAGE_KEYS: Readonly<Record<string, MessageKey>> = {
+  high: 'tasks.priority.high',
+  medium: 'tasks.priority.medium',
+  low: 'tasks.priority.low',
+}
+
 /** Workflow status categories whose labels the Work Item messages define. */
 const STATUS_CATEGORY_MESSAGE_KEYS: Readonly<Record<string, MessageKey>> = {
   backlog: 'workItems.statusCategory.backlog',
@@ -71,6 +78,10 @@ export function createAnalyticsGroupLabelLookup(
       const key = Object.hasOwn(STATUS_CATEGORY_MESSAGE_KEYS, category)
         ? STATUS_CATEGORY_MESSAGE_KEYS[category]
         : undefined
+      return key === undefined ? undefined : t(key)
+    },
+    priority: (priority) => {
+      const key = Object.hasOwn(PRIORITY_MESSAGE_KEYS, priority) ? PRIORITY_MESSAGE_KEYS[priority] : undefined
       return key === undefined ? undefined : t(key)
     },
     unset: t('analytics.group.unset'),

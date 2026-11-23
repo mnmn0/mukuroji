@@ -62,6 +62,7 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DIRECTORY_DISPLAY_NAME_MAX_LENGTH,
   DIRECTORY_REORDER_MAX_ITEMS,
   isProjectLifecycleState,
   PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
@@ -5530,10 +5531,16 @@ function isProjectTone(value: unknown): value is ProjectTone {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
 }
 
+/** Control characters a Team or Project name may not contain, such as line breaks and NUL. */
+const DIRECTORY_DISPLAY_NAME_CONTROL_CHARACTER = /\p{Cc}/u
+
 /**
- * Reads and validates localized names from a Team or Project create request.
+ * Reads and validates localized names from a Team or Project create or rename request.
  *
- * @param input - Create request containing either a shared name or localized names.
+ * Creating, renaming, and applying a Project template share the same limits, so a name that a
+ * rename would refuse can never be stored by a creation.
+ *
+ * @param input - Request containing either a shared name or localized names.
  * @returns Normalized Japanese and English names.
  */
 export function readLocalizedNames(input: CreateTeamRequestBody | CreateProjectRequestBody) {
@@ -5546,10 +5553,29 @@ export function readLocalizedNames(input: CreateTeamRequestBody | CreateProjectR
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'Name is required.')
   }
 
-  return {
+  const names = {
     nameJa: primaryName,
     nameEn: nameEn || name || primaryName,
   }
+
+  for (const value of [name, names.nameJa, names.nameEn]) {
+    if (value.length > DIRECTORY_DISPLAY_NAME_MAX_LENGTH) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        `Name must be at most ${DIRECTORY_DISPLAY_NAME_MAX_LENGTH} characters.`,
+      )
+    }
+    if (DIRECTORY_DISPLAY_NAME_CONTROL_CHARACTER.test(value)) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Name must not contain line breaks or other control characters.',
+      )
+    }
+  }
+
+  return names
 }
 
 function readProjectTone(value: unknown): ProjectTone {
@@ -5634,9 +5660,6 @@ function readIdempotencyResourceId(value: unknown): string | undefined {
   }
   return value
 }
-
-/** Longest Team or Project display name a rename stores. */
-const DIRECTORY_DISPLAY_NAME_MAX_LENGTH = 500
 
 /** Longest Team or Project identifier a reorder request may name. */
 const DIRECTORY_ORDER_ID_MAX_LENGTH = 256
@@ -5869,20 +5892,7 @@ function readDirectoryOrderIds(input: unknown, field: 'teamIds' | 'projectIds') 
  * @returns Trimmed names; an empty English name reuses the Japanese one.
  */
 function readDirectoryDisplayNames(input: unknown) {
-  const names = readLocalizedNames(isRecord(input) ? input : {})
-
-  if (
-    names.nameJa.length > DIRECTORY_DISPLAY_NAME_MAX_LENGTH ||
-    names.nameEn.length > DIRECTORY_DISPLAY_NAME_MAX_LENGTH
-  ) {
-    throw new ProjectDataError(
-      400,
-      'InvalidProjectWrite',
-      `Name must be at most ${DIRECTORY_DISPLAY_NAME_MAX_LENGTH} characters.`,
-    )
-  }
-
-  return names
+  return readLocalizedNames(isRecord(input) ? input : {})
 }
 
 /**

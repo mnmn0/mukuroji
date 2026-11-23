@@ -1,3 +1,4 @@
+import type { NotificationBulkAction, NotificationBulkFailure } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -240,6 +241,112 @@ export function updateNotification(
       method: 'PATCH',
     },
   )
+}
+
+/** Result of one bulk Inbox request. */
+export type BulkUpdateNotificationsResponse = {
+  /** Notifications that now have the requested state, in request order. */
+  notifications: InboxNotification[]
+  /** Notifications the server could not change. */
+  failures: NotificationBulkFailure[]
+  /** Unread count after the change. */
+  unreadCount: number
+}
+
+/**
+ * Applies one action to several notifications in one request. The server checks each
+ * notification as a single update would and reports the ones it could not change.
+ *
+ * @param accessToken - API 認証に使う access token です。
+ * @param action - Action applied to every notification.
+ * @param notificationIds - Up to `NOTIFICATION_BULK_MAXIMUM` opaque notification IDs.
+ * @param mutationContext - retry 間で共有する mutation context です。
+ * @returns Changed notifications, failures, and the unread count.
+ */
+export async function bulkUpdateNotifications(
+  accessToken: string,
+  action: NotificationBulkAction,
+  notificationIds: readonly string[],
+  mutationContext: MutationRequestContext,
+): Promise<BulkUpdateNotificationsResponse> {
+  const body = await requestJson<unknown>(
+    `${notificationsApiBaseUrl}/notifications/bulk`,
+    accessToken,
+    {
+      body: JSON.stringify({ action, notificationIds }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'POST',
+    },
+  )
+  return parseBulkUpdateNotificationsResponse(body)
+}
+
+/**
+ * Checks the body of a bulk Inbox response before the caller uses it.
+ *
+ * @param body - Parsed JSON body.
+ * @returns The validated response.
+ * @throws NotificationsApiError (502) when the body is not a bulk response.
+ */
+function parseBulkUpdateNotificationsResponse(body: unknown): BulkUpdateNotificationsResponse {
+  if (
+    isRecord(body) &&
+    Array.isArray(body.notifications) && body.notifications.every(isBulkNotification) &&
+    Array.isArray(body.failures) && body.failures.every(isBulkFailure) &&
+    typeof body.unreadCount === 'number' && Number.isInteger(body.unreadCount) && body.unreadCount >= 0
+  ) {
+    return { notifications: body.notifications, failures: body.failures, unreadCount: body.unreadCount }
+  }
+  throw new NotificationsApiError(502, 'The bulk notification response was not understood.', 'InvalidBulkNotificationResponse')
+}
+
+/** Notification states the Inbox can show. */
+const notificationStates: ReadonlySet<unknown> = new Set<NotificationState>(['unread', 'read', 'archived', 'snoozed'])
+
+/** Optional notification fields, all strings when present. */
+const optionalNotificationStringFields = [
+  'eventId', 'actorLabel', 'title', 'summary', 'deepLink', 'teamId', 'projectId', 'issueId',
+  'triageEntryId', 'commentId', 'rootCommentId', 'readAt', 'archivedAt', 'snoozedUntil',
+] as const
+
+/**
+ * Reports whether a value is a notification from a bulk response.
+ *
+ * @param value - One entry of `notifications`.
+ * @returns Whether the entry has every required field, a known state, and string optional fields.
+ */
+function isBulkNotification(value: unknown): value is InboxNotification {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.eventType === 'string' &&
+    typeof value.occurredAt === 'string' &&
+    Array.isArray(value.reasons) && value.reasons.every((reason) => typeof reason === 'string') &&
+    notificationStates.has(value.state) &&
+    optionalNotificationStringFields.every((field) => value[field] === undefined || typeof value[field] === 'string')
+}
+
+/**
+ * Reports whether a value is one failure from a bulk response.
+ *
+ * @param value - One entry of `failures`.
+ * @returns Whether the entry has a string ID, a numeric status, and a string code.
+ */
+function isBulkFailure(value: unknown): value is NotificationBulkFailure {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.status === 'number' &&
+    typeof value.code === 'string'
+}
+
+/**
+ * Reports whether a value is a non-array object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a record.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**

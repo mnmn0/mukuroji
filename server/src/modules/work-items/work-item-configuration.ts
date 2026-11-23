@@ -885,6 +885,14 @@ export type WorkItemConfigurationClient = {
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
   /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  countRelationLinks?(workspaceId: string, teamId: string): Promise<number>
+  /**
    * Reads how many times a child of the parent Work Item has been restored.
    *
    * @param workspaceId - Workspace that owns the parent Work Item.
@@ -3083,6 +3091,19 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       throw storedConfigurationInvalid()
     }
     return item.generation
+  }
+
+  /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  async countRelationLinks(workspaceId: string, teamId: string): Promise<number> {
+    await this.ensureTable()
+    const { edgeCount } = await this.readRelationGraphState(workspaceId, teamId)
+    return Math.floor(edgeCount / 2)
   }
 
   /**

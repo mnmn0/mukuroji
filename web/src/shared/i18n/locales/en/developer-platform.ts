@@ -1,0 +1,23 @@
+/** English copy for the Developer Platform panel, starting with the Work Item relation webhook events. */
+export const developerPlatformMessages = {
+  'developerPlatform.webhookEvents.parentChanged.label': 'Parent changed',
+  'developerPlatform.webhookEvents.parentChanged.description': 'The parent of a Work Item was set, changed, or removed (sent for the child).',
+  'developerPlatform.webhookEvents.childAdded.label': 'Child added',
+  'developerPlatform.webhookEvents.childAdded.description': 'A child was added to a Work Item (sent for the parent).',
+  'developerPlatform.webhookEvents.childRemoved.label': 'Child removed',
+  'developerPlatform.webhookEvents.childRemoved.description': 'A child left a Work Item (sent for the parent).',
+  'developerPlatform.webhookEvents.blockerAdded.label': 'Blocker added',
+  'developerPlatform.webhookEvents.blockerAdded.description': 'A Work Item that blocks this one was added.',
+  'developerPlatform.webhookEvents.blockerRemoved.label': 'Blocker removed',
+  'developerPlatform.webhookEvents.blockerRemoved.description': 'A Work Item that blocked this one was removed.',
+  'developerPlatform.webhookEvents.blockingAdded.label': 'Now blocking',
+  'developerPlatform.webhookEvents.blockingAdded.description': 'This Work Item started blocking another Work Item.',
+  'developerPlatform.webhookEvents.blockingRemoved.label': 'No longer blocking',
+  'developerPlatform.webhookEvents.blockingRemoved.description': 'This Work Item stopped blocking another Work Item.',
+  'developerPlatform.webhookEvents.relationAdded.label': 'Related item linked',
+  'developerPlatform.webhookEvents.relationAdded.description': 'A related or duplicate link was added.',
+  'developerPlatform.webhookEvents.relationRemoved.label': 'Related item unlinked',
+  'developerPlatform.webhookEvents.relationRemoved.description': 'A related or duplicate link was removed.',
+  'developerPlatform.webhookEvents.siblingOrderChanged.label': 'Sibling order changed',
+  'developerPlatform.webhookEvents.siblingOrderChanged.description': 'A Work Item moved among its siblings.',
+} as const

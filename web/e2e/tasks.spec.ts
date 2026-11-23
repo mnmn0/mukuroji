@@ -1329,13 +1329,55 @@ async function mockAuthenticatedTaskPage(
       action?: 'archive' | 'mark-read' | 'mark-unread' | 'restore' | 'snooze'
       snoozedUntil?: string
     }
-    const notification = notifications.find((candidate) => candidate.id === notificationId)
+    const updatedNotification = body.action ? applyMockNotificationAction(notificationId, body.action, body.snoozedUntil) : undefined
 
-    if (!notification || !body.action) {
+    if (!updatedNotification) {
       await route.fulfill({ status: 404, json: { message: 'Notification not found.' } })
       return
     }
+    await route.fulfill({ json: updatedNotification })
+  })
 
+  await page.route('**/api/notifications/bulk', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.notificationUpdates += 1
+    const body = route.request().postDataJSON() as {
+      action: 'archive' | 'mark-read' | 'mark-unread' | 'restore'
+      notificationIds: string[]
+    }
+    const updated: InboxNotification[] = []
+    const failures: Array<{ id: string, status: number, code: string }> = []
+    const failIds = new Set((route.request().headers()['x-mock-fail-ids'] ?? '').split(',').filter(Boolean))
+    for (const notificationId of body.notificationIds) {
+      if (failIds.has(notificationId)) {
+        failures.push({ id: notificationId, status: 409, code: 'NotificationVersionConflict' })
+        continue
+      }
+      const updatedNotification = applyMockNotificationAction(notificationId, body.action)
+      if (updatedNotification) {
+        updated.push(updatedNotification)
+      } else {
+        failures.push({ id: notificationId, status: 404, code: 'NotificationNotFound' })
+      }
+    }
+    await route.fulfill({
+      json: { notifications: updated, failures, unreadCount: countUnreadNotifications(notifications) },
+    })
+  })
+
+  /** Applies one Inbox action to the mock notification list, returning the updated row. */
+  function applyMockNotificationAction(
+    notificationId: string,
+    action: 'archive' | 'mark-read' | 'mark-unread' | 'restore' | 'snooze',
+    snoozedUntil?: string,
+  ) {
+    const notification = notifications.find((candidate) => candidate.id === notificationId)
+    if (!notification) return undefined
+    const body = { action, snoozedUntil }
     const updatedStateFields = {
       ...notification,
       ...(body.action === 'mark-read' ? { readAt: new Date().toISOString() } : {}),
@@ -1357,8 +1399,8 @@ async function mockAuthenticatedTaskPage(
     notifications = notifications.map((candidate) =>
       candidate.id === notificationId ? updatedNotification : candidate,
     )
-    await route.fulfill({ json: updatedNotification })
-  })
+    return updatedNotification
+  }
 
   await page.route(/.*\/api\/notifications(?:\?.*)?$/, async (route) => {
     if (route.request().method() !== 'GET') {
@@ -1421,6 +1463,15 @@ async function mockAuthenticatedTaskPage(
     }
 
     await route.fulfill({ json: notificationPreferences })
+  })
+
+  // Detail panes list a Work Item's external links; no Work Item in these fixtures has one.
+  await page.route(/.*\/api\/developer\/work-items\/[^/]+\/external-links(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({ json: { hasMore: false, items: [] } })
   })
 
   await page.route(/.*\/api\/teams\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
@@ -2557,6 +2608,8 @@ function cloneNotificationPreferences(
     ...preferences,
     channels: { ...preferences.channels },
     quietHours: { ...preferences.quietHours },
+    ...(preferences.categoryChannels ? { categoryChannels: structuredClone(preferences.categoryChannels) } : {}),
+    ...(preferences.mutes ? { mutes: structuredClone(preferences.mutes) } : {}),
   }
 }
 
@@ -4128,7 +4181,7 @@ test.describe('authenticated task page', () => {
     const agentRunRequests: string[] = []
     page.on('request', (request) => {
       const { pathname } = new URL(request.url())
-      if (pathname.startsWith('/api/') && /\/agent-(runs?|settings|connection)/.test(pathname)) {
+      if (pathname.startsWith('/api/') && /\/agent-(runs?|settings)/.test(pathname)) {
         agentRunRequests.push(request.url())
       }
     })
@@ -4156,9 +4209,22 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/teams/core-team/factory')
     await expect(page).toHaveURL('/teams/core-team/issues')
+    // Personal tokens stay available for the Workspace MCP profile, which only reads.
+    await page.route('**/api/developer/me/agent-connection', async (route) => {
+      await route.fulfill({
+        json: {
+          memberId: 'demo@example.com',
+          canIssue: true,
+          policy: { selfIssuanceEnabled: true },
+          scopes: ['work-items:read', 'work-items:write'],
+          maxLifetimeDays: 90,
+          apiKeys: [],
+        },
+      })
+    })
     await page.goto('/settings/agent-connection')
-    await expect(page).toHaveURL('/settings/personal')
-    await expect(page.getByTestId('agent-connection-settings-link')).toHaveCount(0)
+    await expect(page).toHaveURL('/settings/agent-connection')
+    await expect(page.getByTestId('agent-connection-workspace-profile')).toBeVisible()
     expect(agentRunRequests).toEqual([])
   })
 
@@ -10432,6 +10498,47 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => requestCounts.issueUpdates).toBe(updatesBefore + 1)
   })
 
+  test('マイタスクから自分が担当する Work Item を続けて追加できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [] },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const form = page.getByTestId('my-tasks-quick-create')
+    const title = form.getByRole('textbox', { name: 'タスク名' })
+    await title.fill('クイック追加したタスク')
+    await form.getByLabel('期限').fill('2026-06-26')
+    await title.press('Enter')
+
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+    await expect(page.getByTestId('my-tasks-quick-create-feedback')).toContainText('クイック追加したタスク')
+    await expect(page.getByTestId('my-tasks-table')).toContainText('クイック追加したタスク')
+    await expect(title).toHaveValue('')
+    await expect(title).toBeFocused()
+
+    // The title keeps focus, so the next Work Item can be typed straight away.
+    await page.keyboard.type('続けて追加したタスク')
+    await page.keyboard.press('Enter')
+    await expect.poll(() => requestCounts.issueCreates).toBe(2)
+    await expect(page.getByTestId('my-tasks-table')).toContainText('続けて追加したタスク')
+  })
+
+  test('Team と Project の詳細 pane に同じ予定と実績の欄と外部リンクが並ぶ', async ({ page }) => {
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const teamPane = page.getByTestId('team-issue-detail-pane')
+    await expect(teamPane.getByTestId('task-detail-actual-dates')).toBeVisible()
+    // Correcting actual dates needs Project management, so the Team screen shows them read-only.
+    await expect(teamPane.getByTestId('task-detail-actual-dates').getByRole('button')).toHaveCount(0)
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const projectPane = page.getByTestId('task-detail-pane')
+    await expect(projectPane.getByTestId('task-detail-actual-dates')).toBeVisible()
+    await expect(projectPane.getByTestId('work-item-external-links-panel')).toBeVisible()
+  })
+
   test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/teams/core-team/issues')
@@ -10453,6 +10560,96 @@ test.describe('authenticated task page', () => {
       .toBeVisible()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
     expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Team の Work Item をテーブルで複数選んで一括アーカイブする', async ({ page }) => {
+    const requestedActions: unknown[] = []
+    const requestedItemIds: string[][] = []
+    /** Reads the Work Item IDs and action of one bulk request body. */
+    const readBulkRequest = (body: unknown) => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items) ||
+          !('action' in body)) {
+        throw new Error('Bulk request did not contain items and an action.')
+      }
+      const ids = body.items.flatMap((item: unknown) =>
+        typeof item === 'object' && item !== null && 'workItemId' in item && typeof item.workItemId === 'string'
+          ? [item.workItemId]
+          : []
+      )
+      return { action: body.action, ids }
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          canApply: true,
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            retryable: false,
+            status: 'ready',
+            teamId: 'core-team',
+            undoable: false,
+            workItemId,
+          })),
+          operationToken: 'team-bulk-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'team-bulk-operation',
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            resultingRevision: 2,
+            retryable: false,
+            status: 'succeeded',
+            teamId: 'core-team',
+            undoable: true,
+            workItemId,
+          })),
+          revision: 1,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues')
+    const wireframe = page.getByTestId('issue-row-select-wireframe')
+    const brand = page.getByTestId('issue-row-select-brand-guideline')
+    await wireframe.check()
+    await brand.check()
+    await expect(page.getByText('2件を選択中')).toBeVisible()
+
+    await page.getByRole('button', { name: '一括アーカイブ', exact: true }).click()
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(preview).toBeVisible()
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect.poll(() => requestedItemIds.length).toBe(2)
+    expect(requestedItemIds.map((ids) => [...ids].sort())).toEqual([
+      ['brand-guideline', 'wireframe'],
+      ['brand-guideline', 'wireframe'],
+    ])
+    expect(requestedActions).toEqual([
+      { archived: true, type: 'archive' },
+      { archived: true, type: 'archive' },
+    ])
+    await expect(page.getByRole('region', { name: '一括操作の実行結果' })).toBeVisible()
+    await expect(page.getByText('2件を選択中')).toHaveCount(0)
   })
 
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
@@ -11899,10 +12096,12 @@ test.describe('authenticated task page', () => {
     await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
 
     let failBrandArchive = true
-    await page.route(/.*\/api\/notifications\/notification-brand-guideline$/, async (route) => {
-      if (route.request().method() === 'PATCH' && failBrandArchive) {
+    await page.route('**/api/notifications/bulk', async (route) => {
+      const body = route.request().postDataJSON() as { notificationIds: string[] }
+      if (failBrandArchive && body.notificationIds.includes('notification-brand-guideline')) {
         failBrandArchive = false
-        await route.fulfill({ status: 500, json: { message: 'Temporary failure.' } })
+        // The mock server reports this notification as not changed and applies the rest.
+        await route.fallback({ headers: { ...route.request().headers(), 'x-mock-fail-ids': 'notification-brand-guideline' } })
         return
       }
       await route.fallback()
@@ -12678,7 +12877,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
   })
 
-  test('設定画面で通知 channel・frequency・quiet hours を保存できる', async ({ page }) => {
+  test('設定画面で通知 channel・種類ごとの配信先・ミュート・frequency・quiet hours を保存できる', async ({ page }) => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.goto('/settings')
@@ -12692,6 +12891,9 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('notification-quiet-hours-start').fill('21:30')
     await page.getByTestId('notification-quiet-hours-end').fill('07:30')
     await page.getByTestId('notification-time-zone').fill('Asia/Tokyo')
+    await page.getByTestId('notification-category-status-email').uncheck()
+    await page.getByTestId('notification-mute-project-core-team-product-roadmap').check()
+    await page.getByTestId('notification-mutes-keepApprovals').uncheck()
     await page.getByTestId('notification-settings-save').click()
 
     await expect.poll(() => requestCounts.notificationPreferenceUpdates).toBe(1)
@@ -12702,6 +12904,11 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('notification-frequency')).toHaveValue('daily')
     await expect(page.getByTestId('notification-quiet-hours-start')).toHaveValue('21:30')
     await expect(page.getByTestId('notification-quiet-hours-end')).toHaveValue('07:30')
+    await expect(page.getByTestId('notification-category-status-email')).not.toBeChecked()
+    await expect(page.getByTestId('notification-category-due-email')).toBeChecked()
+    await expect(page.getByTestId('notification-mute-project-core-team-product-roadmap')).toBeChecked()
+    await expect(page.getByTestId('notification-mutes-keepMentions')).toBeChecked()
+    await expect(page.getByTestId('notification-mutes-keepApprovals')).not.toBeChecked()
   })
 
   test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {

@@ -1,3 +1,4 @@
+import type { ArchiveImpactLabels } from '../ui/archive-impact'
 import type { SidebarLabels, SidebarNavId } from '../ui/sidebar'
 import { enMessages } from './locales/en'
 import { jaMessages, type MessageKey } from './locales/ja'
@@ -183,6 +184,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
         t('sidebar.archive.confirmProjectDescription').replace('{name}', name),
       cancel: t('sidebar.archive.cancel'),
       confirm: t('sidebar.archive.confirm'),
+      impact: createArchiveImpactLabels(t),
     },
     teamOverview: t('sidebar.teamOverview'),
     triage: t('sidebar.triage'),
@@ -212,5 +214,34 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       help: t(navKeyMap.help),
       settings: t(navKeyMap.settings),
     },
+  }
+}
+
+/**
+ * Builds the labels of the Team and Project archive impact notice.
+ *
+ * @param t - Translator of the current locale.
+ * @returns Labels with counts formatted for the locale.
+ */
+export function createArchiveImpactLabels(t: (key: MessageKey) => string): ArchiveImpactLabels {
+  const line = (key: MessageKey) => (count: string) => t(key).replace('{count}', count)
+
+  return {
+    loading: t('archiveImpact.loading'),
+    loadError: t('archiveImpact.loadError'),
+    title: t('archiveImpact.title'),
+    none: t('archiveImpact.none'),
+    blocked: t('archiveImpact.blocked'),
+    blockedByDependencyLimit: t('archiveImpact.blockedByDependencyLimit'),
+    warning: t('archiveImpact.warning'),
+    count: ({ count, hasMore }) =>
+      t(hasMore ? 'archiveImpact.countAtLeast' : 'archiveImpact.count')
+        .replace('{count}', count.toLocaleString()),
+    openWorkItems: line('archiveImpact.openWorkItems'),
+    activeAgentRuns: line('archiveImpact.activeAgentRuns'),
+    planningEntities: line('archiveImpact.planningEntities'),
+    planningWorkItemLinks: line('archiveImpact.planningWorkItemLinks'),
+    planningDependencies: line('archiveImpact.planningDependencies'),
+    webhookSubscriptions: line('archiveImpact.webhookSubscriptions'),
   }
 }

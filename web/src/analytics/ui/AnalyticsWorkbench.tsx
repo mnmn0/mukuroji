@@ -2002,6 +2002,9 @@ function AnalyticsWidgetEditor({
               'assignee',
               'status',
               'work-item-type',
+              'priority',
+              'cycle',
+              'milestone',
               'custom-field',
             ]).map((dimension) => (
               <option key={dimension} value={dimension}>
@@ -3222,6 +3225,9 @@ function formatAnalyticsWarning(
   }
   if (warning === 'Milestone history is not available for this run.') {
     return t('analytics.warning.milestoneHistoryUnavailable')
+  }
+  if (warning === 'Cycle and Milestone membership is not available for this run.') {
+    return t('analytics.warning.planningGroupsUnavailable')
   }
   const milestonesWithoutHistory = /^(\d+) Milestone\(s\) have no recorded date history; their current date is shown since creation\.$/u
     .exec(warning)
