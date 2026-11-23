@@ -9,6 +9,7 @@ import {
   createCustomerRecord,
   createCustomerRequestRecord,
 } from '../../domain/customer'
+import { createMutationAuditContext } from '../../../audit'
 import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
 
 /** Stable DynamoDB adapter test instant. */
@@ -125,6 +126,8 @@ type HarnessOptions = {
   directoryIndexRows?: readonly unknown[]
   /** Maximum number of rows returned by one test Query response. */
   queryPageSize?: number
+  /** Audit table written with audited mutations, when the test needs one. */
+  auditTableName?: string
 }
 
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
@@ -324,6 +327,7 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
       bootstrapLocalTable: false,
       now: () => new Date(NOW),
       id: () => 'generated-id',
+      ...(options.auditTableName ? { auditTableName: options.auditTableName } : {}),
     }),
     commands,
     rows,
@@ -1234,6 +1238,38 @@ test('resumes Customer retention after a later transaction fails', async () => {
     })
     expect(harness.rows.get('META')).toMatchObject({ revision: 6 })
     expect(harness.rows.get('META')).not.toHaveProperty('retention')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('records one Customer deletion event in the first deletion batch of the HTTP deletion path', async () => {
+  const customer = createCustomerRow().customer
+  const contactRow = createContactRow(customer.id, 'contact-1')
+  const harness = createHarness([createCustomerRow(), contactRow, createRequestRow(createRequest('request-1', '2027-08-01T00:00:00.000Z'))], {
+    auditTableName: 'AuditTable',
+  })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'delete-customer-1',
+      request: { method: 'DELETE', path: `/customers/${customer.id}`, body: {} },
+      source: { kind: 'api' },
+    }))
+    await client.beginCustomerDeletion('workspace-1', customer.id, 'member-1', customer.revision)
+    await client.completeCustomerDeletion('workspace-1', customer.id, 'member-1')
+
+    const auditPuts = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .map((command) => command.input.TransactItems)
+      .map((items) => (Array.isArray(items) ? items : []).flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item] : []
+      }))
+    expect(auditPuts.map((items) => items.map((item) => item.eventType))).toEqual([[], [], ['customer.deleted']])
+    expect(JSON.stringify(auditPuts)).not.toContain('Contact contact-1')
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
   } finally {
     harness.restore()
   }

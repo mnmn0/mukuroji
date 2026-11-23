@@ -768,12 +768,27 @@ function captureAuditEvents(): AuditEventV1[] {
   const written: AuditEventV1[] = []
   setTestAppDependencies({
     auditEvents: {
+      /**
+       * Finds no stored event.
+       *
+       * @returns Always `undefined`.
+       */
       async getEvent() {
         return undefined
       },
+      /**
+       * Captures one written event.
+       *
+       * @param event - Audit event written by the route.
+       */
       async putEvent(event) {
         written.push(event)
       },
+      /**
+       * Returns an empty page.
+       *
+       * @returns A page with no events.
+       */
       async query() {
         return { events: [] }
       },

@@ -1223,6 +1223,12 @@ test('records a dependency change on both Planning entities in the same transact
       expect(transaction?.rebaseSafe).toBe(true)
       return transaction && {
         rebaseSafe: transaction.rebaseSafe,
+        /**
+         * Prepares the wrapped transaction and captures its audit events.
+         *
+         * @param result - Committed Planning mutation result.
+         * @returns The wrapped transaction's contribution.
+         */
         async prepare(result: T) {
           const contribution = await transaction.prepare(result)
           const items = isRecord(contribution)

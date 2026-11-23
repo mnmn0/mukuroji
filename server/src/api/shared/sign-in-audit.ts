@@ -39,7 +39,14 @@ export type SignInFailureReason = 'invalid-credentials' | 'invalid-mfa-code'
  */
 export async function recordSignInSucceeded(
   c: Context,
-  principal: { directoryId: string; actorId: string; userKey: string },
+  principal: {
+    /** Workspace the session belongs to. */
+    directoryId: string
+    /** Cognito subject of the member. */
+    actorId: string
+    /** Member key, recorded as the actor display name. */
+    userKey: string
+  },
   authenticationMethods: readonly string[],
 ): Promise<void> {
   try {

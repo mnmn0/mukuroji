@@ -96,6 +96,12 @@ export function createPlanningDependencyAuditTransaction(
   const tableName = getConfiguredAuditTableName()
   if (!tableName) return undefined
   return {
+    /**
+     * Builds the audit Puts of both Planning entities for the committed dependency change.
+     *
+     * @param result - Dependency change and the Planning entities on both ends.
+     * @returns The predecessor event Put and the successor event Put as an additional item.
+     */
     async prepare(result) {
       const [predecessorEvent, successorEvent] = createPlanningDependencyAuditEvents({
         workspaceId,

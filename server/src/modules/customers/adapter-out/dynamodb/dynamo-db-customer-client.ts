@@ -710,7 +710,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         nextDeletion: { customerId, phase: 'customer' },
       })
     }
-    await this.resumePendingDeletion(workspaceId, { ...pendingDeletion, phase: 'customer' })
+    await this.resumePendingDeletion(workspaceId, { ...pendingDeletion, phase: 'customer' }, true)
   }
 
   /** Merges a source customer into a retained customer.
@@ -2322,10 +2322,20 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     return revision
   }
 
-  /** Resumes a durable deletion marker before exposing the Customer graph. */
+  /**
+   * Resumes a durable deletion marker before exposing the Customer graph.
+   *
+   * @param workspaceId - Workspace containing the Customer.
+   * @param pendingDeletion - Durable deletion marker to complete.
+   * @param audited - Whether the deletion is completed by its own request, whose audit context
+   *   records `customer.deleted` in the first deletion batch. Recovery from another request is not
+   *   audited, and neither is a deletion whose first batch already committed.
+   * @returns A promise that resolves after the Customer's records are deleted.
+   */
   private async resumePendingDeletion(
     workspaceId: string,
     pendingDeletion: CustomerDeletionOperation,
+    audited = false,
   ): Promise<void> {
     const loaded = await this.loadWithoutRecovery(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
@@ -2339,13 +2349,27 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       .filter((row) => isOwnedByCustomer(row, pendingDeletion.customerId))
       .map((row) => row.recordKey)
       .sort(compareCustomerDeletionRecordKeys)
-    await this.persistDeletionBatches(
-      workspaceId,
-      loaded.revision,
-      recordKeys,
-      pendingDeletion.customerId,
-      pendingDeletion,
-    )
+    if (audited && pendingDeletion.cursor === undefined) {
+      const customerId = pendingDeletion.customerId
+      this.prepareAudit(workspaceId, loaded.state, {
+        ...loaded.state,
+        customers: new Map([...loaded.state.customers].filter(([id]) => id !== customerId)),
+        contacts: new Map([...loaded.state.contacts].filter(([, contact]) => contact.customerId !== customerId)),
+        requests: new Map([...loaded.state.requests].filter(([, request]) => request.customerId !== customerId)),
+      })
+    }
+    try {
+      await this.persistDeletionBatches(
+        workspaceId,
+        loaded.revision,
+        recordKeys,
+        pendingDeletion.customerId,
+        pendingDeletion,
+      )
+    } finally {
+      // Events not taken by the first deletion batch must never ride on a later write.
+      this.takeAuditItems()
+    }
   }
 
   /** Recomputes and resumes a retention operation using its original timestamp. */
