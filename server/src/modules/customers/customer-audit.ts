@@ -25,13 +25,20 @@ type CustomerAuditKind<T> = {
   contactId?: (record: T) => string | undefined
 }
 
-/** Customer merge that the change completes, when known from the stored merge marker. */
-export type CustomerAuditMergeHint = {
-  /** Customer merged away. */
-  sourceCustomerId: string
-  /** Customer that is kept. */
-  targetCustomerId: string
-}
+/** Merge that the change completes, when known from the stored operation marker. */
+export type CustomerAuditMergeHint =
+  | {
+      /** Customer merged away. */
+      sourceCustomerId: string
+      /** Customer that is kept. */
+      targetCustomerId: string
+    }
+  | {
+      /** Contact merged away. */
+      sourceContactId: string
+      /** Contact that is kept. */
+      targetContactId: string
+    }
 
 /** Change of one record before it becomes an audit event. */
 type CustomerRecordChange = {
@@ -60,7 +67,7 @@ type CustomerRecordChange = {
  * @param workspaceId - Workspace that owns the graph.
  * @param before - Graph before the change.
  * @param after - Graph after the change.
- * @param merge - Customer merge completed by the change, when known.
+ * @param merge - Customer or Contact merge completed by the change, when known.
  * @returns Audit events in a stable order, at most `CUSTOMER_AUDIT_EVENT_LIMIT`.
  */
 export function createCustomerAuditEvents(
@@ -77,10 +84,13 @@ export function createCustomerAuditEvents(
   const viewChanges = compareRecords(before.views, after.views, VIEW_KIND)
   const changes = [
     ...markMerges(customerChanges, before.contacts, after.contacts, (contact) => contact.customerId).map((change) =>
-      merge && change.entityId === merge.sourceCustomerId && change.action === 'deleted'
+      merge && 'sourceCustomerId' in merge && change.entityId === merge.sourceCustomerId && change.action === 'deleted'
         ? { ...change, action: 'merged' as const, metadata: { ...change.metadata, mergedIntoId: merge.targetCustomerId } }
         : change),
-    ...markMerges(contactChanges, before.requests, after.requests, (request) => request.contactId),
+    ...markMerges(contactChanges, before.requests, after.requests, (request) => request.contactId).map((change) =>
+      merge && 'sourceContactId' in merge && change.entityId === merge.sourceContactId && change.action === 'deleted'
+        ? { ...change, action: 'merged' as const, metadata: { ...change.metadata, mergedIntoId: merge.targetContactId } }
+        : change),
     ...requestChanges.map((change) => {
       const merged = after.requests.get(change.entityId)?.mergedIntoRequestId
       return merged && before.requests.get(change.entityId)?.mergedIntoRequestId !== merged

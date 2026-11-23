@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -144,8 +144,6 @@ export type DynamoDbCustomerClientOptions = {
 type CustomerAuditBinding = {
   /** Request audit context. */
   context: MutationAuditContext
-  /** Next event sequence, so several writes in one request get distinct event IDs. */
-  nextSequence: number
   /** Event type and entity pairs already recorded, so a resumed multi-step write records them once. */
   recorded: Set<string>
   /** Audit writes waiting for the next transaction of the current write. */
@@ -238,7 +236,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       now: this.now,
       id: this.id,
       auditTableName: this.auditTableName,
-    }, { context, nextSequence: 0, recorded: new Set(), pending: [] })
+    }, { context, recorded: new Set(), pending: [] })
   }
 
   /**
@@ -247,7 +245,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId - Workspace that owns the graph.
    * @param before - Graph before the write.
    * @param after - Graph after the write.
-   * @param merge - Customer merge the write completes, when any.
+   * @param merge - Customer or Contact merge the write completes, when any.
    */
   private prepareAudit(
     workspaceId: string,
@@ -261,9 +259,11 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     for (const event of createCustomerAuditEvents(workspaceId, before, after, merge)) {
       const key = `${event.eventType}\0${event.entityId}`
       if (audit.recorded.has(key)) continue
-      const put = createMutationAuditEventPut(this.auditTableName, audit.context, { ...event, sequence: audit.nextSequence })
+      const put = createMutationAuditEventPut(this.auditTableName, audit.context, {
+        ...event,
+        sequence: customerAuditEventSequence(event.eventType, event.entityId),
+      })
       if (!put) continue
-      audit.nextSequence += 1
       audit.recorded.add(key)
       audit.pending.push(put)
     }
@@ -2074,7 +2074,31 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     nextState: CustomerWorkspaceState,
     options: CustomerPersistOptions = {},
   ): Promise<void> {
-    this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected)
+    const contactMerge = options.contact?.expected.kind === 'merge' ? options.contact.expected : undefined
+    this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected ?? contactMerge)
+    try {
+      await this.persistPrepared(workspaceId, loaded, nextState, options)
+    } finally {
+      // Events not taken by a transaction of this write must never ride on a later one.
+      this.takeAuditItems()
+    }
+  }
+
+  /**
+   * Commits one graph diff whose audit events, if any, are already prepared.
+   *
+   * @param workspaceId - Workspace that owns the graph.
+   * @param loaded - Graph and metadata revision read before the change.
+   * @param nextState - Graph after the change.
+   * @param options - Fences and resumable-operation markers of the write.
+   * @returns A promise that resolves after every transaction of the write commits.
+   */
+  private async persistPrepared(
+    workspaceId: string,
+    loaded: LoadedCustomerWorkspace,
+    nextState: CustomerWorkspaceState,
+    options: CustomerPersistOptions,
+  ): Promise<void> {
     const previousRows = new Map(serializeState(workspaceId, loaded.state).map((row) => [row.recordKey, row]))
     const nextRows = new Map(serializeState(workspaceId, nextState).map((row) => [row.recordKey, row]))
     const putItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
@@ -3698,4 +3722,19 @@ function chunk<T>(values: readonly T[], size: number): T[][] {
     chunks.push(values.slice(index, index + size))
   }
   return chunks
+}
+
+/**
+ * Derives the audit event sequence of one Customer change from what it records.
+ *
+ * A request can make several Customer writes, and a retry with the same idempotency key can
+ * repeat only some of them, so a counter would give a retried write the ID of another write's
+ * event. Deriving the slot from the event type and record keeps each logical event on one ID.
+ *
+ * @param eventType - Audit event type.
+ * @param entityId - Changed record ID.
+ * @returns A non-negative safe integer.
+ */
+function customerAuditEventSequence(eventType: string, entityId: string): number {
+  return Number.parseInt(createHash('sha256').update(`${eventType}\0${entityId}`).digest('hex').slice(0, 12), 16)
 }

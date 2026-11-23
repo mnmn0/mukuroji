@@ -98,3 +98,19 @@ test('caps the events of one write and counts the rest', async () => {
   expect(events).toHaveLength(3)
   expect(events[2]?.metadata).toEqual({ additionalChanges: 2 })
 })
+
+test('marks a Contact merge from its operation marker even when no Request moved', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('w', 'member-1', { ...customerInput, name: 'Acme' })
+  const source = await client.createContact('w', customer.id, 'member-1', { name: 'Old' }, 'contact-key-4')
+  const target = await client.createContact('w', customer.id, 'member-1', { name: 'New' }, 'contact-key-5')
+  const before = client.readWorkspaceState('w')
+  const after = client.readWorkspaceState('w')
+  after.contacts.delete(source.id)
+  const events = createCustomerAuditEvents('w', before, after, { sourceContactId: source.id, targetContactId: target.id })
+  expect(events).toEqual([expect.objectContaining({
+    eventType: 'customer-contact.merged',
+    entityId: source.id,
+    metadata: { customerId: customer.id, mergedIntoId: target.id },
+  })])
+})
