@@ -373,6 +373,31 @@ test('lets an auditor read the audit log but not export it or read Projects', as
   })
 })
 
+test('tells the Web that a Workspace-wide teams.manage role may edit Team settings', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(false, { workspaceRole: 'member' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    /**
+     * Reads `/api/auth/me` as the fixture member.
+     *
+     * @returns Parsed response body.
+     */
+    const readMe = async () => {
+      const response = await app.request('/api/auth/me', {
+        headers: { Authorization: createAuthorization() },
+      })
+      expect(response.status).toBe(200)
+      return response.json()
+    }
+    expect(await readMe()).toMatchObject({ canManageTeams: false })
+
+    await assignToFixtureMember(identity, 'workspace:admin')
+    expect(await readMe()).toMatchObject({ canManageTeams: true })
+  })
+})
+
 test('tells the Web that an auditor may read the audit log but not export it', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(false, { workspaceRole: 'member' })

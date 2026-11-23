@@ -2465,6 +2465,7 @@ function configureFakeProjectClients(
           ],
         }
       },
+      async requireUnusedProjectGrantRequest() {},
       async addProjectMemberIfAbsent(directoryId, _teamId, projectId, memberKey, input) {
         if (memberKey.trim().toLowerCase() === 'demo@example.com') return { added: false }
         calls.memberUpdates.push({

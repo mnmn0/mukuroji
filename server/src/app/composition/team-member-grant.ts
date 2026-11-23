@@ -11,7 +11,10 @@ import type { WorkspaceAccessClient } from '../../modules/workspace-access/works
 export type TeamMemberGrantRequestPorts = Pick<
   TeamMemberGrantPorts<DirectoryAuthorizationConditionChecks[number], MutationAuditContext>,
   'canManageProject' | 'createAuditContext'
->
+> & {
+  /** Idempotency key hash and request fingerprint, joined by `:`, recorded on each granted row. */
+  grantRequestKey: string
+}
 
 /**
  * Connects the Team-wide member grant use case to the directory store and the Workspace access
@@ -29,7 +32,15 @@ export function createTeamMemberGrantPorts(
 ): TeamMemberGrantPorts<DirectoryAuthorizationConditionChecks[number], MutationAuditContext> {
   return {
     getDirectoryAdministration: (workspaceId) => projectDirectory.getDirectoryAdministration(workspaceId),
-    addProjectMemberIfAbsent: (...args) => projectDirectory.addProjectMemberIfAbsent(...args),
+    addProjectMemberIfAbsent: (...args) =>
+      projectDirectory.addProjectMemberIfAbsent(...args, request.grantRequestKey),
+    requireUnusedGrantRequest: (workspaceId, projectIds, memberKey) =>
+      projectDirectory.requireUnusedProjectGrantRequest(
+        workspaceId,
+        projectIds,
+        memberKey,
+        request.grantRequestKey,
+      ),
     async readActiveMemberVersion(workspaceId, memberKey) {
       const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
       if (!member) {

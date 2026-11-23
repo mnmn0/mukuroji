@@ -139,9 +139,10 @@ export const InactiveMember: Story = {
 function SavingTeamProfilePanel(props: TeamProfilePanelProps) {
   const [current, setCurrent] = useState(team)
   const save = async (_teamId: string, input: UpdateDirectoryTeamProfileInput) => {
-    setCurrent((previous) => ({
+    setCurrent(({ leaderMemberKey: _cleared, ...previous }) => ({
       ...previous,
       description: input.description,
+      // Choosing no leader clears the stored one, as the server does.
       ...(input.leaderMemberKey === null ? {} : { leaderMemberKey: input.leaderMemberKey }),
       profileRevision: (previous.profileRevision ?? 0) + 1,
     }))

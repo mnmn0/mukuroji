@@ -71,6 +71,7 @@ function createProjectRow(
  * @param planningItems - Planning rows served by key reads, keyed by `workspaceId|recordKey`.
  * @param cleanupLocators - Webhook grant cleanup locators still waiting for an archive cleanup.
  * @param failedIndex - Index of the transaction item that fails its condition, when one does.
+ * @param beforeTransaction - Runs when a transaction arrives, before it commits or fails.
  * @returns The client and the commands it sent.
  */
 function createClient(
@@ -79,10 +80,12 @@ function createClient(
   planningItems: Record<string, Record<string, unknown>> = {},
   cleanupLocators: Array<Record<string, unknown>> = [],
   failedIndex?: number,
+  beforeTransaction?: () => void,
 ) {
   const sent: SentCommand[] = []
   const send = async (command: SentCommand) => {
     sent.push(command)
+    if ('TransactItems' in command.input) beforeTransaction?.()
     if ('KeyConditionExpression' in command.input) {
       const values = command.input.ExpressionAttributeValues
       const partition = typeof values === 'object' && values !== null
@@ -123,7 +126,8 @@ function createClient(
   const transactions = () => sent
     .filter((command) => 'TransactItems' in command.input)
     .map((command) => command.input.TransactItems)
-  return { client, transactions }
+  const queryCount = () => sent.filter((command) => 'KeyConditionExpression' in command.input).length
+  return { client, transactions, queryCount }
 }
 
 /**
@@ -870,6 +874,9 @@ test('skips an unchanged Team profile and rejects an invalid one', async () => {
   for (const input of [
     { description: 'x'.repeat(2001), leaderMemberKey: null, expectedProfileRevision: 0 },
     { description: 'nul\u0000', leaderMemberKey: null, expectedProfileRevision: 0 },
+    // A control character at either end is refused, not trimmed away.
+    { description: '\u000bleading tab', leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: 'trailing\u001f', leaderMemberKey: null, expectedProfileRevision: 0 },
     { description: '', leaderMemberKey: 7, expectedProfileRevision: 0 },
     { leaderMemberKey: null, expectedProfileRevision: 0 },
     { description: '', leaderMemberKey: null },
@@ -1009,14 +1016,17 @@ test('keeps a Project role granted concurrently and refuses a revoked caller', a
     createTeamRow('alpha', 10),
     createProjectRow('alpha', 10, 'refero', 1),
   ]
-  const raced = createClient(rows, false, {}, [], 0)
+  // Another administrator's grant lands after the first read, so the insert-only write fails.
+  const raced = createClient(rows, false, {}, [], 0, () => {
+    rows.push(createProjectMemberRow('refero', 'sato@example.com'))
+  })
   const input = { role: 'viewer', email: 'sato@example.com' }
-  const pending = raced.client.addProjectMemberIfAbsent(
+  await expect(raced.client.addProjectMemberIfAbsent(
     directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
-  )
-  // Another administrator's grant lands before the insert-only write commits.
-  rows.push(createProjectMemberRow('refero', 'sato@example.com'))
-  await expect(pending).resolves.toEqual({ added: false })
+  )).resolves.toEqual({ added: false })
+  // The failed insert is followed by a read that finds the concurrent role.
+  expect(raced.transactions()).toHaveLength(1)
+  expect(raced.queryCount()).toBe(2)
 
   const projectRows = [createTeamRow('alpha', 10), createProjectRow('alpha', 10, 'refero', 1)]
   const probe = createClient(projectRows)
@@ -1029,6 +1039,41 @@ test('keeps a Project role granted concurrently and refuses a revoked caller', a
   await expect(revoked.client.addProjectMemberIfAbsent(
     directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
   )).rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
+})
+
+test('refuses a Team-wide grant retried under the same key with another input', async () => {
+  const rows = [
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'refero', 1),
+    createProjectRow('alpha', 10, 'billing', 2),
+    { ...createProjectMemberRow('refero', 'sato@example.com'), grantRequestKey: 'key-hash:member-request' },
+  ]
+  const { client, transactions } = createClient(rows)
+  const input = { role: 'viewer', email: 'sato@example.com' }
+
+  // The same request repeats; another key is a separate request.
+  await expect(client.requireUnusedProjectGrantRequest(
+    directoryId, ['refero', 'billing'], 'Sato@example.com', 'key-hash:member-request',
+  )).resolves.toBeUndefined()
+  await expect(client.requireUnusedProjectGrantRequest(
+    directoryId, ['refero', 'billing'], 'sato@example.com', 'other-hash:viewer-request',
+  )).resolves.toBeUndefined()
+  // The same key with another role is refused before Billing is written.
+  await expect(client.requireUnusedProjectGrantRequest(
+    directoryId, ['refero', 'billing'], 'sato@example.com', 'key-hash:viewer-request',
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, [], 'key-hash:viewer-request',
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+
+  await client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'billing', 'sato@example.com', input, 3, undefined, [], 'key-hash:member-request',
+  )
+  expect(listItems(transactions()[0])[0]).toEqual({
+    Put: expect.objectContaining({
+      Item: expect.objectContaining({ projectId: 'billing', grantRequestKey: 'key-hash:member-request' }),
+    }),
+  })
 })
 
 test('does not check the leader twice when the caller leads the Team', async () => {
@@ -1069,6 +1114,28 @@ test('answers a retried profile save as its success and refuses another stale re
     createRestoreContext('another-key', '/api/teams/alpha/profile'),
   )).rejects.toMatchObject({ status: 409, code: 'TeamProfileConflict' })
   expect(transactions()).toEqual([])
+})
+
+test('answers the same profile save sent twice at once as one success', async () => {
+  const context = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const input = { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+  const rows: Array<Record<string, unknown>> = [createTeamRow('alpha', 10)]
+  // The twin request commits after this one read the Team, so this one loses the revision.
+  const raced = createClient(rows, false, {}, [], 0, () => {
+    rows[0] = createTeamRow('alpha', 10, {
+      description: '新しい説明',
+      profileRevision: 1,
+      profileRequestKey: `${context.idempotencyKeyHash}:${context.requestFingerprint}`,
+    })
+  })
+  await expect(raced.client.updateTeamProfile(directoryId, 'alpha', input, context))
+    .resolves.toEqual({ teamId: 'alpha', description: '新しい説明' })
+
+  // Another request losing the same race is still refused.
+  rows[0] = createTeamRow('alpha', 10)
+  const other = createRestoreContext('other-key', '/api/teams/alpha/profile')
+  await expect(raced.client.updateTeamProfile(directoryId, 'alpha', input, other))
+    .rejects.toMatchObject({ status: 409 })
 })
 
 test('records the request of a profile save so its retry is recognized', async () => {

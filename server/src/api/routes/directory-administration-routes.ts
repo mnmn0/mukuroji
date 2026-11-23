@@ -146,6 +146,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
             // Every grant shares the request's correlation, with an audit identity bound to its
             // Project so a retry keeps each event ID however the Team's Projects change.
             createAuditContext: (projectId) => deriveMutationAuditPartContext(auditContext, projectId),
+            // A retry under the same key with another role is refused instead of mixing roles.
+            grantRequestKey: `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`,
           },
         ),
         {

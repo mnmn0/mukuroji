@@ -184,7 +184,7 @@ export function SettingsPage() {
         ) : null}
         {section === 'team' && workspace.accessToken ? (
           <>
-            {workspace.canManageWorkspaceConfiguration ? (
+            {workspace.canManageTeams ? (
               <TeamProfilePanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
             ) : null}
             <WorkItemConfigurationPanelContainer

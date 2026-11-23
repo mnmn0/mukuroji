@@ -4,6 +4,7 @@ import {
   addMemberToTeamProjectsUseCase,
   type TeamMemberGrantPorts,
 } from './team-member-grant-use-case'
+import { ProjectDataError } from '../project-data-error'
 
 const team: DirectoryAdministrationTeam = {
   id: 'core',
@@ -17,20 +18,40 @@ const team: DirectoryAdministrationTeam = {
   ],
 }
 
-/** One grant the fake store received. */
-type Grant = { projectId: string; expectedVersion: number; fences: string[]; audit: string }
+/** One grant the fake store received, as the use case passed it in. */
+type Grant = {
+  /** Project granted. */
+  projectId: string
+  /** Workspace member version the use case expected, not the version after the grant. */
+  expectedVersion: number
+  /** Caller fences passed with the grant. */
+  fences: string[]
+  /** Audit context created for the Project. */
+  audit: string
+}
+
+/** Options of {@link createPorts}. */
+type PortOptions = {
+  /** Whether the member is no longer active in the Workspace. */
+  inactive?: boolean
+  /** Whether the request's idempotency key already granted a Project with another input. */
+  reusedKey?: boolean
+}
 
 /**
  * Creates fake ports over one Team.
  *
  * @param existing - Projects the member already belongs to.
  * @param manageable - Tells whether the caller manages a Project.
+ * @param otherTeams - Other Teams of the Workspace, for Project ID sharing.
+ * @param options - Member state and key reuse to simulate.
  * @returns The ports and the grants they received.
  */
 function createPorts(
   existing: string[] = [],
   manageable = (_projectId: string) => true,
   otherTeams: DirectoryAdministrationTeam[] = [],
+  options: PortOptions = {},
 ) {
   const grants: Grant[] = []
   let memberVersion = 10
@@ -44,7 +65,15 @@ function createPorts(
       memberVersion += 1
       return { added: true }
     },
-    readActiveMemberVersion: async () => memberVersion,
+    requireUnusedGrantRequest: async () => {
+      if (options.reusedKey) {
+        throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+    },
+    readActiveMemberVersion: async () => {
+      if (options.inactive) throw new ProjectDataError(409, 'WorkspaceMemberInactive', 'Inactive.')
+      return memberVersion
+    },
     canManageProject: (_teamId, projectId) => manageable(projectId),
     createAuditContext: (projectId) => `audit:${projectId}`,
   }
@@ -98,7 +127,7 @@ test('refuses before any grant when one Project is not manageable, and an unknow
   expect(grants).toEqual([])
 })
 
-test('refuses a Team whose Project ID is shared with another active Team', async () => {
+test('refuses a Team whose Project ID is shared with another Team, archived or not', async () => {
   const other = (archivedAt?: string): DirectoryAdministrationTeam => ({
     id: 'other',
     nameJa: '他',
@@ -113,9 +142,29 @@ test('refuses a Team whose Project ID is shared with another active Team', async
   })).rejects.toMatchObject({ status: 409, code: 'TeamProjectIdShared' })
   expect(shared.grants).toEqual([])
 
-  // An archived Team no longer owns its Projects for access, so its IDs do not block the add.
+  // Restoring an archived Team would show the grant there too, so its IDs block the add as well.
   const archived = createPorts([], () => true, [other('2026-01-01T00:00:00.000Z')])
   await expect(addMemberToTeamProjectsUseCase(archived.ports, {
     workspaceId: 'ws', teamId: 'core', member, role: 'member', caller,
-  })).resolves.toMatchObject({ addedProjectIds: ['alpha', 'beta', 'gamma'] })
+  })).rejects.toMatchObject({ status: 409, code: 'TeamProjectIdShared' })
+  expect(archived.grants).toEqual([])
+})
+
+test('refuses a reused idempotency key with another input before any grant', async () => {
+  const { ports, grants } = createPorts([], () => true, [], { reusedKey: true })
+
+  await expect(addMemberToTeamProjectsUseCase(ports, {
+    workspaceId: 'ws', teamId: 'core', member, role: 'viewer', caller,
+  })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  expect(grants).toEqual([])
+})
+
+test('refuses an inactive member even when the Team has no active Project', async () => {
+  const { ports } = createPorts([], () => true, [], { inactive: true })
+  const empty: DirectoryAdministrationTeam = { id: 'empty', nameJa: '空', nameEn: 'Empty', projects: [] }
+  ports.getDirectoryAdministration = async () => ({ teams: [team, empty] })
+
+  await expect(addMemberToTeamProjectsUseCase(ports, {
+    workspaceId: 'ws', teamId: 'empty', member, role: 'member', caller,
+  })).rejects.toMatchObject({ status: 409, code: 'WorkspaceMemberInactive' })
 })

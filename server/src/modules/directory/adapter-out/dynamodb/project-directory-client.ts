@@ -387,6 +387,11 @@ type ProjectMemberItem = {
    */
   role: ProjectRole
   /**
+   * Idempotency key hash and request fingerprint of the Team-wide grant that created the row,
+   * joined by `:`, so a retry under the same key with another input is refused.
+   */
+  grantRequestKey?: string
+  /**
    * member item の作成日時です。
    */
   createdAt: string
@@ -922,6 +927,7 @@ export type ProjectDirectoryClient = {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param grantRequestKey - Idempotency key hash and request fingerprint of the Team-wide grant.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   addProjectMemberIfAbsent(
@@ -933,7 +939,23 @@ export type ProjectDirectoryClient = {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+    grantRequestKey?: string,
   ): Promise<{ added: boolean }>
+  /**
+   * Refuses a Team-wide grant whose idempotency key already granted one of the Projects with
+   * another input.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param projectIds - Projects the grant covers.
+   * @param memberKey - Member being added.
+   * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
+   */
+  requireUnusedProjectGrantRequest(
+    directoryId: string,
+    projectIds: readonly string[],
+    memberKey: string,
+    grantRequestKey: string,
+  ): Promise<void>
   /**
    * DynamoDB から project member role を削除します。
    */
@@ -2034,6 +2056,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param grantRequestKey - Idempotency key hash and request fingerprint of the Team-wide grant.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   async addProjectMemberIfAbsent(
@@ -2045,6 +2068,7 @@ export class DynamoDbProjectDirectoryClient {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+    grantRequestKey?: string,
   ): Promise<{ added: boolean }> {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -2054,6 +2078,7 @@ export class DynamoDbProjectDirectoryClient {
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId, teamId)
     if (hasActiveProjectMember(items, projectId, normalizedMemberKey)) {
+      requireUnusedGrantRequestKey(items, [projectId], normalizedMemberKey, grantRequestKey)
       return { added: false }
     }
 
@@ -2069,6 +2094,7 @@ export class DynamoDbProjectDirectoryClient {
       email,
       name,
       role,
+      ...(grantRequestKey === undefined ? {} : { grantRequestKey }),
       createdAt: updatedAt,
       updatedAt,
     }
@@ -2125,6 +2151,7 @@ export class DynamoDbProjectDirectoryClient {
         const latest = await this.readValidDirectoryItems(directoryId, true)
         this.requireActiveProject(latest, projectId, teamId)
         if (hasActiveProjectMember(latest, projectId, normalizedMemberKey)) {
+          requireUnusedGrantRequestKey(latest, [projectId], normalizedMemberKey, grantRequestKey)
           return { added: false }
         }
       }
@@ -2149,6 +2176,25 @@ export class DynamoDbProjectDirectoryClient {
       }
       throw toProjectDataError(error)
     }
+  }
+
+  /**
+   * Refuses a Team-wide grant whose idempotency key already granted one of the Projects with
+   * another input, before any Project is written.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param projectIds - Projects the grant covers.
+   * @param memberKey - Member being added.
+   * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
+   */
+  async requireUnusedProjectGrantRequest(
+    directoryId: string,
+    projectIds: readonly string[],
+    memberKey: string,
+    grantRequestKey: string,
+  ): Promise<void> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    requireUnusedGrantRequestKey(items, projectIds, normalizeProjectMemberKey(memberKey), grantRequestKey)
   }
 
   /**
@@ -3198,6 +3244,73 @@ export class DynamoDbProjectDirectoryClient {
     const revisionClause = team.profileRevision === undefined
       ? 'attribute_not_exists(#profileRevision)'
       : '#profileRevision = :readProfileRevision'
+    try {
+      await this.sendTeamProfileTransaction(
+        directoryId,
+        teamId,
+        team,
+        profile,
+        auditContext,
+        authorizationConditionChecks,
+        { setClauses, removeClauses, values, condition, revisionClause },
+      )
+    } catch (error) {
+      // The same request sent twice at once: one commits, the other loses the revision condition.
+      // It is answered as the success the first one recorded; any other conflict stays refused.
+      if (
+        requestKey !== undefined &&
+        error instanceof ProjectDataError &&
+        error.code === 'ConditionalCheckFailedException'
+      ) {
+        const latest = (await this.readValidDirectoryItems(directoryId, true)).find(
+          (item): item is ProjectDirectoryTeamItem =>
+            item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+        )
+        if (
+          latest?.profileRequestKey === requestKey &&
+          latest.profileRevision === profile.expectedProfileRevision + 1
+        ) {
+          return response
+        }
+      }
+      throw error
+    }
+
+    return response
+  }
+
+  /**
+   * Sends the transaction that stores a Team profile.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param team - Team row read before the update.
+   * @param profile - Validated description, leader, and expected revision.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param update - Update clauses, values, and conditions of the Team row.
+   */
+  private async sendTeamProfileTransaction(
+    directoryId: string,
+    teamId: string,
+    team: ProjectDirectoryTeamItem,
+    profile: ReturnType<typeof readDirectoryTeamProfile>,
+    auditContext: MutationAuditContext | undefined,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks,
+    update: {
+      /** SET clauses of the Team row. */
+      setClauses: string[]
+      /** REMOVE clauses of the Team row. */
+      removeClauses: string[]
+      /** Values of the SET clauses. */
+      values: Record<string, unknown>
+      /** Active Team row condition. */
+      condition: ReturnType<typeof createActiveTeamRowCondition>
+      /** Condition on the revision read before the update. */
+      revisionClause: string
+    },
+  ) {
+    const { setClauses, removeClauses, values, condition, revisionClause } = update
     await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
       {
         Update: {
@@ -3247,8 +3360,6 @@ export class DynamoDbProjectDirectoryClient {
         metadata: { kind: 'team', teamId },
       }),
     ])
-
-    return response
   }
 
   /**
@@ -5091,6 +5202,48 @@ function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string
 }
 
 /**
+ * Refuses a grant when the same idempotency key already granted one of the Projects with another
+ * input, as a retry under one key must repeat the same request.
+ *
+ * @param items - Directory rows of the Workspace.
+ * @param projectIds - Projects the grant covers.
+ * @param memberKey - Normalized member key.
+ * @param grantRequestKey - Idempotency key hash and request fingerprint, joined by `:`.
+ */
+function requireUnusedGrantRequestKey(
+  items: ProjectDirectoryItem[],
+  projectIds: readonly string[],
+  memberKey: string,
+  grantRequestKey: string | undefined,
+) {
+  if (grantRequestKey === undefined) return
+  const keyHash = readGrantRequestKeyHash(grantRequestKey)
+  const reused = items.some((item) =>
+    item.entryType === 'project-member' &&
+    projectIds.includes(item.projectId) &&
+    item.memberKey === memberKey &&
+    isActiveDirectoryItem(item) &&
+    item.grantRequestKey !== undefined &&
+    item.grantRequestKey !== grantRequestKey &&
+    readGrantRequestKeyHash(item.grantRequestKey) === keyHash
+  )
+  if (reused) {
+    throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+  }
+}
+
+/**
+ * Reads the idempotency key hash part of a grant request key.
+ *
+ * @param grantRequestKey - Idempotency key hash and request fingerprint, joined by `:`.
+ * @returns The idempotency key hash.
+ */
+function readGrantRequestKeyHash(grantRequestKey: string) {
+  const separator = grantRequestKey.indexOf(':')
+  return separator === -1 ? grantRequestKey : grantRequestKey.slice(0, separator)
+}
+
+/**
  * Tells whether a transaction item is a condition check on one Workspace member row.
  *
  * @param check - Transaction item to inspect.
@@ -5866,6 +6019,7 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       (value.email === undefined || typeof value.email === 'string') &&
       (value.name === undefined || typeof value.name === 'string') &&
       isProjectRole(value.role) &&
+      (value.grantRequestKey === undefined || typeof value.grantRequestKey === 'string') &&
       typeof value.createdAt === 'string' &&
       typeof value.updatedAt === 'string' &&
       (value.archivedAt === undefined || typeof value.archivedAt === 'string')
@@ -5938,11 +6092,11 @@ function readDirectoryTeamProfile(input: unknown) {
   if (!isRecord(input) || typeof input.description !== 'string') {
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'description must be a string.')
   }
-  const description = input.description.replace(/\r\n?/g, '\n').trim()
-  if (
-    description.length > DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH ||
-    DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER.test(description)
-  ) {
+  const normalized = input.description.replace(/\r\n?/g, '\n')
+  // Checked before trimming, which would otherwise drop a leading or trailing control character.
+  const hasControlCharacter = DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER.test(normalized)
+  const description = normalized.trim()
+  if (description.length > DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH || hasControlCharacter) {
     throw new ProjectDataError(
       400,
       'InvalidProjectWrite',

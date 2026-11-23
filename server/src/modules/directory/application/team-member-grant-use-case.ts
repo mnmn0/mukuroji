@@ -38,6 +38,8 @@ export type TeamMemberGrantPorts<TFence, TAudit> = {
     auditContext: TAudit,
     authorizationFences: TFence[],
   ): Promise<{ added: boolean }>
+  /** Refuses a retry whose idempotency key already granted one of the Projects with another input. */
+  requireUnusedGrantRequest(workspaceId: string, projectIds: readonly string[], memberKey: string): Promise<void>
   /** Reads the current version of an active Workspace member, refusing an inactive one. */
   readActiveMemberVersion(workspaceId: string, memberKey: string): Promise<number>
   /** Tells whether the caller may grant roles on a Project. */
@@ -94,13 +96,13 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
     )
   }
 
-  // A legacy Project ID shared with another active Team cannot carry a Team-qualified role, so
-  // access readers would ignore the grant; it is refused before any grant instead.
+  // A legacy Project ID shared with another Team cannot carry a Team-qualified role: access
+  // readers would ignore the grant, and restoring the other Team would show it there too. It is
+  // refused before any grant, whether the other Team or its Project is archived or not.
   const sharedProjectIds = new Set(
     directory.teams
-      .filter((candidate) => candidate.id !== teamId && candidate.archivedAt === undefined)
+      .filter((candidate) => candidate.id !== teamId)
       .flatMap((candidate) => candidate.projects)
-      .filter((project) => project.archivedAt === undefined)
       .map((project) => project.id),
   )
   if (activeProjects.some((project) => sharedProjectIds.has(project.id))) {
@@ -117,15 +119,25 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
     addedProjectIds: [],
     existingProjectIds: [],
   }
+  // A retry under the same key must repeat the same request, or grants would mix roles.
+  await ports.requireUnusedGrantRequest(
+    workspaceId,
+    activeProjects.map((project) => project.id),
+    member.id,
+  )
+  // An inactive member is refused even when the Team has no active Project to add them to.
+  let nextReadVersion: number | undefined = await ports.readActiveMemberVersion(workspaceId, member.id)
   // A caller adding themselves keeps the membership version they were authorized with, advanced
   // only by their own grants, so a change to their membership in between still fails.
   const addsSelf = caller.membership !== undefined &&
     isSameMemberKey(caller.membership.memberKey, member.id)
   for (const project of activeProjects) {
-    // Each grant advances the member's version, so it is read again before every Project.
+    // Each grant advances the member's version, so it is read again before every later Project.
+    const readVersion = nextReadVersion ?? await ports.readActiveMemberVersion(workspaceId, member.id)
+    nextReadVersion = undefined
     const expectedVersion = addsSelf && caller.membership
       ? caller.membership.version + response.addedProjectIds.length
-      : await ports.readActiveMemberVersion(workspaceId, member.id)
+      : readVersion
     const { added } = await ports.addProjectMemberIfAbsent(
       workspaceId,
       teamId,
