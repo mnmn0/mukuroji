@@ -40,6 +40,7 @@ const emptySavedTaskViews: SavedTaskView[] = []
 const deniedSavedTaskViewCapabilities = {
   canManageSharedViews: false,
   canSetTeamDefault: false,
+  canSetProjectDefault: false,
   canWrite: false,
   writableProjectScopes: [],
   writableTeamIds: [],
@@ -91,6 +92,8 @@ export type TaskViewController = {
   canManageShared: boolean
   /** Whether the server authorizes assigning a Team default in this scope. */
   canSetTeamDefault: boolean
+  /** Whether the server authorizes assigning a Project default in this Project scope. */
+  canSetProjectDefault: boolean
   /** Whether the server authorizes task-view lifecycle mutations in this scope. */
   canWrite: boolean
   /** Copies the current canonical route as a permalink. */
@@ -142,6 +145,8 @@ export type TaskViewPreferenceMutation = {
   isDefault?: boolean
   /** Whether to make this view the Team default. */
   isTeamDefault?: boolean
+  /** Whether to make this view the Project default. */
+  isProjectDefault?: boolean
   /** Next pin preference. */
   pinned?: boolean
 }
@@ -230,18 +235,23 @@ function reconcileSavedTaskViewDefaults(
   const personalDefaultId = changedView?.preference.isPersonalDefault
     ? changedView.id
     : views.find((view) => view.preference.isPersonalDefault)?.id
-  const teamDefaultId = changedView?.preference.isTeamDefault
+  // One scope carries one shared default: a Team default on a Team scope, or a Project default on
+  // a Project scope.
+  const isSharedDefault = (view: SavedTaskView) =>
+    view.preference.isTeamDefault || view.preference.isProjectDefault
+  const sharedDefaultId = changedView && isSharedDefault(changedView)
     ? changedView.id
-    : views.find((view) => view.preference.isTeamDefault)?.id
+    : views.find(isSharedDefault)?.id
 
   return views.map((view) => {
     const isPersonalDefault = view.id === personalDefaultId
-    const isTeamDefault = view.id === teamDefaultId
-    const isDefault = isPersonalDefault || (!personalDefaultId && isTeamDefault)
+    const isShared = view.id === sharedDefaultId
+    const isProjectScope = view.definition.scope.kind === 'project'
+    const isDefault = isPersonalDefault || (!personalDefaultId && isShared)
     const defaultSource: SavedTaskView['preference']['defaultSource'] = isPersonalDefault
       ? 'personal'
-      : isDefault && isTeamDefault
-        ? 'team'
+      : isDefault && isShared
+        ? isProjectScope ? 'project' : 'team'
         : undefined
     const preference = { ...view.preference }
     delete preference.defaultSource
@@ -251,7 +261,8 @@ function reconcileSavedTaskViewDefaults(
         ...preference,
         isDefault,
         isPersonalDefault,
-        isTeamDefault,
+        isTeamDefault: isShared && !isProjectScope,
+        isProjectDefault: isShared && isProjectScope,
         ...(defaultSource ? { defaultSource } : {}),
       },
     }
@@ -500,6 +511,7 @@ export function useTaskViewController(
     baselineDefinition: baselineSanitized.definition,
     canManageShared: savedTaskViewCapabilities.canManageSharedViews,
     canSetTeamDefault: savedTaskViewCapabilities.canSetTeamDefault,
+    canSetProjectDefault: savedTaskViewCapabilities.canSetProjectDefault,
     canWrite: savedTaskViewCapabilities.canWrite,
     copyPermalink: async () => {
       try {
@@ -595,6 +607,10 @@ export function useTaskViewController(
         (
           patch.isTeamDefault !== undefined &&
           !savedTaskViewCapabilities.canSetTeamDefault
+        ) ||
+        (
+          patch.isProjectDefault !== undefined &&
+          !savedTaskViewCapabilities.canSetProjectDefault
         )
       ) return
       const update: UpdateSavedTaskViewInput = {
@@ -603,13 +619,17 @@ export function useTaskViewController(
         ...(patch.pinned === undefined ? {} : { pinned: patch.pinned }),
         ...(patch.isTeamDefault
           ? { defaultSource: 'team' }
-          : patch.isDefault
-            ? { defaultSource: 'personal' }
-            : patch.isTeamDefault === false
-              ? { clearDefaultSource: 'team' }
-              : patch.isDefault === false
-                ? { clearDefaultSource: 'personal' }
-                : {}),
+          : patch.isProjectDefault
+            ? { defaultSource: 'project' }
+            : patch.isDefault
+              ? { defaultSource: 'personal' }
+              : patch.isTeamDefault === false
+                ? { clearDefaultSource: 'team' }
+                : patch.isProjectDefault === false
+                  ? { clearDefaultSource: 'project' }
+                  : patch.isDefault === false
+                    ? { clearDefaultSource: 'personal' }
+                    : {}),
       }
       await runMutation(
         `task-view:preference:${viewId}`,
