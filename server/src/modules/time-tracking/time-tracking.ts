@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   DEFAULT_TEAM_TIME_ENTRY_POLICY,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   readTeamTimeEntryPolicy,
@@ -24,6 +25,8 @@ import {
   isActiveTimeEntryCategory,
   readTimeEntryCategoryKey,
   type WorkspaceTimeEntryCategorySettings,
+  type WorkspaceWeekStartDay,
+  workspaceWeekContaining,
   type RunningTimer,
   type TimeBudget,
   type TimeEntry,
@@ -399,6 +402,13 @@ export type TimeTrackingCategorySource = {
    * @returns IANA time zone, or the Workspace default when the Workspace has not chosen one.
    */
   readTimeZone?(workspaceId: string): Promise<string>
+  /**
+   * Reads the day the Workspace week starts on, which decides the weekly report and timesheet buckets.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Week start day from 0 (Sunday) to 6, or Monday when the Workspace has not chosen one.
+   */
+  readWeekStartDay?(workspaceId: string): Promise<WorkspaceWeekStartDay>
 }
 
 /** A stored Team time entry policy. */
@@ -800,6 +810,16 @@ export class TimeTrackingService {
     return this.categories
       ? await this.categories.readCategories(workspaceId)
       : DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  }
+
+  /**
+   * Reads the day the Workspace week starts on, or Monday when no source is configured.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Week start day weekly buckets begin on.
+   */
+  private async readWeekStartDay(workspaceId: string): Promise<WorkspaceWeekStartDay> {
+    return await this.categories?.readWeekStartDay?.(workspaceId) ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay
   }
 
   /**
@@ -1934,7 +1954,8 @@ export class TimeTrackingService {
     const categoryLabels = input.groupBy === 'category'
       ? readCategoryLabels(await this.readCategorySettings(input.workspaceId))
       : undefined
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels)
+    const weekStartDay = input.groupBy === 'week' ? await this.readWeekStartDay(input.workspaceId) : undefined
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay)
     const includeBudget = input.includeCosts && (
       input.budgetScope !== 'project' ||
       input.managedProjectIds === undefined ||
@@ -1975,7 +1996,8 @@ export class TimeTrackingService {
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
-    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const weekStartDay = await this.readWeekStartDay(input.workspaceId)
+    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, weekStartDay)
     return {
       from: period.from,
       to: period.to,
@@ -3240,9 +3262,10 @@ function aggregateEntries(
   includeCosts: boolean,
   managedProjectIds?: ReadonlySet<string>,
   categoryLabels?: ReadonlyMap<string, string>,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
-    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds)
+    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds, weekStartDay)
   }
   const grouped = new Map<string, MutableSummaryGroup>()
   for (const entry of entries) {
@@ -3297,7 +3320,7 @@ function readFallbackGroupLabel(groupBy: TimeTrackingGroupBy, entry: TimeEntry):
   return undefined
 }
 
-/** Aggregates entries into local day or Monday-based week buckets. */
+/** Aggregates entries into local day buckets, or week buckets that begin on the Workspace week start day. */
 function aggregateCalendarEntries(
   entries: readonly TimeEntry[],
   groupBy: 'day' | 'week',
@@ -3307,6 +3330,7 @@ function aggregateCalendarEntries(
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
   managedProjectIds?: ReadonlySet<string>,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
 ): TimeSummaryGroup[] {
   const grouped = new Map<string, MutableSummaryGroup>()
   const segments = entries.flatMap((entry) => splitEntryByLocalDate(entry, timeZone, from, to)
@@ -3322,7 +3346,7 @@ function aggregateCalendarEntries(
     )
   }
   for (const { entry, segment } of segments) {
-    const key = groupBy === 'day' ? segment.date : mondayOfWeek(segment.date)
+    const key = groupBy === 'day' ? segment.date : workspaceWeekContaining(segment.date, weekStartDay).from
     const group = grouped.get(key) ?? createMutableSummaryGroup(key)
     group.minutes += segment.minutes
     group.billableMinutes += entry.billable ? segment.minutes : 0
@@ -3862,14 +3886,6 @@ function addCalendarDays(date: string, days: number): string {
   const next = new Date(`${date}T00:00:00.000Z`)
   next.setUTCDate(next.getUTCDate() + days)
   return next.toISOString().slice(0, 10)
-}
-
-/** Returns the Monday date for a local date. */
-function mondayOfWeek(date: string): string {
-  const value = new Date(`${date}T00:00:00.000Z`)
-  const weekday = value.getUTCDay()
-  value.setUTCDate(value.getUTCDate() - (weekday === 0 ? 6 : weekday - 1))
-  return value.toISOString().slice(0, 10)
 }
 
 /** Validates an interval and returns normalized instants. */

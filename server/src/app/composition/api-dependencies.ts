@@ -20,6 +20,7 @@ import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
@@ -1830,6 +1831,9 @@ export function createProductionAppDependencies(): AppDependencies {
       readTimeZone: async (workspaceId) =>
         (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
           DEFAULT_WORKSPACE_TIME_ZONE,
+      readWeekStartDay: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.weekStartDay ??
+          DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     },
   )
   return {

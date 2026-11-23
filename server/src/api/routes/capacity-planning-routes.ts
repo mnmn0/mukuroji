@@ -11,7 +11,7 @@ import { CapacityPlanningError } from '../../modules/capacity-planning'
 import { requireAppDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { readWorkspaceWorkloadCalendarPolicy } from '../shared/workspace-calendar'
+import { readWorkspaceCalendarSettingsOf, readWorkspaceWorkloadCalendarPolicy } from '../shared/workspace-calendar'
 import {
   requireTeamPermission,
   toProjectDataErrorResponse,
@@ -85,6 +85,9 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
     // Profiles that inherit the Workspace calendar follow every Workspace day off, uncapped.
     readWorkspaceCalendar: async (principal) =>
       await readWorkspaceWorkloadCalendarPolicy(principal.directoryId),
+    // Weekly buckets begin on the Workspace week start day.
+    readWeekStartDay: async (principal) =>
+      (await readWorkspaceCalendarSettingsOf(principal.directoryId)).weekStartDay,
     requireTeamPermission: async (principal, teamId, minimum) => {
       if (principal.workspaceRole === 'guest') {
         throw new ProjectDataError(403, 'ProjectAccessDenied', 'Guests cannot access workload planning.')
