@@ -194,3 +194,26 @@ test('rejects an invalid range', async () => {
     expect(await response.json()).toMatchObject({ code: 'InvalidProjectBudgetReportRequest' })
   }
 })
+
+test('does not let a manager of the same Project ID in another Team change this Team\'s Project budget', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'other-project', name: 'Other', tone: 'green' },
+    ],
+    projectAccesses: [
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+      { projectId: 'refero', role: 'manager', teamId: 'other-team' },
+    ],
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/time-budget', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amountMinor: 1, currency: 'JPY', expectedRevision: 0 }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await getTestAppDependencies().timeTracking.timeTrackingService.getBudget(workspaceId, 'core-team', 'project', 'refero')).toBeUndefined()
+})

@@ -59,7 +59,7 @@ export function registerProjectBudgetRoutes(routeApp: Hono): void {
       const report = await readReport(c)
       return c.body(createProjectBudgetReportCsv(report), 200, {
         'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="project-budget-${report.projectId}-${report.from}-${report.to}.csv"`,
+        'Content-Disposition': `attachment; filename="project-budget-${report.projectId.replaceAll(/[^A-Za-z0-9_-]/g, '_')}-${report.from}-${report.to}.csv"`,
         'Cache-Control': 'no-store',
       })
     } catch (error) {

@@ -287,6 +287,7 @@ export const timeTrackingMessages = {
   'timeTracking.projectBudget.description': 'Actual cost and time against the Project budget, and earned value against the approved baseline (PV, EV, AC, SPI, CPI, estimate at completion). Only Project managers see it.',
   'timeTracking.projectBudget.editBudget': 'Edit budget',
   'timeTracking.projectBudget.export': 'Download CSV',
+  'timeTracking.projectBudget.exportError': 'The CSV could not be downloaded. Try again later.',
   'timeTracking.projectBudget.exporting': 'Downloading…',
   'timeTracking.projectBudget.from': 'From',
   'timeTracking.projectBudget.to': 'To',

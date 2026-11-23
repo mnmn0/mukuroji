@@ -22,6 +22,8 @@ export type ProjectBudgetReportPanelProps = {
   hasLoadError?: boolean
   /** Whether the CSV is being downloaded. */
   isExporting?: boolean
+  /** Whether the last CSV download failed. */
+  hasExportError?: boolean
   /** Path of the screen where the budget is edited. */
   budgetEditPath: string
   /** Renders a link to an in-app path. */
@@ -43,6 +45,7 @@ export type ProjectBudgetReportPanelProps = {
  */
 export function ProjectBudgetReportPanel({
   budgetEditPath,
+  hasExportError = false,
   hasLoadError = false,
   isExporting = false,
   isLoading = false,
@@ -76,6 +79,9 @@ export function ProjectBudgetReportPanel({
           </button>
         </div>
       </div>
+      {hasExportError ? (
+        <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('timeTracking.projectBudget.exportError')}</p>
+      ) : null}
       <div className="flex flex-wrap items-end gap-3 text-sm">
         <label className="grid gap-1" htmlFor={`${id}-from`}>
           <span className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.projectBudget.from')}</span>

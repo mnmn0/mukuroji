@@ -60,6 +60,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   const [pickedRange, setPickedRange] = useState<TimeReportRange>()
   const [budgetRange, setBudgetRange] = useState<TimeReportRange>()
   const [isExporting, setIsExporting] = useState(false)
+  const [hasExportError, setHasExportError] = useState(false)
   const range = pickedRange ?? budgetRange ?? resolveProjectBudgetReportRange(undefined, today)
   const input = { ...range, timeZone, interval: chooseProjectBudgetReportInterval(range) }
   const report = useProjectBudgetReport(
@@ -79,6 +80,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   return (
     <ProjectBudgetReportPanel
       budgetEditPath={createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy: 'project' })}
+      hasExportError={hasExportError}
       hasLoadError={Boolean(report.error)}
       isExporting={isExporting}
       isLoading={report.isLoading}
@@ -87,9 +89,10 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
       onExport={() => {
         if (!accessToken) return
         setIsExporting(true)
+        setHasExportError(false)
         void downloadProjectBudgetReportCsv(accessToken, teamId, projectId, input)
           .then((blob) => triggerCsvDownload(blob, `project-budget-${projectId}-${range.from}-${range.to}.csv`))
-          .catch(() => undefined)
+          .catch(() => setHasExportError(true))
           .finally(() => setIsExporting(false))
       }}
       onRetry={() => { void report.mutate().catch(() => undefined) }}

@@ -287,6 +287,7 @@ export const timeTrackingMessages = {
   'timeTracking.projectBudget.description': 'Project の予算に対する実績コスト・工数と、承認済みベースラインに対する出来高（PV・EV・AC、SPI・CPI、完了時見積）です。Project のマネージャーだけに表示されます。',
   'timeTracking.projectBudget.editBudget': '予算を編集',
   'timeTracking.projectBudget.export': 'CSV をダウンロード',
+  'timeTracking.projectBudget.exportError': 'CSV をダウンロードできませんでした。時間をおいてもう一度お試しください。',
   'timeTracking.projectBudget.exporting': 'ダウンロード中…',
   'timeTracking.projectBudget.from': '開始日',
   'timeTracking.projectBudget.to': '終了日',
