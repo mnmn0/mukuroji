@@ -253,6 +253,11 @@ export type WebDistributionResources = Readonly<{
    * custom domain when one is configured, otherwise the CloudFront domain.
    */
   readonly webOrigin: string;
+  /**
+   * Comma-separated HTTPS origins a browser can load the app from: the custom
+   * domain when configured, and always the CloudFront domain.
+   */
+  readonly webBrowserOrigins: string;
 }>;
 
 /**
@@ -396,5 +401,11 @@ export function buildWebDistribution(
 
   input.fileBucket.addCorsRule(createFileBucketBrowserCorsRule(browserOrigins));
 
-  return { webBucket, webDistribution, webOrigin };
+  const webBrowserOrigins = cdk.Token.asString(cdk.Fn.conditionIf(
+    customDomain.configured.logicalId,
+    `${customOrigin},${distributionOrigin}`,
+    distributionOrigin,
+  ));
+
+  return { webBucket, webDistribution, webOrigin, webBrowserOrigins };
 }

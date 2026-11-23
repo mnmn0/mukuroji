@@ -143,3 +143,23 @@ export const RouteError: Story = {
 export const RouteErrorEnglish: Story = {
   render: () => renderPublicPage(<RouteErrorPage initialLocale="en" onReload={() => undefined} />, '/settings'),
 }
+
+/**
+ * Route error page after the failure was reported, showing the report ID to quote.
+ */
+export const RouteErrorReported: Story = {
+  render: () => renderPublicPage(
+    <RouteErrorPage initialLocale="ja" onReload={() => undefined} reportId="3f2a7c1e-9b4d-4e8a-8c5f-0123456789ab" />,
+    '/settings',
+  ),
+}
+
+/**
+ * English route error page with the report ID.
+ */
+export const RouteErrorReportedEnglish: Story = {
+  render: () => renderPublicPage(
+    <RouteErrorPage initialLocale="en" onReload={() => undefined} reportId="3f2a7c1e-9b4d-4e8a-8c5f-0123456789ab" />,
+    '/settings',
+  ),
+}

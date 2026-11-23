@@ -378,6 +378,7 @@ TLSv1.2_2021 の viewer policy と SNI で使います。CloudFront の domain�
    `mukuroji:webHostedZoneId` も書き、stack に A / AAAA alias を作らせます。それ以外の DNS では、domain の
    CNAME を output の `WebDistributionDomainName` に向けます。
 3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
+   ブラウザの error 送信が受け付ける origin（`WEB_APP_ORIGINS`）にも、独自 domain と CloudFront domain を stack が自動で入れます。
    file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
 4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
    `https://<domain>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
