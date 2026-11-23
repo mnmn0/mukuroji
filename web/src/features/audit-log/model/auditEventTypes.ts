@@ -56,6 +56,7 @@ const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
   'time-budget': 'auditLog.resource.time-budget',
   'time-entry': 'auditLog.resource.time-entry',
   'time-period': 'auditLog.resource.time-period',
+  'time-rate-card': 'auditLog.resource.time-rate-card',
   'timer': 'auditLog.resource.timer',
   'triage': 'auditLog.resource.triage',
   'update-feed': 'auditLog.resource.update-feed',
