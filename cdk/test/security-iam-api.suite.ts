@@ -1182,6 +1182,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminUserGlobalSignOut');
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminResetUserPassword');
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminSetUserMFAPreference');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminAddUserToGroup');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminRemoveUserFromGroup');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:ListUsersInGroup');
   expect(JSON.stringify(cognitoStatement)).toContain('CognitoUserPoolId');
   const wildcardStatements = statements.filter((statement) => statement.Resource === '*');
   expect(wildcardStatements).toEqual([{

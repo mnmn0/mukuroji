@@ -186,6 +186,8 @@ export const auditLogMessages = {
   'auditLog.action.owner-reconciled': 'オーナーの照合',
   'auditLog.action.parent-changed': '親の変更',
   'auditLog.action.password-reset-requested': 'パスワード再設定の依頼',
+  'auditLog.action.system-administrator-granted': 'システム管理者の付与',
+  'auditLog.action.system-administrator-revoked': 'システム管理者の解除',
   'auditLog.action.previewed': 'プレビュー',
   'auditLog.action.reactivated': '利用再開',
   'auditLog.action.received': '受信',

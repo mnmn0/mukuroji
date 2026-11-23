@@ -186,6 +186,8 @@ export const auditLogMessages = {
   'auditLog.action.owner-reconciled': 'owner reconciled',
   'auditLog.action.parent-changed': 'parent changed',
   'auditLog.action.password-reset-requested': 'password reset requested',
+  'auditLog.action.system-administrator-granted': 'System administrator granted',
+  'auditLog.action.system-administrator-revoked': 'System administrator revoked',
   'auditLog.action.previewed': 'previewed',
   'auditLog.action.reactivated': 'reactivated',
   'auditLog.action.received': 'received',

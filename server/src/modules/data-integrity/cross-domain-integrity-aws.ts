@@ -1307,9 +1307,10 @@ function normalizeWorkspaceAccessRow(row: Record<string, unknown>): CrossDomainI
   return normalizationFailure()
 }
 
-/** Tells whether a value names an administrator credential action. */
+/** Tells whether a value names an administrator credential or system administrator action. */
 function isWorkspaceMemberCredentialAction(value: unknown) {
-  return value === 'password-reset-requested' || value === 'mfa-reset'
+  return value === 'password-reset-requested' || value === 'mfa-reset' ||
+    value === 'system-administrator-granted' || value === 'system-administrator-revoked'
 }
 
 /** Tells whether a value is a stage of an administrator credential action. */

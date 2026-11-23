@@ -20,6 +20,7 @@ import type {
   CognitoMfaChallengeName,
 } from '../../domain/mfa-challenge'
 import {
+  AdminAddUserToGroupCommand,
   AdminCreateUserCommand,
   AdminDeleteUserAttributesCommand,
   AdminDeleteUserCommand,
@@ -27,6 +28,7 @@ import {
   AdminEnableUserCommand,
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
+  AdminRemoveUserFromGroupCommand,
   AdminResetUserPasswordCommand,
   AdminSetUserMFAPreferenceCommand,
   AdminUpdateUserAttributesCommand,
@@ -41,6 +43,7 @@ import {
   GetUserCommand,
   InitiateAuthCommand,
   ListUsersCommand,
+  ListUsersInGroupCommand,
   RespondToAuthChallengeCommand,
   RevokeTokenCommand,
   SetUserMFAPreferenceCommand,
@@ -277,6 +280,14 @@ type ListUsersResponse = {
    * 次 page 取得用の Cognito pagination token です。
    */
   PaginationToken?: string
+}
+
+/** Response of Cognito ListUsersInGroup. */
+type ListUsersInGroupResponse = {
+  /** Users of the group on this page. */
+  Users?: CognitoUserRecord[]
+  /** Token of the next page. */
+  NextToken?: string
 }
 
 /** Cognito AdminListGroupsForUser のレスポンスです。 */
@@ -665,6 +676,26 @@ export type CognitoClient = {
    * Cognito user が現在所属する全 group 名を返します。
    */
   getUserGroups(userId: string): Promise<string[]>
+  /**
+   * Adds a user to the first configured system administrator group (AdminAddUserToGroup).
+   *
+   * @param userId - Email address of the target user.
+   */
+  addSystemAdmin?(userId: string): Promise<void>
+  /**
+   * Removes a user from every configured system administrator group (AdminRemoveUserFromGroup).
+   *
+   * @param userId - Email address of the target user.
+   */
+  removeSystemAdmin?(userId: string): Promise<void>
+  /**
+   * Lists the emails of the users of one directory that are in a system administrator group
+   * (ListUsersInGroup).
+   *
+   * @param directoryId - Workspace directory whose users are kept.
+   * @returns Normalized emails of the system administrators of the directory.
+   */
+  listSystemAdminEmails?(directoryId: string): Promise<string[]>
   /**
    * Cognito User Pool に実在する federation provider 設定を返します。
    */
@@ -1406,6 +1437,80 @@ export class AwsCognitoClient implements CognitoClient {
     } catch (error) {
       throw toCognitoSdkError(error)
     }
+  }
+
+  /**
+   * Adds a user to the first configured system administrator group.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async addSystemAdmin(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const [groupName] = getSystemAdminGroups()
+
+    try {
+      await this.client.send(new AdminAddUserToGroupCommand({
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+        GroupName: groupName,
+      }))
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Removes a user from every configured system administrator group.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async removeSystemAdmin(userId: string): Promise<void> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const configuredGroups = new Set(getSystemAdminGroups())
+
+    try {
+      for (const groupName of await this.getUserGroups(userId)) {
+        if (!configuredGroups.has(groupName)) continue
+        await this.client.send(new AdminRemoveUserFromGroupCommand({
+          UserPoolId: userPoolId,
+          Username: normalizeCognitoUserId(userId),
+          GroupName: groupName,
+        }))
+      }
+    } catch (error) {
+      throw toCognitoSdkError(error)
+    }
+  }
+
+  /**
+   * Lists the emails of one directory's users in a system administrator group.
+   *
+   * @param directoryId - Workspace directory whose users are kept.
+   * @returns Normalized emails, without duplicates.
+   */
+  async listSystemAdminEmails(directoryId: string): Promise<string[]> {
+    const { userPoolId } = this.readRequiredConfiguration()
+    const emails = new Set<string>()
+
+    try {
+      for (const groupName of getSystemAdminGroups()) {
+        let nextToken: string | undefined
+        do {
+          const response = await this.client.send(new ListUsersInGroupCommand({
+            UserPoolId: userPoolId,
+            GroupName: groupName,
+            ...(nextToken ? { NextToken: nextToken } : {}),
+          }))
+          addDirectoryUserEmails(emails, response.Users ?? [], directoryId)
+          nextToken = response.NextToken
+        } while (nextToken)
+      }
+    } catch (error) {
+      if (isCognitoResourceNotFoundError(error)) return [...emails]
+      throw toCognitoSdkError(error)
+    }
+
+    return [...emails]
   }
 
   /** Cognito の現在 group membership から system administrator 判定を返します。 */
@@ -2248,6 +2353,69 @@ export class FlociCognitoClient implements CognitoClient {
     return [...groups]
   }
 
+  /**
+   * Adds a user to the first configured system administrator group.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async addSystemAdmin(userId: string) {
+    const [groupName] = getSystemAdminGroups()
+    await this.request('AdminAddUserToGroup', {
+      UserPoolId: await this.resolveUserPoolId(),
+      Username: normalizeCognitoUserId(userId),
+      GroupName: groupName,
+    })
+  }
+
+  /**
+   * Removes a user from every configured system administrator group.
+   *
+   * @param userId - Email address of the target user.
+   */
+  async removeSystemAdmin(userId: string) {
+    const configuredGroups = new Set(getSystemAdminGroups())
+    const userPoolId = await this.resolveUserPoolId()
+    for (const groupName of await this.getUserGroups(userId)) {
+      if (!configuredGroups.has(groupName)) continue
+      await this.request('AdminRemoveUserFromGroup', {
+        UserPoolId: userPoolId,
+        Username: normalizeCognitoUserId(userId),
+        GroupName: groupName,
+      })
+    }
+  }
+
+  /**
+   * Lists the emails of one directory's users in a system administrator group.
+   *
+   * @param directoryId - Workspace directory whose users are kept.
+   * @returns Normalized emails, without duplicates.
+   */
+  async listSystemAdminEmails(directoryId: string) {
+    const userPoolId = await this.resolveUserPoolId()
+    const emails = new Set<string>()
+
+    for (const groupName of getSystemAdminGroups()) {
+      let nextToken: string | undefined
+      try {
+        do {
+          const response = await this.request<ListUsersInGroupResponse>('ListUsersInGroup', {
+            UserPoolId: userPoolId,
+            GroupName: groupName,
+            ...(nextToken ? { NextToken: nextToken } : {}),
+          })
+          addDirectoryUserEmails(emails, response.Users ?? [], directoryId)
+          nextToken = response.NextToken
+        } while (nextToken)
+      } catch (error) {
+        if (isCognitoResourceNotFoundError(error)) continue
+        throw error
+      }
+    }
+
+    return [...emails]
+  }
+
   /** Cognito の現在 group membership から system administrator 判定を返します。 */
   async isSystemAdmin(userId: string) {
     try {
@@ -3008,6 +3176,32 @@ function requireEnabledWorkspaceUser(user: CognitoWorkspaceUser) {
  * @param value - User record returned by Cognito or Floci.
  * @returns A normalized profile, or undefined when required identity fields are absent.
  */
+/**
+ * Adds the normalized emails of the users that belong to one directory.
+ *
+ * @param emails - Set that receives the emails.
+ * @param users - Cognito users of one group page.
+ * @param directoryId - Workspace directory whose users are kept.
+ */
+function addDirectoryUserEmails(emails: Set<string>, users: CognitoUserRecord[], directoryId: string) {
+  for (const user of users) {
+    if (!isCognitoUserInDirectory(user, directoryId)) continue
+    const email = readCognitoUserAttribute(user, 'email')?.trim().toLowerCase()
+    if (email) emails.add(email)
+  }
+}
+
+/**
+ * Tells whether a Cognito error reports a missing resource, such as a group not created yet.
+ *
+ * @param error - Error thrown by Cognito.
+ * @returns True for ResourceNotFoundException.
+ */
+function isCognitoResourceNotFoundError(error: unknown) {
+  if (error instanceof CognitoServiceError) return error.code === 'ResourceNotFoundException'
+  return error instanceof Error && error.name === 'ResourceNotFoundException'
+}
+
 function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | undefined {
   const username = value.Username?.trim()
   const email = readCognitoUserAttribute(value, 'email')?.trim().toLowerCase()

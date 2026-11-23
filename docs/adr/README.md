@@ -73,3 +73,4 @@
 | [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |
 | [0052](0052-personal-tokens-without-software-factory.md) | Software factory が off でも本人用 token を発行でき、MCP は Workspace profile で読む | 提案 |
 | [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |
+| [0067](0067-owner-managed-system-administrator-group.md) | system administrator の付与・解除を owner が画面から行い、Cognito group を正本のまま使う | 提案 |

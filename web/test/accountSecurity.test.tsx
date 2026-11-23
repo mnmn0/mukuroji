@@ -24,9 +24,12 @@ import { createEnterpriseSecurityConfirmationCopy } from '../src/security/model/
 import { createTranslator } from '../src/shared/i18n/i18n'
 import {
   getWorkspaceMembersSignInSecurity,
+  getWorkspaceMembersSignInSecurityReport,
   resetWorkspaceMemberCredential,
+  setWorkspaceMemberSystemAdministrator,
   WorkspaceAccessApiError,
 } from '../src/workspace/api'
+import { groupMemberRoleAssignments } from '../src/workspace/model/memberRoleAssignments'
 import {
   shouldCloseCredentialResetDialog,
   shouldRetainCredentialResetContext,
@@ -164,6 +167,55 @@ describe('member sign-in security API', () => {
     expect(requests[0]?.url).toEndWith('/workspace/members/a%40example.com/mfa-reset')
     expect(requests[0]?.init.method).toBe('POST')
     expect(new Headers(requests[0]?.init.headers).get('Idempotency-Key')).toBe('credential-1')
+  })
+})
+
+describe('system administrators in the member list', () => {
+  test('reads the system administrators with the sign-in security and drops non-strings', async () => {
+    recordFetch(200, {
+      members: [{ memberKey: 'a@example.com', mfa: 'enrolled', passwordReset: 'available' }],
+      systemAdministratorMemberKeys: ['a@example.com', 7],
+    })
+
+    const report = await getWorkspaceMembersSignInSecurityReport('token')
+
+    expect(report.systemAdministratorMemberKeys).toEqual(['a@example.com'])
+  })
+
+  test('leaves the system administrators unknown when the API omits them', async () => {
+    recordFetch(200, { members: [] })
+
+    const report = await getWorkspaceMembersSignInSecurityReport('token')
+
+    expect(report.systemAdministratorMemberKeys).toBeUndefined()
+  })
+
+  test('puts the requested state with idempotency headers', async () => {
+    const requests = recordFetch(200, { systemAdministrator: true, changed: true })
+
+    await setWorkspaceMemberSystemAdministrator('token', 'a@example.com', true, mutationContext)
+
+    expect(requests[0]?.url).toEndWith('/workspace/members/a%40example.com/system-administrator')
+    expect(requests[0]?.init.method).toBe('PUT')
+    expect(requests[0]?.init.body).toBe('{"systemAdministrator":true}')
+    expect(new Headers(requests[0]?.init.headers).get('Idempotency-Key')).toBe('credential-1')
+  })
+
+  test('groups direct roles by member with role names, Workspace scope first', () => {
+    const grouped = groupMemberRoleAssignments({
+      memberRoleAssignments: [
+        { id: 'a-project', memberKey: 'a@example.com', roleId: 'custom:editor', scopeType: 'project' },
+        { id: 'a-workspace', memberKey: 'a@example.com', roleId: 'workspace:portfolio-viewer', scopeType: 'workspace' },
+        { id: 'b-team', memberKey: 'b@example.com', roleId: 'custom:missing', scopeType: 'team' },
+      ],
+      roles: [
+        { id: 'workspace:portfolio-viewer', name: 'Portfolio viewer' },
+        { id: 'custom:editor', name: 'Editor' },
+      ],
+    })
+
+    expect(grouped.get('a@example.com')?.map((label) => label.roleName)).toEqual(['Portfolio viewer', 'Editor'])
+    expect(grouped.get('b@example.com')).toEqual([{ id: 'b-team', roleName: 'custom:missing', scopeType: 'team' }])
   })
 })
 
