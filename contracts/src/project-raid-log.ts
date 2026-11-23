@@ -508,7 +508,37 @@ function readDecision(value: unknown): ProjectRaidChangeDecision | undefined | n
 function sameScheduleChanges(normalized: readonly ProjectRaidScheduleChange[] | undefined, raw: unknown) {
   if (normalized === undefined) return raw === undefined
   return Array.isArray(raw) && raw.length === normalized.length &&
-    normalized.every((change, index) => JSON.stringify(change) === JSON.stringify(raw[index]))
+    normalized.every((change, index) => sameScheduleChange(change, raw[index]))
+}
+
+/**
+ * Tells whether one stored change holds exactly the fields of its normalized form, whatever order
+ * its object keys are in.
+ *
+ * @param normalized - Normalized change.
+ * @param raw - Change as stored or received.
+ * @returns Whether both hold the same Work Item and the same operation, with no other fields.
+ */
+function sameScheduleChange(normalized: ProjectRaidScheduleChange, raw: unknown) {
+  if (!isRecord(raw) || !hasOnlyKeys(raw, ['workItemId', 'operation'])) return false
+  if (raw.workItemId !== normalized.workItemId || !isRecord(raw.operation)) return false
+  const operation = raw.operation
+  return normalized.operation.type === 'move'
+    ? hasOnlyKeys(operation, ['type', 'targetDate']) &&
+      operation.type === 'move' && operation.targetDate === normalized.operation.targetDate
+    : hasOnlyKeys(operation, ['type', 'endDate']) &&
+      operation.type === 'resize' && operation.endDate === normalized.operation.endDate
+}
+
+/**
+ * Tells whether an object has no keys besides the given ones.
+ *
+ * @param value - Object to check.
+ * @param keys - Allowed keys.
+ * @returns Whether every key of the object is allowed.
+ */
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]) {
+  return Object.keys(value).every((key) => keys.includes(key))
 }
 
 /**

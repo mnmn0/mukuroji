@@ -189,6 +189,7 @@ export const projectsMessages = {
   'projects.raidLog.decision.rejected': 'Rejected by {name} on {date}',
   'projects.raidLog.decision.baselineReplaced': '(baseline replaced)',
   'projects.raidLog.decision.error.schedule': 'A date change conflicts with dependencies. Check the dates on the Work Item, then approve again.',
+  'projects.raidLog.decision.error.movedWorkItem': 'A related Work Item has moved to another Project. Remove it from the request, then approve again.',
   'projects.raidLog.decision.error.forbidden': 'Only a Project manager can approve or reject change requests.',
   'projects.raidLog.decision.error.failed': 'The decision could not be saved. Try again; dates already applied do not move twice.',
   'projects.raidLog.error.loading': 'The log could not be loaded.',

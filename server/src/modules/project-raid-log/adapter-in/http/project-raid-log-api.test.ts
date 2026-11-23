@@ -270,6 +270,43 @@ test('refuses related Work Items from an Enterprise writer without Work Item rea
   })
 })
 
+test('lets an Enterprise Project manager decide change requests by projects.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    const path = '/api/teams/core-team/projects/refero/raid-log'
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write'])
+    const writerRead = await requestAsEnterprise(path)
+    expect(await writerRead.json()).toMatchObject({ viewer: { canEdit: true, canDecide: false } })
+    const created = await requestAsEnterprise(`${path}/entries`, 'POST', {
+      entry: { kind: 'change-request', title: 'Scope', impact: 3, status: 'open' },
+    })
+    expect(created.status).toBe(201)
+    const entry = (await created.json() as ProjectRaidEntryResponse).entry
+    const refused = await requestAsEnterprise(`${path}/entries/${entry.id}/decision`, 'POST', {
+      expectedRevision: entry.revision,
+      outcome: 'rejected',
+    })
+    expect(refused.status).toBe(403)
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write', 'projects.manage'])
+    const managerRead = await requestAsEnterprise(path)
+    expect(await managerRead.json()).toMatchObject({ viewer: { canEdit: true, canDecide: true } })
+    const decided = await requestAsEnterprise(`${path}/entries/${entry.id}/decision`, 'POST', {
+      expectedRevision: entry.revision,
+      outcome: 'rejected',
+    })
+    expect(decided.status).toBe(200)
+    expect((await decided.json() as ProjectRaidEntryResponse).entry).toMatchObject({
+      status: 'closed',
+      decision: { outcome: 'rejected' },
+    })
+  })
+})
+
 test('keeps an Enterprise Project viewer read-only', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(true, {

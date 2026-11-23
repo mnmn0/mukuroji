@@ -1,4 +1,4 @@
-import type { ProjectRaidScheduleChange, ProjectRaidScheduleChangeOperation } from '@mukuroji/contracts'
+import type { ProjectRaidScheduleChange, ProjectRaidScheduleChangeOperation, WorkItemSchedule } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { labelProjectRaidReference, type ProjectRaidReferenceOption } from './projectRaidLogExport'
 
@@ -53,4 +53,48 @@ export function describeScheduleChanges(
       .replace('{item}', labelProjectRaidReference(workItemOptions, change.workItemId))
       .replace('{date}', operationDate(change.operation))
   }).join(' / ')
+}
+
+/**
+ * Error raised when a related Work Item of a change request now belongs to another Project, so
+ * approving the request would change dates outside the Project.
+ */
+export class ProjectChangeRequestWorkItemMovedError extends Error {
+  /** Work Item that left the Project. */
+  readonly workItemId: string
+
+  /**
+   * Creates the error.
+   *
+   * @param workItemId - Work Item that left the Project.
+   */
+  constructor(workItemId: string) {
+    super(`Work Item "${workItemId}" no longer belongs to this Project.`)
+    this.name = 'ProjectChangeRequestWorkItemMovedError'
+    this.workItemId = workItemId
+  }
+}
+
+/**
+ * Tells whether a Work Item schedule already holds a requested change: a move puts the deadline,
+ * milestone, or range start on the target date, and a resize puts a range end on the new date.
+ *
+ * @param schedule - Current Work Item schedule.
+ * @param operation - Requested change.
+ * @returns Whether the schedule matches the request.
+ */
+export function isScheduleChangeInPlace(
+  schedule: WorkItemSchedule,
+  operation: ProjectRaidScheduleChangeOperation,
+): boolean {
+  if (operation.type === 'resize') return schedule.mode === 'date-range' && schedule.endDate === operation.endDate
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return false
+    case 'due-date':
+      return schedule.dueDate === operation.targetDate
+    case 'date-range':
+    case 'milestone':
+      return schedule.startDate === operation.targetDate
+  }
 }

@@ -187,6 +187,7 @@ export const projectsMessages = {
   'projects.raidLog.decision.rejected': '{name} が {date} に却下',
   'projects.raidLog.decision.baselineReplaced': '（ベースラインを差し替え）',
   'projects.raidLog.decision.error.schedule': '日程の変更が依存関係と衝突しています。Work Item で日程を確認してから、もう一度承認してください。',
+  'projects.raidLog.decision.error.movedWorkItem': '関連 Work Item が別の Project に移っています。変更要求から外してから、もう一度承認してください。',
   'projects.raidLog.decision.error.forbidden': '承認・却下できるのは Project のマネージャーだけです。',
   'projects.raidLog.decision.error.failed': '承認・却下できませんでした。もう一度お試しください。反映済みの日程はやり直しても二重には動きません。',
   'projects.raidLog.error.loading': '登録簿を読み込めませんでした。',

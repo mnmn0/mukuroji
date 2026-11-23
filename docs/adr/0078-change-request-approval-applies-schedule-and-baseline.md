@@ -24,12 +24,16 @@
 - 承認・却下は `POST /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId/decision`
   （`{ expectedRevision, outcome, baselineId? }`）で記録する。判断は登録を close し、`decision`
   （outcome・日時・判断した member・差し替えた baseline）を残す。判断済みの登録は更新できない。
-- 判断できるのは Project のマネージャーだけにする（baseline の capture と同じ）。
+- 判断できるのは Project のマネージャーだけにする（baseline の capture と同じ）。Enterprise では Project に対する `projects.manage` で判定する。
 - 承認の操作は Web が次の順で行う。
-  1. 各 `scheduleChanges` を、Work Item 画面と同じ preview → confirm で適用する。依存の衝突があれば止める。
-     すでに反映済みで impact がないものは飛ばす。
+  1. 各 `scheduleChanges` を、Work Item 画面と同じ preview → confirm で適用する。関連 Work Item が別の Project に
+     移っていたら止める。すでに反映済みのものは飛ばす。依存のある Work Item 同士では、適用の順番や後の連鎖で
+     結果が変わるため、全件を適用したあと全件が要求どおりの日付かを確かめる。外れたものがあれば、もう一巡適用する。
+     件数より多く巡っても全件がそろわなければ、衝突として止める。
   2. 指定があれば、反映後の計画を `変更要求: <件名>` という名前で baseline に capture する。
   3. 判断を記録する。approve で `baselineId` を渡した場合、server はそれが Project の active baseline であることを確かめる。
+     判断の応答が失われたとき（5xx や通信の失敗）は、次の承認で日程と capture をやり直さず、同じ判断を
+     同じ Idempotency-Key で送り直す。
 - 却下は判断の記録だけで、日程と baseline には触れない。
 
 ## 検討した選択肢

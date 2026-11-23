@@ -17,7 +17,11 @@ import {
 import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from '../api/errors'
-import { describeScheduleChanges, ProjectChangeRequestScheduleConflictError } from '../model/projectChangeRequestDecision'
+import {
+  describeScheduleChanges,
+  ProjectChangeRequestScheduleConflictError,
+  ProjectChangeRequestWorkItemMovedError,
+} from '../model/projectChangeRequestDecision'
 import {
   createProjectRaidLogCsv,
   labelProjectRaidReference,
@@ -235,6 +239,9 @@ function describeSaveError(error: unknown, t: (key: MessageKey) => string) {
 function describeDecisionError(error: unknown, t: (key: MessageKey) => string) {
   if (error instanceof ProjectChangeRequestScheduleConflictError) {
     return t('projects.raidLog.decision.error.schedule')
+  }
+  if (error instanceof ProjectChangeRequestWorkItemMovedError) {
+    return t('projects.raidLog.decision.error.movedWorkItem')
   }
   if (error instanceof ProjectDirectoryApiError) {
     if (error.status === 409) return t('projects.raidLog.error.conflict')

@@ -118,6 +118,30 @@ describe('change request schedule changes and decisions', () => {
     expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'replace' } }] }).ok).toBe(false)
   })
 
+  test('reads stored schedule changes whatever order their keys are in', () => {
+    const request = entry({
+      kind: 'change-request',
+      probability: undefined,
+      relatedWorkItemIds: ['wi-1', 'wi-2'],
+      scheduleChanges: [
+        { workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10' } },
+        { workItemId: 'wi-2', operation: { type: 'resize', endDate: '2026-12-20' } },
+      ],
+    })
+    const reordered = {
+      ...request,
+      scheduleChanges: [
+        { operation: { targetDate: '2026-12-10', type: 'move' }, workItemId: 'wi-1' },
+        { operation: { endDate: '2026-12-20', type: 'resize' }, workItemId: 'wi-2' },
+      ],
+    }
+    expect(parseProjectRaidEntry(reordered)?.scheduleChanges).toEqual(request.scheduleChanges)
+    expect(parseProjectRaidEntry({
+      ...request,
+      scheduleChanges: [{ workItemId: 'wi-1', operation: { type: 'move', targetDate: '2026-12-10', extra: true } }],
+    })).toBeUndefined()
+  })
+
   test('keeps a decision only on a closed change request', () => {
     const decision = { outcome: 'approved', decidedAt: '2026-11-20T00:00:00.000Z', decidedByMemberId: 'sato@example.com', baselineId: 'b-1' }
     const closed = entry({ kind: 'change-request', probability: undefined, status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' })

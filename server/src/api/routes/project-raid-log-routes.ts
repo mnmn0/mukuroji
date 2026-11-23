@@ -178,8 +178,9 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
  * Tells whether the principal may approve or reject change requests: a Project member who also
  * manages the Project, as capturing the baseline an approval replaces requires.
  *
- * A direct Team grant read at viewer level reports every Project role as viewer, so the roles
- * are read again at manager level before refusing.
+ * Enterprise principals need `projects.manage` at the Project. For others, a direct Team grant
+ * read at viewer level reports every Project role as viewer, so the roles are read again at
+ * manager level before refusing.
  *
  * @param principal - Authenticated principal.
  * @param teamId - Team that owns the Project.
@@ -188,6 +189,17 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
  */
 async function canDecideProjectChangeRequests(principal: WorkspacePrincipal, teamId: string, projectId: string) {
   if (!await canEditProjectRaidLog(principal, teamId, projectId)) return false
+  // The route authorization of a log request proves only `projects.read` or `projects.write`, so
+  // Enterprise principals are evaluated for `projects.manage` at this Project, as baseline
+  // capture requires.
+  if (principal.enterprisePermissions !== undefined) {
+    return hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })
+  }
   const context = await requireTeamPermission(principal, teamId, 'viewer')
   if (canAccessAssignedProject(principal, context, projectId, 'manager')) return true
   let managerContext: TeamPermissionContext
