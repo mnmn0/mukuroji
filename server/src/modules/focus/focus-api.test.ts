@@ -2610,6 +2610,72 @@ test('lists Project log entries in Focus only with Enterprise Project read permi
   })
 })
 
+test('lists Project log entries from a Project granted only Enterprise Project read permission', async () => {
+  await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources('member', undefined, 1, 'member', [{
+      id: 'side-team',
+      name: 'Side',
+      projects: [{ id: 'side-project', name: 'Side project', tone: 'purple' }],
+    }])
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = await createFocusEnterpriseIdentity('project', ['work-items.read'])
+    const snapshot = await identity.getSnapshot(workspaceId)
+    const group = snapshot.scimGroups.find((candidate) => candidate.active)
+    if (group === undefined) throw new Error('Expected one active Focus SCIM group.')
+    const now = new Date().toISOString()
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:focus-project-log-reader',
+      name: 'Focus Project log reader',
+      permissions: ['projects.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'focus-project-log-mapping',
+      identityProviderId: 'focus-project-idp',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:focus-project-log-reader',
+      scope: { workspaceId, kind: 'project', targetId: 'side-project', parentTeamId: 'side-team' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+    const store = new InMemoryProjectRaidLogStore()
+    const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+    const readProjects: string[] = []
+    store.listOpenOwnedBy = async (scope, ownerMemberId) => {
+      readProjects.push(`${scope.teamId}/${scope.projectId}`)
+      return listOpenOwnedBy(scope, ownerMemberId)
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity, projectRaidLogs: store })
+
+    const response = await app.request('/api/focus', {
+      headers: {
+        Authorization: `Bearer ${createAccessToken([], { client_id: 'mukuroji-main-client', token_use: 'access' })}`,
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(readProjects).toEqual(['side-team/side-project'])
+  })
+})
+
 test('reports an incomplete Project log list instead of an empty one when a log cannot be read', async () => {
   configureFocusSources('member', undefined, 0)
   configureFakeAuthenticatedUser({
