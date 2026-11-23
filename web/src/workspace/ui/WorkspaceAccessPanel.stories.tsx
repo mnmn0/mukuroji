@@ -334,6 +334,21 @@ export const MemberRoleAssignmentsLoadError: Story = {
 }
 
 /**
+ * The system administrator groups could not be read; the ledger says so and offers a reload.
+ */
+export const SystemAdministratorsLoadError: Story = {
+  args: {
+    systemAdministratorsLoadFailed: true,
+    onRetrySignInSecurity: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('workspace-member-system-admin-retry'))
+    await expect(args.onRetrySignInSecurity).toHaveBeenCalledTimes(1)
+  },
+}
+
+/**
  * Members' MFA enrollment could not be loaded; the ledger says so and offers a reload.
  */
 export const SignInSecurityLoadError: Story = {

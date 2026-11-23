@@ -255,4 +255,5 @@ test('still lists sign-in security when the groups cannot be read', async () => 
   const body = await response.json()
   expect(body.members.length).toBeGreaterThan(0)
   expect(body.systemAdministratorMemberKeys).toBeUndefined()
+  expect(body.systemAdministratorsUnavailable).toBe(true)
 })

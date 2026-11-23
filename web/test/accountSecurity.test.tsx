@@ -188,6 +188,15 @@ describe('system administrators in the member list', () => {
     const report = await getWorkspaceMembersSignInSecurityReport('token')
 
     expect(report.systemAdministratorMemberKeys).toBeUndefined()
+    expect(report.systemAdministratorsLoadFailed).toBe(false)
+  })
+
+  test('reports a failed system administrator lookup so the screen can offer a retry', async () => {
+    recordFetch(200, { members: [], systemAdministratorsUnavailable: true })
+
+    const report = await getWorkspaceMembersSignInSecurityReport('token')
+
+    expect(report.systemAdministratorsLoadFailed).toBe(true)
   })
 
   test('puts the requested state with idempotency headers', async () => {

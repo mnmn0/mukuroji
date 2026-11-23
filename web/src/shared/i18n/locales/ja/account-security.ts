@@ -153,6 +153,7 @@ export const accountSecurityMessages = {
   'memberSecurity.systemAdmin.revokeDescription': '{name} は次の操作から、ワークスペースのロールと割り当てどおりの権限に戻ります。この操作は監査ログに記録されます。',
   'memberSecurity.systemAdmin.granted': '{name} をシステム管理者にしました。',
   'memberSecurity.systemAdmin.revoked': '{name} をシステム管理者から外しました。',
+  'memberSecurity.systemAdmin.loadError': 'システム管理者を読み込めませんでした。ここでは表示と変更ができません。',
   'memberSecurity.systemAdmin.error.guest': 'ゲストはシステム管理者にできません。先にロールを変更してください。',
   'memberSecurity.systemAdmin.error.otherWorkspace': 'このメンバーのアカウントは別のワークスペースに属しているため、システム管理者にできません。',
   'memberSecurity.roleAssignments.loadError': '個人に割り当てたロールを読み込めませんでした。',

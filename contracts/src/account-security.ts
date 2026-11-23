@@ -84,6 +84,11 @@ export type WorkspaceMembersSignInSecurityResponse = {
    * system administrator groups could not be read.
    */
   systemAdministratorMemberKeys?: string[]
+  /**
+   * True when the system administrator groups could not be read, so that the screen can say so
+   * and offer a retry instead of hiding the administrator controls without a word.
+   */
+  systemAdministratorsUnavailable?: true
 }
 
 /** Request body of `PUT /api/workspace/members/:memberKey/system-administrator`. */

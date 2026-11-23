@@ -146,6 +146,7 @@ export const accountSecurityMessages = {
   'memberSecurity.systemAdmin.revokeDescription': 'From their next request, {name} has only the access of their Workspace role and assignments. This action is recorded in the audit log.',
   'memberSecurity.systemAdmin.granted': '{name} is now a system administrator.',
   'memberSecurity.systemAdmin.revoked': '{name} is no longer a system administrator.',
+  'memberSecurity.systemAdmin.loadError': 'System administrators could not be loaded, so they are not shown and cannot be changed here.',
   'memberSecurity.systemAdmin.error.guest': 'A guest cannot be a system administrator. Change the role first.',
   'memberSecurity.systemAdmin.error.otherWorkspace': 'This member\'s account belongs to another Workspace, so it cannot be made a system administrator here.',
   'memberSecurity.roleAssignments.loadError': 'The roles assigned to members could not be loaded.',

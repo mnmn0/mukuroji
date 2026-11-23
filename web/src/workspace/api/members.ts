@@ -92,6 +92,8 @@ export type WorkspaceMembersSignInSecurityReport = {
   members: WorkspaceMemberSignInSecurity[]
   /** Member keys of the system administrators, absent when the API could not read them. */
   systemAdministratorMemberKeys?: string[]
+  /** Whether the API reported that it could not read the system administrators. */
+  systemAdministratorsLoadFailed: boolean
 }
 
 /**
@@ -119,7 +121,10 @@ export async function getWorkspaceMembersSignInSecurityReport(
     'systemAdministratorMemberKeys' in data
     ? data.systemAdministratorMemberKeys
     : undefined
+  const systemAdministratorsLoadFailed = typeof data === 'object' && data !== null &&
+    'systemAdministratorsUnavailable' in data && data.systemAdministratorsUnavailable === true
   return {
+    systemAdministratorsLoadFailed,
     members: members.flatMap((member: unknown) => {
       const parsed = parseMemberSignInSecurity(member)
       return parsed ? [parsed] : []

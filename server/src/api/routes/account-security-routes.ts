@@ -584,13 +584,17 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
         createRequestMemberSignInSecurityPorts(),
         principal.directoryId,
       )
-      const systemAdministratorMemberKeys = await readSystemAdministratorMemberKeys(
+      const systemAdministrators = await readSystemAdministratorMemberKeys(
         principal.directoryId,
         members.map((member) => member.memberKey),
       )
       const response: WorkspaceMembersSignInSecurityResponse = {
         members,
-        ...(systemAdministratorMemberKeys ? { systemAdministratorMemberKeys } : {}),
+        ...(systemAdministrators === 'unavailable'
+          ? { systemAdministratorsUnavailable: true }
+          : systemAdministrators
+            ? { systemAdministratorMemberKeys: systemAdministrators }
+            : {}),
       }
       return c.json(response)
     } catch (error) {
@@ -687,10 +691,14 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
  *
  * @param workspaceId - Workspace whose directory the users must belong to.
  * @param memberKeys - Member keys of the active members.
- * @returns The member keys in a system administrator group, or undefined when the groups could
- *   not be read, so that the roster still loads.
+ * @returns The member keys in a system administrator group, `unavailable` when the groups could
+ *   not be read, so that the roster still loads and the screen offers a retry, or undefined when
+ *   this deployment cannot list the groups.
  */
-async function readSystemAdministratorMemberKeys(workspaceId: string, memberKeys: readonly string[]) {
+async function readSystemAdministratorMemberKeys(
+  workspaceId: string,
+  memberKeys: readonly string[],
+): Promise<string[] | 'unavailable' | undefined> {
   const { listSystemAdminEmails } = authenticationDependencies.cognito
   if (!listSystemAdminEmails) return undefined
   try {
@@ -700,7 +708,7 @@ async function readSystemAdministratorMemberKeys(workspaceId: string, memberKeys
     console.error('Failed to read the system administrator groups.', {
       error: error instanceof Error ? error.name : 'UnknownError',
     })
-    return undefined
+    return 'unavailable'
   }
 }
 

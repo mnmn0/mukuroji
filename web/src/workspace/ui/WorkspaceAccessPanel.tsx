@@ -173,6 +173,10 @@ type WorkspaceAccessPanelProps = {
    */
   systemAdministratorMemberKeys?: string[]
   /**
+   * Whether the API could not read the system administrators; the retry reloads the sign-in security.
+   */
+  systemAdministratorsLoadFailed?: boolean
+  /**
    * Roles assigned directly to each member, for callers who can read the security settings.
    */
   memberRoleAssignments?: ReadonlyMap<string, MemberRoleAssignmentLabel[]>
@@ -519,6 +523,7 @@ export function WorkspaceAccessPanelContainer({
       signInSecurityLoadFailed={Boolean(signInSecurityError)}
       onRetrySignInSecurity={() => void mutateSignInSecurity()}
       systemAdministratorMemberKeys={signInSecurity?.systemAdministratorMemberKeys}
+      systemAdministratorsLoadFailed={signInSecurity?.systemAdministratorsLoadFailed}
       memberRoleAssignments={memberRoleAssignments}
       memberRoleAssignmentsLoadFailed={isMemberRoleAssignmentsLoadFailure(memberRoleAssignmentsError)}
       onRetryMemberRoleAssignments={() => void mutateMemberRoleAssignments()}
@@ -566,6 +571,7 @@ export function WorkspaceAccessPanel({
   signInSecurityLoadFailed = false,
   onRetrySignInSecurity,
   systemAdministratorMemberKeys,
+  systemAdministratorsLoadFailed = false,
   memberRoleAssignments,
   memberRoleAssignmentsLoadFailed = false,
   onRetryMemberRoleAssignments,
@@ -903,6 +909,7 @@ export function WorkspaceAccessPanel({
           signInSecurity={signInSecurity}
           signInSecurityLoadFailed={signInSecurityLoadFailed}
           systemAdministratorMemberKeys={systemAdministratorMemberKeys}
+          systemAdministratorsLoadFailed={systemAdministratorsLoadFailed}
           t={t}
           onRequestAction={requestAction}
           onRetryMemberRoleAssignments={onRetryMemberRoleAssignments}
@@ -982,6 +989,7 @@ function WorkspaceMemberLedger({
   signInSecurity,
   signInSecurityLoadFailed,
   systemAdministratorMemberKeys,
+  systemAdministratorsLoadFailed,
   t,
   onRequestAction,
   onRetryMemberRoleAssignments,
@@ -996,6 +1004,7 @@ function WorkspaceMemberLedger({
   signInSecurity?: WorkspaceMemberSignInSecurity[]
   signInSecurityLoadFailed: boolean
   systemAdministratorMemberKeys?: string[]
+  systemAdministratorsLoadFailed: boolean
   t: (key: MessageKey) => string
   onRequestAction: (action: WorkspaceAccessAction) => void
   onRetryMemberRoleAssignments?: () => void
@@ -1050,6 +1059,23 @@ function WorkspaceMemberLedger({
         >
           {t('memberSecurity.summary').replace('{count}', String(unenrolledMemberCount))}
         </p>
+      ) : null}
+      {systemAdministratorsLoadFailed && !signInSecurityLoadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.systemAdmin.loadError')}
+          </p>
+          {onRetrySignInSecurity ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-system-admin-retry"
+              type="button"
+              onClick={onRetrySignInSecurity}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
       ) : null}
       {memberRoleAssignmentsLoadFailed ? (
         <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
