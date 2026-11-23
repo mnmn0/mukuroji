@@ -5,6 +5,7 @@ import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import {
   resolveAgentConnectionOrigin,
   resolvePersonalKeyExpiryBounds,
+  type AgentConnectionProfile,
   type AgentConnectionShell,
 } from '../model/agentConnection'
 import { toLocalEndOfDayIso } from '../model/credentials'
@@ -26,6 +27,8 @@ export type AgentConnectionPanelContainerProps = {
   t: (key: MessageKey) => string
   /** Teams the member belongs to. */
   teams: readonly AgentConnectionTeamOption[]
+  /** MCP tool set to configure: `workspace` when the deployment omits Software factory. */
+  profile: AgentConnectionProfile
 }
 
 /**
@@ -40,7 +43,7 @@ function detectShell(): AgentConnectionShell {
 /**
  * Connects the agent connection view to the member's personal key API.
  *
- * @param props - Session, locale, translator, and Teams.
+ * @param props - Session, locale, translator, Teams, and MCP profile.
  * @returns The agent connection page content.
  */
 export function AgentConnectionPanelContainer({
@@ -48,6 +51,7 @@ export function AgentConnectionPanelContainer({
   locale,
   t,
   teams,
+  profile,
 }: AgentConnectionPanelContainerProps) {
   const credentials = usePersonalAgentCredentials(accessToken)
   const expiryBounds = useMemo(() => resolvePersonalKeyExpiryBounds(new Date()), [])
@@ -102,6 +106,7 @@ export function AgentConnectionPanelContainer({
       onRevoke={(apiKey) => void credentials.revoke(apiKey)}
       onRotate={rotate}
       origin={origin}
+      profile={profile}
       overview={credentials.overview}
       t={t}
       teams={teams}

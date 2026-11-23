@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { S3Client } from '@aws-sdk/client-s3'
 import type { SQSClient } from '@aws-sdk/client-sqs'
-import { createDefaultDueDateWorkItemSchedule, type WorkItemScheduleCalendarPolicy } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
+  createDefaultDueDateWorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
+} from '@mukuroji/contracts'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
@@ -99,6 +103,165 @@ describe('durable Work Item import', () => {
     expect(JSON.stringify(fixture.execution?.terminalReport)).not.toContain('Ship durable import')
     expect(fixture.jobEvents).toEqual(['running', 'running', 'completed'])
     expect(fixture.deletedSources).toBe(1)
+  })
+
+  test('applies links after every row and resumes them from the same checkpoint', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-links')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const steps: string[] = []
+    const linkIdentities: string[] = []
+    const createdIds = new Map<number, string>()
+    let failDependency = true
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'dependency', predecessorRow: 1, successorRow: 2, type: 'finish-to-start', lagDays: 0 },
+          ],
+        }
+      },
+      /** Records each created row. */
+      async createWorkItem(request) {
+        steps.push(`row:${request.row}`)
+        createdIds.set(request.row, request.workItemId)
+      },
+      /** Records each applied link. */
+      async applyLink(request) {
+        if (request.link.kind === 'dependency' && failDependency) {
+          failDependency = false
+          throw new Error('temporary planning outage')
+        }
+        steps.push(`link:${request.link.kind}`)
+        linkIdentities.push(request.linkIdentity)
+        if (request.link.kind === 'parent') {
+          expect(request.workItemIdForRow(1)).toBe(createdIds.get(1)!)
+          expect(request.workItemIdForRow(2)).toBe(createdIds.get(2)!)
+        }
+      },
+    })
+
+    const first = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+    const second = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(second).toEqual({ batchItemFailures: [] })
+    expect(steps).toEqual(['row:1', 'row:2', 'link:parent', 'link:dependency'])
+    expect(new Set(linkIdentities).size).toBe(2)
+    expect(fixture.execution?.checkpointRow).toBe(4)
+    expect(fixture.execution?.status).toBe('completed')
+    expect(fixture.execution?.terminalReport?.validRows).toBe(2)
+  })
+
+  test('finishes a retry near the Team link limit when a link was applied before its receipt', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-receipt')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    // The Team has room for exactly the import's two links; applying one twice would overflow it.
+    const storedLinks = new Set(Array.from({ length: WORK_ITEM_TEAM_RELATION_LINK_LIMIT - 2 }, (_, index) => `existing-${index}`))
+    let failFirstLinkReceipt = true
+    const dependencies = createWorkerDependencies(fixture, {
+      executions: {
+        ...fixture.executions,
+        /** Loses the receipt of the first link once, after the link was applied. */
+        async recordRowReceipt(workspaceId, receiptJobId, leaseOwner, receipt, leaseExpiresAt) {
+          if (receipt.row === 3 && failFirstLinkReceipt) {
+            failFirstLinkReceipt = false
+            throw new Error('receipt write timed out')
+          }
+          return fixture.executions.recordRowReceipt(workspaceId, receiptJobId, leaseOwner, receipt, leaseExpiresAt)
+        },
+      },
+      /** Returns the fixture validation with the links under test. */
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'relation', sourceRow: 1, targetRow: 2, type: 'related' },
+          ],
+        }
+      },
+      /** Stores each link once, as the relation graph does, and rejects one past the limit. */
+      async applyLink(request) {
+        if (storedLinks.has(request.linkIdentity)) return
+        if (storedLinks.size >= WORK_ITEM_TEAM_RELATION_LINK_LIMIT) {
+          throw new WorkItemImportError('WorkItemRelationGraphLimitExceeded', 'The Team relation graph is full.')
+        }
+        storedLinks.add(request.linkIdentity)
+      },
+    })
+
+    const first = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+    const second = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(second).toEqual({ batchItemFailures: [] })
+    expect(storedLinks.size).toBe(WORK_ITEM_TEAM_RELATION_LINK_LIMIT)
+    expect(fixture.execution?.status).toBe('completed')
+    expect(fixture.execution?.checkpointRow).toBe(4)
+  })
+
+  test('reports a rejected link on the row it belongs to', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-reject')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [{ kind: 'parent', childRow: 2, parentRow: 1 }],
+        }
+      },
+      /** Fails the link under test. */
+      async applyLink() {
+        throw new WorkItemImportError('ImportValidationRejected', 'Import source no longer passes current validation.')
+      },
+    })
+
+    await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(fixture.execution?.status).toBe('failed')
+    expect(fixture.jobReports.at(-1)?.errors.at(-1)).toMatchObject({ row: 2, code: 'ImportValidationRejected' })
+    // The row's Work Item exists, but its link was not applied, so it does not count as imported.
+    expect(fixture.jobReports.at(-1)).toMatchObject({ totalRows: 2, validRows: 1, invalidRows: 1 })
+  })
+
+  test('stops applying links once cancellation is requested', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-cancel')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const applied: string[] = []
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'relation', sourceRow: 1, targetRow: 2, type: 'related' },
+          ],
+        }
+      },
+      /** Records each applied link. */
+      async applyLink(request) {
+        applied.push(request.link.kind)
+        await fixture.executions.requestCancellation()
+      },
+    })
+
+    await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(applied).toEqual(['parent'])
+    expect(fixture.execution?.status).toBe('cancelled')
   })
 
   test('revalidates creator/team/project access before every row', async () => {
@@ -830,7 +993,10 @@ function createWorkerDependencies(
         ],
       }
     },
+    /** Accepts every row. */
     async createWorkItem() {},
+    /** Accepts every link. */
+    async applyLink() {},
     now: fixture.now,
     createLeaseOwner() {
       lease += 1

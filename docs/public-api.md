@@ -33,7 +33,7 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 | Scope | 許可する操作 |
 | --- | --- |
-| `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文 |
+| `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文、credential 所有者・Team・Project・Project メンバーの参照と Work Item key の解決 |
 | `work-items:write` | Work Item の作成と更新 |
 | `work-items:delete` | Work Item の削除 |
 | `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
@@ -47,6 +47,16 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 ## Work Item key
 
 `GET /api/v1/work-items/{workItemId}/key?teamId={teamId}` は Work Item の `ABC-123` 形式の `key` を `{ schemaVersion, teamId, workItemId, createdAt, key }` で返します。`createdAt` は Work Item の作成時刻で、削除後に同じ ID で作り直された Work Item とを区別するのに使えます。key は Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item では `key` を省きます。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。既存の `WorkItem` は closed schema なので `key` を含めません。操作の path には従来どおり `id` を使います。Work Item の `title` は 1〜256 文字（Unicode code point）で、超えると `400 validation_failed` を返します。
+
+`GET /api/v1/work-item-keys/{key}` は `ABC-123` 形式の key から `{ schemaVersion, key, teamId, workItemId }` を返します。小文字の key も受け付け、`key` は大文字に正規化した値です。key ではない文字列、使われていない key、削除された Work Item、credential 所有者が読めない Work Item は、どれも同じ `404 not_found` です。Web の `GET /api/work-items/keys/{key}` と同じ判定で、`work-items:read` scope が要ります。
+
+## 参照用の directory
+
+API キーだけで、接続先の Team・Project・メンバーを調べられます。どれも `work-items:read` scope で、request ごとに credential 所有者の現在の権限で評価します。
+
+- `GET /api/v1/me` は credential 所有者を `{ schemaVersion, workspaceId, memberId, name?, email }` で返します。`memberId` は Work Item の `assigneeUserId` に使う値です。
+- `GET /api/v1/teams?locale=ja|en` は、所有者が閲覧できる Project と、その Project を持つ Team（Enterprise RBAC で Team を直接与えられた場合はその Team も）を Web の Project directory と同じ規則で返します。Project には `lifecycleState` と charter の要約（`code`、責任者の `ownerMemberId`、`plannedStartDate`、`plannedEndDate`）を含めます。
+- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーは含めません。
 
 ## Work Item の作成と稼働カレンダー
 
@@ -127,7 +137,7 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   timezone での `YYYY-MM-DD` です。`actualStartDate` は初めて `started` か `completed` に入った日で、着手前は省きます。
   `actualEndDate` は直近の完了日で、`completed` の間だけ返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、
   `work-items:read` scope が要ります。`WorkItem` の response schema は閉じた object のため、実績日は含めません。
-  `GET /api/developer/exports` も同じ `WorkItem` schema の page を返すため実績日を含めません。export した Work Item の
+  `GET /api/developer/exports` は `WorkItem` schema の page、`GET /api/developer/work-item-exports` は Contributor と受け入れ条件を足した `WorkItemExportItem` schema の page を返し、どちらも実績日は含めません。export した Work Item の
   実績日が要る client は、この endpoint で 1 件ずつ読みます。
 - Work Item に link された Document は `GET /api/v1/work-items/{workItemId}/documents?teamId={teamId}` で
   `{ items: [{ id, title }], hasMore, nextCursor? }` として一覧し、本文は
@@ -298,10 +308,60 @@ Import は mapping の作成、dry-run、source の再送、report 確認の順�
 4. 成功時は `202 Accepted` と `queued` の import record を返す。Worker は durable queue から job を取得し、現在の Team/Project access、workflow、assignee、custom field 設定を再検証してから `running`、`completed` または `failed` へ遷移させる。実行中も row ごとに current RBAC を確認し、終了後は validation failure の場合も集計と bounded row error report を取得できる。
 5. `DELETE /api/developer/imports/{importJobId}` は未完了 job に cancellation を要求する。実行中の Worker は永続化した cancellation 状態を確認し、安全な区切りで停止する。
 
+### 階層・依存・Contributor・受け入れ条件の import
+
+Mapping の `targetField` には Work Item の項目に加えて、行どうしの関係を表す次の項目を指定できる（#339）。どれも省略でき、省略した import の動作と report の形はこれまでと変わらない。
+
+| `targetField` | 値 | 意味 |
+| --- | --- | --- |
+| `importKey` | 256 文字以内の文字列 | 他の行がこの行を参照するキー。export の `key` 列（別の Team に同じ ID があるときは `<teamId>/<id>`）を割り当てると再 import で同じ構造になる。`id` 列は Team をまたぐと重なることがあるため使わない。必須にした mapping では、空白だけの値も欠けているものとして扱う。 |
+| `wbsNumber` | `1.2.3` など | WBS 番号。`parentKey` がない行は、最後の `.` より前（`1.2`）を WBS 番号に持つ行を親にする。`importKey` がない行の参照キーにもなる。 |
+| `outlineLevel` | 1〜100 の整数 | アウトラインの深さ（MS Project の OutlineLevel）。`parentKey` と `wbsNumber` がない行は、直前にある 1 段浅い行を親にする。空欄は 1。 |
+| `parentKey` | 他の行のキー | 親の行。`wbsNumber` と `outlineLevel` より優先する。 |
+| `dependencies` | `1.2FS+2d, 3SS-1`、`a1 SS +2` または `[{ "key", "type", "lagDays", "constraint" }]` | この行の先行タスク。JSON の `constraint`（省略可）は後続の日付制約 `{ "anchor": "start" \| "finish", "kind": "on" \| "not-before" \| "not-after", "date": "YYYY-MM-DD" }` で、取り込む日程が満たさないと dry-run の error になる。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。件数の上限はない（Planning が持てる依存に合わせる）。空白を挟まない形では種類を大文字で書き、項目全体が他の行のキーと一致すればそのキーとして読む。キーの末尾が種類やラグに見える場合は空白で区切る。 |
+| `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 100 件まで（Work Item が持てる relation の数）。両方の行に書いた同じ relation は 1 つにまとめる。 |
+| `contributors` | `member:<userId> effort:2h; role:<jobRoleId>` または `contributorAssignments` と同じ JSON 配列 | Contributor。`;` か改行で区切り、`member:`・`role:`・`effort:`（分、または `2h`・`30m`）・`status:` を空白で並べる。接頭辞のない値は member。member の後の接頭辞のない語は名前の続きとして読む（`member:Yamada Hanako effort:2h`）。1 つの Contributor に member を 2 つ書くと error。 |
+| `acceptanceCriteria` | 1 行 1 条件、または `[{ "text", "satisfied" }]` | 受け入れ条件。行頭の `[x]` は達成済み、`[ ]` と `- ` は取り除く。20 件まで。 |
+
+参照は同じ file の行だけを指し、`importKey` を先に、見つからなければ `wbsNumber` を探す。Dry-run は次を row error として返し、1 行でも error があれば import を開始できない。
+
+- 参照先がない、自分自身を指す、キーが重複する、親の参照が循環する、依存が循環する（循環の上にある行だけに出し、循環の前後や二つの循環をつなぐだけの行には出さない）、`blocks` の relation が循環する、同じ先行タスクを 2 回書いた（`ImportReferenceInvalid`、`ImportKeyDuplicate`、`ImportHierarchyCycle`、`ImportDependencyCycle`、`ImportRelationCycle`、`ImportDependencyDuplicate`）
+- 他の行が書いた relation の相手側と親（`parent:<id>`）を合わせて、1 行の relation が 100 件を超える（`ImportRelationLimitExceeded`。relation は両端に書かれるため）。import が足す親子と relation に Team に既にある link を足すと、Team が持てる 10,000 件を超える場合も同じ code（上限を超える最初の link の行に出す。Team にある link を数えるのは dry-run だけで、worker の再検証では数えない。worker が付け終えた link を二重に数えないため）
+- 親の Work Item Type が子の Type を許可しない（`WorkItemChildTypeDenied`）
+- 依存の両端に Team と Project の manager 権限がない（Enterprise のロールでは、各行の Team か Project で `planning.manage`。worker が依存を作るときと同じ確認）、どちらかの行に日程がない、取り込む日程が依存を満たさない（`ImportDependencyScheduleConflict`。依存は作成時に日程を満たす必要があるため）
+- Contributor の member が有効な Workspace member でない、ジョブロールがない・archive 済み
+
+Worker は全行を作成した後に、親子、依存、relation、受け入れ条件の順で 1 件ずつ付ける。各 link の完了も row と同じ durable receipt に記録するため（番号は `totalRows` の次から続く）、retry や lease takeover では残りの link から再開し、既にある link は作り直さない。Link の前にも cancellation、tenant 状態、現在の権限を確認し、そのとき読んだ Workspace member と Planning の版を link の書き込みと同じ transaction で確かめる。依存の ID は job と link の位置から決まる。依存は、Planning の版を読んでから両端の権限を確かめるため、確認の後に端の Work Item が移ると作成は版の競合で失敗する。Import の途中で誰かが受け入れ条件を付けた Work Item は上書きせず、job を `ImportAcceptanceCriteriaChanged` で止める。Link で止まった job の report では、作成済みでも link を付け終えていない行を `invalidRows` に数える。
+
 Worker retry を使い切った job は `failed` として source を削除し、DLQ の locator は運用診断専用に保持する。再実行は修正済み source と新しい idempotency key で新規 job を作成する。
 
 同じ request の再送は idempotency record で job の二重作成を防ぎ、修正した source の再実行には新しい idempotency key を使う。各 row の Work Item ID は Workspace、actor、idempotency key、Team、row から決まるため、Worker の retry や lease takeover でも同じ row を二重作成しない。
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。Web の export file は、各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）から `wbsNumber` を足す（CSV では `teamId` の次の列、JSON では値があるときだけ）。階層を読めない Team と archive 済みの Work Item では空になる。API の export page 自体は `wbsNumber` を持たない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。この page の Work Item は閉じた `WorkItem` schema のままにする。Web の export は `GET /api/developer/work-item-exports?format=csv|json` を使い、Workspace 管理者（`canExport`）に限るため、この page の Work Item（`WorkItemExportItem` schema）は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）も含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
+
+Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から選べる。Excel と MS Project XML は JSON の export page から browser で作る。各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）と Planning の依存（`GET /api/planning`）を読み、次の列を足して WBS の順に並べる。
+
+| 列 | 内容 |
+| --- | --- |
+| `key` | ほかの行が参照に使うキー。Work Item ID。ただし同じ ID の Work Item が export の別の Team にもあるときは `<teamId>/<id>`。`parentId`・`dependencies`・`relations` と MS Project の Task もこのキーで指す。import の mapping では `importKey` に当てる |
+| `wbsNumber` | export 全体で階層の順に振り直した番号（`1`、`1.1`、`2` など）。Team ごとの WBS 番号ではないので、複数 Team の export でも重ならず、import の参照キーにそのまま使える |
+| `outlineLevel` | export に含まれる Work Item の中での階層の深さ（1 から） |
+| `parentId` | export に含まれる最も近い祖先の `key` |
+| `workItemTypeId` | Work Item Type の ID |
+| `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。日付制約のある依存を含む cell は `{ key, type, lagDays, constraint }` の JSON 配列。JSON では同じ形の配列 |
+| `relations` | parent・child 以外の relation を `blocks:<id>` の形で `;` 区切り。JSON では `{ type, key }` の配列 |
+| `contributors` | `member:<id> role:<id> effort:<分> status:<状態>` を `;` 区切り。JSON では配列 |
+| `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。改行を含む条件や `[`・`-`・`*`・`・` で始まる条件があるときは `[{ "text", "satisfied" }]` の JSON 配列。JSON では `{ text, satisfied }` の配列 |
+
+依存と relation は、相手も同じ export に含まれるものだけを書く。Planning か、いずれかの Team の階層を読めない場合は export が失敗する（依存や親の列が空の file を import し直すと、依存や階層が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（`wbsNumber` と同じ番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。Assignment に入らないジョブロールだけの Contributor と、ジョブロール・状態は、Task の Text1（別名 `mukuroji contributors`）に JSON 配列で書き、import はこの項目があれば Assignment より優先して読む。親子でも依存でもない relation は Text2（別名 `mukuroji relations`、相手は Task の `UID`）、受け入れ条件と達成状態は Text3（別名 `mukuroji acceptance criteria`）に JSON 配列で書き、import は `Relations`・`AcceptanceCriteria` の列として読む。項目は別名で探すため、MS Project で保存し直して番号が変わっても読める。依存の日付制約は MS Project の link に対応する項目がないため、MS Project XML には書かず、制約のある依存を MS Project XML で import し直すと制約はなくなる（CSV・JSON・Excel には残る）。API の export page 自体は追加の列を持たない。
+
+Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
+
+- Excel は最初の 20 行から header 行を探し、その sheet の表を読む。cell は文字列にして送り、日付の書式の cell は `YYYY-MM-DD` にする。file は 10 MB まで、ZIP64・暗号化した file は読まない。
+- MS Project XML は Task ごとに `UID`、`Name`、`WBS`、`OutlineLevel`、`Owner`（最初の Assignment の Resource の e-mail か名前）、`Contributors`（ほかの Assignment と作業時間）、`Predecessors`（`<UID> SS -1` の形、lag は作業日 8 時間か暦日で日数に直す）、`Schedule`、`Notes` の列を作る。`Schedule` は、マイルストーンの Task を終了日の milestone、開始日と終了日のある Task を期間（1 日の Task も含む）、終了日だけの Task を期日にする。依存には両側の開始日と終了日が要るため、期日だけの Task は依存に使えない。export は期日の Work Item を終了日だけで、milestone をマイルストーンとして書く。Resource はメールアドレスか表示名で Workspace member に照合する（下の「責任者と Contributor の書き方」）。document type 宣言のある XML は読まない。
+- JSON の file は全行から列を集め、`customFieldValues` の中は `customFieldValues.<fieldId>` の列として扱う。
+- file を選んだときに mapping が空なら、mukuroji の export の列名と MS Project の列名から mapping を提案する。親の列があるときは WBS 番号と階層の深さは提案しない。
+
+責任者と Contributor の書き方: import の `assigneeUserId` と Contributor の member は、user ID（member のメールアドレス）か Workspace member の表示名で書ける。メールアドレスは小文字にして user ID として扱う。`@` を含まない値は表示名として、大文字小文字・前後の空白・全角半角の違いを無視して active な member と照合し、1 人だけに一致したときにその user ID にする。一致しない場合は `ImportMemberUnknown`、2 人以上に一致する場合は `ImportMemberAmbiguous` を row error で返す。表示名を使う row があるときだけ Workspace の member 一覧を読む。

@@ -2369,6 +2369,35 @@
         ],
         "type": "object"
       },
+      "PublicCredentialOwner": {
+        "description": "Workspace member that owns the credential. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "memberId": {
+            "description": "Workspace member ID, the value Work Items use as assigneeUserId.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "workspaceId",
+          "memberId",
+          "email"
+        ],
+        "type": "object"
+      },
       "PublicCustomFieldDefinition": {
         "additionalProperties": false,
         "properties": {
@@ -2505,6 +2534,150 @@
         ],
         "type": "object"
       },
+      "PublicProjectMember": {
+        "description": "Active Workspace member of a Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Workspace member ID, usable as a Work Item assigneeUserId.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "manager",
+              "member",
+              "viewer"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role"
+        ],
+        "type": "object"
+      },
+      "PublicProjectMemberList": {
+        "description": "Active members of one Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicProjectMember"
+            },
+            "type": "array"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "projectId",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PublicTeam": {
+        "description": "Team with the Projects in it that the credential owner can view. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/PublicTeamProject"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "projects"
+        ],
+        "type": "object"
+      },
+      "PublicTeamList": {
+        "description": "Teams the credential owner can view, in directory order. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicTeam"
+            },
+            "type": "array"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PublicTeamProject": {
+        "description": "Project the credential owner can view, with its charter summary. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "code": {
+            "description": "Workspace-unique Project code.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lifecycleState": {
+            "enum": [
+              "proposed",
+              "approved",
+              "active",
+              "on-hold",
+              "closed",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ownerMemberId": {
+            "description": "Member ID of the accountable Project manager.",
+            "type": "string"
+          },
+          "plannedEndDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "plannedStartDate": {
+            "format": "date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "lifecycleState"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemComment": {
         "additionalProperties": false,
         "properties": {
@@ -2590,6 +2763,54 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemExportPage": {
+        "additionalProperties": false,
+        "properties": {
+          "hasMore": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemExportItem"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemKeyLookup": {
+        "description": "Team and Work Item a key names. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "key": {
+            "pattern": "^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,8}$",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "key",
+          "teamId",
+          "workItemId"
         ],
         "type": "object"
       },
@@ -3793,6 +4014,186 @@
           "teamId",
           "workItemId",
           "revision"
+        ],
+        "type": "object"
+      },
+      "WorkItemExportContributorAssignment": {
+        "additionalProperties": false,
+        "description": "Contributor assignment of an exported Work Item.",
+        "properties": {
+          "assignmentId": {
+            "description": "Stable identifier of the assignment within its Work Item.",
+            "type": "string"
+          },
+          "jobRoleId": {
+            "description": "Stable job role ID from the Work Item configuration.",
+            "type": "string"
+          },
+          "memberUserId": {
+            "description": "Workspace user ID of the contributing member, when decided.",
+            "type": "string"
+          },
+          "plannedEffortMinutes": {
+            "description": "Planned effort for this contribution in minutes.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "description": "Progress of this contribution.",
+            "enum": [
+              "planned",
+              "in-progress",
+              "done"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignmentId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WorkItemExportItem": {
+        "additionalProperties": false,
+        "description": "Work Item in a developer export page. Exports are read by Workspace administrators, so they also carry contributors and acceptance criteria for a re-import.",
+        "properties": {
+          "acceptanceCriteria": {
+            "description": "Conditions the Work Item must meet before it is accepted; absent when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterion"
+            },
+            "type": "array"
+          },
+          "assignedProjectId": {
+            "type": "string"
+          },
+          "assigneeEmail": {
+            "format": "email",
+            "type": "string"
+          },
+          "assigneeName": {
+            "type": "string"
+          },
+          "assigneeUserId": {
+            "type": "string"
+          },
+          "contributorAssignments": {
+            "description": "Contributors carrying out the work, separate from the accountable owner; absent when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemExportContributorAssignment"
+            },
+            "type": "array"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "creatorMemberKey": {
+            "type": "string"
+          },
+          "customFieldValues": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": {
+            "type": "string"
+          },
+          "dueDate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "description": "Deadline projection derived from schedule; empty when unscheduled."
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "relationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/WorkItemSchedule"
+          },
+          "schemaVersion": {
+            "const": 2,
+            "type": "integer"
+          },
+          "source": {
+            "const": "dynamodb",
+            "type": "string"
+          },
+          "statusCategory": {
+            "enum": [
+              "backlog",
+              "unstarted",
+              "started",
+              "completed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
+          "workflowSchemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workflowStatusId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "revision",
+          "id",
+          "teamId",
+          "title",
+          "assigneeUserId",
+          "dueDate",
+          "schedule",
+          "priority",
+          "creatorMemberKey",
+          "workflowStatusId",
+          "workItemTypeId",
+          "statusCategory",
+          "workflowSchemaVersion",
+          "customFieldValues",
+          "relationIds",
+          "createdAt",
+          "updatedAt",
+          "source"
         ],
         "type": "object"
       },
@@ -8301,6 +8702,105 @@
         ]
       }
     },
+    "/api/developer/work-item-exports": {
+      "get": {
+        "description": "Workspace 管理者の export です。`/api/developer/exports` の Work Item に Contributor と受け入れ条件を足した `WorkItemExportItem` を返し、export した file を import し直すときに使います。",
+        "operationId": "listManagedWorkItemStructuredExportPage",
+        "parameters": [
+          {
+            "description": "UI が page を集約して生成する download file の形式です。",
+            "in": "query",
+            "name": "format",
+            "schema": {
+              "default": "csv",
+              "enum": [
+                "csv",
+                "json"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 page に返す最大件数です。",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemExportPage"
+                }
+              }
+            },
+            "description": "RBAC で閲覧可能な Work Item の、Contributor と受け入れ条件つきの bounded export page です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "閲覧可能な Work Item を Contributor と受け入れ条件つきの bounded export page で取得する",
+        "tags": [
+          "Import and Export"
+        ]
+      }
+    },
     "/api/developer/work-items/{workItemId}/external-links": {
       "get": {
         "operationId": "listManagedExternalWorkItemLinks",
@@ -9265,6 +9765,71 @@
         ]
       }
     },
+    "/api/v1/me": {
+      "get": {
+        "description": "Returns the Workspace member that owns the credential, so a client can refer to the owner without being told the member ID separately.",
+        "operationId": "getPublicCredentialOwner",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicCredentialOwner"
+                }
+              }
+            },
+            "description": "Credential owner",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the credential owner",
+        "tags": [
+          "Directory"
+        ]
+      }
+    },
     "/api/v1/oauth/token": {
       "post": {
         "description": "client_credentials grant の client ID と client secret を交換します。",
@@ -9370,6 +9935,246 @@
         "summary": "OpenAPI 3.1 document を取得する",
         "tags": [
           "Schema"
+        ]
+      }
+    },
+    "/api/v1/projects/{projectId}/members": {
+      "get": {
+        "description": "Lists the active Workspace members of a Project and their Project roles. The credential owner needs member access to the Project, as in the Web assignee picker.",
+        "operationId": "listPublicProjectMembers",
+        "parameters": [
+          {
+            "description": "Project ID です。",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProjectMemberList"
+                }
+              }
+            },
+            "description": "Project members",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List the active members of a Project",
+        "tags": [
+          "Directory"
+        ]
+      }
+    },
+    "/api/v1/teams": {
+      "get": {
+        "description": "Lists the Teams that hold a Project the credential owner can view, or that Enterprise RBAC grants directly, with those Projects and their charter summary.",
+        "operationId": "listPublicTeams",
+        "parameters": [
+          {
+            "description": "Team と Project の名前の言語です。既定は ja です。",
+            "in": "query",
+            "name": "locale",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ja",
+                "en"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicTeamList"
+                }
+              }
+            },
+            "description": "Teams and Projects",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List the Teams and Projects the credential owner can view",
+        "tags": [
+          "Directory"
+        ]
+      }
+    },
+    "/api/v1/work-item-keys/{key}": {
+      "get": {
+        "description": "Resolves a key such as ABC-123 to its Team and Work Item. Text that is not a key, an unused key, a deleted Work Item, and a Work Item the credential owner cannot read all answer 404.",
+        "operationId": "lookupPublicWorkItemKey",
+        "parameters": [
+          {
+            "description": "ABC-123 形式の Work Item key です。",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemKeyLookup"
+                }
+              }
+            },
+            "description": "Team and Work Item the key names",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Resolve a Work Item key",
+        "tags": [
+          "Directory"
         ]
       }
     },
@@ -11866,6 +12671,10 @@
     {
       "description": "Versioned public Work Item API",
       "name": "Work Items"
+    },
+    {
+      "description": "Credential owner, Teams, Projects, Project members, and Work Item keys the credential owner can view",
+      "name": "Directory"
     },
     {
       "description": "Developer settings overview",

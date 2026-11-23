@@ -208,7 +208,14 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
   **再接続** も同じで、押した本人が完了します。
-- **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。
+- **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
+  export には親子・WBS 番号・依存・relation・Contributor・受け入れ条件が入り、そのまま import し直せます。
+  ただし MS Project XML には依存の日付制約（「この日より後に終える」など）を書けないため、制約のある依存を
+  MS Project XML で import し直すと制約はなくなります。制約を残すときは CSV・JSON・Excel を使ってください。
+  親子でも依存でもない relation と受け入れ条件は、MS Project XML でも Task のテキスト項目に残り、import し直せます。
+  import の mapping では、WBS 番号・アウトラインの深さ・親のキーから親子を、先行タスク（`1.2FS+2d` など）から依存を、
+  Contributor と受け入れ条件もあわせて取り込めます。Excel と MS Project XML の file も選べ、file を選ぶと mapping を提案します。書き方と dry-run で見つかる error は
+  [Public API の説明](../public-api.md#階層依存contributor受け入れ条件の-import) にあります。
 
 ## AI assistance の接続先と API キー
 
@@ -231,9 +238,10 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 （変更は Team の管理者のみ）。仕組みは [`docs/software-factory.md`](../software-factory.md)。
 
 この欄は Software factory を有効にして deploy した環境（CDK context `mukuroji:softwareFactory=true`）にだけ
-表示されます。既定の deploy では Factory board、agent 接続、Work Item の「エージェントへ引き継ぐ」と Run 履歴も
+表示されます。既定の deploy では Factory board、Work Item の「エージェントへ引き継ぐ」と Run 履歴も
 表示されず、API は Agent Run 系の操作を `503 SoftwareFactoryNotDeployed` で断ります
-（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
+（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。**agent を接続** と自分用 token の発行は off でも使え、
+設定例は Workspace を読むだけの Workspace profile になります。
 
 - 「リース時間（分）」: agent が作業を確保しておける時間（5〜240分、既定30分）。
   期限切れ後に同じ担当者の別インスタンスが引き継ぐことを許可するかも選べます。

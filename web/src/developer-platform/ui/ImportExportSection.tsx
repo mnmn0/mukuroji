@@ -2,10 +2,13 @@ import type { FormEvent } from 'react'
 import type { ImportDryRunReport, ImportJob } from '@mukuroji/contracts'
 import { interpolate } from '../model/displayFormatting'
 import {
+  DEVELOPER_IMPORT_FILE_ACCEPT,
+  type DeveloperImportFileFormat,
+} from '../model/importSources'
+import {
   updateImportMapping,
   type DeveloperExportFormat,
   type DeveloperImportFieldMapping,
-  type DeveloperImportFormat,
 } from '../model/transfers'
 import { SectionHeader } from './DeveloperPlatformSectionParts'
 import { StatusBadge } from './DeveloperPlatformStatus'
@@ -49,7 +52,7 @@ export function ImportExportSection({
   canExport: boolean
   canImport: boolean
   exportingFormat?: DeveloperExportFormat
-  format: DeveloperImportFormat
+  format: DeveloperImportFileFormat
   importFile?: File
   importMappings: DeveloperImportFieldMapping[]
   importProjectId: string
@@ -62,7 +65,7 @@ export function ImportExportSection({
   onCommit?: () => void
   onExport?: (format: DeveloperExportFormat) => Promise<void>
   onFileChange: (file?: File) => void
-  onFormatChange: (format: DeveloperImportFormat) => void
+  onFormatChange: (format: DeveloperImportFileFormat) => void
   onMappingChange: (mapping: DeveloperImportFieldMapping[]) => void
   onProjectChange: (projectId: string) => void
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void
@@ -83,7 +86,7 @@ export function ImportExportSection({
           title={labels.headings.imports}
         />
         <div className="mt-4 grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
-          {(['csv', 'json'] as const).map((sourceFormat) => (
+          {(['csv', 'json', 'xlsx', 'msproject'] as const).map((sourceFormat) => (
             <button
               aria-pressed={format === sourceFormat}
               className={`rounded-lg border p-4 text-left transition ${
@@ -158,11 +161,7 @@ export function ImportExportSection({
             <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
               {labels.fields.importFile}
               <input
-                accept={
-                  format === 'csv'
-                    ? '.csv,text/csv'
-                    : '.json,application/json'
-                }
+                accept={DEVELOPER_IMPORT_FILE_ACCEPT[format]}
                 className="workbench-input min-h-10 bg-surface px-3 py-2 normal-case tracking-normal"
                 required
                 type="file"
@@ -251,6 +250,11 @@ export function ImportExportSection({
                           {option.label}
                         </option>
                       ))}
+                      {/* A custom field target such as one suggested from a file is not a fixed option. */}
+                      {mapping.targetField &&
+                      !labels.importFieldOptions.some((option) => option.value === mapping.targetField) ? (
+                        <option value={mapping.targetField}>{mapping.targetField}</option>
+                      ) : null}
                     </select>
                   </label>
                   <button
@@ -367,7 +371,7 @@ export function ImportExportSection({
           title={labels.headings.exports}
         />
         <div className="mt-4 flex flex-wrap gap-3">
-          {(['csv', 'json'] as const).map((exportFormat) => (
+          {(['csv', 'json', 'xlsx', 'msproject'] as const).map((exportFormat) => (
             <button
               className="workbench-button-secondary min-h-10 px-4 disabled:opacity-50"
               disabled={
