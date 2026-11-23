@@ -25,7 +25,7 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 - `varianceMinutes`: `capacityMinutes - allocatedMinutes`。
 - `status`: capacity が 0 で demand がなければ `unavailable`、差が負なら `over`、0 なら `balanced`、正なら `under` です。
 
-日次 cell を Monday-first の week、または calendar month に集約できます。member ごとに timezone が異なっても availability は member の local date で再現されます。
+日次 cell を Workspace の「週の開始曜日」から始まる week（未設定なら月曜始まり）、または calendar month に集約できます。member ごとに timezone が異なっても availability は member の local date で再現されます。
 
 ## Resource requests and assignments
 

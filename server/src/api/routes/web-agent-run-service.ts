@@ -7,6 +7,7 @@ import {
   FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH,
   classifyFactoryBoardItem,
   type AgentRunReport,
+  type AgentRunUsage,
   type AgentRunView,
   type AgentSettings,
   type FactoryBoardItem,
@@ -17,6 +18,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  combineAgentRunUsage,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
   createAgentRunReportCommentBody,
@@ -55,6 +57,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /**
@@ -64,7 +67,7 @@ import type { TeamPermissionContext } from '../shared/workspace-access'
  * @param teamId - Team ID.
  * @returns True for Team managers and system administrators.
  */
-async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
+export async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
   try {
     await requireTeamPermission(principal, teamId, 'manager')
     return true
@@ -139,11 +142,12 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @param now - Read time.
  * @returns Run view.
  */
-function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date): AgentRunView {
+function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date, usage?: AgentRunUsage): AgentRunView {
   return {
     ...toAgentRun(run, now),
     canRelease: run.state === 'active' && canRelease,
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
+    ...(usage === undefined ? {} : { usage }),
   }
 }
 
@@ -170,13 +174,18 @@ export async function listWebWorkItemAgentRuns(
     canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
   ])
   const now = new Date()
+  // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
+  const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
+  const usageTotal = combineAgentRunUsage(usages)
   return {
-    items: page.runs.map((run) => toAgentRunView(
+    items: page.runs.map((run, index) => toAgentRunView(
       run,
       writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
       now,
+      usages[index],
     )),
     hasMore: page.nextCursor !== undefined,
+    ...(usageTotal === undefined ? {} : { usageTotal }),
   }
 }
 

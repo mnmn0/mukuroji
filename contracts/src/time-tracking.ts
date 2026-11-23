@@ -8,7 +8,8 @@ export type TimeEntryStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 
 export type TimeEntrySource = 'manual' | 'timer'
 
 /**
- * Work categories a time entry can be classified under, in display order.
+ * Built-in work categories, in display order. A Workspace starts with these and may retire them
+ * or add its own (see `WorkspaceTimeEntryCategorySettings`).
  *
  * Entries saved before categories existed have no category and are reported as uncategorized.
  */
@@ -22,8 +23,14 @@ export const TIME_ENTRY_CATEGORIES = [
   'leave',
 ] as const
 
-/** Work category of a time entry, such as implementation or a meeting. */
-export type TimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
+/** Key of a built-in work category. */
+export type BuiltInTimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
+
+/**
+ * Key of a work category of a time entry, such as `implementation` or `meeting`: a built-in key
+ * from {@link TIME_ENTRY_CATEGORIES} or one the Workspace added.
+ */
+export type TimeEntryCategory = string
 
 /** Report group key used for entries that have no work category. */
 export const UNCATEGORIZED_TIME_ENTRY_GROUP_KEY = 'uncategorized' as const

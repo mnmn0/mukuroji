@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono'
 import type {
   CapacityPlanningGranularity,
   WorkItemScheduleCalendarPolicy,
+  WorkspaceWeekStartDay,
   WorkloadCalendarSource,
   ResourceAssignmentStatus,
   WorkloadTimeOff,
@@ -87,6 +88,8 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
    * Teams' records stay out of Workspace-wide totals; every stored Team counts when omitted.
    */
   listActiveTeamIds?(principal: Principal): Promise<ReadonlySet<string>>
+  /** Reads the day the Workspace week starts on; weekly buckets start on Monday when omitted. */
+  readWeekStartDay?(principal: Principal): Promise<WorkspaceWeekStartDay>
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps authentication, authorization, validation, and persistence failures to HTTP. */
@@ -117,6 +120,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
         ...await readActiveTeamIdsInput(principal, dependencies),
+        ...await readWeekStartDayInput(principal, dependencies),
       })
       return context.json(snapshot)
     })
@@ -147,6 +151,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         teams: visibilities,
         ...await readWorkspaceCalendarInput(principal, dependencies),
         ...await readActiveTeamIdsInput(principal, dependencies),
+        ...await readWeekStartDayInput(principal, dependencies),
       })
       return context.json(snapshot)
     })
@@ -364,6 +369,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
         ...await readActiveTeamIdsInput(principal, dependencies),
+        ...await readWeekStartDayInput(principal, dependencies),
       })
       return context.json(result)
     })
@@ -399,6 +405,21 @@ async function readWorkspaceCalendarInput<Principal extends CapacityPlanningPrin
 ): Promise<{ workspaceCalendar?: WorkItemScheduleCalendarPolicy }> {
   if (!dependencies.readWorkspaceCalendar) return {}
   return { workspaceCalendar: await dependencies.readWorkspaceCalendar(principal) }
+}
+
+/**
+ * Reads the Workspace week start a workload read buckets weeks by.
+ *
+ * @param principal - Authenticated member whose Workspace is read.
+ * @param dependencies - Router dependencies.
+ * @returns The `weekStartDay` snapshot field, or nothing when the router has no reader.
+ */
+async function readWeekStartDayInput<Principal extends CapacityPlanningPrincipal>(
+  principal: Principal,
+  dependencies: CapacityPlanningRouterDependencies<Principal>,
+): Promise<{ weekStartDay?: WorkspaceWeekStartDay }> {
+  if (!dependencies.readWeekStartDay) return {}
+  return { weekStartDay: await dependencies.readWeekStartDay(principal) }
 }
 
 /**

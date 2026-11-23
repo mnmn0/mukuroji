@@ -21,6 +21,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - 定期 timesheet scan: `timesheet`（未提出の工数の督促）
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
 - Planning update の publish / health 悪化 / コメント: `watcher` / `project-member` / `escalation` / `update-owner` / `update-author` / `mention`（詳細は [Planning](./planning.md)）
+- Milestone の完了 / 日付の変更（`planning-entity.milestone-completed` / `planning-entity.milestone-rescheduled`）: `watcher`（下の「Milestone の watch」）
 - Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
 Approval と automation の各 subsystem は、実装時に同じ契約で `approval` / `automation-failure` candidate と deep link を発行します。notification projector は event type を限定せず、候補を持つ audit event を同じ重複排除・認可ルールで扱います。
@@ -38,6 +39,12 @@ recipientStatusKey    = <recipientKey>#<unread|read|archived|snoozed>
 `RecipientStatusIndex` は `recipientStatusKey` と `notificationKey` で status ごとの timeline と実 unread 件数を query します。opaque notification ID と cursor は recipient、filter、last evaluated key に束縛し、別ユーザーや別 filter へ流用できません。
 
 Notification row は `recipientStatusKey`、`itemType: notification`、正の `version` を必須とする current schema で保存します。current schema でない row は request path で補完せず、`InvalidNotificationData`（503）の fail-closed エラーとして扱います。
+
+### 概要の文言
+
+システムが書く概要は、文ではなく code と値（`message: { code, params }`）でも保存します。code ごとの日本語と英語の文言は `contracts/src/notification-messages.ts` の `NOTIFICATION_MESSAGE_TEMPLATES` にあり、`{name}` を同じ名前の値で置き換えます（値の中の `{name}` は置き換えません）。producer は audit metadata の `notificationMessage` に code と値を入れ、`summary` には同じ code の英語の文を入れます。projection は読めた code だけを通知 row の `message` に写します。
+
+Web の Inbox は表示言語で、Slack と Email は受信者の表示設定の言語（未設定は日本語）で文にします。`message` のない row、知らない code、壊れた値は保存済みの `summary` をそのまま出すため、code を入れる前の通知と古い client も読めます。ブロック解除と定期配信のレポートは、以前から Web が event type で翻訳しているので、その文言を優先します。人が書いた文（コメントの本文や Health update の抜粋など）は値として入れるだけで翻訳しません。
 
 read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。この解除処理は250件 × 4 page（最大1,000行）で正常に打ち切り、残りは次回の read へ持ち越します。cursor が進まない場合だけ `503` で fail closed します。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
 
@@ -160,6 +167,10 @@ Service worker は `push` を受けると payload（`PushNotificationPayload`: `
 payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
 それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合（`navigate` が失敗または `null` を返した場合）は新しい window を開きます。
 
+## Work Item key の表示
+
+Work Item を対象にした通知は、projection が通知を書くときに強整合で読んだ現在の Work Item row から key（`ABC-123`）を取り、notification row の `workItemKey` に保存します。audit metadata の値は使いません。key は変わらないので、後から Work Item が移動しても表示はそのままです。Inbox は title の前に key を表示し、Email は件名と本文の先頭を `ABC-123 タイトル` にして本文に key のページの URL を足し、Slack は本文の先頭に key を付けてリンクを付けます。key を持たない Work Item（key 導入前に作られたもの）と、Work Item 以外の通知には key を出しません。
+
 ## Slack 配信
 
 通知設定の **Slack** を有効にして保存すると、その後に発生する担当・メンション・返信・期限などの既存通知を、同じ受信者のSlack送信先にも配信します。`channels.slack` を省略した既存API clientと保存済み設定は無効として扱います。Inboxを無効にしてもSlackだけの配信は可能です。有効化時刻をサーバーで保存し、auditの投影が遅れても、それより古いイベントはSlackへ送りません。設定の頻度変更ではこの時刻を保持し、無効化後の再有効化では更新します。送信直前も現在の有効化時刻を確認するため、以前の配信待ち通知が再有効化で復活することはありません。有効化時刻も旧設定の保存時刻も不明な場合は配信せず、設定の再保存で時刻を確定します。
@@ -180,7 +191,7 @@ CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する
 
 通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
 
-60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
+60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
 
@@ -232,7 +243,7 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
 
-本文は ja / en 併記のプレーンテキストです。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+本文は ja / en 併記のプレーンテキストです。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
 
 ### 失敗の調査
 
@@ -297,5 +308,15 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - projection は配信時に週の行を強整合で読み直し、提出済みなら捨てます。未提出なら「週の行がないか `submissionCount = 0`」の ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で捨てます。読み直す手段がない projection では届けません
 - 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます
 - Slack と Email への配信も、送信の直前に同じ週の行を強整合で読み直します。通知行は作成者（`weeklyReportAuthorMemberKey`）と週の開始日（`weeklyReportWeekStart`）を持ち、提出済みなら送らずに `suppressed` で終えます。quiet hours や digest で送信が遅れる間に提出した場合も、古い督促は届きません。manager への通知も、作成者が提出していれば届きません。週の開始日を持たない行と、読み直す手段（`PLANNING_TABLE_NAME`）のない送信 job では督促を送りません。読み直しから送信までの間に提出した場合は、まれに届くことがあります
+
+### Milestone の watch
+
+Milestone の watcher は（[ADR 0063](adr/0063-planning-milestone-watcher-key.md)）collaboration entity key `<workspaceId>#planning-entity#<encodeURIComponent(entityId)>` に保存し、`GET|PUT|DELETE /api/planning/entities/:entityId/watch` で読み書きします。呼び出した人が見られる、archive されていない Milestone だけが対象で、見えない entity は `404`、Milestone 以外は `400`、archive 済みは `409` です。Milestone を閲覧できる人は、guest や読み取りの permission だけの Enterprise member（`planning.read`）も含めて watch できます（`PUT` / `DELETE` も同じ）。watch は閲覧できるものの通知を受け取るだけで、通知ごとに閲覧権限を確かめ直すためです。
+
+- Planning entity の更新 audit のうち、Milestone の `status` が `completed` になった更新は `planning-entity.milestone-completed`、ベースラインか予測の日付が変わった更新は `planning-entity.milestone-rescheduled` になります。同じ更新で両方が変わった場合は完了です。どちらも `planning-entity.` の prefix のままなので、活動と Milestone の予定日推移はほかの更新と同じように読みます
+- event は `notificationCandidates` を空で持ち、projection が現在の watcher を `watcher` として加えます。変更した本人には送りません。Project watcher には送りません
+- projection（と Slack・Email の送信直前の再確認）は、composition root が注入する reader で Planning table の Milestone の行を強整合で読み直し、消えた・archive された・event の Team / Project から移った Milestone では届けません。宛先は Planning の読み取り（Enterprise では `planning.read`）が要ります
+- Inbox は表示のたびに、Milestone が同じ scope に archive されずに残っていること、読めること、今も watch していることを確かめます。Slack・Email の送信直前にも Milestone の行と watch を読み直します
+- 通知は「Milestone の完了」「Milestone の予定変更」として届き、`/planning/timeline?entityId=<id>` を開きます。title は Milestone 名です
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

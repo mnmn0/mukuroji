@@ -124,6 +124,7 @@ import {
   type TaskScheduleWindowLayout,
 } from '../../tasks/model/taskScheduleWindow'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
+import { useWorkCalendar } from '../../workspace/queries/useWorkCalendar'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
   createBuiltInTaskViewDefinition,
@@ -406,10 +407,6 @@ export function TaskPage() {
   // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
-  const workspaceCalendarPolicy = useMemo(
-    () => createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
-    [workspaceCalendar.settings],
-  )
   const {
     data: teams = [],
     error: projectDirectoryError,
@@ -567,6 +564,23 @@ export function TaskPage() {
       suppressIssueFallback,
       teams,
     ],
+  )
+  // A Project with its own calendar, or a Team calendar, replaces the Workspace one (ADR 0058). The
+  // Team is the one new Work Items are created in, which the route resolves even without `teamId`.
+  const {
+    data: projectWorkCalendar,
+    error: projectWorkCalendarError,
+    mutate: mutateProjectWorkCalendar,
+  } = useWorkCalendar(
+    accessToken,
+    creationTeam?.id ?? selectedTeamId,
+    projectId,
+    Boolean(user && !currentUserError),
+  )
+  const workspaceCalendarPolicy = useMemo(
+    () => projectWorkCalendar?.resolvedPolicy ??
+      createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
+    [projectWorkCalendar?.resolvedPolicy, workspaceCalendar.settings],
   )
   const workspaceId = (
     user?.attributes['custom:workspace_id'] ??
@@ -2076,8 +2090,16 @@ export function TaskPage() {
       accessToken={accessToken}
       workspaceCalendarPolicy={workspaceCalendarPolicy}
       workspaceCalendarPeriods={workspaceCalendar.settings}
-      workspaceCalendarErrorMessage={workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined}
-      onRetryWorkspaceCalendar={workspaceCalendar.retry}
+      workspaceCalendarErrorMessage={
+        // A failed Team or Project calendar read is shown, not hidden behind the Workspace calendar.
+        projectWorkCalendarError
+          ? t('tasks.workspaceCalendar.scopedError')
+          // A loaded Team or Project calendar is what dates use, not the Monday-to-Friday fallback.
+          : workspaceCalendarErrorKey === 'tasks.workspaceCalendar.error' && projectWorkCalendar?.resolvedPolicy
+            ? t('tasks.workspaceCalendar.scopedFallbackError')
+            : workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined
+      }
+      onRetryWorkspaceCalendar={projectWorkCalendarError ? () => void mutateProjectWorkCalendar() : workspaceCalendar.retry}
       onAuthenticatedApiError={(error) => {
         redirectEnterpriseSessionError(error)
       }}

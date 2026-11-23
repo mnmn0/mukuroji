@@ -320,7 +320,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAutomationScheduleJob(this, { dataStores, fileStorage, parameters }),
         defineTriageScheduleJob({ dataStores, parameters }),
         ...(softwareFactoryEnabled ? [defineAgentRunTriageJob({ dataStores, parameters })] : []),
-        defineSlackNotificationJob(this, { dataStores, parameters }),
+        defineSlackNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),

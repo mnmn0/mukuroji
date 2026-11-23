@@ -236,6 +236,25 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members[0]?.cells.every((cell) => cell.status === 'balanced')).toBe(true)
   })
 
+  test('starts weekly capacity buckets on the Workspace week start day', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile], [createAssignment('assignment-1', false, '2026-08-03', '2026-08-14', 4_800)]),
+      [],
+      [],
+      createInput({
+        fromDate: '2026-08-02',
+        toDate: '2026-08-15',
+        granularity: 'week',
+        weekStartDay: 0,
+      }),
+    )
+
+    expect(snapshot.members[0]?.cells.map((cell) => [cell.fromDate, cell.toDate])).toEqual([
+      ['2026-08-02', '2026-08-08'],
+      ['2026-08-09', '2026-08-15'],
+    ])
+  })
+
   test('keeps remaining effort when an earlier assignment for the Work Item is outside the range', () => {
     const assignments = [
       { ...createAssignment('outside-range', false, '2026-08-01'), workItemId: 'work-item-1' },

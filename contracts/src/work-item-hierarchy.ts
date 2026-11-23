@@ -128,7 +128,8 @@ function createRankAfter(lower: string): string {
   }
   if (lower.length < WORK_ITEM_HIERARCHY_RANK_MAX_LENGTH) return `${lower}i`
   // No room to append: raise the last digit that is not `z` and drop the rest, which is shorter.
-  const index = lower.replace(/z+$/u, '').length - 1
+  let index = lower.length - 1
+  while (index >= 0 && lower.charAt(index) === 'z') index -= 1
   if (index < 0) return `${lower}i`
   return `${lower.slice(0, index)}${RANK_DIGITS.charAt(RANK_DIGITS.indexOf(lower.charAt(index)) + 1)}`
 }

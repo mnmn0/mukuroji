@@ -770,6 +770,14 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'The same item already exists.' }, 409)
   }
 
+  if (error.code === 'InvalidWorkItemKeyPrefix') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (error.code === 'WorkItemKeyPrefixTaken' || error.code === 'WorkItemKeyPrefixChanged') {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
   if (error.code === 'WorkItemRevisionConflict') {
     return c.json({
       code: error.code,

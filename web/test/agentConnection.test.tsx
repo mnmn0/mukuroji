@@ -3,6 +3,7 @@ import type { PersonalAgentCredentialOverview } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   buildAgentConnectionSnippet,
+  buildAgentUsageSnippet,
   buildChecksumCommand,
   buildTokenEnvironmentCommand,
   resolveAgentConnectionOrigin,
@@ -26,6 +27,32 @@ const settings: AgentConnectionSettings = {
 }
 
 describe('agent connection snippets', () => {
+  test('ties the MCP server and the Claude Code usage export to one instance ID, only for valid IDs', () => {
+    const withUsage = { ...settings, usageInstanceId: ' laptop-claude-1 ' }
+    expect(buildAgentConnectionSnippet(withUsage).content).toContain('--env MUKUROJI_MCP_INSTANCE_ID=laptop-claude-1')
+    const usage = buildAgentUsageSnippet(withUsage)
+    expect(usage?.location).toBe('~/.claude/settings.json')
+    const parsed: unknown = JSON.parse(usage?.content ?? '')
+    expect(parsed).toMatchObject({
+      env: {
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'https://mukuroji.example.com/api/v1/agent-telemetry/v1/logs',
+        OTEL_RESOURCE_ATTRIBUTES: 'mukuroji.agent_instance=laptop-claude-1',
+      },
+    })
+    expect(usage?.content).toContain('$MUKUROJI_MCP_TOKEN')
+    expect(usage?.content).not.toContain('mk_')
+    for (const other of [
+      settings,
+      { ...withUsage, usageInstanceId: 'a,b=c' },
+      { ...withUsage, client: 'codex' as const },
+      { ...withUsage, profile: 'workspace' as const },
+    ]) {
+      expect(buildAgentUsageSnippet(other)).toBeUndefined()
+      expect(buildAgentConnectionSnippet(other).content).not.toContain('MUKUROJI_MCP_INSTANCE_ID')
+    }
+  })
+
   test('resolves the MCP origin from relative and absolute API base URLs', () => {
     expect(resolveAgentConnectionOrigin('/api', 'https://app.example.com')).toBe('https://app.example.com')
     expect(resolveAgentConnectionOrigin('https://api.example.com/api', 'https://app.example.com'))
@@ -196,6 +223,18 @@ function accessibleButtonNames(html: string): string[] {
 }
 
 describe('agent connection view', () => {
+  test('offers the usage instance ID for Claude Code and shows the usage settings once it is valid', () => {
+    expect(render()).toContain('data-testid="agent-connection-usage-instance"')
+    expect(render()).not.toContain('data-testid="agent-connection-usage"')
+    const html = render({ choices: { client: 'claude-code', teamId: 'team-core', shell: 'posix', mcpPath: '', usageInstanceId: 'laptop-claude-1' } })
+    expect(html).toContain('data-testid="agent-connection-usage"')
+    expect(html).toContain('mukuroji.agent_instance=laptop-claude-1')
+    const invalid = render({ choices: { client: 'claude-code', teamId: 'team-core', shell: 'posix', mcpPath: '', usageInstanceId: 'bad id' } })
+    expect(invalid).toContain('aria-invalid="true"')
+    expect(invalid).not.toContain('data-testid="agent-connection-usage"')
+    expect(render({ choices: { client: 'kiro', teamId: 'team-core', shell: 'posix', mcpPath: '' } })).not.toContain('agent-connection-usage-instance')
+  })
+
   test('shows the member ID, origin, and a configuration without any secret', () => {
     const html = render()
     expect(html).toContain('taro@example.com')
