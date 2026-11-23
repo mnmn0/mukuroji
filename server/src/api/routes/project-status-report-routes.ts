@@ -7,6 +7,7 @@ import {
 import { createHmac, randomBytes } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { createAnalyticsTextPdf } from '../../modules/analytics'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { ProjectDataError } from '../../modules/directory'
 import {
   createProjectStatusShareUseCase,
@@ -197,7 +198,7 @@ let shareRequestKey: string | undefined
  * @returns The request secret.
  */
 function deriveShareRequestSecret(idempotencyKeyHash: string) {
-  shareRequestKey ??= resolveShareRequestKey(process.env.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET)
+  shareRequestKey ??= resolveShareRequestKey(loadServerConfig().environment.DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET)
   return createHmac('sha256', shareRequestKey)
     .update('project-status-share-request-v1\0')
     .update(idempotencyKeyHash)
