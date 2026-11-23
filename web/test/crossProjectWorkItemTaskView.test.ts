@@ -6,6 +6,7 @@ import {
   removeLegacyCrossProjectWorkItemParams,
   taskViewDefinitionToCrossProjectWorkItemState,
 } from '../src/features/cross-project-work-items/model/crossProjectWorkItemTaskView'
+import { parseTaskViewUrlOverride } from '../src/task-views/model/taskViewDefinition'
 import {
   defaultCrossProjectWorkItemListState,
   filterCrossProjectWorkItems,
@@ -68,6 +69,28 @@ describe('cross-Project Work Item task view', () => {
       redacted,
     )
     expect(cleared.filters.projectScopes).toBeUndefined()
+  })
+
+  test('ignores a link that asks for more than one contributor or job role', () => {
+    for (const filters of [
+      { contributorUserIds: ['dev@example.com', 'pm@example.com'] },
+      {
+        contributorJobRoles: [
+          { teamId: 'core-team', jobRoleId: 'designer' },
+          { teamId: 'core-team', jobRoleId: 'developer' },
+        ],
+      },
+    ]) {
+      const parsed = parseTaskViewUrlOverride({ filters })
+      expect(parsed.override?.filters).toBeUndefined()
+      expect(parsed.warnings).toContainEqual({
+        code: 'invalid-url-override',
+        section: 'filter',
+        fallback: 'ignored',
+      })
+    }
+    expect(parseTaskViewUrlOverride({ filters: { contributorUserIds: ['dev@example.com'] } }).override)
+      .toEqual({ filters: { contributorUserIds: ['dev@example.com'] } })
   })
 
   test('keeps filters that the list does not edit', () => {

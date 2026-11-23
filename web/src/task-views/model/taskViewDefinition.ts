@@ -768,12 +768,13 @@ function readTaskViewFilters(value: unknown): TaskViewFilters | undefined {
   }
   if (Object.hasOwn(value, 'contributorUserIds')) {
     const contributorUserIds = readStringArray(value.contributorUserIds)
-    if (!contributorUserIds) return undefined
+    // The server accepts one contributor, which is what the Work Item list applies.
+    if (!contributorUserIds || contributorUserIds.length > 1) return undefined
     filters.contributorUserIds = contributorUserIds
   }
   if (Object.hasOwn(value, 'contributorJobRoles')) {
     const jobRoles = readTeamQualifiedPairs(value.contributorJobRoles, 'jobRoleId')
-    if (!jobRoles) return undefined
+    if (!jobRoles || jobRoles.length > 1) return undefined
     filters.contributorJobRoles = jobRoles.map(({ teamId, id }) => ({ teamId, jobRoleId: id }))
   }
   return filters
