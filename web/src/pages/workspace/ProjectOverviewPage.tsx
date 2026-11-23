@@ -162,7 +162,8 @@ export function ProjectOverviewPage() {
   // because those do not change on a retry and the creator cannot see that data either.
   const isPlanningDenied = planning.error instanceof PlanningApiError && planning.error.status === 403
   const reportReadFailed = (Boolean(planning.error) && !isPlanningDenied) ||
-    (Boolean(workItems.error) && workItemsError !== 'limit') ||
+    (Boolean(workItems.error) && workItemsError !== 'limit' &&
+      !(workItems.error instanceof TeamIssuesApiError && workItems.error.status === 403)) ||
     raidError === 'load' ||
     resolveDocumentsError(projectDocuments.error, actionItemsQuery.error) === 'load'
   const retryReport = () => {

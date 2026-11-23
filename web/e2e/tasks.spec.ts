@@ -4262,6 +4262,29 @@ test.describe('authenticated task page', () => {
     await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
   })
 
+  test('Issue #349: 読む権限のない Work Item は進捗欄を外してレポートを出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/projects\/refero\/issues(\?.*)?$/, async (route) => {
+      await route.fulfill({ status: 403, json: { error: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-progress')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+  })
+
   test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {
     const agentRunRequests: string[] = []
     page.on('request', (request) => {
