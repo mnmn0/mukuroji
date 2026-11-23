@@ -129,6 +129,17 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members[0]?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0])
   })
 
+  test('reads the current holidays of a reused custom profile in every snapshot', () => {
+    const reused = createProfile('member-1', 'UTC')
+    const state = createState([reused])
+    const input = createInput({ fromDate: '2026-08-03', toDate: '2026-08-03' })
+    expect(buildWorkloadSnapshot(state, [], [], input).members[0]?.capacityMinutes).toBe(480)
+
+    reused.holidays.push({ date: '2026-08-03' })
+
+    expect(buildWorkloadSnapshot(state, [], [], input).members[0]?.capacityMinutes).toBe(0)
+  })
+
   test('splits actual submitted time at a DST-aware local midnight', () => {
     const member = createProfile('member-1', 'America/New_York')
     const entries: WorkloadTimeEntry[] = [{

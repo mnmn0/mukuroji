@@ -66,6 +66,17 @@ describe('weekly report reminder timing', () => {
     expect(resolveWeeklyReportReminderRun(new Date('2026-11-27T09:00:00.000Z'), sameDayEarlier)).toEqual({ kind: 'escalation', date: '2026-11-20' })
   })
 
+  test('acts in the first hour after daylight saving time skips the slot hour', () => {
+    const timing = { timeZone: 'America/New_York', reminder: { weekday: 0, hour: 2 } }
+    // Sunday 2027-03-14 goes from 01:59 EST (06:59 UTC) straight to 03:00 EDT (07:00 UTC).
+    expect(resolveWeeklyReportReminderRun(new Date('2027-03-14T06:00:00.000Z'), timing)).toBeUndefined()
+    expect(resolveWeeklyReportReminderRun(new Date('2027-03-14T07:00:00.000Z'), timing)).toEqual({ kind: 'reminder', date: '2027-03-14' })
+    expect(resolveWeeklyReportReminderRun(new Date('2027-03-14T08:00:00.000Z'), timing)).toBeUndefined()
+    // A normal Sunday still acts at 02:00 EST (07:00 UTC) only.
+    expect(resolveWeeklyReportReminderRun(new Date('2027-03-07T07:00:00.000Z'), timing)).toEqual({ kind: 'reminder', date: '2027-03-07' })
+    expect(resolveWeeklyReportReminderRun(new Date('2027-03-07T08:00:00.000Z'), timing)).toBeUndefined()
+  })
+
   test('maps the date to the Workspace week', () => {
     expect(weeklyReportWeekStart('2026-11-20', 1)).toBe('2026-11-16')
     expect(weeklyReportWeekStart('2026-11-20', 0)).toBe('2026-11-15')

@@ -364,7 +364,10 @@ function ProfileForm({
   const [timeZone, setTimeZone] = useState(() => profile?.timeZone ?? 'UTC')
   const [role, setRole] = useState(() => profile?.role ?? '')
   const [skills, setSkills] = useState(() => profile?.skills.join(', ') ?? '')
-  const [hours, setHours] = useState(() => String((profile?.schedule.monday.minutes ?? 480) / 60))
+  // The hours shown are those of the first working weekday, so a member off on Monday still sees
+  // their saved hours; the schedule changes only when these hours are edited.
+  const [initialHours] = useState(() => readProfileDailyHours(profile?.schedule))
+  const [hours, setHours] = useState(initialHours)
   const [holidayDates, setHolidayDates] = useState(() => profile?.holidays.map((holiday) => holiday.date).join(', ') ?? '')
 
   /** Saves the selected member's recurring availability profile. */
@@ -379,7 +382,7 @@ function ProfileForm({
       // A saved profile keeps its weekdays, so a member's own days off survive a change of hours
       // or of calendar; only a new profile gets a fresh schedule.
       schedule: profile
-        ? Number(hours) === profile.schedule.monday.minutes / 60
+        ? hours === initialHours
           ? profile.schedule
           : applyScheduleHours(profile.schedule, hours)
         : createSchedule(hours, inheritsWorkspace),
@@ -443,6 +446,27 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
 function readScheduleMinutes(hoursValue: string): number {
   const hours = Number(hoursValue)
   return Number.isFinite(hours) ? Math.max(0, Math.min(1_440, Math.round(hours * 60))) : 0
+}
+
+/**
+ * Reads the daily hours a profile form starts with.
+ *
+ * @param schedule - Saved schedule, or undefined for a new profile.
+ * @returns The hours of the first enabled weekday, Monday's hours when none is enabled, or eight
+ *   hours for a new profile.
+ */
+function readProfileDailyHours(schedule: WorkingSchedule | undefined): string {
+  if (!schedule) return '8'
+  const day = [
+    schedule.monday,
+    schedule.tuesday,
+    schedule.wednesday,
+    schedule.thursday,
+    schedule.friday,
+    schedule.saturday,
+    schedule.sunday,
+  ].find((candidate) => candidate.enabled) ?? schedule.monday
+  return String(day.minutes / 60)
 }
 
 /**

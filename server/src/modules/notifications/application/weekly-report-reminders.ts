@@ -10,6 +10,9 @@ import {
 /** Milliseconds in one day. */
 const dayMilliseconds = 86_400_000
 
+/** Milliseconds in one hour, the interval of the reminder schedule. */
+const hourMilliseconds = 3_600_000
+
 /** One weekly local time at which the hourly schedule acts. */
 export type WeeklyReportReminderSlot = {
   /** Local weekday, 0 (Sunday) to 6 (Saturday). */
@@ -121,14 +124,38 @@ export function resolveWeeklyReportReminderRun(
   const date = toWorkspaceLocalDate(now, timing.timeZone)
   const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay()
   const hour = readLocalHour(now, timing.timeZone)
-  if (weekday === timing.reminder.weekday && hour === timing.reminder.hour) {
+  const previousHour = readLocalHour(new Date(now.getTime() - hourMilliseconds), timing.timeZone)
+  if (weekday === timing.reminder.weekday && isSlotHour(timing.reminder.hour, hour, previousHour)) {
     return { kind: 'reminder', date }
   }
   const escalation = timing.escalation
-  if (!escalation || weekday !== escalation.weekday || hour !== escalation.hour) return undefined
+  if (!escalation || weekday !== escalation.weekday || !isSlotHour(escalation.hour, hour, previousHour)) {
+    return undefined
+  }
   let daysBack = (escalation.weekday - timing.reminder.weekday + 7) % 7
   if (daysBack === 0 && escalation.hour <= timing.reminder.hour) daysBack = 7
   return { kind: 'escalation', date: addDays(date, -daysBack) }
+}
+
+/**
+ * Tells whether an hourly run falls on a slot's local hour.
+ *
+ * When the clocks go forward over the slot (for example 2:00 does not exist on the day daylight
+ * saving time starts), the run of the first hour after the gap acts instead, so the week's
+ * reminder is not lost. An offset that is not a whole hour (such as Asia/Kathmandu) runs within
+ * the slot's local hour rather than on the hour.
+ *
+ * @param slotHour - Local hour of the slot.
+ * @param hour - Local hour of this run.
+ * @param previousHour - Local hour one hour before this run.
+ * @returns Whether this run acts for the slot.
+ */
+function isSlotHour(slotHour: number, hour: number, previousHour: number): boolean {
+  if (hour === slotHour) return true
+  // The local hour jumped past the slot: one hour ago it was before the slot, now it is after.
+  const step = (hour - previousHour + 24) % 24
+  const slotOffset = (slotHour - previousHour + 24) % 24
+  return step > 1 && slotOffset > 0 && slotOffset < step
 }
 
 /**

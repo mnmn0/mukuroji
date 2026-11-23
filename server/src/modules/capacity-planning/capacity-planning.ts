@@ -818,7 +818,9 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
  *
  * The result uses the Workspace time zone, keeps a weekday only when both the Workspace and the
  * member work on it, and adds every Workspace day off to the member's personal days off. A
- * profile with its own calendar comes back unchanged.
+ * profile with its own calendar comes back as a shallow copy with the same values. Either way the
+ * result is a new object for each snapshot, so the holiday lookup cached on it never outlives the
+ * snapshot or reflects holidays from an earlier one.
  *
  * @param profile - Stored profile.
  * @param workspaceCalendar - Workspace time zone, working weekdays, and days off.
@@ -828,7 +830,7 @@ function resolveEffectiveProfile(
   profile: WorkloadMemberProfile,
   workspaceCalendar: WorkItemScheduleCalendarPolicy,
 ): WorkloadMemberProfile {
-  if (profile.calendarSource !== 'workspace') return profile
+  if (profile.calendarSource !== 'workspace') return { ...profile }
   const workingWeekdays = new Set<string>(workspaceCalendar.workingWeekdays)
   const schedule = clone(profile.schedule)
   for (const weekday of WORKING_SCHEDULE_WEEKDAYS) {
@@ -971,13 +973,16 @@ function calculateAvailableMinutes(profile: WorkloadMemberProfile, date: string)
   return Math.max(0, schedule.minutes - absence)
 }
 
-/** Holiday dates of each profile, kept while the profile object lives. */
+/**
+ * Holiday dates of each effective profile. Effective profiles are created anew for every snapshot
+ * by {@link resolveEffectiveProfile}, so an entry lives only as long as that snapshot.
+ */
 const holidayDatesByProfile = new WeakMap<WorkloadMemberProfile, ReadonlySet<string>>()
 
 /**
  * Reads a profile's holiday dates as a set, so inherited Workspace days off stay cheap to check.
  *
- * @param profile - Profile whose holidays are read; it is not changed afterwards.
+ * @param profile - Effective profile of the current snapshot; it is not changed afterwards.
  * @returns The holiday dates.
  */
 function readHolidayDates(profile: WorkloadMemberProfile): ReadonlySet<string> {
