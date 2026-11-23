@@ -68,11 +68,16 @@ import {
   type CustomerWorkItemProjectResolver,
   type CustomerWorkspaceState,
 } from '../../customers'
+import { createMutationAuditEventPut, getConfiguredAuditTableName, type MutationAuditContext } from '../../../audit'
+import { CUSTOMER_AUDIT_EVENT_LIMIT, createCustomerAuditEvents, type CustomerAuditMergeHint } from '../../customer-audit'
 import { createDynamoDbClient } from '../../../../infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Maximum number of Customer records written alongside one metadata fence. */
 const CUSTOMER_TRANSACTION_RECORD_LIMIT = 99
+
+/** Record writes per step of a resumable deletion or merge, leaving room for its audit events. */
+const CUSTOMER_BATCH_RECORD_LIMIT = CUSTOMER_TRANSACTION_RECORD_LIMIT - CUSTOMER_AUDIT_EVENT_LIMIT
 
 /** GSI used to wake retention processing for records whose expiry is due. */
 const CUSTOMER_RETENTION_INDEX_NAME = 'CustomerRetentionIndex'
@@ -131,6 +136,20 @@ export type DynamoDbCustomerClientOptions = {
   now?: () => Date
   /** Test-replaceable ID generator. */
   id?: () => string
+  /** Audit event table; defaults to the configured one. */
+  auditTableName?: string
+}
+
+/** Request-scoped audit state shared by the writes of one bound client. */
+type CustomerAuditBinding = {
+  /** Request audit context. */
+  context: MutationAuditContext
+  /** Next event sequence, so several writes in one request get distinct event IDs. */
+  nextSequence: number
+  /** Event type and entity pairs already recorded, so a resumed multi-step write records them once. */
+  recorded: Set<string>
+  /** Audit writes waiting for the next transaction of the current write. */
+  pending: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /**
@@ -163,11 +182,21 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
   /** In-flight local table initialization. */
   private tableReady?: Promise<void>
 
+  /** Audit event table, when audit is configured. */
+  private readonly auditTableName: string | undefined
+
+  /** Request-scoped audit state of a client returned by `withAuditContext`. */
+  private readonly audit: CustomerAuditBinding | undefined
+
+  /** Options this client was created with, reused by `withAuditContext`. */
+  private readonly options: DynamoDbCustomerClientOptions
+
   /** Creates a DynamoDB-backed Customer client.
    *
    * @param options Adapter configuration and optional test replacements.
+   * @param audit Request-scoped audit state; only `withAuditContext` passes it.
    */
-  constructor(options: DynamoDbCustomerClientOptions = {}) {
+  constructor(options: DynamoDbCustomerClientOptions = {}, audit?: CustomerAuditBinding) {
     const serverConfig = loadServerConfig()
     const endpoint = serverConfig.dynamoDbEndpoint
     this.dynamoDbClient = options.dynamoDbClient ?? createDynamoDbClient(serverConfig)
@@ -184,6 +213,82 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     this.bootstrapLocalTable = options.bootstrapLocalTable ?? localEndpoint
     this.now = options.now ?? (() => new Date())
     this.id = options.id ?? randomUUID
+    this.auditTableName = options.auditTableName ?? getConfiguredAuditTableName()
+    this.audit = audit
+    this.options = options
+  }
+
+  /**
+   * Returns a client whose Customer graph writes also record audit events for one request.
+   *
+   * Each write compares the graph before and after it (see `createCustomerAuditEvents`) and
+   * commits the events in the first transaction of that write.
+   *
+   * @param context - Request audit context.
+   * @returns A client bound to the request; it shares this client's connections and table.
+   */
+  withAuditContext(context: MutationAuditContext): DynamoDbCustomerClient {
+    if (!this.auditTableName) return this
+    return new DynamoDbCustomerClient({
+      ...this.options,
+      tableName: this.tableName,
+      documentClient: this.documentClient,
+      dynamoDbClient: this.dynamoDbClient,
+      bootstrapLocalTable: this.bootstrapLocalTable,
+      now: this.now,
+      id: this.id,
+      auditTableName: this.auditTableName,
+    }, { context, nextSequence: 0, recorded: new Set(), pending: [] })
+  }
+
+  /**
+   * Prepares the audit events of one graph write for its first transaction.
+   *
+   * @param workspaceId - Workspace that owns the graph.
+   * @param before - Graph before the write.
+   * @param after - Graph after the write.
+   * @param merge - Customer merge the write completes, when any.
+   */
+  private prepareAudit(
+    workspaceId: string,
+    before: CustomerWorkspaceState,
+    after: CustomerWorkspaceState,
+    merge?: CustomerAuditMergeHint,
+  ): void {
+    const audit = this.audit
+    if (!audit) return
+    audit.pending = []
+    for (const event of createCustomerAuditEvents(workspaceId, before, after, merge)) {
+      const key = `${event.eventType}\0${event.entityId}`
+      if (audit.recorded.has(key)) continue
+      const put = createMutationAuditEventPut(this.auditTableName, audit.context, { ...event, sequence: audit.nextSequence })
+      if (!put) continue
+      audit.nextSequence += 1
+      audit.recorded.add(key)
+      audit.pending.push(put)
+    }
+  }
+
+  /**
+   * Returns how many record writes one atomic Customer transaction may hold.
+   *
+   * @returns The DynamoDB limit less the metadata row and, for an audited client, its audit events.
+   */
+  private atomicRecordLimit(): number {
+    return this.audit ? CUSTOMER_BATCH_RECORD_LIMIT : CUSTOMER_TRANSACTION_RECORD_LIMIT
+  }
+
+  /**
+   * Takes the audit writes prepared for the current graph write.
+   *
+   * @returns Audit Puts for this transaction; later transactions of the same write get none.
+   */
+  private takeAuditItems(): NonNullable<TransactWriteCommandInput['TransactItems']> {
+    const audit = this.audit
+    if (!audit) return []
+    const items = audit.pending
+    audit.pending = []
+    return items
   }
 
   /** Lists customers within one Workspace boundary.
@@ -1635,7 +1740,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       const previous = previousRows.get(recordKey)
       return !previous || JSON.stringify(previous) !== JSON.stringify(row)
     }).length + [...previousRows.keys()].filter((recordKey) => !nextRows.has(recordKey)).length
-    if (changedRows > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+    if (changedRows > this.atomicRecordLimit()) {
       throw new CustomerError(
         409,
         'CustomerTransactionTooLarge',
@@ -1662,7 +1767,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       const previous = previousRows.get(recordKey)
       return !previous || JSON.stringify(previous) !== JSON.stringify(row)
     }).length + [...previousRows.keys()].filter((recordKey) => !nextRows.has(recordKey)).length
-    if (changedRows > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+    if (changedRows > this.atomicRecordLimit()) {
       throw new CustomerError(
         409,
         'CustomerTransactionTooLarge',
@@ -1969,6 +2074,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     nextState: CustomerWorkspaceState,
     options: CustomerPersistOptions = {},
   ): Promise<void> {
+    this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected)
     const previousRows = new Map(serializeState(workspaceId, loaded.state).map((row) => [row.recordKey, row]))
     const nextRows = new Map(serializeState(workspaceId, nextState).map((row) => [row.recordKey, row]))
     const putItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
@@ -2048,7 +2154,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     }
     const childGroupsInOrder = [...childGroups.entries()].sort(([left], [right]) => compareCustomerRecordKeys(left, right))
     const childItems = childGroupsInOrder.flatMap(([, items]) => items)
-    const maxChildItems = CUSTOMER_TRANSACTION_RECORD_LIMIT - rootItems.length
+    const maxChildItems = CUSTOMER_BATCH_RECORD_LIMIT - rootItems.length
     if (maxChildItems < 0) {
       throw new CustomerError(409, 'CustomerTransactionTooLarge', 'The Customer merge root graph is too large to commit atomically.')
     }
@@ -2085,7 +2191,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     expectedRequestOperation?: CustomerRequestDeletionOperation,
   ): Promise<number> {
     const authorizationItems = authorizationConditionChecks ?? []
-    if (recordItems.length + authorizationItems.length > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+    if (recordItems.length + authorizationItems.length > this.atomicRecordLimit()) {
       throw new CustomerError(
         409,
         'CustomerTransactionTooLarge',
@@ -2167,7 +2273,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       )
       return revision + 1
     }
-    const batches = chunk(pendingKeys, CUSTOMER_TRANSACTION_RECORD_LIMIT)
+    const batches = chunk(pendingKeys, CUSTOMER_BATCH_RECORD_LIMIT)
     for (const [batchIndex, batch] of batches.entries()) {
       const cursor = batch.at(-1)
       if (cursor === undefined) continue
@@ -2250,7 +2356,8 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     options: CustomerTransactionOptions = {},
   ): Promise<number> {
     const authorizationConditionChecks = options.authorizationConditionChecks ?? []
-    if (recordItems.length + authorizationConditionChecks.length + 1 > 100) {
+    const auditItems = this.takeAuditItems()
+    if (recordItems.length + authorizationConditionChecks.length + auditItems.length + 1 > 100) {
       throw new CustomerError(
         409,
         'CustomerTransactionTooLarge',
@@ -2434,6 +2541,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
             : {}),
         },
       },
+      ...auditItems,
     ]
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
