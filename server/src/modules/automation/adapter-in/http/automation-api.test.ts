@@ -13,6 +13,7 @@ const {
   createTeamIssuesFake,
   createInboundWebhookProvisioning,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   originalBulkRecoveryTitle,
   resetTestApp,
   runWithTestAppDependencies,
@@ -43,8 +44,9 @@ import {
 } from '../../../work-items/work-item-configuration'
 import {
   createWorkItemAuthorizationChangedError,
+  normalizeWorkItemSchedule,
 } from '../../../work-items'
-import { InMemoryPlanningClient } from '../../../planning/planning'
+import { InMemoryPlanningClient, PlanningError } from '../../../planning/planning'
 import {
   createActiveAgentRun,
   InMemoryAgentRunStore,
@@ -3254,6 +3256,673 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       hierarchyRank: createWorkItemHierarchyRankBetween(topLevelStart),
     },
   ])
+})
+
+/**
+ * Builds the in-memory Work Item and Planning fakes a Project template with Planning content uses.
+ *
+ * @param planning - Planning client the application writes to.
+ * @returns Created Work Items keyed by ID.
+ */
+function configureProjectTemplatePlanningFakes(planning: InMemoryPlanningClient) {
+  const createdIssues = new Map<string, ReturnType<typeof createBulkRecoveryIssue>>()
+  setTestAppDependencies({
+    planning,
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(_directoryId, teamId, input) {
+        const id = String(input.idempotencyResourceId)
+        const schedule = normalizeWorkItemSchedule(input.schedule)
+        if (schedule.mode !== 'date-range') throw new Error('Template Work Items carry a date range.')
+        const issue = {
+          ...createBulkRecoveryIssue(),
+          id,
+          teamId,
+          title: String(input.title),
+          assigneeUserId: 'demo@example.com',
+          assignedProjectId: String(input.assignedProjectId),
+          schedule,
+          dueDate: schedule.endDate,
+        }
+        createdIssues.set(id, issue)
+        return { issue }
+      },
+      async getTeamIssueDetail(_directoryId, _teamId, issueId) {
+        const issue = createdIssues.get(issueId)
+        if (!issue) throw Object.assign(new Error('Work Item not found.'), { status: 404, code: 'TeamIssueNotFound' })
+        return { issue, activity: [], comments: [] }
+      },
+      async getTeamIssues(_directoryId, teamId) {
+        return { teamId, issues: [...createdIssues.values()] }
+      },
+      async getTeamHierarchyEntries() {
+        return [...createdIssues.values()].map((issue) => ({ issue, hierarchyRank: 'm' }))
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelationGraph() {
+        return { relations: [], graphRevision: 0 }
+      },
+      async replaceParent(_workspaceId, _teamId, input) {
+        return {
+          previousParentWorkItemId: null,
+          parentWorkItemId: input.nextParent?.workItemId ?? null,
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+    }),
+  })
+  return createdIssues
+}
+
+/**
+ * Seeds a Workspace roadmap that template Phases can be placed under.
+ *
+ * @param planning - Planning client to seed.
+ */
+async function seedProjectTemplatePlanningRoadmap(planning: InMemoryPlanningClient) {
+  const workspaceId = 'user#demo@example.com'
+  const base = {
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'unknown' as const,
+    risk: 'none' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-12-01', endDate: '2027-03-31' },
+    forecast: { startDate: '2026-12-01', endDate: '2027-03-31' },
+  }
+  await planning.create(workspaceId, { ...base, id: 'portfolio-1', type: 'portfolio', title: 'Portfolio', expectedRevision: 0 }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...base,
+    id: 'roadmap-1',
+    type: 'roadmap',
+    title: 'Roadmap',
+    parentId: 'portfolio-1',
+    expectedRevision: 1,
+  }, { workItems: [] })
+}
+
+/** Project template with a WBS, two dependencies, a Phase with a Milestone, and a top-level Milestone. */
+function createProjectTemplateWithPlanning(): AutomationTemplate {
+  const now = '2026-07-16T00:00:00.000Z'
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-planning',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Planned Project',
+    enabled: true,
+    version: 2,
+    revision: 1,
+    payload: {
+      nameJa: '計画付きプロジェクト',
+      tone: 'blue',
+      workItems: [
+        {
+          title: '要件定義',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+        },
+        { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+      ],
+      dependencies: [
+        { predecessor: '1', successor: '2', type: 'finish-to-start', lagDays: 0 },
+        { predecessor: '1.1', successor: '2', type: 'start-to-start', lagDays: 1 },
+      ],
+      phases: [{
+        title: '準備',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+      }],
+      milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+test('previews a Project template application with dates, counts, and validation errors without writing', async () => {
+  const template = createProjectTemplateWithPlanning()
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const projectCalls = configureFakeProjectClients(true, { teamProjects: [] })
+  const createdIssues = configureProjectTemplatePlanningFakes(planning)
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getTemplate() {
+        return structuredClone(template)
+      },
+    }),
+  })
+  const preview = (target: Record<string, unknown>) => app.request(
+    `/api/automation/templates/${template.id}/application-previews`,
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team', ...target } }),
+    },
+  )
+
+  const valid = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect(valid.status).toBe(200)
+  expect(await valid.json()).toEqual({
+    kind: 'project',
+    teamId: 'core-team',
+    name: '計画付きプロジェクト',
+    templateVersion: 2,
+    calendarFingerprint: expect.any(String),
+    startDate: '2026-12-05',
+    endDate: '2026-12-16',
+    workItems: [
+      { wbsNumber: '1', title: '要件定義', startDate: '2026-12-07', endDate: '2026-12-11' },
+      { wbsNumber: '1.1', title: 'ヒアリング', startDate: '2026-12-07', endDate: '2026-12-08' },
+      { wbsNumber: '2', title: '設計', startDate: '2026-12-14', endDate: '2026-12-16' },
+    ],
+    planningEntities: [
+      { type: 'phase', title: '準備', startDate: '2026-12-07', endDate: '2026-12-11' },
+      { type: 'milestone', title: '要件確定', phaseTitle: '準備', startDate: '2026-12-11', endDate: '2026-12-11' },
+      { type: 'milestone', title: '設計完了', startDate: '2026-12-16', endDate: '2026-12-16' },
+    ],
+    dependencyCount: 2,
+    errors: [],
+  })
+
+  const missingParent = await preview({ startDate: '2026-12-05' })
+  expect((await missingParent.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplatePlanningParentRequired' }),
+  ])
+  const wrongParent = await preview({ startDate: '2026-12-05', planningParentId: 'portfolio-1' })
+  expect((await wrongParent.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplatePlanningParentInvalid' }),
+  ])
+  const missingStart = await preview({ planningParentId: 'roadmap-1' })
+  expect((await missingStart.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplateStartDateRequired' }),
+  ])
+
+  // A lag that the WBS dates cannot meet is reported against the dependency.
+  template.payload = {
+    ...template.payload,
+    dependencies: [{ predecessor: '1', successor: '2', type: 'finish-to-start', lagDays: 5 }],
+  }
+  const conflicted = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect((await conflicted.json()).errors).toEqual([
+    expect.objectContaining({
+      code: 'AutomationProjectTemplateDependencyConflict',
+      dependencyNumber: 1,
+    }),
+  ])
+
+  // A Planning graph without room for the template's rows is reported before anything is created.
+  const get = planning.get.bind(planning)
+  planning.get = async (...args) => {
+    const snapshot = await get(...args)
+    return { ...snapshot, capacity: { ...snapshot.capacity, liveRowCount: snapshot.capacity.liveRowCapacity - 1 } }
+  }
+  const full = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect((await full.json()).errors).toContainEqual(expect.objectContaining({ code: 'PlanningCapacityExceeded' }))
+  planning.get = get
+
+  expect(createdIssues.size).toBe(0)
+  expect(projectCalls.projectCreates).toEqual([])
+  expect((await planning.get('user#demo@example.com', { workItems: [] })).entities).toHaveLength(2)
+})
+
+test('applies a Project template with Phases, Milestones, and WBS dependencies, and a retry creates nothing twice', async () => {
+  const template = createProjectTemplateWithPlanning()
+  const now = '2026-07-16T00:00:00.000Z'
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_planning',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = []
+  configureFakeProjectClients(true, {
+    teamProjects,
+    // The applier manages the Project the application creates.
+    projectAccesses: [
+      { projectId: 'application_project_planning', role: 'manager', teamId: 'core-team' },
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+    ],
+    async projectCreateHook(_input, completionTransactItems) {
+      expect(completionTransactItems).toHaveLength(0)
+      projectCreates += 1
+      teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+      // The applier loses Workspace administration after the request was authorized.
+      demoteApplier = true
+    },
+  })
+  let projectCreates = 0
+  const createdIssues = configureProjectTemplatePlanningFakes(planning)
+  // Count each create call: the fake's Map would hide a second create of the same ID.
+  const issueCreates = new Map<string, number>()
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    teamIssues: {
+      ...teamIssues,
+      async createTeamIssue(...args) {
+        const id = String(args[2].idempotencyResourceId)
+        issueCreates.set(id, (issueCreates.get(id) ?? 0) + 1)
+        return teamIssues.createTeamIssue(...args)
+      },
+    },
+  })
+  let demoteApplier = false
+  const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getActiveMember(workspaceId, memberKey) {
+        const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
+        return member && demoteApplier ? { ...member, role: 'member' } : member
+      },
+    },
+  })
+  let failNextDependency = true
+  const createWorkItemDependency = planning.createWorkItemDependency.bind(planning)
+  planning.createWorkItemDependency = async (...args) => {
+    if (failNextDependency) {
+      failNextDependency = false
+      throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    return createWorkItemDependency(...args)
+  }
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
+        application = { ...candidate, status: 'running', revision: candidate.revision + 1, runnerLeaseExpiresAt: leaseExpiresAt }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+  const request = () => app.request(`/api/automation/templates/${template.id}/applications`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'apply-project-planning',
+    },
+    body: JSON.stringify({ target: application.target }),
+  })
+
+  const demoted = await request()
+  expect(await demoted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(demoted.status).toBe(409)
+  expect(application.status).toBe('pending')
+  expect(failNextDependency).toBe(true)
+  demoteApplier = false
+
+  const conflicted = await request()
+  expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(conflicted.status).toBe(409)
+  expect(application.status).toBe('pending')
+  // Someone moves a created dependency endpoint to another Project of the Team before the retry.
+  teamProjects.push({ id: 'other-project', name: '別プロジェクト', tone: 'blue' })
+  const moved = createdIssues.get('application_project_planning_wbs_2')
+  if (!moved) throw new Error('The first attempt must create the Work Items.')
+  createdIssues.set(moved.id, { ...moved, assignedProjectId: 'other-project' })
+  // Someone archives a created Milestone before the retry; the retry keeps it archived.
+  const beforeArchive = await planning.get('user#demo@example.com', { workItems: [] })
+  await planning.archive(
+    'user#demo@example.com',
+    'application_project_planning_plan_2',
+    { expectedRevision: beforeArchive.revision },
+    { workItems: [] },
+  )
+
+  const response = await request()
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'succeeded',
+    result: { workItemCount: 3, planningEntityCount: 3, dependencyCount: 2 },
+  })
+  expect(projectCreates).toBe(1)
+  expect(Object.fromEntries(issueCreates)).toEqual({
+    application_project_planning_wbs_0: 1,
+    application_project_planning_wbs_1: 1,
+    application_project_planning_wbs_2: 1,
+  })
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities
+    .filter((entity) => entity.projectId === application.id && entity.archivedAt === undefined)
+    .map((entity) => ({
+      id: entity.id,
+      type: entity.type,
+      title: entity.title,
+      parentId: entity.parentId,
+      teamId: entity.teamId,
+      baseline: entity.baseline,
+    }))).toEqual([
+    {
+      id: 'application_project_planning_plan_0',
+      type: 'phase',
+      title: '準備',
+      parentId: 'roadmap-1',
+      teamId: 'core-team',
+      baseline: { startDate: '2026-12-07', endDate: '2026-12-11' },
+    },
+    {
+      id: 'application_project_planning_plan_1',
+      type: 'milestone',
+      title: '要件確定',
+      parentId: 'application_project_planning_plan_0',
+      teamId: 'core-team',
+      baseline: { startDate: '2026-12-11', endDate: '2026-12-11' },
+    },
+  ])
+  const withWorkItems = await planning.get('user#demo@example.com', {
+    workItems: [...createdIssues.values()].map((issue) => ({
+      id: issue.id,
+      revision: issue.revision,
+      teamId: issue.teamId,
+      title: issue.title,
+      projectId: application.id,
+      statusCategory: issue.statusCategory,
+      dueDate: issue.dueDate,
+      schedule: issue.schedule,
+    })),
+  })
+  expect(withWorkItems.workItemDependencies.map((dependency) => ({
+    id: dependency.id,
+    predecessor: dependency.predecessor.workItemId,
+    successor: dependency.successor.workItemId,
+    type: dependency.type,
+    lagDays: dependency.lagDays,
+  }))).toEqual([
+    {
+      id: 'application_project_planning_dep_0',
+      predecessor: 'application_project_planning_wbs_0',
+      successor: 'application_project_planning_wbs_2',
+      type: 'finish-to-start',
+      lagDays: 0,
+    },
+    {
+      id: 'application_project_planning_dep_1',
+      predecessor: 'application_project_planning_wbs_1',
+      successor: 'application_project_planning_wbs_2',
+      type: 'start-to-start',
+      lagDays: 1,
+    },
+  ])
+})
+
+test('resumes Project template Planning after its Phase moved, leaving the Phase\'s missing Milestone out', async () => {
+  const template = createProjectTemplateWithPlanning()
+  // Phases and Milestones only, so the retry depends on nothing but Planning.
+  template.payload = {
+    nameJa: '計画付きプロジェクト',
+    tone: 'blue',
+    phases: [{
+      title: '準備',
+      startOffsetWorkingDays: 0,
+      durationWorkingDays: 5,
+      milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+    }],
+    milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+  }
+  const now = '2026-07-16T00:00:00.000Z'
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_phase_moved',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = []
+  configureFakeProjectClients(true, {
+    teamProjects,
+    projectAccesses: [
+      { projectId: 'application_project_phase_moved', role: 'manager', teamId: 'core-team' },
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+    ],
+    async projectCreateHook() {
+      teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+    },
+  })
+  configureProjectTemplatePlanningFakes(planning)
+  // The first attempt stops after creating the Phase, before its Milestone.
+  let failMilestone = true
+  const create = planning.create.bind(planning)
+  planning.create = async (...args) => {
+    if (failMilestone && args[1].id === 'application_project_phase_moved_plan_1') {
+      failMilestone = false
+      throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    return create(...args)
+  }
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
+        application = { ...candidate, status: 'running', revision: candidate.revision + 1, runnerLeaseExpiresAt: leaseExpiresAt }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+  const request = () => app.request(`/api/automation/templates/${template.id}/applications`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'apply-project-phase-moved',
+    },
+    body: JSON.stringify({ target: application.target }),
+  })
+
+  const interrupted = await request()
+  expect(await interrupted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(application.status).toBe('pending')
+  // Someone moves the created Phase to another Project of the Team before the retry.
+  teamProjects.push({ id: 'other-project', name: '別プロジェクト', tone: 'blue' })
+  const beforeMove = await planning.get('user#demo@example.com', { workItems: [] })
+  await planning.move(
+    'user#demo@example.com',
+    'application_project_phase_moved_plan_0',
+    { parentId: 'roadmap-1', teamId: 'core-team', projectId: 'other-project', expectedRevision: beforeMove.revision },
+    { workItems: [] },
+  )
+
+  const response = await request()
+  expect(response.status).toBe(200)
+  // The Phase and the top-level Milestone exist; the Phase's Milestone was never created.
+  expect(await response.json()).toMatchObject({ status: 'succeeded', result: { planningEntityCount: 2 } })
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities
+    .filter((entity) => entity.id.startsWith('application_project_phase_moved_'))
+    .map((entity) => [entity.id, entity.projectId])).toEqual([
+    ['application_project_phase_moved_plan_0', 'other-project'],
+    ['application_project_phase_moved_plan_2', 'application_project_phase_moved'],
+  ])
+})
+
+test('treats a Planning parent moved during an existing-entity re-read as a conflict to retry', async () => {
+  const template = createProjectTemplateWithPlanning()
+  // An archived Phase followed by a top-level Milestone, so Planning goes on after the re-read.
+  template.payload = {
+    nameJa: '計画付きプロジェクト',
+    tone: 'blue',
+    phases: [{ title: '準備', startOffsetWorkingDays: 0, durationWorkingDays: 5 }],
+    milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+  }
+  const now = '2026-07-16T00:00:00.000Z'
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_parent_moved',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = [
+    { id: 'other-project', name: '別プロジェクト', tone: 'blue' },
+  ]
+  configureFakeProjectClients(true, {
+    teamProjects,
+    projectAccesses: [
+      { projectId: 'application_project_parent_moved', role: 'manager', teamId: 'core-team' },
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+    ],
+    async projectCreateHook() {
+      teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+    },
+  })
+  configureProjectTemplatePlanningFakes(planning)
+  // The Phase's ID is taken by an archive, and the roadmap moves into a Project meanwhile.
+  const create = planning.create.bind(planning)
+  planning.create = async (...args) => {
+    if (args[1].id === 'application_project_parent_moved_plan_0') {
+      const current = await planning.get('user#demo@example.com', { workItems: [] })
+      await planning.move(
+        'user#demo@example.com',
+        'roadmap-1',
+        { parentId: 'portfolio-1', teamId: 'core-team', projectId: 'other-project', expectedRevision: current.revision },
+        { workItems: [] },
+      )
+      throw new PlanningError(409, 'PlanningEntityExists', 'A Planning entity with this ID already exists.')
+    }
+    return create(...args)
+  }
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
+        application = { ...candidate, status: 'running', revision: candidate.revision + 1, runnerLeaseExpiresAt: leaseExpiresAt }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+
+  const response = await app.request(`/api/automation/templates/${template.id}/applications`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'apply-project-parent-moved',
+    },
+    body: JSON.stringify({ target: application.target }),
+  })
+
+  expect(await response.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(application.status).toBe('pending')
+  // The top-level Milestone was not created under the moved roadmap.
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities.some((entity) => entity.id.startsWith('application_project_parent_moved_'))).toBe(false)
+})
+
+test('refuses a new Project template application whose accepted preview is stale', async () => {
+  const template = createProjectTemplateWithPlanning()
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const projectCalls = configureFakeProjectClients(true, { teamProjects: [] })
+  configureProjectTemplatePlanningFakes(planning)
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getTemplate() {
+        return structuredClone(template)
+      },
+      // A new receipt reads the calendar for the version it pins, as the repository does.
+      async reserveTemplateApplication(_workspaceId, _actorId, _templateId, _target, _key, readCalendarPolicy) {
+        await readCalendarPolicy?.(template.version)
+        throw new Error('The stale preview must stop the reservation.')
+      },
+    }),
+  })
+  const target = { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' }
+  const preview = await app.request(`/api/automation/templates/${template.id}/application-previews`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  })
+  const { calendarFingerprint } = await preview.json()
+  expect(typeof calendarFingerprint).toBe('string')
+  const apply = (expectedPreview: Record<string, unknown>) => app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-stale-preview',
+      },
+      body: JSON.stringify({ target, expectedPreview }),
+    },
+  )
+
+  // Another administrator saved a new version after the preview.
+  const oldVersion = await apply({ templateVersion: template.version - 1, calendarFingerprint })
+  expect(oldVersion.status).toBe(409)
+  expect(await oldVersion.json()).toMatchObject({ code: 'AutomationTemplatePreviewStale' })
+  // The working calendar changed after the preview.
+  const oldCalendar = await apply({ templateVersion: template.version, calendarFingerprint: 'stale' })
+  expect(oldCalendar.status).toBe(409)
+  expect(await oldCalendar.json()).toMatchObject({ code: 'AutomationTemplatePreviewStale' })
+  expect(projectCalls.projectCreates).toEqual([])
 })
 
 test('rejects a Project template WBS without a start date or with a denied child type before creating anything', async () => {
