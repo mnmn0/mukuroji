@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
+  UpdateTableCommand,
   DynamoDBClient,
   waitUntilTableExists,
+  type AttributeDefinition,
+  type GlobalSecondaryIndex,
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -4437,6 +4440,22 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
 
 const localTableInitializers = new Map<string, Promise<void>>()
 
+/** Key attributes of the CDK Planning table's `InboxDigestDueIndex`. */
+const LOCAL_INBOX_DIGEST_ATTRIBUTES: AttributeDefinition[] = [
+  { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+  { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
+]
+
+/** Matches the CDK Planning table; the Inbox digest worker finds due members here. */
+const LOCAL_INBOX_DIGEST_INDEX: GlobalSecondaryIndex = {
+  IndexName: 'InboxDigestDueIndex',
+  KeySchema: [
+    { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+    { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
+  ],
+  Projection: { ProjectionType: 'KEYS_ONLY' },
+}
+
 /** Local DynamoDB に CDK 互換の Planning table を作成します。 */
 export async function ensureLocalPlanningTable(tableName: string, client: DynamoDBClient) {
   const current = localTableInitializers.get(tableName)
@@ -4446,6 +4465,14 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
       const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
       if (!isPlanningTableDescription(response.Table)) {
         throw new Error(`Local DynamoDB table "${tableName}" has an incompatible schema.`)
+      }
+      if (!response.Table?.GlobalSecondaryIndexes?.some((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)) {
+        // Tables created before the Inbox digest job lack its index; add it like the CDK table.
+        await client.send(new UpdateTableCommand({
+          TableName: tableName,
+          AttributeDefinitions: LOCAL_INBOX_DIGEST_ATTRIBUTES,
+          GlobalSecondaryIndexUpdates: [{ Create: LOCAL_INBOX_DIGEST_INDEX }],
+        }))
       }
       return
     } catch (error) {
@@ -4458,8 +4485,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
-        { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
-        { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
+        ...LOCAL_INBOX_DIGEST_ATTRIBUTES,
       ],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
@@ -4472,15 +4498,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
-      }, {
-        // Matches the CDK Planning table; the Inbox digest worker finds due members here.
-        IndexName: 'InboxDigestDueIndex',
-        KeySchema: [
-          { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
-          { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
-        ],
-        Projection: { ProjectionType: 'KEYS_ONLY' },
-      }],
+      }, LOCAL_INBOX_DIGEST_INDEX],
       BillingMode: 'PAY_PER_REQUEST',
     }))
     await waitUntilTableExists({ client, maxWaitTime: 30 }, { TableName: tableName })
