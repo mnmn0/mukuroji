@@ -434,10 +434,9 @@ export function IssueDecisionsTab({
                       onClick={() => {
                         setPromotions((current) => ({ ...current, [item.id]: 'pending' }))
                         riskPromotion.promote(item).then(
-                          () => setPromotions((current) => {
-                            const { [item.id]: _settled, ...rest } = current
-                            return rest
-                          }),
+                          () => setPromotions((current) =>
+                            Object.fromEntries(Object.entries(current).filter(([id]) => id !== item.id)),
+                          ),
                           () => setPromotions((current) => ({ ...current, [item.id]: 'failed' })),
                         )
                       }}
