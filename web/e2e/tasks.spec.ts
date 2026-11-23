@@ -4091,8 +4091,9 @@ test.describe('authenticated task page', () => {
     await expect(projectLog).toContainText('判断待ち')
     await expect(projectLog).toContainText('見直して期限を今日以降に更新するか、クローズすると消えます')
     await projectLog.getByRole('link', { name: '主要部品のベンダー納期遅延' }).click()
-    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&tab=permissions')
     await expect(page.getByTestId('project-raid-log')).toBeVisible()
+    // The tab request is consumed once the screen switches, so the URL keeps only the Project.
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
   })
 
   test('Issue #194: Done の Focus 行は状態 selector から再オープンできる', async ({ page }) => {
@@ -12303,7 +12304,7 @@ test.describe('authenticated task page', () => {
     await expect(brandNotification).toBeVisible()
   })
 
-  test('Issue #344: 登録簿を編集できない人には Work Item のリスクの登録を出さない', async ({ page }) => {
+  test('Issue #344: 登録簿を編集できない人には Work Item のリスクの登録を出さず、確認できないときは再読み込みを出す', async ({ page }) => {
     await page.route(/.*\/api\/teams\/core-team\/issues\/wireframe\/context-items(?:\?.*)?$/, async (route) => {
       if (route.request().method() !== 'GET') {
         await route.fallback()
@@ -12332,17 +12333,25 @@ test.describe('authenticated task page', () => {
         },
       })
     })
-    let logReads = 0
+    // The first read fails and the retry answers read-only.
+    const answers: { status: number, canEdit?: boolean }[] = [{ status: 503 }, { status: 200, canEdit: false }]
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
-      logReads += 1
-      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [], viewer: { canEdit: false } } })
+      const answer = answers.shift() ?? { status: 200, canEdit: true }
+      if (answer.status !== 200) {
+        await route.fulfill({ status: answer.status, json: { error: 'Unavailable' } })
+        return
+      }
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [], viewer: { canEdit: answer.canEdit } } })
     })
 
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const panel = page.getByTestId('issue-collaboration-panel')
     await panel.getByRole('tab', { name: /判断/ }).click()
     await expect(panel.getByText('デザイン確認が遅れる')).toBeVisible()
-    await expect.poll(() => logReads).toBeGreaterThan(0)
+    await expect(panel.getByRole('alert').filter({ hasText: 'Project のリスクに登録できるか確認できませんでした。' })).toBeVisible()
+    await expect(panel.getByTestId('context-promote-risk')).toHaveCount(0)
+    await panel.getByRole('button', { name: '再読み込み' }).click()
+    await expect(panel.getByRole('alert').filter({ hasText: '確認できませんでした' })).toHaveCount(0)
     await expect(panel.getByTestId('context-promote-risk')).toHaveCount(0)
   })
 
@@ -12428,8 +12437,16 @@ test.describe('authenticated task page', () => {
       })
     })
     await Promise.all([panel.getByRole('link', { name: '登録簿を開く' }).click(), accepted])
-    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&tab=permissions')
     await expect(page.getByTestId('project-raid-log-entry')).toContainText('デザイン確認が遅れる')
+    await expect(page).not.toHaveURL(/tab=permissions/)
+
+    // After moving back to the table, the same link opens the log again.
+    await page.getByRole('tab', { name: 'テーブル' }).click()
+    await expect(page.getByTestId('project-raid-log')).toHaveCount(0)
+    await panel.getByRole('tab', { name: /判断/ }).click()
+    await panel.getByTestId('context-promote-risk').click()
+    await panel.getByRole('link', { name: '登録簿を開く' }).click()
+    await expect(page.getByTestId('project-raid-log')).toBeVisible()
   })
 
   test('Issue #192 の共同作業タブで判断のページング、採用解決策、利用不能な情報源を操作できる', async ({ page }) => {

@@ -34,6 +34,14 @@ export type ProjectRiskPromotion = {
    * the decisions tab, so switching collaboration tabs does not offer the same risk again.
    */
   promotedItemIds: ReadonlySet<string>
+  /**
+   * Set when the Project log could not be read, so it is unknown whether the viewer may add
+   * risks. Promotion is then not offered, and `retry` reads the log again.
+   */
+  capabilityError?: {
+    /** Reads the Project log again. */
+    retry: () => void
+  }
 }
 
 /**
@@ -76,7 +84,8 @@ function promotionKey(teamId: string, projectId: string, itemId: string) {
  *
  * @param scope - Session, Team, Project, and Work Item.
  * @returns The promotion, or `undefined` when the Work Item has no Project or session, or the
- * viewer may not edit the Project log.
+ * viewer may not edit the Project log. When the log could not be read, the promotion carries
+ * `capabilityError` instead of being dropped, so the failure is shown with a retry.
  */
 export function usePromoteProjectRisk({
   accessToken,
@@ -115,11 +124,17 @@ export function usePromoteProjectRisk({
     }
     return ids
   }, [projectId, promotedKeys, teamId])
-  if (!accessToken || !teamId || !projectId || log.data?.viewer?.canEdit !== true) return undefined
+  const { mutate: reloadLog } = log
+  const retry = useCallback(() => {
+    void reloadLog()
+  }, [reloadLog])
+  if (!accessToken || !teamId || !projectId) return undefined
   const search = new URLSearchParams({ teamId, tab: 'permissions' })
-  return {
+  const promotion = {
     promote,
     logPath: `/projects/${encodeURIComponent(projectId)}/issues?${search.toString()}`,
     promotedItemIds,
   }
+  if (log.data === undefined && log.error !== undefined) return { ...promotion, capabilityError: { retry } }
+  return log.data?.viewer?.canEdit === true ? promotion : undefined
 }

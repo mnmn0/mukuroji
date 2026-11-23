@@ -291,7 +291,8 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
  * one the caller can read and must belong to this Project, and its fence fails the write when the
  * Work Item is deleted or moved to another Project before it commits. Every refusal answers the same 400
  * whether the Work Item is missing, hidden, or in another Project, so the response does not
- * reveal which Work Items exist.
+ * reveal which Work Items exist. An Enterprise caller also needs `work-items.read` on the Project,
+ * because the write request itself is authorized by `projects.write` alone.
  *
  * @param principal - Authenticated principal changing the entry.
  * @param teamId - Team that owns the Project.
@@ -308,6 +309,23 @@ async function verifyEntryReferences(
   references: ProjectRaidEntryReferences,
 ): Promise<ProjectRaidLogCallerAuthorizationCheck[]> {
   const workItemFences: ProjectRaidLogCallerAuthorizationCheck[] = []
+  const [firstAddedWorkItemId] = references.addedWorkItemIds
+  if (
+    firstAddedWorkItemId !== undefined &&
+    principal.enterprisePermissions !== undefined &&
+    !hasEnterprisePermissionAtResource(principal, 'work-items.read', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectRaidEntry',
+      `Related Work Item "${firstAddedWorkItemId}" is not a Work Item of this Project.`,
+    )
+  }
   for (const workItemId of references.addedWorkItemIds) {
     let assignedProjectId: string | undefined
     try {

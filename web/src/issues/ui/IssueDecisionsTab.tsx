@@ -407,7 +407,18 @@ export function IssueDecisionsTab({
                     {t('collaboration.decisions.replace')}
                   </button>
                 ) : null}
-                {riskPromotion && item.kind === 'risk' && item.state !== 'superseded' ? (
+                {riskPromotion?.capabilityError && item.kind === 'risk' && item.state !== 'superseded' ? (
+                  <span className="inline-flex min-h-[44px] flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-danger)]" role="alert">
+                    {t('collaboration.decisions.promoteRisk.unavailable')}
+                    <button
+                      className="min-h-[44px] text-[var(--workbench-primary-text)] underline underline-offset-2"
+                      onClick={riskPromotion.capabilityError.retry}
+                      type="button"
+                    >
+                      {t('collaboration.retry')}
+                    </button>
+                  </span>
+                ) : riskPromotion && item.kind === 'risk' && item.state !== 'superseded' ? (
                   riskPromotion.promotedItemIds.has(item.id) ? (
                     <span className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
                       {t('collaboration.decisions.promoteRisk.done')}

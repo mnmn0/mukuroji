@@ -1198,3 +1198,28 @@ export const RiskAlreadyPromoted: Story = {
     await expect(canvas.queryByRole('button', { name: 'Project のリスクに登録' })).toBeNull()
   },
 }
+
+/**
+ * The Project log could not be read, so it is unknown whether the viewer may add risks: the row
+ * says so and offers a retry instead of the button.
+ */
+export const RiskPromotionCapabilityError: Story = {
+  args: {
+    controller: riskPromotionController,
+    defaultTab: 'decisions',
+    riskPromotion: {
+      promote: fn(async () => undefined),
+      logPath: '/projects/refero/issues?teamId=core-team&tab=permissions',
+      promotedItemIds: new Set<string>(),
+      capabilityError: { retry: fn() },
+    },
+  },
+  decorators: [withRouter],
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Project のリスクに登録できるか確認できませんでした。')
+    await expect(canvas.queryByRole('button', { name: 'Project のリスクに登録' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: '再読み込み' }))
+    await expect(args.riskPromotion?.capabilityError?.retry).toHaveBeenCalledOnce()
+  },
+}

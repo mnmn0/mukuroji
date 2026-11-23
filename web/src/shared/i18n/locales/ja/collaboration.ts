@@ -112,6 +112,7 @@ export const collaborationMessages = {
   'collaboration.decisions.promoteRisk': 'Project のリスクに登録',
   'collaboration.decisions.promoteRisk.done': 'Project のリスクに登録しました。',
   'collaboration.decisions.promoteRisk.open': '登録簿を開く',
+  'collaboration.decisions.promoteRisk.unavailable': 'Project のリスクに登録できるか確認できませんでした。',
   'collaboration.decisions.promoteRisk.failed': 'Project のリスクに登録できませんでした。Project のメンバーか確認して、もう一度お試しください。',
   'collaboration.decisions.empty.title': '整理済みの判断はまだありません',
   'collaboration.decisions.empty.description': '根拠を判断へ記録するか、判断・アクション・リスク・補足情報を人が追加してください。',
