@@ -38,7 +38,7 @@ Workspace profile（下の「Workspace 全体を読む」）になります。on
 4. **接続を確認**: クライアントを再起動し、agent から確認する。確認に使うツールは profile で違います。
    - tasks profile（既定）: `get_configuration` を呼べることを確認する。
      `mcp.serverCompatibility.status` が `compatible` 以外なら、`message` に従って Mukuroji か `mcp.mjs` を更新する。
-   - Workspace profile: `get_configuration` はありません。代わりに `whoami` を呼び、自分の member ID と名前が返ることを確認する。
+   - Workspace profile: `get_configuration` はありません。代わりに `whoami` を呼び、自分の member ID と email が返ることを確認する（名前は未設定なら省かれます）。
 
    `node mcp.mjs --version` で手元の `mcp.mjs` の version を確認できます。
 
