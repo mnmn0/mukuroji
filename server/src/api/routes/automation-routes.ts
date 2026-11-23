@@ -1083,7 +1083,8 @@ function createApiBulkOperationAdapter(
           preparedBody,
           configuration,
           loaded.detail.issue.contributorAssignments ?? [],
-          action.toMemberUserId,
+          // The successor is checked even when their existing share absorbs the moved one.
+          [action.toMemberUserId],
         )
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
@@ -1365,24 +1366,24 @@ function createApiBulkOperationAdapter(
         isStoredContributorAssignmentList(item.undoPayload.contributorAssignments)
         ? listBulkReassignMemberRemovedShares(item.undoPayload.contributorAssignments, loaded.detail.issue)
         : []
+      const restoredOwner = typeof item.undoPayload.assigneeUserId === 'string' &&
+        item.undoPayload.assigneeUserId.trim().toLowerCase() !==
+          loaded.detail.issue.assigneeUserId.trim().toLowerCase()
+        ? [item.undoPayload.assigneeUserId.trim().toLowerCase()]
+        : []
       const configuredBody = undoConfiguration === undefined || operation.action.type !== 'reassign-member'
         ? preparedUndoBody
-        : {
-            ...preparedUndoBody,
-            ...withContributorAssignmentChange(
-              preparedUndoBody,
-              await readContributorAssignmentChange(
-                principal.directoryId,
-                preparedUndoBody,
-                undoConfiguration,
-                [...(loaded.detail.issue.contributorAssignments ?? []), ...removedShares],
-                {
-                  fencedMembers: removedShares.flatMap((share) =>
-                    share.memberUserId === undefined ? [] : [share.memberUserId]),
-                },
-              ),
-            ),
-          }
+        : await withBulkReassignMemberFences(
+            principal.directoryId,
+            preparedUndoBody,
+            undoConfiguration,
+            [...(loaded.detail.issue.contributorAssignments ?? []), ...removedShares],
+            // The owner it gives the Work Item back to must stay active until the write commits.
+            [
+              ...restoredOwner,
+              ...removedShares.flatMap((share) => share.memberUserId === undefined ? [] : [share.memberUserId]),
+            ],
+          )
       if ('assigneeUserId' in configuredBody) {
         await requireActiveWorkspaceAssignee(
           principal.directoryId,
@@ -1705,17 +1706,19 @@ function withoutBulkUndoActualDates(
 }
 
 /**
- * Adds a member handover's contributor change and the successor's membership fence to an update.
+ * Adds a member handover's contributor change and the membership fences of the members it gives
+ * work to.
  *
- * The successor must stay an active non-guest member until the write commits, whether they take
- * over ownership, a share, or both. When they hold a share afterwards the contributor change
- * already fences them; otherwise, as when only ownership moves, one fence is added here.
+ * Each of `members` must stay an active non-guest member until the write commits, whether they
+ * take ownership, a share, or both. A member who holds a share afterwards is already fenced by
+ * the contributor change; every other member, such as a new or restored owner, gets one fence
+ * here.
  *
  * @param directoryId - Workspace directory ID.
  * @param body - Configured update body.
  * @param configuration - Team configuration that defines the job roles.
- * @param existing - Contributors currently stored on the Work Item.
- * @param successor - Member who takes over.
+ * @param existing - Contributors treated as already stored on the Work Item.
+ * @param members - Normalized members the handover or its undo gives work to.
  * @returns The update body with the contributor change and every membership fence.
  */
 async function withBulkReassignMemberFences<Body extends UpdateTeamIssueRequestBody>(
@@ -1723,22 +1726,23 @@ async function withBulkReassignMemberFences<Body extends UpdateTeamIssueRequestB
   body: Body,
   configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
   existing: NonNullable<TeamIssueResponseItem['contributorAssignments']>,
-  successor: string,
+  members: readonly string[],
 ): Promise<Body> {
   const change = await readContributorAssignmentChange(directoryId, body, configuration, existing, {
-    // The successor is checked even when their existing share absorbs the moved one.
-    fencedMembers: [successor],
+    fencedMembers: members,
   })
   const fields = withContributorAssignmentChange(body, change)
-  if (change?.contributorAssignments.some((assignment) => assignment.memberUserId === successor) === true) {
-    return { ...body, ...fields }
-  }
+  const sharedMembers = new Set((change?.contributorAssignments ?? []).flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId]))
+  const unfencedMembers = [...new Set(members)].filter((member) => !sharedMembers.has(member))
+  if (unfencedMembers.length === 0) return { ...body, ...fields }
+  const memberFences = await Promise.all(unfencedMembers.map((member) => createActiveMemberFence(directoryId, member)))
   return {
     ...body,
     ...fields,
     authorizationConditionChecks: [
       ...(fields.authorizationConditionChecks ?? body.authorizationConditionChecks ?? []),
-      await createActiveMemberFence(directoryId, successor),
+      ...memberFences,
     ],
   }
 }

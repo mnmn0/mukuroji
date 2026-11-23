@@ -805,6 +805,61 @@ test('undoes a merged handover with the original share and its archived job role
   expect(inactive.calls.issueUpdates).toHaveLength(0)
 })
 
+test('checks the restored owner when an owner-only handover is undone', async () => {
+  const runUndo = async (inactiveWorkspaceMemberKeys: string[]) => {
+    const updateChecks: unknown[][] = []
+    const calls = configureFakeProjectClients(true, {
+      detailAssigneeUserId: 'demo@example.com',
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys,
+      issueUpdateHook: async (input) => {
+        updateChecks.push([...(input.authorizationConditionChecks ?? [])])
+      },
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-owner-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'sato@example.com', toMemberUserId: 'demo@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload: { assigneeUserId: 'sato@example.com', contributorAssignments: [] },
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    })
+    expect(response.status).toBe(200)
+    return { body: await response.json(), calls, updateChecks }
+  }
+
+  // The owner it brings back must still be an active member when the write commits.
+  const restored = await runUndo([])
+  expect(restored.body).toMatchObject({ status: 'undone' })
+  expect(restored.calls.issueUpdates).toHaveLength(1)
+  expect(JSON.stringify(restored.updateChecks.at(-1))).toContain('MEMBER#sato@example.com')
+
+  const inactive = await runUndo(['sato@example.com'])
+  expect(inactive.body.status).not.toBe('undone')
+  expect(inactive.calls.issueUpdates).toHaveLength(0)
+})
+
 test('fences bulk Project-move undo with the Planning revision', async () => {
   const calls = configureFakeProjectClients(true, {
     detailAssignedProjectId: 'project-2',
