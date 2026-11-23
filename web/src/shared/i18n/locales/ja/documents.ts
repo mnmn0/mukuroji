@@ -334,6 +334,7 @@ export const documentsMessages = {
   'documents.whiteboard.canvas': 'ホワイトボード',
   'documents.whiteboard.note': '付箋',
   'documents.whiteboard.text': 'テキスト',
+  'documents.whiteboard.noteDone': '完了',
   'documents.whiteboard.shape': '図形',
   'documents.whiteboard.frame': 'フレーム',
   'documents.whiteboard.work-item': 'Work Item',

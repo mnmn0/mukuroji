@@ -6,8 +6,17 @@ import type { McpServer } from '@modelcontextprotocol/server'
 import { createCodingAgentMcpServer } from '../../modules/coding-agent-mcp/adapter-in/mcp/server'
 import { readServerCompatibility } from '../../modules/coding-agent-mcp/adapter-out/http/server-compatibility'
 import { createAgentWorkItemApi } from '../../modules/coding-agent-mcp/adapter-out/http/work-item-api'
+import { createWorkspaceApi } from '../../modules/coding-agent-mcp/adapter-out/http/workspace-api'
+import { createWorkspaceMcpServer } from '../../modules/coding-agent-mcp/adapter-in/mcp/workspace-server'
 import { assessServerCompatibility, type ServerCompatibility } from '../../modules/coding-agent-mcp/application/compatibility'
 import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+
+const profileSchema = z.enum(['tasks', 'workspace']).default('tasks')
+
+const workspaceConfigSchema = z.object({
+  MUKUROJI_MCP_URL: z.url(),
+  MUKUROJI_MCP_TOKEN: z.string().min(1),
+})
 
 const configSchema = z.object({
   MUKUROJI_MCP_URL: z.url(),
@@ -74,24 +83,18 @@ export type CodingAgentMcpFactory = {
  * @returns A server factory compatible with modern and legacy MCP stdio clients.
  */
 export function composeCodingAgentMcp(environment: Record<string, string | undefined> = process.env): CodingAgentMcpFactory {
+  const profile = profileSchema.safeParse(environment.MUKUROJI_MCP_PROFILE)
+  if (!profile.success) {
+    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_PROFILE must be tasks or workspace.')
+  }
+  if (profile.data === 'workspace') return composeWorkspaceMcp(environment)
   const parsed = configSchema.safeParse(environment)
   if (!parsed.success) {
     throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL, MUKUROJI_MCP_TOKEN, MUKUROJI_MCP_TEAM_ID, and MUKUROJI_MCP_ASSIGNEE_ID. Check optional PROJECT_ID, AGENT_NAME, READ_ONLY, RUNTIME, and INSTANCE_ID values.')
   }
   const config = parsed.data
   const api = createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId: config.MUKUROJI_MCP_TEAM_ID })
-  let compatibility: Promise<ServerCompatibility> | undefined
-  /** Reads the server's served MCP API revisions, reusing a known result and retrying an unknown one. */
-  const serverCompatibility = () => {
-    const pending = compatibility ?? readServerCompatibility(config.MUKUROJI_MCP_URL).then((server) => {
-      const assessed = assessServerCompatibility(server)
-      // A transient failure must not hide the server's range for the rest of the process.
-      if (assessed.status === 'unknown') compatibility = undefined
-      return assessed
-    })
-    compatibility = pending
-    return pending
-  }
+  const serverCompatibility = createServerCompatibilityReader(config.MUKUROJI_MCP_URL)
   const createServer = () => createCodingAgentMcpServer(api, {
     assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
     assignedProjectId: config.MUKUROJI_MCP_PROJECT_ID,
@@ -101,4 +104,42 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
       deriveAgentInstanceId(config.MUKUROJI_MCP_RUNTIME, config.MUKUROJI_MCP_ASSIGNEE_ID),
   }, config.MUKUROJI_MCP_READ_ONLY === 'true', serverCompatibility)
   return Object.assign(createServer, { serverCompatibility })
+}
+
+/**
+ * Creates a reader of the server's served MCP API revisions that reuses a known result for the
+ * process and reads again after an unknown one.
+ *
+ * @param origin - Mukuroji origin.
+ * @returns The compatibility reader.
+ */
+function createServerCompatibilityReader(origin: string): () => Promise<ServerCompatibility> {
+  let compatibility: Promise<ServerCompatibility> | undefined
+  return () => {
+    const pending = compatibility ?? readServerCompatibility(origin).then((server) => {
+      const assessed = assessServerCompatibility(server)
+      // A transient failure must not hide the server's range for the rest of the process.
+      if (assessed.status === 'unknown') compatibility = undefined
+      return assessed
+    })
+    compatibility = pending
+    return pending
+  }
+}
+
+/**
+ * Composes the Workspace profile: Linear-style read tools that need only the origin and the
+ * token, because each call names its Team.
+ *
+ * @param environment - Process environment or isolated test configuration.
+ * @returns A server factory for stdio clients.
+ */
+function composeWorkspaceMcp(environment: Record<string, string | undefined>): CodingAgentMcpFactory {
+  const parsed = workspaceConfigSchema.safeParse(environment)
+  if (!parsed.success) {
+    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL and MUKUROJI_MCP_TOKEN for the workspace profile.')
+  }
+  const api = createWorkspaceApi({ origin: parsed.data.MUKUROJI_MCP_URL, token: parsed.data.MUKUROJI_MCP_TOKEN })
+  const serverCompatibility = createServerCompatibilityReader(parsed.data.MUKUROJI_MCP_URL)
+  return Object.assign(() => createWorkspaceMcpServer(api), { serverCompatibility })
 }

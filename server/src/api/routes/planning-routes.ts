@@ -140,7 +140,6 @@ import {
   getEffectiveProjectScopeAccessList,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
-  requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessRead,
@@ -148,6 +147,11 @@ import {
   resolveProjectAccessTeamId,
   type WorkspacePrincipal,
 } from '../shared/project-access'
+import {
+  requirePlanningActiveOwner,
+  requirePlanningEntityPermission,
+  requirePlanningScopePermission,
+} from '../shared/planning-scope-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { getEnv } from '../shared/runtime-config'
 import { isRecord, stableDigestStringify } from '../shared/value-guards'
@@ -504,21 +508,6 @@ function requireAuthorizedPlanningWorkItemRevision(
   }
 }
 
-async function requirePlanningActiveOwner(
-  principal: WorkspacePrincipal,
-  ownerMemberKey: unknown,
-) {
-  const memberKey = readPlanningIdentifier(ownerMemberKey, 'Planning owner member key')
-  const owner = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, memberKey)
-  if (!owner) {
-    throw new PlanningError(
-      409,
-      'PlanningOwnerInactive',
-      'Planning owner must be an active Workspace member.',
-    )
-  }
-  return owner
-}
 
 /**
  * Requires a cadence recipient to retain the role needed for its future action.
@@ -735,62 +724,6 @@ async function requirePlanningAutomationManagement(
   }
 }
 
-async function requirePlanningScopePermission(
-  principal: WorkspacePrincipal,
-  scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
-  minimumRole: Extract<ProjectRole, 'member' | 'manager'>,
-  allowWorkspaceScopeMember = false,
-) {
-  requireWorkspaceBusinessWrite(principal)
-  const teamId = scope.teamId === undefined
-    ? undefined
-    : readPlanningIdentifier(scope.teamId, 'Team ID')
-  const projectId = scope.projectId === undefined
-    ? undefined
-    : readPlanningIdentifier(scope.projectId, 'Project ID')
-  if (teamId && !projectId && principal.enterprisePermissions !== undefined) {
-    const resource = principal.enterpriseAuthorizationResource
-    if (
-      !principal.enterpriseRouteAuthorizedAtResource ||
-      !resource ||
-      (
-        resource.kind !== 'workspace' &&
-        !(resource.kind === 'team' && resource.targetId === teamId)
-      )
-    ) {
-      throw new PlanningError(
-        403,
-        'ProjectAccessDenied',
-        'Enterprise Team permission is required for this Planning scope.',
-      )
-    }
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-    if (!directory.teams.some((team) => team.id === teamId)) {
-      throw new PlanningError(404, 'TeamNotFound', 'Planning Team was not found.')
-    }
-    return
-  }
-  const teamContext = teamId
-    ? await requireTeamPermission(principal, teamId, minimumRole)
-    : undefined
-  if (projectId) {
-    await requireProjectPermission(principal, projectId, minimumRole, teamId)
-  }
-  if (
-    teamContext &&
-    projectId &&
-    !teamContext.team.projects.some((project) => project.id === projectId)
-  ) {
-    throw new PlanningError(
-      409,
-      'PlanningScopeMismatch',
-      'Planning Team and Project scopes do not belong to the same hierarchy.',
-    )
-  }
-  if (!teamId && !projectId && !principal.isSystemAdmin && !allowWorkspaceScopeMember) {
-    requireWorkspaceAdministration(principal)
-  }
-}
 
 /**
  * Creates the audit transaction committed with one Planning entity change from this request.
@@ -833,27 +766,6 @@ function requireWatchablePlanningMilestone(snapshot: PlanningSnapshot, entityId:
   if (entity.archivedAt !== undefined) {
     throw new PlanningError(409, 'PlanningEntityArchived', 'An archived Milestone cannot be watched.')
   }
-  return entity
-}
-
-async function requirePlanningEntityPermission(
-  principal: WorkspacePrincipal,
-  entities: readonly PlanningEntity[],
-  entityId: unknown,
-  minimumRole: Extract<ProjectRole, 'member' | 'manager'>,
-  allowWorkspaceScopeMember = false,
-) {
-  const normalizedEntityId = readPlanningIdentifier(entityId, 'Planning entity ID')
-  const entity = entities.find((candidate) => candidate.id === normalizedEntityId)
-  if (!entity) {
-    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
-  }
-  await requirePlanningScopePermission(
-    principal,
-    entity,
-    minimumRole,
-    allowWorkspaceScopeMember,
-  )
   return entity
 }
 

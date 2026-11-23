@@ -962,6 +962,8 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.profileMeta': 'Authoritative owner, region, locale, and the default role for new invitations',
   'workspace.tenantAdministration.owner': 'Workspace owner',
   'workspace.tenantAdministration.region': 'Control-plane region',
+  'workspace.tenantAdministration.defaultCurrency': 'Currency',
+  'workspace.tenantAdministration.defaultCurrencyHint': 'Used for new time costs, rate cards, and budgets that name no currency. Saved amounts keep their own currency.',
   'workspace.tenantAdministration.locale': 'Tenant locale',
   'workspace.tenantAdministration.defaultRole': 'Default member role',
   'workspace.tenantAdministration.fiscalYearStartMonth': 'Fiscal year starts in',

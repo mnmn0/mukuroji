@@ -38,6 +38,7 @@ import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
   type ProjectPrincipal,
   readLegacyProjectScopeAccesses,
+  requireAssignedProjectPermission,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
@@ -160,21 +161,100 @@ export function requirePlanningWorkspaceScopeRead(principal: WorkspacePrincipal)
 }
 
 /**
+ * Reports whether Enterprise access allows a role on a dependency endpoint's Team or Project scope.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param evaluation - Enterprise authorization evaluation of the principal.
+ * @param teamId - Team that owns the endpoint.
+ * @param assignedProjectId - Project the endpoint is assigned to, if any.
+ * @param minimumRole - Minimum Project-style role the operation needs.
+ * @returns Whether the matching Enterprise permission is granted at that scope.
+ */
+function isEnterprisePlanningEndpointAllowed(
+  principal: WorkspacePrincipal,
+  evaluation: NonNullable<WorkspacePrincipal['enterpriseAuthorizationEvaluation']>,
+  teamId: string,
+  assignedProjectId: string | undefined,
+  minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+) {
+  const permission: EnterprisePermissionId = minimumRole === 'viewer'
+    ? 'work-items.read'
+    : minimumRole === 'member'
+      ? 'work-items.write'
+      : 'planning.manage'
+  return evaluateEnterpriseAccess({
+    permission,
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: assignedProjectId
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: assignedProjectId,
+          parentTeamId: teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: teamId,
+        },
+  }).allowed
+}
+
+/**
+ * Checks dependency access for an endpoint that does not exist yet, such as a row of an import.
+ *
+ * It applies the rule of {@link requirePlanningWorkItemEndpointPermission} to the Team and Project
+ * the Work Item will have: Enterprise access needs `planning.manage` there, and Workspace roles
+ * need the role on the Team and the Project.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that will own the endpoint.
+ * @param assignedProjectId - Project the endpoint will be assigned to, if any.
+ * @param minimumRole - Minimum Project-style role the operation needs.
+ * @throws ProjectDataError `403 WorkItemScheduleDependencyAccessDenied` when access is missing.
+ */
+export async function requirePlanningEndpointScopePermission(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  assignedProjectId: string | undefined,
+  minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+) {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation && !principal.isSystemAdmin) {
+    if (!isEnterprisePlanningEndpointAllowed(principal, evaluation, teamId, assignedProjectId, minimumRole)) {
+      throw new ProjectDataError(
+        403,
+        'WorkItemScheduleDependencyAccessDenied',
+        'Schedule dependency impact cannot be evaluated within the current access scope.',
+      )
+    }
+    return
+  }
+  const permission = await requireTeamPermission(principal, teamId, minimumRole)
+  requireAssignedProjectPermission(principal, permission, assignedProjectId, minimumRole)
+}
+
+/**
  * Requires Team and assigned-Project permission for one Work Item dependency endpoint.
  *
  * @param principal - Authenticated Workspace principal.
  * @param endpoint - Qualified Work Item endpoint.
  * @param minimumRole - Required role at both Team and assigned Project scopes.
+ * @param readContext - Directory and ACL reads to reuse, such as a consistent read right after a write.
  * @returns Strongly read authorized Work Item detail.
  */
 export async function requirePlanningWorkItemEndpointPermission(
   principal: WorkspacePrincipal,
   endpoint: WorkItemDependencyEndpoint,
   minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+  readContext?: TeamPermissionReadContext,
 ) {
   const evaluation = principal.enterpriseAuthorizationEvaluation
   if (evaluation && !principal.isSystemAdmin) {
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(
       principal.directoryId,
       'ja',
     )
@@ -199,31 +279,7 @@ export async function requirePlanningWorkItemEndpointPermission(
         'Schedule dependency Work Item assignment does not match its owning Team.',
       )
     }
-    const permission: EnterprisePermissionId = minimumRole === 'viewer'
-      ? 'work-items.read'
-      : minimumRole === 'member'
-        ? 'work-items.write'
-        : 'planning.manage'
-    const allowed = evaluateEnterpriseAccess({
-      permission,
-      principal: evaluation.principal,
-      assignments: evaluation.assignments,
-      customRoles: evaluation.snapshot.customRoles,
-      groupMappings: evaluation.groupMappings,
-      resource: assignedProjectId
-        ? {
-            workspaceId: principal.directoryId,
-            kind: 'project',
-            targetId: assignedProjectId,
-            parentTeamId: endpoint.teamId,
-          }
-        : {
-            workspaceId: principal.directoryId,
-            kind: 'team',
-            targetId: endpoint.teamId,
-          },
-    }).allowed
-    if (!allowed) {
+    if (!isEnterprisePlanningEndpointAllowed(principal, evaluation, endpoint.teamId, assignedProjectId, minimumRole)) {
       throw new ProjectDataError(
         403,
         'WorkItemScheduleDependencyAccessDenied',
@@ -247,6 +303,8 @@ export async function requirePlanningWorkItemEndpointPermission(
     endpoint.teamId,
     endpoint.workItemId,
     minimumRole,
+    undefined,
+    readContext,
   )
 }
 

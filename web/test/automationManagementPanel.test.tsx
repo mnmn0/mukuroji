@@ -676,6 +676,105 @@ describe('AutomationManagementPanel', () => {
     expect(plainApplicationHtml).not.toContain('automation-template-application-start-date')
   })
 
+  test('edits Project template Phases, Milestones, and dependencies and gates applying on a clean preview', () => {
+    const plannedTemplate = {
+      ...projectAutomationTemplateFixture,
+      payload: {
+        ...projectAutomationTemplateFixture.payload,
+        workItems: [
+          { title: 'Requirements', startOffsetWorkingDays: 0, durationWorkingDays: 5 },
+          { title: 'Design', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+        ],
+        dependencies: [{ predecessor: '1', successor: '2', type: 'finish-to-start' as const, lagDays: 2 }],
+        phases: [{
+          title: 'Preparation',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          milestones: [{ title: 'Scope fixed', offsetWorkingDays: 4 }],
+        }],
+      },
+    }
+    const editorHtml = renderToStaticMarkup(
+      <AutomationTemplateUpdateEditor
+        locale="en"
+        template={plannedTemplate}
+        onCancel={() => undefined}
+        onUpdate={async () => undefined}
+      />,
+    )
+    expect(editorHtml).toContain('data-testid="automation-template-project-planning"')
+    expect(editorHtml).toContain('Preparation | 0 | 5\n  ◆ Scope fixed | 4')
+    expect(editorHtml).toContain('data-testid="automation-template-project-dependencies"')
+    expect(editorHtml).toContain('1 -&gt; 2 FS +2')
+
+    const preview = {
+      kind: 'project' as const,
+      teamId: 'core-team',
+      name: 'ローンチ準備',
+      templateVersion: 2,
+      calendarFingerprint: 'calendar-test',
+      startDate: '2026-12-07',
+      endDate: '2026-12-16',
+      workItems: [
+        { wbsNumber: '1', title: 'Requirements', startDate: '2026-12-07', endDate: '2026-12-11' },
+        { wbsNumber: '2', title: 'Design', startDate: '2026-12-14', endDate: '2026-12-16' },
+      ],
+      planningEntities: [
+        { type: 'phase' as const, title: 'Preparation', startDate: '2026-12-07', endDate: '2026-12-11' },
+        {
+          type: 'milestone' as const,
+          title: 'Scope fixed',
+          phaseTitle: 'Preparation',
+          startDate: '2026-12-11',
+          endDate: '2026-12-11',
+        },
+      ],
+      dependencyCount: 1,
+      errors: [{
+        code: 'AutomationProjectTemplateDependencyConflict',
+        message: 'Dependency 1 needs its successor on or after 2026-12-14.',
+        dependencyNumber: 1,
+      }],
+    }
+    const applicationHtml = renderToStaticMarkup(
+      <AutomationTemplateApplicationEditor
+        initialPreview={preview}
+        locale="en"
+        teams={teams}
+        template={plannedTemplate}
+        workflowTargets={[]}
+        onApply={async () => projectTemplateApplicationFixture}
+        planningParents={{ parents: [], isLoading: false, failed: true, onRetry: () => undefined }}
+        onPreview={async () => preview}
+      />,
+    )
+    expect(applicationHtml).toContain('data-testid="automation-template-application-planning-parent"')
+    expect(applicationHtml).toContain('data-testid="automation-template-application-preview"')
+    expect(applicationHtml).toContain('data-testid="automation-template-application-planning-parent-retry"')
+    expect(applicationHtml).toContain('Creates project “ローンチ準備” with 2 Work Items, 2 phases and milestones, and 1 dependencies.')
+    expect(applicationHtml).toContain('Period: 2026-12-07 to 2026-12-16')
+    expect(applicationHtml).toContain('Dependency 1: Dependency 1 needs its successor')
+    expect(applicationHtml).toContain('Milestone: Preparation / Scope fixed')
+
+    // Without Phases no Planning parent is needed, so only the preview's errors decide.
+    const wbsOnlyTemplate = { ...plannedTemplate, payload: { ...plannedTemplate.payload, phases: undefined } }
+    const wbsOnlyPreview = { ...preview, planningEntities: [] }
+    const renderWbsOnly = (errors: typeof preview.errors) => renderToStaticMarkup(
+      <AutomationTemplateApplicationEditor
+        initialPreview={{ ...wbsOnlyPreview, errors }}
+        locale="en"
+        teams={teams}
+        template={wbsOnlyTemplate}
+        workflowTargets={[]}
+        onApply={async () => projectTemplateApplicationFixture}
+        onPreview={async () => wbsOnlyPreview}
+      />,
+    )
+    const submitDisabled = /data-testid="automation-template-application-submit" disabled=""/u
+    expect(renderWbsOnly([])).not.toMatch(submitDisabled)
+    expect(renderWbsOnly(preview.errors)).toMatch(submitDisabled)
+  })
+
   test('renders Workflow workspace/team targets with expected revisions and result state', () => {
     const html = renderToStaticMarkup(
       <AutomationTemplateApplicationEditor

@@ -26,7 +26,7 @@ import type {
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
-import { readWeeklyReportReminderSettings, readWorkspaceCalendarSettings } from '@mukuroji/contracts'
+import { isCurrencyCode, readWeeklyReportReminderSettings, readWorkspaceCalendarSettings } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -280,6 +280,7 @@ export class DynamoDbTenantAdministrationClient implements
       ...(input.weeklyReportReminders
         ? { weeklyReportReminders: readStoredWeeklyReportReminders(input.weeklyReportReminders) }
         : {}),
+      ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
     }
@@ -1993,6 +1994,7 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readStoredWeeklyReportReminders(value.weeklyReportReminders) }),
+    ...(value.defaultCurrency === undefined ? {} : { defaultCurrency: readStoredDefaultCurrency(value.defaultCurrency) }),
     status,
     ...(closedAt ? { closedAt } : {}),
     ...(closedByOperationId ? { closedByOperationId } : {}),
@@ -2000,6 +2002,18 @@ function readTenantProfile(value: unknown): TenantProfile {
     createdAt,
     updatedAt,
   }
+}
+
+/**
+ * Reads a stored Workspace currency.
+ *
+ * @param value - Stored or already validated currency.
+ * @returns The ISO 4217 code.
+ * @throws Error When the value is not an upper-case three-letter code.
+ */
+function readStoredDefaultCurrency(value: unknown): string {
+  if (!isCurrencyCode(value)) throw new Error('invalid tenant default currency')
+  return value
 }
 
 /**

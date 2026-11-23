@@ -431,6 +431,10 @@ export type WhiteboardNoteObject = WhiteboardObjectBase & {
    * Note に表示する plain text です。
    */
   text: string
+  /**
+   * 付箋の宿題が完了したかどうかです。リンクした Work Item の完了でも true になります。
+   */
+  done?: boolean
 }
 
 /**

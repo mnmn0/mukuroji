@@ -206,3 +206,10 @@ namespace）。作成済みの付箋には「Work Item を開く」が出て、W
 Whiteboard へ戻れます。付箋を削除すると server が relation も一緒に消します。付箋は配置したまま残し、
 Work Item card への置き換えはしません。
 
+こうして作った Work Item を完了にすると、元のチェック項目は `checked: true`、付箋は `done: true` に
+なります。Work Item の更新で audit outbox に入る `work-item.updated`（`completionTransition`）を
+automation event worker が受け、上の 2 種類の relation を持つ要素だけを system actor
+（`system:work-item-completion`）で書き換えます（ADR 0053）。完了させた人の Document 権限は問わず、
+archive 済みの Document と、手で張った link・Work Item card は対象外です。Work Item を再オープンしても
+チェックは外しません。付箋の完了は inspector の「完了」でも切り替えられます。
+
