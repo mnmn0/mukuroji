@@ -690,6 +690,21 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('Retry')
   })
 
+  test('offers to read earlier deliveries while more remain', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[]}
+        hasMoreDeliveries
+        onLoadMoreDeliveries={() => undefined}
+      />,
+    )
+    expect(html).toContain('data-testid="analytics-deliveries-more"')
+    expect(html).toContain('Load earlier deliveries')
+    expect(renderToStaticMarkup(<AnalyticsWorkbench {...baseProps} deliveries={[]} />))
+      .not.toContain('analytics-deliveries-more')
+  })
+
   test('shows a delivery-list failure with a retry on the empty state too', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench

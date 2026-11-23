@@ -198,9 +198,11 @@ export function ReportsPage() {
   const reports = reportResponse?.reports ?? emptyReports
   // A failed delivery read shows an error with a retry next to the reports, which stay usable.
   const {
-    data: deliveryResponse,
+    deliveries,
     error: deliveriesError,
-    mutate: retryDeliveries,
+    hasMore: hasMoreDeliveries,
+    loadMore: loadMoreDeliveries,
+    retry: retryDeliveries,
   } = useAnalyticsDeliveries(
     accessToken,
     Boolean(user && !currentUserError),
@@ -584,6 +586,8 @@ export function ReportsPage() {
       }),
       { revalidate: false },
     )
+    // Deliveries carry the report name and readability, so read them again.
+    void retryDeliveries()
     setHasStartedAdHoc(false)
     commitRouteState({
       asOf: undefined,
@@ -620,6 +624,8 @@ export function ReportsPage() {
       { reports: remainingReports },
       { revalidate: false },
     )
+    // The deleted report's deliveries leave the list.
+    void retryDeliveries()
     const nextReport = remainingReports[0]
     if (nextReport) {
       commitRouteState({
@@ -850,8 +856,12 @@ export function ReportsPage() {
           locale={locale}
           noticeMessage={noticeMessage}
           reports={reports}
-          {...(deliveryResponse ? { deliveries: deliveryResponse.deliveries } : {})}
+          {...(deliveries ? { deliveries } : {})}
           deliveriesFailed={Boolean(deliveriesError)}
+          hasMoreDeliveries={hasMoreDeliveries}
+          onLoadMoreDeliveries={() => {
+            void loadMoreDeliveries()
+          }}
           onRetryDeliveries={() => {
             void retryDeliveries()
           }}

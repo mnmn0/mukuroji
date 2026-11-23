@@ -143,6 +143,7 @@ export const analyticsMessages = {
   'analytics.deliveries.label': 'Delivered to me',
   'analytics.deliveries.choose': 'Open a delivery',
   'analytics.deliveries.error': 'Your deliveries could not be loaded.',
+  'analytics.deliveries.loadMore': 'Load earlier deliveries',
   'analytics.size.small': 'Small',
   'analytics.size.medium': 'Medium',
   'analytics.size.large': 'Large',

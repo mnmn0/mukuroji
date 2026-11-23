@@ -267,6 +267,22 @@ export const MyDeliveries: Story = {
 }
 
 /**
+ * 新しい配信がすべて読めなくなった report のもので、以前の配信がまだ残っている状態です。
+ * 続きを読み込めます。
+ */
+export const MyDeliveriesMore: Story = {
+  args: {
+    deliveries: [],
+    hasMoreDeliveries: true,
+    onLoadMoreDeliveries: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    await userEvent.click(within(canvasElement).getByTestId('analytics-deliveries-more'))
+    await expect(args.onLoadMoreDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
  * 自分への配信を読み込めなかった状態です。report はそのまま使え、再試行できます。
  */
 export const MyDeliveriesFailed: Story = {

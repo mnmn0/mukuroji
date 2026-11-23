@@ -89,6 +89,10 @@ export type AnalyticsWorkbenchProps = {
   deliveriesFailed?: boolean
   /** Reloads the delivery list after a failure. */
   onRetryDeliveries?: () => void
+  /** Whether older deliveries remain to be read. */
+  hasMoreDeliveries?: boolean
+  /** Reads the next page of older deliveries. */
+  onLoadMoreDeliveries?: () => void
   /**
    * URL で選択された report ID です。
    */
@@ -435,6 +439,8 @@ export function AnalyticsWorkbench({
   onOpenDelivery,
   deliveriesFailed = false,
   onRetryDeliveries,
+  hasMoreDeliveries = false,
+  onLoadMoreDeliveries,
   selectedReportId,
   filter,
   calendarSettings,
@@ -631,6 +637,16 @@ export function AnalyticsWorkbench({
                 ))}
               </select>
             </label>
+          ) : null}
+          {hasMoreDeliveries && onLoadMoreDeliveries ? (
+            <button
+              className="self-end pb-2 text-xs font-medium text-[var(--workbench-primary-text)] underline underline-offset-2"
+              data-testid="analytics-deliveries-more"
+              type="button"
+              onClick={onLoadMoreDeliveries}
+            >
+              {t('analytics.deliveries.loadMore')}
+            </button>
           ) : null}
           {deliveriesFailed && deliveries.length === 0 ? (
             <span className="flex flex-wrap items-center gap-2 self-end pb-2 text-xs font-medium text-fg-red-800" data-testid="analytics-deliveries-error" role="alert">

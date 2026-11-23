@@ -61,19 +61,24 @@ export async function getAnalyticsDeliveries(
 const maxSkippedDeliveryPages = 5
 
 /**
- * Reads the first page that holds a delivery, following the cursor past pages the server emptied
+ * Reads the next page that holds a delivery, following the cursor past pages the server emptied
  * because the user can no longer read their reports.
  *
+ * The read stops after a bounded number of empty pages and keeps the cursor, so the screen can
+ * offer to read on instead of hiding older deliveries.
+ *
  * @param accessToken - Access token for the Authorization header.
+ * @param cursor - Cursor of the previous page; omitted for the newest deliveries.
  * @param signal - Signal that aborts the requests.
  * @returns The first non-empty page, or the last page read when none holds a delivery.
  * @throws AnalyticsApiError when a request fails or a response is malformed.
  */
 export async function getRecentAnalyticsDeliveries(
   accessToken: string,
+  cursor?: string,
   signal?: AbortSignal,
 ): Promise<AnalyticsDeliveryListResponse> {
-  let page = await getAnalyticsDeliveries(accessToken, undefined, signal)
+  let page = await getAnalyticsDeliveries(accessToken, cursor, signal)
   for (
     let skipped = 1;
     page.deliveries.length === 0 && page.nextCursor !== undefined && skipped < maxSkippedDeliveryPages;

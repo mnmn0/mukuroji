@@ -374,8 +374,10 @@ describe('Analytics deliveries API', () => {
 
   test('stops following empty pages after a bound', async () => {
     const requests = installFetchRecorder(() => ({ deliveries: [], nextCursor: 'again' }))
-    expect(await getRecentAnalyticsDeliveries('token-1')).toEqual({ deliveries: [], nextCursor: 'again' })
+    expect(await getRecentAnalyticsDeliveries('token-1', 'start')).toEqual({ deliveries: [], nextCursor: 'again' })
     expect(requests).toHaveLength(5)
+    // The read starts from the given cursor and keeps the last cursor for the next read.
+    expect(requests[0]?.url).toContain('cursor=start')
   })
 
   test('accepts an empty list', async () => {
