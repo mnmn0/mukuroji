@@ -68,14 +68,18 @@ function workItemTemplate(
  * Serves the given templates from the Automation template store and records created Work Items.
  *
  * @param templates - Templates the Workspace holds.
+ * @param workspaceRole - Workspace role of the credential's user.
  * @returns Create inputs sent to storage.
  */
-function configureTemplates(templates: AutomationTemplate[]): Record<string, unknown>[] {
+function configureTemplates(
+  templates: AutomationTemplate[],
+  workspaceRole: 'member' | 'guest' = 'member',
+): Record<string, unknown>[] {
   const creates: Record<string, unknown>[] = []
   configureFakeProjectClients(true, {
     directoryId: credential.workspaceId,
     role: 'member',
-    workspaceRole: 'member',
+    workspaceRole,
     issueCreateHook(input) {
       creates.push({ ...input })
     },
@@ -163,4 +167,14 @@ test('lists the enabled Work Item templates of a Team in the creation catalog', 
     { id: 'z-check', version: 3, name: 'Z check', title: 'Release check', description: 'Check the release.', priority: 'high', acceptanceCriteria: ['Tests pass', 'Docs updated'] },
   ])
   expect(JSON.stringify(catalog.templates)).not.toContain('someone-else')
+})
+
+test('keeps templates from guests, who cannot read Workspace business data', async () => {
+  const creates = configureTemplates([workItemTemplate()], 'guest')
+
+  const catalog = await runWithTestAppDependencies(() =>
+    createCanonicalPublicWorkItemService().listWorkItemTypes(credential, 'core-team'))
+  expect(catalog.templates).toEqual([])
+  await expect(createWorkItem({ templateId: 'release-check' }, 'template-guest')).rejects.toMatchObject({ status: 403 })
+  expect(creates).toEqual([])
 })

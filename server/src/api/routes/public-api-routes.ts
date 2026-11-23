@@ -184,6 +184,7 @@ import {
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   selectTeamProjectScopeAccesses,
   type WorkspacePrincipal,
@@ -1014,15 +1015,24 @@ function readTemplateCustomFieldValues(
 /**
  * Lists the Work Item templates a Team can create from, for the Public API catalog.
  *
- * @param workspaceId - Workspace whose templates are read.
+ * Templates are Workspace business data, so a principal that cannot read them, such as a guest,
+ * gets an empty list, as `GET /api/automation/templates` would refuse it.
+ *
+ * @param principal - Principal the catalog is for.
  * @param teamId - Team the catalog is for.
  * @returns Enabled Work Item templates for the Team, by name.
  */
 async function listPublicWorkItemTemplates(
-  workspaceId: string,
+  principal: WorkspacePrincipal,
   teamId: string,
 ): Promise<PublicWorkItemTemplate[]> {
-  const templates = await automationDependencies.ruleTemplates.listTemplates(workspaceId)
+  try {
+    requireWorkspaceBusinessRead(principal)
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) return []
+    throw error
+  }
+  const templates = await automationDependencies.ruleTemplates.listTemplates(principal.directoryId)
   return templates
     .filter((template) => isPublicWorkItemTemplateFor(template, teamId))
     .sort((first, second) => first.name.localeCompare(second.name) || first.id.localeCompare(second.id))
@@ -1655,7 +1665,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         teamId,
         resolvedConfiguration,
         accessibleProjectIds,
-        await listPublicWorkItemTemplates(principal.directoryId, teamId),
+        await listPublicWorkItemTemplates(principal, teamId),
       )
     },
 
@@ -1745,18 +1755,19 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async authorizeCreate(credential, input) {
       const { teamId, ...requestInput } = input
-      const workItemInput = await applyPublicWorkItemTemplate(credential.workspaceId, teamId, requestInput)
-      rejectInternalPublicCreateWorkItemFields(workItemInput)
+      // A template never sets the Project, so the credential is checked before the template is read.
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
-        ...(typeof workItemInput.assignedProjectId === 'string'
-          ? { projectId: workItemInput.assignedProjectId }
+        ...(typeof requestInput.assignedProjectId === 'string'
+          ? { projectId: requestInput.assignedProjectId }
           : {}),
         evaluateProjectScopes: true,
       })
       requireWorkspaceBusinessWrite(principal)
       const permission = await requireTeamPermission(principal, teamId, 'member')
+      const workItemInput = await applyPublicWorkItemTemplate(principal.directoryId, teamId, requestInput)
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const body = normalizeTeamIssueInput(workItemInput, permission.team)
       requireAssignedProjectPermission(
         principal,
@@ -1768,30 +1779,33 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async create(credential, input, context) {
       const { teamId, ...requestInput } = input
-      const workItemInput = await applyPublicWorkItemTemplate(credential.workspaceId, teamId, requestInput)
-      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
+        // A template never sets the Project, so the credential is checked before the template is read.
         async () => await resolveDeveloperCredentialPrincipal(credential, {
           permission: 'work-items.write',
           teamId,
-          ...(typeof workItemInput.assignedProjectId === 'string'
-            ? { projectId: workItemInput.assignedProjectId }
+          ...(typeof requestInput.assignedProjectId === 'string'
+            ? { projectId: requestInput.assignedProjectId }
             : {}),
           evaluateProjectScopes: true,
         }),
         async (principal) => {
           requireWorkspaceBusinessWrite(principal)
           const permission = await requireTeamPermission(principal, teamId, 'member')
-          const body = normalizeTeamIssueInput(workItemInput, permission.team)
+          const templatedInput = await applyPublicWorkItemTemplate(principal.directoryId, teamId, requestInput)
+          rejectInternalPublicCreateWorkItemFields(templatedInput)
+          const body = normalizeTeamIssueInput(templatedInput, permission.team)
           requireAssignedProjectPermission(
             principal,
             permission,
             readAssignedProjectId(body.assignedProjectId),
             'member',
           )
+          return templatedInput
         },
       )
+      const workItemInput = authorization.value
       return projectPublicWorkItem(await createCanonicalPublicWorkItem(
         authorization.principal,
         teamId,

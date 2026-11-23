@@ -3722,10 +3722,14 @@ export function TaskScreen({
                 isSubmitting={isCreatingTask}
                 locale={locale}
                 onApplyTemplate={(template) => {
+                  // Restarting from a template replaces what the member typed, so ask first.
+                  if (createTaskDirtyRef.current && !globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
+                    return
+                  }
                   setCreateTaskError(undefined)
                   setCreateTaskContext((current) => {
-                    if (!current) return current
-                    const context = { ...current }
+                    // A panel opened from the header has no context yet; it starts as one.
+                    const context: TaskCreateContext = { ...(current ?? { source: 'header' }) }
                     // A template draft replaces the previous draft; no template clears it.
                     delete context.duplicate
                     return template ? { ...context, duplicate: createWorkItemTemplateDraft(template) } : context
