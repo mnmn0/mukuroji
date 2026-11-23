@@ -572,7 +572,8 @@ function readTaskViewSurface(value: unknown): TaskViewSurface {
     value === 'team' ||
     value === 'my-tasks' ||
     value === 'focus' ||
-    value === 'triage'
+    value === 'triage' ||
+    value === 'work-items'
   ) {
     return value
   }
@@ -650,7 +651,9 @@ function readTaskViewDefinition(value: unknown): TaskViewDefinition {
         ? scope.kind === 'team'
         : surface === 'my-tasks' || surface === 'focus'
           ? scope.kind === 'viewer'
-          : false
+          : surface === 'work-items'
+            ? scope.kind === 'workspace'
+            : false
   if (!validScope) {
     return invalidTaskViewApiInput('Task view surface and scope do not match.')
   }
@@ -900,7 +903,60 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
       'Task view include archived',
     )
   }
+  if (value.projectScopes !== undefined) {
+    filters.projectScopes = readTaskViewTeamQualifiedList(
+      value.projectScopes,
+      'projectId',
+      'Task view Project scopes',
+    ).map(({ teamId, id }) => ({ teamId, projectId: id }))
+  }
+  if (value.involvement !== undefined) {
+    if (value.involvement !== 'mine') {
+      return invalidTaskViewApiInput('Task view involvement is invalid.')
+    }
+    filters.involvement = 'mine'
+  }
+  if (value.contributorUserIds !== undefined) {
+    filters.contributorUserIds = readTaskViewStringList(
+      value.contributorUserIds,
+      'Task view contributorUserIds',
+      100,
+      512,
+    )
+  }
+  if (value.contributorJobRoles !== undefined) {
+    filters.contributorJobRoles = readTaskViewTeamQualifiedList(
+      value.contributorJobRoles,
+      'jobRoleId',
+      'Task view contributor job roles',
+    ).map(({ teamId, id }) => ({ teamId, jobRoleId: id }))
+  }
   return filters
+}
+
+/**
+ * Reads a bounded list of Team-qualified identifiers used by a cross-Project task-view filter.
+ *
+ * @param value - Untrusted list of `{ teamId, <idKey> }` records.
+ * @param idKey - Property holding the Team-local identifier.
+ * @param label - Field label used in validation errors.
+ * @returns Validated pairs in their original order.
+ */
+function readTaskViewTeamQualifiedList(
+  value: unknown,
+  idKey: 'projectId' | 'jobRoleId',
+  label: string,
+): { teamId: string, id: string }[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    return invalidTaskViewApiInput(`${label} are invalid.`)
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) return invalidTaskViewApiInput(`${label} are invalid.`)
+    return {
+      teamId: readRequiredTaskViewText(entry.teamId, `${label} Team ID`, 256),
+      id: readRequiredTaskViewText(entry[idKey], `${label} ID`, 256),
+    }
+  })
 }
 
 /**
@@ -1362,7 +1418,7 @@ function validateTaskViewVisibilityTeam(
 function readTaskViewDefaultSource(
   value: unknown,
 ): NonNullable<CreateSavedTaskViewInput['defaultSource']> {
-  if (value === 'personal' || value === 'team') return value
+  if (value === 'personal' || value === 'team' || value === 'project') return value
   return invalidTaskViewApiInput('Task view default source is invalid.')
 }
 
