@@ -64,6 +64,23 @@ export const Empty: Story = {
   },
 }
 
+/**
+ * A member who inherits a Workspace calendar in another time zone shows the effective time zone,
+ * not the one stored on the profile.
+ */
+export const InheritedWorkspaceTimeZone: Story = {
+  ...DayHeatmap,
+  args: {
+    ...DayHeatmap.args,
+    snapshot: {
+      ...snapshot,
+      members: snapshot.members.map((member, index) => index === 0
+        ? { ...member, calendarSource: 'workspace', effectiveTimeZone: 'America/New_York' }
+        : { ...member, calendarSource: 'custom', effectiveTimeZone: member.timeZone }),
+    },
+  },
+}
+
 /** Creates one member row from the supplied daily cells. */
 function createMember(memberId: string, displayName: string, cells: WorkloadSnapshot['members'][number]['cells']) {
   return {

@@ -44,6 +44,17 @@ test('validates optional deployment commit provenance', () => {
   }
 })
 
+test('reads the deployed Web app origins that same-origin reports come from', () => {
+  expect(loadServerConfig({}, { localBun: true }).webAppOrigins).toEqual([])
+  expect(loadServerConfig({
+    WEB_APP_ORIGINS: ' https://app.example.com/ ,https://d111111abcdef8.cloudfront.net,',
+  }, { localBun: true }).webAppOrigins).toEqual(['https://app.example.com', 'https://d111111abcdef8.cloudfront.net'])
+  for (const invalid of ['http://app.example.com', 'https://app.example.com/path', 'app.example.com']) {
+    expect(() => loadServerConfig({ WEB_APP_ORIGINS: invalid }, { localBun: true }))
+      .toThrow('WEB_APP_ORIGINS must list https origins, or http origins on localhost.')
+  }
+})
+
 test('validates the connector OAuth Web origin used for split API and Web hosts', () => {
   expect(loadServerConfig({}, { localBun: true })).not.toHaveProperty('connectorOAuthWebOrigin')
   expect(loadServerConfig({ CONNECTOR_OAUTH_WEB_ORIGIN: '  ' }, { localBun: true }))

@@ -124,6 +124,7 @@ export type {
 
 export {
   getAllowedOrigins,
+  getSameOriginBrowserOrigins,
   normalizeLambdaApiEvent,
 } from './shared/http'
 

@@ -12,7 +12,7 @@ import { CapacityPlanningError } from '../../modules/capacity-planning'
 import { requireAppDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import { readWorkspaceWorkloadCalendarPolicy } from '../shared/workspace-calendar'
 import {
   listPermittedTeams,
   requireTeamPermission,
@@ -129,9 +129,9 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
     readBearerAccessToken,
     authenticate: async (accessToken, context) =>
       await authenticateWorkspacePrincipal(accessToken, undefined, context),
-    // Profiles that inherit the Workspace calendar follow the same days off as new Work Items.
+    // Profiles that inherit the Workspace calendar follow every Workspace day off, uncapped.
     readWorkspaceCalendar: async (principal) =>
-      await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+      await readWorkspaceWorkloadCalendarPolicy(principal.directoryId),
     requireTeamPermission: async (principal, teamId, minimum) => {
       requireWorkloadAccess(principal)
       return toWorkloadTeamPermission(principal, await requireTeamPermission(principal, teamId, minimum))
