@@ -44,6 +44,13 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
    * direct Team grant with manage permission, not a manager of only some Projects.
    */
   canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
+  /**
+   * Returns whether the principal may close and reopen months for every Team of the Workspace:
+   * a system administrator or a Workspace owner or administrator.
+   */
+  canManageWorkspacePeriods(principal: Principal): Promise<boolean>
+  /** Lists every Team of the principal's Workspace that a Workspace-wide month close covers. */
+  listWorkspaceTeamIds(principal: Principal): Promise<readonly string[]>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /**
@@ -323,9 +330,56 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   }
 
   router.get('/api/teams/:teamId/time-periods', async (context) => {
-    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const closedPeriods = await dependencies.getTimeTracking().listClosedPeriods(principal.directoryId, teamId)
-      return context.json({ closedPeriods })
+      return context.json({
+        closedPeriods,
+        canManagePeriods: canManage && await dependencies.canManageWholeTeam(principal, teamId),
+        canManageWorkspacePeriods: await dependencies.canManageWorkspacePeriods(principal),
+      })
+    })
+  })
+
+  router.get('/api/time-periods/:month', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const month = readRequiredString(context.req.param('month'), 'Month')
+      const teams = await dependencies.getTimeTracking().listWorkspacePeriodCloses(
+        principal.directoryId,
+        await dependencies.listWorkspaceTeamIds(principal),
+        month,
+      )
+      return context.json({ month, teams })
+    })
+  })
+
+  router.post('/api/time-periods/:month/close', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const result = await dependencies.getTimeTracking().closeWorkspacePeriod({
+        workspaceId: principal.directoryId,
+        teamIds: await dependencies.listWorkspaceTeamIds(principal),
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
+        actorUserId: principal.userKey,
+      })
+      return context.json(result)
+    })
+  })
+
+  router.post('/api/time-periods/:month/reopen', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const result = await dependencies.getTimeTracking().reopenWorkspacePeriod({
+        workspaceId: principal.directoryId,
+        teamIds: await dependencies.listWorkspaceTeamIds(principal),
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        actorUserId: principal.userKey,
+        reason: typeof body.reason === 'string' ? body.reason : '',
+      })
+      return context.json(result)
     })
   })
 
@@ -635,6 +689,22 @@ async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
 ): Promise<void> {
   if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
     throw new TimeTrackingError(403, 'TimePeriodCloseDenied', 'Only a manager of the whole Team may close or reopen a month.')
+  }
+}
+
+/**
+ * Requires a Workspace administrator, because a Workspace-wide close changes every Team's time.
+ *
+ * @param dependencies - Router dependencies used to read the Workspace role.
+ * @param principal - Authenticated caller.
+ * @throws TimeTrackingError with `WorkspaceTimePeriodCloseDenied` for any other caller.
+ */
+async function requireWorkspacePeriodManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+): Promise<void> {
+  if (!await dependencies.canManageWorkspacePeriods(principal)) {
+    throw new TimeTrackingError(403, 'WorkspaceTimePeriodCloseDenied', 'Only a Workspace administrator may close or reopen a month for every Team.')
   }
 }
 

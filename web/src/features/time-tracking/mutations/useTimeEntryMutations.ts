@@ -12,6 +12,7 @@ import {
   type IndirectTimeEntryInput,
   type TimeEntryDraftInput,
   type TimeEntryTransitionAction,
+  type TimesheetTransitionAction,
   type TimesheetTransitionResult,
 } from '../api/timeEntries'
 import { classifyTimeTrackingFailure, shouldRetainTimeTrackingMutation } from '../model/timeTrackingFailure'
@@ -34,7 +35,7 @@ export type TimeEntryMutations = {
   /** Applies one lifecycle action to every eligible entry of a period. */
   transitionPeriod: (
     teamId: string,
-    action: TimeEntryTransitionAction,
+    action: TimesheetTransitionAction,
     period: { from: string; to: string },
   ) => Promise<TimesheetTransitionResult>
 }

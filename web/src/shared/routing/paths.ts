@@ -398,14 +398,16 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  */
 export function createTeamTimeTrackingPath(
   teamId: string,
-  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'approvals' | 'report' = 'timesheet',
+  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'approvals' | 'report' | 'periods' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
   exactWeek = false,
 ) {
   const query = new URLSearchParams()
   if (view !== 'timesheet') query.set('view', view)
-  if (view === 'report') {
+  if (view === 'periods') {
+    // Month closes are not tied to a week.
+  } else if (view === 'report') {
     if (report) {
       query.set('from', report.from)
       query.set('to', report.to)

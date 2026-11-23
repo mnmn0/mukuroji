@@ -17,7 +17,7 @@ function toHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
  * @param scope - Whether the caller manages time at all, and whether it manages the whole Team.
  * @returns The router and its service.
  */
-function createFixture(scope: { canManage: boolean; wholeTeam: boolean }) {
+function createFixture(scope: { canManage: boolean; wholeTeam: boolean; workspaceAdmin?: boolean; teamIds?: string[] }) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
@@ -33,6 +33,8 @@ function createFixture(scope: { canManage: boolean; wholeTeam: boolean }) {
     canManageRates: async () => scope.canManage,
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,
+    canManageWorkspacePeriods: async () => scope.workspaceAdmin === true,
+    listWorkspaceTeamIds: async () => scope.teamIds ?? ['team-1', 'team-2'],
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,
@@ -88,7 +90,7 @@ describe('time period close routes', () => {
     })
     expect(reopened.status).toBe(200)
     const listedAfter = await router.request('/api/teams/team-1/time-periods', { headers })
-    expect(await listedAfter.json()).toEqual({ closedPeriods: [] })
+    expect(await listedAfter.json()).toMatchObject({ closedPeriods: [] })
   })
 
   test('only a manager of the whole Team may close or reopen a month', async () => {
@@ -138,5 +140,76 @@ describe('time period close routes', () => {
     })
     expect(returned.status).toBe(200)
     expect(await returned.json()).toMatchObject({ entry: { status: 'rejected' } })
+  })
+
+  test('the Team list tells whether the caller may close the Team and the whole Workspace', async () => {
+    const { router } = createFixture({ canManage: true, wholeTeam: false, workspaceAdmin: true })
+    const listed = await router.request('/api/teams/team-1/time-periods', { headers })
+    expect(await listed.json()).toEqual({ closedPeriods: [], canManagePeriods: false, canManageWorkspacePeriods: true })
+  })
+
+  test('a Workspace administrator closes and reopens a month for every Team', async () => {
+    const { router, service } = createFixture({ canManage: false, wholeTeam: false, workspaceAdmin: true })
+    await service.closePeriod({ workspaceId: 'workspace-1', teamId: 'team-2', month: '2026-07', timeZone: 'Asia/Tokyo', actorUserId: 'manager-1' })
+
+    const closed = await router.request('/api/time-periods/2026-07/close', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ timeZone: 'Asia/Tokyo' }),
+    })
+    expect(closed.status).toBe(200)
+    expect(await closed.json()).toEqual({
+      month: '2026-07',
+      results: [{ teamId: 'team-1', status: 'closed' }, { teamId: 'team-2', status: 'already-closed' }],
+      partialFailure: false,
+    })
+
+    const state = await router.request('/api/time-periods/2026-07', { headers })
+    expect(await state.json()).toMatchObject({
+      month: '2026-07',
+      teams: [{ teamId: 'team-1', close: { month: '2026-07' } }, { teamId: 'team-2', close: { month: '2026-07' } }],
+    })
+
+    const blocked = await router.request('/api/teams/team-1/time-entries', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ workItemId: 'work-item-1', date: '2026-07-31', minutes: 60, timeZone: 'Asia/Tokyo', billable: false }),
+    })
+    expect(blocked.status).toBe(409)
+
+    const withoutReason = await router.request('/api/time-periods/2026-07/reopen', { method: 'POST', headers, body: JSON.stringify({}) })
+    expect(withoutReason.status).toBe(400)
+    expect(await withoutReason.json()).toMatchObject({ code: 'ReopenReasonRequired' })
+
+    await service.reopenPeriod({ workspaceId: 'workspace-1', teamId: 'team-2', month: '2026-07', actorUserId: 'manager-1', reason: 'fix' })
+    const reopened = await router.request('/api/time-periods/2026-07/reopen', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'Late corrections' }),
+    })
+    expect(await reopened.json()).toEqual({
+      month: '2026-07',
+      results: [{ teamId: 'team-1', status: 'reopened' }, { teamId: 'team-2', status: 'not-closed' }],
+      partialFailure: false,
+    })
+  })
+
+  test('a Team manager who is not a Workspace administrator cannot close every Team', async () => {
+    const { router, service } = createFixture({ canManage: true, wholeTeam: true, workspaceAdmin: false })
+    for (const path of ['/api/time-periods/2026-07/close', '/api/time-periods/2026-07/reopen']) {
+      const response = await router.request(path, { method: 'POST', headers, body: JSON.stringify({ timeZone: 'UTC', reason: 'x' }) })
+      expect(response.status).toBe(403)
+      expect(await response.json()).toMatchObject({ code: 'WorkspaceTimePeriodCloseDenied' })
+    }
+    const state = await router.request('/api/time-periods/2026-07', { headers })
+    expect(state.status).toBe(403)
+    expect(await service.listClosedPeriods('workspace-1', 'team-1')).toEqual([])
+  })
+
+  test('a Workspace close rejects an invalid month before closing any Team', async () => {
+    const { router, service } = createFixture({ canManage: false, wholeTeam: false, workspaceAdmin: true })
+    const response = await router.request('/api/time-periods/2026-13/close', { method: 'POST', headers, body: JSON.stringify({ timeZone: 'UTC' }) })
+    expect(response.status).toBe(400)
+    expect(await service.listClosedPeriods('workspace-1', 'team-1')).toEqual([])
   })
 })

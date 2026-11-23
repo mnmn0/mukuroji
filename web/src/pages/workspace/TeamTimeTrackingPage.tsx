@@ -6,10 +6,11 @@ import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/P
 import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
 import { TeamWeeklySummaryContainer } from '../../features/time-tracking/ui/TeamWeeklySummaryContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
+import { TimePeriodCloseContainer } from '../../features/time-tracking/ui/TimePeriodCloseContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
-import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { resolveBrowserTimeZone, resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
 import { useTeamWeeklySummary } from '../../features/time-tracking/queries/useWeeklyReports'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { resolveTimeReportGroupBy, resolveTimeReportRange } from '../../features/time-tracking/model/timeReport'
@@ -54,6 +55,7 @@ export function TeamTimeTrackingPage() {
   const viewParam = searchParams.get('view')
   const view: TimeTrackingView = viewParam === 'approvals' ||
     viewParam === 'report' ||
+    viewParam === 'periods' ||
     viewParam === 'weekly-report' ||
     viewParam === 'team-weekly-reports' ||
     viewParam === 'weekly-summary'
@@ -83,7 +85,7 @@ export function TeamTimeTrackingPage() {
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
   // The weekly summary is counted on the server, so it does not read the Team's Work Items here.
-  const workItems = useWorkspaceWorkItems(accessToken, enabled && view !== 'weekly-summary', false, teamWorkItemFilter)
+  const workItems = useWorkspaceWorkItems(accessToken, enabled && view !== 'weekly-summary' && view !== 'periods', false, teamWorkItemFilter)
   // The weekly report lists only the member's own Work Items, filtered by the server.
   const myWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '', involvement: 'mine' as const }), [teamId])
   const myWorkItems = useWorkspaceWorkItems(accessToken, enabled && view === 'weekly-report', false, myWorkItemFilter)
@@ -131,6 +133,10 @@ export function TeamTimeTrackingPage() {
     return names
   }, [projectMembers.data?.members])
   const teamProjects = activeTeam?.projects ?? emptyTeamProjects
+  const teamNames = useMemo(
+    () => Object.fromEntries(workspace.teams.map((team) => [team.id, team.name])),
+    [workspace.teams],
+  )
   const projectNames = useMemo(
     () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
     [teamProjects],
@@ -182,6 +188,7 @@ export function TeamTimeTrackingPage() {
     if (candidate === 'report') {
       return createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
     }
+    if (candidate === 'periods') return createTeamTimeTrackingPath(teamId, 'periods')
     if (candidate === 'weekly-report' && exactReportWeekDay !== undefined) {
       return createTeamTimeTrackingPath(teamId, 'weekly-report', reportWeekStart, undefined, true)
     }
@@ -225,6 +232,15 @@ export function TeamTimeTrackingPage() {
             projects={teamProjects}
             range={reportRange}
             teamId={teamId}
+          />
+        ) : view === 'periods' ? (
+          <TimePeriodCloseContainer
+            accessToken={accessToken}
+            key={`${teamId}:periods`}
+            locale={workspace.locale}
+            teamId={teamId}
+            teamNames={teamNames}
+            timeZone={workspace.timeZone ?? resolveBrowserTimeZone()}
           />
         ) : !calendarSettings.settings ? (
           calendarSettings.error ? (

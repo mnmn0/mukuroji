@@ -99,6 +99,11 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
     canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
     canManageWholeTeam: async (principal, teamId) =>
       principal.isSystemAdmin || (await readTeamManagerContext(principal, teamId))?.directTeamGrant === true,
+    canManageWorkspacePeriods: async (principal) =>
+      principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin',
+    listWorkspaceTeamIds: async (principal) =>
+      (await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'en', true)).teams
+        .map((team) => team.id),
     getAccessibleProjectIds: async (principal, teamId) => {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined

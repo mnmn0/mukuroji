@@ -48,8 +48,9 @@ export type TimeApprovalQueueProps = {
 }
 
 /**
- * Manager queue: submitted entries grouped by member with approve / reject, and approved entries
- * with lock, plus week-wide approve and lock that report entries needing a retry.
+ * Manager queue: submitted entries grouped by member with approve / reject, approved entries with
+ * lock and return, locked entries with return, plus week-wide approve and lock that report entries
+ * needing a retry.
  *
  * @param props - Week, entries, and actions.
  * @returns Approval queue.
@@ -74,10 +75,11 @@ export function TimeApprovalQueue({
   const id = useId()
   const [pendingKey, setPendingKey] = useState<string>()
   const [rejectingEntryId, setRejectingEntryId] = useState<string>()
+  const [returningEntryId, setReturningEntryId] = useState<string>()
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const submitted = groupTimeEntriesByMember(entries, 'submitted')
   const approved = sortTimeEntries(entries.filter((entry) => entry.status === 'approved'))
-  const lockedCount = entries.filter((entry) => entry.status === 'locked').length
+  const locked = sortTimeEntries(entries.filter((entry) => entry.status === 'locked'))
   const submittedCount = submitted.reduce((total, group) => total + group.entries.length, 0)
   const dayTotals = new Map((teamTimesheet?.days ?? []).map((day) => [day.key, day.minutes]))
 
@@ -144,6 +146,81 @@ export function TimeApprovalQueue({
       setRejectingEntryId(undefined)
     }
   }
+
+  /**
+   * Returns an approved or locked entry to the member with the typed reason.
+   *
+   * @param event - Reason form submission.
+   * @param entry - Entry being returned.
+   */
+  const submitReturn = async (event: FormEvent<HTMLFormElement>, entry: TimeEntry) => {
+    event.preventDefault()
+    const value = new FormData(event.currentTarget).get('reason')
+    const reason = typeof value === 'string' ? value.trim() : ''
+    if (!reason) {
+      setMessage({ tone: 'error', text: t('timeTracking.approval.reasonRequired') })
+      return
+    }
+    if (await runAction(`return:${entry.id}`, () => onTransitionEntry(entry, 'return', reason), t('timeTracking.approval.returned'))) {
+      setReturningEntryId(undefined)
+    }
+  }
+
+  /**
+   * Renders one approved or locked entry with lock and return actions.
+   *
+   * @param entry - Entry to render.
+   * @returns List row.
+   */
+  const renderReviewedEntry = (entry: TimeEntry) => (
+    <li className="grid min-w-0 gap-2 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 py-2 text-sm" data-testid="time-reviewed-row" key={entry.id}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="font-semibold text-[var(--workbench-text)]">{memberName(entry.userId)}</span>
+        <span className="font-semibold tabular-nums text-[var(--workbench-text)]">{formatMinutes(entry.durationMinutes)}</span>
+        <span className="min-w-0 flex-1 break-words text-[var(--workbench-muted)]">{describeEntry(entry)}</span>
+        {returningEntryId === entry.id ? null : (
+          <>
+            {entry.status === 'approved' ? (
+              <button
+                aria-label={`${t('timeTracking.approval.lock')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
+                className="workbench-button-secondary min-h-8 px-3"
+                disabled={pendingKey !== undefined}
+                onClick={() => { void runAction(`lock:${entry.id}`, () => onTransitionEntry(entry, 'lock'), t('timeTracking.approval.locked')) }}
+                type="button"
+              >
+                {t('timeTracking.approval.lock')}
+              </button>
+            ) : null}
+            <button
+              aria-label={`${t('timeTracking.approval.return')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
+              className="workbench-button-secondary min-h-8 px-3"
+              disabled={pendingKey !== undefined}
+              onClick={() => setReturningEntryId(entry.id)}
+              type="button"
+            >
+              {t('timeTracking.approval.return')}
+            </button>
+          </>
+        )}
+      </div>
+      {returningEntryId === entry.id ? (
+        <form className="grid min-w-0 gap-2" onSubmit={(event) => { void submitReturn(event, entry) }}>
+          <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-return-${entry.id}`}>
+            {t('timeTracking.approval.returnReason')}
+            <textarea autoFocus className="workbench-input min-h-16 w-full min-w-0 px-3 py-2" id={`${id}-return-${entry.id}`} maxLength={4000} name="reason" required />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button className="workbench-button-primary min-h-8 px-3" disabled={pendingKey !== undefined} type="submit">
+              {t('timeTracking.approval.confirmReturn')}
+            </button>
+            <button className="workbench-button-secondary min-h-8 px-3" onClick={() => setReturningEntryId(undefined)} type="button">
+              {t('timeTracking.form.cancel')}
+            </button>
+          </div>
+        </form>
+      ) : null}
+    </li>
+  )
 
   /**
    * Names a member by display name, falling back to the member key.
@@ -331,29 +408,18 @@ export function TimeApprovalQueue({
             {approved.length === 0 ? (
               <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('timeTracking.approval.emptyApproved')}</p>
             ) : (
-              <ul className="grid min-w-0 gap-2">
-                {approved.map((entry) => (
-                  <li className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 py-2 text-sm" key={entry.id}>
-                    <span className="font-semibold text-[var(--workbench-text)]">{memberName(entry.userId)}</span>
-                    <span className="font-semibold tabular-nums text-[var(--workbench-text)]">{formatMinutes(entry.durationMinutes)}</span>
-                    <span className="min-w-0 flex-1 break-words text-[var(--workbench-muted)]">{describeEntry(entry)}</span>
-                    <button
-                      aria-label={`${t('timeTracking.approval.lock')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
-                      className="workbench-button-secondary min-h-8 px-3"
-                      disabled={pendingKey !== undefined}
-                      onClick={() => { void runAction(`lock:${entry.id}`, () => onTransitionEntry(entry, 'lock'), t('timeTracking.approval.locked')) }}
-                      type="button"
-                    >
-                      {t('timeTracking.approval.lock')}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <ul className="grid min-w-0 gap-2">{approved.map(renderReviewedEntry)}</ul>
             )}
-            {lockedCount > 0 ? (
-              <p className="text-xs font-medium text-[var(--workbench-muted)]">{interpolate(t('timeTracking.approval.lockedSummary'), { count: lockedCount })}</p>
-            ) : null}
           </section>
+
+          {locked.length > 0 ? (
+            <section aria-labelledby={`${id}-locked`} className="grid min-w-0 gap-3">
+              <h3 className="text-base font-semibold text-[var(--workbench-text)]" id={`${id}-locked`}>
+                {interpolate(t('timeTracking.approval.lockedHeading'), { count: locked.length })}
+              </h3>
+              <ul className="grid min-w-0 gap-2">{locked.map(renderReviewedEntry)}</ul>
+            </section>
+          ) : null}
         </>
       ) : null}
     </section>

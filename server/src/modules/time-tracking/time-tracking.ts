@@ -23,6 +23,9 @@ import {
   type TimeEntrySource,
   type TimeEntryStatus,
   type TimePeriodClose,
+  type WorkspaceTimePeriodResult,
+  type WorkspaceTimePeriodTeamResult,
+  type WorkspaceTimePeriodTeamState,
   type TimeRateCard,
   type TimeRateCardJobRoleRate,
   type TimeRateCardMemberRate,
@@ -467,6 +470,34 @@ export type ReopenTimePeriodInput = {
   reason: string
   /** Optional client key used to make the reopen idempotent. */
   idempotencyKey?: string
+}
+
+/** A request to close one month for every listed Team of a Workspace. */
+export type CloseWorkspaceTimePeriodInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Teams of the Workspace whose month is closed. */
+  teamIds: readonly string[]
+  /** Month to close as `YYYY-MM`. */
+  month: string
+  /** IANA timezone that defines the month boundaries for every Team. */
+  timeZone: string
+  /** Workspace administrator closing the month. */
+  actorUserId: string
+}
+
+/** A request to reopen one month for every listed Team of a Workspace. */
+export type ReopenWorkspaceTimePeriodInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Teams of the Workspace whose month is reopened. */
+  teamIds: readonly string[]
+  /** Closed month as `YYYY-MM`. */
+  month: string
+  /** Workspace administrator reopening the month. */
+  actorUserId: string
+  /** Required explanation recorded in each Team's audit event. */
+  reason: string
 }
 
 /** Configuration for appending time-tracking mutations to the shared audit table. */
@@ -1574,6 +1605,91 @@ export class TimeTrackingService {
     const idempotencyPut = completion ? await completion(close) : undefined
     await this.repository.deletePeriodClose(close, auditPut, idempotencyPut)
     return close
+  }
+
+  /**
+   * Reads one month's close state for every listed Team of a Workspace.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamIds - Teams to read.
+   * @param month - Month as `YYYY-MM`.
+   * @returns Each Team with its close, in Team order.
+   */
+  async listWorkspacePeriodCloses(
+    workspaceId: string,
+    teamIds: readonly string[],
+    month: string,
+  ): Promise<WorkspaceTimePeriodTeamState[]> {
+    const resolvedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const resolvedMonth = readMonth(month)
+    return await Promise.all(readWorkspaceTeamIds(teamIds).map(async (teamId) => {
+      const close = (await this.repository.listPeriodCloses(resolvedWorkspaceId, teamId))
+        .find((candidate) => candidate.month === resolvedMonth)
+      return close ? { teamId, close } : { teamId }
+    }))
+  }
+
+  /**
+   * Closes one month for every listed Team, recording each Team's close in its own audit event.
+   *
+   * A Team whose month is already closed keeps its close. A Team that fails is reported, and the
+   * other Teams are still closed, so a retry closes only what is left.
+   *
+   * @param input - Teams, month, timezone, and closing administrator.
+   * @returns The outcome for each Team.
+   */
+  async closeWorkspacePeriod(input: CloseWorkspaceTimePeriodInput): Promise<WorkspaceTimePeriodResult> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const month = readMonth(input.month)
+    validateTimeZone(input.timeZone)
+    monthBounds(month, input.timeZone)
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    const results: WorkspaceTimePeriodTeamResult[] = []
+    for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
+      try {
+        await this.closePeriodInternal({ workspaceId, teamId, month, timeZone: input.timeZone, actorUserId })
+        results.push({ teamId, status: 'closed' })
+      } catch (error) {
+        if (error instanceof TimeTrackingError && error.code === 'TimePeriodAlreadyClosed') {
+          results.push({ teamId, status: 'already-closed' })
+        } else {
+          console.error(error)
+          results.push({ teamId, status: 'failed' })
+        }
+      }
+    }
+    return { month, results, partialFailure: results.some((result) => result.status === 'failed') }
+  }
+
+  /**
+   * Reopens one month for every listed Team, recording the reason in each Team's audit event.
+   *
+   * @param input - Teams, month, reason, and reopening administrator.
+   * @returns The outcome for each Team.
+   */
+  async reopenWorkspacePeriod(input: ReopenWorkspaceTimePeriodInput): Promise<WorkspaceTimePeriodResult> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const month = readMonth(input.month)
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    if (typeof input.reason !== 'string' || input.reason.trim() === '') {
+      throw new TimeTrackingError(400, 'ReopenReasonRequired', 'A reason is required to reopen a closed month.')
+    }
+    readText(input.reason, 'Reason', MAX_DESCRIPTION_LENGTH)
+    const results: WorkspaceTimePeriodTeamResult[] = []
+    for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
+      try {
+        await this.reopenPeriodInternal({ workspaceId, teamId, month, actorUserId, reason: input.reason })
+        results.push({ teamId, status: 'reopened' })
+      } catch (error) {
+        if (error instanceof TimeTrackingError && error.code === 'TimePeriodNotClosed') {
+          results.push({ teamId, status: 'not-closed' })
+        } else {
+          console.error(error)
+          results.push({ teamId, status: 'failed' })
+        }
+      }
+    }
+    return { month, results, partialFailure: results.some((result) => result.status === 'failed') }
   }
 
   /**
@@ -2809,6 +2925,16 @@ function historyActionFor(action: TransitionTimeEntryInput['action']): TimeEntry
     case 'lock': return 'locked'
     case 'return': return 'returned'
   }
+}
+
+/**
+ * Validates and de-duplicates the Teams of a Workspace-wide month operation.
+ *
+ * @param teamIds - Team identifiers from the Workspace directory.
+ * @returns Unique Team identifiers in sorted order.
+ */
+function readWorkspaceTeamIds(teamIds: readonly string[]): string[] {
+  return [...new Set(teamIds.map((teamId) => readIdentifier(teamId, 'Team ID')))].sort()
 }
 
 /**

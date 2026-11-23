@@ -60,7 +60,10 @@ export type IndirectTimeEntryInput = {
 }
 
 /** Single-entry lifecycle action. */
-export type TimeEntryTransitionAction = 'submit' | 'approve' | 'reject' | 'lock'
+export type TimeEntryTransitionAction = 'submit' | 'approve' | 'reject' | 'lock' | 'return'
+
+/** Lifecycle action that can be applied to every eligible entry of a period. */
+export type TimesheetTransitionAction = Exclude<TimeEntryTransitionAction, 'return'>
 
 /** Result of a period-wide lifecycle action. */
 export type TimesheetTransitionResult = {
@@ -305,7 +308,7 @@ export async function deleteTimeEntry(
  * @param entry - Entry whose revision is expected.
  * @param action - Lifecycle action.
  * @param context - Mutation identity shared by retries.
- * @param reason - Rejection reason.
+ * @param reason - Rejection or return reason.
  * @returns Entry in its new state.
  */
 export async function transitionTimeEntry(
@@ -347,7 +350,7 @@ export async function transitionTimeEntry(
 export async function transitionTimesheet(
   accessToken: string,
   teamId: string,
-  action: TimeEntryTransitionAction,
+  action: TimesheetTransitionAction,
   period: { from: string; to: string },
   context: MutationRequestContext,
 ): Promise<TimesheetTransitionResult> {
