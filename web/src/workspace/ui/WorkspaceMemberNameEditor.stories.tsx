@@ -38,6 +38,7 @@ const meta = {
 
 export default meta
 
+/** Story variants for the member display name editor. */
 type Story = StoryObj<typeof meta>
 
 /** The closed state: a button in the member row. */

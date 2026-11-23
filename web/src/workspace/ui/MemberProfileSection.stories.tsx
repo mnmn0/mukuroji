@@ -35,6 +35,7 @@ const meta = {
 
 export default meta
 
+/** Story variants for the member profile section. */
 type Story = StoryObj<typeof meta>
 
 /** A member who can change their display name. */
