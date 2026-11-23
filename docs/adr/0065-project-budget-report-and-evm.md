@@ -29,7 +29,7 @@ Work Item の進捗（Team の `progressMode`）はすでに保存されてい�
      期間は `from` から `asOf`（今日と `to` の早い方）まで。
    - 金額は予算額 ÷ BAC（工数）を 1 分あたりの単価として PV・EV を換算し、AC は予算通貨の実績コストだけを使う。
      単価のない entry は工数にだけ入る。他通貨は換算しない。
-   - SPI = EV / PV、CPI = EV / AC、EAC = BAC / CPI、ETC = EAC − AC、VAC = BAC − EAC。分母が 0 のときは返さない。
+   - SPI = EV / PV、CPI = EV / AC、EAC = BAC / CPI、ETC = EAC − AC、VAC = BAC − EAC。分母が 0 のときは返さない。実績があって出来高が 0 なら CPI は 0 とし、EAC・ETC・VAC は返さない。
 4. Project 予算の保存 key を `TIME_BUDGET#project#<teamId>#<projectId>` に変え、`TimeBudget` に `teamId` を持たせる。
    Team 予算の key（`TIME_BUDGET#team#<teamId>`）は変えない。まだ deploy していないので既存 row の移行はしない。
 

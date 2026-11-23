@@ -28,6 +28,14 @@ export type ProjectBudgetReportSectionProps = {
   enabled: boolean
 }
 
+/** A report range together with the Team and Project it was chosen for. */
+type ScopedRange = {
+  /** `teamId/projectId` the range belongs to. */
+  scope: string
+  /** The chosen range. */
+  range: TimeReportRange
+}
+
 /**
  * Offers a CSV body as a file download.
  *
@@ -57,10 +65,14 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   const t = useMemo(() => createTranslator(locale), [locale])
   const timeZone = resolveBrowserTimeZone()
   const today = toLocalDateKey(new Date())
-  const [pickedRange, setPickedRange] = useState<TimeReportRange>()
-  const [budgetRange, setBudgetRange] = useState<TimeReportRange>()
+  // Ranges remember the Project they were chosen for, so another Project starts from its own default.
+  const scope = `${teamId ?? ''}/${projectId ?? ''}`
+  const [pickedState, setPickedState] = useState<ScopedRange>()
+  const [budgetState, setBudgetState] = useState<ScopedRange>()
   const [isExporting, setIsExporting] = useState(false)
   const [hasExportError, setHasExportError] = useState(false)
+  const pickedRange = pickedState?.scope === scope ? pickedState.range : undefined
+  const budgetRange = budgetState?.scope === scope ? budgetState.range : undefined
   const range = pickedRange ?? budgetRange ?? resolveProjectBudgetReportRange(undefined, today)
   const input = { ...range, timeZone, interval: chooseProjectBudgetReportInterval(range) }
   const report = useProjectBudgetReport(
@@ -72,7 +84,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   )
   if (!pickedRange && !budgetRange && report.data?.budget) {
     const next = resolveProjectBudgetReportRange(report.data.budget, today)
-    if (next.from !== range.from || next.to !== range.to) setBudgetRange(next)
+    if (next.from !== range.from || next.to !== range.to) setBudgetState({ scope, range: next })
   }
 
   if (!teamId || !projectId) return null
@@ -85,7 +97,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
       isExporting={isExporting}
       isLoading={report.isLoading}
       locale={locale}
-      onChangeRange={setPickedRange}
+      onChangeRange={(next) => setPickedState({ scope, range: next })}
       onExport={() => {
         if (!accessToken) return
         setIsExporting(true)

@@ -154,4 +154,15 @@ describe('createProjectBudgetReport', () => {
     expect(report.earnedValue?.estimateAtCompletionMinutes).toBeUndefined()
     expect(report.earnedValue?.money?.costPerformanceIndex).toBeUndefined()
   })
+
+  test('reports a CPI of 0 when time is logged but nothing is earned, without estimates', () => {
+    const report = createProjectBudgetReport(input({ workItems: new Map() }))
+
+    expect(report.earnedValue?.earnedValueMinutes).toBe(0)
+    expect(report.earnedValue?.costPerformanceIndex).toBe(0)
+    expect(report.earnedValue?.estimateAtCompletionMinutes).toBeUndefined()
+    expect(report.earnedValue?.estimateToCompleteMinutes).toBeUndefined()
+    expect(report.earnedValue?.money?.costPerformanceIndex).toBe(0)
+    expect(report.earnedValue?.money?.estimateAtCompletionMinor).toBeUndefined()
+  })
 })

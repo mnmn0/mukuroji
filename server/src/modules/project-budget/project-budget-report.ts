@@ -192,8 +192,9 @@ function createEarnedValue(
   minorPerMinute: number | undefined,
   actualCostMinor: number,
 ): ProjectEarnedValueMetrics {
-  const cpi = ev > 0 && ac > 0 ? ev / ac : undefined
-  const eac = cpi === undefined ? undefined : bac / cpi
+  // Work logged with nothing earned yet is a CPI of 0; the estimates stay open until CPI is positive.
+  const cpi = ac > 0 ? ev / ac : undefined
+  const eac = cpi === undefined || cpi === 0 ? undefined : bac / cpi
   const metrics: ProjectEarnedValueMetrics = {
     budgetAtCompletionMinutes: Math.round(bac),
     plannedValueMinutes: Math.round(pv),
@@ -214,8 +215,8 @@ function createEarnedValue(
   if (!budget || minorPerMinute === undefined) return metrics
   const pvMinor = pv * minorPerMinute
   const evMinor = ev * minorPerMinute
-  const moneyCpi = evMinor > 0 && actualCostMinor > 0 ? evMinor / actualCostMinor : undefined
-  const eacMinor = moneyCpi === undefined ? undefined : budget.amountMinor / moneyCpi
+  const moneyCpi = actualCostMinor > 0 ? evMinor / actualCostMinor : undefined
+  const eacMinor = moneyCpi === undefined || moneyCpi === 0 ? undefined : budget.amountMinor / moneyCpi
   const money: ProjectEarnedValueMoney = {
     currency: budget.currency,
     budgetAtCompletionMinor: budget.amountMinor,
