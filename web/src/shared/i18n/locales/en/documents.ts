@@ -333,6 +333,7 @@ export const documentsMessages = {
   'documents.whiteboard.canvas': 'Whiteboard',
   'documents.whiteboard.note': 'Note',
   'documents.whiteboard.text': 'Text',
+  'documents.whiteboard.noteDone': 'Done',
   'documents.whiteboard.shape': 'Shape',
   'documents.whiteboard.frame': 'Frame',
   'documents.whiteboard.work-item': 'Work Item',

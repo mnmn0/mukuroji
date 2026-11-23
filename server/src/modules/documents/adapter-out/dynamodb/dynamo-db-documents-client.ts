@@ -48,6 +48,8 @@ import {
 } from '../../../../infrastructure/aws/dynamodb-client'
 import type {
   ApplyDocumentOperationsRequest,
+  ReflectWorkItemCompletionRequest,
+  ReflectWorkItemCompletionResult,
   ChangeDocumentArchiveStateRequest,
   CreatedDocumentPublicShare,
   CreateDocumentCommentRequest,
@@ -118,6 +120,10 @@ import {
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
 import {
+  isWorkItemCompletionRelationId,
+  planWorkItemCompletionOperations,
+} from '../../domain/work-item-completion'
+import {
   resolveDocumentCapabilities,
   type DocumentAccessSubject,
 } from '../../domain/document-access'
@@ -135,6 +141,7 @@ import {
   createDocumentWorkspaceSearchBody,
 } from '../../../workspace-search'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
+
 
 /** Work Item backlink target fence の schema version です。 */
 const DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION = 1
@@ -4113,6 +4120,302 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     }
   }
 
+  /**
+   * Marks the checklist items and Whiteboard notes linked to a completed Work
+   * Item as done in every Document that turned them into that Work Item.
+   *
+   * This runs for the completion event, not for a viewer, so it reads the
+   * Work Item backlink rows without permission filtering. It only checks
+   * items and notes that a Document editor explicitly linked to the Work Item
+   * and never changes text, relations, or permissions. Archived Documents are
+   * left as they are. Each Document is updated in its own transaction with an
+   * optimistic revision check, so a concurrent edit is retried against the
+   * latest content.
+   *
+   * @param input - Workspace, completed Work Item, completion event, and actor.
+   * @returns IDs of the Documents that changed.
+   */
+  async reflectWorkItemCompletion(
+    input: ReflectWorkItemCompletionRequest,
+  ): Promise<ReflectWorkItemCompletionResult> {
+    await this.ensureTable()
+    validateCanonicalDocumentWorkItemId(input.workItemId, 'workItemId')
+    assertIdentifier(input.eventId, 'eventId')
+    assertIdentifier(input.actorId, 'actorId')
+    const documentIds = new Set<string>()
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    // Every backlink page is read: stopping at a page budget would acknowledge
+    // the event while later Documents were never visited.
+    do {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': input.workspaceId,
+          ':prefix': backlinkPrefix('work-item', input.workItemId),
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        Limit: DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
+        ConsistentRead: true,
+      }))
+      for (const raw of result.Items ?? []) {
+        const relation: unknown = raw.relation
+        if (
+          typeof raw.documentId === 'string' &&
+          isRecord(relation) &&
+          typeof relation.id === 'string' &&
+          isWorkItemCompletionRelationId(relation.id)
+        ) {
+          documentIds.add(raw.documentId)
+        }
+      }
+      exclusiveStartKey = result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    const updatedDocumentIds: string[] = []
+    for (const documentId of documentIds) {
+      if (await this.reflectWorkItemCompletionInDocument(input, documentId)) {
+        updatedDocumentIds.push(documentId)
+      }
+    }
+    return { updatedDocumentIds }
+  }
+
+  /**
+   * Applies the completion to one Document in operation batches the reducer
+   * accepts, rereading the Document between commits.
+   *
+   * Each commit completes up to {@link DOCUMENT_MAX_OPERATION_COUNT} elements,
+   * and the next plan leaves them out because they are already done, so the
+   * loop ends once nothing is left to complete.
+   *
+   * @param input - Completion request.
+   * @param documentId - Document that links to the Work Item.
+   * @returns Whether the Document changed.
+   */
+  private async reflectWorkItemCompletionInDocument(
+    input: ReflectWorkItemCompletionRequest,
+    documentId: string,
+  ): Promise<boolean> {
+    let changed = false
+    while (await this.reflectWorkItemCompletionBatch(input, documentId)) {
+      changed = true
+    }
+    return changed
+  }
+
+  /**
+   * Commits one batch of completion operations to a Document, retrying on
+   * concurrent edits.
+   *
+   * Documents that are archived, or that sit beneath an archived folder, are
+   * left alone. The ancestors' revisions are checked in the same transaction,
+   * so archiving a folder while the batch is written fails the write and the
+   * retry sees the archive.
+   *
+   * @param input - Completion request.
+   * @param documentId - Document that links to the Work Item.
+   * @returns Whether a batch was committed.
+   */
+  private async reflectWorkItemCompletionBatch(
+    input: ReflectWorkItemCompletionRequest,
+    documentId: string,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT; attempt += 1) {
+      const row = await this.getDocumentRow(input.workspaceId, documentId)
+      if (row === undefined || row.document.archivedAt !== undefined) return false
+      const ancestorRows = await this.loadAncestorRows(input.workspaceId, row.document)
+      if (ancestorRows.some((ancestor) => ancestor.document.archivedAt !== undefined)) {
+        return false
+      }
+      // The first attempt of an event records which elements it set out to
+      // complete. A redelivered event only works through that scope, so an
+      // element that was already done then, and unchecked since, stays as
+      // the editor left it, even inside a block the event still changes.
+      const scope = await this.getWorkItemCompletionScope(
+        input.workspaceId,
+        documentId,
+        input.eventId,
+        input.workItemId,
+      )
+      const scopeElementKeys = scope === undefined ? undefined : new Set(scope.elementKeys)
+      const planned = planWorkItemCompletionOperations(
+        row.document,
+        input.workItemId,
+        (operationKey) => workItemCompletionOperationId(input.eventId, operationKey),
+        scopeElementKeys === undefined
+          ? undefined
+          : (elementKey) => scopeElementKeys.has(elementKey),
+      )
+      // A block or note this event already changed keeps its receipt, so a
+      // retried event never undoes an edit made after the first attempt.
+      const operations: DocumentOperation[] = []
+      for (const operation of planned.operations) {
+        if (operations.length >= DOCUMENT_MAX_OPERATION_COUNT) break
+        const receipt = await this.getOperationReceipt(
+          input.workspaceId,
+          documentId,
+          operation.operationId,
+        )
+        if (receipt === undefined) operations.push(operation)
+      }
+      const scopeActions = scope === undefined
+        ? [workItemCompletionScopePut(
+            this.tableName,
+            input,
+            documentId,
+            planned.elementKeys,
+            this.now(),
+          )]
+        : []
+      if (operations.length === 0) {
+        if (scopeActions.length === 0) return false
+        // Nothing to change: record the empty or already-done scope against
+        // the revision it was planned from.
+        try {
+          await this.client.send(new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: { workspaceId: input.workspaceId, recordKey: row.recordKey },
+                  ConditionExpression: 'revision = :expectedRevision',
+                  ExpressionAttributeValues: { ':expectedRevision': row.revision },
+                },
+              },
+              ...scopeActions,
+            ],
+          }))
+          return false
+        } catch (error) {
+          if (isConditionalFailure(error) || isRetryableTransactionConflict(error)) continue
+          throw normalizeDynamoError(error)
+        }
+      }
+      const conflictFloorRevision = row.operationConflictFloorRevision ?? 1
+      const nextRevision = row.revision + 1
+      const reduced = reduceDocumentOperations({
+        document: row.document,
+        elementRevisions: row.elementRevisions,
+        conflictFloorRevision,
+        baseRevision: row.revision,
+        nextRevision,
+        operations,
+      })
+      reduced.document.updatedAt = this.now().toISOString()
+      reduced.document.updatedByUserId = input.actorId
+      validateDocumentPayload(reduced.document)
+      const compactedHistory = compactElementRevisionHistory(
+        reduced.document,
+        reduced.elementRevisions,
+        conflictFloorRevision,
+      )
+      const createsVersionSnapshot = shouldCreateVersionSnapshot(row, reduced.document)
+      const nextRow: StoredDocumentItem = {
+        ...row,
+        revision: nextRevision,
+        document: reduced.document,
+        elementRevisions: compactedHistory.elementRevisions,
+        operationConflictFloorRevision: compactedHistory.operationConflictFloorRevision,
+        ...(createsVersionSnapshot
+          ? {
+              lastVersionSnapshotRevision: nextRevision,
+              lastVersionSnapshotAt: reduced.document.updatedAt,
+            }
+          : {}),
+      }
+      const actions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        ...ancestorRows.map((ancestor) => ({
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: { workspaceId: input.workspaceId, recordKey: ancestor.recordKey },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': ancestor.revision },
+          },
+        })),
+        currentDocumentPut(this.tableName, nextRow, row.revision),
+        documentSearchAccessPut(this.tableName, input.workspaceId, reduced.document),
+        documentSearchBodyPut(this.tableName, input.workspaceId, reduced.document),
+        ...scopeActions,
+        ...operations.map((operation) =>
+          workItemCompletionReceiptPut(
+            this.tableName,
+            input,
+            documentId,
+            operation,
+            nextRevision,
+            this.now(),
+          )),
+        ...versionPutActions(
+          this.tableName,
+          createVersionItems(
+            input.workspaceId,
+            reduced.document,
+            compactedHistory.elementRevisions,
+            'edit',
+            undefined,
+            {
+              previousDocument: row.document,
+              operations,
+              forceSnapshot: createsVersionSnapshot,
+            },
+          ),
+        ),
+      ]
+      assertTransactionSize(actions)
+      try {
+        await this.client.send(new TransactWriteCommand({ TransactItems: actions }))
+        return true
+      } catch (error) {
+        if (isConditionalFailure(error) || isRetryableTransactionConflict(error)) continue
+        throw normalizeDynamoError(error)
+      }
+    }
+    throw new DocumentError(
+      409,
+      'DocumentConcurrentUpdate',
+      'The document changed too frequently; retry the completion.',
+    )
+  }
+
+  /**
+   * Reads the elements one completion event set out to complete in a Document.
+   *
+   * @param workspaceId - Workspace partition.
+   * @param documentId - Document the event changes.
+   * @param eventId - Completion event ID.
+   * @param workItemId - Completed Work Item the scope must belong to.
+   * @returns The recorded scope, or undefined before the event's first attempt.
+   */
+  private async getWorkItemCompletionScope(
+    workspaceId: string,
+    documentId: string,
+    eventId: string,
+    workItemId: string,
+  ): Promise<StoredWorkItemCompletionScope | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: workItemCompletionScopeKey(documentId, eventId) },
+      ConsistentRead: true,
+    }))
+    const item: unknown = result.Item
+    if (item === undefined) return undefined
+    // A damaged scope must not widen or narrow what a redelivered event
+    // changes, so the event fails and is retried instead.
+    const elementKeys = isRecord(item) &&
+        item.entryType === 'work-item-completion-scope' &&
+        item.documentId === documentId &&
+        item.workItemId === workItemId
+      ? item.elementKeys
+      : undefined
+    if (
+      !Array.isArray(elementKeys) ||
+      !elementKeys.every((elementKey): elementKey is string => typeof elementKey === 'string')
+    ) {
+      throw invalidStoredDocumentData()
+    }
+    return { elementKeys: [...elementKeys] }
+  }
+
   /** Document を安全な text format へ export します。 */
   async exportDocument(input: ExportDocumentRequest): Promise<RenderedDocumentExport> {
     await this.ensureTable()
@@ -5772,6 +6075,118 @@ function blockTextLength(block: DocumentBlock): number {
       return (block.title ?? block.url).length
     case 'diagram':
       return block.source.length
+  }
+}
+
+/** Elements one Work Item completion event set out to complete in a Document. */
+type StoredWorkItemCompletionScope = {
+  /** Keys of the elements, as planned on the event's first attempt. */
+  elementKeys: string[]
+}
+
+/**
+ * Builds the sort key of a completion event's scope in one Document.
+ *
+ * @param documentId - Document the event changes.
+ * @param eventId - Completion event ID.
+ * @returns Sort key of the scope row.
+ */
+function workItemCompletionScopeKey(documentId: string, eventId: string): string {
+  return `WORK_ITEM_COMPLETION#${encodeKeyPart(documentId)}#${sha256(eventId)}`
+}
+
+/**
+ * Records the scope of a completion event's first attempt in a Document.
+ *
+ * @param tableName - Documents table name.
+ * @param input - Completion request.
+ * @param documentId - Document the event changes.
+ * @param elementKeys - Keys of the elements planned on the first attempt.
+ * @param now - Write time.
+ * @returns Put that fails if another attempt recorded the scope first.
+ */
+function workItemCompletionScopePut(
+  tableName: string,
+  input: ReflectWorkItemCompletionRequest,
+  documentId: string,
+  elementKeys: readonly string[],
+  now: Date,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: workItemCompletionScopeKey(documentId, input.eventId),
+        entryType: 'work-item-completion-scope',
+        documentId,
+        workItemId: input.workItemId,
+        elementKeys: [...elementKeys],
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      },
+      ConditionExpression: 'attribute_not_exists(workspaceId)',
+    },
+  }
+}
+
+/**
+ * Builds a bounded operation ID for one element completed by one event.
+ *
+ * Event and element IDs are each valid on their own but can exceed the
+ * identifier limit together, so the pair is hashed.
+ *
+ * @param eventId - Completion event ID.
+ * @param elementKey - `block:<blockId>` or `object:<objectId>`.
+ * @returns Operation ID of at most 85 characters.
+ */
+function workItemCompletionOperationId(eventId: string, elementKey: string): string {
+  return `work-item-completion:${sha256(`${eventId}\n${elementKey}`)}`
+}
+
+/**
+ * Records that one completion event completed one element.
+ *
+ * The receipt uses the operation receipt row of the Document, so the same
+ * retention and expiry apply.
+ *
+ * @param tableName - Documents table name.
+ * @param input - Completion request.
+ * @param documentId - Changed Document.
+ * @param operation - Completion operation written in the same transaction.
+ * @param revision - Revision the transaction writes.
+ * @param now - Write time.
+ * @returns Conditional put of the receipt.
+ */
+function workItemCompletionReceiptPut(
+  tableName: string,
+  input: ReflectWorkItemCompletionRequest,
+  documentId: string,
+  operation: DocumentOperation,
+  revision: number,
+  now: Date,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: operationKey(documentId, operation.operationId),
+        entryType: 'document-operation',
+        documentId,
+        clientId: input.actorId,
+        operationId: operation.operationId,
+        fingerprint: fingerprint(operation),
+        revision,
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      } satisfies StoredOperationReceipt,
+      ConditionExpression:
+        'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+      ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+    },
   }
 }
 
