@@ -345,6 +345,33 @@ describe('Focus queue', () => {
     expect(html).toContain('href="/projects/refero/issues?teamId=core-team&amp;tab=permissions"')
   })
 
+  test('tells the viewer when some Project logs could not be read, even with no entries', () => {
+    /**
+     * Renders the queue for one response.
+     *
+     * @param response - Focus response.
+     * @returns The markup.
+     */
+    const render = (response: FocusQueueResponse) => renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="ja"
+          onOpenItem={() => undefined}
+          onRetry={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
+    )
+
+    const failed = render({ ...focusQueueResponseFixture, projectLogEntries: [], projectLogIncomplete: true })
+    expect(failed).toContain('data-testid="focus-project-log-incomplete"')
+    expect(failed).toContain('一部の Project の登録簿を読み込めませんでした。')
+    expect(render({ ...focusQueueResponseFixture, projectLogEntries: [] })).not.toContain('focus-project-log')
+  })
+
   test('falls back from an inaccessible requested signal to another authorized source', () => {
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     const firstSignal = item?.signals[0]

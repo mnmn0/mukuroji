@@ -265,6 +265,7 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
       value.projectLogEntries !== undefined &&
       (!Array.isArray(value.projectLogEntries) || !value.projectLogEntries.every(isFocusProjectLogEntry))
     ) ||
+    (value.projectLogIncomplete !== undefined && value.projectLogIncomplete !== true) ||
     !Array.isArray(value.effectivePolicies) ||
     !value.effectivePolicies.every(isFocusEffectivePolicy) ||
     !Array.isArray(value.teamPolicies) ||

@@ -181,6 +181,7 @@ export const workspaceMessages = {
   'workspace.focus.projectLog.decisionPending': 'Decision pending',
   'workspace.focus.projectLog.resolvesReview': 'Disappears once you review it and move the date to today or later, or close it',
   'workspace.focus.projectLog.resolvesDecision': 'Disappears once you approve or reject it and close it',
+  'workspace.focus.projectLog.incomplete': 'Some Project logs could not be loaded, so some entries may be missing.',
   'workspace.focus.policy.nowThreshold': 'Now score threshold',
   'workspace.focus.policy.provenance': 'Policy layers: {layers}',
   'workspace.focus.policy.save': 'Save rules',

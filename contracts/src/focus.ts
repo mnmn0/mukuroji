@@ -510,6 +510,11 @@ export type FocusQueueResponse = {
    * most severe first. Absent only in responses from servers that predate the field.
    */
   projectLogEntries?: FocusProjectLogEntry[]
+  /**
+   * True when the log of at least one Project could not be read, so `projectLogEntries` may be
+   * missing entries. Absent when every log was read.
+   */
+  projectLogIncomplete?: boolean
   /** Effective policies referenced by the returned items. */
   effectivePolicies: FocusEffectivePolicy[]
   /** Accessible stored Team overrides used by the policy editor. */

@@ -181,6 +181,7 @@ export const workspaceMessages = {
   'workspace.focus.projectLog.decisionPending': '判断待ち',
   'workspace.focus.projectLog.resolvesReview': '見直して期限を今日以降に更新するか、クローズすると消えます',
   'workspace.focus.projectLog.resolvesDecision': '承認か却下を決めて、クローズすると消えます',
+  'workspace.focus.projectLog.incomplete': '一部の Project の登録簿を読み込めませんでした。表示されていない登録があるかもしれません。',
   'workspace.focus.policy.nowThreshold': '「いま」に入るスコア閾値',
   'workspace.focus.policy.provenance': '適用ルール: {layers}',
   'workspace.focus.policy.save': 'ルールを保存',

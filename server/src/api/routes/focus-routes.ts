@@ -125,6 +125,7 @@ import {
 } from '../shared/work-item-schedule'
 import { projectAccessAllows, type TeamPermissionContext } from '../shared/workspace-access'
 import { filterReadableProjectDirectory } from '../shared/project-directory-visibility'
+import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
 
 /** Maximum notification page size accepted by the durable Inbox port. */
 const FOCUS_NOTIFICATION_PAGE_LIMIT = 50
@@ -1584,7 +1585,7 @@ async function readFocusQueue(
     state,
     projectTitlesByKey,
     scheduleBaselines,
-    projectLogSources,
+    projectLog,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1606,7 +1607,8 @@ async function readFocusQueue(
     planning,
     projectTitlesByKey,
     initiativeTitlesById,
-    projectLogSources,
+    projectLogSources: projectLog.sources,
+    ...(projectLog.incomplete ? { projectLogIncomplete: true } : {}),
     relationGraphs,
     scheduleBaselines,
     reviewerApprovals,
@@ -2169,22 +2171,31 @@ async function readFocusLegacyUpdateTargetScope(
   }
 }
 
-/** Most Project logs one Focus read scans for entries the viewer owns. */
-const FOCUS_PROJECT_LOG_PROJECT_LIMIT = 100
+/** Most Project logs one Focus read queries at the same time. */
+const FOCUS_PROJECT_LOG_READ_CONCURRENCY = 8
+
+/** Owned open Project log entries, and whether any Project log could not be read. */
+type FocusProjectLogRead = {
+  /** Entries with their Team, Project, and Project name. */
+  sources: FocusProjectLogSource[]
+  /** True when at least one Project log failed, so `sources` may be missing entries. */
+  incomplete: boolean
+}
 
 /**
  * Reads the open Project log entries the viewer owns, from Projects the viewer can see and has a
  * Project role in, since an owner must be a member of the Project.
  *
- * A log that cannot be read is left out, so one failing Project does not hide the rest of the
- * Focus queue.
+ * Every such Project is read, a few at a time. A log that cannot be read is reported as an
+ * incomplete result instead of an empty one, so the rest of the Focus queue still loads and the
+ * viewer is told that some entries may be missing.
  *
  * @param principal - Current authenticated Workspace principal.
- * @returns Owned open entries with their Team, Project, and Project name.
+ * @returns Owned open entries, and whether any Project log failed.
  */
 async function readFocusProjectLogSources(
   principal: WorkspacePrincipal,
-): Promise<FocusProjectLogSource[]> {
+): Promise<FocusProjectLogRead> {
   const directory = await filterReadableProjectDirectory(
     principal,
     await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja'),
@@ -2196,8 +2207,8 @@ async function readFocusProjectLogSources(
       access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
     ))
     .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
-    .slice(0, FOCUS_PROJECT_LOG_PROJECT_LIMIT)
-  const sources = await Promise.all(projects.map(async (project) => {
+  let incomplete = false
+  const sources = await mapInOrderWithConcurrency(projects, FOCUS_PROJECT_LOG_READ_CONCURRENCY, async (project) => {
     try {
       const entries = await workItemDependencies.projectRaidLogs.listOpenOwnedBy(
         { workspaceId: principal.directoryId, teamId: project.teamId, projectId: project.projectId },
@@ -2210,10 +2221,11 @@ async function readFocusProjectLogSources(
         projectId: project.projectId,
         error,
       })
+      incomplete = true
       return []
     }
-  }))
-  return sources.flat()
+  })
+  return { sources: sources.flat(), incomplete }
 }
 
 /**

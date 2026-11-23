@@ -6,6 +6,10 @@ import type { MessageKey } from '../../../shared/i18n/i18n'
 export type FocusProjectLogEntriesProps = {
   /** Entries in server order: most severe first. */
   entries: readonly FocusProjectLogEntry[]
+  /** Whether the log of at least one Project could not be read, so entries may be missing. */
+  incomplete?: boolean
+  /** Reloads the Focus queue after a failed Project log read. */
+  onRetry?: () => void
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -29,11 +33,14 @@ const severityMessageKeys: Record<ProjectRaidSeverity, MessageKey> = {
  * Lists the risks and issues the viewer owns whose review is overdue and the change requests
  * waiting for the viewer's decision, each with what makes it disappear.
  *
- * @param props - Entries and localized copy.
- * @returns A compact panel, or null when nothing needs attention.
+ * When some Project logs could not be read, the panel says so with a retry, even with no entries,
+ * so missing obligations are not mistaken for none.
+ *
+ * @param props - Entries, read state, retry, and localized copy.
+ * @returns A compact panel, or null when nothing needs attention and every log was read.
  */
-export function FocusProjectLogEntries({ entries, t }: FocusProjectLogEntriesProps) {
-  if (entries.length === 0) return null
+export function FocusProjectLogEntries({ entries, incomplete = false, onRetry, t }: FocusProjectLogEntriesProps) {
+  if (entries.length === 0 && !incomplete) return null
   return (
     <section
       aria-labelledby="focus-project-log-title"
@@ -44,6 +51,22 @@ export function FocusProjectLogEntries({ entries, t }: FocusProjectLogEntriesPro
         <h3 id="focus-project-log-title">{t('workspace.focus.projectLog.title')}</h3>
         <span className="tabular-nums">{entries.length}</span>
       </div>
+      {incomplete ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3"
+          data-testid="focus-project-log-incomplete"
+          role="alert"
+        >
+          <p className="text-app-body font-semibold text-[var(--workbench-danger)]">
+            {t('workspace.focus.projectLog.incomplete')}
+          </p>
+          {onRetry ? (
+            <button className="workbench-button-secondary min-h-[44px] px-4" onClick={onRetry} type="button">
+              {t('workspace.focus.retry')}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <ul className="divide-y divide-[var(--workbench-border)]">
         {entries.map((entry) => (
           <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" data-testid="focus-project-log-entry" key={entry.id}>

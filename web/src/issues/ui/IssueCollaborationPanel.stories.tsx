@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useRef, useState, type ComponentProps } from 'react'
+import { MemoryRouter } from 'react-router'
 import type {
   AiWorkItemSource,
   CreateCuratedContextItemRequest,
@@ -13,6 +14,7 @@ import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAss
 import {
   acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
+  curatedContextItemFixtures,
   curatedContextRevisionFixtures,
   issueCollaborationControllerFixture,
 } from '../fixtures'
@@ -1076,5 +1078,73 @@ export const InheritedSourceReplacement: Story = {
       'context-decision-1',
     )
     await expect(request).not.toHaveProperty('source')
+  },
+}
+
+/** An active risk recorded on the Work Item, which the Project log promotion offers to register. */
+const activeRiskFixture = (() => {
+  const risk = curatedContextItemFixtures.find((item) => item.kind === 'risk')
+  if (!risk) throw new Error('The curated context fixtures need a risk.')
+  return { ...risk, id: 'context-risk-active', state: 'active', title: 'ベンダーの納期が遅れる可能性がある' } satisfies CuratedContextItem
+})()
+
+/** Controller whose decisions tab lists the active risk first. */
+const riskPromotionController = {
+  ...issueCollaborationControllerFixture,
+  context: {
+    ...issueCollaborationControllerFixture.context,
+    items: [activeRiskFixture, ...issueCollaborationControllerFixture.context.items],
+  },
+}
+
+/** Wraps a story in a router, since the promotion links to the Project log. */
+const withRouter = (Story: () => React.JSX.Element) => <MemoryRouter><Story /></MemoryRouter>
+
+/**
+ * A risk on a Work Item assigned to a Project can be registered in the Project log; once it is,
+ * the row links to the log.
+ */
+export const RiskPromotion: Story = {
+  args: {
+    controller: riskPromotionController,
+    defaultTab: 'decisions',
+    riskPromotion: { promote: fn(async () => undefined), logPath: '/projects/refero/issues?teamId=core-team&tab=permissions' },
+  },
+  decorators: [withRouter],
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const buttons = canvas.getAllByRole('button', { name: 'Project のリスクに登録' })
+    // Superseded risks are not offered, so only the active one has the button.
+    await expect(buttons).toHaveLength(1)
+    const [button] = buttons
+    if (!button) throw new Error('The promotion button is missing.')
+    await userEvent.click(button)
+    await expect(args.riskPromotion?.promote).toHaveBeenCalledWith(activeRiskFixture)
+    await expect(await canvas.findByText('Project のリスクに登録しました。')).toBeVisible()
+    await expect(canvas.getByRole('link', { name: '登録簿を開く' })).toHaveAttribute(
+      'href',
+      '/projects/refero/issues?teamId=core-team&tab=permissions',
+    )
+  },
+}
+
+/** A failed registration says what to check and keeps the button for another try. */
+export const RiskPromotionFailed: Story = {
+  args: {
+    controller: riskPromotionController,
+    defaultTab: 'decisions',
+    riskPromotion: {
+      promote: fn(async () => {
+        throw new Error('Forbidden')
+      }),
+      logPath: '/projects/refero/issues?teamId=core-team&tab=permissions',
+    },
+  },
+  decorators: [withRouter],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Project のリスクに登録' }))
+    await expect(await canvas.findByRole('alert')).toHaveTextContent('Project のリスクに登録できませんでした。')
+    await expect(canvas.getByRole('button', { name: 'Project のリスクに登録' })).toBeEnabled()
   },
 }
