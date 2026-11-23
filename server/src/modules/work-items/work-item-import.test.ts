@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { S3Client } from '@aws-sdk/client-s3'
 import type { SQSClient } from '@aws-sdk/client-sqs'
-import { createDefaultDueDateWorkItemSchedule, type WorkItemScheduleCalendarPolicy } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
+  createDefaultDueDateWorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
+} from '@mukuroji/contracts'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
@@ -151,6 +155,56 @@ describe('durable Work Item import', () => {
     expect(fixture.execution?.checkpointRow).toBe(4)
     expect(fixture.execution?.status).toBe('completed')
     expect(fixture.execution?.terminalReport?.validRows).toBe(2)
+  })
+
+  test('finishes a retry near the Team link limit when a link was applied before its receipt', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-receipt')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    // The Team has room for exactly the import's two links; applying one twice would overflow it.
+    const storedLinks = new Set(Array.from({ length: WORK_ITEM_TEAM_RELATION_LINK_LIMIT - 2 }, (_, index) => `existing-${index}`))
+    let failFirstLinkReceipt = true
+    const dependencies = createWorkerDependencies(fixture, {
+      executions: {
+        ...fixture.executions,
+        /** Loses the receipt of the first link once, after the link was applied. */
+        async recordRowReceipt(workspaceId, receiptJobId, leaseOwner, receipt, leaseExpiresAt) {
+          if (receipt.row === 3 && failFirstLinkReceipt) {
+            failFirstLinkReceipt = false
+            throw new Error('receipt write timed out')
+          }
+          return fixture.executions.recordRowReceipt(workspaceId, receiptJobId, leaseOwner, receipt, leaseExpiresAt)
+        },
+      },
+      /** Returns the fixture validation with the links under test. */
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'relation', sourceRow: 1, targetRow: 2, type: 'related' },
+          ],
+        }
+      },
+      /** Stores each link once, as the relation graph does, and rejects one past the limit. */
+      async applyLink(request) {
+        if (storedLinks.has(request.linkIdentity)) return
+        if (storedLinks.size >= WORK_ITEM_TEAM_RELATION_LINK_LIMIT) {
+          throw new WorkItemImportError('WorkItemRelationGraphLimitExceeded', 'The Team relation graph is full.')
+        }
+        storedLinks.add(request.linkIdentity)
+      },
+    })
+
+    const first = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+    const second = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(second).toEqual({ batchItemFailures: [] })
+    expect(storedLinks.size).toBe(WORK_ITEM_TEAM_RELATION_LINK_LIMIT)
+    expect(fixture.execution?.status).toBe('completed')
+    expect(fixture.execution?.checkpointRow).toBe(4)
   })
 
   test('reports a rejected link on the row it belongs to', async () => {
