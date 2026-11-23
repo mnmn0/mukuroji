@@ -1960,6 +1960,35 @@ test('DynamoDB idempotent Work Item create conflicts when the contributor list d
   )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
 })
 
+test('DynamoDB idempotent Work Item create replays a shared-calendar schedule after the calendar changed', async () => {
+  const client = createIdempotentReplayClient()
+  /**
+   * Builds the create body on the given shared calendar rules.
+   *
+   * @param holidays - Days off the shared calendar resolved for this attempt.
+   * @returns A create request bound to one caller-selected resource ID.
+   */
+  const body = (holidays: string[]) => ({
+    ...createIdempotentContributorCreateBody([]),
+    schedule: {
+      ...createDueDateSchedule('2026-08-14'),
+      calendarPolicy: { ...createDueDateSchedule('2026-08-14').calendarPolicy, holidays, calendarSource: 'shared' },
+    },
+  })
+  const created = await client.createTeamIssue('workspace-1', 'core-team', body([]), 'demo@example.com')
+
+  // The retry resolves the shared calendar again after a day off was added to it (ADR 0058).
+  const replay = await client.createTeamIssue('workspace-1', 'core-team', body(['2026-08-10']), 'demo@example.com')
+
+  expect(replay).toEqual(created)
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...body([]), schedule: { ...body([]).schedule, dueDate: '2026-08-17' } },
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
 test('DynamoDB Work Item persists and re-reads explicit schedule replacements', async () => {
   let persistedItem: Record<string, unknown> | undefined
   const documentClient = {

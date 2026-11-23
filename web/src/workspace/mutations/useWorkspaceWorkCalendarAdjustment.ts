@@ -71,7 +71,7 @@ export function useWorkspaceWorkCalendarAdjustment(accessToken: string): Workspa
         calendar: toWorkspaceCalendarSettings(settings),
         adjustment,
       })
-      setPreview({ key, impact: previewed })
+      setPreview({ key, impact: previewed, calendar: toWorkspaceCalendarSettings(settings) })
     } catch {
       setFailed(true)
     } finally {
@@ -81,11 +81,14 @@ export function useWorkspaceWorkCalendarAdjustment(accessToken: string): Workspa
 
   /** Applies the previewed adjustment. */
   async function apply() {
+    // The server refuses the apply when the saved settings are no longer the previewed ones.
+    const expectedCalendar = preview && preview.key === currentKey ? preview.calendar : undefined
+    if (!expectedCalendar) return
     setIsBusy(true)
     setFailed(false)
     applyContext.current ??= createMutationRequestContext()
     try {
-      setResult(await applyWorkspaceWorkCalendar(accessToken, { adjustment }, applyContext.current))
+      setResult(await applyWorkspaceWorkCalendar(accessToken, { adjustment, expectedCalendar }, applyContext.current))
       applyContext.current = undefined
       setPreview(undefined)
     } catch {
@@ -128,17 +131,21 @@ type PreviewedImpact = {
   key: string
   /** Previewed impact. */
   impact: WorkCalendarChangeImpact
+  /** Saved Workspace calendar settings the preview was made with. */
+  calendar: WorkspaceCalendarSettings
 }
 
 /**
- * Builds the key that binds a preview to the saved settings and the chosen adjustment.
+ * Builds the key that binds a preview to the saved settings, the synced national holidays, and the
+ * chosen adjustment.
  *
- * @param settings - Saved Workspace calendar settings.
+ * @param settings - Saved Workspace calendar settings with the synced national holidays.
  * @param adjustment - Chosen adjustment.
  * @returns The key.
  */
 function previewKey(settings: WorkspaceCalendarSettingsResponse, adjustment: WorkCalendarAdjustment): string {
-  return JSON.stringify([toWorkspaceCalendarSettings(settings), adjustment])
+  // The synced national holidays count too, since a Team or Project calendar may use them.
+  return JSON.stringify([toWorkspaceCalendarSettings(settings), settings.nationalHolidayDates ?? null, adjustment])
 }
 
 /**

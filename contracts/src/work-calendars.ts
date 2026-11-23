@@ -131,10 +131,15 @@ export type SaveWorkCalendarInput = WorkCalendarChangeInput & {
 export type ApplyWorkspaceWorkCalendarInput = {
   /** How Work Items that follow the Workspace calendar keep their dates. */
   adjustment: WorkCalendarAdjustment
+  /**
+   * Saved Workspace calendar settings the caller previewed. When they no longer match the saved
+   * settings, nothing is rewritten and the apply fails with a conflict.
+   */
+  expectedCalendar?: WorkspaceCalendarSettings
 }
 
 /** Body of `POST /api/workspace/work-calendar/preview`. */
-export type PreviewWorkspaceWorkCalendarInput = ApplyWorkspaceWorkCalendarInput & {
+export type PreviewWorkspaceWorkCalendarInput = Pick<ApplyWorkspaceWorkCalendarInput, 'adjustment'> & {
   /** Workspace calendar settings to compare with the saved ones. */
   calendar: WorkspaceCalendarSettings
 }

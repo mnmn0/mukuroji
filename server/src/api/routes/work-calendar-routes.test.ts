@@ -345,6 +345,25 @@ test('applies the saved Workspace calendar only to Work Items whose rules differ
   expect(updates[0]?.schedule.calendarPolicy.holidays).not.toContain('2026-12-09')
 })
 
+test('refuses a Workspace apply whose previewed settings are no longer the saved ones', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const batches = installWorkItems([{ ...base, id: 'current', revision: 3, schedule: weekSchedule(sharedPolicy) }])
+  const stale = { ...DEFAULT_WORKSPACE_CALENDAR_SETTINGS, holidays: ['2026-12-09'] }
+  const refused = await request('/api/workspace/work-calendar/apply', 'POST', {
+    adjustment: 'keep-duration',
+    expectedCalendar: stale,
+  })
+  expect(refused.status).toBe(409)
+  expect(batches.flat()).toEqual([])
+
+  const accepted = await request('/api/workspace/work-calendar/apply', 'POST', {
+    adjustment: 'keep-duration',
+    expectedCalendar: DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  })
+  expect(accepted.status).toBe(200)
+})
+
 test('retries a conflicting rewrite from a fresh read so an adopted older Work Item still follows', async () => {
   configureFakeProjectClients(true)
   const base = await readBaseIssue()

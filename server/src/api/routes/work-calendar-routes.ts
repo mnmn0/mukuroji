@@ -201,10 +201,15 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
     try {
       const body = await readJsonBody(c)
       const adjustment = readAdjustment(body)
+      const expectedValue: unknown = readRecord(body).expectedCalendar
+      const expectedCalendar = expectedValue === undefined ? undefined : readWorkspaceCalendarSettings(expectedValue)
+      if (expectedValue !== undefined && !expectedCalendar) {
+        throw invalidRequest('expectedCalendar is not valid Workspace calendar settings.')
+      }
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       requireWorkspaceAdministration(principal)
-      const change = await createWorkspaceCalendarChange(principal, undefined, adjustment)
+      const change = await createWorkspaceCalendarChange(principal, undefined, adjustment, expectedCalendar)
       return c.json(await applyWorkCalendarChange(
         change.rules,
         createWorkCalendarChangePorts(c, principal, change.teamIds, body),
@@ -344,12 +349,17 @@ async function createWorkspaceCalendarChange(
   principal: WorkspacePrincipal,
   candidateSettings: WorkspaceCalendarSettings | undefined,
   adjustment: WorkCalendarAdjustment,
+  expectedSettings?: WorkspaceCalendarSettings,
 ): Promise<CalendarChange> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const teamIds = directory.teams.map((team) => team.id)
   // Read first, so a calendar saved while the rules resolve shows up as a newer version.
   const plannedVersion = await readWorkCalendarVersion(principal.directoryId, teamIds)
   const current = await readWorkspaceCalendarInputs(principal.directoryId)
+  // An apply stands only for the saved settings its preview showed; newer ones need a new preview.
+  if (expectedSettings && !haveSameWorkspaceCalendarSettings(expectedSettings, current.settings)) {
+    throw new WorkCalendarRevisionConflictError()
+  }
   // The candidate keeps the synced holidays, which a Team or Project calendar may turn on.
   const candidate: WorkspaceCalendarInputs = candidateSettings ? { ...current, settings: candidateSettings } : current
   const teams = await Promise.all(teamIds.map(async (teamId) => ({
@@ -380,6 +390,20 @@ async function createWorkspaceCalendarChange(
       adoptLegacy: false,
     },
   }
+}
+
+/**
+ * Compares two Workspace calendar settings field by field.
+ *
+ * @param left - Settings a caller previewed.
+ * @param right - Settings saved now.
+ * @returns Whether both describe the same calendar.
+ */
+function haveSameWorkspaceCalendarSettings(left: WorkspaceCalendarSettings, right: WorkspaceCalendarSettings): boolean {
+  const normalizedLeft = readWorkspaceCalendarSettings(left)
+  const normalizedRight = readWorkspaceCalendarSettings(right)
+  return normalizedLeft !== undefined && normalizedRight !== undefined &&
+    JSON.stringify(normalizedLeft) === JSON.stringify(normalizedRight)
 }
 
 /**

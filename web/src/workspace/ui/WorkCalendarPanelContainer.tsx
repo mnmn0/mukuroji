@@ -63,10 +63,16 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
   const ownDraft = draftState && draftState.scope === scope?.value ? draftState : undefined
   const draft = calendar ? ownDraft?.value ?? createWorkCalendarDraft(calendar) : undefined
   const baseRevision = ownDraft?.baseRevision ?? calendar?.calendar?.revision ?? 0
+  // A preview stands only for the calendar and revision it was made from: a scope that falls back
+  // to another Team, or a reloaded revision under an unedited draft, hides it and blocks the save.
+  const previewTarget = `${scope?.value ?? ''}@${baseRevision}`
+  const [previewedTarget, setPreviewedTarget] = useState<string>()
+  const impact = previewedTarget === previewTarget ? change.impact : undefined
 
   /** Previews the drafted change. */
   function preview() {
     if (!teamId || !draft) return
+    setPreviewedTarget(previewTarget)
     void change.preview(teamId, {
       ...(projectId ? { projectId } : {}),
       overrides: toWorkCalendarOverrides(draft),
@@ -76,7 +82,7 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
 
   /** Saves the previewed change and applies it to the Work Items that follow the calendar. */
   async function save() {
-    if (!teamId || !draft || !change.impact) return
+    if (!teamId || !draft || !impact) return
     const saved = await change.save(teamId, {
       ...(projectId ? { projectId } : {}),
       overrides: toWorkCalendarOverrides(draft),
@@ -93,7 +99,7 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
       errorMessage={change.errorKey
         ? t(change.errorKey)
         : query.error ? t(readWorkCalendarErrorKey(query.error)) : undefined}
-      impact={change.impact}
+      impact={impact}
       isBusy={change.isBusy}
       isLoading={query.isLoading}
       onDraftChange={(value) => {

@@ -5824,7 +5824,7 @@ function isMatchingIdempotentWorkItemCreate(
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
-    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
+    idempotentCreateSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
@@ -5878,6 +5878,42 @@ function workItemSchedulesEqual(
 ): boolean {
   return JSON.stringify(normalizeWorkItemSchedule(left)) ===
     JSON.stringify(normalizeWorkItemSchedule(right))
+}
+
+/**
+ * Compares the schedules of an idempotent create and its stored Work Item.
+ *
+ * @param stored - Schedule of the stored Work Item.
+ * @param requested - Schedule of the create request being retried.
+ * @returns Whether both identify the same create.
+ */
+function idempotentCreateSchedulesEqual(stored: WorkItemSchedule, requested: WorkItemSchedule): boolean {
+  return JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(stored))) ===
+    JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(requested)))
+}
+
+/**
+ * Reduces a schedule to what identifies an idempotent create.
+ *
+ * A schedule that follows the shared calendar takes its rules, and the working days counted on
+ * them, from the calendar saved when it is created (ADR 0058). A retry after that calendar changed
+ * resolves other rules for the same request, so for such a schedule only the mode, the dates and
+ * the planned effort identify it.
+ *
+ * @param schedule - Normalized schedule.
+ * @returns The schedule, or its identifying fields when it follows the shared calendar.
+ */
+function toComparableWorkItemSchedule(schedule: WorkItemSchedule): unknown {
+  if (schedule.calendarPolicy.calendarSource !== 'shared') return schedule
+  return {
+    mode: schedule.mode,
+    calendarSource: 'shared',
+    ...(schedule.mode === 'due-date' ? { dueDate: schedule.dueDate } : {}),
+    ...(schedule.mode === 'date-range' || schedule.mode === 'milestone'
+      ? { startDate: schedule.startDate, endDate: schedule.endDate }
+      : {}),
+    ...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes }),
+  }
 }
 
 function readOptionalString(value: unknown, message: string) {

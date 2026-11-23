@@ -2094,7 +2094,10 @@ export function TaskPage() {
         // A failed Team or Project calendar read is shown, not hidden behind the Workspace calendar.
         projectWorkCalendarError
           ? t('tasks.workspaceCalendar.scopedError')
-          : workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined
+          // A loaded Team or Project calendar is what dates use, not the Monday-to-Friday fallback.
+          : workspaceCalendarErrorKey === 'tasks.workspaceCalendar.error' && projectWorkCalendar?.resolvedPolicy
+            ? t('tasks.workspaceCalendar.scopedFallbackError')
+            : workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined
       }
       onRetryWorkspaceCalendar={projectWorkCalendarError ? () => void mutateProjectWorkCalendar() : workspaceCalendar.retry}
       onAuthenticatedApiError={(error) => {

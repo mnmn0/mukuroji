@@ -70,7 +70,8 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   保存済みの行（次の revision）を保存済みとして扱い、古い写しのままの `shared` な Work Item を書き換える。
   同じ規則かどうかには調整方法（keep-duration / keep-end-date）も含めるため、Project の行も保存時の調整方法を持つ。
   設定画面が最初に選ぶ調整方法は、Project でも Team の行のものを使う。
-  再開では変更前のカレンダーが分からないので、まだ取り込んでいない旧来の Work Item は取り込まない。
+  再開では変更前のカレンダーが分からないので、まだ取り込んでいない旧来の Work Item は取り込まない（衝突としても数えない。
+  見分けられないため）。
   他の更新と衝突した transaction は、読み直した Work Item で同じ変更前・変更後のカレンダーから1件ずつ計画し直して再試行する
   （取り込み中の旧来の Work Item も対象から外れない）。それでも衝突した Work Item は数だけ返す。
   最後に Work Item をもう一度読み、変更の実行中に古いカレンダーで作られた Work Item も同じ規則で書き換える（書き換えの上限を超えた分は衝突として数える）。
@@ -112,6 +113,10 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
 - 受け入れる欠点:
   - Team・Project をまたいで移動した Work Item は、次にそのカレンダーを適用するまで移動前の写しのまま。
   - Workspace の apply は旧来（`calendarSource` なし）の Work Item を取り込まない。Team・Project の変更でだけ取り込む。
+  - タスク詳細で個別に決めた規則も `calendarSource` を持たないので、旧来の Work Item と見分けられない。
+    その規則が変更前のカレンダーとまったく同じなら、Team・Project の変更で取り込まれる（個別の規則を区別して残す値は持たない。
+    既存の行を見分ける手段が無く、移行できないため）。
+  - Workspace の apply は、プレビューした保存済みの設定（`expectedCalendar`）が今の設定と違えば何も書き換えずに 409 を返す。
   - 日程 dependency の伝播は従来どおり暦日の lag で動かす。critical path は lag を稼働日の差として足す。
   - カレンダーの変更による日程の書き換えは日程 dependency を伝播させず、依存先の確認も求めない。
     書き換えで dependency の制約を満たさなくなった Work Item は、Planning の派生 summary の constraint conflict として表示される

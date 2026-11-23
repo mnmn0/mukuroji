@@ -85,13 +85,14 @@ export function createDefaultTaskScheduleCalendarPolicy(): WorkItemScheduleCalen
  *   fails. National holiday dates the server sent are used; older servers send none, and then the
  *   bundled national holidays are used.
  * @returns The Workspace time zone with the Workspace working weekdays and days off (company
- *   holidays and, when the Workspace uses them, national holidays), or the default
- *   Monday-to-Friday policy without holidays when no settings are available.
+ *   holidays and, when the Workspace uses them, national holidays). Without settings it is the
+ *   Monday-to-Friday policy without holidays, still marked as following the shared calendar, so a
+ *   Work Item created before the settings load takes its Team or Project calendar on the server.
  */
 export function createWorkspaceTaskScheduleCalendarPolicy(
   settings: WorkspaceCalendarSettingsResponse | undefined,
 ): WorkItemScheduleCalendarPolicy {
-  if (!settings) return createDefaultTaskScheduleCalendarPolicy()
+  if (!settings) return { ...createDefaultTaskScheduleCalendarPolicy(), calendarSource: 'shared' }
   // The Work Item follows the shared calendar; the server applies its Team and Project calendars.
   return {
     ...createWorkspaceWorkItemCalendarPolicy(settings, settings.nationalHolidayDates),

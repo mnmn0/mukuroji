@@ -417,6 +417,7 @@ export const workItemsMessages = {
   'tasks.create.title': 'タスク名',
   'tasks.workspaceCalendar.error': 'Workspace の稼働カレンダーを取得できませんでした。新しい Work Item と Gantt は、月〜金を稼働日・休日なしとして扱っています。',
   'tasks.workspaceCalendar.scopedError': 'Team・Project の稼働カレンダーを読み込めませんでした。読み込めるまでは Workspace のカレンダーで日程を数えるので、日程を決める前に読み直してください。',
+  'tasks.workspaceCalendar.scopedFallbackError': 'Workspace の稼働カレンダーを取得できませんでした。新しい Work Item と Gantt は、読み込めた Team・Project の稼働カレンダーを使っています。',
   'tasks.workspaceCalendar.staleError': 'Workspace の稼働カレンダーを読み直せませんでした。新しい Work Item と Gantt は、前回読み込んだカレンダーを使っています。',
   'tasks.workspaceCalendar.retry': 'もう一度読み込む',
   'tasks.create.titlePlaceholder': '例: リリース前チェック',

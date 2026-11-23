@@ -87,18 +87,22 @@ export function useWorkCalendarChange(
    * @returns Whether it was saved.
    */
   async function save(teamId: string, input: SaveWorkCalendarInput): Promise<boolean> {
+    const generation = requestGeneration.current
     setIsBusy(true)
     setErrorKey(undefined)
     saveContext.current ??= createMutationRequestContext()
     try {
       const saved = await saveWorkCalendar(accessToken, teamId, input, saveContext.current)
+      // The calendar was saved either way, so the read is refreshed even after a reset.
+      await revalidate()
+      // A reply to a save made before the last reset must not change the reset draft.
+      if (generation !== requestGeneration.current) return false
       saveContext.current = undefined
       setResult(saved)
       setImpact(undefined)
-      await revalidate()
       return true
     } catch (error) {
-      setErrorKey(readWorkCalendarErrorKey(error))
+      if (generation === requestGeneration.current) setErrorKey(readWorkCalendarErrorKey(error))
       return false
     } finally {
       setIsBusy(false)

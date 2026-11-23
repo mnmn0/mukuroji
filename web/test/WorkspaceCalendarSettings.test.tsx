@@ -214,8 +214,10 @@ describe('Workspace calendar settings', () => {
       publicHolidays: 'japan',
       nationalHolidayDates: ['2028-01-01'],
     }).holidays).toEqual(['2027-01-01', '2027-05-03', '2028-01-01'])
-    // Before the settings load, new Work Items keep the Monday-to-Friday default.
+    // Before the settings load, new Work Items count Monday to Friday but still follow the shared
+    // calendar, which the server resolves.
     expect(createWorkspaceTaskScheduleCalendarPolicy(undefined)).toEqual({
+      calendarSource: 'shared',
       holidays: [],
       timeZone: 'Asia/Tokyo',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],

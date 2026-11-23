@@ -22,7 +22,12 @@ const write: WorkCalendarWrite = {
 
 /** Fence on the saving member's authorization. */
 const fence = {
-  ConditionCheck: { TableName: 'access', Key: { recordKey: 'MEMBER#a' }, ConditionExpression: 'version = :v' },
+  ConditionCheck: {
+    TableName: 'access',
+    Key: { recordKey: 'MEMBER#a' },
+    ConditionExpression: 'version = :v',
+    ExpressionAttributeValues: { ':v': 1 },
+  },
 }
 
 /**
@@ -63,7 +68,8 @@ test('saves the calendar in one transaction with the authorization fences', asyn
   expect(saved).toMatchObject({ revision: 1, updatedBy: 'user#a@example.com' })
   const items = sent[0]?.input.TransactItems
   expect(Array.isArray(items) ? items.length : 0).toBe(2)
-  expect(JSON.stringify(items)).toContain('MEMBER#a')
+  // The fence goes into the transaction whole, with its condition and values.
+  expect(Array.isArray(items) ? items[1] : undefined).toEqual(fence)
 })
 
 test('tells a revision conflict apart from a changed authorization', async () => {

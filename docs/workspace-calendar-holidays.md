@@ -26,7 +26,8 @@ Team と Project は Workspace の稼働カレンダーへの上書きを持て�
 | `POST /api/workspace/work-calendar/apply` | Workspace 管理者 | 保存済みの Workspace 設定に `shared` な Work Item を揃える |
 
 - 調整は `keep-duration`（開始日と稼働日数を保ち、終了日を動かす）と `keep-end-date`（開始日と終了日を保ち、稼働日数を数え直す。
-  0 日になるものは `keep-duration`）から選ぶ。選んだ調整はカレンダーの行に保存し、次の既定にする。
+  0 日になるものは `keep-duration`）から選ぶ。選んだ調整はカレンダーの行に保存する。
+  次の既定にするのは Team の行の調整だけで、Project の画面も Team の行の調整を最初に選ぶ。
 - 従う Work Item は `shared` のものと、Team・Project の変更では変更前の解決済み policy と同じ規則を持つ旧来の Work Item。
   旧来の Work Item は書き換えるときに `shared` にする。書き換えるのは新しいカレンダーと規則が違う Work Item だけ。
   Workspace の apply は旧来の Work Item を取り込まない。

@@ -241,6 +241,19 @@ export class InMemoryWorkCalendarStore implements WorkCalendarStore {
   /** Stored row fields keyed by Workspace, then sort key. */
   private readonly rows = new Map<string, Map<string, Record<string, unknown>>>()
 
+  /**
+   * Creates the store.
+   *
+   * @param holdsAuthorizationFences - Evaluates the authorization fences of a save. The authorization
+   *   rows live in DynamoDB, which this store cannot read, so by default every fence holds; a test
+   *   injects a check to stand in for the transaction's condition checks.
+   */
+  constructor(
+    private readonly holdsAuthorizationFences: (
+      fences: readonly WorkCalendarAuthorizationFence[],
+    ) => boolean = () => true,
+  ) {}
+
   /** @inheritdoc */
   async get(workspaceId: string, scope: StoredWorkCalendarScope): Promise<WorkCalendar | undefined> {
     const row = this.rows.get(workspaceId)?.get(createWorkCalendarRecordKey(scope))
@@ -270,12 +283,16 @@ export class InMemoryWorkCalendarStore implements WorkCalendarStore {
     expectedRevision: number,
     actorMemberKey: string,
     now: string,
+    authorizationFences: readonly WorkCalendarAuthorizationFence[] = [],
   ): Promise<WorkCalendar> {
     const rows = this.rows.get(workspaceId) ?? new Map<string, Record<string, unknown>>()
     const recordKey = createWorkCalendarRecordKey(write.scope)
     const current = rows.get(recordKey)
     const currentRevision = current === undefined ? 0 : Reflect.get(current, 'revision')
     if (currentRevision !== expectedRevision) throw new WorkCalendarRevisionConflictError()
+    if (authorizationFences.length > 0 && !this.holdsAuthorizationFences(authorizationFences)) {
+      throw new WorkCalendarAuthorizationChangedError()
+    }
     const calendar = createStoredWorkCalendar(write, expectedRevision + 1, actorMemberKey, now)
     rows.set(recordKey, toStoredWorkCalendarFields(calendar))
     this.rows.set(workspaceId, rows)
