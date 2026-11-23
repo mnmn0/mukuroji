@@ -91,6 +91,7 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
     canWrite: state.writableProjectIds.length > 0,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: state.writableProjectIds.length > 0 ? ['core-team'] : [],
     writableProjectScopes: state.writableProjectIds.map((projectId) => ({ teamId: 'core-team', projectId })),
   } } }))
