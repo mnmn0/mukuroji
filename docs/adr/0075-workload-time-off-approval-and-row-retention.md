@@ -23,7 +23,10 @@ manager が「空いていない」と判断した後に休暇が取り消され
   休暇自身の `revision` と Team の revision で楽観的排他を取る。
   - `approved` と `rejected`、および本人以外の休暇の変更は Team manager（Workspace owner / admin / システム管理者を含む）だけ。
   - 本人は自分の休暇を `canceled`（取り下げ）と `planned`（再申請）にできる。
-  - 承認・却下した人と日時を `reviewedBy` / `reviewedAt` に残す。
+  - 承認・却下した人と日時を `reviewedBy` / `reviewedAt` に、承認待ちにした日時を `submittedAt` に残す。
+- この変更より前に保存された休暇は `planned` でも capacity から引かれていた。deploy で空きが急に増えないよう、
+  `submittedAt` のない `planned` の行は読み取り時に `approved` として扱い、Team の次の書き込みでそのまま保存する。
+  schema version は上げず、別の migration も行わない（読み取り時の既定で、旧版の値の意味を保つ）。
 - 既存の `PUT` で日付を変えた休暇は、送った状態（本人なら `planned`）に戻る。承認済みの休暇を本人が変えたら、承認し直しになる。
 - snapshot の member 行に、表示開始日以降に終わる `canceled` 以外の休暇を返す。理由（`reason`）は本人と confidential を見られる人にだけ返す。
 - snapshot に `viewer`（自分の member ID と Team manager かどうか）を返し、画面は承認ボタンや確定ボタンの表示に使う。権限の判断は API が行う。
@@ -64,8 +67,8 @@ manager が「空いていない」と判断した後に休暇が取り消され
 
 ## 影響
 
-- 以前 `planned` で登録した休暇は、deploy 後は capacity から引かれず「承認待ち」になる。manager が承認すると以前と同じ値になる。
-  data migration は行わない（状態はそのまま正しい意味で読める）。
+- 以前 `planned` で登録した休暇は承認済みとして読むので、deploy の前後で capacity は変わらない。
+  取り消したい休暇は manager が「承認待ちに戻す」か、本人が取り下げる。
 - `WorkloadCell` と `WorkloadMemberSummary` に必須の field が増える。Web と server は同じ deploy で更新する。
 - 30 日を過ぎた取消済みの依頼は一覧から消える。
 - `rejected` の休暇を保存した後に server をこの変更より前へ戻すと、古い reader は `rejected` を知らないため、その Team の

@@ -10,6 +10,7 @@ import {
   createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
   pruneCapacityPlanningState,
+  upgradeLegacyTimeOff,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
@@ -726,6 +727,8 @@ describe('capacity planning reviews and retention', () => {
 
     expect(approved).toMatchObject({ status: 'approved', reviewedBy: 'manager-1', reviewedAt: '2026-08-01T00:00:00.000Z', revision: 2 })
     expect(reopened.reviewedBy).toBeUndefined()
+    expect(reopened.submittedAt).toBe('2026-08-01T00:00:00.000Z')
+    expect(upgradeLegacyTimeOff(reopened)).toEqual(reopened)
     expect(repository.auditLog.map((audit) => audit.events[0].eventType)).toEqual([
       'workload.time-off.requested',
       'workload.time-off.approved',
@@ -763,6 +766,15 @@ describe('capacity planning reviews and retention', () => {
       ['workload.assignment.canceled', [{ memberKey: 'member-2', reason: 'workload-assignment' }]],
       ['workload.request.canceled', undefined],
     ])
+  })
+
+  test('reads time off saved before approval existed as approved so capacity does not change', () => {
+    const legacy = { id: 'legacy', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'planned' as const, revision: 1 }
+    const submitted = { ...legacy, id: 'submitted', submittedAt: '2026-08-01T00:00:00.000Z' }
+
+    expect(upgradeLegacyTimeOff(legacy).status).toBe('approved')
+    expect(upgradeLegacyTimeOff(submitted).status).toBe('planned')
+    expect(upgradeLegacyTimeOff({ ...legacy, status: 'canceled' }).status).toBe('canceled')
   })
 
   test('prunes closed rows after 30 days and any row after 400 days, keeping referenced requests', () => {

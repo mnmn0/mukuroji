@@ -479,6 +479,7 @@ function isWorkloadTimeOff(value: unknown): value is WorkloadTimeOff {
     (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
     (value.reason === undefined || typeof value.reason === 'string') &&
     (value.status === 'planned' || value.status === 'approved' || value.status === 'rejected' || value.status === 'canceled') &&
+    (value.submittedAt === undefined || typeof value.submittedAt === 'string') &&
     (value.reviewedBy === undefined || typeof value.reviewedBy === 'string') &&
     (value.reviewedAt === undefined || typeof value.reviewedAt === 'string') &&
     isPositiveSafeInteger(value.revision)

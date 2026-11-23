@@ -483,7 +483,7 @@ export class CapacityPlanningService {
         throw new CapacityPlanningError(409, 'WorkloadTimeOffCanceled', 'A canceled time off cannot be reviewed.')
       }
       const timestamp = this.now().toISOString()
-      const { reviewedAt: _reviewedAt, reviewedBy: _reviewedBy, ...unreviewed } = current
+      const { reviewedAt: _reviewedAt, reviewedBy: _reviewedBy, submittedAt: _submittedAt, ...unreviewed } = current
       const saved: WorkloadTimeOff = {
         ...unreviewed,
         status: input.status,
@@ -1519,9 +1519,30 @@ export function pruneCapacityPlanningState(state: CapacityPlanningState, today: 
   state.requests = state.requests.filter((request) => referencedRequestIds.has(request.id) || keep(request))
 }
 
-/** Returns the reviewer fields for a status set by an actor, or none for unreviewed states. */
-function reviewFields(status: WorkloadTimeOff['status'], actorMemberId: string, timestamp: string): Pick<WorkloadTimeOff, 'reviewedAt' | 'reviewedBy'> {
+/**
+ * Returns the submission or reviewer fields for a status set by an actor: a `planned` absence
+ * records when it was submitted, and an approval or rejection records who decided it.
+ */
+function reviewFields(
+  status: WorkloadTimeOff['status'],
+  actorMemberId: string,
+  timestamp: string,
+): Pick<WorkloadTimeOff, 'reviewedAt' | 'reviewedBy' | 'submittedAt'> {
+  if (status === 'planned') return { submittedAt: timestamp }
   return status === 'approved' || status === 'rejected' ? { reviewedBy: actorMemberId, reviewedAt: timestamp } : {}
+}
+
+/**
+ * Reads a stored absence saved before time-off approval existed as approved.
+ *
+ * Such rows are `planned` without `submittedAt`, and they used to reduce capacity. Reading them
+ * as approved keeps capacity unchanged on deploy; the next write of the Team stores them that way.
+ *
+ * @param timeOff - Stored absence.
+ * @returns The absence, upgraded when it predates approval.
+ */
+export function upgradeLegacyTimeOff(timeOff: WorkloadTimeOff): WorkloadTimeOff {
+  return timeOff.status === 'planned' && timeOff.submittedAt === undefined ? { ...timeOff, status: 'approved' } : timeOff
 }
 
 /** Workspace, Team, and actor shared by every workload mutation input. */
@@ -1731,7 +1752,7 @@ function readState(item: Record<string, unknown>, workspaceId: string, teamId: s
   }
   return {
     revision,
-    profiles,
+    profiles: profiles.map((profile) => ({ ...profile, timeOff: profile.timeOff.map(upgradeLegacyTimeOff) })),
     requests,
     assignments,
     ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
@@ -1830,6 +1851,7 @@ function isStoredTimeOff(value: unknown): value is WorkloadTimeOff {
     (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
     isOptionalString(value.reason) &&
     isTimeOffStatus(value.status) &&
+    isOptionalString(value.submittedAt) &&
     isOptionalString(value.reviewedBy) &&
     isOptionalString(value.reviewedAt) &&
     isPositiveSafeInteger(value.revision)

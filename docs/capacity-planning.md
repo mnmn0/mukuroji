@@ -8,7 +8,7 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 1. 曜日の schedule が disabled なら capacity は 0 です。
 2. holiday はその日の capacity を 0 にします。
-3. `approved` の time off は `minutesPerDay`（省略時は scheduled minutes）を差し引き、capacity が負にならないよう 0 にします。`planned`（承認待ち）は差し引かず、承認済みで残った空きを上限に cell の `pendingTimeOffMinutes` として返します。`rejected` と `canceled` は無視します（[ADR 0075](adr/0075-workload-time-off-approval-and-row-retention.md)）。
+3. `approved` の time off は `minutesPerDay`（省略時は scheduled minutes）を差し引き、capacity が負にならないよう 0 にします。`planned`（承認待ち）は差し引かず、承認済みで残った空きを上限に cell の `pendingTimeOffMinutes` として返します。`rejected` と `canceled` は無視します。承認の導入前に保存された `planned`（`submittedAt` がない行）は、以前どおり capacity から引くよう読み取り時に `approved` として扱います（[ADR 0075](adr/0075-workload-time-off-approval-and-row-retention.md)）。
 4. assignment の effort は、対象期間の available date に均等配分します。すべての日が unavailable の場合は指定された calendar date に配分し、overflow を検出できるようにします。
 5. UTC の time entry は member の timezone の local midnight で分割します。DST の 23/25 時間日も calendar date として扱います。
 

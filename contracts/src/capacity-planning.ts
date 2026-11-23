@@ -55,6 +55,11 @@ export type WorkloadTimeOff = {
    * pending review and shown separately, and `rejected` or `canceled` absences are ignored.
    */
   status: WorkloadTimeOffStatus
+  /**
+   * When the absence was last submitted for approval. Rows saved before approval existed lack it;
+   * a `planned` row without it is read as `approved` so their capacity does not change on deploy.
+   */
+  submittedAt?: string
   /** Member who last approved or rejected the absence. */
   reviewedBy?: string
   /** Timestamp of the last approval or rejection. */
