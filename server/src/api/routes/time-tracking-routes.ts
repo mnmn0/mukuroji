@@ -1,5 +1,6 @@
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
+import { DEFAULT_WORKSPACE_CURRENCY } from '@mukuroji/contracts'
 import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
@@ -8,7 +9,7 @@ import {
   createTimeTrackingRouter,
 } from '../../modules/time-tracking/adapter-in/http/time-tracking-router'
 import { TimeTrackingError } from '../../modules/time-tracking'
-import { requireAppDependencies } from '../shared/app-dependencies'
+import { requireAppDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
@@ -122,6 +123,9 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
           .map((access) => access.projectId),
       )
     },
+    readDefaultCurrency: async (principal) =>
+      (await workspaceDependencies.tenantAdministration.getProfile(principal.directoryId))?.defaultCurrency ??
+        DEFAULT_WORKSPACE_CURRENCY,
     verifyProject: async (principal, teamId, projectId, minimum) => {
       const context = await requireTeamPermission(principal, teamId, minimum)
       if (

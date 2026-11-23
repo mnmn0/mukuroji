@@ -133,6 +133,7 @@ export const auditLogMessages = {
   'auditLog.resource.time-budget': 'Time budget',
   'auditLog.resource.time-entry': 'Time entry',
   'auditLog.resource.time-period': 'Time period',
+  'auditLog.resource.time-rate-card': 'Time rate card',
   'auditLog.resource.timer': 'Timer',
   'auditLog.resource.triage': 'Triage',
   'auditLog.resource.update-feed': 'Update feed',
