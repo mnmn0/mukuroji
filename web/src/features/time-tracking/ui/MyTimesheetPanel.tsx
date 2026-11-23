@@ -18,7 +18,7 @@ export type MyTimesheetPanelProps = {
   isSubmitting: boolean
   /** Outcome of the last submission. */
   notice?: MyTimesheetSubmitNotice
-  /** Moves by whole weeks. */
+  /** Moves by whole weeks; turned off while a submission runs, so its outcome stays on its week. */
   onMoveWeek: (weeks: number) => void
   /** Submits every Team's drafts in the week. */
   onSubmit: () => void
@@ -57,13 +57,13 @@ export function MyTimesheetPanel({
           <p className="mt-1 max-w-2xl text-sm font-medium leading-6 text-[var(--workbench-muted)]">{t('myTimesheet.description')}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => onMoveWeek(-1)}>
+          <button className="workbench-button-secondary min-h-9 px-3" type="button" disabled={isSubmitting} onClick={() => onMoveWeek(-1)}>
             {t('myTimesheet.previous')}
           </button>
           <span className="text-sm font-semibold text-[var(--workbench-text)]" aria-live="polite">
             {days[0]} – {days.at(-1)}
           </span>
-          <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => onMoveWeek(1)}>
+          <button className="workbench-button-secondary min-h-9 px-3" type="button" disabled={isSubmitting} onClick={() => onMoveWeek(1)}>
             {t('myTimesheet.next')}
           </button>
         </div>

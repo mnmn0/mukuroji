@@ -190,4 +190,21 @@ describe('personal timesheet across Teams', () => {
     expect(html).toContain('1:30')
     expect(html).toContain('1 件は提出できなかった')
   })
+
+  test('turns off week navigation while a submission runs', () => {
+    const html = renderToStaticMarkup(
+      <MyTimesheetPanel
+        days={['2026-08-03']}
+        failed={false}
+        isLoading={false}
+        isSubmitting
+        onMoveWeek={() => {}}
+        onRetry={() => {}}
+        onSubmit={() => {}}
+        t={t}
+        timesheet={timesheet}
+      />,
+    )
+    expect(html.match(/<button[^>]*disabled=""[^>]*>[^<]*(前の週|次の週)/g)).toHaveLength(2)
+  })
 })
