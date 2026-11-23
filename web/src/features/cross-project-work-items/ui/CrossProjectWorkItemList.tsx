@@ -7,6 +7,7 @@ import { useMemo, useState } from 'react'
 import type { ProjectDirectoryTeam } from '../../../projects/api/directory'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import type { TaskGanttDisplaySettings } from '../../../tasks/model/taskGanttDisplay'
+import type { TaskCalendarPeriods } from '../../../tasks/model/taskGanttTimeline'
 import { TaskGanttView } from '../../../tasks/ui/TaskGanttView'
 import {
   resolveWorkItemAssignee,
@@ -50,6 +51,8 @@ export type CrossProjectWorkItemListProps = {
   teams: readonly ProjectDirectoryTeam[]
   /** Workspace working calendar whose days off the Gantt chart shades; nothing is shaded when omitted. */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt headings follow. */
+  calendarPeriods?: TaskCalendarPeriods
   /** Whether the Work Items are still loading. */
   isLoading: boolean
   /** Whether the Work Items could not be loaded; the page shows the error notice instead of a count. */
@@ -88,6 +91,7 @@ export function CrossProjectWorkItemList({
   memberLabels,
   teams,
   workingCalendar,
+  calendarPeriods,
   isLoading,
   loadFailed,
   t,
@@ -283,6 +287,7 @@ export function CrossProjectWorkItemList({
           t={t}
           tasks={ganttWorkItems}
           workingCalendar={workingCalendar}
+          calendarPeriods={calendarPeriods}
         />
       ) : null}
       {state.layout === 'table' ? (

@@ -19,12 +19,16 @@ import {
 } from '@mukuroji/contracts'
 import type { DocumentBacklink } from '../../documents/api/backlinks'
 import type { DocumentSummary } from '../../documents/api/documents'
+import type { ProjectActionItem } from '../../documents/model/projectActionItems'
 import type { ProjectMember, ProjectMemberRole } from '../api/members'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
 import { isWorkspaceTaskOverdue } from '../../work-items/model/workspaceWorkItems'
 
 /** Most schedule entities (Phase, Milestone, Release) shown on the Project overview. */
 export const PROJECT_OVERVIEW_SCHEDULE_LIMIT = 6
+
+/** Most open Document action items listed on the Project overview. */
+export const PROJECT_OVERVIEW_ACTION_ITEM_LIMIT = 15
 
 /** Most Project members listed by name on the Project overview. */
 export const PROJECT_OVERVIEW_MEMBER_LIMIT = 8
@@ -568,4 +572,72 @@ function countCalendarDaysBetween(from: string, to: string) {
   const toTime = Date.parse(`${to}T00:00:00.000Z`)
   if (!Number.isFinite(fromTime) || !Number.isFinite(toTime)) return 0
   return Math.round((toTime - fromTime) / 86_400_000)
+}
+
+/** One open Document action item as the Project overview shows it. */
+export type ProjectOverviewActionItem = ProjectActionItem & {
+  /** Owner name, or the saved member key when the owner is not a Project member. */
+  ownerLabel?: string
+  /** Whether the deadline is before today. */
+  overdue: boolean
+}
+
+/** Bounded list of a Project's open Document action items. */
+export type ProjectOverviewActionItems = {
+  /** Items shown, earliest deadline first. */
+  items: ProjectOverviewActionItem[]
+  /** Open items read but left out because of the overview limit. */
+  hiddenCount: number
+  /** Pages whose read failed, so their items are missing until a retry. */
+  failedDocumentCount: number
+  /**
+   * Whether some pages were not read on purpose: older pages past the read
+   * limit, or Documents past the listing pages loaded so far.
+   */
+  hasUnscannedDocuments: boolean
+}
+
+/** How completely the Project's pages were read for action items. */
+export type ProjectOverviewActionItemCoverage = {
+  /** Pages whose read failed. */
+  failedDocumentCount: number
+  /** Pages left out by the read limit. */
+  skippedDocumentCount: number
+  /** Whether the Project Document listing has more pages not loaded yet. */
+  hasMoreDocuments: boolean
+}
+
+/**
+ * Prepares a Project's open Document action items for the overview.
+ *
+ * @param items - Open action items, earliest deadline first.
+ * @param coverage - Pages that failed, were left out, or were not listed yet.
+ * @param members - Project members used to show owner names.
+ * @param today - Viewer's local `YYYY-MM-DD` date.
+ * @param limit - Most items to show.
+ * @returns Items with owner names and overdue state, and what was left out.
+ */
+export function summarizeProjectOverviewActionItems(
+  items: readonly ProjectActionItem[],
+  coverage: ProjectOverviewActionItemCoverage,
+  members: readonly ProjectMember[],
+  today: string,
+  limit = PROJECT_OVERVIEW_ACTION_ITEM_LIMIT,
+): ProjectOverviewActionItems {
+  const names = new Map(members.map((member) => [member.id, resolveProjectOverviewMemberName(member)]))
+  return {
+    hiddenCount: Math.max(0, items.length - limit),
+    items: items.slice(0, limit).map((item) => {
+      const ownerLabel = item.assigneeMemberKey
+        ? names.get(item.assigneeMemberKey) ?? item.assigneeMemberKey
+        : undefined
+      return {
+        ...item,
+        ...(ownerLabel ? { ownerLabel } : {}),
+        overdue: item.dueDate !== undefined && item.dueDate < today,
+      }
+    }),
+    failedDocumentCount: coverage.failedDocumentCount,
+    hasUnscannedDocuments: coverage.skippedDocumentCount > 0 || coverage.hasMoreDocuments,
+  }
 }

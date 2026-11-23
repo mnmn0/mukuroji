@@ -103,7 +103,8 @@ export function WorkItemsPage() {
     false,
     serverFilter,
   )
-  // Only the Gantt chart shades the Workspace days off, so the calendar is read for that layout.
+  // Only the Gantt chart shades the Workspace days off and follows its weeks and fiscal quarters,
+  // so the calendar is read for that layout.
   const workspaceCalendar = useWorkspaceCalendarSettings(
     workspace.accessToken,
     workspace.canLoadWorkspaceData && state.layout === 'gantt',
@@ -238,6 +239,7 @@ export function WorkItemsPage() {
           teams={workspace.teams}
           totalCount={filteredWorkItems.length}
           workingCalendar={workingCalendar}
+          calendarPeriods={workspaceCalendar.settings}
         />
       </div>
     </WorkspaceRouteContent>

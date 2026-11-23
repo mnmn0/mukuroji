@@ -1780,6 +1780,7 @@ test('projects every public document kind without internal metadata', async () =
     id: 'note-1',
     type: 'note',
     text: 'Public note',
+    done: true,
     bounds: { x: 220, y: 20, width: 160, height: 96 },
     zIndex: 2,
   } satisfies Extract<WhiteboardObject, { type: 'note' }>
@@ -1901,6 +1902,7 @@ test('projects every public document kind without internal metadata', async () =
               id: 'note-1',
               type: 'note',
               text: 'Public note',
+              done: true,
               bounds: { x: 220, y: 20, width: 160, height: 96 },
               zIndex: 2,
             },
@@ -2013,6 +2015,7 @@ test('exports a public document only when the current token permits it', async (
             text: 'Publish the roadmap.',
             checked: false,
             assigneeMemberKey: 'private-assignee@example.com',
+            dueDate: '2026-07-31',
           },
         ],
       },
@@ -2050,6 +2053,7 @@ test('exports a public document only when the current token permits it', async (
     ],
   })
   expect(jsonArtifact.content).not.toContain('private-')
+  expect(jsonArtifact.content).not.toContain('2026-07-31')
 
   const exported = await app.request(
     '/api/public/documents/a-valid-public-token-with-more-than-32-characters/export?format=markdown',

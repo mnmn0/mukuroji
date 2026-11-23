@@ -979,8 +979,13 @@ test('commits the relation and Collection clean-up with the Public Work Item del
   })
   setTestAppDependencies({
     workItemConfigurations: createFakeWorkItemConfigurationClient({
-      async prepareWorkItemDeletionRelationCleanup(workspaceId, teamId, workItemId) {
+      async prepareWorkItemDeletionRelationCleanup(workspaceId, teamId, workItemId, audit) {
         cleanupRequests.push(`relations:${workspaceId}:${teamId}:${workItemId}`)
+        // The other endpoints record the removed relations under the delete's audit context.
+        expect(audit?.context.workspaceId).toBe(workspaceId)
+        expect(audit?.createDeepLink('peer')).toBe('/teams/core-team/issues?issueId=peer')
+        // Slots 0 and 1 belong to the delete event and a released Agent Run.
+        expect(audit?.firstSequence).toBe(2)
         return { childWorkItemIds: [], transactItems: [relationWrite] }
       },
     }),
@@ -1182,7 +1187,7 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
   expect(calls.issueReads).toEqual([])
 })
 
-test('omits contributors and acceptance criteria from developer Work Item exports', async () => {
+test('keeps contributors and acceptance criteria only in the structured developer export', async () => {
   configureFakeProjectClients(true, {
     issueContributorAssignments: [{
       assignmentId: 'a'.repeat(32),
@@ -1200,16 +1205,27 @@ test('omits contributors and acceptance criteria from developer Work Item export
     },
   })
 
-  const response = await app.request('/api/developer/exports?format=json&limit=50', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
+  /** Reads one export page of the endpoint. */
+  const readItems = async (path: string) => {
+    const response = await app.request(`${path}?format=json&limit=50`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(response.status).toBe(200)
+    const body: { items: Record<string, unknown>[] } = await response.json()
+    expect(body.items.length).toBeGreaterThan(0)
+    return body.items
+  }
 
-  expect(response.status).toBe(200)
-  const body: { items: Record<string, unknown>[] } = await response.json()
-  expect(body.items.length).toBeGreaterThan(0)
-  expect(body.items.some((item) => 'contributorAssignments' in item)).toBe(false)
-  // The closed public Work Item schema omits acceptance criteria; they have their own endpoint.
-  expect(body.items.some((item) => 'acceptanceCriteria' in item)).toBe(false)
+  // The structured export goes to Workspace administrators, who can view these Work Items, and a
+  // re-import reads both lists back.
+  const structured = await readItems('/api/developer/work-item-exports')
+  expect(structured.some((item) => 'contributorAssignments' in item)).toBe(true)
+  expect(structured.some((item) => 'acceptanceCriteria' in item)).toBe(true)
+  expect(structured.some((item) => 'remainingEffortMinutes' in item || 'progressPercent' in item)).toBe(false)
+  // The original export keeps its closed Work Item schema.
+  const original = await readItems('/api/developer/exports')
+  expect(original.some((item) => 'contributorAssignments' in item || 'acceptanceCriteria' in item)).toBe(false)
+  expect(original.some((item) => 'remainingEffortMinutes' in item || 'progressPercent' in item)).toBe(false)
 })
 
 test('filters canonical Work Items for authorization before enforcing the response limit', async () => {

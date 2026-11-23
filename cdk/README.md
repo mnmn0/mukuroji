@@ -65,7 +65,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 | `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
-| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）、Team の agent 設定、本人用 agent token（`/developer/me/agent-connection` と発行・rotate）を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、agent 接続、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token の失効は使えます。 |
+| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）と Team の agent 設定を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token（発行・rotate・失効）は使えます。Web の agent 接続は MCP の Workspace profile の設定例を出します。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -362,6 +362,7 @@ Lambda が同じ deploy で切り替わりますが、切り替え中の数分�
    Route 53 にあれば `WebHostedZoneId` も指定し、stack に A / AAAA alias を作らせます。
    それ以外の DNS では、`WebDomainName` の CNAME を output の `WebDistributionDomainName` に向けます。
 3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
+   ブラウザの error 送信が受け付ける origin（`WEB_APP_ORIGINS`）にも、独自 domain と CloudFront domain を stack が自動で入れます。
    file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
 4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
    `https://<WebDomainName>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。

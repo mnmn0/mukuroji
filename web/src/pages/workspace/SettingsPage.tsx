@@ -49,7 +49,6 @@ export function SettingsPage() {
         <SettingsSectionNav current={section} t={t} />
         {section === 'personal' ? (
           <WorkspaceSettingsView
-            showAgentConnection={workspace.softwareFactoryEnabled}
             accountSections={workspace.accessToken ? (
               <>
                 <AccountSecurityPanelContainer
@@ -112,6 +111,7 @@ export function SettingsPage() {
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
                 guardRequest={workspace.guardEnterpriseSession}
+                muteTargets={workspace.teams}
                 onSessionError={workspace.reportNotificationPreferencesError}
               />
             ) : undefined}

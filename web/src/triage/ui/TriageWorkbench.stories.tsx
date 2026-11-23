@@ -301,7 +301,7 @@ export const AiDraftRoutingReplacementConfirmation: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
     await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
 
-    await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual edits?')
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual conversion edits?')
     await userEvent.click(canvas.getByRole('button', { name: 'Keep manual edits' }))
     await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-manual')
     await expect(canvas.getByRole('button', { name: 'Use in Accept / Assign form' })).toBeVisible()

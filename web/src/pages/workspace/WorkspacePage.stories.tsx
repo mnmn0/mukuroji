@@ -27,6 +27,7 @@ import { EnterpriseSecurityPanel } from '../../security/ui/EnterpriseSecurityPan
 import { createTranslator } from '../../shared/i18n/i18n'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
+import { startWorkItemListScheduleChange } from '../../task-views/model/workItemListScheduleChange'
 import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
@@ -37,6 +38,7 @@ import { createWorkspaceTaskTestId } from '../../work-items/ui/WorkspaceWorkItem
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
+import { MyTasksQuickCreate } from '../../workspace/ui/MyTasksQuickCreate'
 import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
@@ -636,6 +638,147 @@ export const MyTasksTable: Story = {
 /** The My Tasks table on a 390px-wide viewport, scrolling sideways inside the table. */
 export const MyTasksTableMobile: Story = {
   render: () => <MyTasksTableStory />,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+const onUpdateMyTaskPriority = fn(async () => undefined)
+
+/**
+ * Renders the My Tasks table with writable rows whose due date and priority change in place.
+ *
+ * @returns The editable My Tasks table story content.
+ */
+function MyTasksEditableTableStory() {
+  const month = getCurrentTaskMonth()
+  const [tasks, setTasks] = useState<CanonicalWorkItem[]>(() => storyTasks.map((task, index) => {
+    const dueDate = `${month}-${String(3 + index * 4).padStart(2, '0')}`
+    return { ...task, dueDate, schedule: createDefaultDueDateWorkItemSchedule(dueDate) }
+  }))
+  return (
+    <MyTasksWorkspaceView
+      canEditTask={() => true}
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      onOpenTask={onOpenMyTaskAction}
+      onRequestScheduleChange={(task, operation) => startWorkItemListScheduleChange(
+        'my-tasks',
+        task,
+        operation,
+        {
+          confirm: async (target, _operation, preview) => {
+            const after = preview.impacts.find((impact) => impact.kind === 'direct')?.after ?? target.schedule
+            const next = { ...target, revision: target.revision + 1, schedule: after }
+            setTasks((current) => current.map((candidate) =>
+              candidate.teamId === next.teamId && candidate.id === next.id ? next : candidate
+            ))
+            return next
+          },
+          preview: async (target, scheduleOperation) => {
+            const after = scheduleOperation.type === 'replace' ? scheduleOperation.schedule : target.schedule
+            return {
+              affectedMilestoneIds: [],
+              affectedProjects: [],
+              conflicts: [],
+              evaluatedRevisions: [{
+                expectedRevision: target.revision,
+                teamId: target.teamId,
+                workItemId: target.id,
+              }],
+              expectedRevision: target.revision,
+              impacts: [{
+                after,
+                before: target.schedule,
+                dateDeltaDays: 0,
+                expectedRevision: target.revision,
+                kind: 'direct',
+                teamId: target.teamId,
+                workItemId: target.id,
+              }],
+              planningRevision: 1,
+              relationGraphRevision: 1,
+              requiresConfirmation: true,
+              warnings: [],
+            }
+          },
+        },
+        true,
+        t('tasks.action.permission'),
+      )}
+      onUpdatePriority={async (task, priority) => {
+        await onUpdateMyTaskPriority()
+        setTasks((current) => current.map((candidate) =>
+          candidate.teamId === task.teamId && candidate.id === task.id ? { ...candidate, priority } : candidate
+        ))
+      }}
+      onViewModeChange={() => undefined}
+      presentation={myTasksTablePresentation}
+      t={t}
+      tasks={tasks}
+      teams={projectDirectoryFixtures}
+      viewMode="table"
+    />
+  )
+}
+
+/** The My Tasks table with due dates confirmed in a schedule preview and priorities changed in place. */
+export const MyTasksTableEditable: Story = {
+  render: () => <MyTasksEditableTableStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onUpdateMyTaskPriority.mockClear()
+    const testId = `refero-${storyTasks[0]?.id ?? ''}`
+
+    await userEvent.click(canvas.getByTestId(`my-tasks-table-priority-edit-${testId}`))
+    await userEvent.selectOptions(canvas.getByTestId(`my-tasks-table-priority-edit-${testId}-input`), 'low')
+    await expect(onUpdateMyTaskPriority).toHaveBeenCalledTimes(1)
+
+    await userEvent.click(canvas.getByTestId(`my-tasks-table-due-edit-${testId}`))
+    const input = canvas.getByTestId(`my-tasks-table-due-edit-${testId}-input`)
+    await userEvent.clear(input)
+    await userEvent.type(input, '2030-01-15{Enter}')
+    const dialog = await within(canvasElement.ownerDocument.body).findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: t('bulk.apply') }))
+    await expect(canvas.getByTestId(`my-tasks-table-due-edit-${testId}`)).toHaveTextContent('2030-01-15')
+  },
+}
+
+/** The editable My Tasks table on a 390px-wide viewport. */
+export const MyTasksTableEditableMobile: Story = {
+  render: () => <MyTasksEditableTableStory />,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+const onQuickCreateMyTask = fn(async () => undefined)
+const quickCreateStoryDestinations = projectDirectoryFixtures.slice(0, 1).flatMap((team) => [
+  { key: team.id, label: team.name, teamId: team.id },
+  ...team.projects.slice(0, 2).map((project) => ({
+    key: `${team.id}/${project.id}`,
+    label: `${team.name} / ${project.name}`,
+    projectId: project.id,
+    teamId: team.id,
+  })),
+])
+
+/** The My Tasks quick create form, which adds a Work Item assigned to the person. */
+export const MyTasksQuickCreateForm: Story = {
+  render: () => (
+    <MyTasksQuickCreate destinations={quickCreateStoryDestinations} onCreate={onQuickCreateMyTask} t={t} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onQuickCreateMyTask.mockClear()
+    const title = canvas.getByRole('textbox', { name: t('workspace.myTasks.quickCreate.title') })
+    await userEvent.type(title, 'Story task{Enter}')
+    await expect(onQuickCreateMyTask).toHaveBeenCalledTimes(1)
+    await expect(title).toHaveValue('')
+  },
+}
+
+/** The My Tasks quick create form on a 390px-wide viewport. */
+export const MyTasksQuickCreateFormMobile: Story = {
+  render: () => (
+    <MyTasksQuickCreate destinations={quickCreateStoryDestinations} onCreate={onQuickCreateMyTask} t={t} />
+  ),
   globals: { viewport: { value: 'mobile1', isRotated: false } },
 }
 

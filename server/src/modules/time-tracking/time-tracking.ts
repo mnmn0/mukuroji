@@ -10,6 +10,10 @@ import {
 import {
   NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
   TIME_ENTRY_CATEGORIES,
+  TIME_RATE_CARD_JOB_ROLE_LIMIT,
+  TIME_RATE_CARD_MAX_HOURLY_RATE_MINOR,
+  TIME_RATE_CARD_MEMBER_LIMIT,
+  isKnownCurrencyCode,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
   type RunningTimer,
   type TimeBudget,
@@ -19,6 +23,9 @@ import {
   type TimeEntrySource,
   type TimeEntryStatus,
   type TimePeriodClose,
+  type TimeRateCard,
+  type TimeRateCardJobRoleRate,
+  type TimeRateCardMemberRate,
   type TimeSheet,
   type TimeSummaryGroup,
   type TimeTrackingGroupBy,
@@ -89,6 +96,7 @@ const HISTORY_PREFIX = 'TIME_HISTORY#'
 const TIMER_PREFIX = 'TIME_TIMER#'
 const BUDGET_PREFIX = 'TIME_BUDGET#'
 const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
+const RATE_CARD_PREFIX = 'TIME_RATE_CARD#'
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/u
 const MIN_CLOSE_YEAR = 1970
 const MAX_CLOSE_YEAR = 9998
@@ -147,6 +155,8 @@ export type CreateTimeEntryInput = {
   billable: boolean
   /** Currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Optional confidential hourly rate. */
   hourlyRateMinor?: number
   /** Origin of the entry. */
@@ -321,6 +331,8 @@ export type StopTimerInput = {
   hourlyRateMinor?: number
   /** Currency for the generated entry. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Whether the caller may set confidential fields. */
   canManageRates: boolean
   /** Optional client key used to make audit writes idempotent across retries. */
@@ -356,6 +368,26 @@ export type TimeTrackingEstimateSource = {
   listPlannedEffort(workspaceId: string, teamId: string): Promise<ReadonlyMap<string, number>>
 }
 
+/** A request replacing a Team's whole rate card. */
+export type SaveTimeRateCardInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team whose rate card is replaced. */
+  teamId: string
+  /** ISO 4217 currency of every rate. */
+  currency: string
+  /** Complete list of member rates, validated by the service. */
+  memberRates: readonly unknown[]
+  /** Complete list of job role rates, validated by the service. */
+  jobRoleRates: readonly unknown[]
+  /** Revision read before editing, or zero for the first save. */
+  expectedRevision: number
+  /** Actor changing the rate card. */
+  updatedBy: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
+}
+
 /** A budget update request. */
 export type SaveTimeBudgetInput = {
   /** Workspace identifier. */
@@ -370,6 +402,8 @@ export type SaveTimeBudgetInput = {
   amountMinor: number
   /** ISO 4217 currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Inclusive local period start. */
   periodFrom?: string
   /** Inclusive local period end. */
@@ -603,6 +637,15 @@ export interface TimeTrackingRepository {
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
   saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  /** Reads a Team's rate card. */
+  getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined>
+  /** Saves a Team's rate card with optimistic concurrency and optional audit. */
+  saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void>
   /** Lists the closed months of a Team in month order. */
   listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]>
   /** Stores a month close and rejects a month that is already closed. */
@@ -680,8 +723,9 @@ export class TimeTrackingService {
     canManageRates: boolean,
     completion?: TimeTrackingIdempotencyCompletion,
   ): Promise<TimeEntry> {
-    const normalized = normalizeCreateInput(input, canManageRates)
-    const periodGuard = await this.requireOpenPeriod(normalized.workspaceId, normalized.teamId, [normalized])
+    const requested = normalizeCreateInput(input, canManageRates)
+    const periodGuard = await this.requireOpenPeriod(requested.workspaceId, requested.teamId, [requested])
+    const normalized = { ...requested, ...await this.resolveEntryRate(requested) }
     const now = readNow(this.now)
     const entry: TimeEntry = {
       schemaVersion: 1,
@@ -773,6 +817,11 @@ export class TimeTrackingService {
         : requireMoney(input.hourlyRateMinor, 'Hourly rate')
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may change hourly rates.')
+    }
+    // A rate, such as one taken from the rate card, is in the entry's currency, so only a manager
+    // who may change the rate may change that currency.
+    if (hourlyRateMinor !== undefined && currency !== current.currency && !input.canManageRates) {
+      throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may change the currency of an entry with an hourly rate.')
     }
     const periodGuard = await this.requireOpenPeriod(current.workspaceId, current.teamId, [current, { startAt, endAt }])
     const now = readNow(this.now).toISOString()
@@ -1061,9 +1110,14 @@ export class TimeTrackingService {
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may set an hourly rate.')
     }
-    const hourlyRateMinor = input.hourlyRateMinor === undefined
-      ? undefined
-      : requireMoney(input.hourlyRateMinor, 'Hourly rate')
+    const rate = await this.resolveEntryRate({
+      workspaceId: timer.workspaceId,
+      teamId: timer.teamId,
+      userId: timer.userId,
+      currency: normalizedCurrency,
+      ...(input.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: requireMoney(input.hourlyRateMinor, 'Hourly rate') }),
+    })
+    const hourlyRateMinor = rate.hourlyRateMinor
     const now = readNow(this.now).toISOString()
     const entry: TimeEntry = {
       schemaVersion: 1,
@@ -1078,7 +1132,7 @@ export class TimeTrackingService {
       durationMinutes: calculateDurationMinutes(timer.startedAt, endedAt),
       ...(timer.description ? { description: timer.description } : {}),
       billable: timer.billable,
-      currency: normalizedCurrency,
+      currency: rate.currency,
       status: 'draft',
       source: 'timer',
       revision: 1,
@@ -1287,6 +1341,138 @@ export class TimeTrackingService {
       idempotencyPut,
     )
     return budget
+  }
+
+  /**
+   * Reads a Team's rate card, or an empty card at revision `0` when none is saved.
+   *
+   * Callers must already have checked that the reader may see confidential rates.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param defaultCurrency - Currency of the empty card returned for an unsaved Team.
+   * @returns The stored or empty rate card.
+   */
+  async getRateCard(workspaceId: string, teamId: string, defaultCurrency: string): Promise<TimeRateCard> {
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const normalizedTeamId = readIdentifier(teamId, 'Team ID')
+    return await this.repository.getRateCard(normalizedWorkspaceId, normalizedTeamId) ?? {
+      schemaVersion: 1,
+      workspaceId: normalizedWorkspaceId,
+      teamId: normalizedTeamId,
+      currency: validateCurrency(defaultCurrency),
+      memberRates: [],
+      jobRoleRates: [],
+      revision: 0,
+    }
+  }
+
+  /**
+   * Replaces a Team's rate card.
+   *
+   * @param input - Whole card, expected revision, and actor.
+   * @returns The stored card.
+   * @throws TimeTrackingError with `InvalidTimeRateCard` for an invalid card and
+   *   `TimeRateCardRevisionConflict` when the card changed after it was read.
+   */
+  async saveRateCard(input: SaveTimeRateCardInput): Promise<TimeRateCard> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.updatedBy,
+      input.idempotencyKey,
+      'time-rate-card.save',
+      input,
+      (completion) => this.saveRateCardInternal(input, completion),
+      readStoredRateCard,
+    )
+  }
+
+  /**
+   * Saves a rate card without the public idempotency wrapper.
+   *
+   * @param input - Whole card, expected revision, and actor.
+   * @param completion - Idempotency receipt completion committed with the card.
+   * @returns The stored card.
+   */
+  private async saveRateCardInternal(
+    input: SaveTimeRateCardInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeRateCard> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const updatedBy = readIdentifier(input.updatedBy, 'Actor user ID')
+    const currency = validateCurrency(input.currency)
+    if (!isKnownCurrencyCode(currency)) {
+      throw new TimeTrackingError(400, 'InvalidCurrency', 'Currency must be a known ISO 4217 code.')
+    }
+    const memberRates = normalizeMemberRates(input.memberRates)
+    const jobRoleRates = normalizeJobRoleRates(input.jobRoleRates)
+    const expectedRevision = requireInteger(input.expectedRevision, 'Rate card revision', 0, Number.MAX_SAFE_INTEGER)
+    const current = await this.repository.getRateCard(workspaceId, teamId)
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
+    }
+    const rateCard: TimeRateCard = {
+      schemaVersion: 1,
+      workspaceId,
+      teamId,
+      currency,
+      memberRates,
+      jobRoleRates,
+      revision: expectedRevision + 1,
+      updatedAt: readNow(this.now).toISOString(),
+      updatedBy,
+    }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId: updatedBy,
+      eventType: 'time-rate-card.updated',
+      entityType: 'time-rate-card',
+      entityId: teamId,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'rate-card.updated', teamId, revision: rateCard.revision },
+      before: current ? toAuditRateCardSnapshot(current) : undefined,
+      after: toAuditRateCardSnapshot(rateCard),
+      includeFields: ['currency', 'memberRates', 'jobRoleRates', 'revision'],
+      // The rows hold confidential rates, so the audit diff only says that they changed.
+      redactFields: ['memberRates', 'jobRoleRates'],
+      metadata: { teamId, memberRateCount: memberRates.length, jobRoleRateCount: jobRoleRates.length },
+      path: `/api/teams/${teamId}/time-rate-card`,
+      occurredAt: rateCard.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(rateCard) : undefined
+    await this.repository.saveRateCard(rateCard, expectedRevision, auditPut, idempotencyPut)
+    return rateCard
+  }
+
+  /**
+   * Fills the rate of a new entry from the Team rate card when the request names none.
+   *
+   * The member's own rate wins over the rate of the member's job role. An applied rate brings the
+   * card's currency, so the stored cost and its currency always agree.
+   *
+   * @param request - Team, member, requested currency, and requested rate of the new entry.
+   * @returns The rate and currency to store; the request's own when the card does not apply.
+   */
+  private async resolveEntryRate(request: {
+    workspaceId: string
+    teamId: string
+    userId: string
+    currency: string
+    hourlyRateMinor?: number
+  }): Promise<{ currency: string; hourlyRateMinor?: number }> {
+    const requested = {
+      currency: request.currency,
+      ...(request.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: request.hourlyRateMinor }),
+    }
+    if (request.hourlyRateMinor !== undefined) return requested
+    const rateCard = await this.repository.getRateCard(request.workspaceId, request.teamId)
+    const hourlyRateMinor = rateCard ? findDefaultHourlyRate(rateCard, request.userId) : undefined
+    return rateCard && hourlyRateMinor !== undefined
+      ? { currency: rateCard.currency, hourlyRateMinor }
+      : requested
   }
 
   /**
@@ -1715,6 +1901,28 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   private readonly budgets = new Map<string, TimeBudget>()
   /** Closed months keyed by Workspace, Team, and month. */
   private readonly periodCloses = new Map<string, TimePeriodClose>()
+  /** Rate cards keyed by Workspace and Team. */
+  private readonly rateCards = new Map<string, TimeRateCard>()
+
+  /** Reads a Team's rate card. */
+  async getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined> {
+    const rateCard = this.rateCards.get(`${workspaceId}#${teamId}`)
+    return rateCard ? clone(rateCard) : undefined
+  }
+
+  /** Saves a rate card when it is still at the expected revision. */
+  async saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const key = `${rateCard.workspaceId}#${rateCard.teamId}`
+    if ((this.rateCards.get(key)?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
+    }
+    this.rateCards.set(key, clone(rateCard))
+  }
 
   /** Lists a Team's closed months. */
   async listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]> {
@@ -2298,6 +2506,53 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       }
     } catch (error) {
       throw mapConditionalWriteError(error, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
+    }
+  }
+
+  /** Reads a Team's rate card with a consistent read. */
+  async getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: `${RATE_CARD_PREFIX}${teamId}` },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const rateCard = readStoredRateCard(response.Item)
+    if (rateCard.workspaceId !== workspaceId || rateCard.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card scope does not match the requested key.')
+    }
+    return rateCard
+  }
+
+  /** Saves a rate card with optimistic concurrency, its audit event, and its receipt. */
+  async saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    try {
+      const put = {
+        Put: {
+          TableName: this.tableName,
+          Item: { ...rateCard, recordKey: `${RATE_CARD_PREFIX}${rateCard.teamId}` },
+          ...(expectedRevision === 0
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {
+                ConditionExpression: 'revision = :expectedRevision',
+                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+              }),
+        },
+      }
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
     }
   }
 
@@ -2933,6 +3188,161 @@ function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
     ...(budget.periodFrom ? { periodFrom: budget.periodFrom } : {}),
     ...(budget.periodTo ? { periodTo: budget.periodTo } : {}),
     revision: budget.revision,
+  }
+}
+
+/**
+ * Creates a rate card snapshot whose rate rows are available for field-level redaction.
+ *
+ * @param rateCard - Card to describe.
+ * @returns Audit snapshot.
+ */
+function toAuditRateCardSnapshot(rateCard: TimeRateCard): Record<string, unknown> {
+  return {
+    currency: rateCard.currency,
+    memberRates: rateCard.memberRates,
+    jobRoleRates: rateCard.jobRoleRates,
+    revision: rateCard.revision,
+  }
+}
+
+/**
+ * Finds the default hourly rate of a member in a rate card.
+ *
+ * @param rateCard - Team rate card.
+ * @param userId - Member recording the time.
+ * @returns The member's own rate, else the rate of the member's job role, else `undefined`.
+ */
+function findDefaultHourlyRate(rateCard: TimeRateCard, userId: string): number | undefined {
+  const memberRate = rateCard.memberRates.find((rate) => rate.userId === userId)
+  if (!memberRate) return undefined
+  if (memberRate.hourlyRateMinor !== undefined) return memberRate.hourlyRateMinor
+  if (memberRate.jobRoleId === undefined) return undefined
+  return rateCard.jobRoleRates.find((rate) => rate.jobRoleId === memberRate.jobRoleId)?.hourlyRateMinor
+}
+
+/**
+ * Throws the stable error for an invalid rate card request.
+ *
+ * @param message - Client-facing reason.
+ * @returns Never returns.
+ * @throws TimeTrackingError with `InvalidTimeRateCard`.
+ */
+function invalidRateCard(message: string): never {
+  throw new TimeTrackingError(400, 'InvalidTimeRateCard', message)
+}
+
+/**
+ * Validates an hourly rate of a rate card.
+ *
+ * @param value - Untrusted rate.
+ * @param label - Field name used in the error.
+ * @returns The rate in minor units.
+ */
+function readRateCardHourlyRate(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > TIME_RATE_CARD_MAX_HOURLY_RATE_MINOR) {
+    invalidRateCard(`${label} must be a non-negative integer in minor currency units.`)
+  }
+  return value
+}
+
+/**
+ * Validates a member or job role identifier of a rate card.
+ *
+ * @param value - Untrusted identifier.
+ * @param label - Field name used in the error.
+ * @returns The trimmed identifier.
+ */
+function readRateCardIdentifier(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.trim().length > 256) invalidRateCard(`${label} is invalid.`)
+  return value.trim()
+}
+
+/**
+ * Validates the member rows of a rate card.
+ *
+ * @param value - Untrusted rows.
+ * @returns Rows sorted by member key, each naming a rate, a job role, or both.
+ */
+function normalizeMemberRates(value: unknown): TimeRateCardMemberRate[] {
+  if (!Array.isArray(value) || value.length > TIME_RATE_CARD_MEMBER_LIMIT) {
+    invalidRateCard(`Member rates must be an array with at most ${TIME_RATE_CARD_MEMBER_LIMIT} entries.`)
+  }
+  const seen = new Set<string>()
+  return value.map((candidate: unknown): TimeRateCardMemberRate => {
+    if (!isRecord(candidate)) invalidRateCard('Member rate must be an object.')
+    const userId = readRateCardIdentifier(candidate.userId, 'Member rate user ID')
+    if (seen.has(userId)) invalidRateCard(`Member "${userId}" is listed more than once.`)
+    seen.add(userId)
+    const hourlyRateMinor = candidate.hourlyRateMinor === undefined || candidate.hourlyRateMinor === null
+      ? undefined
+      : readRateCardHourlyRate(candidate.hourlyRateMinor, 'Member hourly rate')
+    const jobRoleId = candidate.jobRoleId === undefined || candidate.jobRoleId === null
+      ? undefined
+      : readRateCardIdentifier(candidate.jobRoleId, 'Member job role ID')
+    if (hourlyRateMinor === undefined && jobRoleId === undefined) {
+      invalidRateCard(`Member "${userId}" needs an hourly rate or a job role.`)
+    }
+    return {
+      userId,
+      ...(hourlyRateMinor === undefined ? {} : { hourlyRateMinor }),
+      ...(jobRoleId === undefined ? {} : { jobRoleId }),
+    }
+  }).sort((left, right) => left.userId.localeCompare(right.userId))
+}
+
+/**
+ * Validates the job role rows of a rate card.
+ *
+ * @param value - Untrusted rows.
+ * @returns Rows sorted by job role ID.
+ */
+function normalizeJobRoleRates(value: unknown): TimeRateCardJobRoleRate[] {
+  if (!Array.isArray(value) || value.length > TIME_RATE_CARD_JOB_ROLE_LIMIT) {
+    invalidRateCard(`Job role rates must be an array with at most ${TIME_RATE_CARD_JOB_ROLE_LIMIT} entries.`)
+  }
+  const seen = new Set<string>()
+  return value.map((candidate: unknown): TimeRateCardJobRoleRate => {
+    if (!isRecord(candidate)) invalidRateCard('Job role rate must be an object.')
+    const jobRoleId = readRateCardIdentifier(candidate.jobRoleId, 'Job role ID')
+    if (seen.has(jobRoleId)) invalidRateCard(`Job role "${jobRoleId}" is listed more than once.`)
+    seen.add(jobRoleId)
+    return { jobRoleId, hourlyRateMinor: readRateCardHourlyRate(candidate.hourlyRateMinor, 'Job role hourly rate') }
+  }).sort((left, right) => left.jobRoleId.localeCompare(right.jobRoleId))
+}
+
+/**
+ * Reads a stored rate card, or an idempotent replay of one.
+ *
+ * @param value - Stored value.
+ * @returns The validated rate card.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for a malformed value.
+ */
+function readStoredRateCard(value: unknown): TimeRateCard {
+  const record = readRecord(value)
+  readSchemaVersion(record, 'Stored rate card')
+  const currency = readString(record.currency, 'Stored rate card currency')
+  if (!CURRENCY_PATTERN.test(currency)) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card currency is invalid.')
+  let memberRates: TimeRateCardMemberRate[]
+  let jobRoleRates: TimeRateCardJobRoleRate[]
+  try {
+    memberRates = normalizeMemberRates(record.memberRates)
+    jobRoleRates = normalizeJobRoleRates(record.jobRoleRates)
+  } catch {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card rates are invalid.')
+  }
+  const updatedAt = readOptionalString(record.updatedAt)
+  const updatedBy = readOptionalString(record.updatedBy)
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored rate card Workspace ID'),
+    teamId: readString(record.teamId, 'Stored rate card Team ID'),
+    currency,
+    memberRates,
+    jobRoleRates,
+    revision: readNumber(record.revision, 'Stored rate card revision'),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(updatedBy ? { updatedBy } : {}),
   }
 }
 
@@ -3647,9 +4057,13 @@ const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
 
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
+  // A currency the route filled from the Workspace default is not what the client sent, so a retry
+  // after the default changes still replays the stored result.
+  const defaultedCurrency = 'currencyFromWorkspaceDefault' in input && input.currencyFromWorkspaceDefault === true
   const body = Object.fromEntries(
     Object.entries(input)
       .filter(([key]) => !IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS.has(key))
+      .filter(([key]) => !(defaultedCurrency && key === 'currency'))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )
