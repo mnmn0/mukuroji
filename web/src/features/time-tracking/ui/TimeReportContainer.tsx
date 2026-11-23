@@ -39,6 +39,12 @@ export type TimeReportContainerProps = {
   onRetryJobRoles?: () => void
   /** Opens another period or grouping. */
   onChange: (range: TimeReportRange, groupBy: TimeTrackingGroupBy) => void
+  /** First month of the Workspace fiscal year, offered as budget periods once known. */
+  fiscalYearStartMonth?: number
+  /** Whether reading the Workspace fiscal year failed. */
+  hasFiscalYearError?: boolean
+  /** Reads the Workspace fiscal year again. */
+  onRetryFiscalYear?: () => void
 }
 
 /**
@@ -67,12 +73,15 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
  */
 export function TimeReportContainer({
   accessToken,
+  fiscalYearStartMonth,
   groupBy,
+  hasFiscalYearError = false,
   hasJobRoleError = false,
   jobRoles,
   labels,
   locale,
   onChange,
+  onRetryFiscalYear,
   onRetryJobRoles,
   projects,
   range,
@@ -127,6 +136,9 @@ export function TimeReportContainer({
       {canSeeCosts ? (
         <TimeBudgetPanel
           defaultCurrency={settings.data?.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
+          fiscalYearStartMonth={fiscalYearStartMonth}
+          hasFiscalYearError={hasFiscalYearError}
+          {...(onRetryFiscalYear ? { onRetryFiscalYear } : {})}
           // The Workspace currency seeds a new budget, so the editor waits for the settings too.
           hasLoadError={Boolean(budgetReport.error ?? settings.error)}
           isLoading={budgetReport.isLoading || (!settings.data && !settings.error)}
