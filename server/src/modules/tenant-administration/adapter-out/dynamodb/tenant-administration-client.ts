@@ -23,10 +23,16 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  PlanningUpdateTemplateSettings,
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
-import { isCurrencyCode, readWeeklyReportReminderSettings, readWorkspaceCalendarSettings } from '@mukuroji/contracts'
+import {
+  isCurrencyCode,
+  readPlanningUpdateTemplateSettings,
+  readWeeklyReportReminderSettings,
+  readWorkspaceCalendarSettings,
+} from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -279,6 +285,9 @@ export class DynamoDbTenantAdministrationClient implements
       ...(input.calendar ? { calendar: readStoredWorkspaceCalendar(input.calendar) } : {}),
       ...(input.weeklyReportReminders
         ? { weeklyReportReminders: readStoredWeeklyReportReminders(input.weeklyReportReminders) }
+        : {}),
+      ...(input.planningUpdateTemplate
+        ? { planningUpdateTemplate: readStoredPlanningUpdateTemplate(input.planningUpdateTemplate) }
         : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       revision: current.revision + 1,
@@ -1994,6 +2003,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readStoredWeeklyReportReminders(value.weeklyReportReminders) }),
+    ...(value.planningUpdateTemplate === undefined
+      ? {}
+      : { planningUpdateTemplate: readStoredPlanningUpdateTemplate(value.planningUpdateTemplate) }),
     ...(value.defaultCurrency === undefined ? {} : { defaultCurrency: readStoredDefaultCurrency(value.defaultCurrency) }),
     status,
     ...(closedAt ? { closedAt } : {}),
@@ -2014,6 +2026,19 @@ function readTenantProfile(value: unknown): TenantProfile {
 function readStoredDefaultCurrency(value: unknown): string {
   if (!isCurrencyCode(value)) throw new Error('invalid tenant default currency')
   return value
+}
+
+/**
+ * Reads stored or already-validated health update template settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredPlanningUpdateTemplate(value: unknown): PlanningUpdateTemplateSettings {
+  const settings = readPlanningUpdateTemplateSettings(value)
+  if (!settings) throw new Error('invalid planning update template settings')
+  return settings
 }
 
 /**

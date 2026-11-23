@@ -728,6 +728,42 @@ test('keeps weekly report reminder settings behind administration and validates 
   expect(updates).toEqual([{ ...body, weeklyReportReminders: settings }])
 })
 
+test('accepts health update required fields and template from an administrator only', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const settings = { requiredFields: ['riskSummary', 'evidence'], template: { summary: '## 今週\n' } }
+  const request = (router: ReturnType<typeof createCalendarRouter>, planningUpdateTemplate: unknown) =>
+    router.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, planningUpdateTemplate }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+  const memberUpdates: unknown[] = []
+  expect((await request(createCalendarRouter(createClient(snapshot, []), memberUpdates), settings)).status)
+    .toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const invalid of [null, { requiredFields: ['summary'], template: {} }, { requiredFields: [] }]) {
+    const rejected = await request(admin, invalid)
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidPlanningUpdateTemplateSettings' })
+  }
+  expect(updates).toEqual([])
+  expect((await request(admin, settings)).status).toBe(200)
+  expect(updates).toEqual([{ ...body, planningUpdateTemplate: settings }])
+})
+
 test('accepts an ISO 4217 Workspace currency from an administrator only', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',

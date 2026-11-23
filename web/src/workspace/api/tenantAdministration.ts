@@ -14,6 +14,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   isCurrencyCode,
+  readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
   readWorkspaceNationalHolidayDates,
@@ -334,6 +335,8 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     (value.calendar === undefined || readWorkspaceCalendarSettings(value.calendar) !== undefined) &&
     (value.weeklyReportReminders === undefined ||
       readWeeklyReportReminderSettings(value.weeklyReportReminders) !== undefined) &&
+    (value.planningUpdateTemplate === undefined ||
+      readPlanningUpdateTemplateSettings(value.planningUpdateTemplate) !== undefined) &&
     (value.defaultCurrency === undefined || isCurrencyCode(value.defaultCurrency)) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&

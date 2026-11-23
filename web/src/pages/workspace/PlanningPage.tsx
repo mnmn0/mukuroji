@@ -78,6 +78,7 @@ import {
   revalidatePlanningUpdateHistoryAfterPublish,
   usePlanningUpdateAnnotations,
   usePlanningUpdates,
+  usePlanningUpdateTemplate,
   usePlanningUpdateWatch,
 } from '../../planning/queries/usePlanningUpdates'
 import { usePlanningBaselineDelays } from '../../planning/queries/usePlanningBaselineDelays'
@@ -219,6 +220,7 @@ export function PlanningPage() {
     selectedUpdateTarget,
     Boolean(user && !currentUserError),
   )
+  const updateTemplate = usePlanningUpdateTemplate(accessToken)
   const updateWatch = usePlanningUpdateWatch(
     accessToken,
     selectedUpdateTarget,
@@ -1083,6 +1085,7 @@ export function PlanningPage() {
                 )
               }
             : undefined}
+          updateTemplate={updateTemplate.data}
           onPublishUpdate={canMutatePlanningContent && snapshot && accessToken
             ? (target, draft) => {
                 const input = {

@@ -16,6 +16,7 @@ const {
   setTestAppDependencies,
   withTestEnvironment,
 } = createApiTestHarness()
+import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration'
 import {
   InMemoryPlanningClient,
   PlanningError,
@@ -4045,4 +4046,74 @@ test('publishes a Team update and lets only the cadence reviewer acknowledge it 
       }],
     })
   })
+})
+
+test('returns the Workspace update template and rejects a publish that leaves a required field empty', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  const profile = {
+    ...createDefaultTenantAdministrationSnapshot(
+      'user#demo@example.com',
+      'demo@example.com',
+      '2026-08-01T00:00:00.000Z',
+    ).profile,
+    planningUpdateTemplate: {
+      requiredFields: ['riskSummary' as const, 'evidence' as const],
+      template: { summary: '## This week\n' },
+    },
+  }
+  setTestAppDependencies({
+    planning,
+    tenantAdministration: new Proxy(getTestAppDependencies().workspace.tenantAdministration, {
+      get(target, property, receiver) {
+        if (property === 'getProfile') return async () => profile
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    tenantLifecycleEnforcement: { async assertActive() {} },
+  })
+  const template = await planningApiRequest('/api/planning/updates/template')
+  expect(template.status).toBe(200)
+  expect(await template.json()).toEqual({ settings: profile.planningUpdateTemplate })
+
+  const target = { type: 'team', teamId: 'core-team' }
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  expect(configured.status).toBe(200)
+  const update = {
+    target,
+    id: 'team-update-1',
+    health: 'on-track',
+    risk: 'low',
+    summary: 'Shipped the weekly plan.',
+    riskSummary: '  ',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 1,
+  }
+  const missing = await planningApiRequest('/api/planning/updates', 'POST', update)
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toMatchObject({
+    code: 'PlanningUpdateRequiredFieldsMissing',
+    message: 'This Workspace requires these update fields: riskSummary, evidence.',
+  })
+  expect((await planning.listUpdates('user#demo@example.com', { target: { type: 'team', teamId: 'core-team' } })).updates).toEqual([])
+
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    ...update,
+    riskSummary: 'Vendor may slip.',
+    evidence: [{ type: 'link', url: 'https://example.com/plan', title: 'Plan' }],
+  })
+  expect(published.status).toBe(201)
 })

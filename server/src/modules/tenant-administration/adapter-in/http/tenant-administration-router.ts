@@ -8,6 +8,7 @@ import type {
   TenantOperation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  PlanningUpdateTemplateSettings,
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceCalendarSettingsResponse,
@@ -15,6 +16,7 @@ import type {
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   isKnownCurrencyCode,
+  readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
@@ -356,6 +358,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readTenantWeeklyReportReminderInput(body.weeklyReportReminders) }),
+    ...(body.planningUpdateTemplate === undefined
+      ? {}
+      : { planningUpdateTemplate: readTenantPlanningUpdateTemplateInput(body.planningUpdateTemplate) }),
     ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
@@ -379,6 +384,25 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     )
   }
   return calendar
+}
+
+/**
+ * Validates the health update required fields and template of a profile update.
+ *
+ * @param value - Untrusted `planningUpdateTemplate` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a field name is unknown or a template text is too long.
+ */
+function readTenantPlanningUpdateTemplateInput(value: unknown): PlanningUpdateTemplateSettings {
+  const settings = readPlanningUpdateTemplateSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidPlanningUpdateTemplateSettings',
+      'Health update required fields or template texts are invalid.',
+    )
+  }
+  return settings
 }
 
 /**

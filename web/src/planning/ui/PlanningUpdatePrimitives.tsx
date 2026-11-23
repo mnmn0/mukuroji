@@ -5,7 +5,11 @@ import type {
   PlanningHealth,
   PlanningRisk,
   PlanningUpdateEvidence,
+  PlanningUpdateRequirableField,
+  PlanningUpdateTemplateSettings,
+  PlanningUpdateTemplateTextField,
 } from '@mukuroji/contracts'
+import { listMissingPlanningUpdateFields } from '@mukuroji/contracts'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import {
@@ -94,6 +98,10 @@ export type PlanningUpdateLabels = {
   composerRequiredHint: string
   /** Form validation error shown when a structured form cannot be submitted. */
   formInvalid: string
+  /** Error naming the Workspace-required fields left empty, as a comma-separated list. */
+  requiredFieldsMissing?: (fields: string) => string
+  /** Marks a field label as required by the Workspace. */
+  requiredField?: (label: string) => string
   /** Health field label. */
   health: string
   /** Localized planning-health values. */
@@ -307,6 +315,8 @@ export type PlanningUpdateDetailPaneProps = {
   evidenceCandidates?: PlanningUpdateEvidenceCandidates
   /** Records behind the baseline that the composer can attach as evidence. */
   baselineDelays?: PlanningBaselineDelaysView
+  /** Workspace required fields and template for new updates. */
+  template?: PlanningUpdateTemplateSettings
 }
 
 /**
@@ -331,6 +341,7 @@ export function PlanningUpdateDetailPane({
   onSaveCadence,
   summary,
   updateView,
+  template,
 }: PlanningUpdateDetailPaneProps) {
   const collaborationIsPending = collaboration?.isPending ?? false
   const collaborationIsLoading = collaboration?.isLoading ?? false
@@ -426,6 +437,7 @@ export function PlanningUpdateDetailPane({
           labels={labels}
           onPublish={onPublish}
           progress={summary.progress}
+          template={template}
         />
         <PlanningStatusUpdateLedger
           errorMessage={historyErrorMessage}
@@ -727,7 +739,18 @@ export type PlanningStatusUpdateComposerProps = {
   initialDraft?: AiPlanningStatusUpdateDraft
   /** Publishes a manual canonical update when the viewer has permission. */
   onPublish?: (draft: PlanningStatusUpdateDraft) => void | Promise<void>
+  /** Workspace required fields and the text a new update starts from. */
+  template?: PlanningUpdateTemplateSettings
 }
+
+/** Composer label of each field a Workspace may make required. */
+const planningUpdateFieldLabelKeys = {
+  riskSummary: 'riskSummary',
+  decisionSummary: 'decisionSummary',
+  helpNeeded: 'helpNeeded',
+  nextAction: 'nextAction',
+  evidence: 'evidence',
+} as const satisfies Record<PlanningUpdateRequirableField, keyof PlanningUpdateLabels>
 
 /** Authentication and revision-fenced source for a Planning status update draft. */
 export type PlanningStatusUpdateAiAssistance = {
@@ -827,7 +850,18 @@ export function PlanningStatusUpdateComposer({
   labels,
   onPublish,
   progress,
+  template,
 }: PlanningStatusUpdateComposerProps) {
+  const requiredFields = new Set(template?.requiredFields ?? [])
+  /**
+   * Adds the Workspace-required mark to one field label.
+   *
+   * @param field - Field that may be required.
+   * @param label - Plain field label.
+   * @returns The label, marked when the Workspace requires the field.
+   */
+  const fieldLabel = (field: PlanningUpdateRequirableField, label: string) =>
+    requiredFields.has(field) && labels.requiredField ? labels.requiredField(label) : label
   const [evidenceType, setEvidenceType] = useState<PlanningUpdateEvidence['type'] | 'none'>(
     initialEvidenceType,
   )
@@ -852,6 +886,9 @@ export function PlanningStatusUpdateComposer({
     draft: initialDraft,
     revision: 0,
   })
+  // A form seeded by a draft (AI or story) keeps that draft; a fresh form starts from the template.
+  const startingText: Partial<Record<PlanningUpdateTemplateTextField, string>> | undefined =
+    formSeed.draft ?? template?.template
   const formDisabled =
     !onPublish ||
     isPublishing ||
@@ -995,7 +1032,8 @@ export function PlanningStatusUpdateComposer({
       </p>
       <form
         className="mt-4 grid gap-3"
-        key={`planning-status-update-form-${formSeed.revision}`}
+        // The template arrives after the first render; remount so the fields pick up its text.
+        key={`planning-status-update-form-${formSeed.revision}-${template ? 'template' : 'plain'}`}
         noValidate
         onChange={() => {
           isFormDirtyRef.current = true
@@ -1026,18 +1064,29 @@ export function PlanningStatusUpdateComposer({
             setFormError(labels.formInvalid)
             return
           }
+          const draftText = {
+            riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
+            decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
+            helpNeeded: readOptionalText(data.get('helpNeeded')) ?? '',
+            nextAction,
+          }
+          const missing = template
+            ? listMissingPlanningUpdateFields(template, { ...draftText, evidence })
+            : []
+          if (missing.length > 0) {
+            const names = missing.map((field) => labels[planningUpdateFieldLabelKeys[field]]).join(', ')
+            setFormError(labels.requiredFieldsMissing?.(names) ?? labels.formInvalid)
+            return
+          }
           if (aiGenerationReference !== undefined && evidence.length === 0) {
             setFormError(aiT?.('ai.planning.evidenceRequired') ?? labels.formInvalid)
             return
           }
           const draft = {
-            decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
+            ...draftText,
             evidence,
             health: selectedHealth,
-            helpNeeded: readOptionalText(data.get('helpNeeded')) ?? '',
-            nextAction,
             risk: selectedRisk,
-            riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
             summary,
           }
           const wasAiSeeded = aiGenerationReference !== undefined
@@ -1113,7 +1162,7 @@ export function PlanningStatusUpdateComposer({
           {labels.summary}
           <textarea
             className="workbench-input min-h-24 p-3"
-            defaultValue={formSeed.draft?.summary}
+            defaultValue={startingText?.summary}
             disabled={formDisabled}
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
@@ -1123,16 +1172,16 @@ export function PlanningStatusUpdateComposer({
         </label>
         <div className="grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.riskSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={formDisabled} name="riskSummary" />
+            {fieldLabel('riskSummary', labels.riskSummary)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.riskSummary} disabled={formDisabled} name="riskSummary" required={requiredFields.has('riskSummary')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.decisionSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={formDisabled} name="decisionSummary" />
+            {fieldLabel('decisionSummary', labels.decisionSummary)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.decisionSummary} disabled={formDisabled} name="decisionSummary" required={requiredFields.has('decisionSummary')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.helpNeeded}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={formDisabled} name="helpNeeded" />
+            {fieldLabel('helpNeeded', labels.helpNeeded)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.helpNeeded} disabled={formDisabled} name="helpNeeded" required={requiredFields.has('helpNeeded')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
@@ -1140,7 +1189,7 @@ export function PlanningStatusUpdateComposer({
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             className="workbench-input min-h-20 p-3"
-            defaultValue={formSeed.draft?.nextAction}
+            defaultValue={startingText?.nextAction}
             disabled={formDisabled}
             name="nextAction"
             required
@@ -1149,7 +1198,7 @@ export function PlanningStatusUpdateComposer({
         </div>
         <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] pt-4">
           <legend className="text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.evidence}
+            {fieldLabel('evidence', labels.evidence)}
           </legend>
           {baselineDelays && labels.baselineDelays ? (
             <PlanningBaselineDelaySection

@@ -230,6 +230,8 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     composerDescription: t('planning.section.updateComposer.description'),
     composerRequiredHint: t('planning.updateComposer.requiredHint'),
     formInvalid: t('planning.form.invalid'),
+    requiredFieldsMissing: (fields) => t('planning.updateComposer.requiredFieldsMissing').replace('{fields}', fields),
+    requiredField: (label) => t('planning.updateComposer.requiredField').replace('{label}', label),
     summary: t('planning.field.summary'),
     progressSnapshot: t('planning.field.progressSnapshot'),
     riskSummary: t('planning.field.riskUpdate'),

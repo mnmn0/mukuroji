@@ -67,5 +67,10 @@ Project と同じに動くこと、確認すると作成者に通知され一覧
 - 確認者を変えても、過去の version の確認は記録した member のまま表示する。未確認の version は新しい
   確認者を待つ。
 - `UPDATE_ACK#` は annotation と同じく graph の読み取りで飛ばす。追加の table・index・IAM はない。
-- Workspace ごとの update テンプレートと必須項目は Issue #402 の別の PR で扱う。
-- 更新した文書: `docs/planning.md`、`docs/guide/pm.md`。
+- Workspace ごとの必須項目とテンプレートは tenant profile の `planningUpdateTemplate` に置く（週報の
+  リマインダーや通貨と同じ Workspace 設定の置き場所）。必須にできるのはリスクの背景・判断事項・
+  必要な支援・次のアクション・根拠で、テンプレートは各欄の初期値（2,000 文字まで）。公開 API は
+  tenant profile を読んで空の必須項目を `400 PlanningUpdateRequiredFieldsMissing` で拒否する。設定と
+  公開は同じ transaction にしないので、設定の変更と同時に公開された update は古い設定で通ることがある。
+  Planning の revision に入れると、設定の変更が Planning 全体の操作を 409 にするため、こちらを選んだ。
+- 更新した文書: `docs/planning.md`、`docs/guide/pm.md`、`docs/guide/admin.md`。

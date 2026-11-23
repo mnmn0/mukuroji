@@ -19,6 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
   WorkspaceWeekStartDay,
+  PlanningUpdateTemplateSettings,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS, toWorkspaceLocalDate } from '@mukuroji/contracts'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -452,6 +453,8 @@ export type PlanningScreenProps = {
     target: PlanningUpdateTargetView,
     draft: PlanningUpdateCadenceDraft,
   ) => void | Promise<void>
+  /** Workspace の health update 必須項目とテンプレートです。 */
+  updateTemplate?: PlanningUpdateTemplateSettings
   /** Project または Initiative の structured manual update を公開する callback です。 */
   onPublishUpdate?: (
     target: PlanningUpdateTargetView,
@@ -547,6 +550,7 @@ export function PlanningScreen({
   onOpenProjectOverview,
   onOpenWorkItem,
   onPublishUpdate,
+  updateTemplate,
   onSaveUpdateCadence,
   onSaveWorkItemLink,
   onSelectUpdateTarget,
@@ -965,6 +969,7 @@ export function PlanningScreen({
                   ? (draft) => onSaveUpdateCadence(resolvedSelectedUpdateTarget, draft)
                   : undefined}
                 onRetryHistory={onRetryUpdateHistory}
+                template={updateTemplate}
               />
             ) : null}
           </div>

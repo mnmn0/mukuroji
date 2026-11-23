@@ -53,6 +53,50 @@ describe('Planning update evidence composer', () => {
     expect(publishCount).toBe(0)
   })
 
+  test('starts a fresh form from the Workspace template and marks required fields', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={labels}
+        onPublish={() => undefined}
+        progress={40}
+        template={{
+          requiredFields: ['riskSummary', 'evidence'],
+          template: { summary: 'Done this week:', helpNeeded: 'None' },
+        }}
+      />,
+    )
+    expect(html).toContain('>Done this week:</textarea>')
+    expect(html).toContain('>None</textarea>')
+    expect(html).toContain('Risk (required)')
+    expect(html).toContain('Evidence links (required)')
+    expect(html).toContain('name="riskSummary" required=""')
+    expect(html).not.toContain('Decision (required)')
+  })
+
+  test('keeps an AI or saved draft instead of the template', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        initialDraft={{
+          health: 'on-track',
+          risk: 'none',
+          summary: 'Drafted summary',
+          riskSummary: '',
+          decisionSummary: '',
+          helpNeeded: '',
+          nextAction: 'Next',
+        }}
+        labels={labels}
+        onPublish={() => undefined}
+        progress={40}
+        template={{ requiredFields: [], template: { summary: 'Template summary' } }}
+      />,
+    )
+    expect(html).toContain('Drafted summary')
+    expect(html).not.toContain('Template summary')
+  })
+
   /** Verifies an in-flight AI decision cannot race the canonical publish action. */
   test('disables the manual publish form while an AI operation is pending', () => {
     const html = renderToStaticMarkup(

@@ -8,6 +8,7 @@ import type {
   PlanningUpdateTarget,
   PublishPlanningUpdateInput,
 } from '@mukuroji/contracts'
+import { readPlanningUpdateTemplateSettings } from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -23,6 +24,7 @@ import {
 } from './contractValidation'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const planningApiBaseUrl = resolveApiBaseUrl()
 
@@ -276,6 +278,21 @@ export async function exportPlanningUpdates(
     filename: readDownloadFilename(response.headers.get('Content-Disposition')) ??
       'mukuroji-planning-updates.json',
   }
+}
+
+/**
+ * Loads the Workspace's health update required fields and template.
+ *
+ * @param accessToken - Authorization bearer token.
+ * @returns The validated settings; the defaults when the Workspace saved none.
+ */
+export function getPlanningUpdateTemplate(accessToken: string) {
+  return requestPlanningUpdateJson(
+    `${planningApiBaseUrl}/planning/updates/template`,
+    accessToken,
+    { method: 'GET' },
+    (value) => (isRecord(value) ? readPlanningUpdateTemplateSettings(value.settings) : undefined),
+  )
 }
 
 /**

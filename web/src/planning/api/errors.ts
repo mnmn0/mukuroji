@@ -44,7 +44,8 @@ export function resolvePlanningErrorMessageKey(
   | 'planning.error'
   | 'planning.mutationError'
   | 'planning.restore.ownerInactive'
-  | 'planning.restore.parentUnavailable' {
+  | 'planning.restore.parentUnavailable'
+  | 'planning.updateComposer.requiredFieldsChanged' {
   const fallback = operation === 'load' ? 'planning.error' : 'planning.mutationError'
   if (typeof error !== 'object' || error === null) return fallback
 
@@ -52,6 +53,9 @@ export function resolvePlanningErrorMessageKey(
   const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
   if (operation === 'mutation' && code === 'PlanningCycleCapacityExceeded') {
     return 'planning.cycle.capacityExceeded'
+  }
+  if (operation === 'mutation' && code === 'PlanningUpdateRequiredFieldsMissing') {
+    return 'planning.updateComposer.requiredFieldsChanged'
   }
   if (operation === 'restore' && code === 'PlanningRestoreParentUnavailable') {
     return 'planning.restore.parentUnavailable'

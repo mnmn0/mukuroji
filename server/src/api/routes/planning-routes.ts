@@ -33,6 +33,7 @@ import {
   type WorkItemDependencyEndpoint,
   type WorkItemScheduleDependency,
   resolvePlanningUpdateReviewerMemberKey,
+  type PlanningUpdateTemplateResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { AuditEventV1 } from '../../modules/audit/audit'
@@ -118,6 +119,10 @@ import {
   readPlanningUpdateCommentMentions,
   withPlanningAuditOutbox,
 } from '../shared/planning-update-notifications'
+import {
+  readPlanningUpdateTemplateSettingsOf,
+  requirePlanningUpdateRequiredFields,
+} from '../shared/planning-update-template'
 import {
   createPlanningCallerAuthorizationConditionChecks,
   filterPlanningSnapshotForPrincipal,
@@ -3499,6 +3504,21 @@ export function registerPlanningRoutes(routeApp: Hono): void {
   })
 
   /** Human-authored structured Project / Initiative update を immutable publish します。 */
+  /** Workspace の health update 必須項目とテンプレートを返します。 */
+  routeApp.get('/api/planning/updates/template', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const settings = await readPlanningUpdateTemplateSettingsOf(principal.directoryId)
+      return c.json({ settings } satisfies PlanningUpdateTemplateResponse)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
   routeApp.post('/api/planning/updates', async (c) => {
     const accessToken = readBearerAccessToken(c)
     let reservationToRelease: ReleaseIdempotencyRequest | undefined
@@ -3593,6 +3613,10 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
         await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
       }
+      requirePlanningUpdateRequiredFields(
+        await readPlanningUpdateTemplateSettingsOf(principal.directoryId),
+        candidate,
+      )
       const evidenceConditionChecks = await createPlanningUpdateEvidenceConditionChecks(
         principal,
         snapshot,

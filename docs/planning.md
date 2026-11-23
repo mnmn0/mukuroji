@@ -144,6 +144,8 @@ Team も update target にできます（`{ type: 'team', teamId }`）。Team �
 
 Cadence の `reviewerMemberKey`（省略時は `escalationMemberKey`）が確認者です。確認者は `POST .../comments` に `acknowledgement: true` を付けたコメントで「確認済み」を記録します。route は認可に使った snapshot の cadence で確認者を確かめ、Planning `META` の revision を同じ transaction で条件にするので、確認者の変更と競合した記録は 409 になります。1つの version に記録できるのは1回で、2回目は `409 PlanningUpdateAlreadyAcknowledged` です。履歴 API は version ごとに `acknowledgement` を返し、activity projection が最初の確認を保持して Update Feed と Focus に渡します。確認者は publish の通知候補（reason `update-reviewer`）になり、確認すると作成者に通知（reason `update-author`、「Acknowledged: …」）が届きます。確認者の Focus には、自分以外が公開した最新 version で未確認のものが「確認待ちの進捗報告」として出ます。
 
+Workspace ごとの必須項目とテンプレートは tenant profile の `planningUpdateTemplate`（`requiredFields`、`template`）に置き、Workspace 管理者が `PATCH /api/tenant/profile` で保存します。`GET /api/planning/updates/template` はどの member にも設定（未設定なら既定値）を返します。`POST /api/planning/updates` は公開前に必須項目を確かめ、空なら `400 PlanningUpdateRequiredFieldsMissing` で拒否します。設定は公開済みの update を変えません。
+
 ### Update Feed read model (Issue #241, first slice)
 
 `GET /api/planning/update-feed?view=recent&limit=50` returns a live, permission-aware aggregate of the latest Project / Initiative summaries. Supported views are `recent`, `for-me`, `at-risk` (including off-track), `missing`, `stale`, and `overdue`. Health remains independent from submission state. Matches contribute to one target entry, not duplicate entries. The fourth slice below defines the current explainable relevance and attention ranking. Recent excludes targets without a report; submission views include them with unknown health.
