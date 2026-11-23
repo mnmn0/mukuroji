@@ -17,10 +17,10 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from '../api/errors'
 import {
   createProjectRaidLogCsv,
-  downloadProjectRaidLogCsv,
   labelProjectRaidReference,
   type ProjectRaidReferenceOption,
 } from '../model/projectRaidLogExport'
+import { downloadProjectRaidLogCsv } from './downloadProjectRaidLogCsv'
 
 /** Props of the Project risk, issue, and change request log panel. */
 export type ProjectRaidLogPanelProps = {
