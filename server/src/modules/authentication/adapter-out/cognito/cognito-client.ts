@@ -1492,9 +1492,9 @@ export class AwsCognitoClient implements CognitoClient {
     const { userPoolId } = this.readRequiredConfiguration()
     const emails = new Set<string>()
 
-    try {
-      for (const groupName of getSystemAdminGroups()) {
-        let nextToken: string | undefined
+    for (const groupName of getSystemAdminGroups()) {
+      let nextToken: string | undefined
+      try {
         do {
           const response = await this.client.send(new ListUsersInGroupCommand({
             UserPoolId: userPoolId,
@@ -1504,10 +1504,11 @@ export class AwsCognitoClient implements CognitoClient {
           addDirectoryUserEmails(emails, response.Users ?? [], directoryId)
           nextToken = response.NextToken
         } while (nextToken)
+      } catch (error) {
+        // A configured group that does not exist yet has no members; keep reading the others.
+        if (isCognitoResourceNotFoundError(error)) continue
+        throw toCognitoSdkError(error)
       }
-    } catch (error) {
-      if (isCognitoResourceNotFoundError(error)) return [...emails]
-      throw toCognitoSdkError(error)
     }
 
     return [...emails]

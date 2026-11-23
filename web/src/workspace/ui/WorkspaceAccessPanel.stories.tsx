@@ -319,6 +319,21 @@ export const SystemAdministrators: Story = {
 }
 
 /**
+ * The direct roles could not be loaded; the ledger says so instead of showing no roles.
+ */
+export const MemberRoleAssignmentsLoadError: Story = {
+  args: {
+    memberRoleAssignmentsLoadFailed: true,
+    onRetryMemberRoleAssignments: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('workspace-member-direct-roles-retry'))
+    await expect(args.onRetryMemberRoleAssignments).toHaveBeenCalledTimes(1)
+  },
+}
+
+/**
  * Members' MFA enrollment could not be loaded; the ledger says so and offers a reload.
  */
 export const SignInSecurityLoadError: Story = {

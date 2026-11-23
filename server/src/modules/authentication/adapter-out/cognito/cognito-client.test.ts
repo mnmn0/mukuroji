@@ -1802,9 +1802,9 @@ test('repairs a missing email verification of a confirmed invited user when a re
   ])
 })
 
-test('adds to the first system administrator group, removes from every one, and lists one directory', async () => {
+test('adds to the first system administrator group, removes from every one, and lists past a missing group', async () => {
   await withTestEnvironment({
-    SYSTEM_ADMIN_GROUPS: 'mukuroji-system-admins,legacy-admins',
+    SYSTEM_ADMIN_GROUPS: 'legacy-admins,mukuroji-system-admins',
   }, async () => {
     const commands: Array<{ name: string, input: Record<string, unknown> }> = []
     const sdkClient = {
@@ -1850,7 +1850,7 @@ test('adds to the first system administrator group, removes from every one, and 
     expect(commands.filter((command) => command.name !== 'ListUsersInGroupCommand')).toEqual([
       {
         name: 'AdminAddUserToGroupCommand',
-        input: { UserPoolId: 'ap-northeast-1_mukuroji', Username: 'sato@example.com', GroupName: 'mukuroji-system-admins' },
+        input: { UserPoolId: 'ap-northeast-1_mukuroji', Username: 'sato@example.com', GroupName: 'legacy-admins' },
       },
       {
         name: 'AdminListGroupsForUserCommand',

@@ -155,6 +155,7 @@ export const accountSecurityMessages = {
   'memberSecurity.systemAdmin.revoked': '{name} をシステム管理者から外しました。',
   'memberSecurity.systemAdmin.error.guest': 'ゲストはシステム管理者にできません。先にロールを変更してください。',
   'memberSecurity.systemAdmin.error.otherWorkspace': 'このメンバーのアカウントは別のワークスペースに属しているため、システム管理者にできません。',
+  'memberSecurity.roleAssignments.loadError': '個人に割り当てたロールを読み込めませんでした。',
   'memberSecurity.roleAssignments.label': '個人に割り当てたロール',
   'memberSecurity.roleAssignments.scope.workspace': 'ワークスペース',
   'memberSecurity.roleAssignments.scope.team': 'Team',

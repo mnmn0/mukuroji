@@ -36,6 +36,7 @@ import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMembersSignInSecurity } from '../queries/useWorkspaceMembersSignInSecurity'
 import { useWorkspaceMemberRoleAssignments } from '../queries/useWorkspaceMemberRoleAssignments'
 import type { MemberRoleAssignmentLabel } from '../model/memberRoleAssignments'
+import { EnterpriseSecurityApiError } from '../../security/api'
 import {
   shouldCloseCredentialResetDialog,
   shouldRetainCredentialResetContext,
@@ -55,6 +56,18 @@ import {
   type WorkspaceMemberFilter,
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
+
+/**
+ * Tells whether a failed direct-role load is worth reporting. A caller without security access
+ * is refused with 403, which only means the roles are not shown to them.
+ *
+ * @param error - Error of the direct-role query, if any.
+ * @returns Whether to show the load error with a retry.
+ */
+function isMemberRoleAssignmentsLoadFailure(error: unknown) {
+  if (!error) return false
+  return !(error instanceof EnterpriseSecurityApiError && error.status === 403)
+}
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -163,6 +176,14 @@ type WorkspaceAccessPanelProps = {
    * Roles assigned directly to each member, for callers who can read the security settings.
    */
   memberRoleAssignments?: ReadonlyMap<string, MemberRoleAssignmentLabel[]>
+  /**
+   * Whether loading the direct roles failed for a reason other than missing security access.
+   */
+  memberRoleAssignmentsLoadFailed?: boolean
+  /**
+   * Loads the direct roles again after a failure.
+   */
+  onRetryMemberRoleAssignments?: () => void
   /**
    * Grants or revokes system administrator access for a member. Offered to owners only.
    */
@@ -343,7 +364,11 @@ export function WorkspaceAccessPanelContainer({
     access?.capabilities.canManageMembers === true,
   )
 
-  const { data: memberRoleAssignments } = useWorkspaceMemberRoleAssignments(
+  const {
+    data: memberRoleAssignments,
+    error: memberRoleAssignmentsError,
+    mutate: mutateMemberRoleAssignments,
+  } = useWorkspaceMemberRoleAssignments(
     mutationSession.accessToken,
     access?.capabilities.canManageMembers === true,
   )
@@ -495,6 +520,8 @@ export function WorkspaceAccessPanelContainer({
       onRetrySignInSecurity={() => void mutateSignInSecurity()}
       systemAdministratorMemberKeys={signInSecurity?.systemAdministratorMemberKeys}
       memberRoleAssignments={memberRoleAssignments}
+      memberRoleAssignmentsLoadFailed={isMemberRoleAssignmentsLoadFailure(memberRoleAssignmentsError)}
+      onRetryMemberRoleAssignments={() => void mutateMemberRoleAssignments()}
       onChangeSystemAdministrator={access?.currentMember.role === 'owner'
         ? async (memberKey, systemAdministrator) => {
           try {
@@ -540,6 +567,8 @@ export function WorkspaceAccessPanel({
   onRetrySignInSecurity,
   systemAdministratorMemberKeys,
   memberRoleAssignments,
+  memberRoleAssignmentsLoadFailed = false,
+  onRetryMemberRoleAssignments,
   onChangeSystemAdministrator,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -870,11 +899,13 @@ export function WorkspaceAccessPanel({
           canChangeSystemAdministrator={Boolean(onChangeSystemAdministrator) &&
             access.currentMember.role === 'owner'}
           memberRoleAssignments={memberRoleAssignments}
+          memberRoleAssignmentsLoadFailed={memberRoleAssignmentsLoadFailed}
           signInSecurity={signInSecurity}
           signInSecurityLoadFailed={signInSecurityLoadFailed}
           systemAdministratorMemberKeys={systemAdministratorMemberKeys}
           t={t}
           onRequestAction={requestAction}
+          onRetryMemberRoleAssignments={onRetryMemberRoleAssignments}
           onRetrySignInSecurity={onRetrySignInSecurity}
         />
 
@@ -947,11 +978,13 @@ function WorkspaceMemberLedger({
   canResetCredentials,
   locale,
   memberRoleAssignments,
+  memberRoleAssignmentsLoadFailed,
   signInSecurity,
   signInSecurityLoadFailed,
   systemAdministratorMemberKeys,
   t,
   onRequestAction,
+  onRetryMemberRoleAssignments,
   onRetrySignInSecurity,
 }: {
   access: WorkspaceAccess
@@ -959,11 +992,13 @@ function WorkspaceMemberLedger({
   canResetCredentials: boolean
   locale: Locale
   memberRoleAssignments?: ReadonlyMap<string, MemberRoleAssignmentLabel[]>
+  memberRoleAssignmentsLoadFailed: boolean
   signInSecurity?: WorkspaceMemberSignInSecurity[]
   signInSecurityLoadFailed: boolean
   systemAdministratorMemberKeys?: string[]
   t: (key: MessageKey) => string
   onRequestAction: (action: WorkspaceAccessAction) => void
+  onRetryMemberRoleAssignments?: () => void
   onRetrySignInSecurity?: () => void
 }) {
   const systemAdministrators = systemAdministratorMemberKeys === undefined
@@ -1015,6 +1050,23 @@ function WorkspaceMemberLedger({
         >
           {t('memberSecurity.summary').replace('{count}', String(unenrolledMemberCount))}
         </p>
+      ) : null}
+      {memberRoleAssignmentsLoadFailed ? (
+        <div className="flex flex-wrap items-center gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
+            {t('memberSecurity.roleAssignments.loadError')}
+          </p>
+          {onRetryMemberRoleAssignments ? (
+            <button
+              className="workbench-button-secondary min-h-9 px-3"
+              data-testid="workspace-member-direct-roles-retry"
+              type="button"
+              onClick={onRetryMemberRoleAssignments}
+            >
+              {t('memberSecurity.retry')}
+            </button>
+          ) : null}
+        </div>
       ) : null}
       <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-left min-[761px]:min-w-[860px]" data-testid="workspace-member-ledger">
