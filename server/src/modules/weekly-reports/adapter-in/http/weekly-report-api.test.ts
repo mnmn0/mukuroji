@@ -8,6 +8,7 @@ const {
 } = createApiTestHarness()
 import {
   createDefaultDueDateWorkItemSchedule,
+  parseTeamMonthlySummaryResponse,
   parseTeamWeeklySummaryResponse,
   type EnterpriseCustomRole,
   type TeamWeeklyReportStatusResponse,
@@ -447,6 +448,32 @@ test('summarizes the week of each readable Project without Work Items of other P
   })
   expect(JSON.stringify(summary)).not.toContain('Secret title')
   expect((await request('/api/teams/core-team/weekly-summary?weekStart=2099-01-05')).status).toBe(400)
+})
+
+test('summarizes a month of each readable Project without Work Items of other Projects', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
+  const dependencies = getTestAppDependencies().workItems
+  const [template] = (await dependencies.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')).issues
+  if (!template) throw new Error('The fake Team has no Work Item.')
+  const issues = [
+    { ...template, id: 'done', title: 'Done in refero', statusCategory: 'completed' as const, actualEndDate: '2026-10-03' },
+    { ...template, id: 'before', title: 'Done before', statusCategory: 'completed' as const, actualEndDate: '2026-09-30' },
+    { ...template, id: 'hidden', title: 'Secret title', assignedProjectId: 'secret', statusCategory: 'completed' as const, actualEndDate: '2026-10-03' },
+  ]
+  dependencies.teamIssues.getTeamIssues = async (_directoryId, teamId) => ({ teamId, issues, evaluatedCount: issues.length })
+
+  const response = await request('/api/teams/core-team/monthly-summary?month=2026-10')
+  expect(response.status).toBe(200)
+  const summary = parseTeamMonthlySummaryResponse(await response.json())
+  if (!summary) throw new Error('The monthly summary does not match the contract.')
+  expect(summary).toMatchObject({ teamId: 'core-team', month: '2026-10', periodStart: '2026-10-01', periodEnd: '2026-10-31' })
+  expect(summary.scopes.map((scope) => scope.projectId)).toEqual(['refero'])
+  expect(summary.totals.completed).toBe(1)
+  expect(summary.previousTotals.completed).toBe(1)
+  expect(JSON.stringify(summary)).not.toContain('Secret title')
+  expect((await request('/api/teams/core-team/monthly-summary?month=2099-01')).status).toBe(400)
+  expect((await request('/api/teams/core-team/monthly-summary?month=2026-13')).status).toBe(400)
+  expect((await request('/api/teams/core-team/monthly-summary')).status).toBe(400)
 })
 
 test('summarizes nothing for an Enterprise role that may read the Team but not its Work Items', async () => {
