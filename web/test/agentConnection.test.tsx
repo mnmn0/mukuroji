@@ -68,6 +68,27 @@ describe('agent connection snippets', () => {
     })
   })
 
+  test('configures the Workspace profile with only the origin and the profile', () => {
+    const kiro = buildAgentConnectionSnippet({ ...settings, client: 'kiro', profile: 'workspace' })
+    expect(JSON.parse(kiro.content)).toEqual({
+      mcpServers: {
+        mukuroji: {
+          command: 'node',
+          args: ['/Users/taro/mukuroji/mcp.mjs'],
+          env: {
+            MUKUROJI_MCP_URL: 'https://mukuroji.example.com',
+            MUKUROJI_MCP_PROFILE: 'workspace',
+            MUKUROJI_MCP_TOKEN: '${MUKUROJI_MCP_TOKEN}',
+          },
+        },
+      },
+    })
+    const claude = buildAgentConnectionSnippet({ ...settings, profile: 'workspace' }).content
+    expect(claude).toContain('claude mcp add --scope user --transport stdio mukuroji \\\n')
+    expect(claude).not.toContain('MUKUROJI_MCP_TEAM_ID')
+    expect(claude).not.toContain('MUKUROJI_MCP_ASSIGNEE_ID')
+  })
+
   test('uses Windows paths, PowerShell quoting, and line continuation', () => {
     const windows = { ...settings, shell: 'powershell' as const, mcpPath: 'C:\\Users\\Taro Y\\mcp.mjs' }
     const claude = buildAgentConnectionSnippet(windows).content
@@ -151,6 +172,7 @@ function render(overrides: Partial<AgentConnectionPanelProps> = {}) {
       onRotate={noop}
       origin="https://mukuroji.example.com"
       overview={overview}
+      profile="tasks"
       t={createTranslator('ja')}
       teams={[{ id: 'team-core', name: 'Core' }]}
       {...overrides}
@@ -181,6 +203,14 @@ describe('agent connection view', () => {
     expect(html).toContain('MUKUROJI_MCP_TEAM_ID=team-core')
     expect(html).toContain('Laptop')
     expect(html).not.toContain('data-testid="issued-agent-token"')
+  })
+
+  test('drops the Team and assignee from the Workspace profile and explains why', () => {
+    const html = render({ profile: 'workspace' })
+    expect(html).toContain('data-testid="agent-connection-workspace-profile"')
+    expect(html).toContain('MUKUROJI_MCP_PROFILE=workspace')
+    expect(html).not.toContain('MUKUROJI_MCP_TEAM_ID')
+    expect(html).toContain('whoami')
   })
 
   test('shows the one-time token with the environment command only while it is kept', () => {

@@ -1,4 +1,4 @@
-import { McpServer, ResourceTemplate, type CallToolResult } from '@modelcontextprotocol/server'
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import {
   AGENT_RUN_ARTIFACT_URL_PATTERN,
@@ -9,6 +9,7 @@ import {
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
 import { CODING_AGENT_MCP_VERSION, describeCodingAgentMcpBuild, type ServerCompatibility } from '../../application/compatibility'
 import { AgentTaskError, type AgentWorkItemApi } from '../../application/work-item-api'
+import { result } from './tool-result'
 
 const id = z.string().trim().min(1).max(256).refine((value) => value !== '.' && value !== '..' &&
   [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127))
@@ -38,19 +39,6 @@ agent_run_not_active means your run was finished, released by a person, or taken
 Every mutation requires a UUID idempotencyKey. After timeout or transport failure retry the same operation with identical arguments and key. Never generate a fresh key to retry an uncertain write. After a revision conflict reload and reassess before issuing a new logical operation.
 Follow nextCursor while hasMore is true, even for empty pages. Narrow Project/type filters if queue limits are reached. Errors are not empty queues or success.
 State means the recorded task and run state. Mukuroji does not start, stop, or monitor agent processes, and it never completes, cancels, or reassigns work automatically.`
-
-/** Converts a use-case result or safe failure into MCP text and structured content. */
-async function result(run: () => Promise<unknown>): Promise<CallToolResult> {
-  try {
-    const data = await run()
-    const output = { data }
-    return { content: [{ type: 'text', text: JSON.stringify(output) }], structuredContent: output }
-  } catch (error) {
-    const safe = error instanceof AgentTaskError ? error : new AgentTaskError('internal', 'The operation could not be completed. No success is implied; verify task state before retrying.')
-    const output = { error: { code: safe.code, message: safe.message, retryable: safe.retryable, retryAfterSeconds: safe.retryAfterSeconds } }
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify(output) }], structuredContent: output }
-  }
-}
 
 /**
  * Creates the MCP tool catalog independently of process startup and HTTP transport.
