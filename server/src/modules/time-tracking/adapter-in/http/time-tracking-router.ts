@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
   DEFAULT_WORKSPACE_CURRENCY,
+  type MyTimesheetSubmitEntry,
   TIME_ENTRY_CATEGORIES,
   type TimeEntry,
   type TimeEntryCategory,
@@ -10,6 +11,7 @@ import {
   type TimeTrackingGroupBy,
   type TimeTrackingTeamSettingsResponse,
 } from '@mukuroji/contracts'
+import { submitMyTimesheet } from '../../application/use-cases/submit-my-timesheet'
 import {
   TimeTrackingError,
   type CreateTimeEntryInput,
@@ -468,41 +470,19 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const requested = readMyTimesheetSubmitEntries(body.entries)
       const idempotencyKey = readOptionalIdempotencyKey(context)
       const teams = await dependencies.listTimeTrackingTeams(principal, 'member')
-      const permittedTeamIds = new Set(teams.map((team) => team.teamId))
-      const results: Array<{ teamId: string; count: number; failedEntryIds: string[]; failed?: true }> = []
-      for (const teamId of new Set(requested.map((entry) => entry.teamId))) {
-        const entries = requested.filter((entry) => entry.teamId === teamId)
-        if (!permittedTeamIds.has(teamId)) {
-          results.push({ teamId, count: 0, failedEntryIds: entries.map((entry) => entry.entryId), failed: true })
-          continue
-        }
-        try {
-          const { updated, failedEntryIds } = await runTimesheetAction(
-            dependencies,
-            principal,
-            teamId,
-            false,
-            {
-              action: 'submit',
-              from,
-              to,
-              entries,
-              ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-            },
-          )
-          results.push({ teamId, count: updated.length, failedEntryIds })
-        } catch {
-          // One Team the caller can no longer submit to must not stop the other Teams.
-          results.push({ teamId, count: 0, failedEntryIds: entries.map((entry) => entry.entryId), failed: true })
-        }
-      }
-      const failedEntryIds = results.flatMap((result) => result.failedEntryIds)
-      return context.json({
-        count: results.reduce((total, result) => total + result.count, 0),
-        failedEntryIds,
-        partialFailure: failedEntryIds.length > 0 || results.some((result) => result.failed === true),
-        teams: results,
-      })
+      const result = await submitMyTimesheet({
+        submitTeamEntries: async (teamId, entries) => {
+          const { updated, failedEntryIds } = await runTimesheetAction(dependencies, principal, teamId, false, {
+            action: 'submit',
+            from,
+            to,
+            entries,
+            ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+          })
+          return { count: updated.length, failedEntryIds }
+        },
+      }, { entries: requested, permittedTeamIds: new Set(teams.map((team) => team.teamId)) })
+      return context.json(result)
     })
   })
 
@@ -663,11 +643,6 @@ type TimesheetActionEntry = {
   expectedRevision: number
 }
 
-/** One entry the cross-Team submit names. */
-type MyTimesheetSubmitEntry = TimesheetActionEntry & {
-  /** Team the entry is stored in. */
-  teamId: string
-}
 
 /**
  * Applies a lifecycle operation to every eligible entry of a Team in a period.
