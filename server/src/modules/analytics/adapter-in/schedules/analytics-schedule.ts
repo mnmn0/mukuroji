@@ -76,6 +76,8 @@ type AnalyticsDirectoryResponse = {
 
 /** Recipient の active project role です。 */
 type AnalyticsProjectAccess = {
+  /** Team the access belongs to, when the access source can name it. */
+  teamId?: string
   /** Active project ID です。 */
   projectId: string
   /** Recipient に現在割り当てられた role です。 */
@@ -634,7 +636,7 @@ export function createAnalyticsScheduleRenderer(
     const authorized = await readRecipientAuthorizedData(
       { ...report, filter },
       initialAuthorization.directory,
-      initialAuthorization.readableProjectIds,
+      initialAuthorization.readableProjectScopeKeys,
       dependencies.workItems,
       historyReadAt,
       dependencies.auditEvents,
@@ -724,10 +726,17 @@ async function readAnalyticsScheduleAuthorization(
       ))
       .map((team) => team.id),
   )
+  const readableProjectScopeKeys = createReadableProjectScopeKeys(
+    directory,
+    projectAccesses,
+    readableProjectIds,
+    isSystemAdmin,
+  )
   if (!canRecipientReadAnalyticsReport(
     report,
     recipientMemberKey,
     readableTeamIds,
+    readableProjectScopeKeys,
   )) {
     return undefined
   }
@@ -744,12 +753,14 @@ async function readAnalyticsScheduleAuthorization(
       memberKey: member.memberKey,
       directory: normalizedDirectory,
       readableProjectIds: [...readableProjectIds].sort(),
+      readableProjectScopeKeys: [...readableProjectScopeKeys].sort(),
       readableTeamIds: [...readableTeamIds].sort(),
     }))
     .digest('hex')
   return {
     directory,
     readableProjectIds,
+    readableProjectScopeKeys,
     fingerprint,
   }
 }
@@ -765,11 +776,21 @@ export async function renderInAppAnalyticsArtifact(
   createAnalyticsPdf(input.snapshotRecord.snapshot)
 }
 
-/** Report visibility と current Team access から recipient の read 可否を判定します。 */
+/**
+ * Reports whether a recipient can read a report under its visibility and current access.
+ *
+ * @param report - Current stored report.
+ * @param recipientMemberKey - Recipient whose access is checked.
+ * @param readableTeamIds - Teams with at least one Project the recipient can read.
+ * @param readableProjectScopeKeys - Team-qualified Project keys the recipient can read, from
+ * {@link createAnalyticsRecipientProjectScopeKey}.
+ * @returns Whether the recipient may receive the report.
+ */
 export function canRecipientReadAnalyticsReport(
   report: AnalyticsReport,
   recipientMemberKey: string,
   readableTeamIds: ReadonlySet<string>,
+  readableProjectScopeKeys: ReadonlySet<string>,
 ) {
   if (report.visibility === 'personal') {
     return report.ownerMemberKey === recipientMemberKey
@@ -777,9 +798,66 @@ export function canRecipientReadAnalyticsReport(
   if (report.visibility === 'shared') {
     return true
   }
+  if (report.visibility === 'project') {
+    return report.teamId !== undefined &&
+      report.projectId !== undefined &&
+      readableProjectScopeKeys.has(
+        createAnalyticsRecipientProjectScopeKey(report.teamId, report.projectId),
+      )
+  }
   return report.visibility === 'team' &&
     report.teamId !== undefined &&
     readableTeamIds.has(report.teamId)
+}
+
+/**
+ * Builds the Team-qualified Projects a recipient can read, for Project report visibility.
+ *
+ * An access that names its Team applies to that Team only. An access without a Team applies only
+ * when the Project ID belongs to a single Team, so a Project ID shared by several Teams fails closed.
+ *
+ * @param directory - Active Team and Project directory.
+ * @param projectAccesses - Recipient's current Project roles.
+ * @param readableProjectIds - Project IDs the recipient can read.
+ * @param isSystemAdmin - Whether the recipient is a system administrator, who reads every Project.
+ * @returns Keys from {@link createAnalyticsRecipientProjectScopeKey}.
+ */
+function createReadableProjectScopeKeys(
+  directory: AnalyticsDirectoryResponse,
+  projectAccesses: readonly AnalyticsProjectAccess[],
+  readableProjectIds: ReadonlySet<string>,
+  isSystemAdmin: boolean,
+) {
+  const teamCountByProjectId = new Map<string, number>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      teamCountByProjectId.set(project.id, (teamCountByProjectId.get(project.id) ?? 0) + 1)
+    }
+  }
+  return new Set(directory.teams.flatMap((team) => team.projects
+    .filter((project) => {
+      if (isSystemAdmin) return true
+      if (!readableProjectIds.has(project.id)) return false
+      return projectAccesses.some((access) =>
+        access.projectId === project.id &&
+        access.role !== undefined &&
+        (access.teamId === undefined
+          ? teamCountByProjectId.get(project.id) === 1
+          : access.teamId === team.id)
+      )
+    })
+    .map((project) => createAnalyticsRecipientProjectScopeKey(team.id, project.id))))
+}
+
+/**
+ * Builds the Team-qualified Project key used by recipient visibility checks.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project within the Team.
+ * @returns A key that cannot collide across Teams.
+ */
+function createAnalyticsRecipientProjectScopeKey(teamId: string, projectId: string) {
+  return `${teamId}\0${projectId}`
 }
 
 /**
@@ -792,7 +870,7 @@ export function canRecipientReadAnalyticsReport(
 async function readRecipientAuthorizedData(
   report: AnalyticsReport,
   directory: AnalyticsDirectoryResponse,
-  readableProjectIds: ReadonlySet<string>,
+  readableProjectScopeKeys: ReadonlySet<string>,
   workItemsClient: AnalyticsScheduleWorkItemsClient,
   historyReadAt: string,
   auditClient: AnalyticsScheduleAuditClient,
@@ -801,7 +879,7 @@ async function readRecipientAuthorizedData(
   let workItems = await readRecipientWorkItems(
     report,
     directory,
-    readableProjectIds,
+    readableProjectScopeKeys,
     workItemsClient,
   )
   assertAnalyticsScheduleWorkItemsAtCutoff(workItems, historyReadAt)
@@ -826,7 +904,7 @@ async function readRecipientAuthorizedData(
     const verifiedWorkItems = await readRecipientWorkItems(
       report,
       directory,
-      readableProjectIds,
+      readableProjectScopeKeys,
       workItemsClient,
     )
     assertAnalyticsScheduleWorkItemsAtCutoff(verifiedWorkItems, historyReadAt)
@@ -999,7 +1077,7 @@ function createAnalyticsScheduleReadBarrierError(message: string) {
 async function readRecipientWorkItems(
   report: AnalyticsReport,
   directory: AnalyticsDirectoryResponse,
-  readableProjectIds: ReadonlySet<string>,
+  readableProjectScopeKeys: ReadonlySet<string>,
   client: AnalyticsScheduleWorkItemsClient,
 ) {
   const filteredTeamIds = report.filter.teamIds === undefined
@@ -1032,7 +1110,7 @@ async function readRecipientWorkItems(
     if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
     if (listedTeamIds !== undefined && !listedTeamIds.has(team.id)) return false
     return team.projects.some((project) => {
-      return readableProjectIds.has(project.id) &&
+      return readableProjectScopeKeys.has(createAnalyticsRecipientProjectScopeKey(team.id, project.id)) &&
         (filteredProjectIds === undefined || filteredProjectIds.has(project.id))
     })
   })
@@ -1050,7 +1128,10 @@ async function readRecipientWorkItems(
         analyticsFilterIncludesWorkItem(report.filter, workItem.teamId, workItem.id) &&
         (
           workItem.assignedProjectId === undefined ||
-          readableProjectIds.has(workItem.assignedProjectId)
+          // The Team qualifies the Project, so another Team's Project with the same ID stays out.
+          readableProjectScopeKeys.has(
+            createAnalyticsRecipientProjectScopeKey(workItem.teamId, workItem.assignedProjectId),
+          )
         )
       ) {
         addWorkItem(workItem)
@@ -1234,6 +1315,8 @@ function createAnalyticsDeliveryDefinitionHash(report: AnalyticsReport) {
       ownerMemberKey: report.ownerMemberKey,
       visibility: report.visibility,
       teamId: report.teamId,
+      // Leave the key out for non-Project reports so their existing hashes stay the same.
+      ...(report.projectId === undefined ? {} : { projectId: report.projectId }),
       timeZone: report.timeZone,
       filter: report.filter,
       forecastBaseline: report.forecastBaseline,

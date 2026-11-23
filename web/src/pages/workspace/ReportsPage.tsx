@@ -568,6 +568,7 @@ export function ReportsPage() {
             name: input.name,
             schedule: input.schedule ?? null,
             teamId: input.teamId ?? null,
+            projectId: input.projectId ?? null,
             timeZone: input.timeZone,
             visibility: input.visibility,
             widgets: input.widgets,

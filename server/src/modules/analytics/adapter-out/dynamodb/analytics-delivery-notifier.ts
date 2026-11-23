@@ -119,8 +119,12 @@ export function createAnalyticsDeliveryAuditEvent(
     summary: 'A scheduled report snapshot is ready.',
     metadata: {
       actorMemberKey: 'system',
-      // Team reports carry their Team so external delivery re-checks the recipient's Team access.
-      ...(report.visibility === 'team' && report.teamId ? { teamId: report.teamId } : {}),
+      // Team and Project reports carry their scope so external delivery re-checks the recipient's
+      // access to that Team or Project.
+      ...((report.visibility === 'team' || report.visibility === 'project') && report.teamId
+        ? { teamId: report.teamId }
+        : {}),
+      ...(report.visibility === 'project' && report.projectId ? { projectId: report.projectId } : {}),
       deepLink: createAnalyticsSnapshotDeepLink(report.id, snapshotId),
       notificationTitle: report.name,
       analyticsSnapshotId: snapshotId,
