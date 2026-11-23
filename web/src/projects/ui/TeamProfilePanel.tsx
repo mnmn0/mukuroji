@@ -365,6 +365,7 @@ function TeamProfileForm({
         <textarea
           className="workbench-input min-h-24 px-3 py-2 text-sm font-normal"
           maxLength={DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH}
+          readOnly={pending}
           onChange={(event) => {
             onEdit()
             setDirty(true)
@@ -377,7 +378,8 @@ function TeamProfileForm({
         {t('projects.teamProfile.leader')}
         <select
           className="workbench-input min-h-10 px-3 text-sm font-normal"
-          disabled={!workspaceMembersReady}
+          // Fields stay fixed while a save is in flight, so the saved values are the ones shown.
+          disabled={!workspaceMembersReady || pending}
           onChange={(event) => {
             onEdit()
             setDirty(true)
