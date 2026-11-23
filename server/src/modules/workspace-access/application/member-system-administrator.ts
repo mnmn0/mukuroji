@@ -141,8 +141,11 @@ export async function changeMemberSystemAdministrator(
     return result
   }
 
+  // The applying mark comes first even when the group already has the requested state, so that
+  // a retry after a failed completion mark is refused instead of resuming, which could undo a
+  // change another owner made in between.
+  await ports.markActionApplying(input.workspaceId, member.memberKey, action, input.auditContext)
   if (!alreadyApplied) {
-    await ports.markActionApplying(input.workspaceId, member.memberKey, action, input.auditContext)
     if (input.systemAdministrator) {
       await ports.addSystemAdministrator(member.memberKey)
     } else {

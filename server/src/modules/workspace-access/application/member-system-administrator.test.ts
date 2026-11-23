@@ -92,7 +92,24 @@ test('records a request for the current state without changing the group, so a l
 
   await changeMemberSystemAdministrator(ports, input)
 
-  expect(steps).toEqual(['directory', 'read-group', 'record', 'complete'])
+  expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'complete'])
+})
+
+test('marks a request for the current state as applying, so a retry after a failed completion is not resumed', async () => {
+  const { ports, steps } = createPorts('none', {
+    isSystemAdministrator: async () => {
+      steps.push('read-group')
+      return true
+    },
+    completeAction: async () => {
+      throw new Error('store unavailable')
+    },
+  })
+
+  const result = await changeMemberSystemAdministrator(ports, input)
+
+  expect(result.systemAdministrator).toBe(true)
+  expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'report'])
 })
 
 test('does not change the group again for a replay of a completed change', async () => {
