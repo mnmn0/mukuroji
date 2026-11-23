@@ -178,3 +178,12 @@ test('keeps templates from guests, who cannot read Workspace business data', asy
   await expect(createWorkItem({ templateId: 'release-check' }, 'template-guest')).rejects.toMatchObject({ status: 403 })
   expect(creates).toEqual([])
 })
+
+test('authorizes a replay from the request as sent, even after its template is gone', async () => {
+  configureTemplates([])
+
+  await expect(runWithTestAppDependencies(() => createCanonicalPublicWorkItemService().authorizeCreate(
+    credential,
+    { teamId: 'core-team', title: 'Ship 1.2', assigneeUserId: 'demo@example.com', templateId: 'release-check' },
+  ))).resolves.toBeUndefined()
+})

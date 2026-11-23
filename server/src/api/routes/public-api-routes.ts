@@ -1754,8 +1754,11 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     async authorizeCreate(credential, input) {
-      const { teamId, ...requestInput } = input
-      // A template never sets the Project, so the credential is checked before the template is read.
+      // A replay returns the stored Work Item, so it checks the request as sent: a template that was
+      // disabled or changed since the first create does not change the answer.
+      const { teamId, templateId: _templateId, priority, ...requestInput } = input
+      const workItemInput: PublicCreateWorkItemInput = { ...requestInput, priority: priority ?? 'medium' }
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
@@ -1766,8 +1769,6 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       })
       requireWorkspaceBusinessWrite(principal)
       const permission = await requireTeamPermission(principal, teamId, 'member')
-      const workItemInput = await applyPublicWorkItemTemplate(principal.directoryId, teamId, requestInput)
-      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const body = normalizeTeamIssueInput(workItemInput, permission.team)
       requireAssignedProjectPermission(
         principal,
