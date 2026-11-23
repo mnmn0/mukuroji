@@ -12,7 +12,9 @@ export {
   type WeeklyReportMemberScope,
 } from './application/weekly-report-use-cases'
 export {
+  buildTeamMonthlySummary,
   buildTeamWeeklySummary,
+  type TeamMonthlySummaryInput,
   type TeamWeeklySummaryInput,
   type WeeklySummaryWorkItem,
 } from './application/weekly-summary'
