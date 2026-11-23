@@ -1155,6 +1155,45 @@ test('splits a large Customer merge while retaining a resumable merge marker', a
   }
 })
 
+test('records a resumed Customer merge once when a later request retries it', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const contactRows = Array.from({ length: 100 }, (_, index) => createContactRow(source.id, `contact-${index + 1}`))
+  const harness = createHarness([
+    { workspaceId: source.workspaceId, recordKey: `CUSTOMER#${source.id}`, entityType: 'customer', customer: source },
+    { workspaceId: target.workspaceId, recordKey: `CUSTOMER#${target.id}`, entityType: 'customer', customer: target },
+    ...contactRows,
+  ], { auditTableName: 'AuditTable', failTransactionAt: 3 })
+  /** Binds the client to the audit context of one merge request with a fixed retry key. */
+  const audited = () => harness.client.withAuditContext(createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+    idempotencyKey: 'merge-customer-source',
+    request: { method: 'POST', path: `/customers/${source.id}/merge`, body: {} },
+    source: { kind: 'api' },
+  }))
+  try {
+    const input = { targetCustomerId: target.id, sourceExpectedRevision: source.revision, targetExpectedRevision: target.revision }
+    await audited().beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(audited().completeCustomerMerge('workspace-1', source.id, 'member-1', input))
+      .rejects.toThrow('Injected Customer transaction failure.')
+    await expect(audited().completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    const auditEventTypes = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item.eventType] : []
+      })
+    expect(auditEventTypes).toEqual(['customer.merged'])
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
 test('splits retention writes into resumable DynamoDB-sized batches', async () => {
   const requestRows = Array.from({ length: 105 }, (_, index) =>
     createRequestRow(createRequest(`request-${index + 1}`)),
@@ -1186,6 +1225,29 @@ test('splits retention writes into resumable DynamoDB-sized batches', async () =
         }),
       }),
     ]))
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not record a retention redaction in the audit log of the request that resumes it', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`)),
+  )
+  const harness = createHarness(requestRows, { auditTableName: 'AuditTable' })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'retention-reader',
+      request: { method: 'GET', path: '/customers', body: {} },
+      source: { kind: 'api' },
+    }))
+    await expect(client.redactExpired('workspace-1')).resolves.toMatchObject({ requestsRedacted: 105 })
+    const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
+    expect(transactions.map((command) => Array.isArray(command.input.TransactItems) ? command.input.TransactItems.length : -1))
+      .toEqual([100, 7])
+    expect(JSON.stringify(transactions)).not.toContain('AuditTable')
   } finally {
     harness.restore()
   }

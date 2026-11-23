@@ -2075,7 +2075,11 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     options: CustomerPersistOptions = {},
   ): Promise<void> {
     const contactMerge = options.contact?.expected.kind === 'merge' ? options.contact.expected : undefined
-    this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected ?? contactMerge)
+    // A retention sweep is a system change, and a merge with a cursor already committed its events
+    // in the first step, possibly from an earlier request whose recorded set this one cannot see.
+    if (!options.retention && options.merge?.expected.cursor === undefined) {
+      this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected ?? contactMerge)
+    }
     try {
       await this.persistPrepared(workspaceId, loaded, nextState, options)
     } finally {
