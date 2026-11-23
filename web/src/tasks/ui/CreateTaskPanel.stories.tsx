@@ -678,9 +678,10 @@ function TemplateCreateTaskPanel(props: CreateTaskPanelProps) {
       {...props}
       context={context}
       key={JSON.stringify(context)}
-      onApplyTemplate={(template) => setContext({
+      onApplyTemplate={(template, schedule) => setContext({
         projectId: 'refero',
         source: 'header',
+        ...(schedule ? { schedule } : {}),
         ...(template ? { duplicate: createWorkItemTemplateDraft(template) } : {}),
       })}
       templates={[releaseCheckTemplate]}
@@ -691,6 +692,7 @@ function TemplateCreateTaskPanel(props: CreateTaskPanelProps) {
 /** Picking a template fills the form and saves its acceptance criteria with the new Work Item. */
 export const StartsFromTemplate: Story = {
   args: {
+    initialMode: 'detailed',
     onSubmit: fn(async (input: CreateWorkItemInput) => {
       void input
     }),
@@ -699,7 +701,10 @@ export const StartsFromTemplate: Story = {
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
 
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'スケジュール種別' }), 'due-date')
+    await userEvent.type(canvas.getByLabelText('期限のみ'), '2026-12-04')
     await userEvent.selectOptions(canvas.getByTestId('create-task-template'), 'release-check')
+    await expect(await canvas.findByLabelText('期限のみ')).toHaveValue('2026-12-04')
     await expect(await canvas.findByText('テンプレート「リリース確認」の内容を下書きに入れました。保存するまで作成されません。')).toBeVisible()
     await expect(canvas.getByDisplayValue('リリースを確認する')).toBeVisible()
     await expect(canvas.getByDisplayValue('テストが通る')).toBeVisible()

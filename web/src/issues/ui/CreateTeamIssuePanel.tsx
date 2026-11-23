@@ -80,10 +80,11 @@ export function CreateIssuePanel({
   errorMessage?: string
   locale: Locale
   /**
-   * Restarts the panel from a Work Item template, or from an empty form when undefined. Without
-   * it, the template picker is hidden.
+   * Restarts the panel from a Work Item template, or from an empty form when undefined. The due
+   * date entered so far is passed along so the restarted form keeps it. Without the callback, the
+   * template picker is hidden.
    */
-  onApplyTemplate?: (template: WorkItemTemplate | undefined) => void
+  onApplyTemplate?: (template: WorkItemTemplate | undefined, dueDate: string) => void
   onCancel: () => void
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
@@ -115,7 +116,10 @@ export function CreateIssuePanel({
   const hasLoadedWorkItemConfiguration = configuration !== undefined
   const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
     creatableWorkItemTypes.length > 0
-  const requestedWorkItemTypeId = workItemTypeId ?? duplicateDraft?.workItemTypeId
+  // A picked template's type wins over the type of the surface the panel was opened from.
+  const requestedWorkItemTypeId = (duplicateDraft?.sourceTemplate ? duplicateDraft.workItemTypeId : undefined) ??
+    workItemTypeId ??
+    duplicateDraft?.workItemTypeId
   const contextualWorkItemTypeId = requestedWorkItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === requestedWorkItemTypeId,
   )
@@ -235,7 +239,11 @@ export function CreateIssuePanel({
         {onApplyTemplate && !(duplicateDraft && !duplicateDraft.sourceTemplate) ? (
           <WorkItemTemplatePicker
             hasLoadError={templateLoadFailed}
-            onSelect={onApplyTemplate}
+            onSelect={(template) => {
+              const form = globalThis.document.getElementById(formId)
+              const dueDate = form instanceof HTMLFormElement ? new FormData(form).get('dueDate') : null
+              onApplyTemplate(template, typeof dueDate === 'string' ? dueDate : today)
+            }}
             selectedTemplateId={duplicateDraft?.sourceTemplate?.id}
             t={t}
             templates={templates}

@@ -1607,9 +1607,10 @@ export function TeamIssueScreen({
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
                     errorMessage={createErrorMessage}
-                    onApplyTemplate={(template) => {
+                    onApplyTemplate={(template, dueDate) => {
                       setCreateErrorMessage(undefined)
-                      setCreateDuplicateDraft(template ? createWorkItemTemplateDraft(template) : undefined)
+                      // The restarted form keeps the due date the member entered.
+                      setCreateDuplicateDraft(template ? { ...createWorkItemTemplateDraft(template), dueDate } : undefined)
                     }}
                     templateLoadFailed={createTemplates.hasLoadError}
                     templates={teamCreateTemplates}

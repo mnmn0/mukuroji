@@ -85,10 +85,11 @@ export type CreateTaskPanelProps = {
   /** Locale used by custom field editors and validation messages. */
   locale: Locale
   /**
-   * Restarts the panel from a Work Item template, or from an empty form when undefined. Without
-   * it, the template picker is hidden.
+   * Restarts the panel from a Work Item template, or from an empty form when undefined. The
+   * schedule entered so far is passed along so the restarted form keeps it; it is undefined when
+   * the entered dates are not valid. Without the callback, the template picker is hidden.
    */
-  onApplyTemplate?: (template: WorkItemTemplate | undefined) => void
+  onApplyTemplate?: (template: WorkItemTemplate | undefined, schedule: WorkItemSchedule | undefined) => void
   /** Closes the creation panel without submitting. */
   onCancel: () => void
   /** Reports whether user-entered values need an explicit discard decision. */
@@ -156,12 +157,16 @@ export function CreateTaskPanel({
   const submissionInFlightRef = useRef(false)
   const dirtyRef = useRef(false)
   const detailedOnlyEditsRef = useRef(false)
+  const formRef = useRef<HTMLFormElement>(null)
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
   const hasLoadedWorkItemConfiguration = configuration !== undefined
   const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
     creatableWorkItemTypes.length > 0
-  const requestedWorkItemTypeId = context?.workItemTypeId ?? duplicateDraft?.workItemTypeId
+  // A picked template's type wins over the type of the surface the panel was opened from.
+  const requestedWorkItemTypeId = (duplicateDraft?.sourceTemplate ? duplicateDraft.workItemTypeId : undefined) ??
+    context?.workItemTypeId ??
+    duplicateDraft?.workItemTypeId
   const contextualWorkItemTypeId = requestedWorkItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === requestedWorkItemTypeId,
   )
@@ -308,6 +313,7 @@ export function CreateTaskPanel({
         className="workbench-panel grid gap-3 p-4"
         data-testid="create-task-form"
         id="create-task-form"
+        ref={formRef}
         onChange={handleFormChange}
         onSubmit={(event) => {
           event.preventDefault()
@@ -476,7 +482,15 @@ export function CreateTaskPanel({
           <WorkItemTemplatePicker
             disabled={isSubmitPending || isSubmissionDisabled}
             hasLoadError={templateLoadFailed}
-            onSelect={onApplyTemplate}
+            onSelect={(template) => {
+              const form = formRef.current
+              const formData = form ? new FormData(form) : undefined
+              onApplyTemplate(template, formData === undefined
+                ? undefined
+                : effectiveMode === 'quick'
+                  ? createQuickCaptureSchedule(formData, initialSchedule)
+                  : createDetailedSchedule(formData, initialSchedule))
+            }}
             selectedTemplateId={duplicateDraft?.sourceTemplate?.id}
             t={t}
             templates={templates}

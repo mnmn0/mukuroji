@@ -3721,7 +3721,7 @@ export function TaskScreen({
                 isSubmissionDisabled={!onCreateTask}
                 isSubmitting={isCreatingTask}
                 locale={locale}
-                onApplyTemplate={(template) => {
+                onApplyTemplate={(template, schedule) => {
                   // Restarting from a template replaces what the member typed, so ask first.
                   if (createTaskDirtyRef.current && !globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
                     return
@@ -3732,6 +3732,8 @@ export function TaskScreen({
                     const context: TaskCreateContext = { ...(current ?? { source: 'header' }) }
                     // A template draft replaces the previous draft; no template clears it.
                     delete context.duplicate
+                    // The restarted form keeps the dates the member entered.
+                    if (schedule) context.schedule = schedule
                     return template ? { ...context, duplicate: createWorkItemTemplateDraft(template) } : context
                   })
                 }}
