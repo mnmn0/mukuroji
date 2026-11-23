@@ -636,7 +636,7 @@ export function createAnalyticsScheduleRenderer(
     const authorized = await readRecipientAuthorizedData(
       { ...report, filter },
       initialAuthorization.directory,
-      initialAuthorization.readableProjectIds,
+      initialAuthorization.readableProjectScopeKeys,
       dependencies.workItems,
       historyReadAt,
       dependencies.auditEvents,
@@ -753,12 +753,14 @@ async function readAnalyticsScheduleAuthorization(
       memberKey: member.memberKey,
       directory: normalizedDirectory,
       readableProjectIds: [...readableProjectIds].sort(),
+      readableProjectScopeKeys: [...readableProjectScopeKeys].sort(),
       readableTeamIds: [...readableTeamIds].sort(),
     }))
     .digest('hex')
   return {
     directory,
     readableProjectIds,
+    readableProjectScopeKeys,
     fingerprint,
   }
 }
@@ -868,7 +870,7 @@ function createAnalyticsRecipientProjectScopeKey(teamId: string, projectId: stri
 async function readRecipientAuthorizedData(
   report: AnalyticsReport,
   directory: AnalyticsDirectoryResponse,
-  readableProjectIds: ReadonlySet<string>,
+  readableProjectScopeKeys: ReadonlySet<string>,
   workItemsClient: AnalyticsScheduleWorkItemsClient,
   historyReadAt: string,
   auditClient: AnalyticsScheduleAuditClient,
@@ -877,7 +879,7 @@ async function readRecipientAuthorizedData(
   let workItems = await readRecipientWorkItems(
     report,
     directory,
-    readableProjectIds,
+    readableProjectScopeKeys,
     workItemsClient,
   )
   assertAnalyticsScheduleWorkItemsAtCutoff(workItems, historyReadAt)
@@ -902,7 +904,7 @@ async function readRecipientAuthorizedData(
     const verifiedWorkItems = await readRecipientWorkItems(
       report,
       directory,
-      readableProjectIds,
+      readableProjectScopeKeys,
       workItemsClient,
     )
     assertAnalyticsScheduleWorkItemsAtCutoff(verifiedWorkItems, historyReadAt)
@@ -1075,7 +1077,7 @@ function createAnalyticsScheduleReadBarrierError(message: string) {
 async function readRecipientWorkItems(
   report: AnalyticsReport,
   directory: AnalyticsDirectoryResponse,
-  readableProjectIds: ReadonlySet<string>,
+  readableProjectScopeKeys: ReadonlySet<string>,
   client: AnalyticsScheduleWorkItemsClient,
 ) {
   const filteredTeamIds = report.filter.teamIds === undefined
@@ -1108,7 +1110,7 @@ async function readRecipientWorkItems(
     if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
     if (listedTeamIds !== undefined && !listedTeamIds.has(team.id)) return false
     return team.projects.some((project) => {
-      return readableProjectIds.has(project.id) &&
+      return readableProjectScopeKeys.has(createAnalyticsRecipientProjectScopeKey(team.id, project.id)) &&
         (filteredProjectIds === undefined || filteredProjectIds.has(project.id))
     })
   })
@@ -1126,7 +1128,10 @@ async function readRecipientWorkItems(
         analyticsFilterIncludesWorkItem(report.filter, workItem.teamId, workItem.id) &&
         (
           workItem.assignedProjectId === undefined ||
-          readableProjectIds.has(workItem.assignedProjectId)
+          // The Team qualifies the Project, so another Team's Project with the same ID stays out.
+          readableProjectScopeKeys.has(
+            createAnalyticsRecipientProjectScopeKey(workItem.teamId, workItem.assignedProjectId),
+          )
         )
       ) {
         addWorkItem(workItem)

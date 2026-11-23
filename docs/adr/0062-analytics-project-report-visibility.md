@@ -28,6 +28,8 @@ Project だけで判定すると、別の Team の同名 Project を読める人
 - 定期配信は、配信時点で受信者がその Team の Project を読めるときだけ snapshot と通知を作る。
   Team を持たない旧形式の Project 権限は、その Project ID が 1 つの Team にしかないときだけ効く。
   同じ Project ID が複数の Team にあるときは、どの Team でも効かせない（#594 と同じ fail-closed）。
+  配信の集計に入れる Work Item も同じ Team 付きの組で選び、別 Team の同じ ID の Project の Work Item は入れない。
+  これは Project report に限らず、すべての定期配信に効く。
   通知の event には `teamId` と `projectId` を載せ、projection と外部送信の直前に、ほかの Project 単位の
   通知と同じ規則で受信者の Project access を確かめ直す。
 - Web の report builder は共有範囲に「プロジェクト」を出し、Team を選ぶとその Team の Project だけを選べる。

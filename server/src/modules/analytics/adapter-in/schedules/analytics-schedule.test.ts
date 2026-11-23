@@ -264,6 +264,63 @@ test('fails closed for a Project ID shared by two Teams unless the access names 
   expect(await render()).toBeDefined()
 })
 
+test('reads only the Work Items of the Team whose Project the recipient can read', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const teamOneItem = createWorkItem('team-one-item', 'shared-project')
+  const teamTwoItem = { ...createWorkItem('team-two-item', 'shared-project'), teamId: 'team-2' }
+  const auditEntityIds: unknown[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [
+            { id: 'team-1', projects: [{ id: 'shared-project' }] },
+            { id: 'team-2', projects: [{ id: 'shared-project' }] },
+          ],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ teamId: 'team-2', projectId: 'shared-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: teamId === 'team-1' ? [teamOneItem] : [teamTwoItem] }
+      },
+      async getProjectIssues() {
+        throw new Error('The unfiltered report must use a Team partition read.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        auditEntityIds.push(input.entityId)
+        return { events: [] }
+      },
+    },
+  })
+
+  await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })
+
+  // Team 1's Project has the same ID, but the recipient's access is in Team 2 only.
+  expect(auditEntityIds.some((id) => String(id).includes('team-one-item'))).toBeFalse()
+})
+
 test('runs a relative period around the scheduled time on the Workspace week start', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['recipient@example.com'])
@@ -1076,7 +1133,8 @@ test('applies the Work Item allowlist before the scheduled history fan-out', asy
         }
       },
       async getProjectAccessList() {
-        return [{ projectId: 'open-project', role: 'viewer' }]
+        // The Project ID is in both Teams, so the access names its Team.
+        return [{ teamId: 'team-1', projectId: 'open-project', role: 'viewer' }]
       },
     },
     workItems: {
