@@ -610,7 +610,12 @@ test('fences a bulk Project move with the Planning revision', async () => {
 })
 
 test('hands a member\'s ownership over through a bulk reassignment', async () => {
-  const calls = configureFakeProjectClients(true)
+  const updateChecks: unknown[][] = []
+  const calls = configureFakeProjectClients(true, {
+    issueUpdateHook: async (input) => {
+      updateChecks.push([...(input.authorizationConditionChecks ?? [])])
+    },
+  })
   const automationFake = createBulkOperationAutomationFake()
   setTestAppDependencies({
     bulkOperations: automationFake.client,
@@ -658,6 +663,8 @@ test('hands a member\'s ownership over through a bulk reassignment', async () =>
     }],
   })
   expect(calls.issueUpdates).toHaveLength(1)
+  // The new owner must still be an active member when the write commits.
+  expect(JSON.stringify(updateChecks.at(-1))).toContain('MEMBER#demo@example.com')
   const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
   expect(stored?.items[0]?.undoPayload).toEqual({
     assigneeUserId: detail.issue.assigneeUserId,

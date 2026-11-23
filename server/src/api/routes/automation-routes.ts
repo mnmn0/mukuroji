@@ -193,6 +193,7 @@ import {
 } from '../shared/work-item-configuration'
 import { createDependencyFencedWorkItemAuthorizationSnapshot } from '../shared/work-item-schedule'
 import {
+  createActiveMemberFence,
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
@@ -1074,23 +1075,16 @@ function createApiBulkOperationAdapter(
           body,
           configuration,
         )
-    // Only a member reassignment changes contributors; newly assigned members are fenced in the write.
+    // Only a member reassignment changes contributors; the successor is fenced in the write.
     const configuredBody = configuration === undefined || action.type !== 'reassign-member'
       ? preparedBody
-      : {
-          ...preparedBody,
-          ...withContributorAssignmentChange(
-            preparedBody,
-            await readContributorAssignmentChange(
-              principal.directoryId,
-              preparedBody,
-              configuration,
-              loaded.detail.issue.contributorAssignments ?? [],
-              // The successor is checked even when their existing share absorbs the moved one.
-              { fencedMembers: [action.toMemberUserId] },
-            ),
-          ),
-        }
+      : await withBulkReassignMemberFences(
+          principal.directoryId,
+          preparedBody,
+          configuration,
+          loaded.detail.issue.contributorAssignments ?? [],
+          action.toMemberUserId,
+        )
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
@@ -1708,6 +1702,45 @@ function withoutBulkUndoActualDates(
 ): Record<string, AutomationValue> {
   const { actualStartDate: _start, actualEndDate: _end, ...fields } = payload
   return fields
+}
+
+/**
+ * Adds a member handover's contributor change and the successor's membership fence to an update.
+ *
+ * The successor must stay an active non-guest member until the write commits, whether they take
+ * over ownership, a share, or both. When they hold a share afterwards the contributor change
+ * already fences them; otherwise, as when only ownership moves, one fence is added here.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param body - Configured update body.
+ * @param configuration - Team configuration that defines the job roles.
+ * @param existing - Contributors currently stored on the Work Item.
+ * @param successor - Member who takes over.
+ * @returns The update body with the contributor change and every membership fence.
+ */
+async function withBulkReassignMemberFences<Body extends UpdateTeamIssueRequestBody>(
+  directoryId: string,
+  body: Body,
+  configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
+  existing: NonNullable<TeamIssueResponseItem['contributorAssignments']>,
+  successor: string,
+): Promise<Body> {
+  const change = await readContributorAssignmentChange(directoryId, body, configuration, existing, {
+    // The successor is checked even when their existing share absorbs the moved one.
+    fencedMembers: [successor],
+  })
+  const fields = withContributorAssignmentChange(body, change)
+  if (change?.contributorAssignments.some((assignment) => assignment.memberUserId === successor) === true) {
+    return { ...body, ...fields }
+  }
+  return {
+    ...body,
+    ...fields,
+    authorizationConditionChecks: [
+      ...(fields.authorizationConditionChecks ?? body.authorizationConditionChecks ?? []),
+      await createActiveMemberFence(directoryId, successor),
+    ],
+  }
 }
 
 function isBulkActionApplied(

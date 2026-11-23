@@ -113,7 +113,7 @@ export async function readContributorAssignmentChange(
   for (let start = 0; start < addedMembers.length; start += CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY) {
     memberConditionChecks.push(...await Promise.all(
       addedMembers.slice(start, start + CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY)
-        .map((memberUserId) => createContributorMemberConditionCheck(directoryId, memberUserId, dependencies)),
+        .map((memberUserId) => createActiveMemberFence(directoryId, memberUserId, dependencies)),
     ))
   }
   return { contributorAssignments, memberConditionChecks }
@@ -148,19 +148,21 @@ export function withContributorAssignmentChange(
 }
 
 /**
- * Validates one newly added contributor and builds its commit-time membership fence.
+ * Validates a member who is newly given work and builds their commit-time membership fence.
+ *
+ * Used for newly added contributors and for the successor of a member handover.
  *
  * @param directoryId - Workspace directory ID.
- * @param memberUserId - Member being added as a contributor.
+ * @param memberUserId - Member being given work.
  * @param dependencies - Membership lookups to use.
  * @returns A ConditionCheck requiring the member to stay active, non-guest, and unchanged.
  * @throws WorkspaceAccessError when the member is not an active non-guest member.
  * @throws ProjectDataError when membership fencing is unavailable.
  */
-async function createContributorMemberConditionCheck(
+export async function createActiveMemberFence(
   directoryId: string,
   memberUserId: string,
-  dependencies: ContributorMemberDependencies,
+  dependencies: ContributorMemberDependencies = ambientAutomationActionExecutorDependencies,
 ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]> {
   await requireActiveWorkspaceAssignee(directoryId, memberUserId, dependencies)
   const workspaceAccess = dependencies.workspaceAccess
