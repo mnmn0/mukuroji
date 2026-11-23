@@ -263,6 +263,8 @@ export function TimePeriodClosePanel({
               className="workbench-input min-h-9 px-3"
               id={`${id}-month`}
               onChange={(event) => setMonth(event.target.value)}
+              pattern="[0-9]{4}-[0-9]{2}"
+              placeholder="YYYY-MM"
               required
               type="month"
               value={month}
@@ -346,6 +348,8 @@ export function TimePeriodClosePanel({
                   setIsReopeningWorkspace(false)
                   onWorkspaceMonthChange(event.target.value)
                 }}
+                pattern="[0-9]{4}-[0-9]{2}"
+                placeholder="YYYY-MM"
                 required
                 type="month"
                 value={workspaceMonth}

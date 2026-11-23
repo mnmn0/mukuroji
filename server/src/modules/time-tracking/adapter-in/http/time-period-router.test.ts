@@ -212,4 +212,34 @@ describe('time period close routes', () => {
     expect(response.status).toBe(400)
     expect(await service.listClosedPeriods('workspace-1', 'team-1')).toEqual([])
   })
+
+  test('a Team that fails is reported and the other Teams are still closed', async () => {
+    /** Repository whose close of `team-1` fails like an unavailable table. */
+    class FailingTeamRepository extends InMemoryTimeTrackingRepository {
+      /** Fails the close of `team-1` and stores the others. */
+      override async createPeriodClose(...args: Parameters<InMemoryTimeTrackingRepository['createPeriodClose']>) {
+        if (args[0].teamId === 'team-1') throw new Error('table unavailable')
+        await super.createPeriodClose(...args)
+      }
+    }
+    const service = new TimeTrackingService(new FailingTeamRepository(), { now: () => new Date('2026-08-02T12:00:00.000Z') })
+    const originalError = console.error
+    console.error = () => undefined
+    try {
+      expect(await service.closeWorkspacePeriod({
+        workspaceId: 'workspace-1',
+        teamIds: ['team-2', 'team-1', 'team-2'],
+        month: '2026-07',
+        timeZone: 'UTC',
+        actorUserId: 'admin-1',
+      })).toEqual({
+        month: '2026-07',
+        results: [{ teamId: 'team-1', status: 'failed' }, { teamId: 'team-2', status: 'closed' }],
+        partialFailure: true,
+      })
+    } finally {
+      console.error = originalError
+    }
+    expect(await service.listClosedPeriods('workspace-1', 'team-2')).toMatchObject([{ month: '2026-07' }])
+  })
 })
