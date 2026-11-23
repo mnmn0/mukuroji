@@ -93,6 +93,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/actual-dates')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents/:documentId')
+  expect(inventory).toContain('GET /api/v1/me')
+  expect(inventory).toContain('GET /api/v1/teams')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/members')
+  expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
@@ -132,12 +136,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
-  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
-  // credential routes (#632).
+  // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
+  // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
-  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
+  expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '8ad7ab19144af1b3fcd70dd39f97d14662df7469e21196ce4464a201c6be15e0',
+    'de38fd7b730d51a9f32535ee8e681f8c6d84a8227889509bceb02ee18086b78b',
   )
 })
