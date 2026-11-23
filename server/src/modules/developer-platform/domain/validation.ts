@@ -36,6 +36,34 @@ export function readDeveloperIdentifier(value: string, label: string) {
   return normalized
 }
 
+/**
+ * Reads the canonical Workspace ID that scopes Developer Platform rows.
+ *
+ * The ID comes from the stack parameter `WorkspaceDirectoryId` and the verified Cognito claim, and its
+ * documented form contains `#` (for example `workspace#production`). Other identifiers keep the stricter
+ * {@link readDeveloperIdentifier} form; one stack serves one Workspace, so the extra `#` cannot make two
+ * Workspaces' composite keys collide.
+ *
+ * @param value - Workspace ID to validate.
+ * @param label - Field label used in the error message.
+ * @returns The trimmed Workspace ID.
+ * @throws DeveloperPlatformError when the ID is empty, too long, or has characters outside the allowed set.
+ */
+export function readDeveloperWorkspaceId(value: string, label = 'Workspace ID') {
+  const normalized = readRequiredText(value, label)
+  if (
+    normalized.length > 200 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u.test(normalized)
+  ) {
+    throw new DeveloperPlatformError(
+      400,
+      'DeveloperIdentifierInvalid',
+      `${label} is invalid.`,
+    )
+  }
+  return normalized
+}
+
 /** Reads a positive safe integer bounded by a caller-provided maximum. */
 export function readPositiveInteger(
   value: number,

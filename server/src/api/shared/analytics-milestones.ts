@@ -1,7 +1,10 @@
-import type { AnalyticsFilter, PlanningEntity } from '@mukuroji/contracts'
+import type { AnalyticsFilter, CanonicalWorkItem, PlanningEntity } from '@mukuroji/contracts'
 import {
   ANALYTICS_MILESTONE_TREND_FIELDS,
   AnalyticsError,
+  createAnalyticsMilestoneScopeKey,
+  type AnalyticsPlanningGroupEntity,
+  type AnalyticsPlanningGroups,
   type AnalyticsMilestoneChange,
   type AnalyticsMilestoneFieldChange,
   type AnalyticsMilestoneHistory,
@@ -74,6 +77,84 @@ export async function readReadableAnalyticsMilestones(
     entity.archivedAt === undefined &&
     canReadPlanningScope(principal, entity)
   )
+}
+
+/**
+ * Reads the current Cycle and Milestone membership of the given Work Items, keeping only the
+ * Cycles and Milestones the caller can read now.
+ *
+ * Entities are filtered with the same Planning ACL as {@link readReadableAnalyticsMilestones};
+ * archived ones stay, so a finished Cycle still names its Work Items. A Work Item linked to an
+ * entity the caller cannot read counts as having none. Every readable Cycle and Milestone is
+ * returned as a scope key, so a snapshot's permission check notices when that access changes.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param workItems - Work Items the caller is authorized to read.
+ * @returns Membership keyed by Team-qualified Work Item key, and the readable entity scope keys.
+ */
+export async function readAuthorizedAnalyticsPlanningGroups(
+  principal: WorkspacePrincipal,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<AnalyticsPlanningGroups> {
+  // Planning returns the links of the Work Items it is given, with their current Project.
+  const planning = await workItemDependencies.planning.get(principal.directoryId, {
+    workItems: workItems.map((workItem) => ({
+      id: workItem.id,
+      revision: workItem.revision,
+      teamId: workItem.teamId,
+      title: workItem.title,
+      ...(workItem.assignedProjectId ? { projectId: workItem.assignedProjectId } : {}),
+      statusCategory: workItem.statusCategory,
+      dueDate: workItem.dueDate,
+      schedule: workItem.schedule,
+    })),
+  })
+  const visible = principal.isSystemAdmin || principal.enterprisePermissions !== undefined
+    ? planning
+    : filterPlanningSnapshotForPrincipal(await withPlanningLegacyReadScope(principal), planning)
+  const readable = new Map<string, PlanningEntity>()
+  for (const entity of visible.entities) {
+    if (entity.type !== 'cycle' && entity.type !== 'milestone') continue
+    if (!canReadPlanningScope(principal, entity)) continue
+    readable.set(entity.id, entity)
+  }
+  /**
+   * Resolves a linked Cycle or Milestone to its group entity.
+   *
+   * @param id - Linked entity ID, if the Work Item has one.
+   * @param type - Entity type the link must point to.
+   * @returns The entity's ID and title, or undefined when the link is missing, the caller cannot
+   * read the entity, or the entity is of another type; the Work Item then joins the unset group.
+   */
+  const toGroupEntity = (
+    id: string | undefined,
+    type: 'cycle' | 'milestone',
+  ): AnalyticsPlanningGroupEntity | undefined => {
+    const entity = id === undefined ? undefined : readable.get(id)
+    return entity === undefined || entity.type !== type ? undefined : { id: entity.id, title: entity.title }
+  }
+  const links = new Map<string, { cycle?: AnalyticsPlanningGroupEntity; milestone?: AnalyticsPlanningGroupEntity }>()
+  // Links of the authorized Work Items come from the unfiltered graph; each entity is checked above.
+  for (const link of planning.workItemLinks) {
+    const key = `${link.teamId}\0${link.workItemId}`
+    const cycle = toGroupEntity(link.cycleId, 'cycle')
+    const milestone = toGroupEntity(link.milestoneId, 'milestone')
+    if (cycle === undefined && milestone === undefined) continue
+    links.set(key, {
+      ...(cycle === undefined ? {} : { cycle }),
+      ...(milestone === undefined ? {} : { milestone }),
+    })
+  }
+  return {
+    links,
+    entityScopeKeys: [...readable.values()].map((entity) =>
+      createAnalyticsMilestoneScopeKey({
+        id: entity.id,
+        ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+        ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+      })
+    ),
+  }
 }
 
 /**

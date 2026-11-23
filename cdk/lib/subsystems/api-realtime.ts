@@ -283,6 +283,7 @@ function bindApiRuntimeConfiguration(
     fileRetentionDays,
     fileUploadUrlTtlSeconds,
     requestRateLimitPerHour,
+    notificationReminderDefaultDays,
     requestTokenHashSecret,
     edgeOriginSecret,
     webPushVapidPublicKey,
@@ -367,6 +368,8 @@ function bindApiRuntimeConfiguration(
       FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
       FILE_RETENTION_DAYS: fileRetentionDays.valueAsString,
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
+      // The same parameter feeds the notification schedule, so both see one set of defaults.
+      NOTIFICATION_REMINDER_DEFAULT_DAYS: notificationReminderDefaultDays.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
       PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,

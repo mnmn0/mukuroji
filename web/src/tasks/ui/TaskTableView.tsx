@@ -335,13 +335,11 @@ export function TaskTableView({
     : [{ field: 'title' }, ...visibleColumns]
   const tableColumnPlacements = resolveTaskViewTableColumnPlacements(renderedColumns)
   const tableColumnCount = tableColumnPlacements.length + 1
-  const tableMinimumWidth = Math.max(
-    720,
-    tableColumnPlacements.reduce(
-      (total, placement) => total + placement.width,
-      taskTableActionColumnWidth,
-    ),
+  const tableContentColumnsWidth = tableColumnPlacements.reduce(
+    (total, placement) => total + placement.width,
+    0,
   )
+  const tableMinimumWidth = Math.max(720, tableContentColumnsWidth + taskTableActionColumnWidth)
   const groupedTasks = presentation?.groupBy && !outline
     ? groupTaskViewItems(
         tasks,
@@ -553,7 +551,8 @@ export function TaskTableView({
     print: printTable,
     printsAllRows,
     rootRef: printRootRef,
-  } = useTaskViewTablePrint('task-table', tableMinimumWidth)
+    // The row action column is left off the paper, so the paper fits the other columns only.
+  } = useTaskViewTablePrint('task-table', tableContentColumnsWidth)
   const renderedTasks = printsAllRows ? displayOrderedTasks : incrementalTasks
   const hiddenTaskCount = printsAllRows ? 0 : incrementalHiddenTaskCount
   const renderedTaskKeys = hiddenTaskCount > 0
@@ -691,8 +690,8 @@ export function TaskTableView({
                       )}
                     </th>
                   ))}
-                  <th className="px-3 py-2.5 text-center text-fg-8f99a8" scope="col">
-                    <div data-print-hidden="">
+                  <th className="px-3 py-2.5 text-center text-fg-8f99a8" data-print-hidden="" scope="col">
+                    <div>
                       <span className="sr-only">{t('tasks.action.more')}</span>
                       <MoreHorizontalIcon className="mx-auto h-5 w-5" />
                     </div>
@@ -1258,8 +1257,8 @@ function TaskTableRow({
           }
         }
       })}
-      <td className="px-2 py-2 text-center">
-        <div className="flex items-center justify-center gap-1" data-print-hidden="">
+      <td className="px-2 py-2 text-center" data-print-hidden="">
+        <div className="flex items-center justify-center gap-1">
         {onCreateTaskOpen ? (
           <button
             aria-label={`${t('tasks.addTask')}: ${taskTitle}`}

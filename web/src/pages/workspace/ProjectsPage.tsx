@@ -1,3 +1,4 @@
+import { DirectoryArchiveImpactGate } from '../../workspace/ui/DirectoryArchiveImpactGate'
 import { useCallback, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
@@ -222,6 +223,7 @@ export function ProjectsPage() {
                     project.projectId,
                   )
                 : undefined}
+              ArchiveImpactGate={workspace.onArchiveProject ? DirectoryArchiveImpactGate : undefined}
               onAssigneeChange={(assigneeId) => replaceFilter('assignee', assigneeId)}
               onClearFilters={clearFilters}
               onOpenProject={(project) => workspace.onSelectProject(

@@ -35,6 +35,17 @@ const approvedSearchGeneration = {
   },
 } satisfies AiAssistanceGeneration
 
+/**
+ * Moves an ISO instant by whole days so retention comparisons follow the fixture deadline.
+ *
+ * @param value - ISO instant to move.
+ * @param days - Days to add; negative values move earlier.
+ * @returns The shifted ISO instant.
+ */
+function shiftIsoInstant(value: string, days: number): string {
+  return new Date(Date.parse(value) + days * 24 * 60 * 60 * 1_000).toISOString()
+}
+
 describe('AI assistance controller safety', () => {
   test('classifies capacity, provider, permission, conflict, and validation failures distinctly', () => {
     expect(classifyAiAssistanceError(new AiAssistanceApiError(
@@ -125,11 +136,11 @@ describe('AI assistance controller safety', () => {
       approvedSearchGeneration,
     )).toBe(true)
     expect(isApprovedAiAssistanceRevalidationConsistent(
-      { ...approvedSearchGeneration, expiresAt: '2026-09-20T02:00:00.000Z' },
+      { ...approvedSearchGeneration, expiresAt: shiftIsoInstant(approvedSearchGeneration.expiresAt, -4) },
       approvedSearchGeneration,
     )).toBe(true)
     expect(isApprovedAiAssistanceRevalidationConsistent(
-      { ...approvedSearchGeneration, expiresAt: '2026-10-01T02:00:00.000Z' },
+      { ...approvedSearchGeneration, expiresAt: shiftIsoInstant(approvedSearchGeneration.expiresAt, 7) },
       approvedSearchGeneration,
     )).toBe(false)
     expect(isApprovedAiAssistanceRevalidationConsistent(

@@ -52,8 +52,10 @@ import {
   resolveNotificationRecipientBoundary,
   requiresCurrentWorkItemAssignee,
   isSlackNotificationEligible,
+  isNotificationRoutedToChannel,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
+  type NotificationRoutingSubject,
 } from '../../../notifications'
 import { isMissingFileObjectVersionError, type ApprovalNotificationReader } from '../../../files'
 import type {
@@ -1406,6 +1408,12 @@ async function projectNotification(
     recipientKey,
     event.occurredAt,
     preferences,
+    {
+      eventType: event.eventType,
+      reasons: candidate.reasons,
+      ...(event.projectId ? { projectId: event.projectId } : {}),
+      ...(event.teamId ? { teamId: event.teamId } : {}),
+    },
   )
   const notificationItem = createNotificationProjectionItem(
     event,
@@ -1520,24 +1528,41 @@ export function createNotificationProjectionKeys(
   }
 }
 
-/** In-app channel、digest frequency、quiet hours を notification row へ反映します。 */
+/**
+ * Applies the in-app channel, category channels, mutes, digest frequency, and quiet hours to a
+ * notification row. A notification the member's category or mute settings keep out of the
+ * Inbox is stored archived, so it stays findable in the archived list without raising the
+ * unread count; turning the in-app channel off still hides the row entirely.
+ * @param recipientKey - Server-derived Workspace/member partition key.
+ * @param occurredAt - Original event time.
+ * @param preferences - Recipient's current stored preferences.
+ * @param subject - Event type, recipient reasons, Project, and Team that decide routing.
+ * @returns Inbox state and channels for the notification row.
+ */
 export function createNotificationProjectionDeliveryState(
   recipientKey: string,
   occurredAt: string,
   preferences: NotificationPreferences,
+  subject: NotificationRoutingSubject,
 ): NotificationProjectionDeliveryState {
   const deliveryPlan = createNotificationDeliveryPlan(preferences, occurredAt)
-  const inboxState = preferences.channels.inApp ? 'unread' : 'archived'
+  const routed = (channel: keyof NotificationPreferences['channels']) =>
+    isNotificationRoutedToChannel(preferences, subject, channel)
+  const inboxState = routed('inApp') ? 'unread' : 'archived'
 
   return {
+    // Only the channel switch hides a row; a category or mute only archives it.
     inAppVisible: preferences.channels.inApp,
     inboxState,
     recipientStatusKey: `${recipientKey}#${inboxState}`,
     ...(inboxState === 'archived' ? { archivedAt: occurredAt } : {}),
-    deliveryChannels: deliveryPlan.channels.filter((channel) => channel !== 'slack' || isSlackNotificationEligible(preferences, occurredAt)),
+    deliveryChannels: deliveryPlan.channels.filter((channel) =>
+      routed(channel) && (channel !== 'slack' || isSlackNotificationEligible(preferences, occurredAt))),
     deliveryAfter: deliveryPlan.deliveryAfter,
     deliveryFrequency: deliveryPlan.frequency,
-    ...(isEmailTransportEnabled() && isEmailNotificationEligible(preferences, occurredAt) ? { emailQueued: true } : {}),
+    ...(isEmailTransportEnabled() && routed('email') && isEmailNotificationEligible(preferences, occurredAt)
+      ? { emailQueued: true }
+      : {}),
   }
 }
 
@@ -1622,8 +1647,12 @@ export function createNotificationProjectionItem(
     workItemUpdatedAt: event.workItemUpdatedAt,
     daysUntilDue: event.daysUntilDue,
     workItemReopenedAt: event.workItemReopenedAt,
-    // External channels recheck the author's Project membership before they send.
+    // External channels recheck the author's Project membership and reread the week before they send.
     weeklyReportAuthorMemberKey: event.weeklyReportAuthorMemberKey,
+    weeklyReportWeekStart: event.weeklyReportWeekStart,
+    // External channels reread these entries before they send, so a submitted timesheet is not reminded.
+    timeEntryIds: event.timeEntryIds,
+    timesheetDueBefore: event.timesheetDueBefore,
     expiresAt,
   }
 }

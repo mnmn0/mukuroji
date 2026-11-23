@@ -1,5 +1,5 @@
 import type { NotificationItem, NotificationPreferences } from '../notifications'
-import { createNotificationDeliveryPlan } from '../notifications'
+import { createNotificationDeliveryPlan, isNotificationRoutedToChannel } from '../notifications'
 import { CHANNEL_DELIVERY_SHARDS, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../domain/channel-delivery'
 
 /** One durable external-channel delivery, bound to its original recipient. */
@@ -32,6 +32,12 @@ export type ChannelDelivery = {
   workItemReopenedAt?: string
   /** Author of the unsubmitted weekly report, when this is a weekly report reminder or escalation. */
   weeklyReportAuthorMemberKey?: string
+  /** First day of the week a weekly report reminder or escalation is about, when this is one. */
+  weeklyReportWeekStart?: string
+  /** Unsubmitted time entries a timesheet reminder was scanned for, when this is one. */
+  timeEntryIds?: string[]
+  /** Instant at or before which a timesheet reminder's entries had to end, when this is one. */
+  timesheetDueBefore?: string
   /** Original approval target, retained independently from its parent Work Item. */
   targetId?: string
   /** Original file subject, when the source is file-backed. */
@@ -174,13 +180,13 @@ export async function deliverDueChannelNotifications(policy: ChannelDeliveryPoli
           continue
         }
         const initialPreferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !policy.isEligible(initialPreferences, delivery.notification.occurredAt) || !await dependencies.isAuthorized(delivery)) {
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, initialPreferences, delivery) || !await dependencies.isAuthorized(delivery)) {
           await dependencies.store.finish(delivery, token, 'suppressed')
           continue
         }
         // Recheck preferences after potentially slow authorization, before the final lease fence and send.
         const preferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !policy.isEligible(preferences, delivery.notification.occurredAt)) {
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, preferences, delivery)) {
           await dependencies.store.finish(delivery, token, 'suppressed')
           continue
         }
@@ -225,6 +231,19 @@ export async function deliverDueChannelNotifications(policy: ChannelDeliveryPoli
   dependencies.telemetry.reportQueueHealth(oldestDueAgeSeconds, invalidCandidates)
   if (failed) throw new Error(`${policy.label} notification delivery requires attention.`)
   return sent
+}
+
+/**
+ * Rechecks the channel opt-in period and the member's current category and mute settings, so a
+ * category turned off or a Project muted after the notification was queued stops the send.
+ * @param policy - Channel identity and opt-in rule.
+ * @param preferences - Strongly read current preferences.
+ * @param delivery - Queued delivery and its notification.
+ * @returns Whether the channel may still send the notification.
+ */
+function isChannelEligible(policy: ChannelDeliveryPolicy, preferences: NotificationPreferences, delivery: ChannelDelivery): boolean {
+  return policy.isEligible(preferences, delivery.notification.occurredAt) &&
+    isNotificationRoutedToChannel(preferences, delivery.notification, policy.channel)
 }
 
 /** Emits the exact failed-index lookup coordinates after the failed state is persisted. */

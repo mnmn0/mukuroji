@@ -150,6 +150,8 @@ export function validateCreateAutomationTemplateInput(
         ['Project template English name', rawNameEn],
       ] as const) {
         if (candidate.length > 160) throw invalidInput(`${label} must be 160 characters or fewer.`)
+        // Matches the Team and Project name rule, so a saved template can always be applied.
+        if (/\p{Cc}/u.test(candidate)) throw invalidInput(`${label} must not contain control characters.`)
       }
       const tone = payload.tone ?? 'blue'
       if (tone !== 'blue' && tone !== 'purple' && tone !== 'green' && tone !== 'yellow') {

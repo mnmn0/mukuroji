@@ -1,5 +1,13 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { authorizeNotificationDelivery, createNotificationDeliveryAuthorizationCache } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
+import {
+  authorizeNotificationDelivery,
+  createNotificationDeliveryAuthorizationCache,
+  readTimesheetReminderFence,
+  readWeeklyReportReminderFence,
+  type AuditProjectionEvent,
+  type TimesheetReminderRevalidator,
+  type WeeklyReportReminderRevalidator,
+} from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
 import { DynamoDbDocumentsClient } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import { DynamoDbTriageClient } from '../../modules/triage'
@@ -13,6 +21,16 @@ export type NotificationDeliveryAuthorizationTables = {
   identityTableName: string
   /** File proofing table that holds approval targets. */
   fileTableName: string
+  /**
+   * Rereads a timesheet reminder's entries before it is sent; without it every timesheet reminder
+   * is suppressed, so a reminder for a submitted timesheet is never sent.
+   */
+  timesheetReminders?: TimesheetReminderRevalidator
+  /**
+   * Rereads a weekly report reminder's week before it is sent; without it every weekly report
+   * reminder and escalation is suppressed, so a reminder for a submitted week is never sent.
+   */
+  weeklyReportReminders?: WeeklyReportReminderRevalidator
 }
 
 /**
@@ -32,20 +50,37 @@ export function createProductionNotificationDeliveryAuthorizer(
   const tenant = createProductionTenantAvailability()
   return async (delivery) => {
     if (!await tenant.isActive(delivery.workspaceId)) return false
-    const notification = delivery.notification
-    return authorizeNotificationDelivery({
-      ...notification,
-      workspaceId: delivery.workspaceId,
-      notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
-      dueDate: delivery.dueDate,
-      workItemUpdatedAt: delivery.workItemUpdatedAt,
-      daysUntilDue: delivery.daysUntilDue,
-      workItemReopenedAt: delivery.workItemReopenedAt,
-      weeklyReportAuthorMemberKey: delivery.weeklyReportAuthorMemberKey,
-      targetId: delivery.targetId,
-      fileId: delivery.fileId,
-      outboxStatus: 'pending',
-    }, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
+    const event = toDeliveryProjectionEvent(delivery)
+    // The member may have submitted the entries while quiet hours or a digest held the message.
+    if (!(await readTimesheetReminderFence(event, tables.timesheetReminders)).current) return false
+    // Likewise the author may have submitted the weekly report since the schedule scanned the week.
+    if (!(await readWeeklyReportReminderFence(event, tables.weeklyReportReminders)).current) return false
+    return authorizeNotificationDelivery(event, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
     (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId), readApproval)
+  }
+}
+
+/**
+ * Rebuilds the projection event a queued delivery was saved from, for the delivery-time rechecks.
+ * @param delivery - Queued external-channel delivery.
+ * @returns The event fields the authorization and the timesheet and weekly report fences read.
+ */
+export function toDeliveryProjectionEvent(delivery: ChannelDelivery): AuditProjectionEvent {
+  const notification = delivery.notification
+  return {
+    ...notification,
+    workspaceId: delivery.workspaceId,
+    notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
+    dueDate: delivery.dueDate,
+    workItemUpdatedAt: delivery.workItemUpdatedAt,
+    daysUntilDue: delivery.daysUntilDue,
+    workItemReopenedAt: delivery.workItemReopenedAt,
+    weeklyReportAuthorMemberKey: delivery.weeklyReportAuthorMemberKey,
+    weeklyReportWeekStart: delivery.weeklyReportWeekStart,
+    timeEntryIds: delivery.timeEntryIds,
+    timesheetDueBefore: delivery.timesheetDueBefore,
+    targetId: delivery.targetId,
+    fileId: delivery.fileId,
+    outboxStatus: 'pending',
   }
 }

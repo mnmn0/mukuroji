@@ -242,6 +242,21 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     row.weeklyReportAuthorMemberKey !== undefined &&
     (typeof row.weeklyReportAuthorMemberKey !== 'string' || !row.weeklyReportAuthorMemberKey.trim())
   ) throw invalidRow()
+  if (
+    row.weeklyReportWeekStart !== undefined &&
+    (typeof row.weeklyReportWeekStart !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.weeklyReportWeekStart))
+  ) throw invalidRow()
+  if (
+    row.timeEntryIds !== undefined &&
+    (!Array.isArray(row.timeEntryIds) ||
+      row.timeEntryIds.length === 0 ||
+      !row.timeEntryIds.every((entryId) => typeof entryId === 'string' && entryId.trim()))
+  ) throw invalidRow()
+  if (
+    row.timesheetDueBefore !== undefined &&
+    (typeof row.timesheetDueBefore !== 'string' || !Number.isFinite(Date.parse(row.timesheetDueBefore)))
+  ) throw invalidRow()
+  const timeEntryIds = readTimeEntryIds(row.timeEntryIds)
   return {
     workspaceId: row.workspaceId, memberKey: row.recipientMemberKey, recipientKey, notificationKey,
     attempts, version: row.version, nextAttemptAt,
@@ -256,9 +271,22 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     ...(typeof row.weeklyReportAuthorMemberKey === 'string'
       ? { weeklyReportAuthorMemberKey: row.weeklyReportAuthorMemberKey }
       : {}),
+    ...(typeof row.weeklyReportWeekStart === 'string' ? { weeklyReportWeekStart: row.weeklyReportWeekStart } : {}),
+    ...(timeEntryIds ? { timeEntryIds } : {}),
+    ...(typeof row.timesheetDueBefore === 'string' ? { timesheetDueBefore: row.timesheetDueBefore } : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
     ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }
+}
+
+/**
+ * Copies a stored timesheet reminder's entry IDs.
+ * @param value - Raw `timeEntryIds` attribute, already checked to be absent or a non-empty string list.
+ * @returns The entry IDs, or undefined when the row has none.
+ */
+function readTimeEntryIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.flatMap((entryId) => typeof entryId === 'string' ? [entryId] : [])
 }
 
 /** Builds the exact notification primary key. */
