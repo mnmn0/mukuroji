@@ -166,9 +166,19 @@ test('writes an EMF record without client address or free text', () => {
     observedAtMilliseconds: Date.UTC(2026, 10, 22),
   }, (line) => lines.push(line))
   const record: unknown = JSON.parse(lines[0] ?? '{}')
-  expect(record).toMatchObject({
+  expect(record).toEqual({
+    _aws: {
+      Timestamp: Date.UTC(2026, 10, 22),
+      CloudWatchMetrics: [{
+        Namespace: 'Mukuroji/Web',
+        Dimensions: [['Service']],
+        Metrics: [{ Name: 'ClientErrorCount', Unit: 'Count' }],
+      }],
+    },
     event: 'web.client.error',
+    service: 'mukuroji-web',
     Service: 'mukuroji-web',
+    correlationId: 'c-1',
     reportId: report.reportId,
     kind: 'route-error',
     route: report.route,

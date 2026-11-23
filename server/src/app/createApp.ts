@@ -8,6 +8,7 @@ import {
   auditRejectedEnterpriseSecurityMutation,
   bindApiDependencies,
   getAllowedOrigins,
+  getSameOriginBrowserOrigins,
   normalizeLambdaApiEvent,
   registerApiRoutes,
 } from '../api/api-router'
@@ -70,7 +71,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     ),
   }))
   app.route('/', createClientErrorRouter({
-    getAllowedOrigins,
+    getAllowedOrigins: getSameOriginBrowserOrigins,
     admit: createClientErrorReportAdmission(
       dependencies.developerPlatform.rateLimits,
       resolveTrustedRequestSource,
