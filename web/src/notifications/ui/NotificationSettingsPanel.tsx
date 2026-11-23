@@ -28,6 +28,11 @@ export type NotificationSettingsPanelProps = {
   controller: NotificationPreferencesController
   /** Teams and Projects the member can mute; omitted while unknown. */
   muteTargets?: readonly NotificationMuteTeam[]
+  /**
+   * Member's display time zone, filled into quiet hours when they are turned on while still at
+   * the unsaved default (UTC).
+   */
+  memberTimeZone?: string
 }
 
 /**
@@ -36,6 +41,7 @@ export type NotificationSettingsPanelProps = {
 export function NotificationSettingsPanel({
   controller,
   locale,
+  memberTimeZone,
   muteTargets,
 }: NotificationSettingsPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -205,6 +211,11 @@ export function NotificationSettingsPanel({
                 quietHours: {
                   ...current.quietHours,
                   enabled: event.target.checked,
+                  timeZone: resolveQuietHoursTimeZone(
+                    current.quietHours.timeZone,
+                    event.target.checked,
+                    memberTimeZone,
+                  ),
                 },
               } : current)}
             />
@@ -319,4 +330,23 @@ function updateQuietHours(
       [key]: value,
     },
   } : current)
+}
+
+/**
+ * Picks the quiet hours time zone when quiet hours are turned on or off.
+ *
+ * Quiet hours start at UTC, which is rarely the member's time zone, so turning them on while
+ * they are still at UTC uses the member's display time zone instead.
+ *
+ * @param current - Time zone in the draft.
+ * @param enabled - Whether quiet hours are being turned on.
+ * @param memberTimeZone - Member's display time zone, when known.
+ * @returns Time zone to keep in the draft.
+ */
+export function resolveQuietHoursTimeZone(
+  current: string,
+  enabled: boolean,
+  memberTimeZone: string | undefined,
+): string {
+  return enabled && current === 'UTC' && memberTimeZone ? memberTimeZone : current
 }

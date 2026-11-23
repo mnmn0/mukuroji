@@ -734,6 +734,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/me/preferences',
     permission: 'workspace.read',
   },
+  // Members read and rename themselves; the service refuses directory-managed names.
+  {
+    method: '*',
+    pathPattern: '/api/me/profile',
+    permission: 'workspace.read',
+  },
   // Push availability and the caller's own device registration change no shared Workspace data.
   {
     method: 'GET',

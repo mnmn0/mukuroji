@@ -310,6 +310,14 @@ export type UpdateWorkspaceMemberInput = {
   authorizationConditionChecks?: readonly WorkspaceAccessTransactWriteItem[]
 }
 
+/** Input that changes a member's display name. */
+export type UpdateWorkspaceMemberNameInput = {
+  /** New display name; undefined or blank removes it so the member is shown by email. */
+  name?: string
+  /** Member version read before the change. */
+  expectedVersion: number
+}
+
 /** Directory reconciliation で member を作成または収束させる入力です。 */
 export type ReconcileDirectoryWorkspaceMemberInput = {
   /** Workspace 内で既存参照が使う immutable member key です。 */
@@ -574,6 +582,14 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     targetMemberKey: string,
     input: UpdateWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
+  /** Changes a member's own or managed member's display name. */
+  updateMemberName(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberNameInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
   /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
@@ -2505,6 +2521,131 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
               isTransactionConditionalFailureAt(error, ownerGuardIndex),
           )
         }
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Changes a member's display name, or removes it so the member is shown by email.
+   *
+   * Members change their own name. Owners change every member's name, and admins change the
+   * names of members and guests, as with role changes. A directory (SCIM) member's name comes
+   * from the directory and is refused. The Cognito `name` attribute is not changed: sign-in reads
+   * it only when the membership is created.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param actorMemberKey - Member key of the signed-in member.
+   * @param targetMemberKey - Member key of the member to rename.
+   * @param input - New name and the member version read before the change.
+   * @param auditContext - Audit context of the request.
+   * @returns The updated member, or the unchanged member when the name is the same.
+   * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not rename the
+   *   target, 409 `WorkspaceMemberNameDirectoryManaged` for a directory member, and 409
+   *   `WorkspaceVersionConflict` when the member changed since it was read.
+   */
+  async updateMemberName(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberNameInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
+    const target = await this.getMember(normalizedWorkspaceId, normalizeMemberKey(targetMemberKey))
+
+    if (!target) {
+      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+    }
+
+    const isSelf = actor.memberKey === target.memberKey
+    if (!isSelf) assertCanUpdateMember(actor, target, target.role)
+    if (target.provisioningSource === 'directory') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberNameDirectoryManaged',
+        'The directory manages this member\'s name.',
+      )
+    }
+    if (target.version !== input.expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+
+    const name = normalizeOptional(input.name)
+    if (name === target.name) return target
+
+    const nowIso = this.clock().toISOString()
+    const nextMember = {
+      ...target,
+      name,
+      version: target.version + 1,
+      updatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.renamed',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      action: 'renamed',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        target,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', ...(isSelf ? { source: 'self' } : {}) },
+      sequence: 0,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    if (!isSelf) transactItems.push(this.actorCondition(normalizedWorkspaceId, actor))
+    transactItems.push({
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(target.memberKey),
+        },
+        UpdateExpression: name
+          ? 'SET #name = :name, updatedAt = :now, version = version + :one'
+          : 'SET updatedAt = :now, version = version + :one REMOVE #name',
+        // A member who became directory-managed after the read keeps the directory's name.
+        ConditionExpression: isSelf
+          ? 'attribute_exists(workspaceId) AND version = :expectedVersion AND (attribute_not_exists(provisioningSource) OR provisioningSource <> :directory) AND #status = :active'
+          : 'attribute_exists(workspaceId) AND version = :expectedVersion AND (attribute_not_exists(provisioningSource) OR provisioningSource <> :directory)',
+        ExpressionAttributeNames: {
+          '#name': 'name',
+          ...(isSelf ? { '#status': 'status' } : {}),
+        },
+        ExpressionAttributeValues: {
+          ...(name ? { ':name': name } : {}),
+          ':now': nowIso,
+          ':one': 1,
+          ':expectedVersion': input.expectedVersion,
+          ':directory': 'directory',
+          ...(isSelf ? { ':active': 'active' } : {}),
+        },
+      },
+    })
+    if (memberAuditPut) transactItems.push(memberAuditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        await this.classifyMemberUpdateConflict(
+          normalizedWorkspaceId,
+          actor,
+          target,
+          input.expectedVersion,
+          false,
+        )
       }
       throw toWorkspaceAccessError(error)
     }

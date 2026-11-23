@@ -43,3 +43,46 @@ export function resolveSettingsSection(
   if (matched) return matched
   return new URLSearchParams(search).has('developerSection') ? 'workspace' : 'personal'
 }
+
+/**
+ * Settings panel that can be opened directly with a URL fragment, such as
+ * `/settings/workspace#settings-members`.
+ */
+export type SettingsPanelId =
+  | 'profile'
+  | 'display'
+  | 'install'
+  | 'notifications'
+  | 'account-security'
+  | 'ai-assistance'
+  | 'agent-connection'
+  | 'enterprise-security'
+  | 'members'
+  | 'tenant'
+  | 'directory'
+  | 'developer-platform'
+  | 'automation'
+  | 'audit-log'
+  | 'work-item-configuration'
+  | 'agent-settings'
+
+/**
+ * Builds the element ID, and URL fragment without `#`, of a settings panel.
+ *
+ * @param panel - Settings panel.
+ * @returns The ID, prefixed so it does not collide with other IDs on the page.
+ */
+export function settingsPanelAnchorId(panel: SettingsPanelId): string {
+  return `settings-${panel}`
+}
+
+/**
+ * Builds the URL that opens a settings panel in its area.
+ *
+ * @param section - Settings area that holds the panel.
+ * @param panel - Settings panel.
+ * @returns Path with the panel's fragment.
+ */
+export function settingsPanelPath(section: SettingsSectionId, panel: SettingsPanelId): string {
+  return `${settingsSectionPaths[section]}#${settingsPanelAnchorId(panel)}`
+}

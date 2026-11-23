@@ -3376,3 +3376,159 @@ test('pins a member record to the version read, or to its absence', () => {
     },
   })
 })
+
+/**
+ * Creates a Workspace Access adapter over the given member rows that records each write.
+ *
+ * @param members - Stored member rows, by member key.
+ * @returns The adapter and the recorded write inputs.
+ */
+function createMemberNameClient(members: readonly WorkspaceMember[]) {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key
+        const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key
+          ? String(key.recordKey)
+          : ''
+        const member = members.find((candidate) => recordKey === `MEMBER#${candidate.memberKey}`)
+        return { Item: member ? toMemberItem(member) : undefined }
+      }
+      inputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+  return { client, inputs }
+}
+
+test('lets a member change their own display name with a version condition', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const { client, inputs } = createMemberNameClient([member])
+
+  const renamed = await client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '  佐藤 花子 ', expectedVersion: 1 },
+    createAuditContext('rename-self'),
+  )
+
+  expect(renamed).toMatchObject({ name: '佐藤 花子', version: 2 })
+  const transactItems = inputs[0]?.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems : []).toHaveLength(2)
+  expect(inputs[0]).toMatchObject({
+    TransactItems: [
+      {
+        Update: {
+          Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+          UpdateExpression: 'SET #name = :name, updatedAt = :now, version = version + :one',
+          ExpressionAttributeValues: { ':name': '佐藤 花子', ':expectedVersion': 1 },
+        },
+      },
+      {
+        Put: {
+          TableName: 'AuditTable',
+          Item: { eventType: 'member.renamed', action: 'renamed' },
+        },
+      },
+    ],
+  })
+})
+
+test('removes the display name when it is blank and skips an unchanged name', async () => {
+  const owner = createWorkspaceMember('demo@example.com')
+  const { client, inputs } = createMemberNameClient([owner])
+
+  const unchanged = await client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: 'Demo User', expectedVersion: 1 },
+  )
+  expect(unchanged).toEqual(owner)
+  expect(inputs).toHaveLength(0)
+
+  const cleared = await client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: ' ', expectedVersion: 1 },
+    createAuditContext('clear-name'),
+  )
+  expect(cleared.name).toBeUndefined()
+  const clearItems = inputs[0]?.TransactItems
+  expect(Array.isArray(clearItems) ? clearItems[0] : undefined).toMatchObject({
+    Update: { UpdateExpression: 'SET updatedAt = :now, version = version + :one REMOVE #name' },
+  })
+})
+
+test('lets an admin rename a member but not an owner, and pins the admin', async () => {
+  const admin = createWorkspaceMember('admin@example.com', 'admin')
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const owner = createWorkspaceMember('demo@example.com')
+  const { client, inputs } = createMemberNameClient([admin, member, owner])
+
+  await client.updateMemberName(
+    workspaceId,
+    admin.memberKey,
+    member.memberKey,
+    { name: 'Sato', expectedVersion: 1 },
+    createAuditContext('admin-rename'),
+  )
+  const adminItems = inputs[0]?.TransactItems
+  expect(Array.isArray(adminItems) ? adminItems.slice(0, 2) : []).toMatchObject([
+    { ConditionCheck: { Key: { recordKey: 'MEMBER#admin@example.com' } } },
+    { Update: { Key: { recordKey: 'MEMBER#sato@example.com' } } },
+  ])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    admin.memberKey,
+    owner.memberKey,
+    { name: 'Owner', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+})
+
+test('refuses a member renaming someone else', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const other = createWorkspaceMember('suzuki@example.com', 'member')
+  const { client, inputs } = createMemberNameClient([member, other])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    other.memberKey,
+    { name: 'Suzuki', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  expect(inputs).toHaveLength(0)
+})
+
+test('refuses renaming a directory member and a stale version', async () => {
+  const owner = createWorkspaceMember('demo@example.com')
+  const directoryMember = {
+    ...createWorkspaceMember('scim@example.com', 'member'),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'ext-1',
+  }
+  const { client } = createMemberNameClient([owner, directoryMember])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    directoryMember.memberKey,
+    directoryMember.memberKey,
+    { name: 'Self', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceMemberNameDirectoryManaged' })
+  await expect(client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: 'New', expectedVersion: 3 },
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+})

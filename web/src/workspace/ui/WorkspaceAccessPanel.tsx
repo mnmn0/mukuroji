@@ -10,6 +10,7 @@ import {
 } from 'react'
 import { useSWRConfig } from 'swr'
 import { WORKSPACE_INVITATION_NAME_MAX_LENGTH } from '@mukuroji/contracts'
+import { WorkspaceMemberNameEditor } from './WorkspaceMemberNameEditor'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -19,6 +20,7 @@ import {
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
   updateWorkspaceMember,
+  updateWorkspaceMemberName,
   WorkspaceAccessApiError,
   type CreateWorkspaceInvitationInput,
   type UpdateWorkspaceMemberInput,
@@ -127,6 +129,14 @@ type WorkspaceAccessPanelProps = {
   onUpdateMember?: (
     memberKey: string,
     input: UpdateWorkspaceMemberInput,
+  ) => Promise<void>
+  /**
+   * Corrects a member's display name; undefined removes it. Rejects on failure.
+   */
+  onRenameMember?: (
+    memberKey: string,
+    name: string | undefined,
+    expectedVersion: number,
   ) => Promise<void>
   /**
    * Workspace access の再取得 callback です。
@@ -444,6 +454,15 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      onRenameMember={async (memberKey, name, expectedVersion) => {
+        const input = { name: name ?? null, expectedVersion }
+        await mutationRequestRunner.run(
+          `workspace-member:rename:${memberKey}`,
+          JSON.stringify(input),
+          (context) => updateWorkspaceMemberName(accessToken, memberKey, input, context),
+          shouldRetainWorkspaceMutationContext,
+        ).finally(() => retryLoad())
+      }}
       onUpdateMember={async (memberKey, input) => {
         await mutationRequestRunner.run(
           `workspace-member:update:${memberKey}`,
@@ -478,6 +497,7 @@ export function WorkspaceAccessPanel({
   onRetry,
   onRevokeInvitation,
   onUpdateMember,
+  onRenameMember,
   onResetMemberCredential,
   signInSecurity,
   signInSecurityLoadFailed = false,
@@ -792,6 +812,7 @@ export function WorkspaceAccessPanel({
           signInSecurity={signInSecurity}
           signInSecurityLoadFailed={signInSecurityLoadFailed}
           t={t}
+          onRenameMember={onRenameMember}
           onRequestAction={requestAction}
           onRetrySignInSecurity={onRetrySignInSecurity}
         />
@@ -866,6 +887,7 @@ function WorkspaceMemberLedger({
   signInSecurity,
   signInSecurityLoadFailed,
   t,
+  onRenameMember,
   onRequestAction,
   onRetrySignInSecurity,
 }: {
@@ -875,6 +897,7 @@ function WorkspaceMemberLedger({
   signInSecurity?: WorkspaceMemberSignInSecurity[]
   signInSecurityLoadFailed: boolean
   t: (key: MessageKey) => string
+  onRenameMember?: (memberKey: string, name: string | undefined, expectedVersion: number) => Promise<void>
   onRequestAction: (action: WorkspaceAccessAction) => void
   onRetrySignInSecurity?: () => void
 }) {
@@ -975,6 +998,14 @@ function WorkspaceMemberLedger({
                         ) : null}
                       </div>
                       <p className="mt-1 break-all text-sm text-[var(--workbench-muted)]">{member.email}</p>
+                      {onRenameMember && canManage && !isCurrentMember && member.provisioningSource !== 'directory' ? (
+                        <WorkspaceMemberNameEditor
+                          member={member}
+                          t={t}
+                          testId={createAccessTestId(member.memberKey)}
+                          onSave={(name, expectedVersion) => onRenameMember(member.memberKey, name, expectedVersion)}
+                        />
+                      ) : null}
                       {memberSignInSecurity ? (
                         <span
                           className="mt-1.5 inline-flex"

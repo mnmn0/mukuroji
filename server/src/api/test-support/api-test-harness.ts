@@ -718,6 +718,7 @@ function createWorkspaceAccessFake(
     prepareReinvite: unsupported,
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
+    updateMemberName: unsupported,
     recordMemberCredentialAction: unsupported,
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
@@ -1869,6 +1870,12 @@ function configureFakeProjectClients(
       role?: WorkspaceRole
       status?: WorkspaceMemberStatus
     }>,
+    workspaceMemberNameUpdates: [] as Array<{
+      actorMemberKey: string
+      expectedVersion: number
+      memberKey: string
+      name?: string
+    }>,
     workspaceReconciliations: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
@@ -2984,6 +2991,21 @@ function configureFakeProjectClients(
           ...createWorkspaceMember(memberKey),
           role: input.role ?? createWorkspaceMember(memberKey).role,
           status: input.status ?? createWorkspaceMember(memberKey).status,
+          version: input.expectedVersion + 1,
+        }
+      },
+      async updateMemberName(_workspaceId, actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMemberName', context: auditContext })
+        calls.workspaceMemberNameUpdates.push({
+          actorMemberKey,
+          memberKey,
+          expectedVersion: input.expectedVersion,
+          ...(input.name === undefined ? {} : { name: input.name }),
+        })
+        const { name: _previousName, ...member } = createWorkspaceMember(memberKey)
+        return {
+          ...member,
+          ...(input.name === undefined ? {} : { name: input.name }),
           version: input.expectedVersion + 1,
         }
       },
