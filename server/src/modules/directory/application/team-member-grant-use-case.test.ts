@@ -158,6 +158,14 @@ test('refuses a reused idempotency key with another input before any grant', asy
   })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
   expect(grants).toEqual([])
 
+  // The key is bound when the Team has no active Project to grant.
+  const noProjects = createPorts([], () => true, [], { reusedKey: true })
+  const empty: DirectoryAdministrationTeam = { id: 'empty', nameJa: '空', nameEn: 'Empty', projects: [] }
+  noProjects.ports.getDirectoryAdministration = async () => ({ teams: [team, empty] })
+  await expect(addMemberToTeamProjectsUseCase(noProjects.ports, {
+    workspaceId: 'ws', teamId: 'empty', member, role: 'viewer', caller,
+  })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+
   // The key is bound even when the member already belongs to every Project.
   const everywhere = createPorts(team.projects.map((project) => project.id), () => true, [], {
     reusedKey: true,
@@ -165,6 +173,7 @@ test('refuses a reused idempotency key with another input before any grant', asy
   await expect(addMemberToTeamProjectsUseCase(everywhere.ports, {
     workspaceId: 'ws', teamId: 'core', member, role: 'viewer', caller,
   })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  expect(everywhere.grants).toEqual([])
 })
 
 test('refuses an inactive member even when the Team has no active Project', async () => {
