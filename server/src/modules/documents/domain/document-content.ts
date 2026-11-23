@@ -936,6 +936,9 @@ function validateWhiteboardObject(object: WhiteboardObject): void {
   }
   if (object.type === 'note' || object.type === 'text') {
     assertText(object.text, 'whiteboard.object.text', DOCUMENT_MAX_TEXT_LENGTH, true)
+    if (object.type === 'note' && object.done !== undefined && typeof object.done !== 'boolean') {
+      throw new DocumentError(400, 'InvalidWhiteboardObject', 'Whiteboard note done must be a boolean.')
+    }
   } else if (object.type === 'shape') {
     if (
       object.shape !== 'rectangle' &&
