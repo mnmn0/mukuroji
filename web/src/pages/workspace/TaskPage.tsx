@@ -307,6 +307,8 @@ export function TaskPage() {
   const focusedSourceKind: CuratedContextSourceKind | undefined =
     readIssueSourceKind(searchParams.get('sourceKind'))
   const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  // Links such as a Focus Project log entry open the permissions tab, where the log lives.
+  const requestedTaskTab = searchParams.get('tab') === 'permissions' ? 'permissions' : undefined
   const requestedCollaborationTab = searchParams.get('collaborationTab')
   const collaborationTab = resolveIssueCollaborationTab({
     requestedTab: requestedCollaborationTab,
@@ -475,6 +477,10 @@ export function TaskPage() {
   const projectCharterCandidates = useMemo(
     () => createProjectCharterPersonCandidates(workspaceAccess?.members ?? emptyWorkspaceMembers),
     [workspaceAccess?.members],
+  )
+  const raidOwnerOptions = useMemo(
+    () => activeProjectMembers.map((member) => ({ id: member.id, label: member.name || member.email })),
+    [activeProjectMembers],
   )
   // Unsaved charter edits survive switching away from the settings tab and back.
   const [projectCharterDraftStore] = useState(createProjectCharterDraftStore)
@@ -1087,6 +1093,18 @@ export function TaskPage() {
     setSearchParams(nextSearchParams, { replace: true })
   }, [isCreateTaskRequested, searchParams, setSearchParams])
 
+  // A requested tab is consumed once the screen has switched to it, so a later link asking for
+  // the same tab switches again after the user has moved to another tab. It waits for the current
+  // user: the screen is keyed by the user's scope, and a screen mounted again after the user loads
+  // must still receive the requested tab.
+  const isTaskScopeSettled = user !== undefined || currentUserError !== undefined
+  useEffect(() => {
+    if (requestedTaskTab === undefined || !isTaskScopeSettled) return
+    const nextSearchParams = new URLSearchParams(searchParams)
+    nextSearchParams.delete('tab')
+    setSearchParams(nextSearchParams, { replace: true })
+  }, [isTaskScopeSettled, requestedTaskTab, searchParams, setSearchParams])
+
   useEffect(() => {
     if (!hasAmbiguousIssueSelection) {
       return
@@ -1170,9 +1188,17 @@ export function TaskPage() {
     const shouldBlockCreate = createTaskDirtyRef.current &&
       createTaskDirtyScopeRef.current === taskScopeKey && changesCreateScope
     const retainedCommentOwner = commentDraftOwnerRef.current
+    // A link that opens the permissions tab, such as the Project log link of a promoted risk,
+    // hides the detail pane like selecting that tab does, so it needs the same confirmation.
+    const opensPermissionsTab = nextSearchParams.get('tab') === 'permissions' &&
+      new URLSearchParams(currentLocation.search).get('tab') !== 'permissions'
     const shouldBlockComment = commentDraftDirtyRef.current &&
       retainedCommentOwner?.taskScopeKey === taskScopeKey &&
-      (pathChanged || JSON.stringify([retainedCommentOwner.teamId, retainedCommentOwner.issueId]) !== nextOwnerKey)
+      (
+        pathChanged ||
+        opensPermissionsTab ||
+        JSON.stringify([retainedCommentOwner.teamId, retainedCommentOwner.issueId]) !== nextOwnerKey
+      )
     blockedDirtyOwnersRef.current = {
       create: shouldBlockCreate,
       comment: shouldBlockComment,
@@ -2086,6 +2112,7 @@ export function TaskPage() {
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
       workspaceId={workspaceId}
+      initialTab={requestedTaskTab}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
       workspaceCalendarPolicy={workspaceCalendarPolicy}
@@ -2160,6 +2187,7 @@ export function TaskPage() {
             canEdit={canMutateProjectTasks}
             canMutate={canMutateContent}
             enabled={Boolean(user && !currentUserError)}
+            ownerOptions={raidOwnerOptions}
             projectId={projectId}
             t={t}
             teamId={interactionTeamId}

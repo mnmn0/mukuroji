@@ -159,6 +159,7 @@ export {
 export {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  createWorkItemProjectAssignmentConditionCheck,
   createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
