@@ -140,3 +140,8 @@ export const English: Story = {
 export const LoadError: Story = {
   args: { entries: undefined, hasLoadError: true },
 }
+
+/** The Work Items to relate failed to load; the log stays usable and offers a retry. */
+export const WorkItemOptionsError: Story = {
+  args: { hasWorkItemOptionsError: true, workItemOptions: [], onReloadWorkItemOptions: () => undefined },
+}

@@ -38,6 +38,10 @@ export type ProjectRaidLogPanelProps = {
   ownerOptions?: readonly ProjectRaidReferenceOption[]
   /** Work Items of the Project an entry may name as related; also names them in the list. */
   workItemOptions?: readonly ProjectRaidReferenceOption[]
+  /** Whether the Work Items to relate failed to load. */
+  hasWorkItemOptionsError?: boolean
+  /** Loads the Work Items to relate again. */
+  onReloadWorkItemOptions?: () => void
   /**
    * Saves a new entry or a change.
    *
@@ -210,6 +214,8 @@ export function ProjectRaidLogPanel({
   canEdit,
   ownerOptions = [],
   workItemOptions = [],
+  hasWorkItemOptionsError = false,
+  onReloadWorkItemOptions,
   onSave,
   onReload,
   t,
@@ -334,6 +340,16 @@ export function ProjectRaidLogPanel({
           <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={onReload}>
             {t('projects.raidLog.reload')}
           </button>
+        </div>
+      ) : null}
+      {hasWorkItemOptionsError ? (
+        <div className="flex flex-wrap items-center gap-3" data-testid="project-raid-log-work-items-error">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('projects.raidLog.error.workItems')}</p>
+          {onReloadWorkItemOptions ? (
+            <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={onReloadWorkItemOptions}>
+              {t('projects.raidLog.reload')}
+            </button>
+          ) : null}
         </div>
       ) : null}
       {isLoading && !entries ? (

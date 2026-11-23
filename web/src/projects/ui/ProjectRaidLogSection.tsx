@@ -63,7 +63,11 @@ export function ProjectRaidLogSection({
   const log = useProjectRaidLog(accessToken, teamId, projectId, enabled, onSessionError)
   // Every Work Item of the Project, read apart from the calendar or Gantt period the page shows,
   // so related Work Items outside that period can be chosen and keep their labels.
-  const { data: projectIssues } = useProjectIssues(accessToken, projectId, enabled, true)
+  const {
+    data: projectIssues,
+    error: projectIssuesError,
+    mutate: reloadProjectIssues,
+  } = useProjectIssues(accessToken, projectId, enabled, true)
   const workItemOptions = useMemo<ProjectRaidReferenceOption[] | undefined>(
     () => projectIssues
       // Related Work Items must belong to the Project's own Team, which the log routes are scoped to.
@@ -86,6 +90,8 @@ export function ProjectRaidLogSection({
       t={t}
       today={toLocalDate(new Date())}
       workItemOptions={workItemOptions}
+      hasWorkItemOptionsError={Boolean(projectIssuesError)}
+      onReloadWorkItemOptions={() => void reloadProjectIssues()}
       onReload={() => void mutate()}
       onSave={save}
     />

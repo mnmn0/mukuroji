@@ -105,6 +105,29 @@ describe('ProjectRaidLogPanel owner and related Work Items', () => {
   })
 })
 
+describe('ProjectRaidLogPanel Work Item candidates', () => {
+  test('explains a failed candidate load and offers a retry', () => {
+    const markup = renderToStaticMarkup(
+      <ProjectRaidLogPanel
+        canEdit
+        entries={[entry()]}
+        hasLoadError={false}
+        hasWorkItemOptionsError
+        isLoading={false}
+        t={t}
+        today="2026-11-19"
+        onReload={() => undefined}
+        onReloadWorkItemOptions={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+    expect(markup).toContain('関連 Work Item の候補を読み込めませんでした。')
+    expect(markup).toContain('data-testid="project-raid-log-work-items-error"')
+    expect(markup).toContain('再読み込み')
+    expect(render([entry()])).not.toContain('project-raid-log-work-items-error')
+  })
+})
+
 describe('createProjectRaidLogCsv', () => {
   test('writes one row per entry with labels and escapes formulas', () => {
     const csv = createProjectRaidLogCsv(

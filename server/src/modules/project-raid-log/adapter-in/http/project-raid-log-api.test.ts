@@ -352,6 +352,7 @@ test('fences another owner once and adds no second fence when the caller owns th
   })
   const dependencies = getTestAppDependencies()
   const fences: string[] = []
+  const order: string[] = []
   const workspaceAccess = dependencies.workspace.workspaceAccess
   setTestAppDependencies({
     workspaceAccess: {
@@ -360,6 +361,7 @@ test('fences another owner once and adds no second fence when the caller owns th
       getActiveMember: workspaceAccess.getActiveMember.bind(workspaceAccess),
       async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
         fences.push(memberKey)
+        order.push('fence')
         return { ConditionCheck: { TableName: 'access', Key: { workspaceId, recordKey: `MEMBER#${memberKey}` }, ConditionExpression: 'attribute_exists(workspaceId)' } }
       },
     },
@@ -371,6 +373,7 @@ test('fences another owner once and adds no second fence when the caller owns th
       get(target, property, receiver) {
         if (property !== 'getProjectMembers') return Reflect.get(target, property, receiver)
         return async (workspaceId: string, requestedProjectId: string, teamId?: string) => {
+          order.push('members')
           const response = await listMembers(workspaceId, requestedProjectId, teamId)
           const first = response.members[0]
           if (!first) throw new Error('The fake Project has no member.')
@@ -392,6 +395,8 @@ test('fences another owner once and adds no second fence when the caller owns th
   }, 'own-2')
   expect(theirs.status).toBe(201)
   expect(fences).toEqual([other.id])
+  // The owner's version is fenced before membership is read, so a later removal fails the write.
+  expect(order.slice(-2)).toEqual(['fence', 'members'])
   const { issues } = await dependencies.workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
   const related = issues.find((issue) => issue.assignedProjectId === projectId)
   if (!related) throw new Error('The fake Project has no Work Item.')

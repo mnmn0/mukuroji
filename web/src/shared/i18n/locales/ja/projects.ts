@@ -162,6 +162,7 @@ export const projectsMessages = {
   'projects.raidLog.overdue': '期限切れです。内容を見直して期限を更新するか、クローズしてください。',
   'projects.raidLog.reviewDue': '見直し {date}',
   'projects.raidLog.error.loading': '登録簿を読み込めませんでした。',
+  'projects.raidLog.error.workItems': '関連 Work Item の候補を読み込めませんでした。',
   'projects.raidLog.error.save': '保存できませんでした。',
   'projects.raidLog.error.conflict': '他のユーザーが先に更新しました。再読み込みしてからやり直してください。',
   'projects.raidLog.error.invalid': '入力を確認してください: {reason}',
