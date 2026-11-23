@@ -752,6 +752,18 @@ async function processQueueRecord(
   }
 }
 
+/**
+ * Builds the report of an import that stopped on a row or link.
+ *
+ * Rows before the checkpoint count as valid. Once every row exists, the checkpoint counts links,
+ * so a row whose link was not applied counts as invalid although its Work Item was created.
+ *
+ * @param validation - Validation the execution ran with, if it got that far.
+ * @param checkpointRow - Last recorded step, rows first and then links.
+ * @param failedRow - Source row of the step that failed, if any.
+ * @param errorCode - Code of the failure.
+ * @returns The stored report, or undefined when no step was running.
+ */
 function createRuntimeFailureReport(
   validation: WorkItemImportValidationResult | undefined,
   checkpointRow: number,
@@ -760,7 +772,14 @@ function createRuntimeFailureReport(
 ) {
   if (!validation || failedRow === undefined) return undefined
   const totalRows = validation.report.totalRows
-  const validRows = Math.min(totalRows, Math.max(0, checkpointRow))
+  const rowsWithUnappliedLinks = new Set(
+    (validation.links ?? [])
+      .filter((_, index) => totalRows + index + 1 > checkpointRow)
+      .map(readLinkRow),
+  )
+  const validRows = checkpointRow < totalRows
+    ? Math.max(0, checkpointRow)
+    : Math.max(0, totalRows - rowsWithUnappliedLinks.size)
   return createStoredWorkItemImportReport({
     totalRows,
     validRows,

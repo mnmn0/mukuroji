@@ -298,7 +298,9 @@ export function resolveWorkItemImportStructure(
         continue
       }
       dependencyKeys.add(key)
-      dependencyEdges.set(predecessorRow, [...(dependencyEdges.get(predecessorRow) ?? []), row.row])
+      const successors = dependencyEdges.get(predecessorRow) ?? []
+      if (successors.length === 0) dependencyEdges.set(predecessorRow, successors)
+      successors.push(row.row)
       links.push({
         kind: 'dependency',
         predecessorRow,
@@ -309,7 +311,7 @@ export function resolveWorkItemImportStructure(
       })
     }
   }
-  const dependencyCycleRows = findDependencyCycleRows(dependencyEdges)
+  const dependencyCycleRows = findRowsOnCycle(dependencyEdges)
   for (const row of dependencyCycleRows) {
     errors.push({
       row,
@@ -344,7 +346,9 @@ export function resolveWorkItemImportStructure(
       if (relationKeys.has(key)) continue
       relationKeys.add(key)
       if (link.type === 'blocks') {
-        blockingEdges.set(link.sourceRow, [...(blockingEdges.get(link.sourceRow) ?? []), link.targetRow])
+        const blocked = blockingEdges.get(link.sourceRow) ?? []
+        if (blocked.length === 0) blockingEdges.set(link.sourceRow, blocked)
+        blocked.push(link.targetRow)
       }
       links.push({ kind: 'relation', ...link })
     }
@@ -413,6 +417,8 @@ export function resolveWorkItemImportStructure(
  * Accepts a JSON array of assignments, or entries separated by `;` or new lines in which
  * whitespace-separated tokens are `member:<userId>`, `role:<jobRoleId>`, `effort:<minutes>` (or
  * `<n>h` / `<n>m`), and `status:<planned|in-progress|done>`. A token without a prefix is a member.
+ * Words without a prefix right after the member are part of its name, so `member:Yamada Hanako
+ * effort:2h` names one member; a second member in the same entry is an error.
  *
  * @param value - Transformed source value.
  * @param row - One-based data row number.
@@ -465,11 +471,19 @@ export function readWorkItemImportContributors(
     assignments = []
     for (const entry of splitEntries(value, /[;\n\r]+/u)) {
       const assignment: WorkItemContributorAssignmentCreateInput = {}
+      // A display name may have spaces, so the words after `member:` up to the next token form it.
+      const memberWords: string[] = []
+      let readingMember = false
       for (const token of entry.split(/\s+/u).filter(Boolean)) {
         const separator = token.indexOf(':')
         const prefix = separator < 0 ? '' : token.slice(0, separator).toLowerCase()
         const text = separator < 0 ? token : token.slice(separator + 1)
-        if (prefix === 'role') {
+        const continuesMember = readingMember && prefix === '' && !/^\d+(?:\.\d+)?[hm]$/iu.test(text)
+        readingMember = false
+        if (continuesMember) {
+          memberWords.push(text)
+          readingMember = true
+        } else if (prefix === 'role') {
           assignment.jobRoleId = text
         } else if (prefix === 'effort' || (prefix === '' && /^\d+(?:\.\d+)?[hm]$/iu.test(text))) {
           const minutes = readEffortMinutes(text)
@@ -479,11 +493,14 @@ export function readWorkItemImportContributors(
           if (!isContributionStatus(text)) return fail(`Contributor status "${text}" is invalid.`)
           assignment.status = text
         } else if (prefix === 'member' || prefix === '') {
-          assignment.memberUserId = text
+          if (memberWords.length > 0) return fail('A contributor can name only one member.')
+          memberWords.push(text)
+          readingMember = true
         } else {
           return fail(`Contributor token "${token}" is invalid.`)
         }
       }
+      if (memberWords.length > 0) assignment.memberUserId = memberWords.join(' ')
       assignments.push(assignment)
     }
   } else {
@@ -640,7 +657,9 @@ function readRelations(
   }
   const references: WorkItemImportRelationReference[] = []
   for (const entry of entries) {
-    if (!isImportRelationType(entry.type)) return fail(`Relation type "${String(entry.type)}" is invalid.`)
+    if (!isImportRelationType(entry.type)) {
+      return fail('Each relation type must be one of blocks, blockedBy, related, or duplicate.')
+    }
     if (typeof entry.key !== 'string' || !entry.key.trim() || [...entry.key].length > importKeyMaxLength) {
       return fail('Each relation needs a key.')
     }
@@ -695,7 +714,8 @@ function readAcceptanceCriteria(
     }
   } else if (typeof value === 'string') {
     for (const line of value.split(/\r\n|\r|\n/u)) {
-      const match = /^\s*(?:\[([ xX])\]|[-*・])?\s*(.*)$/u.exec(line)
+      // A `-` or `*` bullet needs a space after it, so `-5 °C` keeps its minus sign.
+      const match = /^\s*(?:[-*]\s+|・\s*)?(?:\[([ xX])\]\s*)?(.*)$/u.exec(line)
       const text = match?.[2]?.trim() ?? ''
       if (text) criteria.push({ text, satisfied: match?.[1] === 'x' || match?.[1] === 'X' })
     }
@@ -772,48 +792,64 @@ function findParentCycleRows(parentByRow: ReadonlyMap<number, number>) {
 }
 
 /**
- * Finds the rows that cannot be ordered because their dependencies loop.
+ * Finds the rows that lie on a cycle, leaving out rows that only lead into, out of, or between
+ * cycles.
  *
- * @param edges - Successor rows by predecessor row.
- * @returns Rows left on or behind a cycle, ascending.
- */
-function findDependencyCycleRows(edges: ReadonlyMap<number, readonly number[]>) {
-  const incoming = new Map<number, number>()
-  for (const [predecessor, successors] of edges) {
-    if (!incoming.has(predecessor)) incoming.set(predecessor, 0)
-    for (const successor of successors) incoming.set(successor, (incoming.get(successor) ?? 0) + 1)
-  }
-  const ready = [...incoming].filter(([, count]) => count === 0).map(([row]) => row)
-  while (ready.length > 0) {
-    const row = ready.pop()!
-    incoming.delete(row)
-    for (const successor of edges.get(row) ?? []) {
-      const count = (incoming.get(successor) ?? 0) - 1
-      incoming.set(successor, count)
-      if (count === 0) ready.push(successor)
-    }
-  }
-  return [...incoming.keys()].sort((left, right) => left - right)
-}
-
-/**
- * Finds the rows that lie on a cycle, leaving out rows that only lead into or out of one.
+ * Uses Tarjan's strongly connected components without recursion, so a long chain of rows does
+ * not exhaust the stack. A row is on a cycle when its component has more than one row; a row
+ * cannot link to itself, since self references are rejected first.
  *
  * @param edges - Target rows by source row.
  * @returns Rows on a cycle, ascending.
  */
 function findRowsOnCycle(edges: ReadonlyMap<number, readonly number[]>) {
-  const remaining = new Set(findDependencyCycleRows(edges))
-  let removed = true
-  while (removed) {
-    removed = false
-    for (const row of remaining) {
-      if ((edges.get(row) ?? []).some((target) => remaining.has(target))) continue
-      remaining.delete(row)
-      removed = true
+  const indexByRow = new Map<number, number>()
+  const lowLinkByRow = new Map<number, number>()
+  const stack: number[] = []
+  const onStack = new Set<number>()
+  const cycleRows: number[] = []
+  for (const root of edges.keys()) {
+    if (indexByRow.has(root)) continue
+    const frames: Array<{ row: number; next: number }> = []
+    /** Opens a row for the search. */
+    const visit = (row: number) => {
+      indexByRow.set(row, indexByRow.size)
+      lowLinkByRow.set(row, indexByRow.size - 1)
+      stack.push(row)
+      onStack.add(row)
+      frames.push({ row, next: 0 })
+    }
+    visit(root)
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!
+      const targets = edges.get(frame.row) ?? []
+      if (frame.next < targets.length) {
+        const target = targets[frame.next]!
+        frame.next += 1
+        if (!indexByRow.has(target)) {
+          visit(target)
+        } else if (onStack.has(target)) {
+          lowLinkByRow.set(frame.row, Math.min(lowLinkByRow.get(frame.row)!, indexByRow.get(target)!))
+        }
+        continue
+      }
+      frames.pop()
+      const parent = frames[frames.length - 1]
+      if (parent) {
+        lowLinkByRow.set(parent.row, Math.min(lowLinkByRow.get(parent.row)!, lowLinkByRow.get(frame.row)!))
+      }
+      if (lowLinkByRow.get(frame.row) !== indexByRow.get(frame.row)) continue
+      const component: number[] = []
+      let member: number | undefined
+      do {
+        member = stack.pop()!
+        onStack.delete(member)
+        component.push(member)
+      } while (member !== frame.row)
+      if (component.length > 1) cycleRows.push(...component)
     }
   }
-  return [...remaining].sort((left, right) => left - right)
+  return cycleRows.sort((left, right) => left - right)
 }
 
 /**

@@ -5817,7 +5817,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicWorkItemExportPage"
+                  "$ref": "#/components/schemas/PublicWorkItemPage"
                 }
               }
             },
@@ -8500,6 +8500,105 @@
         "summary": "Webhook signing secret を rotation する",
         "tags": [
           "Webhook Management"
+        ]
+      }
+    },
+    "/api/developer/work-item-exports": {
+      "get": {
+        "description": "Workspace 管理者の export です。`/api/developer/exports` の Work Item に Contributor と受け入れ条件を足した `WorkItemExportItem` を返し、export した file を import し直すときに使います。",
+        "operationId": "listManagedWorkItemStructuredExportPage",
+        "parameters": [
+          {
+            "description": "UI が page を集約して生成する download file の形式です。",
+            "in": "query",
+            "name": "format",
+            "schema": {
+              "default": "csv",
+              "enum": [
+                "csv",
+                "json"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "1 page に返す最大件数です。",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemExportPage"
+                }
+              }
+            },
+            "description": "RBAC で閲覧可能な Work Item の、Contributor と受け入れ条件つきの bounded export page です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "閲覧可能な Work Item を Contributor と受け入れ条件つきの bounded export page で取得する",
+        "tags": [
+          "Import and Export"
         ]
       }
     },

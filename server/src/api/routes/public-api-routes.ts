@@ -295,11 +295,21 @@ async function requireWebhookTeamPermission(
   )
 }
 
-/** Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。 */
+/**
+ * Export を一つの Team/GSI Query に制限し、次 page の store continuation を返します。
+ *
+ * @param principal - Workspace principal reading the export.
+ * @param continuation - Store continuation of the previous page, if any.
+ * @param limit - Largest number of Work Items in the page.
+ * @param includeStructure - Whether rows keep contributors and acceptance criteria, as the
+ *   structured export endpoint returns them.
+ * @returns The page and the continuation of the next one.
+ */
 async function readAccessibleWorkItemExportPage(
   principal: ProjectPrincipal,
   continuation: string | undefined,
   limit: number,
+  includeStructure: boolean,
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
@@ -357,10 +367,13 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // The export is read by Workspace administrators in the Web and lists only Work Items they can
-    // view, so it keeps contributors and acceptance criteria for a re-import. Remaining effort and
-    // progress have their own endpoints and stay out of export rows.
-    items: page.issues.map(omitWorkItemExportExcludedFields),
+    // The export lists only Work Items the administrator can view. The structured export keeps
+    // contributors and acceptance criteria for a re-import; the original export keeps its closed
+    // Work Item schema. Remaining effort and progress have their own endpoints and stay out of both.
+    items: page.issues.map((issue) => {
+      const exported = omitWorkItemExportExcludedFields(issue)
+      return includeStructure ? exported : omitWorkItemStructureFields(exported)
+    }),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
   }
@@ -387,6 +400,26 @@ function omitWorkItemExportExcludedFields<
   } = workItem
   void _remainingEffortMinutes
   void _progressPercent
+  return exported
+}
+
+/**
+ * Removes contributor assignments and acceptance criteria from a Work Item export row, which the
+ * closed Work Item schema of the original export endpoint does not list.
+ *
+ * @param workItem - Export row.
+ * @returns The row without contributors and acceptance criteria.
+ */
+function omitWorkItemStructureFields<
+  T extends { readonly contributorAssignments?: unknown; readonly acceptanceCriteria?: unknown },
+>(workItem: T): Omit<T, 'contributorAssignments' | 'acceptanceCriteria'> {
+  const {
+    contributorAssignments: _contributorAssignments,
+    acceptanceCriteria: _acceptanceCriteria,
+    ...exported
+  } = workItem
+  void _contributorAssignments
+  void _acceptanceCriteria
   return exported
 }
 
@@ -2078,7 +2111,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       return requireImportJob(principal.directoryId, job.id)
     },
 
-    async export(managementPrincipal, _format, continuation, limit) {
+    async export(managementPrincipal, _format, continuation, limit, includeStructure = false) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.read',
         evaluateProjectScopes: true,
@@ -2088,6 +2121,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal,
         continuation,
         limit,
+        includeStructure,
       )
     },
   }

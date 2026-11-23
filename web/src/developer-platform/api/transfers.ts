@@ -108,7 +108,7 @@ async function requestDeveloperExportPage(
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await requestJson<CursorPage<CanonicalWorkItem>>(
-        `/developer/exports?${query.toString()}`,
+        `/developer/work-item-exports?${query.toString()}`,
         accessToken,
       )
     } catch (error) {

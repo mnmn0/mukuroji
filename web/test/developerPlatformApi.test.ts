@@ -91,6 +91,9 @@ describe('Developer Platform API', () => {
     expect(
       paths['/api/developer/exports'].get.operationId,
     ).toBe('listManagedWorkItemExportPage')
+    expect(
+      paths['/api/developer/work-item-exports'].get.responses['200'].content['application/json'].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemExportPage' })
   })
 
   test('gets the aggregate resource with Bearer authorization', async () => {
@@ -570,12 +573,12 @@ describe('Developer Platform API', () => {
     ).toEqual([
       '/api/developer/imports/dry-run',
       '/api/developer/imports',
-      '/api/developer/exports?format=csv&limit=100',
-      '/api/developer/exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/developer/work-item-exports?format=csv&limit=100',
+      '/api/developer/work-item-exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
       '/api/planning',
-      '/api/developer/exports?format=json&limit=100',
-      '/api/developer/exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/developer/work-item-exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
       '/api/planning',
     ])
@@ -665,8 +668,8 @@ describe('Developer Platform API', () => {
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
     expect(urls).toEqual([
-      '/api/developer/exports?format=json&limit=100',
-      '/api/developer/exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100',
+      '/api/developer/work-item-exports?format=json&limit=100',
       '/api/teams/team-product/work-item-hierarchy',
       '/api/planning',
     ])

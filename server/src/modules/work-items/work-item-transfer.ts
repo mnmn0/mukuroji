@@ -448,17 +448,25 @@ function mapImportRow(
   }
 }
 
+/** Structure target fields, whose text values are trimmed when read. */
+const structureTargetFields = new Set<string>(WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS)
+
 function resolveMappedValue(
   source: Record<string, unknown>,
   mapping: WorkItemTransferMapping,
   row: number,
   errors: WorkItemTransferRowError[],
 ) {
+  // Structure keys are trimmed, so a value of only spaces is as missing as an empty one.
+  const structureField = structureTargetFields.has(mapping.targetField)
+  /** Checks whether a value counts as missing for this mapping. */
+  const isMissing = (candidate: unknown) =>
+    isEmptyImportValue(candidate) || (structureField && typeof candidate === 'string' && !candidate.trim())
   const sourceValue = readSourceValue(source, mapping.sourceField)
-  const value = isEmptyImportValue(sourceValue)
+  const value = isMissing(sourceValue)
     ? mapping.defaultValue
     : sourceValue
-  if (isEmptyImportValue(value)) {
+  if (isMissing(value)) {
     if (mapping.required) {
       errors.push({
         row,

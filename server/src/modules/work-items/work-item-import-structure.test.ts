@@ -206,6 +206,85 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('reads a member name with spaces and rejects a second member in one entry', () => {
+    const mapping = [
+      ...baseMapping,
+      { sourceField: 'Contributors', targetField: 'contributors' },
+    ]
+    const named = previewWorkItemImport('json', source([
+      { Contributors: 'member:Yamada Hanako effort:2h; Sato Ken role:designer' },
+    ]), mapping)
+    expect(named.errors).toEqual([])
+    expect(named.rows[0]?.input?.contributorAssignments).toEqual([
+      { memberUserId: 'Yamada Hanako', plannedEffortMinutes: 120 },
+      { memberUserId: 'Sato Ken', jobRoleId: 'designer' },
+    ])
+
+    const twoMembers = previewWorkItemImport('json', source([
+      { Contributors: 'member:a@example.com effort:2h member:b@example.com' },
+    ]), mapping)
+    expect(twoMembers.errors.map((error) => [error.row, error.code])).toEqual([[1, 'ImportContributorsInvalid']])
+  })
+
+  test('keeps a leading minus sign in an acceptance criterion', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Criteria: '-5 °C でも起動する\n- [x] Released\n* Logged' },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Criteria', targetField: 'acceptanceCriteria' },
+    ])
+
+    expect(preview.links).toEqual([{
+      kind: 'acceptance-criteria',
+      row: 1,
+      criteria: [
+        { text: '-5 °C でも起動する', satisfied: false },
+        { text: 'Released', satisfied: true },
+        { text: 'Logged', satisfied: false },
+      ],
+    }])
+  })
+
+  test('reports only the rows on a dependency cycle, not rows between cycles', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Key: 'a', Predecessors: 'b' },
+      { Key: 'b', Predecessors: 'a' },
+      { Key: 'bridge', Predecessors: 'b' },
+      { Key: 'c', Predecessors: 'bridge; d' },
+      { Key: 'd', Predecessors: 'c' },
+      { Key: 'after', Predecessors: 'd' },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Predecessors', targetField: 'dependencies' },
+    ])
+
+    expect(preview.errors.map((error) => [error.row, error.code])).toEqual([
+      [1, 'ImportDependencyCycle'],
+      [2, 'ImportDependencyCycle'],
+      [4, 'ImportDependencyCycle'],
+      [5, 'ImportDependencyCycle'],
+    ])
+  })
+
+  test('lists the allowed relation types for an invalid one', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Key: 'a', Relations: [{ type: { nested: true }, key: 'b' }] },
+      { Key: 'b' },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Relations', targetField: 'relations' },
+    ])
+
+    expect(preview.errors).toEqual([{
+      row: 1,
+      field: 'relations',
+      code: 'ImportRelationsInvalid',
+      message: 'Each relation type must be one of blocks, blockedBy, related, or duplicate.',
+    }])
+  })
+
   test('rejects blocking relations that form a cycle', () => {
     const preview = previewWorkItemImport('json', source([
       { Key: 'a', Relations: 'blocks:b; related:c' },
@@ -256,6 +335,12 @@ describe('Work Item import structure', () => {
   })
 
   test('accepts as many declared relations as a Work Item can hold', () => {
+    /**
+     * Builds a hub row that declares relations to its spokes, and the spoke rows.
+     *
+     * @param count - Relations the hub declares itself; no other row adds one to it.
+     * @returns JSON rows.
+     */
     const declare = (count: number) => [
       { Key: 'hub', Relations: Array.from({ length: count }, (_, index) => ({ type: 'related', key: `spoke-${index}` })) },
       ...Array.from({ length: count }, (_, index) => ({ Key: `spoke-${index}` })),
@@ -273,6 +358,12 @@ describe('Work Item import structure', () => {
   })
 
   test('rejects a row that other rows would give more relations than a Work Item can hold', () => {
+    /**
+     * Builds spoke rows that each declare a relation to the hub.
+     *
+     * @param count - Relations the other rows add to the hub; the hub declares none itself.
+     * @returns JSON rows.
+     */
     const relatedRows = (count: number) => Array.from({ length: count }, (_, index) => ({
       Key: `spoke-${index}`,
       Relations: 'related:hub',

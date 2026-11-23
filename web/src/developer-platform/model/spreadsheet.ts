@@ -214,7 +214,7 @@ function createCell(column: number, row: number, value: SpreadsheetCell, isDateC
   const serial = isDateColumn ? toDateSerial(value) : undefined
   if (serial !== undefined) return `<c r="${reference}" s="1"><v>${serial}</v></c>`
   const space = /^\s|\s$|\n/u.test(value) ? ' xml:space="preserve"' : ''
-  return `<c r="${reference}" t="inlineStr"${style ? ` s="${style}"` : ''}><is><t${space}>${escapeXml(value)}</t></is></c>`
+  return `<c r="${reference}" t="inlineStr"${style ? ` s="${style}"` : ''}><is><t${space}>${escapeXml(escapeSpreadsheetText(value))}</t></is></c>`
 }
 
 /**
@@ -295,8 +295,31 @@ function readCellValue(
  */
 function readStringItem(item: XmlElement) {
   const plain = childElement(item, 't')
-  if (plain) return textContent(plain)
-  return childElements(item, 'r').map((run) => textContent(childElement(run, 't'))).join('')
+  if (plain) return decodeSpreadsheetText(textContent(plain))
+  return decodeSpreadsheetText(childElements(item, 'r').map((run) => textContent(childElement(run, 't'))).join(''))
+}
+
+/**
+ * Decodes the `_xHHHH_` escapes that SpreadsheetML uses for characters XML cannot hold.
+ *
+ * One pass decodes each escape once, so `_x005F_x000D_` (an escaped underscore) stays the literal
+ * text `_x000D_`.
+ *
+ * @param text - String as stored.
+ * @returns The text the cell shows.
+ */
+function decodeSpreadsheetText(text: string) {
+  return text.replace(/_x([0-9A-Fa-f]{4})_/gu, (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
+}
+
+/**
+ * Escapes text that would otherwise read back as a SpreadsheetML `_xHHHH_` escape.
+ *
+ * @param text - Cell text.
+ * @returns Text whose underscores before `xHHHH_` are written as `_x005F_`.
+ */
+function escapeSpreadsheetText(text: string) {
+  return text.replace(/_(?=x[0-9A-Fa-f]{4}_)/gu, '_x005F_')
 }
 
 /**

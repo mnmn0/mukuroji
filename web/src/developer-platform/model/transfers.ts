@@ -306,15 +306,17 @@ export function createDeveloperExportRows(
     const predecessorKey = createWorkItemOutlineKey(dependency.predecessor.teamId, dependency.predecessor.workItemId)
     const successorKey = createWorkItemOutlineKey(dependency.successor.teamId, dependency.successor.workItemId)
     if (!exportedKeys.has(predecessorKey) || !exportedKeys.has(successorKey)) continue
-    dependenciesBySuccessor.set(successorKey, [
-      ...(dependenciesBySuccessor.get(successorKey) ?? []),
-      {
-        key: toExportKey(dependency.predecessor.teamId, dependency.predecessor.workItemId),
-        type: dependency.type,
-        lagDays: dependency.lagDays,
-        ...(dependency.constraint ? { constraint: dependency.constraint } : {}),
-      },
-    ])
+    let predecessors = dependenciesBySuccessor.get(successorKey)
+    if (!predecessors) {
+      predecessors = []
+      dependenciesBySuccessor.set(successorKey, predecessors)
+    }
+    predecessors.push({
+      key: toExportKey(dependency.predecessor.teamId, dependency.predecessor.workItemId),
+      type: dependency.type,
+      lagDays: dependency.lagDays,
+      ...(dependency.constraint ? { constraint: dependency.constraint } : {}),
+    })
   }
   const outline = createMultiTeamWorkItemOutlineRows(workItems, context.hierarchies, new Set())
   const ancestors: string[] = []
@@ -500,6 +502,8 @@ function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
       type: dependency.type,
       lagDays: dependency.lagDays,
     })),
+    relations: row.relations.map((relation) => ({ ...relation })),
+    acceptanceCriteria: row.acceptanceCriteria.map((criterion) => ({ ...criterion })),
   }
 }
 

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import type {
-  PlanningWorkItemSummary,
-  ResolvedWorkItemConfiguration,
-  WorkItemRelationType,
-  WorkItemSchedule,
+import {
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
+  type PlanningWorkItemSummary,
+  type ResolvedWorkItemConfiguration,
+  type WorkItemRelationType,
+  type WorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
   findWorkItemDependencyScheduleConflicts,
@@ -118,6 +119,7 @@ export async function validateWorkItemImportLinks(
     }
     return access
   }
+  errors.push(...await validateWorkItemImportTeamLinkCapacity(principal.directoryId, teamId, links))
   for (const link of links) {
     if (link.kind !== 'dependency') continue
     const predecessor = rows.get(link.predecessorRow)
@@ -163,6 +165,70 @@ export async function validateWorkItemImportLinks(
     }
   }
   return errors
+}
+
+/**
+ * Checks that the Team has room for the parent and relation links of the import.
+ *
+ * The import alone is checked against the limit while the source is read; this adds the links
+ * the Team already stores, so an import that would stop partway is reported before any row is
+ * created. Links are counted as creating a relation counts them.
+ *
+ * @param workspaceId - Workspace that owns the Team.
+ * @param teamId - Team the rows are imported into.
+ * @param links - Links resolved from the source.
+ * @returns An error on the row whose link passes the limit, or none.
+ */
+async function validateWorkItemImportTeamLinkCapacity(
+  workspaceId: string,
+  teamId: string,
+  links: readonly WorkItemImportLink[],
+): Promise<WorkItemImportLinkError[]> {
+  const graphLinks = readWorkItemImportGraphLinks(links)
+  const store = workItemDependencies.workItemConfigurations
+  // An import that alone passes the limit is already reported with the source errors.
+  if (graphLinks.length === 0 || graphLinks.length > WORK_ITEM_TEAM_RELATION_LINK_LIMIT || !store.countRelationLinks) {
+    return []
+  }
+  return findWorkItemImportTeamLinkOverflow(links, await store.countRelationLinks(workspaceId, teamId))
+}
+
+/**
+ * Finds the link of an import that would pass the Team link limit.
+ *
+ * @param links - Links resolved from the source.
+ * @param storedLinks - Parent and relation links the Team already stores.
+ * @returns An error on the row whose link passes the limit, or none.
+ */
+export function findWorkItemImportTeamLinkOverflow(
+  links: readonly WorkItemImportLink[],
+  storedLinks: number,
+): WorkItemImportLinkError[] {
+  const graphLinks = readWorkItemImportGraphLinks(links)
+  const room = Math.max(WORK_ITEM_TEAM_RELATION_LINK_LIMIT - storedLinks, 0)
+  const firstLinkOverLimit = graphLinks[room]
+  if (!firstLinkOverLimit) return []
+  return [{
+    row: firstLinkOverLimit.row,
+    field: firstLinkOverLimit.field,
+    code: 'ImportRelationLimitExceeded',
+    message: `The Team stores ${storedLinks} parent and relation links, and the import would add ${graphLinks.length}; a Team can store at most ${WORK_ITEM_TEAM_RELATION_LINK_LIMIT}.`,
+  }]
+}
+
+/**
+ * Lists the links of an import that the Team relation graph stores, in apply order.
+ *
+ * @param links - Links resolved from the source.
+ * @returns The row and field each parent or relation link is reported on.
+ */
+function readWorkItemImportGraphLinks(links: readonly WorkItemImportLink[]) {
+  return links.flatMap((link) =>
+    link.kind === 'parent'
+      ? [{ row: link.childRow, field: 'parentKey' }]
+      : link.kind === 'relation'
+        ? [{ row: link.sourceRow, field: 'relations' }]
+        : [])
 }
 
 /**
@@ -316,12 +382,14 @@ async function createImportDependency(
   const id = createWorkItemImportDependencyId(request.linkIdentity)
   const predecessor = { teamId, workItemId: request.workItemIdForRow(link.predecessorRow) }
   const successor = { teamId, workItemId: request.workItemIdForRow(link.successorRow) }
+  // The revision is read before the endpoints are checked, so an endpoint that moves after the
+  // check changes the revision and the create fails as a conflict.
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
   await Promise.all([
     requirePlanningWorkItemEndpointPermission(principal, predecessor, 'manager'),
     requirePlanningWorkItemEndpointPermission(principal, successor, 'manager'),
   ])
-  const workItemState = await readPlanningWorkItemState(principal)
-  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
   if (snapshot.workItemDependencies.some((dependency) => dependency.id === id)) return
   await workItemDependencies.planning.createWorkItemDependency(
     principal.directoryId,

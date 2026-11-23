@@ -10,7 +10,7 @@ import {
 } from '@mukuroji/contracts'
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
 import { createMsProjectXml, readMsProjectXml } from '../src/developer-platform/model/msProjectXml'
-import { findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/developer-platform/model/spreadsheet'
+import { createSpreadsheetWorkbook, findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/developer-platform/model/spreadsheet'
 import { createDeveloperExportFile, createDeveloperExportRows, type DeveloperExportContext } from '../src/developer-platform/model/transfers'
 import { parseXmlDocument } from '../src/developer-platform/model/xmlDocument'
 import { createZipArchive, readZipArchive } from '../src/developer-platform/model/zipArchive'
@@ -121,6 +121,10 @@ describe('Developer Platform ZIP and XML readers', () => {
     await expect(readZipArchive(archive, { ...zipLimits, maxEntryBytes: 4 })).rejects.toThrow('too large')
     await expect(readZipArchive(archive, { ...zipLimits, maxEntries: 1 })).rejects.toThrow('too many entries')
     await expect(readZipArchive(new Uint8Array(30), zipLimits)).rejects.toThrow('not a ZIP archive')
+    // A stored entry's bytes follow its 30-byte local header and name; one flipped byte fails the CRC.
+    const corrupted = archive.slice()
+    corrupted[30 + 'a.txt'.length] ^= 0xff
+    await expect(readZipArchive(corrupted, zipLimits)).rejects.toThrow('corrupted')
   })
 
   test('rejects document type declarations and unknown entities', () => {
@@ -147,6 +151,22 @@ describe('Developer Platform workbook import', () => {
     ])
 
     await expect(readSpreadsheetWorkbook(workbook)).rejects.toThrow('too many cells')
+  })
+
+  test('decodes SpreadsheetML escapes once and writes literal escape text back unchanged', async () => {
+    const encoder = new TextEncoder()
+    const workbook = createZipArchive([
+      { name: 'xl/workbook.xml', data: encoder.encode('<workbook><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>') },
+      { name: 'xl/_rels/workbook.xml.rels', data: encoder.encode('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      {
+        name: 'xl/worksheets/sheet1.xml',
+        data: encoder.encode('<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Line_x000D_ end _x005F_x000D_</t></is></c></row></sheetData></worksheet>'),
+      },
+    ])
+    expect((await readSpreadsheetWorkbook(workbook))[0]?.rows).toEqual([['Line\r end _x000D_']])
+
+    const written = createSpreadsheetWorkbook([{ name: 'S', columns: ['text'], rows: [['keep _x000D_ as typed']] }])
+    expect((await readSpreadsheetWorkbook(written))[0]?.rows).toEqual([['text'], ['keep _x000D_ as typed']])
   })
 
   test('finds the header row and reads shared strings, numbers, booleans, and dates of a saved workbook', async () => {
@@ -244,19 +264,35 @@ describe('Developer Platform Work Item export', () => {
   })
 
   // A role-only contributor and the statuses come back from the task text field mukuroji writes.
-  test('round-trips tasks, outline, predecessors, and assignments through MS Project XML', async () => {
+  test('round-trips tasks, outline, predecessors, assignments, relations, and criteria through MS Project XML', async () => {
     const file = createDeveloperExportFile('msproject', items, context, exportedAt)
     const source = await readDeveloperImportSource('msproject', fileFrom('plan.xml', new TextEncoder().encode(await file.blob.text())))
     const rows: unknown = JSON.parse(source.content)
 
     expect(rows).toEqual([
-      { UID: '1', Name: 'Plan', WBS: '1', OutlineLevel: 1, Owner: 'user-owner', Contributors: [], Predecessors: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: 'Line 1\nLine 2' },
-      { UID: '2', Name: 'Design', WBS: '1.1', OutlineLevel: 2, Owner: 'user-owner', Contributors: [{ memberUserId: 'user-dev', plannedEffortMinutes: 120, status: 'planned' }, { jobRoleId: 'designer', status: 'in-progress' }], Predecessors: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
-      { UID: '3', Name: '=Build', WBS: '1.2', OutlineLevel: 2, Owner: 'user-owner', Contributors: [], Predecessors: '2 FS +2', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
+      { UID: '1', Name: 'Plan', WBS: '1', OutlineLevel: 1, Owner: 'user-owner', Contributors: [], Predecessors: '', Relations: '', AcceptanceCriteria: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: 'Line 1\nLine 2' },
+      {
+        UID: '2',
+        Name: 'Design',
+        WBS: '1.1',
+        OutlineLevel: 2,
+        Owner: 'user-owner',
+        Contributors: [{ memberUserId: 'user-dev', plannedEffortMinutes: 120, status: 'planned' }, { jobRoleId: 'designer', status: 'in-progress' }],
+        Predecessors: '',
+        Relations: [{ type: 'blocks', key: '3' }],
+        AcceptanceCriteria: [{ text: 'Spec reviewed', satisfied: true }, { text: 'Tests pass', satisfied: false }],
+        Schedule: { mode: 'due-date', dueDate: '2026-08-03' },
+        Notes: '',
+      },
+      { UID: '3', Name: '=Build', WBS: '1.2', OutlineLevel: 2, Owner: 'user-owner', Contributors: [], Predecessors: '2 FS +2', Relations: [{ type: 'blockedBy', key: '2' }], AcceptanceCriteria: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
     ])
     expect(suggestDeveloperImportMapping(source.headers).map((entry) => entry.targetField)).toEqual([
-      'importKey', 'title', 'wbsNumber', 'outlineLevel', 'assigneeUserId', 'contributors', 'dependencies', 'schedule', 'description',
+      'importKey', 'title', 'wbsNumber', 'outlineLevel', 'assigneeUserId', 'contributors', 'dependencies', 'relations', 'acceptanceCriteria', 'schedule', 'description',
     ])
+    // MS Project reads the elements of a project and of a resource in schema order.
+    const xml = await file.blob.text()
+    expect(xml.indexOf('<SaveVersion>')).toBeLessThan(xml.indexOf('<Name>'))
+    expect(xml).toContain('<Name>user-owner</Name><Type>1</Type><EmailAddress>user-owner</EmailAddress>')
   })
 
   test('numbers MS Project tasks over the whole export when several Teams start at WBS 1', async () => {

@@ -48,6 +48,20 @@ export type MsProjectTaskInput = {
   }>
   /** Predecessors. */
   dependencies: MsProjectDependency[]
+  /** Relations to other tasks without parent and child, kept in a task text field. */
+  relations?: Array<{
+    /** Relation type, such as `blocks`. */
+    type: string
+    /** Key of the related task. */
+    key: string
+  }>
+  /** Acceptance criteria, kept in a task text field. */
+  acceptanceCriteria?: Array<{
+    /** Criterion text. */
+    text: string
+    /** Whether the criterion is met. */
+    satisfied: boolean
+  }>
 }
 
 /** Error for a file that cannot be read as MS Project XML. */
@@ -72,6 +86,8 @@ export const MS_PROJECT_IMPORT_COLUMNS = [
   'Owner',
   'Contributors',
   'Predecessors',
+  'Relations',
+  'AcceptanceCriteria',
   'Schedule',
   'Notes',
 ] as const
@@ -82,11 +98,18 @@ const lagUnitsPerWorkingDay = 4_800
 /** Tenths of a minute in one elapsed day. */
 const lagUnitsPerElapsedDay = 14_400
 
-/** Field ID of the task field Text1, which keeps the contributors as JSON. */
-const contributorsFieldId = '188743731'
-
-/** Alias of the contributors field, so a file saved again by MS Project still names it. */
-const contributorsFieldAlias = 'mukuroji contributors'
+/**
+ * Task text fields that keep, as JSON, what MS Project cannot hold itself. Each has an alias, so a
+ * file saved again by MS Project still names it.
+ */
+const storedFields = {
+  /** Contributors, with the roles and statuses that assignments cannot hold. */
+  contributors: { fieldId: '188743731', fieldName: 'Text1', alias: 'mukuroji contributors' },
+  /** Relations other than parent and child, which are not schedule links. */
+  relations: { fieldId: '188743734', fieldName: 'Text2', alias: 'mukuroji relations' },
+  /** Acceptance criteria and whether each is met. */
+  acceptanceCriteria: { fieldId: '188743737', fieldName: 'Text3', alias: 'mukuroji acceptance criteria' },
+} as const
 
 /** Lag formats that count elapsed rather than working time. */
 const elapsedLagFormats = new Set([4, 6, 8, 10, 12, 36, 38, 40, 42, 44])
@@ -104,7 +127,9 @@ const dependencyTypeCodes: Record<MsProjectDependency['type'], number> = {
  *
  * Each task becomes one row keyed by its `UID`. The outline number names the parent, the first
  * assigned resource's e-mail address (or name) is the owner, the other assignments are
- * contributors (an array of `{ memberUserId, plannedEffortMinutes }`) with their work, and predecessor links become `UID TYPE +lag` entries.
+ * contributors (an array of `{ memberUserId, plannedEffortMinutes }`) with their work, and
+ * predecessor links become `UID TYPE +lag` entries. Contributors, relations (keyed by task `UID`),
+ * and acceptance criteria that mukuroji kept in task text fields are read back from them.
  *
  * @param text - XML text saved by MS Project.
  * @returns Rows in task order.
@@ -123,20 +148,28 @@ export function readMsProjectXml(text: string): Array<Record<string, unknown>> {
       readText(resource, 'UID'),
       readText(resource, 'EmailAddress') || readText(resource, 'Name'),
     ]))
-  // Contributors written by mukuroji keep roles and statuses that assignments cannot hold.
-  const contributorsField = childElements(childElement(project, 'ExtendedAttributes') ?? emptyElement(), 'ExtendedAttribute')
-    .find((attribute) => readText(attribute, 'Alias') === contributorsFieldAlias)
-  const contributorsFieldIdInFile = contributorsField ? readText(contributorsField, 'FieldID') : undefined
+  // Fields written by mukuroji are found by alias, since MS Project may renumber them.
+  const fieldAttributes = childElements(childElement(project, 'ExtendedAttributes') ?? emptyElement(), 'ExtendedAttribute')
+  /** Returns the field ID that the file gives a stored field, if it has one. */
+  const fieldIdInFile = (alias: string) => {
+    const attribute = fieldAttributes.find((entry) => readText(entry, 'Alias') === alias)
+    return attribute ? readText(attribute, 'FieldID') : undefined
+  }
+  const contributorsFieldId = fieldIdInFile(storedFields.contributors.alias)
+  const relationsFieldId = fieldIdInFile(storedFields.relations.alias)
+  const acceptanceCriteriaFieldId = fieldIdInFile(storedFields.acceptanceCriteria.alias)
   const assignmentsByTask = new Map<string, Array<{ resource: string; workMinutes?: number }>>()
   for (const assignment of childElements(childElement(project, 'Assignments') ?? emptyElement(), 'Assignment')) {
     const resource = resources.get(readText(assignment, 'ResourceUID'))
     if (!resource) continue
     const taskUid = readText(assignment, 'TaskUID')
     const workMinutes = readDurationMinutes(readText(assignment, 'Work'))
-    assignmentsByTask.set(taskUid, [
-      ...(assignmentsByTask.get(taskUid) ?? []),
-      { resource, ...(workMinutes ? { workMinutes } : {}) },
-    ])
+    let taskAssignments = assignmentsByTask.get(taskUid)
+    if (!taskAssignments) {
+      taskAssignments = []
+      assignmentsByTask.set(taskUid, taskAssignments)
+    }
+    taskAssignments.push({ resource, ...(workMinutes ? { workMinutes } : {}) })
   }
   const rows: Array<Record<string, unknown>> = []
   for (const task of childElements(childElement(project, 'Tasks') ?? emptyElement(), 'Task')) {
@@ -161,11 +194,13 @@ export function readMsProjectXml(text: string): Array<Record<string, unknown>> {
       OutlineLevel: Number.isSafeInteger(outlineLevel) ? outlineLevel : 1,
       Owner: assignments[0]?.resource ?? '',
       // An array keeps a resource name with spaces as one member.
-      Contributors: readStoredContributors(task, contributorsFieldIdInFile) ?? assignments.slice(1).map((assignment) => ({
+      Contributors: readStoredArray(task, contributorsFieldId) ?? assignments.slice(1).map((assignment) => ({
         memberUserId: assignment.resource,
         ...(assignment.workMinutes ? { plannedEffortMinutes: assignment.workMinutes } : {}),
       })),
       Predecessors: predecessors.join('; '),
+      Relations: readStoredArray(task, relationsFieldId) ?? '',
+      AcceptanceCriteria: readStoredArray(task, acceptanceCriteriaFieldId) ?? '',
       Schedule: readSchedule(startDate, finishDate, readText(task, 'Milestone') === '1'),
       Notes: readText(task, 'Notes'),
     })
@@ -216,21 +251,26 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
       `<Milestone>${task.milestone ? 1 : 0}</Milestone>`,
       `<PercentComplete>${task.completed ? 100 : 0}</PercentComplete>`,
       task.notes ? `<Notes>${escapeXml(task.notes)}</Notes>` : '',
-      task.contributors.length > 0
-        ? `<ExtendedAttribute><FieldID>${contributorsFieldId}</FieldID><Value>${escapeXml(JSON.stringify(task.contributors))}</Value></ExtendedAttribute>`
-        : '',
+      writeStoredField(storedFields.contributors.fieldId, task.contributors),
+      // Relations name tasks by UID, the row key that import reads.
+      writeStoredField(storedFields.relations.fieldId, (task.relations ?? []).flatMap((relation) => {
+        const relatedUid = uidByKey.get(relation.key)
+        return relatedUid === undefined ? [] : [{ type: relation.type, key: String(relatedUid) }]
+      })),
+      writeStoredField(storedFields.acceptanceCriteria.fieldId, task.acceptanceCriteria ?? []),
       ...links,
       '</Task>',
     ].join('')
   })
   const resourceXml = [...resourceIds].map(([member, uid]) =>
-    `<Resource><UID>${uid}</UID><ID>${uid}</ID><Name>${escapeXml(member)}</Name><EmailAddress>${escapeXml(member)}</EmailAddress><Type>1</Type></Resource>`)
+    `<Resource><UID>${uid}</UID><ID>${uid}</ID><Name>${escapeXml(member)}</Name><Type>1</Type><EmailAddress>${escapeXml(member)}</EmailAddress></Resource>`)
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Project xmlns="http://schemas.microsoft.com/project">',
-    `<Name>${escapeXml(projectName)}</Name>`,
     '<SaveVersion>14</SaveVersion>',
-    `<ExtendedAttributes><ExtendedAttribute><FieldID>${contributorsFieldId}</FieldID><FieldName>Text1</FieldName><Alias>${contributorsFieldAlias}</Alias></ExtendedAttribute></ExtendedAttributes>`,
+    `<Name>${escapeXml(projectName)}</Name>`,
+    `<ExtendedAttributes>${Object.values(storedFields).map((field) =>
+      `<ExtendedAttribute><FieldID>${field.fieldId}</FieldID><FieldName>${field.fieldName}</FieldName><Alias>${field.alias}</Alias></ExtendedAttribute>`).join('')}</ExtendedAttributes>`,
     `<Tasks>${taskXml.join('')}</Tasks>`,
     `<Resources>${resourceXml.join('')}</Resources>`,
     `<Assignments>${assignments.join('')}</Assignments>`,
@@ -240,14 +280,26 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
 }
 
 /**
- * Reads the contributors that mukuroji kept in a task text field.
+ * Writes a task text field that keeps a list as JSON.
+ *
+ * @param fieldId - Field ID of the text field.
+ * @param entries - Entries to keep.
+ * @returns The task's ExtendedAttribute, or nothing for an empty list.
+ */
+function writeStoredField(fieldId: string, entries: readonly unknown[]) {
+  if (entries.length === 0) return ''
+  return `<ExtendedAttribute><FieldID>${fieldId}</FieldID><Value>${escapeXml(JSON.stringify(entries))}</Value></ExtendedAttribute>`
+}
+
+/**
+ * Reads a list that mukuroji kept as JSON in a task text field.
  *
  * @param task - Task XML.
- * @param fieldId - Field ID that the file names as the contributors field, if any.
- * @returns The contributors as written, or undefined when the task has none or the value is not
- *   a JSON array; import validates each entry.
+ * @param fieldId - Field ID that the file gives the field, if any.
+ * @returns The entries as written, or undefined when the task has none or the value is not a
+ *   JSON array; import validates each entry.
  */
-function readStoredContributors(task: XmlElement, fieldId: string | undefined): unknown[] | undefined {
+function readStoredArray(task: XmlElement, fieldId: string | undefined): unknown[] | undefined {
   if (!fieldId) return undefined
   const attribute = childElements(task, 'ExtendedAttribute').find((entry) => readText(entry, 'FieldID') === fieldId)
   if (!attribute) return undefined

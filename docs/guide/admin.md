@@ -210,6 +210,9 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   **再接続** も同じで、押した本人が完了します。
 - **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
   export には親子・WBS 番号・依存・relation・Contributor・受け入れ条件が入り、そのまま import し直せます。
+  ただし MS Project XML には依存の日付制約（「この日より後に終える」など）を書けないため、制約のある依存を
+  MS Project XML で import し直すと制約はなくなります。制約を残すときは CSV・JSON・Excel を使ってください。
+  親子でも依存でもない relation と受け入れ条件は、MS Project XML でも Task のテキスト項目に残り、import し直せます。
   import の mapping では、WBS 番号・アウトラインの深さ・親のキーから親子を、先行タスク（`1.2FS+2d` など）から依存を、
   Contributor と受け入れ条件もあわせて取り込めます。Excel と MS Project XML の file も選べ、file を選ぶと mapping を提案します。書き方と dry-run で見つかる error は
   [Public API の説明](../public-api.md#階層依存contributor受け入れ条件の-import) にあります。

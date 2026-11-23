@@ -69,6 +69,7 @@ export async function readZipArchive(
     }
     const flags = view.getUint16(offset + 8, true)
     const method = view.getUint16(offset + 10, true)
+    const expectedCrc = view.getUint32(offset + 16, true)
     const compressedSize = view.getUint32(offset + 20, true)
     const uncompressedSize = view.getUint32(offset + 24, true)
     const nameLength = view.getUint16(offset + 28, true)
@@ -100,6 +101,7 @@ export async function readZipArchive(
       throw new ZipArchiveError(`"${name}" uses an unsupported compression method.`)
     }
     if (data.byteLength !== uncompressedSize) throw new ZipArchiveError(`"${name}" has the wrong size.`)
+    if (crc32(data) !== expectedCrc) throw new ZipArchiveError(`"${name}" is corrupted.`)
     files.set(name, data)
   }
   return files

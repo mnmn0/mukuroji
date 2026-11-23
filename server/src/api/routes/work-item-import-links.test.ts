@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   DEFAULT_WORK_ITEM_TYPE,
+  WORK_ITEM_TEAM_RELATION_LINK_LIMIT,
   createDefaultDueDateWorkItemSchedule,
   type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
@@ -8,7 +9,8 @@ import {
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_CONFIGURATION } from '../../modules/work-items/work-item-configuration'
 import { findWorkItemDependencyScheduleConflicts } from '../../modules/planning'
-import { validateWorkItemImportParentLinks } from './work-item-import-links'
+import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
+import { findWorkItemImportTeamLinkOverflow, validateWorkItemImportParentLinks } from './work-item-import-links'
 
 const configuration: ResolvedWorkItemConfiguration = {
   configuration: {
@@ -74,4 +76,20 @@ test('finds the schedule conflicts that would reject an imported dependency', ()
     summary('a', '2026-08-01'),
     summary('b', '2026-08-09'),
   )).toEqual([expect.objectContaining({ code: 'missing-schedule' })])
+})
+
+test('reports the import link that the links a Team already stores push past the limit', () => {
+  const links: WorkItemImportLink[] = [
+    { kind: 'parent', childRow: 2, parentRow: 1 },
+    { kind: 'dependency', predecessorRow: 1, successorRow: 3, type: 'finish-to-start', lagDays: 0 },
+    { kind: 'relation', sourceRow: 3, targetRow: 1, type: 'related' },
+  ]
+
+  expect(findWorkItemImportTeamLinkOverflow(links, WORK_ITEM_TEAM_RELATION_LINK_LIMIT - 2)).toEqual([])
+  expect(findWorkItemImportTeamLinkOverflow(links, WORK_ITEM_TEAM_RELATION_LINK_LIMIT - 1)).toEqual([
+    expect.objectContaining({ row: 3, field: 'relations', code: 'ImportRelationLimitExceeded' }),
+  ])
+  expect(findWorkItemImportTeamLinkOverflow(links, WORK_ITEM_TEAM_RELATION_LINK_LIMIT)).toEqual([
+    expect.objectContaining({ row: 2, field: 'parentKey', code: 'ImportRelationLimitExceeded' }),
+  ])
 })

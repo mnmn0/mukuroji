@@ -176,6 +176,8 @@ describe('durable Work Item import', () => {
 
     expect(fixture.execution?.status).toBe('failed')
     expect(fixture.jobReports.at(-1)?.errors.at(-1)).toMatchObject({ row: 2, code: 'ImportValidationRejected' })
+    // The row's Work Item exists, but its link was not applied, so it does not count as imported.
+    expect(fixture.jobReports.at(-1)).toMatchObject({ totalRows: 2, validRows: 1, invalidRows: 1 })
   })
 
   test('stops applying links once cancellation is requested', async () => {
