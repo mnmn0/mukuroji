@@ -151,6 +151,16 @@ type PendingDecision = {
 }
 
 /**
+ * Drops a retained decision once its outcome is known, unless a newer attempt replaced it.
+ *
+ * @param pending - Retained decisions by entry key.
+ * @param attempt - The attempt whose outcome is known.
+ */
+function forgetDecision(pending: Map<string, PendingDecision>, attempt: PendingDecision) {
+  if (pending.get(attempt.entryKey) === attempt) pending.delete(attempt.entryKey)
+}
+
+/**
  * Replaces one entry of a loaded log with its stored version.
  *
  * @param log - The loaded log.
@@ -174,7 +184,9 @@ function replaceLogEntry(log: ProjectRaidLogResponse, stored: ProjectRaidEntry):
  */
 export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }: ProjectChangeRequestDecisionScope) {
   const { mutate } = useSWRConfig()
-  const pendingDecision = useRef<PendingDecision>(undefined)
+  // Decisions whose outcome is unknown, by entry key. The log shares this hook across its rows, so
+  // deciding another request must not drop one still waiting to be sent again.
+  const pendingDecisions = useRef(new Map<string, PendingDecision>())
   return useCallback(async (
     entry: ProjectRaidEntry,
     outcome: ProjectRaidChangeDecisionOutcome,
@@ -192,7 +204,7 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
     const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision, outcome])
     // A decision whose outcome is unknown is sent again as it was, before any date change or
     // baseline capture runs again, so a lost response neither repeats them nor changes the key.
-    let attempt = pendingDecision.current?.entryKey === entryKey ? pendingDecision.current : undefined
+    let attempt = pendingDecisions.current.get(entryKey)
     if (attempt === undefined) {
       let baselineId: string | undefined
       try {
@@ -221,7 +233,7 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
         },
         context: createMutationRequestContext(),
       }
-      pendingDecision.current = attempt
+      pendingDecisions.current.set(entryKey, attempt)
     }
     let decided: ProjectRaidEntry
     try {
@@ -229,13 +241,13 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
         accessToken, teamId, projectId, entry.id, attempt.request, attempt.context,
       )).entry
     } catch (error) {
-      if (error instanceof ProjectDirectoryApiError && error.status < 500 && pendingDecision.current === attempt) {
-        pendingDecision.current = undefined
+      if (error instanceof ProjectDirectoryApiError && error.status < 500) {
+        forgetDecision(pendingDecisions.current, attempt)
       }
       void refresh()
       throw error
     }
-    if (pendingDecision.current === attempt) pendingDecision.current = undefined
+    forgetDecision(pendingDecisions.current, attempt)
     // The closed entry is shown before the log reloads, so a failed reload cannot leave the
     // request open with its approval controls enabled.
     await mutate<ProjectRaidLogResponse>(

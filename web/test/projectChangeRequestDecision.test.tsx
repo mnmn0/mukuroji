@@ -258,6 +258,21 @@ describe('approving a change request', () => {
     expect(calls.decisions[0]?.body).toMatchObject({ baselineId: 'baseline-1' })
   })
 
+  test('keeps the unknown outcome of one request while another request is decided', async () => {
+    const calls = installFakeApi({}, [503, 200, 200])
+    const first = changeRequest([])
+    const second: ProjectRaidEntry = { ...changeRequest([]), id: 'cr-2' }
+    const decide = captureDecide()
+
+    await expect(decide(first, 'rejected', { replaceBaseline: false, baselineName: '' })).rejects.toThrow()
+    await decide(second, 'rejected', { replaceBaseline: false, baselineName: '' })
+    await decide(first, 'rejected', { replaceBaseline: false, baselineName: '' })
+
+    expect(calls.decisions).toHaveLength(3)
+    expect(calls.decisions[1]?.key).not.toBe(calls.decisions[0]?.key)
+    expect(calls.decisions[2]?.key).toBe(calls.decisions[0]?.key)
+  })
+
   test('shows the closed request even when the log cannot be reloaded', async () => {
     installFakeApi({}, [])
     const entry = changeRequest([])
