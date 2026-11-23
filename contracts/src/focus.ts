@@ -1,4 +1,5 @@
 import type { CanonicalWorkItem } from './work-items'
+import type { PlanningHealth } from './planning'
 
 /** Current schema version of the Focus queue contract. */
 export const FOCUS_SCHEMA_VERSION = 1
@@ -425,6 +426,12 @@ export type FocusUpdateDeadlineTarget =
       /** Planning entity ID of the Initiative. */
       entityId: string
     }
+  | {
+      /** Identifies a Team-level target. */
+      type: 'team'
+      /** Team that submits the update. */
+      teamId: string
+    }
 
 /**
  * Health update whose submission deadline is near or past for the current viewer, who is the
@@ -442,6 +449,31 @@ export type FocusUpdateDeadline = {
   state: FocusUpdateDeadlineState
   /** ISO 8601 deadline of the current cadence occurrence. */
   dueAt: string
+  /** Authorized application-relative link to the target's update page. */
+  deepLink: string
+}
+
+/**
+ * Latest health update that the viewer reviews and has not acknowledged yet. It disappears once
+ * the viewer records the acknowledgement or a newer update replaces it.
+ */
+export type FocusUpdateReview = {
+  /** Stable identifier made from the target and the update version. */
+  id: string
+  /** Project, Team, or Initiative whose update waits for acknowledgement. */
+  target: FocusUpdateDeadlineTarget
+  /** Display title of the target when the server can resolve it. */
+  title?: string
+  /** Immutable version of the latest update. */
+  version: number
+  /** Health reported by the update. */
+  health: PlanningHealth
+  /** Bounded summary text of the update. */
+  summary: string
+  /** Workspace member key of the update author. */
+  authorMemberKey: string
+  /** ISO 8601 publish time of the update. */
+  publishedAt: string
   /** Authorized application-relative link to the target's update page. */
   deepLink: string
 }
@@ -469,6 +501,11 @@ export type FocusQueueResponse = {
    * responses from servers that predate the field.
    */
   updateDeadlines?: FocusUpdateDeadline[]
+  /**
+   * Published health updates that wait for the viewer's acknowledgement as the cadence reviewer,
+   * oldest first. Absent only in responses from servers that predate the field.
+   */
+  updateReviews?: FocusUpdateReview[]
   /** Effective policies referenced by the returned items. */
   effectivePolicies: FocusEffectivePolicy[]
   /** Accessible stored Team overrides used by the policy editor. */

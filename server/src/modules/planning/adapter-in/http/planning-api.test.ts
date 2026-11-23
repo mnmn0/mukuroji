@@ -3889,3 +3889,160 @@ test('rejects a Work Item link when the Work Item changed after authorization', 
   expect(await response.json()).toMatchObject({ code: 'PlanningWorkItemChanged' })
   expect(putCalls).toBe(0)
 })
+
+test('publishes a Team update and lets only the cadence reviewer acknowledge it once', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    const { planning } = configurePlanningAnnotationIdempotency(
+      new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+    )
+    const contributions: unknown[] = []
+    /** Records the contribution a route-supplied transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown> } | undefined) =>
+      transaction && {
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          contributions.push(contribution)
+          return contribution
+        },
+      }
+    const publish = planning.publishUpdate.bind(planning)
+    planning.publishUpdate = (workspaceId, input, author, state, checks, transaction) =>
+      publish(workspaceId, input, author, state, checks, record(transaction))
+    const comment = planning.createUpdateComment.bind(planning)
+    planning.createUpdateComment = (workspaceId, input, author, transaction, checks) =>
+      comment(workspaceId, input, author, record(transaction), checks)
+    const target = { type: 'team', teamId: 'core-team' }
+    /** Configures the Team cadence with the given reviewer at one Planning revision. */
+    const configure = async (reviewerMemberKey: string, expectedRevision: number) =>
+      planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+        target,
+        cadence: {
+          updateOwnerMemberKey: 'demo@example.com',
+          cadence: { unit: 'week', count: 1 },
+          timeZone: 'Asia/Tokyo',
+          nextDueAt: '2026-08-10T00:00:00.000Z',
+          reminderHoursBefore: 24,
+          reviewerMemberKey,
+        },
+        expectedRevision,
+      })
+    const configured = await configure('lead@example.com', 0)
+    expect(configured.status).toBe(200)
+    expect(await configured.json()).toMatchObject({
+      updateTarget: {
+        target,
+        cadence: { reviewerMemberKey: 'lead@example.com' },
+        updateState: 'missing',
+      },
+    })
+
+    const published = await planningApiRequest('/api/planning/updates', 'POST', {
+      target,
+      id: 'team-update-1',
+      health: 'on-track',
+      risk: 'low',
+      summary: 'Shipped the weekly plan.',
+      riskSummary: '',
+      decisionSummary: '',
+      helpNeeded: '',
+      nextAction: 'Plan next week.',
+      evidence: [],
+      expectedRevision: 1,
+    })
+    expect(published.status).toBe(201)
+    expect(await published.json()).toMatchObject({
+      update: { target, version: 1, contextSnapshot: { scope: { teamId: 'core-team' } } },
+    })
+    expect(contributions[0]).toMatchObject({
+      transactWriteItem: {
+        Put: {
+          Item: {
+            eventType: 'planning-update.published',
+            metadata: {
+              planningTargetType: 'team',
+              planningTargetId: 'core-team',
+              planningTargetRecordKey: 'UPDATE_TARGET#TEAM#core-team',
+              teamId: 'core-team',
+              deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+              notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'update-reviewer' }],
+            },
+          },
+        },
+      },
+    })
+
+    const query = '?targetType=team&teamId=core-team'
+    const notReviewer = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-1', body: '確認しました', acknowledgement: true },
+      'team-ack-request-1',
+    )
+    expect(notReviewer.status).toBe(403)
+    expect(await notReviewer.json()).toMatchObject({ code: 'PlanningUpdateAcknowledgementForbidden' })
+    const invalidFlag = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-1', body: '確認しました', acknowledgement: false },
+      'team-ack-request-2',
+    )
+    expect(invalidFlag.status).toBe(400)
+
+    expect((await configure('demo@example.com', 2)).status).toBe(200)
+    const acknowledged = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(acknowledged.status).toBe(201)
+    expect(await acknowledged.json()).toMatchObject({
+      comment: { id: 'team-ack-2', acknowledgement: true, authorMemberKey: 'demo@example.com' },
+    })
+    expect(contributions.at(-1)).toMatchObject({
+      additionalTransactWriteItems: [{
+        Put: {
+          Item: {
+            eventType: 'planning-update.commented',
+            action: 'acknowledged',
+            metadata: {
+              planningTargetType: 'team',
+              notificationTitle: 'Acknowledged: 確認しました',
+              notificationCandidates: [{ memberKey: 'demo@example.com', reason: 'update-author' }],
+            },
+          },
+        },
+      }],
+    })
+    const replay = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(replay.status).toBe(201)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    const duplicate = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-3', body: 'もう一度', acknowledgement: true },
+      'team-ack-request-4',
+    )
+    expect(duplicate.status).toBe(409)
+    expect(await duplicate.json()).toMatchObject({ code: 'PlanningUpdateAlreadyAcknowledged' })
+
+    const history = await planningApiRequest(`/api/planning/updates${query}`)
+    expect(history.status).toBe(200)
+    expect(await history.json()).toMatchObject({
+      updates: [{
+        version: 1,
+        acknowledgement: {
+          memberKey: 'demo@example.com',
+          commentId: 'team-ack-2',
+          acknowledgedAt: '2026-08-07T00:00:00.000Z',
+        },
+      }],
+    })
+  })
+})

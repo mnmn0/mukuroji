@@ -717,6 +717,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   if (normalizedReason === 'update-owner') {
     return t('workspace.inbox.reason.updateOwner')
   }
+  if (normalizedReason === 'update-reviewer') {
+    return t('workspace.inbox.reason.updateReviewer')
+  }
   if (normalizedReason === 'creator') {
     return t('workspace.inbox.reason.creator')
   }

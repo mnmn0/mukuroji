@@ -52,6 +52,33 @@ describe('Focus queue API', () => {
     await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
   })
 
+  test('accepts Team update reviews and rejects an unknown review target', async () => {
+    const review = {
+      id: 'update-review:team:core-team:3',
+      target: { type: 'team', teamId: 'core-team' },
+      version: 3,
+      health: 'on-track',
+      summary: 'On plan.',
+      authorMemberKey: 'lead@example.com',
+      publishedAt: '2026-08-09T09:00:00.000Z',
+      deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+    }
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, updateReviews: [review] }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).updateReviews).toEqual([review])
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({
+        ...focusQueueResponseFixture,
+        updateReviews: [{ ...review, target: { type: 'portfolio', id: 'all' } }],
+      }),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+  })
+
   test('accepts a missing involvement from an older server and rejects an unknown one', async () => {
     const firstSection = focusQueueResponseFixture.sections[0]
     const firstItem = firstSection?.items[0]

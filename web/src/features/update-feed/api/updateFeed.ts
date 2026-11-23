@@ -81,6 +81,7 @@ export function isEntry(value: unknown): value is UpdateFeedEntry {
   const target = value.target
   if (!(target.type === 'project' && typeof target.teamId === 'string' && target.teamId.length > 0 &&
     typeof target.projectId === 'string' && target.projectId.length > 0) &&
+    !(target.type === 'team' && typeof target.teamId === 'string' && target.teamId.length > 0) &&
     !(target.type === 'initiative' && typeof target.entityId === 'string' && target.entityId.length > 0)) return false
   if (value.latestUpdate === undefined) return value.readState === undefined
   const latest = value.latestUpdate
@@ -93,7 +94,11 @@ export function isEntry(value: unknown): value is UpdateFeedEntry {
     isRecord(latest.progressSnapshot) && typeof latest.progressSnapshot.percent === 'number' &&
     Number.isFinite(latest.progressSnapshot.percent) && latest.progressSnapshot.percent >= 0 &&
     latest.progressSnapshot.percent <= 100 && isNonnegativeSafeInteger(latest.progressSnapshot.linkedWorkItemCount) &&
-    isReadState(value.readState)
+    isReadState(value.readState) &&
+    (value.acknowledgement === undefined || isRecord(value.acknowledgement) &&
+      typeof value.acknowledgement.memberKey === 'string' &&
+      typeof value.acknowledgement.acknowledgedAt === 'string' &&
+      Number.isFinite(Date.parse(value.acknowledgement.acknowledgedAt)))
 }
 
 /** Narrows independent reported health. */

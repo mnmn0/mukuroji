@@ -152,8 +152,8 @@ export type NotificationItem = {
   commentId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
-  /** Scheduled health update の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled health update の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled health update の canonical target ID です。 */
   planningTargetId?: string
   /** Current Planning target を再検証する record key です。 */
@@ -1539,8 +1539,8 @@ function readStringArray(value: unknown) {
 }
 
 /** Reads a validated Planning health update target type. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning health update notification kind. */

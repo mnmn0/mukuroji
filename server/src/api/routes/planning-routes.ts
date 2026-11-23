@@ -32,6 +32,7 @@ import {
   type UpdateWorkItemScheduleDependencyInput,
   type WorkItemDependencyEndpoint,
   type WorkItemScheduleDependency,
+  resolvePlanningUpdateReviewerMemberKey,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { AuditEventV1 } from '../../modules/audit/audit'
@@ -209,11 +210,66 @@ function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
       entityId: readPlanningIdentifier(value.entityId, 'Update target Initiative ID'),
     }
   }
+  if (value.type === 'team') {
+    return {
+      type: 'team',
+      teamId: readPlanningIdentifier(value.teamId, 'Update target Team ID'),
+    }
+  }
   throw new PlanningError(
     400,
     'PlanningUpdateTargetInvalid',
     'Planning update target type is invalid.',
   )
+}
+
+/**
+ * Reads the optional acknowledgement flag of an update comment request.
+ *
+ * @param value - Untrusted `acknowledgement` request value.
+ * @returns Whether the request records the reviewer acknowledgement.
+ * @throws PlanningError when the value is neither absent nor `true`.
+ */
+function readPlanningUpdateCommentAcknowledgement(value: unknown): boolean {
+  if (value === undefined) return false
+  if (value === true) return true
+  throw new PlanningError(
+    400,
+    'PlanningUpdateAcknowledgementInvalid',
+    'Planning update acknowledgement must be true when present.',
+  )
+}
+
+/**
+ * Requires the caller to be the current reviewer of an active update cadence.
+ *
+ * The annotation mutation also checks the Planning revision read here, so a reviewer change
+ * committed after this check cancels the acknowledgement.
+ *
+ * @param snapshot - Planning snapshot whose revision guards the annotation mutation.
+ * @param target - Validated update target.
+ * @param memberKey - Authenticated caller member key.
+ * @throws PlanningError when no reviewer is configured or the caller is someone else.
+ */
+function requirePlanningUpdateReviewer(
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+  memberKey: string,
+) {
+  const summary = findPlanningUpdateTargetSummary(snapshot, target)
+  const reviewer = resolvePlanningUpdateReviewerMemberKey(summary?.cadence)
+  if (
+    !summary ||
+    summary.archivedAt ||
+    !reviewer ||
+    reviewer.trim().toLowerCase() !== memberKey.trim().toLowerCase()
+  ) {
+    throw new PlanningError(
+      403,
+      'PlanningUpdateAcknowledgementForbidden',
+      'Only the configured reviewer can acknowledge this Planning update.',
+    )
+  }
 }
 
 /**
@@ -237,10 +293,13 @@ function readPlanningUpdateTargetQuery(
   if (targetType === 'initiative') {
     return readPlanningUpdateTarget({ type: targetType, entityId })
   }
+  if (targetType === 'team') {
+    return readPlanningUpdateTarget({ type: targetType, teamId })
+  }
   throw new PlanningError(
     400,
     'PlanningUpdateTargetInvalid',
-    'targetType must be project or initiative.',
+    'targetType must be project, team, or initiative.',
   )
 }
 
@@ -541,6 +600,8 @@ async function requirePlanningCadenceRecipientTargetPermission(
   if (target.type === 'project') {
     teamId = target.teamId
     projectId = target.projectId
+  } else if (target.type === 'team') {
+    teamId = target.teamId
   } else {
     const entity = snapshot.entities.find((candidate) =>
       candidate.id === target.entityId && candidate.type === 'initiative'
@@ -905,7 +966,7 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
         return evaluateEnterpriseAccess({ permission: 'planning.read', principal: { ...evaluation.principal, systemAdministrator: false, includeWorkspaceRolePermissions: false, directPermissions: [] }, assignments: evaluation.assignments.filter((assignment) => assignment.scope.kind === 'project'), groupMappings: evaluation.groupMappings.filter((mapping) => mapping.scope.kind === 'project'), customRoles: evaluation.snapshot.customRoles, resource: { workspaceId: principal.directoryId, kind: 'project', targetId: scope.projectId, parentTeamId: scope.teamId }, projectScopeOwnerTeamId: resolveProjectAccessTeamId({ projectId: scope.projectId }, directory) }).allowed
       }
       return targets.map(({ target }, index) => {
-        const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId)
+        const scope = target.type === 'initiative' ? snapshot.entities.find((entity) => entity.id === target.entityId) : target
         return { target, projectMember: isProjectMember(scope), watching: watches.has(keys[index] ?? ''), activity: activityByTarget.get(createPlanningUpdatePublicTargetKey(target)) }
       })
     },
@@ -913,6 +974,7 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
     describeTeam: (teamId) => directory.teams.find((team) => team.id === teamId)?.name ?? teamId,
     describeTarget: (summary, snapshot) => {
       const target = summary.target
+      if (target.type === 'team') return directory.teams.find((team) => team.id === target.teamId)?.name ?? target.teamId
       return target.type === 'initiative'
         ? snapshot.entities.find((entity) => entity.id === target.entityId)?.title ?? target.entityId
         : directory.teams.find((team) => team.id === target.teamId)?.projects.find((project) => project.id === target.projectId)?.name ?? target.projectId
@@ -921,7 +983,7 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
     readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
     authorizeTarget: async (summary, snapshot) => {
       const target = summary.target
-      const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative' && !entity.archivedAt)
+      const scope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined = target.type === 'initiative' ? snapshot.entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative' && !entity.archivedAt) : target
       if (!scope || !activeScope(scope)) return undefined
       try {
         await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'viewer', readContext)
@@ -1119,6 +1181,8 @@ function findPlanningUpdateTargetSummary(
       target.type === 'initiative'
         ? candidate.target.type === 'initiative' &&
           candidate.target.entityId === target.entityId
+        : target.type === 'team'
+        ? candidate.target.type === 'team' && candidate.target.teamId === target.teamId
         : candidate.target.type === 'project' &&
           candidate.target.teamId === target.teamId &&
           candidate.target.projectId === target.projectId
@@ -1230,6 +1294,8 @@ function createPlanningUpdateEvidenceScopes(
 ): FileProofingScope[] {
   const envelope = target.type === 'project'
     ? { teamId: target.teamId, projectId: target.projectId }
+    : target.type === 'team'
+    ? { teamId: target.teamId, projectId: undefined }
     : (() => {
         const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
         return {
@@ -1751,6 +1817,8 @@ type PlanningUpdateAnnotationReceiptExpectation = PlanningUpdateAnnotationReceip
       body: string
       /** Validated mentioned members, present only when the comment mentions someone. */
       mentionMemberKeys?: string[]
+      /** Present when the comment records the reviewer acknowledgement. */
+      acknowledgement?: true
     }
   | {
       /** Current-member reaction operation. */
@@ -2197,6 +2265,7 @@ function readStoredPlanningUpdateCadenceMutationReceipt(
 function isPlanningUpdateTarget(value: unknown): value is PlanningUpdateTarget {
   if (!isRecord(value) || typeof value.type !== 'string') return false
   if (value.type === 'initiative') return typeof value.entityId === 'string'
+  if (value.type === 'team') return typeof value.teamId === 'string'
   return value.type === 'project' &&
     typeof value.teamId === 'string' &&
     typeof value.projectId === 'string'
@@ -2487,6 +2556,7 @@ function createPlanningUpdateAnnotationReceiptResponse(
       result.comment.body !== expectation.body ||
       result.comment.updateVersion !== expectation.updateVersion ||
       result.comment.authorMemberKey !== expectation.memberKey ||
+      result.comment.acknowledgement !== expectation.acknowledgement ||
       !planningUpdateTargetsEqual(result.comment.target, expectation.target)
     ) {
       throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
@@ -2624,6 +2694,7 @@ function readStoredPlanningUpdateAnnotationMutationReceipt(
       body: expectation.body,
       authorMemberKey: expectation.memberKey,
       createdAt: readStoredPlanningUpdateAnnotationTimestamp(rawComment.createdAt),
+      ...(expectation.acknowledgement ? { acknowledgement: true as const } : {}),
     }
     if (stableDigestStringify(comment) !== stableDigestStringify(rawComment)) {
       throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
@@ -3389,6 +3460,16 @@ export function registerPlanningRoutes(routeApp: Hono): void {
                 'viewer',
               )]
             : []),
+          // The reviewer acknowledges with an update comment, which needs member access.
+          ...(input.cadence.reviewerMemberKey
+            ? [requirePlanningCadenceRecipientTargetPermission(
+                principal,
+                visibleSnapshot,
+                input.target,
+                input.cadence.reviewerMemberKey,
+                'member',
+              )]
+            : []),
         ])
         : []
       const response = await workItemDependencies.planning.configureUpdateCadence(
@@ -3626,15 +3707,28 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const candidate = await readPlanningJson<Pick<
         CreatePlanningUpdateCommentInput,
-        'body' | 'id' | 'mentionMemberKeys'
+        'acknowledgement' | 'body' | 'id' | 'mentionMemberKeys'
       >>(c.req)
       const id = readPlanningIdentifier(candidate.id, 'Planning update comment ID')
       const body = readPlanningUpdateCommentBody(candidate.body)
       const mentionMemberKeys = readPlanningUpdateCommentMentions(candidate.mentionMemberKeys)
+      const acknowledgement = readPlanningUpdateCommentAcknowledgement(candidate.acknowledgement)
       const snapshot = await workItemDependencies.planning.get(
         principal.directoryId,
         await readPlanningWorkItemState(principal),
       )
+      if (acknowledgement) {
+        requirePlanningUpdateReviewer(
+          snapshot,
+          readPlanningUpdateTargetQuery(
+            c.req.query('targetType'),
+            c.req.query('teamId'),
+            c.req.query('projectId'),
+            c.req.query('entityId'),
+          ),
+          principal.userKey,
+        )
+      }
       return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
         targetType: c.req.query('targetType'),
         teamId: c.req.query('teamId'),
@@ -3651,12 +3745,19 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           id,
           body,
           ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
+          ...(acknowledgement ? { acknowledgement: true as const } : {}),
         }),
         mutate: async ({ target, updateVersion, transaction, authorizationConditionChecks }) => {
           const update = await readPlanningUpdateByVersion(principal.directoryId, target, updateVersion)
           return workItemDependencies.planning.createUpdateComment(
             principal.directoryId,
-            { target, updateVersion, id, body },
+            {
+              target,
+              updateVersion,
+              id,
+              body,
+              ...(acknowledgement ? { acknowledgement: true as const } : {}),
+            },
             principal.userKey,
             update
               ? withPlanningAuditOutbox(

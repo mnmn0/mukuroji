@@ -21,6 +21,8 @@ import type {
   FocusSignalWeights,
   FocusSlaAnchor,
   FocusUpdateDeadline,
+  FocusUpdateDeadlineTarget,
+  FocusUpdateReview,
   PlanningSnapshot,
   ProjectScheduleBaselineEntry,
   WorkItemRelation,
@@ -29,6 +31,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemBaselineEndDelayDays,
   FOCUS_SCHEMA_VERSION,
+  resolvePlanningUpdateReviewerMemberKey,
 } from '@mukuroji/contracts'
 import { createHash } from 'node:crypto'
 import type { NotificationItem } from '../notifications'
@@ -144,6 +147,11 @@ export type CreateFocusQueueInput = {
    * filter. Labels health update deadlines whose Initiative is not in the filtered entity list.
    */
   initiativeTitlesById?: ReadonlyMap<string, string>
+  /**
+   * Update versions that already carry the reviewer acknowledgement, keyed by
+   * {@link createFocusUpdateReviewKey}. Without it, no update reviews are projected.
+   */
+  acknowledgedUpdateKeys?: ReadonlySet<string>
   /**
    * Optional authoritative semantic relation graphs with source occurrence evidence.
    * Relation-only blockers are omitted when this evidence is unavailable.
@@ -417,6 +425,15 @@ export function createFocusQueue(input: CreateFocusQueueInput): FocusQueueRespon
       input.projectTitlesByKey,
       input.initiativeTitlesById,
     ),
+    updateReviews: input.acknowledgedUpdateKeys === undefined
+      ? []
+      : createFocusUpdateReviews(
+          input.planning,
+          viewerMemberKey,
+          input.acknowledgedUpdateKeys,
+          input.projectTitlesByKey,
+          input.initiativeTitlesById,
+        ),
     effectivePolicies,
     teamPolicies,
     ...(userPolicy === undefined ? {} : { userPolicy: cloneFocusPolicy(userPolicy) }),
@@ -1758,6 +1775,79 @@ function readLocalDateStart(date: string, workItem: CanonicalWorkItem): Date | u
 }
 
 /**
+ * Creates the key that identifies one immutable update version for acknowledgement lookups.
+ *
+ * @param target - Project, Team, or Initiative update target.
+ * @param version - Immutable update version.
+ * @returns Unambiguous key.
+ */
+export function createFocusUpdateReviewKey(target: FocusUpdateDeadlineTarget, version: number) {
+  const identity = target.type === 'project'
+    ? ['project', target.teamId, target.projectId]
+    : target.type === 'team'
+    ? ['team', target.teamId]
+    : ['initiative', target.entityId]
+  return JSON.stringify([...identity, version])
+}
+
+/**
+ * Projects latest health updates that wait for the viewer's acknowledgement as cadence reviewer.
+ *
+ * @param planning - Planning snapshot already filtered to readable update targets and content.
+ * @param viewerMemberKey - Normalized current viewer member key.
+ * @param acknowledgedUpdateKeys - Update versions that already have an acknowledgement.
+ * @param projectTitlesByKey - Readable Project titles keyed by Team-qualified Project identity.
+ * @param initiativeTitlesById - Authorized Initiative titles keyed by Planning entity ID.
+ * @returns Pending reviews, oldest publish first.
+ */
+function createFocusUpdateReviews(
+  planning: PlanningSnapshot,
+  viewerMemberKey: string,
+  acknowledgedUpdateKeys: ReadonlySet<string>,
+  projectTitlesByKey: ReadonlyMap<string, string> | undefined,
+  initiativeTitlesById: ReadonlyMap<string, string> | undefined,
+): FocusUpdateReview[] {
+  const entityTitles = new Map(planning.entities.map((entity) => [entity.id, entity.title]))
+  return planning.updateTargets.flatMap((summary): FocusUpdateReview[] => {
+    const latest = summary.latestUpdate
+    const reviewer = resolvePlanningUpdateReviewerMemberKey(summary.cadence)
+    if (latest === undefined || reviewer === undefined || summary.archivedAt !== undefined) return []
+    if (reviewer.trim().toLowerCase() !== viewerMemberKey) return []
+    if (latest.authorMemberKey.trim().toLowerCase() === viewerMemberKey) return []
+    const target: FocusUpdateDeadlineTarget = summary.target.type === 'project'
+      ? { type: 'project', teamId: summary.target.teamId, projectId: summary.target.projectId }
+      : summary.target.type === 'team'
+      ? { type: 'team', teamId: summary.target.teamId }
+      : { type: 'initiative', entityId: summary.target.entityId }
+    const key = createFocusUpdateReviewKey(target, latest.version)
+    if (acknowledgedUpdateKeys.has(key)) return []
+    const search = target.type === 'project'
+      ? new URLSearchParams({ targetType: 'project', teamId: target.teamId, projectId: target.projectId })
+      : target.type === 'team'
+      ? new URLSearchParams({ targetType: 'team', teamId: target.teamId })
+      : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
+    const title = target.type === 'project'
+      ? projectTitlesByKey?.get(createWorkItemKey(target.teamId, target.projectId))
+      : target.type === 'team'
+      ? undefined
+      : entityTitles.get(target.entityId) ?? initiativeTitlesById?.get(target.entityId)
+    return [{
+      id: `update-review:${encodeURIComponent(key)}`,
+      target,
+      ...(title === undefined ? {} : { title }),
+      version: latest.version,
+      health: latest.health,
+      summary: latest.summary,
+      authorMemberKey: latest.authorMemberKey,
+      publishedAt: latest.createdAt,
+      deepLink: `/planning/portfolio?${search.toString()}`,
+    }]
+  }).sort((left, right) =>
+    left.publishedAt.localeCompare(right.publishedAt) || left.id.localeCompare(right.id)
+  )
+}
+
+/**
  * Projects health update deadlines that are near or past for their update owner.
  *
  * @param planning - Planning snapshot already filtered to readable update targets.
@@ -1795,18 +1885,26 @@ function createFocusUpdateDeadlines(
           teamId: target.teamId,
           projectId: target.projectId,
         })
+      : target.type === 'team'
+      ? new URLSearchParams({ targetType: 'team', teamId: target.teamId })
       : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
     const title = target.type === 'project'
       ? projectTitlesByKey?.get(createWorkItemKey(target.teamId, target.projectId))
+      : target.type === 'team'
+      ? undefined
       : entityTitles.get(target.entityId) ?? initiativeTitlesById?.get(target.entityId)
     const targetIdentity = target.type === 'project'
       ? `project:${encodeURIComponent(target.teamId)}:${encodeURIComponent(target.projectId)}`
+      : target.type === 'team'
+      ? `team:${encodeURIComponent(target.teamId)}`
       : `initiative:${encodeURIComponent(target.entityId)}`
     const dueAtText = new Date(dueAt).toISOString()
     return [{
       id: `update-due:${targetIdentity}:${encodeURIComponent(dueAtText)}`,
       target: target.type === 'project'
         ? { type: 'project', teamId: target.teamId, projectId: target.projectId }
+        : target.type === 'team'
+        ? { type: 'team', teamId: target.teamId }
         : { type: 'initiative', entityId: target.entityId },
       ...(title === undefined ? {} : { title }),
       state,

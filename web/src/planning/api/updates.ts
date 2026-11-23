@@ -174,6 +174,7 @@ export function createPlanningUpdateComment(
         body: input.body,
         id: input.id,
         ...(input.mentionMemberKeys?.length ? { mentionMemberKeys: input.mentionMemberKeys } : {}),
+        ...(input.acknowledgement ? { acknowledgement: true } : {}),
       }),
       headers: {
         'Content-Type': 'application/json',
@@ -407,6 +408,8 @@ export function createPlanningUpdateSearchParams(
   if (target.type === 'project') {
     parameters.set('teamId', target.teamId)
     parameters.set('projectId', target.projectId)
+  } else if (target.type === 'team') {
+    parameters.set('teamId', target.teamId)
   } else {
     parameters.set('entityId', target.entityId)
   }

@@ -23,7 +23,6 @@ import {
 } from '../model/baselineDelayEvidence'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
   readPlanningUpdateEvidence,
   readPlanningUpdateEvidenceType,
   submitPlanningUpdateCommentAndReset,
@@ -79,6 +78,8 @@ export type PlanningUpdateLabels = {
   escalation: string
   /** Escalation recipient field label. */
   escalationOwner: string
+  /** Reviewer field label. */
+  reviewer: string
   /** Schedule save action label. */
   saveCadence: string
   /** Schedule clear action label. */
@@ -155,6 +156,8 @@ export type PlanningUpdateLabels = {
   acknowledged: (reviewerMemberKey: string, acknowledgedAt: string) => string
   /** Badge text shown while the configured reviewer has not confirmed an update. */
   acknowledgementPending: (reviewerMemberKey: string) => string
+  /** Reviewer action that records the acknowledgement. */
+  acknowledge: string
   /** History loading-state label. */
   historyLoading: string
   /** History error-state label. */
@@ -524,6 +527,7 @@ export function PlanningUpdateCadenceEditor({
             cadence: { unit: cadenceUnit, count: cadenceCount },
             escalationHoursAfter,
             escalationMemberKey: readOptionalText(data.get('escalationMemberKey')),
+            reviewerMemberKey: readOptionalText(data.get('reviewerMemberKey')),
             nextDueAt,
             reminderHoursBefore,
             timeZone,
@@ -622,6 +626,15 @@ export function PlanningUpdateCadenceEditor({
             defaultValue={cadence?.escalationMemberKey}
             disabled={!onSave || isSaving}
             name="escalationMemberKey"
+          />
+        </label>
+        <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+          {labels.reviewer}
+          <input
+            className="workbench-input h-10 px-3"
+            defaultValue={cadence?.reviewerMemberKey}
+            disabled={!onSave || isSaving}
+            name="reviewerMemberKey"
           />
         </label>
         {!onSave ? (
@@ -1461,6 +1474,7 @@ export function PlanningStatusUpdateLedger({
   updateView,
 }: PlanningStatusUpdateLedgerProps) {
   const onAddComment = collaboration?.onAddComment
+  const onAcknowledge = collaboration?.onAcknowledge
   const collaborationIsPending = collaboration?.isPending ?? false
   const collaborationIsLoading = collaboration?.isLoading ?? false
   const collaborationErrorMessage = collaboration?.errorMessage
@@ -1535,6 +1549,17 @@ export function PlanningStatusUpdateLedger({
                           )
                         : labels.acknowledgementPending(acknowledgement.reviewerMemberKey)}
                     </span>
+                  ) : null}
+                  {acknowledgement && !acknowledgement.acknowledgedAt && onAcknowledge ? (
+                    <button
+                      className="workbench-button-primary min-h-9 px-3"
+                      data-testid="planning-update-acknowledge"
+                      disabled={collaborationIsPending}
+                      onClick={() => void onAcknowledge(update.id)}
+                      type="button"
+                    >
+                      {labels.acknowledge}
+                    </button>
                   ) : null}
                   <span className="workbench-badge">{labels.immutable}</span>
                 </div>
@@ -1795,7 +1820,7 @@ const planningUpdateReactionChoices: readonly string[] = [
   '❤️',
   '🎉',
   '👀',
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
+  '✅',
 ]
 
 /**

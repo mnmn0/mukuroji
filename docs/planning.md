@@ -11,12 +11,13 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `DEPENDENCY#<id>`: directed scheduling dependency
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
 - `LINK#<teamId>#<workItemId>`: Work Item から Cycle / Milestone / Goal への link
-- `UPDATE_TARGET#PROJECT#<teamId>#<projectId>` / `UPDATE_TARGET#INITIATIVE#<entityId>`: update owner、cadence、次回期限、latest version の bounded projection
+- `UPDATE_TARGET#PROJECT#<teamId>#<projectId>` / `UPDATE_TARGET#TEAM#<teamId>` / `UPDATE_TARGET#INITIATIVE#<entityId>`: update owner、cadence、次回期限、latest version の bounded projection
 - `UPDATE#<target>#<zero-padded-version>`: structured health update の append-only 正本
 - `UPDATE_ID#<target>#<updateId>`: target 内で update ID の再利用を防ぐ immutable marker
 - `UPDATE_COMMENT#<target>#<version>#...`: immutable update に対する append-only comment
 - `UPDATE_COMMENT_ID#<target>#<version>#<commentId>`: update version 内で comment ID の再利用を防ぐ immutable marker
 - `UPDATE_REACTION#<target>#<version>#...`: immutable update に対する member reaction
+- `UPDATE_ACK#<target>#<version>`: 確認者の「確認済み」を update version ごとに1つに限る marker（確認のコメントと同じ transaction で書く。ADR 0073）
 - `COLLECTION#<collectionId>`: Work Item を参照する整理用 Collection（[Collections](./collections.md)）。Planning graph の revision fence には含めません
 - `COLLECTION_COUNT`: Workspace の Collection 数。作成・削除と同じ transaction で更新し、上限を強制します
 
@@ -137,7 +138,11 @@ Automation は呼び出し元の権限なしで `/next` と rollover を実行�
 
 Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
 
-## Project / Initiative health update
+## Project / Team / Initiative health update
+
+Team も update target にできます（`{ type: 'team', teamId }`）。Team の update は Team scope の Initiative と同じく Team の member 権限で読み書きし、cadence・リマインダー・期限超過・エスカレーション・Update Feed・Focus の扱いは Project と同じです。根拠や進捗に使うのは Team 直下（Project を持たない）の Work Item と計画だけです。AI の下書きは Team では使えません。
+
+Cadence の `reviewerMemberKey`（省略時は `escalationMemberKey`）が確認者です。確認者は `POST .../comments` に `acknowledgement: true` を付けたコメントで「確認済み」を記録します。route は認可に使った snapshot の cadence で確認者を確かめ、Planning `META` の revision を同じ transaction で条件にするので、確認者の変更と競合した記録は 409 になります。1つの version に記録できるのは1回で、2回目は `409 PlanningUpdateAlreadyAcknowledged` です。履歴 API は version ごとに `acknowledgement` を返し、activity projection が最初の確認を保持して Update Feed と Focus に渡します。確認者は publish の通知候補（reason `update-reviewer`）になり、確認すると作成者に通知（reason `update-author`、「Acknowledged: …」）が届きます。確認者の Focus には、自分以外が公開した最新 version で未確認のものが「確認待ちの進捗報告」として出ます。
 
 ### Update Feed read model (Issue #241, first slice)
 

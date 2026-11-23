@@ -111,6 +111,8 @@ export const updatesMessages = {
   "updates.truncated": "Showing the top {count} targets. Choose another feed to explore other matches.",
   "updates.target.project": "Project",
   "updates.target.initiative": "Initiative",
+  "updates.target.team": "Team",
+  "updates.acknowledged": "Reviewed by {reviewer}",
   "updates.reason.update-owner": "You own the update",
   "updates.reason.latest-author": "You wrote the latest report",
 }

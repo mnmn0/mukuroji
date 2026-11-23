@@ -54,6 +54,7 @@ import {
   type PlanningUpdateCadence,
   type PlanningUpdateCadenceMutationResponse,
   type PlanningUpdateChange,
+  type PlanningUpdateAcknowledgement,
   type PlanningUpdateComment,
   type PlanningUpdateCommentPage,
   type PlanningUpdateContextSnapshot,
@@ -82,6 +83,7 @@ import {
   type WorkItemSchedule,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
+  resolvePlanningUpdateReviewerMemberKey,
 } from '@mukuroji/contracts'
 import {
   createPlanningCycleScheduleRecordKey,
@@ -95,7 +97,7 @@ import {
 import {
   bindPlanningRevisionFenceBarrierDocumentClient,
 } from '../../infrastructure/runtime/planning-revision-fence-barrier'
-import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity } from './planning-update-activity'
+import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity, type PlanningUpdateActivityKind } from './planning-update-activity'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 const META_RECORD_KEY = 'META'
@@ -111,6 +113,7 @@ const UPDATE_ID_RECORD_PREFIX = 'UPDATE_ID#'
 const UPDATE_COMMENT_RECORD_PREFIX = 'UPDATE_COMMENT#'
 const UPDATE_COMMENT_ID_RECORD_PREFIX = 'UPDATE_COMMENT_ID#'
 const UPDATE_REACTION_RECORD_PREFIX = 'UPDATE_REACTION#'
+const UPDATE_ACKNOWLEDGEMENT_RECORD_PREFIX = 'UPDATE_ACK#'
 /**
  * Archived entities that left the live graph. No live graph prefix is a prefix of it, so live
  * reads never return these rows and they never count toward the live capacity.
@@ -315,6 +318,8 @@ export type PlanningUpdatePublishNotificationContext = {
   updateOwnerMemberKey: string
   /** Escalation recipient of the cadence the publish covered, when configured. */
   escalationMemberKey?: string
+  /** Reviewer of the cadence the publish covered, when configured. */
+  reviewerMemberKey?: string
 }
 
 /** Severity order used to decide whether a health change is a degradation. */
@@ -1982,6 +1987,9 @@ abstract class BasePlanningClient implements PlanningClient {
           ...(current.cadence.escalationMemberKey
             ? { escalationMemberKey: current.cadence.escalationMemberKey }
             : {}),
+          ...(resolvePlanningUpdateReviewerMemberKey(current.cadence)
+            ? { reviewerMemberKey: resolvePlanningUpdateReviewerMemberKey(current.cadence) }
+            : {}),
         }
         let next = replacePlanningUpdateTarget(state, updatedTarget)
         if (target.type === 'initiative') {
@@ -2031,6 +2039,9 @@ abstract class BasePlanningClient implements PlanningClient {
       body: readPlanningUpdateCommentBody(input.body),
       authorMemberKey: readOwnerMemberKey(authorMemberKey),
       createdAt: this.now().toISOString(),
+      ...(readPlanningUpdateAcknowledgementFlag(input.acknowledgement)
+        ? { acknowledgement: true as const }
+        : {}),
     }
     const transactionContribution = transaction
       ? await preparePlanningMutationTransactionContribution(transaction, {
@@ -3100,7 +3111,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
   }
 
   /** Records current-version activity in the same synchronous source mutation step. */
-  private recordUpdateActivity(workspaceId: string, annotation: PlanningUpdateComment | PlanningUpdateReaction, kind: 'comment' | 'reaction') {
+  private recordUpdateActivity(workspaceId: string, annotation: PlanningUpdateComment | PlanningUpdateReaction, kind: PlanningUpdateActivityKind) {
     const target = this.states.get(workspaceId)?.updateTargets.find((item) => planningUpdateTargetsEqual(item.target, annotation.target))
     if (!target || target.archivedAt || target.latestVersion !== annotation.updateVersion) return
     const key = `${JSON.stringify(workspaceId)}:${createPlanningUpdateTargetRecordSuffix(annotation.target)}`
@@ -3225,7 +3236,22 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     const candidates = history
       .filter((update) => update.version < beforeVersion)
       .sort((first, second) => second.version - first.version)
-    const updates = candidates.slice(0, limit).map((update) => structuredClone(update))
+    const updates = candidates.slice(0, limit).map((update) => {
+      const copy = structuredClone(update)
+      const acknowledgement = (this.updateComments.get(
+        createPlanningUpdateAnnotationMapKey(workspaceId, target, update.version),
+      ) ?? []).find((comment) => comment.acknowledgement)
+      return acknowledgement
+        ? {
+            ...copy,
+            acknowledgement: {
+              memberKey: acknowledgement.authorMemberKey,
+              commentId: acknowledgement.id,
+              acknowledgedAt: acknowledgement.createdAt,
+            },
+          }
+        : copy
+    })
     const hasMore = candidates.length > updates.length
     const last = updates.at(-1)
     return {
@@ -3265,8 +3291,11 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     if (comments.some((candidate) => candidate.id === comment.id)) {
       throw conflict('PlanningUpdateCommentExists', 'Planning update comment already exists.')
     }
+    if (comment.acknowledgement && comments.some((candidate) => candidate.acknowledgement)) {
+      throw planningUpdateAlreadyAcknowledged()
+    }
     this.updateComments.set(key, [...comments, structuredClone(comment)])
-    this.recordUpdateActivity(workspaceId, comment, 'comment')
+    this.recordUpdateActivity(workspaceId, comment, comment.acknowledgement ? 'acknowledgement' : 'comment')
   }
 
   /** In-memory comments の cursor page を返します。 */
@@ -3472,7 +3501,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   }
 
   /** Prepares a fenced compact activity write without overwriting the canonical target. */
-  private async prepareUpdateActivity(workspaceId: string, target: PlanningUpdateTarget, version: number, activity: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Server-resolved actor. */ memberKey: string; /** Source timestamp. */ at: string }): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  private async prepareUpdateActivity(workspaceId: string, target: PlanningUpdateTarget, version: number, activity: { /** Added annotation kind. */ kind: PlanningUpdateActivityKind; /** Server-resolved actor. */ memberKey: string; /** Source timestamp. */ at: string }): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
     const targetKey = createPlanningUpdateTargetRecordKey(target)
     const recordKey = `${UPDATE_ACTIVITY_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`
     const source = await this.documentClient.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: targetKey }, ConsistentRead: true }))
@@ -3811,7 +3840,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       const decoded = (response.Items ?? []).map((item) =>
         readStoredPlanningUpdate(item, workspaceId)
       )
-      const updates = decoded.slice(0, limit)
+      const pageUpdates = decoded.slice(0, limit)
+      const acknowledgements = await this.readUpdateAcknowledgements(
+        workspaceId,
+        target,
+        pageUpdates.map((update) => update.version),
+      )
+      const updates = pageUpdates.map((update) => {
+        const acknowledgement = acknowledgements.get(update.version)
+        return acknowledgement ? { ...update, acknowledgement } : update
+      })
       const last = updates.at(-1)
       return {
         updates,
@@ -3823,6 +3861,50 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (error instanceof PlanningError) throw persistenceInvalid('Stored Planning update is invalid.')
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Reads the acknowledgement rows of one history page in a single bounded range query.
+   *
+   * @param workspaceId - Owning Workspace partition.
+   * @param target - Canonical update target.
+   * @param versions - Versions on the history page.
+   * @returns Acknowledgements keyed by update version.
+   */
+  private async readUpdateAcknowledgements(
+    workspaceId: string,
+    target: PlanningUpdateTarget,
+    versions: readonly number[],
+  ): Promise<Map<number, PlanningUpdateAcknowledgement>> {
+    const acknowledgements = new Map<number, PlanningUpdateAcknowledgement>()
+    if (versions.length === 0) return acknowledgements
+    const lowest = Math.min(...versions)
+    const highest = Math.max(...versions)
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND recordKey BETWEEN :lowest AND :highest',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':lowest': createPlanningUpdateAcknowledgementRecordKey(target, lowest),
+          ':highest': createPlanningUpdateAcknowledgementRecordKey(target, highest),
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        ConsistentRead: true,
+      }))
+      for (const item of response.Items ?? []) {
+        const { updateVersion, acknowledgement } = readStoredPlanningUpdateAcknowledgement(
+          item,
+          workspaceId,
+          target,
+        )
+        acknowledgements.set(updateVersion, acknowledgement)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return acknowledgements
   }
 
   /** Strongly checks one immutable update row before reading annotations. */
@@ -3869,7 +3951,12 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       createPlanningUpdateCommentIdRow(workspaceId, comment),
       transactionContribution,
       authorizationConditionChecks,
-      { kind: 'comment', memberKey: comment.authorMemberKey, at: comment.createdAt },
+      {
+        kind: comment.acknowledgement ? 'acknowledgement' : 'comment',
+        memberKey: comment.authorMemberKey,
+        at: comment.createdAt,
+      },
+      comment.acknowledgement ? createPlanningUpdateAcknowledgementRow(workspaceId, comment) : undefined,
     )
   }
 
@@ -4085,7 +4172,8 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     uniquenessRow?: Record<string, unknown>,
     transactionContribution?: PlanningMutationTransactionContribution,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
-    activity?: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Authenticated actor. */ memberKey: string; /** Source timestamp. */ at: string },
+    activity?: { /** Added annotation kind. */ kind: PlanningUpdateActivityKind; /** Authenticated actor. */ memberKey: string; /** Source timestamp. */ at: string },
+    acknowledgementRow?: Record<string, unknown>,
   ) {
     await this.ensureTable()
     const activityWrites = activity ? await this.prepareUpdateActivity(workspaceId, target, updateVersion, activity).catch((error: unknown) => { throw toPersistenceError(error) }) : []
@@ -4117,12 +4205,22 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          ...(acknowledgementRow === undefined
+            ? []
+            : [{
+                Put: {
+                  TableName: this.tableName,
+                  Item: acknowledgementRow,
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+                },
+              }]),
           ...activityWrites,
           ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
-      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
+      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + (acknowledgementRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
@@ -4140,7 +4238,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       ) {
         throw conflict(duplicateCode, duplicateMessage)
       }
-      const activityIndex = rowIndex + 1
+      const acknowledgementIndex = rowIndex + 1
+      if (acknowledgementRow !== undefined && isPlanningTransactionConditionalFailureAt(error, acknowledgementIndex)) {
+        throw planningUpdateAlreadyAcknowledged()
+      }
+      const activityIndex = acknowledgementIndex + (acknowledgementRow === undefined ? 0 : 1)
       if (activityWrites.some((_, index) => isPlanningTransactionConditionalFailureAt(error, activityIndex + index))) throw conflict('PlanningUpdateActivityConflict', 'Update activity or the latest version changed. Retry with current authorization.')
       const transactionContributionIndex = activityIndex + activityWrites.length
       if (
@@ -4518,6 +4620,12 @@ function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
       entityId: readIdentifier(value.entityId, 'Update target Initiative ID'),
     }
   }
+  if (value.type === 'team') {
+    return {
+      type: 'team',
+      teamId: readIdentifier(value.teamId, 'Update target Team ID'),
+    }
+  }
   throw invalid('PlanningUpdateTargetInvalid', 'Planning update target type is invalid.')
 }
 
@@ -4528,8 +4636,9 @@ function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
  * @returns Target-local identity string.
  */
 function createPlanningUpdateTargetIdentity(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `project\u0000${target.teamId}\u0000${target.projectId}`
+  if (target.type === 'project') return `project\u0000${target.teamId}\u0000${target.projectId}`
+  return target.type === 'team'
+    ? `team\u0000${target.teamId}`
     : `initiative\u0000${target.entityId}`
 }
 
@@ -4657,6 +4766,9 @@ function readPlanningUpdateCadence(value: unknown): PlanningUpdateCadence {
           escalationMemberKey: readOwnerMemberKey(value.escalationMemberKey),
         }
       : {}),
+    ...(value.reviewerMemberKey === undefined
+      ? {}
+      : { reviewerMemberKey: readOwnerMemberKey(value.reviewerMemberKey) }),
   }
 }
 
@@ -5684,6 +5796,7 @@ function createPlanningUpdateVisibilityEnvelope(
   if (target.type === 'project') {
     return { teamId: target.teamId, projectId: target.projectId }
   }
+  if (target.type === 'team') return { teamId: target.teamId }
   const initiative = requireActiveEntity(state, target.entityId)
   return {
     ...(initiative.teamId === undefined ? {} : { teamId: initiative.teamId }),
@@ -6783,7 +6896,8 @@ function readPlanningRows(
         row.entryType === 'planning-update-id' ||
         row.entryType === 'planning-update-comment' ||
         row.entryType === 'planning-update-comment-id' ||
-        row.entryType === 'planning-update-reaction'
+        row.entryType === 'planning-update-reaction' ||
+        row.entryType === 'planning-update-acknowledgement'
       ) {
         continue
       } else {
@@ -8510,8 +8624,11 @@ function createLinkRecordKey(teamId: string, workItemId: string) {
  * @returns DynamoDB-safe target suffix.
  */
 function createPlanningUpdateTargetRecordSuffix(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `PROJECT#${encodeRecordKeyIdentifier(target.teamId)}#${encodeRecordKeyIdentifier(target.projectId)}`
+  if (target.type === 'project') {
+    return `PROJECT#${encodeRecordKeyIdentifier(target.teamId)}#${encodeRecordKeyIdentifier(target.projectId)}`
+  }
+  return target.type === 'team'
+    ? `TEAM#${encodeRecordKeyIdentifier(target.teamId)}`
     : `INITIATIVE#${encodeRecordKeyIdentifier(target.entityId)}`
 }
 
@@ -8529,6 +8646,17 @@ function requirePublishedUpdateNotification(
     throw new PlanningError(503, 'PlanningUpdateUnavailable', 'Published update is unavailable.')
   }
   return { ...value }
+}
+
+/**
+ * Returns the identifier that notification metadata stores for one update target.
+ *
+ * @param target - Project, Team, or Initiative update target.
+ * @returns Project ID, Team ID, or Initiative entity ID.
+ */
+export function readPlanningUpdateTargetId(target: PlanningUpdateTarget): string {
+  if (target.type === 'project') return target.projectId
+  return target.type === 'team' ? target.teamId : target.entityId
 }
 
 /**
@@ -8686,6 +8814,123 @@ function createPlanningUpdateCommentRecordKey(
 }
 
 /**
+ * Reads the optional acknowledgement flag of an update comment.
+ *
+ * @param value - Untrusted `acknowledgement` value.
+ * @returns Whether the comment records the reviewer acknowledgement.
+ * @throws PlanningError when the value is neither absent nor `true`.
+ */
+function readPlanningUpdateAcknowledgementFlag(value: unknown): boolean {
+  if (value === undefined) return false
+  if (value === true) return true
+  throw invalid(
+    'PlanningUpdateAcknowledgementInvalid',
+    'Planning update acknowledgement must be true when present.',
+  )
+}
+
+/**
+ * Creates the conflict raised when a version already has its reviewer acknowledgement.
+ *
+ * @returns Planning conflict error.
+ */
+function planningUpdateAlreadyAcknowledged() {
+  return conflict(
+    'PlanningUpdateAlreadyAcknowledged',
+    'This Planning update version is already acknowledged.',
+  )
+}
+
+/**
+ * Creates the target-bound sort-key prefix of acknowledgement rows.
+ *
+ * @param target - Canonical update target.
+ * @returns DynamoDB sort-key prefix.
+ */
+function createPlanningUpdateAcknowledgementRecordPrefix(target: PlanningUpdateTarget) {
+  return readRecordKey(
+    `${UPDATE_ACKNOWLEDGEMENT_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}#`,
+    'Planning update acknowledgement record prefix',
+  )
+}
+
+/**
+ * Creates the one acknowledgement key allowed for an immutable update version.
+ *
+ * @param target - Canonical update target.
+ * @param updateVersion - Immutable target-local version.
+ * @returns Zero-padded DynamoDB sort key.
+ */
+function createPlanningUpdateAcknowledgementRecordKey(
+  target: PlanningUpdateTarget,
+  updateVersion: number,
+) {
+  return readRecordKey(
+    `${createPlanningUpdateAcknowledgementRecordPrefix(target)}` +
+      `${String(readPlanningUpdateVersion(updateVersion)).padStart(UPDATE_VERSION_WIDTH, '0')}`,
+    'Planning update acknowledgement record key',
+  )
+}
+
+/**
+ * Creates the acknowledgement row written atomically with its acknowledgement comment.
+ *
+ * @param workspaceId - Owning Workspace partition.
+ * @param comment - Validated acknowledgement comment.
+ * @returns DynamoDB row that is unique per immutable update version.
+ */
+function createPlanningUpdateAcknowledgementRow(
+  workspaceId: string,
+  comment: PlanningUpdateComment,
+) {
+  const row = {
+    workspaceId,
+    recordKey: createPlanningUpdateAcknowledgementRecordKey(comment.target, comment.updateVersion),
+    entryType: 'planning-update-acknowledgement',
+    target: structuredClone(comment.target),
+    updateVersion: comment.updateVersion,
+    memberKey: comment.authorMemberKey,
+    commentId: comment.id,
+    acknowledgedAt: comment.createdAt,
+  }
+  requirePlanningAnnotationRowSize(row)
+  return row
+}
+
+/**
+ * Decodes one acknowledgement row.
+ *
+ * @param row - Untrusted DynamoDB row.
+ * @param workspaceId - Expected Workspace partition.
+ * @param target - Expected update target.
+ * @returns Version and validated acknowledgement.
+ */
+function readStoredPlanningUpdateAcknowledgement(
+  row: Record<string, unknown>,
+  workspaceId: string,
+  target: PlanningUpdateTarget,
+): { updateVersion: number, acknowledgement: PlanningUpdateAcknowledgement } {
+  if (row.workspaceId !== workspaceId || row.entryType !== 'planning-update-acknowledgement') {
+    throw persistenceInvalid('Planning update acknowledgement row scope is invalid.')
+  }
+  const updateVersion = readPlanningUpdateVersion(row.updateVersion)
+  if (
+    !planningUpdateTargetsEqual(readPlanningUpdateTarget(row.target), target) ||
+    row.recordKey !== createPlanningUpdateAcknowledgementRecordKey(target, updateVersion)
+  ) {
+    throw persistenceInvalid('Planning update acknowledgement row key is invalid.')
+  }
+  return {
+    updateVersion,
+    acknowledgement: {
+      memberKey: readOwnerMemberKey(row.memberKey),
+      commentId: readIdentifier(row.commentId, 'Planning update comment ID'),
+      acknowledgedAt: readTimestamp(row.acknowledgedAt, 'Planning update acknowledgement timestamp'),
+    },
+  }
+}
+
+/**
  * Creates and size-checks one append-only comment row.
  *
  * @param workspaceId - Owning Workspace partition.
@@ -8769,6 +9014,9 @@ function readStoredPlanningUpdateComment(
     body: readPlanningUpdateCommentBody(row.body),
     authorMemberKey: readOwnerMemberKey(row.authorMemberKey),
     createdAt: readTimestamp(row.createdAt, 'Planning update comment timestamp'),
+    ...(readPlanningUpdateAcknowledgementFlag(row.acknowledgement)
+      ? { acknowledgement: true as const }
+      : {}),
   }
   if (row.recordKey !== createPlanningUpdateCommentRecordKey(comment)) {
     throw persistenceInvalid('Planning update comment row key is invalid.')

@@ -1,5 +1,5 @@
 import type { PlanningSnapshot, PlanningUpdateTarget, PlanningUpdateTargetSummary, UpdateFeedEntry, UpdateFeedFilters, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
-import { PlanningError, type PlanningUpdateActivity } from '../../planning'
+import { PlanningError, readPlanningUpdateTargetId, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
@@ -138,7 +138,7 @@ export async function readUpdateFeedProjection(reader: UpdateFeedReader): Promis
     if (recent(activity?.reactionAt, now, 7)) attentionReasons.push('recent-reaction')
     const latest = summary.latestUpdate
     const entry: UpdateFeedEntry = {
-      title: reader.describeTarget?.(summary, snapshot) ?? (summary.target.type === 'project' ? summary.target.projectId : summary.target.entityId),
+      title: reader.describeTarget?.(summary, snapshot) ?? readPlanningUpdateTargetId(summary.target),
       target: summary.target,
       health: latest?.health ?? 'unknown',
       updateState: summary.updateState,
@@ -150,6 +150,7 @@ export async function readUpdateFeedProjection(reader: UpdateFeedReader): Promis
       } } : {}),
       reasons,
       relevance: (reasons.includes('update-owner') ? reader.expandedSignals ? 8 : 2 : 0) + (reasons.includes('project-member') ? 4 : 0) + (reasons.includes('watching') ? 3 : 0) + (reasons.includes('recent-interaction') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
+      ...(latest && activity?.acknowledgement ? { acknowledgement: { memberKey: activity.acknowledgement.memberKey, acknowledgedAt: activity.acknowledgement.at } } : {}),
       ...(reader.expandedSignals ? { attention: { score: (attentionReasons.includes('recent-comment') ? 2 : 0) + (attentionReasons.includes('recent-reaction') ? 1 : 0), reasons: attentionReasons } } : {}),
     }
     const key = targetKey(entry)
@@ -163,7 +164,7 @@ export async function readUpdateFeedProjection(reader: UpdateFeedReader): Promis
     if (!summary) throw new PlanningError(409, 'UpdateFeedProjectionMismatch', 'Feed projection changed.')
     let scope = scopes.get(key)
     if (!scope) {
-      scope = reader.filterScope?.(summary, snapshot) ?? Promise.resolve({ portfolioIds: [], ...(summary.target.type === 'project' ? summary.target : {}) })
+      scope = reader.filterScope?.(summary, snapshot) ?? Promise.resolve({ portfolioIds: [], ...(summary.target.type === 'initiative' ? {} : summary.target) })
       scopes.set(key, scope)
     }
     return scope
@@ -243,7 +244,7 @@ function matchesView(entry: UpdateFeedEntry, view: UpdateFeedView): boolean {
 /** Creates an unambiguous identity without exposing physical storage keys. */
 function targetKey(entry: Pick<UpdateFeedEntry, 'target'>): string {
   const target = entry.target
-  return JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId] : ['initiative', target.entityId])
+  return JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId] : target.type === 'team' ? ['team', target.teamId] : ['initiative', target.entityId])
 }
 
 /** Compares stable text without locale-dependent ordering. */

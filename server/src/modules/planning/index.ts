@@ -6,6 +6,7 @@ export {
   findWorkItemDependencyScheduleConflicts,
   createPlanningUpdateProjectTargetRecordKey,
   createPlanningUpdateTargetRecordKey,
+  readPlanningUpdateTargetId,
   isPlanningHealthDegraded,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,

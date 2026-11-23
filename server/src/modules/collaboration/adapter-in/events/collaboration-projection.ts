@@ -143,8 +143,8 @@ export type AuditProjectionEvent = {
   daysUntilDue?: number
   /** Work Item `reopenedAt` an escalation was scanned under; absent before any reopening. */
   workItemReopenedAt?: string
-  /** Scheduled Planning event の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled Planning event の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled Planning event の canonical target ID です。 */
   planningTargetId?: string
   /** Scheduled Planning event が再検証する UPDATE_TARGET record key です。 */
@@ -411,8 +411,8 @@ export type CurrentPlanningUpdateNotificationScope = {
   exists: boolean
   /** Current target が archived / disabled かどうかです。 */
   archived: boolean
-  /** Current Project / Initiative target type です。 */
-  targetType?: 'project' | 'initiative'
+  /** Current Project / Team / Initiative target type です。 */
+  targetType?: 'project' | 'initiative' | 'team'
   /** Current canonical target ID です。 */
   targetId?: string
   /** Current target record key です。 */
@@ -1194,6 +1194,11 @@ export function createSubscribedWatcherScopes(
             type: 'initiative',
             entityId: event.planningTargetId,
           })
+      : event.planningTargetType === 'team' && event.planningTargetId
+        ? createPlanningUpdatePublicTargetKey({
+            type: 'team',
+            teamId: event.planningTargetId,
+          })
           : event.teamId && event.projectId
             ? createPlanningUpdatePublicTargetKey({
                 type: 'project',
@@ -1202,6 +1207,7 @@ export function createSubscribedWatcherScopes(
               })
           : event.entityId && (
               event.entityId.startsWith('project/') ||
+              event.entityId.startsWith('team/') ||
               event.entityId.startsWith('initiative/')
             )
             ? event.entityId
@@ -2960,8 +2966,10 @@ async function readCurrentPlanningUpdateScope(
     throw new Error('Planning notification target row is invalid.')
   }
   const targetType = record.target.type
-  const targetId = targetType === 'project'
+  const targetId = record.target.type === 'project'
     ? record.target.projectId
+    : record.target.type === 'team'
+    ? record.target.teamId
     : record.target.entityId
   const base = {
     checked: true,
@@ -2986,6 +2994,9 @@ async function readCurrentPlanningUpdateScope(
       teamId: record.target.teamId,
       projectId: record.target.projectId,
     }
+  }
+  if (record.target.type === 'team') {
+    return { ...base, teamId: record.target.teamId }
   }
 
   const initiativeRecordKey = `ENTITY#${encodeURIComponent(record.target.entityId)}`
@@ -3109,8 +3120,8 @@ function planningNotificationKindFromEventType(
 }
 
 /** Reads a validated Planning target type from audit metadata. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning notification kind from audit metadata. */

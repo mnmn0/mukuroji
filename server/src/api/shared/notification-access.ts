@@ -11,7 +11,11 @@ import { NotificationError, type NotificationItem } from '../../modules/notifica
 import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
-import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
+import {
+  createPlanningUpdateTargetRecordKey,
+  readPlanningUpdateTargetId,
+  type PlanningAuthorizationState,
+} from '../../modules/planning'
 import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../../modules/analytics'
 import {
   DocumentError,
@@ -105,24 +109,11 @@ function resolveCurrentPlanningNotificationScope(
     return undefined
   }
 
-  const updateTarget = state.updateTargets.find((candidate) => {
-    if (candidate.target.type !== notification.planningTargetType) return false
-    if (candidate.target.type === 'project') {
-      return candidate.target.projectId === notification.planningTargetId &&
-        notification.planningTargetRecordKey === [
-          'UPDATE_TARGET',
-          'PROJECT',
-          encodeURIComponent(candidate.target.teamId),
-          encodeURIComponent(candidate.target.projectId),
-        ].join('#')
-    }
-    return candidate.target.entityId === notification.planningTargetId &&
-      notification.planningTargetRecordKey === [
-        'UPDATE_TARGET',
-        'INITIATIVE',
-        encodeURIComponent(candidate.target.entityId),
-      ].join('#')
-  })
+  const updateTarget = state.updateTargets.find((candidate) =>
+    candidate.target.type === notification.planningTargetType &&
+    readPlanningUpdateTargetId(candidate.target) === notification.planningTargetId &&
+    createPlanningUpdateTargetRecordKey(candidate.target) === notification.planningTargetRecordKey
+  )
   if (!updateTarget || updateTarget.archivedAt || !updateTarget.cadence) {
     return undefined
   }
@@ -146,6 +137,14 @@ function resolveCurrentPlanningNotificationScope(
       planningUpdateTargetKey,
       teamId: currentTarget.teamId,
       projectId: currentTarget.projectId,
+    }
+  }
+  if (currentTarget.type === 'team') {
+    return {
+      currentRecipientMatches,
+      notificationKind: kind,
+      planningUpdateTargetKey,
+      teamId: currentTarget.teamId,
     }
   }
 
@@ -194,9 +193,7 @@ function resolveCurrentPlanningActivityScope(
   }
   const updateTarget = state.updateTargets.find((candidate) =>
     candidate.target.type === notification.planningTargetType &&
-    (candidate.target.type === 'project'
-      ? candidate.target.projectId
-      : candidate.target.entityId) === notification.planningTargetId &&
+    readPlanningUpdateTargetId(candidate.target) === notification.planningTargetId &&
     createPlanningUpdateTargetRecordKey(candidate.target) === notification.planningTargetRecordKey
   )
   if (!updateTarget || updateTarget.archivedAt) return undefined
@@ -208,6 +205,9 @@ function resolveCurrentPlanningActivityScope(
       teamId: currentTarget.teamId,
       projectId: currentTarget.projectId,
     }
+  }
+  if (currentTarget.type === 'team') {
+    return { planningUpdateTargetKey, teamId: currentTarget.teamId }
   }
   const initiative = state.entities.find((entity) =>
     entity.id === currentTarget.entityId && entity.type === 'initiative'

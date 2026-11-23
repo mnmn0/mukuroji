@@ -111,6 +111,8 @@ export const updatesMessages = {
   "updates.truncated": "上位 {count} 件を表示しています。ほかの対象は別のフィードから確認してください。",
   "updates.target.project": "Project",
   "updates.target.initiative": "Initiative",
+  "updates.target.team": "Team",
+  "updates.acknowledged": "{reviewer} が確認済み",
   "updates.reason.update-owner": "自分が更新担当",
   "updates.reason.latest-author": "自分が最新報告を作成",
 }

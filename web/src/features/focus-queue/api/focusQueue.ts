@@ -22,6 +22,7 @@ import {
   type FocusSignalSource,
   type FocusSignalType,
   type FocusUpdateDeadline,
+  type FocusUpdateReview,
   type UpdateFocusPolicyInput,
   type UpdateFocusPolicyResponse,
   type UpdateFocusSnoozeInput,
@@ -258,6 +259,10 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
       value.updateDeadlines !== undefined &&
       (!Array.isArray(value.updateDeadlines) || !value.updateDeadlines.every(isFocusUpdateDeadline))
     ) ||
+    (
+      value.updateReviews !== undefined &&
+      (!Array.isArray(value.updateReviews) || !value.updateReviews.every(isFocusUpdateReview))
+    ) ||
     !Array.isArray(value.effectivePolicies) ||
     !value.effectivePolicies.every(isFocusEffectivePolicy) ||
     !Array.isArray(value.teamPolicies) ||
@@ -281,14 +286,36 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
   )
 }
 
+/** Returns whether an unknown value is one Project, Team, or Initiative update target. */
+function isFocusUpdateDeadlineTarget(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  if (value.type === 'project') {
+    return isNonemptyTrimmedString(value.teamId) && isNonemptyTrimmedString(value.projectId)
+  }
+  if (value.type === 'team') return isNonemptyTrimmedString(value.teamId)
+  return value.type === 'initiative' && isNonemptyTrimmedString(value.entityId)
+}
+
+/** Returns whether an unknown value is one published update waiting for the viewer's review. */
+function isFocusUpdateReview(value: unknown): value is FocusUpdateReview {
+  return isRecord(value) &&
+    isFocusUpdateDeadlineTarget(value.target) &&
+    isNonemptyTrimmedString(value.id) &&
+    (value.title === undefined || typeof value.title === 'string') &&
+    isPositiveSafeInteger(value.version) &&
+    (value.health === 'unknown' || value.health === 'on-track' ||
+      value.health === 'at-risk' || value.health === 'off-track') &&
+    typeof value.summary === 'string' &&
+    typeof value.authorMemberKey === 'string' &&
+    isCanonicalUtcTimestamp(value.publishedAt) &&
+    typeof value.deepLink === 'string' &&
+    isSafeApplicationPath(value.deepLink)
+}
+
 /** Returns whether an unknown value is one health update deadline owned by the viewer. */
 function isFocusUpdateDeadline(value: unknown): value is FocusUpdateDeadline {
-  if (!isRecord(value) || !isRecord(value.target)) return false
-  const target = value.target
-  const validTarget = target.type === 'project'
-    ? isNonemptyTrimmedString(target.teamId) && isNonemptyTrimmedString(target.projectId)
-    : target.type === 'initiative' && isNonemptyTrimmedString(target.entityId)
-  return validTarget &&
+  if (!isRecord(value)) return false
+  return isFocusUpdateDeadlineTarget(value.target) &&
     isNonemptyTrimmedString(value.id) &&
     (value.title === undefined || typeof value.title === 'string') &&
     (value.state === 'due-soon' || value.state === 'overdue') &&

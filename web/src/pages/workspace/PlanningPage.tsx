@@ -6,6 +6,7 @@ import type {
   PlanningUpdateTarget,
   PlanningUpdateTargetSummary,
 } from '@mukuroji/contracts'
+import { resolvePlanningUpdateReviewerMemberKey } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
@@ -229,11 +230,11 @@ export function PlanningPage() {
     updateHistory.data?.updates,
     Boolean(user && !currentUserError),
   )
-  // Derive reviewer confirmation only from loaded reactions so loading never reads as unconfirmed.
-  const selectedUpdateReviewerMemberKey = selectedUpdateTarget && updateAnnotations.data
-    ? snapshot?.updateTargets.find((summary) =>
+  // Acknowledgements arrive with the history page, so a pending badge never precedes its data.
+  const selectedUpdateReviewerMemberKey = selectedUpdateTarget
+    ? resolvePlanningUpdateReviewerMemberKey(snapshot?.updateTargets.find((summary) =>
         planningUpdateTargetsAreEqual(summary.target, selectedUpdateTarget)
-      )?.cadence?.escalationMemberKey
+      )?.cadence)
     : undefined
   const updateAnnotationViews = useMemo(
     () => createPlanningUpdateAnnotationViews(
@@ -572,6 +573,55 @@ export function PlanningPage() {
     }
   }
 
+  /**
+   * Records the current viewer's reviewer acknowledgement as an acknowledgement comment.
+   *
+   * @param updateId - Immutable update that the viewer acknowledges.
+   */
+  const acknowledgePlanningUpdate = async (updateId: string) => {
+    const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
+    if (!accessToken || !selectedUpdateTarget || !update || update.acknowledgement) return
+    const input = {
+      acknowledgement: true as const,
+      body: t('planning.updateHistory.acknowledgeComment'),
+      id: createPlanningClientId('planning-update-acknowledgement'),
+      target: selectedUpdateTarget,
+      updateVersion: update.version,
+    }
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      await mutationRequestRunner.run(
+        `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:acknowledge`,
+        JSON.stringify(input),
+        (context) => createPlanningUpdateComment(accessToken, input, context),
+      )
+      try {
+        await Promise.all([
+          updateHistory.mutate(),
+          updateAnnotations.loadVersion(update.version),
+        ])
+        await updateAnnotations.mutate()
+      } catch {
+        // SWR preserves the history and annotation query errors for the recoverable alerts.
+      }
+    } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) clearAuthSession()
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
   const canAnnotateSelectedUpdate = Boolean(
     canMutatePlanningContent &&
     selectedUpdateTarget &&
@@ -598,6 +648,11 @@ export function PlanningPage() {
           isPending: isUpdateCollaborationPending,
           onAddComment: canAnnotateSelectedUpdate
             ? submitPlanningUpdateComment
+            : undefined,
+          onAcknowledge: canAnnotateSelectedUpdate &&
+            selectedUpdateReviewerMemberKey !== undefined &&
+            selectedUpdateReviewerMemberKey.trim().toLowerCase() === currentUserProjectKey
+            ? acknowledgePlanningUpdate
             : undefined,
           onExport: exportPlanningUpdateHistory,
           onRetry: updateWatch.error || updateAnnotations.error
@@ -1116,6 +1171,10 @@ function resolveSelectedPlanningUpdateTarget(
       ? { type: 'project', projectId, teamId }
       : undefined
   }
+  if (targetType === 'team') {
+    const teamId = searchParams.get('teamId')?.trim()
+    return teamId ? { type: 'team', teamId } : undefined
+  }
   const entityId = searchParams.get('entityId')?.trim() || selectedEntityId
   if (targetType === 'initiative' && entityId) {
     return { type: 'initiative', entityId }
@@ -1189,7 +1248,7 @@ function createPlanningUpdateTargetDetails(
  * @param comments - Loaded append-only comments across the visible versions.
  * @param reactions - Loaded member reactions across the visible versions.
  * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
- * @param reviewerMemberKey - Cadence escalation member whose confirmation reaction marks an update reviewed.
+ * @param reviewerMemberKey - Cadence reviewer who has not acknowledged an update yet.
  * @returns Comment, reaction, and reviewer confirmation maps keyed by immutable update ID.
  */
 function createPlanningUpdateAnnotationViews(
@@ -1230,11 +1289,7 @@ function createPlanningUpdateAnnotationViews(
       reaction,
       reactedByViewer: aggregate.reactedByViewer,
     }))
-    const acknowledgement = derivePlanningUpdateAcknowledgement(
-      reactions,
-      update.version,
-      reviewerMemberKey,
-    )
+    const acknowledgement = derivePlanningUpdateAcknowledgement(update, reviewerMemberKey)
     if (acknowledgement) acknowledgementsByUpdateId[update.id] = acknowledgement
   }
 
@@ -1269,6 +1324,17 @@ function createPlanningUpdateTargetSummaryView(
       title: project.name,
     }
   }
+  if (target.type === 'team') {
+    const team = teams.find((candidate) => candidate.id === target.teamId)
+    if (!team) return undefined
+    return {
+      health: updateSummary?.latestUpdate?.health ?? 'unknown',
+      ownerMemberKey: updateSummary?.cadence?.updateOwnerMemberKey ?? '',
+      progress: updateSummary?.latestUpdate?.progressSnapshot.percent ?? 0,
+      target,
+      title: team.name,
+    }
+  }
   const entity = snapshot.entities.find((candidate) =>
     candidate.type === 'initiative' && candidate.id === target.entityId
   )
@@ -1299,6 +1365,8 @@ function createPlanningUpdateTargetPath(
   if (target.type === 'project') {
     parameters.set('teamId', target.teamId)
     parameters.set('projectId', target.projectId)
+  } else if (target.type === 'team') {
+    parameters.set('teamId', target.teamId)
   } else {
     parameters.set('entityId', target.entityId)
   }

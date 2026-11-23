@@ -175,6 +175,12 @@ export type PlanningUpdateTargetReference =
     /** Canonical Planning entity ID です。 */
     entityId: string
   }
+  | {
+    /** Directory Team target です。 */
+    type: 'team'
+    /** Canonical Team ID です。 */
+    teamId: string
+  }
 
 /** Planning health update cadence の persisted projection です。 */
 export type PlanningUpdateNotificationCadence = {
@@ -1595,6 +1601,16 @@ async function readPlanningScheduledTargetScope(
       maxPages,
     )
   }
+  if (record.target.type === 'team') {
+    return await readCurrentScheduledTeamScope(
+      options,
+      record.workspaceId,
+      record.target.teamId,
+      activeProjectsByWorkspace,
+      pageSize,
+      maxPages,
+    )
+  }
 
   const entityRecordKey = `ENTITY#${encodePlanningRecordKeySegment(record.target.entityId)}`
   const response = await options.documentClient.send(new GetCommand({
@@ -1679,6 +1695,54 @@ async function readCurrentScheduledProjectScope(
 }
 
 /**
+ * Reads the current Team directory row through the shared Workspace directory cache.
+ *
+ * @param options - Schedule dependencies and table names.
+ * @param workspaceId - Canonical Workspace ID.
+ * @param teamId - Expected current Team ID.
+ * @param activeDirectoryByWorkspace - Workspace-scoped current Team / Project lookup cache.
+ * @param pageSize - Directory query page size.
+ * @param maxPages - Directory query safety bound.
+ * @returns Current active Team scope.
+ */
+async function readCurrentScheduledTeamScope(
+  options: NotificationScheduleRunOptions,
+  workspaceId: string,
+  teamId: string,
+  activeDirectoryByWorkspace: Map<string, Promise<ReadonlySet<string>>>,
+  pageSize: number,
+  maxPages: number,
+): Promise<PlanningScheduledTargetScope> {
+  const tableName = requireText(
+    options.projectDirectoryTableName,
+    'Project Directory table name for Planning notification schedule',
+  )
+  let activeDirectory = activeDirectoryByWorkspace.get(workspaceId)
+  if (!activeDirectory) {
+    activeDirectory = readActiveScheduledProjectKeys(
+      options,
+      tableName,
+      workspaceId,
+      pageSize,
+      maxPages,
+    )
+    activeDirectoryByWorkspace.set(workspaceId, activeDirectory)
+  }
+  const active = (await activeDirectory).has(createScheduledTeamKey(teamId))
+  return active ? { active: true, teamId } : { active: false }
+}
+
+/**
+ * Creates the directory cache key of one active Team, distinct from Team / Project keys.
+ *
+ * @param teamId - Canonical Team ID.
+ * @returns Cache key that cannot collide with a `teamId\0projectId` key.
+ */
+function createScheduledTeamKey(teamId: string) {
+  return `\0team\0${teamId}`
+}
+
+/**
  * Reads every current Project directory page once for a schedule Workspace.
  *
  * @param options - Schedule dependencies.
@@ -1714,6 +1778,15 @@ async function readActiveScheduledProjectKeys(
     }))
     pages += 1
     for (const item of response.Items ?? []) {
+      if (item.entryType === 'team') {
+        const teamId = requireText(item.teamId, 'Team directory team ID')
+        if (item.archivedAt !== undefined) {
+          requireTimestamp(item.archivedAt, 'Team directory archived timestamp')
+          continue
+        }
+        activeProjects.add(createScheduledTeamKey(teamId))
+        continue
+      }
       if (item.entryType !== 'project') continue
       const teamId = requireText(item.teamId, 'Project directory team ID')
       const projectId = requireText(item.projectId, 'Project directory project ID')
@@ -1745,6 +1818,8 @@ function createPlanningScheduledNotificationAuditEvent(
 ) {
   const targetId = candidate.target.type === 'project'
     ? candidate.target.projectId
+    : candidate.target.type === 'team'
+    ? candidate.target.teamId
     : candidate.target.entityId
   const entityId = createPlanningUpdatePublicTargetKey(candidate.target)
   const occurredAt = now.toISOString()
@@ -1787,12 +1862,18 @@ function createPlanningScheduledNotificationAuditEvent(
         teamId: candidate.target.teamId,
         projectId: candidate.target.projectId,
       })
+    : candidate.target.type === 'team'
+    ? new URLSearchParams({ targetType: 'team', teamId: candidate.target.teamId })
     : new URLSearchParams({
         targetType: 'initiative',
         entityId: candidate.target.entityId,
       })
   const deepLink = `/planning/portfolio?${search.toString()}`
-  const targetLabel = candidate.target.type === 'project' ? 'Project' : 'Initiative'
+  const targetLabel = candidate.target.type === 'project'
+    ? 'Project'
+    : candidate.target.type === 'team'
+    ? 'Team'
+    : 'Initiative'
   const summary = candidate.kind === 'reminder'
     ? `${targetLabel} health update is due soon.`
     : candidate.kind === 'overdue'
@@ -1842,6 +1923,12 @@ function parsePlanningUpdateTargetReference(
     return {
       type: 'initiative',
       entityId: requireText(value.entityId, 'Planning update target Initiative ID'),
+    }
+  }
+  if (value.type === 'team') {
+    return {
+      type: 'team',
+      teamId: requireText(value.teamId, 'Planning update target Team ID'),
     }
   }
   throw new TypeError('Planning update target type is invalid.')
@@ -1906,6 +1993,9 @@ function parsePlanningUpdateNotificationCadence(
 
 /** Creates the canonical physical key for an update target reference. */
 function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTargetReference): string {
+  if (target.type === 'team') {
+    return `UPDATE_TARGET#TEAM#${encodePlanningRecordKeySegment(target.teamId)}`
+  }
   return target.type === 'project'
     ? `UPDATE_TARGET#PROJECT#${encodePlanningRecordKeySegment(target.teamId)}#${encodePlanningRecordKeySegment(target.projectId)}`
     : `UPDATE_TARGET#INITIATIVE#${encodePlanningRecordKeySegment(target.entityId)}`

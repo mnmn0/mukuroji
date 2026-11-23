@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { PlanningUpdateReaction } from '@mukuroji/contracts'
 import {
   planningSnapshotFixture,
   planningUpdateHistoryFixture,
@@ -19,7 +18,6 @@ import {
   readPlanningEvidenceHttpsUrl,
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
 } from '../src/planning/model/statusUpdateView'
 import {
   PlanningStatusUpdateComposer,
@@ -256,45 +254,24 @@ describe('Planning update evidence composer', () => {
   })
 })
 
-/**
- * Builds one reaction row on the onboarding Initiative used by acknowledgement tests.
- *
- * @param memberKey - Member that added the reaction.
- * @param emoji - Reaction token.
- * @param updateVersion - Immutable update version that owns the reaction.
- * @returns Contract reaction row.
- */
-function createReaction(
-  memberKey: string,
-  emoji: string,
-  updateVersion: number,
-): PlanningUpdateReaction {
-  return {
-    target: { type: 'initiative', entityId: 'initiative-onboarding' },
-    updateVersion,
-    emoji,
-    memberKey,
-    createdAt: '2026-07-16T01:00:00.000Z',
-  }
-}
-
 describe('Planning update reviewer acknowledgement', () => {
-  test('is absent when the cadence has no escalation reviewer', () => {
-    expect(derivePlanningUpdateAcknowledgement([], 2, undefined)).toBeUndefined()
-    expect(derivePlanningUpdateAcknowledgement([], 2, '  ')).toBeUndefined()
+  test('is absent when the cadence has no reviewer and nobody acknowledged', () => {
+    expect(derivePlanningUpdateAcknowledgement({}, undefined)).toBeUndefined()
+    expect(derivePlanningUpdateAcknowledgement({}, '  ')).toBeUndefined()
   })
 
-  test('counts only the reviewer confirmation reaction on the same version', () => {
-    const reactions = [
-      createReaction('member@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 2),
-      createReaction('Manager@Example.com', '👍', 2),
-      createReaction('manager@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 1),
-    ]
-    expect(derivePlanningUpdateAcknowledgement(reactions, 2, 'manager@example.com')).toEqual({
+  test('waits for the cadence reviewer until the version records an acknowledgement', () => {
+    expect(derivePlanningUpdateAcknowledgement({}, ' manager@example.com ')).toEqual({
       reviewerMemberKey: 'manager@example.com',
     })
-    expect(derivePlanningUpdateAcknowledgement(reactions, 1, ' MANAGER@example.com ')).toEqual({
-      reviewerMemberKey: 'MANAGER@example.com',
+    expect(derivePlanningUpdateAcknowledgement({
+      acknowledgement: {
+        memberKey: 'manager@example.com',
+        commentId: 'comment-1',
+        acknowledgedAt: '2026-07-16T01:00:00.000Z',
+      },
+    }, undefined)).toEqual({
+      reviewerMemberKey: 'manager@example.com',
       acknowledgedAt: '2026-07-16T01:00:00.000Z',
     })
   })
