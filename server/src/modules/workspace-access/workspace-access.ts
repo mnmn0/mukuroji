@@ -470,6 +470,11 @@ export interface WorkspaceAccessClient {
   getAccessSnapshot(workspaceId: string, actorMemberKey: string): Promise<WorkspaceAccessResponse>
   /** Project assignment 候補に利用できる active member を取得します。 */
   listActiveMembers(workspaceId: string): Promise<WorkspaceMember[]>
+  /**
+   * Lists every member row of the Workspace, deactivated members included, for readers that show
+   * names of people who may have left.
+   */
+  listMembers?(workspaceId: string): Promise<WorkspaceMember[]>
   /** 新しい invitation を provisioning 状態で作成します。 */
   createInvitation(
     workspaceId: string,
@@ -901,6 +906,17 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async listActiveMembers(workspaceId: string) {
     const items = await this.queryItems(workspaceId, 'MEMBER#')
     return items.map(toWorkspaceMember).filter((member) => member.status === 'active').sort(compareWorkspaceMembers)
+  }
+
+  /**
+   * Lists every member row of the Workspace, deactivated members included.
+   *
+   * @param workspaceId - Workspace ID.
+   * @returns Members in display order.
+   */
+  async listMembers(workspaceId: string) {
+    const items = await this.queryItems(workspaceId, 'MEMBER#')
+    return items.map(toWorkspaceMember).sort(compareWorkspaceMembers)
   }
 
   /** invitation を 7 日間有効な provisioning item として作成します。 */

@@ -702,6 +702,7 @@ function createWorkspaceAccessFake(
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
     listActiveMembers: unsupported,
+    listMembers: unsupported,
     createInvitation: unsupported,
     getInvitation: unsupported,
     acquireInvitationAcceptanceLock: unsupported,
@@ -2782,6 +2783,14 @@ function configureFakeProjectClients(
           createWorkspaceMember('viewer@example.com'),
         ].filter((member) => member.status === 'active')
       },
+      async listMembers() {
+        return [
+          createWorkspaceMember('demo@example.com'),
+          createWorkspaceMember('sato@example.com'),
+          createWorkspaceMember('suzuki@example.com'),
+          createWorkspaceMember('viewer@example.com'),
+        ]
+      },
       async getAccessSnapshot(_workspaceId, memberKey) {
         const currentMember = createWorkspaceMember(memberKey)
         return {
@@ -3671,6 +3680,9 @@ async function configureEnterpriseScimGuestRoleScenario(
     },
     async listActiveMembers() {
       return [...members.values()].filter((member) => member.status === 'active')
+    },
+    async listMembers() {
+      return [...members.values()]
     },
     async reconcileDirectoryMember(
       _workspaceId: string,

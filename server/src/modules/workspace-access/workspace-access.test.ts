@@ -3612,3 +3612,22 @@ test('returns the saved member when a committed rename is retried with the same 
     createRenameAuditContext('rename-retry', '別の名前'),
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
 })
+
+test('lists every member row, deactivated members included, for name readers', async () => {
+  const active = createWorkspaceMember('sato@example.com', 'member')
+  const deactivated = { ...createWorkspaceMember('suzuki@example.com', 'member', 'deactivated'), name: '鈴木 改名' }
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Items: [toMemberItem(active), toMemberItem(deactivated)] })),
+    undefined,
+    false,
+    () => now,
+  )
+
+  expect((await client.listMembers(workspaceId)).map((member) => [member.memberKey, member.status, member.name]))
+    .toEqual([
+      ['sato@example.com', 'active', undefined],
+      ['suzuki@example.com', 'deactivated', '鈴木 改名'],
+    ])
+  expect((await client.listActiveMembers(workspaceId)).map((member) => member.memberKey)).toEqual(['sato@example.com'])
+})

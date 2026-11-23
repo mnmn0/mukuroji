@@ -286,7 +286,7 @@ export async function requireActiveWorkspaceAssignee(
 }
 
 /**
- * Reads the display names of a Workspace's active members, keyed by lower-cased member key.
+ * Reads the display names of a Workspace's members, deactivated ones included, keyed by lower-cased member key.
  *
  * Members rename themselves on their Workspace member row (ADR 0074), so Project member rows and
  * Cognito keep the name they had when they were written. Readers that show names prefer this map
@@ -298,7 +298,11 @@ export async function requireActiveWorkspaceAssignee(
 export async function readWorkspaceMemberNames(
   directoryId: string,
 ): Promise<Map<string, string | undefined>> {
-  const members = await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)
+  // Deactivated members stay on Work Items and reports, so their names are read too.
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  const members = workspaceAccess.listMembers
+    ? await workspaceAccess.listMembers(directoryId)
+    : await workspaceAccess.listActiveMembers(directoryId)
   return new Map(members.map((member) => [
     member.memberKey.trim().toLowerCase(),
     member.name?.trim() || undefined,
