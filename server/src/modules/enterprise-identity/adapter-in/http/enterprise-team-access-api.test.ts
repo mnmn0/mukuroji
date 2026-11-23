@@ -41,10 +41,12 @@ afterEach(() => {
  * Configures one Team-scoped enterprise group mapping for the authenticated fixture member.
  *
  * @param permissions - Exact custom-role permissions granted on the fixture Team.
+ * @param projectPermissions - Permissions of a second role granted on the `refero` Project, if any.
  * @returns The bearer authorization header for the configured member.
  */
 async function configureEnterpriseTeamAccess(
   permissions: EnterprisePermissionId[],
+  projectPermissions?: EnterprisePermissionId[],
 ): Promise<string> {
   configureFakeProjectClients(false, {
     workspaceRole: 'member',
@@ -118,6 +120,30 @@ async function configureEnterpriseTeamAccess(
     revision: 1,
     updatedAt: now,
   })
+  if (projectPermissions) {
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:project-api-access',
+      name: 'Project API access',
+      permissions: projectPermissions,
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'project-api-access-mapping',
+      identityProviderId: 'idp-team-api-access',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:project-api-access',
+      scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' },
+      enabled: true,
+      priority: 1,
+      revision: 1,
+      updatedAt: now,
+    })
+  }
   setTestAppDependencies({ enterpriseIdentity: identity })
   const accessToken = createAccessToken([], {
     client_id: 'mukuroji-main-client',
@@ -330,6 +356,43 @@ test('rejects capacity request creation when Team teams.manage access is missing
     expect(await response.json()).toMatchObject({
       message: 'Project access is denied.',
     })
+  })
+})
+
+test('shows the Team work calendar as read-only to a teams.read grant without teams.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+
+    const read = await app.request('/api/teams/core-team/work-calendar', {
+      headers: { Authorization: authorization },
+    })
+    const preview = await app.request('/api/teams/core-team/work-calendar/preview', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overrides: { additionalHolidays: [] }, adjustment: 'keep-duration' }),
+    })
+
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ canManage: false })
+    expect(preview.status).toBe(403)
+  })
+})
+
+test('shows a Project work calendar as editable to a Project-scoped teams.manage grant', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'], ['teams.read', 'teams.manage'])
+
+    const projectRead = await app.request('/api/teams/core-team/work-calendar?projectId=refero', {
+      headers: { Authorization: authorization },
+    })
+    const teamRead = await app.request('/api/teams/core-team/work-calendar', {
+      headers: { Authorization: authorization },
+    })
+
+    expect(projectRead.status).toBe(200)
+    expect(await projectRead.json()).toMatchObject({ canManage: true })
+    expect(teamRead.status).toBe(200)
+    expect(await teamRead.json()).toMatchObject({ canManage: false })
   })
 })
 

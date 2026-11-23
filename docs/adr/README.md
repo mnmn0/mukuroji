@@ -79,6 +79,7 @@
 | [0055](0055-team-work-item-key-prefix-change.md) | Work Item key の prefix を Team ごとに変更でき、番号は prefix をまたいで続ける | 提案 |
 | [0056](0056-web-custom-domain-cdk-context.md) | 独自 domain を `cdk.json` の CDK context で受け、synth 時に distribution・DNS・正規 URL を決める | 提案 |
 | [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |
+| [0058](0058-team-project-shared-work-calendars.md) | Team・Project の稼働カレンダーを tenant administration table の Workspace partition に置き、Work Item は共有カレンダーの写しを持って変更時に書き換える | 提案 |
 | [0059](0059-cycle-schedule-baselines.md) | Cycle ごとの名前付き schedule baseline を、一覧の行と baseline ごとの行で Planning table に置く | 提案 |
 | [0060](0060-project-default-task-view.md) | Project の既定ビューを、その Project の管理者だけが設定できる共有の既定として持つ | 提案 |
 | [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |

@@ -183,9 +183,12 @@ import {
   normalizeProjectMemberKey,
 } from '../../modules/directory'
 import {
+  DynamoDbWorkCalendarStore,
+  InMemoryWorkCalendarStore,
   createProductionTenantExportDownloadClient,
   type TenantLifecycleEnforcement,
 } from '../../modules/tenant-administration'
+import { loadServerDynamoDbResourceConfig } from '../../infrastructure/config/server-resource-config'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import {
   TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
@@ -587,6 +590,10 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
     nationalHolidays: createProductionJapanesePublicHolidayDates(),
+    workCalendars: new DynamoDbWorkCalendarStore(
+      loadServerDynamoDbResourceConfig().tenantAdministrationTableName,
+      createDynamoDbDocumentClient(createDynamoDbClient()),
+    ),
     tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantLifecycleEnforcement: tenantAdministration,
   }
@@ -1926,6 +1933,9 @@ export function createTestAppDependencies(): AppDependencies {
       tenantAdministration,
       // Tests have no synced list, so the bundled national holidays are used.
       nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
+      // Test authorization does not change during a request, so every fence holds; tests of a
+      // revoked fence build their own store.
+      workCalendars: new InMemoryWorkCalendarStore(() => true),
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },

@@ -15,10 +15,12 @@ import {
   calculateWorkItemScheduleEndDate,
   calculateWorkItemScheduleStartDate,
   deriveWorkItemScheduleDueDate,
+  isCanonicalWorkItemSchedule,
   isWorkItemSchedule,
   normalizeWorkItemSchedule,
   normalizeWorkItemScheduleOperation,
   previewWorkItemScheduleChange,
+  rebaseWorkItemScheduleCalendar,
   workItemScheduleInstantToLocalDate,
   workItemScheduleLocalDateToStartInstant,
 } from './work-item-schedule'
@@ -460,3 +462,47 @@ function expectScheduleError(callback: () => unknown, code: string): void {
   expect(thrown).toBeInstanceOf(WorkItemScheduleError)
   expect(thrown).toMatchObject({ status: 400, code })
 }
+
+test('moves a date range onto a new calendar keeping either its working days or its end date', () => {
+  const before: WorkItemSchedule = {
+    mode: 'date-range',
+    calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'], holidays: [] },
+    startDate: '2026-12-07',
+    endDate: '2026-12-11',
+    durationDays: 5,
+  }
+  const policy = { ...before.calendarPolicy, holidays: ['2026-12-09'], calendarSource: 'shared' as const }
+  expect(rebaseWorkItemScheduleCalendar(before, policy, 'keep-duration')).toEqual({
+    schedule: { ...before, calendarPolicy: policy, endDate: '2026-12-14' },
+    fellBackToKeepDuration: false,
+  })
+  expect(rebaseWorkItemScheduleCalendar(before, policy, 'keep-end-date')).toEqual({
+    schedule: { ...before, calendarPolicy: policy, durationDays: 4 },
+    fellBackToKeepDuration: false,
+  })
+  const weekend = { ...before.calendarPolicy, workingWeekdays: ['saturday' as const] }
+  const oneDay: WorkItemSchedule = { ...before, endDate: '2026-12-08', durationDays: 2 }
+  expect(rebaseWorkItemScheduleCalendar(oneDay, weekend, 'keep-end-date')).toEqual({
+    schedule: { ...oneDay, calendarPolicy: weekend, endDate: '2026-12-19' },
+    fellBackToKeepDuration: true,
+  })
+  const startOff = { ...before.calendarPolicy, holidays: ['2026-12-07'] }
+  expect(rebaseWorkItemScheduleCalendar(before, startOff, 'keep-duration').schedule).toEqual({
+    ...before,
+    calendarPolicy: startOff,
+    endDate: '2026-12-14',
+  })
+  const due = createDefaultDueDateWorkItemSchedule('2026-12-09')
+  expect(rebaseWorkItemScheduleCalendar(due, policy, 'keep-duration').schedule).toEqual({ ...due, calendarPolicy: policy })
+})
+
+test('keeps the shared calendar source when normalizing and rejects any other source', () => {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-12-09')
+  const shared = { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, calendarSource: 'shared' } }
+  expect(normalizeWorkItemSchedule(shared).calendarPolicy.calendarSource).toBe('shared')
+  expect(isCanonicalWorkItemSchedule(shared)).toBe(true)
+  expect(() => normalizeWorkItemSchedule({
+    ...schedule,
+    calendarPolicy: { ...schedule.calendarPolicy, calendarSource: 'team' },
+  })).toThrow(WorkItemScheduleError)
+})

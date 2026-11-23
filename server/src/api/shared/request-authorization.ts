@@ -297,6 +297,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/members/sign-in-security',
     permission: 'members.manage',
   },
+  // Applying or previewing a Workspace calendar change rewrites Work Item schedules (ADR 0058).
+  {
+    method: '*',
+    pathPattern: '/api/workspace/work-calendar/*',
+    permission: 'workspace.manage',
+  },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
@@ -510,6 +516,16 @@ const enterpriseRoutePermissionRules = [
     method: '*',
     pathPattern: '/api/work-item-configuration*',
     permission: 'work-items.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-calendar',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/work-calendar*',
+    permission: 'teams.manage',
   },
   {
     method: 'GET',

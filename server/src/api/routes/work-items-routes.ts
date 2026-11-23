@@ -310,7 +310,10 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import {
+  applySharedCalendarToNewSchedule,
+  readWorkspaceWorkItemCalendarPolicy,
+} from '../shared/workspace-calendar'
 import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
@@ -3845,6 +3848,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       )
       const normalized = normalizeTeamIssueInput({
         ...conversion.input,
+        // The Request becomes a Work Item of its target Team and Project, so it takes their
+        // shared calendar (ADR 0058).
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          {
+            teamId: conversion.target.teamId,
+            ...(conversion.target.projectId ? { projectId: conversion.target.projectId } : {}),
+          },
+          conversion.input.schedule,
+        ),
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
@@ -4725,21 +4738,32 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       }
       // Built from public fields only; the raw body never reaches the adapter input.
       const requestBody = readPublicWorkItemCreateBody(rawRequestBody)
-      const body = normalizeTeamIssueInput(
+      const normalizedBody = normalizeTeamIssueInput(
         requestBody,
         context.team,
       )
       const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
         principal.directoryId,
         context.team,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
       )
       requireAssignedProjectPermission(
         principal,
         context,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
         'member',
       )
+      // A schedule that follows the shared calendar takes the Team or Project calendar the server
+      // resolves, not the copy the client showed (ADR 0058).
+      const newWorkItemProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
+      const body = {
+        ...normalizedBody,
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          { teamId, ...(newWorkItemProjectId ? { projectId: newWorkItemProjectId } : {}) },
+          normalizedBody.schedule,
+        ),
+      }
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,
