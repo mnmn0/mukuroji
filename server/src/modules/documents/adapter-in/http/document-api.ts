@@ -2379,7 +2379,12 @@ function toPublicWhiteboardContent(
       }
       switch (object.type) {
         case 'note':
-          return { ...base, type: 'note', text: object.text }
+          return {
+            ...base,
+            type: 'note',
+            text: object.text,
+            ...(object.done === true ? { done: true } : {}),
+          }
         case 'shape':
           return {
             ...base,

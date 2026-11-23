@@ -63,6 +63,7 @@ export {
 } from './domain/bulk-reassign-member'
 export {
   validateApplyAutomationTemplateInput,
+  listProjectTemplateWbsNumbers,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,

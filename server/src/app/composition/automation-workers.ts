@@ -26,6 +26,7 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
+import { DynamoDbDocumentsClient } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbCustomerClient } from '../../modules/customers'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
@@ -103,6 +104,7 @@ export function createProductionAutomationEventHandler() {
     new AutomationEngine(automationRepository, actionExecutor),
     teamIssues,
     actionDependencies.customers,
+    new DynamoDbDocumentsClient(),
   )
 
   return (event: DynamoStreamEvent) => processAutomationEventBatch(event, processor)

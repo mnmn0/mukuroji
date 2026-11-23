@@ -1,11 +1,13 @@
 import {
   isWeeklyReportDate,
+  parseTeamMonthlySummaryResponse,
   parseTeamWeeklySummaryResponse,
   parseWeeklyReportIndirectTime,
   WEEKLY_REPORT_SECTION_NAMES,
   type SubmitWeeklyReportRequest,
   type TeamWeeklyReportMemberStatus,
   type TeamWeeklyReportStatusResponse,
+  type TeamMonthlySummaryResponse,
   type TeamWeeklySummaryResponse,
   type WeeklyReportDraft,
   type WeeklyReportHistoryEntry,
@@ -365,5 +367,28 @@ export async function getTeamWeeklySummary(
   )
   const summary = parseTeamWeeklySummaryResponse(data)
   if (!summary) throw invalidResponse('Team weekly summary')
+  return summary
+}
+
+/**
+ * Reads a calendar month of the Team and of each Project the signed-in member may read, with the
+ * totals of the month before.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param teamId - Team ID.
+ * @param month - Month as `YYYY-MM`.
+ * @returns The summary, counted by the server over the Work Items the member may read.
+ */
+export async function getTeamMonthlySummary(
+  accessToken: string,
+  teamId: string,
+  month: string,
+): Promise<TeamMonthlySummaryResponse> {
+  const data = await requestTimeTrackingJson(
+    createTeamTimeTrackingUrl(teamId, `/monthly-summary?month=${encodeURIComponent(month)}`),
+    accessToken,
+  )
+  const summary = parseTeamMonthlySummaryResponse(data)
+  if (!summary) throw invalidResponse('Team monthly summary')
   return summary
 }

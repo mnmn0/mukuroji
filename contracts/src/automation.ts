@@ -1,3 +1,4 @@
+import type { ScheduleDependencyType } from './schedule-dependencies'
 import type { WorkflowDefinition } from './work-item-configuration'
 import type { WorkItemContributorAssignmentCreateInput } from './work-item-contributors'
 import type {
@@ -440,6 +441,70 @@ export type AutomationProjectTemplateWorkItem = {
   children?: AutomationProjectTemplateWorkItem[]
 }
 
+/** Most Phases and Milestones one Project template can create together. */
+export const AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT = 30
+
+/** Longest Phase or Milestone title in UTF-16 code units, the limit Planning itself enforces. */
+export const AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH = 500
+
+/**
+ * Marks a Milestone line in the template editor's Phase / Milestone outline.
+ * A Phase title cannot start with it, so the editor text always reads back the same way.
+ */
+export const AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER = '◆'
+
+/** Most schedule dependencies between WBS Work Items one Project template can hold. */
+export const AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT = 100
+
+/** Largest calendar-day lead or lag of a Project template dependency, in either direction. */
+export const AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS = 365
+
+/**
+ * One Milestone a Project template creates in Planning.
+ *
+ * The date is relative to the Project start date and counted in working days of the Workspace
+ * working calendar, like the WBS dates.
+ */
+export type AutomationProjectTemplateMilestone = {
+  /** Title of the Milestone to create. */
+  title: string
+  /** Working days between the Project start and the Milestone date; 0 is the first working day. */
+  offsetWorkingDays: number
+}
+
+/**
+ * One Phase a Project template creates in Planning, with the Milestones placed under it.
+ *
+ * Dates are relative to the Project start date and counted in working days, like the WBS dates.
+ */
+export type AutomationProjectTemplatePhase = {
+  /** Title of the Phase to create. */
+  title: string
+  /** Working days between the Project start and the Phase start; 0 starts on the first working day. */
+  startOffsetWorkingDays: number
+  /** Working days the Phase occupies, including its start date; at least 1. */
+  durationWorkingDays: number
+  /** Milestones created as children of this Phase, in display order. */
+  milestones?: AutomationProjectTemplateMilestone[]
+}
+
+/**
+ * One schedule dependency between two Work Items of a Project template's WBS.
+ *
+ * Both ends are WBS numbers of the template outline, such as `1` or `2.3`, counted from 1 in
+ * display order.
+ */
+export type AutomationProjectTemplateDependency = {
+  /** WBS number of the Work Item whose schedule drives the dependency. */
+  predecessor: string
+  /** WBS number of the Work Item whose schedule is constrained. */
+  successor: string
+  /** Start/finish boundary relationship. */
+  type: ScheduleDependencyType
+  /** Signed calendar-day offset; positive values are lag and negative values are lead. */
+  lagDays: number
+}
+
 /** Project template の作成 payload です。 */
 export type AutomationProjectTemplatePayload = {
   /** Locale 非依存の Project 名です。 */
@@ -452,6 +517,12 @@ export type AutomationProjectTemplatePayload = {
   tone?: AutomationProjectTemplateTone
   /** WBS created inside the new Project when the template is applied, in display order. */
   workItems?: AutomationProjectTemplateWorkItem[]
+  /** Schedule dependencies created between the WBS Work Items when the template is applied. */
+  dependencies?: AutomationProjectTemplateDependency[]
+  /** Planning Phases created for the new Project, each with its Milestones, in display order. */
+  phases?: AutomationProjectTemplatePhase[]
+  /** Planning Milestones created for the new Project outside any Phase, in display order. */
+  milestones?: AutomationProjectTemplateMilestone[]
 }
 
 /** Workflow template の payload です。 */
@@ -541,6 +612,11 @@ export type AutomationTemplateApplicationTarget =
        * counted from. Required when the template has Work Items.
        */
       startDate?: string
+      /**
+       * Existing Planning roadmap, initiative, or goal that the template's Phases and top-level
+       * Milestones are created under. Required when the template has Phases or Milestones.
+       */
+      planningParentId?: string
     }
   | {
       /** Workflow 設定 target です。 */
@@ -566,6 +642,10 @@ export type AutomationTemplateApplicationResult =
       name: string
       /** Number of WBS Work Items created in the Project; absent when the template had none. */
       workItemCount?: number
+      /** Number of Planning Phases and Milestones created; absent when the template had none. */
+      planningEntityCount?: number
+      /** Number of Work Item schedule dependencies created; absent when the template had none. */
+      dependencyCount?: number
     }
   | {
       /** Workflow 保存結果です。 */
@@ -623,6 +703,90 @@ export type AutomationTemplateApplication = {
 export type ApplyAutomationTemplateInput = {
   /** Project または Workflow の適用先です。 */
   target: AutomationTemplateApplicationTarget
+  /**
+   * The Project template preview the caller accepted. A new application is refused when the
+   * template version or the working calendar has changed since; a retry of an existing receipt
+   * ignores it and resumes with what the receipt pinned.
+   */
+  expectedPreview?: AutomationProjectTemplatePreviewExpectation
+}
+
+/** What a caller saw in an accepted Project template preview, checked again when applying. */
+export type AutomationProjectTemplatePreviewExpectation = {
+  /** Template version of the preview. */
+  templateVersion: number
+  /** Working calendar fingerprint of the preview. */
+  calendarFingerprint: string
+}
+
+/** One Work Item a Project template application would create, placed on real dates. */
+export type AutomationProjectTemplatePreviewWorkItem = {
+  /** WBS number in the template outline, such as `1` or `2.3`. */
+  wbsNumber: string
+  /** Title of the Work Item. */
+  title: string
+  /** First working day in `YYYY-MM-DD` form. */
+  startDate: string
+  /** Last working day in `YYYY-MM-DD` form. */
+  endDate: string
+}
+
+/** One Planning Phase or Milestone a Project template application would create. */
+export type AutomationProjectTemplatePreviewPlanningEntity = {
+  /** Planning entity type. */
+  type: 'phase' | 'milestone'
+  /** Title of the entity. */
+  title: string
+  /** Title of the Phase it is created under; absent for entities under the Planning parent. */
+  phaseTitle?: string
+  /** First day in `YYYY-MM-DD` form; equals `endDate` for a Milestone. */
+  startDate: string
+  /** Last day in `YYYY-MM-DD` form. */
+  endDate: string
+}
+
+/** One problem that would stop a Project template application. */
+export type AutomationProjectTemplatePreviewError = {
+  /** Stable machine-readable error code. */
+  code: string
+  /** Safe error message. */
+  message: string
+  /** WBS number of the Work Item the problem belongs to, when it belongs to one. */
+  wbsNumber?: string
+  /** Position of the template dependency the problem belongs to, counted from 1. */
+  dependencyNumber?: number
+}
+
+/**
+ * Dry-run result of applying a Project template: what would be created and on which dates, and
+ * every problem found. Nothing is written; `errors` is empty when the application can proceed.
+ */
+export type AutomationProjectTemplateApplicationPreview = {
+  /** Preview discriminator. */
+  kind: 'project'
+  /** Team that would receive the Project. */
+  teamId: string
+  /** Name of the Project that would be created. */
+  name: string
+  /** Template version the preview was computed from. */
+  templateVersion: number
+  /**
+   * Opaque fingerprint of the Workspace working calendar the dates were counted with. Send it
+   * back in `expectedPreview` so the application uses the same calendar.
+   */
+  calendarFingerprint: string
+  /** Project start date the relative dates were counted from, when one was given. */
+  startDate?: string
+  /** Last date of any Work Item, Phase, or Milestone; absent when nothing is dated. */
+  endDate?: string
+  /** WBS Work Items in outline order. */
+  workItems: AutomationProjectTemplatePreviewWorkItem[]
+  /** Phases and Milestones in creation order. */
+  planningEntities: AutomationProjectTemplatePreviewPlanningEntity[]
+  /** Number of Work Item schedule dependencies that would be created. */
+  dependencyCount: number
+  /** Problems found; the application would fail while any remain. */
+  errors: AutomationProjectTemplatePreviewError[]
 }
 
 /** Server-issued inbound webhook endpoint の lifecycle status です。 */
