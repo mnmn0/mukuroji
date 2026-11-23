@@ -46,6 +46,7 @@ describe('saved task-view API', () => {
         capabilities: createSavedTaskViewCapabilities({
           canManageSharedViews: false,
           canSetTeamDefault: false,
+          canSetProjectDefault: false,
           canWrite: false,
           writableProjectScopes: [
             { teamId: 'operations-team', projectId: 'shared-project' },
@@ -69,6 +70,7 @@ describe('saved task-view API', () => {
     expect(result.capabilities).toEqual({
       canManageSharedViews: false,
       canSetTeamDefault: false,
+      canSetProjectDefault: false,
       canWrite: false,
       writableProjectScopes: [{ teamId: 'core-team', projectId: 'shared-project' }],
       writableTeamIds: ['core-team'],
@@ -250,6 +252,7 @@ describe('saved task-view API', () => {
         isDefault: false,
         isPersonalDefault: true,
         isTeamDefault: false,
+        isProjectDefault: false,
         pinned: false,
       },
     }
@@ -261,6 +264,7 @@ describe('saved task-view API', () => {
         isDefault: true,
         isPersonalDefault: false,
         isTeamDefault: false,
+        isProjectDefault: false,
         pinned: false,
       },
     }
@@ -287,6 +291,7 @@ describe('saved task-view API', () => {
         isDefault: false,
         isPersonalDefault: false,
         isTeamDefault: true,
+        isProjectDefault: false,
         pinned: false,
       },
     }
@@ -357,6 +362,7 @@ describe('saved task-view API', () => {
       capabilities: {
         canManageSharedViews: false,
         canSetTeamDefault: false,
+        canSetProjectDefault: false,
         canWrite: false,
         writableTeamIds: [],
       },
@@ -434,6 +440,7 @@ function createSavedTaskViewFixture(id: string): SavedTaskView {
       isDefault: true,
       isPersonalDefault: true,
       isTeamDefault: false,
+      isProjectDefault: false,
       pinned: false,
     },
     revision: 1,
@@ -454,6 +461,7 @@ function createSavedTaskViewCapabilities(
   return {
     canManageSharedViews: true,
     canSetTeamDefault: true,
+    canSetProjectDefault: false,
     canWrite: true,
     writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
     writableTeamIds: ['core-team'],

@@ -493,7 +493,7 @@ export type PlanningWorkItemSummary = {
 export type PlanningCriticalPath = {
   /** Critical path 上の entity ID を先頭から並べた配列です。 */
   entityIds: string[]
-  /** Critical path の合計 calendar day 数です。 */
+  /** Critical path の合計日数です。Workspace の稼働カレンダーがあれば稼働日で数えます（ADR 0058）。 */
   totalDurationDays: number
   /** Entity ID ごとの total slack day 数です。 */
   slackByEntityId: Record<string, number>

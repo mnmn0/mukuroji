@@ -18,6 +18,7 @@ import {
   type DocumentWorkItemSource,
 } from '../model/checklistWorkItems'
 import { createCanonicalWorkItemId } from '../model/relations'
+import { revalidateWorkItemKeyPrefixes } from '../../issues/queries/workItemKeyPrefixesCache'
 
 /**
  * Options for creating Work Items from Document checklist items.
@@ -93,6 +94,7 @@ export function useChecklistWorkItemCreation({
       JSON.stringify([input.teamId, request]),
       (context) => createTeamIssue(input.teamId, accessToken, request, context),
     )
+    void revalidateWorkItemKeyPrefixes()
     const workItemId = createCanonicalWorkItemId(issue.teamId, issue.id)
     if (!workItemId) throw new Error(errorMessage)
     return workItemId

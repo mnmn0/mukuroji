@@ -150,7 +150,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{ Items: [] }, {}], commands),
+        createDocumentClient([{ Items: [] }, {}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -181,9 +181,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
 
     // The first command reads the Team's closed months before the entry is written.
     expect(commands[0]?.input.ExpressionAttributeValues).toMatchObject({ ':prefix': 'TIME_CLOSE#team-1#' })
-    // The open month is rechecked in the transaction so a close that lands after the read cancels it.
-    expect(commands[1]?.input.TransactItems).toHaveLength(4)
-    const transactionItems = commands[1]?.input.TransactItems
+    // The second command reads the Team's time entry policy. The open month is rechecked in the
+    // transaction so a close that lands after the read cancels it.
+    expect(commands[2]?.input.TransactItems).toHaveLength(4)
+    const transactionItems = commands[2]?.input.TransactItems
     expect(Array.isArray(transactionItems)).toBe(true)
     if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
     expect(transactionItems[0]).toEqual({
@@ -320,7 +321,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{ Items: [] }, {}], commands),
+        createDocumentClient([{ Items: [] }, {}, {}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -342,8 +343,12 @@ describe('DynamoDbTimeTrackingRepository', () => {
       idempotencyKey: 'entry-1',
     }, false)
 
-    expect(commands[1]?.input.TransactItems).toHaveLength(4)
-    expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('developer-platform-table')
+    // An entry saved without a rate reads the Team rate card before it is written.
+    expect(commands[1]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_RATE_CARD#team-1' })
+    // Then the Team's time entry policy.
+    expect(commands[2]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_POLICY#team-1' })
+    expect(commands[3]?.input.TransactItems).toHaveLength(4)
+    expect(JSON.stringify(commands[3]?.input.TransactItems)).toContain('developer-platform-table')
     expect(completed).toBe(0)
   })
 
@@ -481,7 +486,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       recordKey: 'TIME_CLOSE#team-1#2026-07',
     }
     const service = new TimeTrackingService(
-      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}], commands)),
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}, {}, {}], commands)),
       { now: () => new Date('2026-08-02T12:00:00.000Z'), createId: () => 'entry-1' },
     )
 
@@ -499,7 +504,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       source: 'manual',
     }, false)
 
-    const items = commands[1]?.input.TransactItems
+    const items = commands[3]?.input.TransactItems
     if (!Array.isArray(items)) throw new Error('Expected transaction items.')
     expect(items.slice(0, 2)).toEqual([
       {
@@ -527,7 +532,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
       configurable: true,
       value: async (): Promise<unknown> => {
         calls += 1
+        // The closed months, the Team rate card, and the Team's time entry policy are read before
+        // the write; there is no rate card and no policy.
         if (calls === 1) return { Items: [] }
+        if (calls <= 3) return {}
         throw Object.assign(new Error('Transaction cancelled'), {
           name: 'TransactionCanceledException',
           CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
@@ -552,6 +560,38 @@ describe('DynamoDbTimeTrackingRepository', () => {
     }, false)).rejects.toMatchObject({ status: 409, code: 'TimePeriodClosed' })
   })
 
+  test('stores the Team time entry policy in one row and fails closed on an invalid stored mode', async () => {
+    const commands: CommandWithInput[] = []
+    const stored = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      overlap: 'warn',
+      dailyLimit: 'reject',
+      dailyLimitMinutes: 480,
+      revision: 1,
+      updatedBy: 'manager-1',
+      updatedAt: '2026-08-02T12:00:00.000Z',
+    } as const
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([
+      {},
+      { Item: { ...stored, recordKey: 'TIME_POLICY#team-1' } },
+      { Item: { ...stored, overlap: 'block', recordKey: 'TIME_POLICY#team-1' } },
+      { Item: { ...stored, teamId: 'team-2', recordKey: 'TIME_POLICY#team-1' } },
+    ], commands))
+
+    await repository.saveEntryPolicy({ ...stored }, 0)
+    expect(commands[0]?.input.Item).toMatchObject({ recordKey: 'TIME_POLICY#team-1', overlap: 'warn' })
+    expect(commands[0]?.input.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+    expect(await repository.getEntryPolicy('workspace-1', 'team-1')).toEqual(stored)
+    expect(commands[1]?.input).toMatchObject({ Key: { workspaceId: 'workspace-1', recordKey: 'TIME_POLICY#team-1' }, ConsistentRead: true })
+    await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+    // A row whose payload names another Team is never used for this Team.
+    await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+  })
+
   test('rejects a stored month close whose payload month differs from its key', async () => {
     const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{
       Items: [{
@@ -567,6 +607,62 @@ describe('DynamoDbTimeTrackingRepository', () => {
     }], []))
 
     await expect(repository.listPeriodCloses('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+  })
+
+  test('saves a rate card with a revision condition and an audit event whose rates are redacted', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}], commands)),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: () => 'id-1',
+        audit: { tableName: 'audit-table', retentionDays: 30 },
+      },
+    )
+
+    const saved = await service.saveRateCard({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      currency: 'jpy',
+      memberRates: [{ userId: 'member-2', hourlyRateMinor: 8_000 }, { userId: 'member-1', jobRoleId: 'role-1' }],
+      jobRoleRates: [{ jobRoleId: 'role-1', hourlyRateMinor: 6_000 }],
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+
+    expect(saved).toMatchObject({ currency: 'JPY', revision: 1, memberRates: [{ userId: 'member-1' }, { userId: 'member-2' }] })
+    expect(commands[0]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_RATE_CARD#team-1' })
+    const items = commands[1]?.input.TransactItems
+    if (!Array.isArray(items)) throw new Error('Expected transaction items.')
+    expect(items[0]).toMatchObject({
+      Put: {
+        TableName: 'analytics-table',
+        Item: { recordKey: 'TIME_RATE_CARD#team-1', teamId: 'team-1' },
+        ConditionExpression: 'attribute_not_exists(recordKey)',
+      },
+    })
+    const audit = JSON.stringify(items[1])
+    expect(audit).toContain('time-rate-card.updated')
+    expect(audit).not.toContain('8000')
+    expect(audit).not.toContain('6000')
+  })
+
+  test('rejects a stored rate card whose Team does not match its key', async () => {
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{
+      Item: {
+        schemaVersion: 1,
+        workspaceId: 'workspace-1',
+        teamId: 'team-2',
+        currency: 'JPY',
+        memberRates: [],
+        jobRoleRates: [{ jobRoleId: 'role-1', hourlyRateMinor: 6_000 }],
+        revision: 1,
+        recordKey: 'TIME_RATE_CARD#team-1',
+      },
+    }], []))
+
+    await expect(repository.getRateCard('workspace-1', 'team-1'))
       .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
   })
 })

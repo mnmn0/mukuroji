@@ -31,6 +31,7 @@ export const notificationFixtures: InboxNotification[] = [
     reasons: ['assignee'],
     actorLabel: '鈴木 大輔',
     title: 'ロードマップの依存リスクを確認',
+    workItemKey: 'CORE-42',
     summary: 'この Work Item の担当者に設定されました。',
     teamId: 'core-team',
     projectId: 'product-roadmap',

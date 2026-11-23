@@ -1,6 +1,7 @@
 import type { NotificationMessageLocale } from '@mukuroji/contracts'
 import type { ChannelDelivery, ChannelSendResult, NotificationLocaleReader } from '../../application/channel-delivery'
 import { DEFAULT_NOTIFICATION_LOCALE, resolveNotificationSummaryText } from '../../domain/notification-summary'
+import { formatNotificationHeading, resolveNotificationLinks } from '../notification-links'
 
 /** Current Cognito Email address of a recipient, or why none can be used. */
 export type EmailRecipientLookup =
@@ -127,34 +128,24 @@ export function renderEmailNotification(
 ): Pick<EmailMessage, 'subject' | 'text'> {
   const notification = delivery.notification
   const summary = resolveNotificationSummaryText(notification, locale)
-  const heading = singleLine(notification.title) || singleLine(summary) || 'mukuroji'
+  const title = singleLine(formatNotificationHeading(notification))
+  const heading = title || singleLine(summary) || 'mukuroji'
   const subject = `[mukuroji] ${heading}`.slice(0, 200)
-  const link = resolveDeepLink(notification.deepLink, appOrigin)
+  const links = resolveNotificationLinks(notification, appOrigin)
+  const link = links.open
   const text = [
-    singleLine(notification.title),
+    title,
     summary?.replace(/\r\n?/g, '\n').trim().slice(0, 2_000),
     notification.reasons.length > 0 ? `通知の理由 / Reason: ${notification.reasons.join(', ')}` : undefined,
     '',
     `mukuroji で開く / Open in mukuroji: ${link}`,
+    ...(links.workItemKey ? [`${links.workItemKey.key}: ${links.workItemKey.url}`] : []),
     '',
     '--',
     'mukuroji の通知設定で Email を有効にしているため、このメールを送信しました。停止するには通知設定で Email を無効にしてください。',
     'You received this email because Email notifications are on in your mukuroji notification settings. Turn Email off there to stop these emails.',
   ].filter((line): line is string => line !== undefined).join('\n')
   return { subject, text }
-}
-
-/**
- * Resolves an Inbox deep link against the application origin, refusing links to other origins.
- * @param deepLink - Stored relative path.
- * @param appOrigin - Web application origin.
- * @returns Absolute URL on the application origin.
- */
-function resolveDeepLink(deepLink: string | undefined, appOrigin: string): string {
-  const origin = new URL(appOrigin).origin
-  if (!deepLink || !deepLink.startsWith('/') || deepLink.startsWith('//') || deepLink.includes('\\')) return `${origin}/`
-  const url = new URL(deepLink, origin)
-  return url.origin === origin ? url.href : `${origin}/`
 }
 
 /**

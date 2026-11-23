@@ -24,7 +24,11 @@ import { buildStackOutputs } from '../subsystems/outputs';
 import { buildRestoreDrill } from '../subsystems/restore-drill';
 import { buildRuntimeControls } from '../subsystems/runtime-controls';
 import { buildUserIdentity } from '../subsystems/user-identity';
-import { buildWebDistribution } from '../subsystems/web-distribution';
+import {
+  buildWebDistribution,
+  resolveWebCustomDomain,
+  type WebCustomDomainSettings,
+} from '../subsystems/web-distribution';
 import {
   buildAiAssistanceObservabilityWorker,
 } from '../subsystems/workers/ai-assistance-observability';
@@ -92,6 +96,12 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * composition root turns it on.
    */
   readonly demoDataEnabled?: boolean;
+  /**
+   * Optional custom domain that serves the Web app and `/api`, from the `mukuroji:web*` context
+   * keys in `cdk.json`. Unset keeps the CloudFront domain. The domain becomes the canonical app
+   * URL used in Cognito and notification Email links.
+   */
+  readonly webCustomDomain?: WebCustomDomainSettings;
 }>;
 
 /**
@@ -113,6 +123,7 @@ export class MukurojiStack extends cdk.Stack {
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
     const softwareFactoryEnabled = props?.softwareFactoryEnabled ?? false;
     const demoDataEnabled = props?.demoDataEnabled ?? false;
+    const webCustomDomain = resolveWebCustomDomain(props?.webCustomDomain);
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameterInputs = buildStackParameters(this, {
@@ -123,6 +134,7 @@ export class MukurojiStack extends cdk.Stack {
     // The user pool's email links to the app URL, which exists only once the Web distribution,
     // built from resources that need the pool, is built below.
     let webOrigin: string | undefined;
+    let webBrowserOrigins: string | undefined;
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
@@ -231,14 +243,26 @@ export class MukurojiStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      // The API reads the app origins from the distribution, which is built from the API below.
+      webBrowserOrigins: cdk.Lazy.string({
+        produce: () => {
+          if (webBrowserOrigins === undefined) {
+            throw new Error('The Web distribution must be built before the stack synthesizes.');
+          }
+          return webBrowserOrigins;
+        },
+      }),
     });
     const webDistribution = buildWebDistribution(this, {
+      customDomain: webCustomDomain,
+      ssoRedirectUri: parameters.cognitoSsoRedirectUri.valueAsString,
       edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
       realtimeWebSocketApi: apiTransports.realtimeWebSocketStage.api,
     });
     webOrigin = webDistribution.webOrigin;
+    webBrowserOrigins = webDistribution.webBrowserOrigins;
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
       fileStorage,
@@ -296,7 +320,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAutomationScheduleJob(this, { dataStores, fileStorage, parameters }),
         defineTriageScheduleJob({ dataStores, parameters }),
         ...(softwareFactoryEnabled ? [defineAgentRunTriageJob({ dataStores, parameters })] : []),
-        defineSlackNotificationJob(this, { dataStores, parameters }),
+        defineSlackNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),

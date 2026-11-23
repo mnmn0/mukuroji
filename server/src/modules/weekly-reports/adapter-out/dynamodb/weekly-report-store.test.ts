@@ -247,7 +247,7 @@ test('reads a stored version and refuses one with an unknown section', async () 
       { Item: { ...row, sections: { ...submission.sections, extra: [] } } },
       { Item: { ...row, totalMinutes: WEEKLY_REPORT_MAX_MINUTES + 1 } },
       { Item: legacyRow },
-      { Item: { ...row, indirectTime: [{ category: 'lunch', minutes: 30 }] } },
+      { Item: { ...row, indirectTime: [{ category: 'Lunch break', minutes: 30 }] } },
     ],
   }))
   expect(await store.getSubmission(scope, '2026-11-16', 1)).toEqual(submission)

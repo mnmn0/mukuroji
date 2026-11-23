@@ -2984,6 +2984,21 @@ test('automation workers consume the audit outbox and run recurring schedules wi
   const scheduleConditionCheckPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationScheduleTransactWritePolicy')
   )?.[1];
+  // Only the event worker reflects Work Item completion into Documents: it
+  // reads backlinks, writes the Document rows, and checks ancestor folders
+  // inside the transaction. The schedule job gets none of it.
+  const eventStatements = (eventPolicy as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+  expect(eventStatements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('DocumentsTable7E808EE5'))).toEqual([{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
+  }]);
+  expect(JSON.stringify(eventConditionCheckPolicy)).toContain('DocumentsTable7E808EE5');
+  expect(JSON.stringify([schedulePolicy, scheduleConditionCheckPolicy]))
+    .not.toContain('DocumentsTable7E808EE5');
   for (const [policy, conditionCheckPolicy] of [
     [eventPolicy, eventConditionCheckPolicy],
     [schedulePolicy, scheduleConditionCheckPolicy],
@@ -3110,9 +3125,10 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         JSON.stringify(statement.Resource)
           .includes('TenantAdministrationTable621D59EB');
     });
+    // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
     expect(tenantEntitlementStatement).toEqual(expect.objectContaining({
       Effect: 'Allow',
-      Action: 'dynamodb:GetItem',
+      Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     }));
   }
   for (const policyPrefix of [

@@ -486,6 +486,14 @@ function NotificationRow({
               </time>
             </span>
             <span className={`mt-1 block truncate text-sm text-[var(--workbench-text)] ${isUnread ? 'font-bold' : 'font-semibold'}`}>
+              {notification.workItemKey ? (
+                <span
+                  className="mr-1.5 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
+                  data-testid={`notification-key-${createNotificationTestToken(notification.id)}`}
+                >
+                  {notification.workItemKey}
+                </span>
+              ) : null}
               {title}
             </span>
             <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
@@ -635,6 +643,12 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   }
   if (normalizedEventType.startsWith('weekly-report.')) {
     return 'workspace.inbox.event.weeklyReport'
+  }
+  if (normalizedEventType === 'planning-entity.milestone-completed') {
+    return 'workspace.inbox.event.milestoneCompleted'
+  }
+  if (normalizedEventType === 'planning-entity.milestone-rescheduled') {
+    return 'workspace.inbox.event.milestoneRescheduled'
   }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'

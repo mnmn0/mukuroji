@@ -45,6 +45,23 @@ describe('Email notification sender', () => {
       expect(text).not.toContain('evil')
     }
   })
+  test('prefixes the Work Item key and links its key page', () => {
+    const rendered = renderEmailNotification({
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'CORE-12' },
+    }, 'https://app.example.test/ignored')
+    expect(rendered.subject).toBe('[mukuroji] CORE-12 Review')
+    expect(rendered.text.split('\n')[0]).toBe('CORE-12 Review')
+    expect(rendered.text).toContain('CORE-12: https://app.example.test/browse/CORE-12')
+  })
+  test('ignores a stored key that is not canonical', () => {
+    const rendered = renderEmailNotification({
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'core-12' },
+    }, 'https://app.example.test')
+    expect(rendered.subject).toBe('[mukuroji] Review')
+    expect(rendered.text).not.toContain('/browse/')
+  })
   test('suppresses missing and unverified recipients and retries identity failures', async () => {
     expect(await sender({ kind: 'missing' }).send(delivery)).toMatchObject({ suppressed: true, code: 'EmailRecipientMissing' })
     expect(await sender({ kind: 'unverified' }).send(delivery)).toMatchObject({ suppressed: true, code: 'EmailRecipientUnverified' })

@@ -6,7 +6,7 @@ import type {
   PlanningWorkItemSummary,
 } from '@mukuroji/contracts'
 import { CYCLE_WORK_ITEMS_BATCH_LIMIT } from '@mukuroji/contracts'
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
   resolveCycleBacklog,
   submitCycleWorkItemBatch,
@@ -84,6 +84,13 @@ export type CyclePlanningPanelProps = {
     cycle: PlanningEntity,
     automation: CycleAutomation | null,
   ) => void | Promise<void>
+  /**
+   * Renders the selected Cycle's schedule baselines. Omitted, the section is not shown.
+   *
+   * @param cycle - Selected Cycle.
+   * @param canManage - Whether the viewer manages the Cycle and may save a baseline.
+   */
+  renderCycleBaseline?: (cycle: PlanningEntity, canManage: boolean) => ReactNode
   /** Adds Work Items to, or removes them from, a Cycle. Rejects when nothing changed. */
   onSetCycleWorkItems?: (
     cycle: PlanningEntity,
@@ -108,6 +115,7 @@ export function CyclePlanningPanel({
   onCreateNextCycle,
   onSetCycleWorkItems,
   onUpdateCycleAutomation,
+  renderCycleBaseline,
   snapshot,
 }: CyclePlanningPanelProps) {
   const cycles = snapshot.entities.filter((entity) => entity.type === 'cycle' && !entity.archivedAt)
@@ -151,6 +159,7 @@ export function CyclePlanningPanel({
         onCreateNextCycle={onCreateNextCycle}
         onSetCycleWorkItems={onSetCycleWorkItems}
         onUpdateCycleAutomation={onUpdateCycleAutomation}
+        renderCycleBaseline={renderCycleBaseline}
         snapshot={snapshot}
       />
     </section>
@@ -166,6 +175,7 @@ function CycleDetail({
   onCreateNextCycle,
   onSetCycleWorkItems,
   onUpdateCycleAutomation,
+  renderCycleBaseline,
   snapshot,
 }: {
   canLink: boolean
@@ -176,6 +186,7 @@ function CycleDetail({
   onCreateNextCycle?: CyclePlanningPanelProps['onCreateNextCycle']
   onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
   onUpdateCycleAutomation?: CyclePlanningPanelProps['onUpdateCycleAutomation']
+  renderCycleBaseline?: CyclePlanningPanelProps['renderCycleBaseline']
   snapshot: PlanningSnapshot
 }) {
   const summary = summarizeCycleCommitment(cycle, snapshot.workItemLinks)
@@ -214,6 +225,8 @@ function CycleDetail({
           {labels.capacityFull}
         </p>
       ) : null}
+
+      {renderCycleBaseline?.(cycle, canManage)}
 
       <div className="grid grid-cols-2 gap-5 max-[1100px]:grid-cols-1">
         <CycleAutomationForm

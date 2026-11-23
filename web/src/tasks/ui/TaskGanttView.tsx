@@ -52,6 +52,7 @@ import {
   resolveTaskScheduleStartDate,
   taskScheduleInstantToLocalDate,
   tryAddTaskTimelineDays,
+  cloneTaskScheduleCalendarPolicy,
 } from '../model/taskSchedule'
 import {
   createTaskKey,
@@ -2843,11 +2844,7 @@ function createModeReplacement(
   fallbackDate: string,
 ): WorkItemSchedule {
   const plannedEffortMinutes = current.plannedEffortMinutes
-  const calendarPolicy = {
-    holidays: [...current.calendarPolicy.holidays],
-    timeZone: current.calendarPolicy.timeZone,
-    workingWeekdays: [...current.calendarPolicy.workingWeekdays],
-  }
+  const calendarPolicy = cloneTaskScheduleCalendarPolicy(current.calendarPolicy)
   const effort = plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }
   if (mode === 'unscheduled') {
     return {

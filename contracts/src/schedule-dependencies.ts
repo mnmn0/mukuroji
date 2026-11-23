@@ -69,7 +69,10 @@ export type WorkItemScheduleDependencyConflict = {
 export type WorkItemDependencyCriticalPath = {
   /** Work Items on the longest dependency path in predecessor-to-successor order. */
   workItems: WorkItemDependencyEndpoint[]
-  /** Total calendar-day duration of the critical path. */
+  /**
+   * Total duration of the critical path in working days: each date range counts the working days
+   * of its own calendar, and lead or lag days are added as they are (ADR 0058).
+   */
   totalDurationDays: number
   /** Total slack keyed by percent-encoded `teamId/workItemId` endpoint identities. */
   slackByWorkItemKey: Record<string, number>

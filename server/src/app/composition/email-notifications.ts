@@ -14,8 +14,10 @@ import {
 } from '../../modules/notifications'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { createMemberNotificationLocaleReader } from './notification-locale'
+import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
+import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
@@ -24,17 +26,7 @@ import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report
  * @returns Normalized origin; HTTPS is required except for a loopback development host.
  */
 export function parseEmailAppOrigin(value: string | undefined): string {
-  let url: URL
-  try {
-    url = new URL(value?.trim() ?? '')
-  } catch {
-    throw new Error('NOTIFICATION_EMAIL_APP_ORIGIN must be an absolute URL.')
-  }
-  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1'
-  if (url.protocol !== 'https:' && !(loopback && url.protocol === 'http:')) {
-    throw new Error('NOTIFICATION_EMAIL_APP_ORIGIN must use HTTPS.')
-  }
-  return url.origin
+  return parseNotificationAppOrigin(value, 'NOTIFICATION_EMAIL_APP_ORIGIN')
 }
 
 /**
@@ -102,6 +94,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
     fileTableName,
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
+    planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const ses = new SESv2Client({ region })
   const send = createEmailNotificationSender({

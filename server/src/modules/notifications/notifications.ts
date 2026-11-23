@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
 import {
+  isCanonicalWorkItemKey,
   parseNotificationMessage,
   type NotificationCategoryChannels,
   type NotificationMessage,
@@ -138,6 +139,8 @@ export type NotificationItem = {
   actorLabel?: string
   /** 対象 Work Item などの表示タイトルです。 */
   title?: string
+  /** Short key such as `ABC-123` of the target Work Item, when it has one. */
+  workItemKey?: string
   /** Event の安全な短い概要です。 */
   summary?: string
   /** System が書いた概要の code と値です。読む人の言語で文にします。 */
@@ -1203,6 +1206,7 @@ export function toNotificationItem(
       ? { actorLabel: readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId) }
       : {}),
     ...(readText(value.title) ? { title: readText(value.title) } : {}),
+    ...(isCanonicalWorkItemKey(value.workItemKey) ? { workItemKey: value.workItemKey } : {}),
     ...(readText(value.summary) ? { summary: readText(value.summary) } : {}),
     ...(message ? { message } : {}),
     ...(deepLink?.startsWith('/') && !deepLink.startsWith('//') ? { deepLink } : {}),
