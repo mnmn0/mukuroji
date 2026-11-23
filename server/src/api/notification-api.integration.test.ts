@@ -1383,6 +1383,8 @@ test('shows a Milestone notification only to a current watcher who can read the 
   }
   for (const [id, projectId, archived] of [
     ['refero-milestone', 'refero', false],
+    // Visible and current, so only the missing watch hides its notification.
+    ['other-milestone', 'refero', false],
     ['private-milestone', 'private-project', false],
     ['archived-milestone', 'refero', true],
   ] as const) {
