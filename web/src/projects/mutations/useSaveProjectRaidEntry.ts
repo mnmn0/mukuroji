@@ -20,8 +20,9 @@ export type ProjectRaidEntrySaveScope = {
  * Returns a function that adds or changes one Project log entry and reloads the log.
  *
  * A failed save keeps its request context, so saving the same input again reuses its
- * Idempotency-Key and the server returns the result of an attempt whose response was lost. The
- * context is dropped once the server answers, with success or a client error. A conflict also
+ * Idempotency-Key and the server returns the result of an attempt whose response was lost. Each
+ * different input keeps its own context, so saving something else in between does not lose it.
+ * A context is dropped once the server answers, with success or a client error. A conflict also
  * reloads the log, so the form can move onto the latest revision.
  *
  * @param scope - Session, Team, and Project.
@@ -29,19 +30,16 @@ export type ProjectRaidEntrySaveScope = {
  */
 export function useSaveProjectRaidEntry({ accessToken, teamId, projectId }: ProjectRaidEntrySaveScope) {
   const { mutate } = useSWRConfig()
-  const pendingSave = useRef<{ fingerprint: string; context: MutationRequestContext }>(undefined)
+  const pendingSaves = useRef(new Map<string, MutationRequestContext>())
   return useCallback(async (entry: ProjectRaidEntry | undefined, input: ProjectRaidEntryInput) => {
     if (!accessToken || !teamId) return
     const key = projectRaidLogKey(accessToken, teamId, projectId)
     const fingerprint = JSON.stringify([teamId, projectId, entry?.id ?? null, entry?.revision ?? null, input])
-    if (pendingSave.current?.fingerprint !== fingerprint) {
-      pendingSave.current = { fingerprint, context: createMutationRequestContext() }
-    }
-    const attempt = pendingSave.current
-    const { context } = attempt
-    /** Drops this save's context, but not one that a different save started meanwhile. */
+    const context = pendingSaves.current.get(fingerprint) ?? createMutationRequestContext()
+    pendingSaves.current.set(fingerprint, context)
+    /** Drops this save's context, but not one that a later save of the same input started. */
     const clearAttempt = () => {
-      if (pendingSave.current === attempt) pendingSave.current = undefined
+      if (pendingSaves.current.get(fingerprint) === context) pendingSaves.current.delete(fingerprint)
     }
     try {
       if (entry) {
