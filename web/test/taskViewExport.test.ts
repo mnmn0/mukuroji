@@ -73,7 +73,7 @@ describe('view export', () => {
 
     expect(file.fileName).toBe('Project- A-B-20261123.csv')
     const bytes = new Uint8Array(await file.blob.arrayBuffer())
-    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
+    expect(Array.from(bytes.subarray(0, 3))).toEqual([0xef, 0xbb, 0xbf])
     expect(new TextDecoder().decode(bytes.slice(3))).toBe(
       "名前,メモ\r\n'=SUM(A1),\"a,\"\"b\"\"\"\r\n'-1,\r\n",
     )
