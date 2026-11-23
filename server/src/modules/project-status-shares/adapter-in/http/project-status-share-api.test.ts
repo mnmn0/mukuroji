@@ -340,8 +340,13 @@ test('hides an expired link, a closed Workspace, and an archived Project', async
     .rejects.toMatchObject({ status: 404 })
   await expect(readPublicProjectStatusReportUseCase(store, token, new Date('2026-11-23T12:00:00.000Z'), {
     ...active,
-    assertWorkspaceActive: async () => { throw new Error('closed') },
+    assertWorkspaceActive: async () => { throw Object.assign(new Error('closed'), { status: 403 }) },
   })).rejects.toMatchObject({ status: 404 })
+  // A failure to read the Workspace state is not reported as a missing link.
+  await expect(readPublicProjectStatusReportUseCase(store, token, new Date('2026-11-23T12:00:00.000Z'), {
+    ...active,
+    assertWorkspaceActive: async () => { throw Object.assign(new Error('unavailable'), { status: 503 }) },
+  })).rejects.toMatchObject({ status: 503 })
   await expect(readPublicProjectStatusReportUseCase(store, token, new Date('2026-11-23T12:00:00.000Z'), {
     ...active,
     isProjectActive: async () => false,

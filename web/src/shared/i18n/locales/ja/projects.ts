@@ -298,6 +298,7 @@ export const projectsMessages = {
   'projects.statusReport.share.copied': 'コピーしました',
   'projects.statusReport.share.list': '発行済みのリンク',
   'projects.statusReport.share.empty': 'まだリンクはありません。',
+  'projects.statusReport.share.retry': '再読み込み',
   'projects.statusReport.share.status.open': '有効',
   'projects.statusReport.share.status.revoked': '失効',
   'projects.statusReport.share.status.expired': '期限切れ',

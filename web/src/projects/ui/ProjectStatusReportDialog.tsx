@@ -337,7 +337,18 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
       <div className="grid gap-2">
         <h4 className="text-sm font-semibold text-[var(--workbench-text)]">{t('projects.statusReport.share.list')}</h4>
         {list.error ? (
-          <p className="text-sm text-red-700" role="alert">{t('projects.statusReport.error.shares')}</p>
+          <div className="grid justify-items-start gap-2" role="alert">
+            <p className="text-sm text-red-700">{t('projects.statusReport.error.shares')}</p>
+            <button
+              className="workbench-button-secondary min-h-9 px-3 text-xs"
+              data-testid="project-status-share-retry"
+              disabled={list.isValidating}
+              onClick={() => void list.mutate()}
+              type="button"
+            >
+              {t('projects.statusReport.share.retry')}
+            </button>
+          </div>
         ) : list.data && list.data.shares.length === 0 ? (
           <p className="text-sm text-[var(--workbench-muted)]">{t('projects.statusReport.share.empty')}</p>
         ) : (

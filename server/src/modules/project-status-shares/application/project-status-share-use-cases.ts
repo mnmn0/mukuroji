@@ -322,8 +322,11 @@ export async function readPublicProjectStatusReportUseCase<TCallerCheck, TAudit>
   }
   try {
     await checks.assertWorkspaceActive(lookup.scope.workspaceId)
-  } catch {
-    throw publicNotFound()
+  } catch (error) {
+    // A closed or suspended Workspace answers like an unknown link; a failure to read the
+    // Workspace state stays a temporary error the recipient can retry.
+    if (isClientError(error)) throw publicNotFound()
+    throw error
   }
   if (!await checks.isProjectActive(lookup.scope)) throw publicNotFound()
   return {
@@ -533,4 +536,15 @@ function replayCreate(
 function canonicalReport(report: ProjectStatusReport) {
   const parsed = parseProjectStatusReport(report)
   return JSON.stringify(parsed.ok ? parsed.value : report)
+}
+
+/**
+ * Tells whether an error carries an HTTP status below 500, such as a Workspace lifecycle denial.
+ *
+ * @param error - Thrown error.
+ * @returns Whether the error is a client error.
+ */
+function isClientError(error: unknown) {
+  return typeof error === 'object' && error !== null && 'status' in error &&
+    typeof error.status === 'number' && error.status >= 400 && error.status < 500
 }

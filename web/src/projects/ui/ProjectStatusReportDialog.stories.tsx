@@ -84,6 +84,14 @@ export const Viewer: Story = {
   },
 }
 
+/** A failed share list offers a retry. */
+export const ShareListFailed: Story = {
+  beforeEach: () => installStoryFetch(() => Response.json({ code: 'Unavailable', message: 'Unavailable.' }, { status: 503 })),
+  play: async ({ canvasElement }) => {
+    await expect(await within(canvasElement).findByTestId('project-status-share-retry')).toBeEnabled()
+  },
+}
+
 /** The report waits for the overview data. */
 export const Loading: Story = {
   args: { report: undefined },

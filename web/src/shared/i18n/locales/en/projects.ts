@@ -299,6 +299,7 @@ export const projectsMessages = {
   'projects.statusReport.share.copy': 'Copy',
   'projects.statusReport.share.copied': 'Copied',
   'projects.statusReport.share.list': 'Links',
+  'projects.statusReport.share.retry': 'Retry',
   'projects.statusReport.share.empty': 'No links yet.',
   'projects.statusReport.share.status.open': 'Open',
   'projects.statusReport.share.status.revoked': 'Revoked',
