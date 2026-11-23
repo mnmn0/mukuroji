@@ -48,10 +48,13 @@ Shinji の方針は「なるべく安く」。
   transaction で条件付き `Put` する。99 bucket ごとに 1 transaction とし、受領行も分ける。ID と bucket の区切りは、
   受信時刻で受け付けの窓から外れた event も含めた export の全 event から作り、再送までに event が 7 日を過ぎても
   同じ受領行に当たるようにする。table に TTL
-  attribute `usageExpiresAt` を追加し、usage の行は 400 日、受領行は 2 日で消す。どの行も `workspaceId` を
-  持つので、Workspace の削除・export の既存の対象に入る。throttling や競合する transaction による一時的な
+  attribute `usageExpiresAt` を追加し、usage の行は 400 日、受領行は 8 日で消す（受け付けの窓 7 日と 5 分より長く残し、窓の中の再送を必ず弾く）。どの行も `workspaceId` を
+  持つので、Workspace の削除・export の既存の対象に入る。throttling、競合する transaction、接続の切断や timeout による一時的な
   保存失敗は `503` で返す。OTLP の exporter が再送するのは 429・502・503・504 だけのため。Agent Run の
   整合性チェックは、Team を探す scan でこの 2 種類の partition を Team ではないものとして読み飛ばす。
+- **header の範囲**：Claude Code は `otelHeadersHelper` の header を logs だけでなく metrics・traces の送信先にも
+  付ける。別の collector に metrics や traces を送っている環境では token がそこへ渡るため、文書と設定画面で
+  その場合は設定しないよう注意を書く。
 - **見せ方**：Web の Work Item の Run 一覧 API が、Run ごとの `usage` と、返した Run の合計 `usageTotal` を返す。
   トークン数は Work Item を見られる人に、推定費用は Team manager にだけ返す。1 Run あたり、その instance の
   2,000 bucket まで読む。同じ member の別 instance の行も同じ partition にあるため、読む行は 10,000 行までとし、

@@ -188,6 +188,7 @@ describe('agent usage buckets and run attribution', () => {
     const withCost = summarizeAgentUsage(buckets, true, true)
     expect(withCost?.estimatedCostMicroUsd).toBe(37_500)
     expect(summarizeAgentUsage([], true, false)).toBeUndefined()
+    expect(summarizeAgentUsage([], true, true)).toMatchObject({ inputTokens: 0, requestCount: 0, hasMore: true })
     expect(combineAgentRunUsage([withCost, undefined, withCost])).toMatchObject({ inputTokens: 720, estimatedCostMicroUsd: 75_000, hasMore: true })
     expect(combineAgentRunUsage([undefined])).toBeUndefined()
   })
@@ -231,6 +232,19 @@ describe('agent usage stores', () => {
     expect((await store.listMemberBuckets('ws', 'member', hashAgentInstanceId('desktop'), '2026-11-22T17:05:00Z', undefined, 2)).buckets).toEqual([])
   })
 
+  test('the in-memory store counts other instances toward the scan bound like the DynamoDB store', async () => {
+    const store = new InMemoryAgentRunUsageStore()
+    const others = groupAgentUsageBuckets(parseAgentTelemetryLogs(exportOf(
+      Array.from({ length: 6 }, (_, index) => apiRequest(`2026-11-22T17:04:${index}0Z`)),
+      'desktop',
+    ), now).events)
+    expect(await store.recordBatch('ws', 'member', 'others', others)).toBe('recorded')
+    expect(await store.recordBatch('ws', 'member', 'own', buckets)).toBe('recorded')
+    const laptop = hashAgentInstanceId('laptop')
+    expect(await store.listMemberBuckets('ws', 'member', laptop, '2026-11-22T17:04:00Z', undefined, 1)).toEqual({ buckets: [], hasMore: true })
+    expect((await store.listMemberBuckets('ws', 'member', laptop, '2026-11-22T17:05:00Z', undefined, 1)).buckets).toHaveLength(1)
+  })
+
   test('the DynamoDB store writes a receipt with ADD updates and treats a receipt conflict as a duplicate', async () => {
     const sent: unknown[] = []
     let conflict = false
@@ -254,7 +268,12 @@ describe('agent usage stores', () => {
         {
           Put: {
             TableName: 'runs',
-            Item: { directoryTeamId: 'ws#agent-usage-batch#member#member', recordKey: 'batch#0', workspaceId: 'ws' },
+            Item: {
+              directoryTeamId: 'ws#agent-usage-batch#member#member',
+              recordKey: 'batch#0',
+              workspaceId: 'ws',
+              usageExpiresAt: Math.floor(now.getTime() / 1_000) + 8 * 86_400,
+            },
             ConditionExpression: 'attribute_not_exists(recordKey)',
           },
         },
@@ -283,6 +302,8 @@ describe('agent usage stores', () => {
     const store = new DynamoDbAgentRunUsageStore(client, 'runs')
     const unavailable = { category: 'temporarily_unavailable', status: 503 }
     failure = Object.assign(new Error('throttled'), { name: 'ThrottlingException' })
+    await expect(store.recordBatch('ws', 'member', 'batch', buckets, now)).rejects.toMatchObject(unavailable)
+    failure = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
     await expect(store.recordBatch('ws', 'member', 'batch', buckets, now)).rejects.toMatchObject(unavailable)
     failure = Object.assign(new Error('cancelled'), {
       name: 'TransactionCanceledException',

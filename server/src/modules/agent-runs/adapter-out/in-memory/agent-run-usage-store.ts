@@ -2,6 +2,7 @@ import { type AgentUsageBucket } from '../../domain/agent-run-usage'
 import {
   agentUsagePartition,
   agentUsageRecordKey,
+  AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR,
   type AgentRunUsageStore,
   type AgentUsageBucketPage,
 } from '../dynamodb/agent-run-usage-store'
@@ -40,11 +41,20 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   /** @inheritdoc */
   async listMemberBuckets(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage> {
     const prefix = `${agentUsagePartition(directoryId, memberKey)}|`
-    const matching = [...this.buckets.entries()]
-      .filter(([key, bucket]) => key.startsWith(prefix) && bucket.instanceIdHash === instanceIdHash &&
+    const inRange = [...this.buckets.entries()]
+      .filter(([key, bucket]) => key.startsWith(prefix) &&
         bucket.bucketStart >= from && (until === undefined || bucket.bucketStart < until))
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([, bucket]) => ({ ...bucket }))
-    return { buckets: matching.slice(0, limit), hasMore: matching.length > limit }
+      .map(([, bucket]) => bucket)
+    // Same bounds as the DynamoDB store: other instances' rows count toward the scan bound.
+    const maxScanned = limit * AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR
+    const buckets: AgentUsageBucket[] = []
+    for (const [index, bucket] of inRange.entries()) {
+      if (index === maxScanned) return { buckets, hasMore: true }
+      if (bucket.instanceIdHash !== instanceIdHash) continue
+      if (buckets.length === limit) return { buckets, hasMore: true }
+      buckets.push({ ...bucket })
+    }
+    return { buckets, hasMore: false }
   }
 }

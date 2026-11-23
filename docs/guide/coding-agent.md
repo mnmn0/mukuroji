@@ -108,7 +108,9 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
 - 値は、Run が動いていた間に同じ agent（instance ID）から届いた分を時刻で割り当てたものです。Run を始める前や
   終えた後の会話の分は、どのタスクにも入りません。
 - 送られるのはトークン数・推定費用・model 名・時刻だけで、prompt や会話の内容は保存されません。
-- 送信には MCP に設定している自分用 token をそのまま使います（`work-items:write`）。
+- 送信には MCP に設定している自分用 token をそのまま使います（`work-items:write`）。Claude Code はこの token を
+  すべての OpenTelemetry の送信先に付けるので、metrics や traces を別の collector に送っている場合は設定しないで
+  ください。
 - **agent を接続** で Claude Code を選び、「トークン使用量を送る instance ID」を入力すると、MCP の登録コマンドと
   `~/.claude/settings.json` に足す設定が作られます。
 - Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
@@ -155,7 +157,8 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 - ランタイム別の成功率・手戻り率・介入
 
 見られるのは自分が閲覧できるプロジェクトのタスクだけです。件数が多く読み込み上限に達したときは、
-集計に含まれていない Run があることを表示します。token 数や費用はまだ集計しません。
+集計に含まれていない Run があることを表示します。期間内に終わった Run のトークン数も合計します（推定費用は Team の
+管理者だけに表示）。Run や使用量が読み込み上限に達したときは、合計に含まれていない分があることを表示します。
 
 「停滞」は、リース時間内に `heartbeat` が届かなかった Run です。自動では止まらず、担当も変わりません。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。

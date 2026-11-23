@@ -5,8 +5,11 @@ import { createAgentRunIntegrityError, createAgentUsageUnavailableError } from '
 /** Days a usage bucket is kept before DynamoDB TTL removes it. */
 export const AGENT_USAGE_RETENTION_DAYS = 400
 
-/** Days an export receipt is kept, long enough to cover every OTLP exporter retry. */
-export const AGENT_USAGE_BATCH_RECEIPT_DAYS = 2
+/**
+ * Days an export receipt is kept. The receiver accepts events up to 7 days old and 5 minutes ahead,
+ * so a receipt outlives every export the receiver could still accept and a late resend is not counted twice.
+ */
+export const AGENT_USAGE_BATCH_RECEIPT_DAYS = 8
 
 /** TTL attribute of usage rows and export receipts in the Agent Runs table. */
 export const AGENT_USAGE_TTL_ATTRIBUTE = 'usageExpiresAt'
@@ -151,6 +154,9 @@ function isReceiptConflict(error: unknown): boolean {
 /** Transaction cancellation codes that may pass when the same transaction is retried. */
 const transientCancellationCodes: ReadonlySet<string> = new Set(['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError'])
 
+/** Node.js network error codes of a dropped or timed-out connection. */
+const transientNetworkErrorCodes: ReadonlySet<string> = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN'])
+
 /** SDK error names that may pass when the same request is retried. */
 const transientErrorNames: ReadonlySet<string> = new Set([
   'ProvisionedThroughputExceededException',
@@ -164,7 +170,7 @@ const transientErrorNames: ReadonlySet<string> = new Set([
 /**
  * Checks whether a failed usage write may succeed when the exporter retries it.
  *
- * A cancelled transaction counts when a competing transaction or throttling cancelled at least one
+ * A dropped connection counts as well. A cancelled transaction counts when a competing transaction or throttling cancelled at least one
  * item and the other items had no failure of their own.
  *
  * @param error - Thrown value.
@@ -173,6 +179,7 @@ const transientErrorNames: ReadonlySet<string> = new Set([
 function isTransientUsageWriteFailure(error: unknown): boolean {
   if (!isRecord(error) || typeof error.name !== 'string') return false
   if (transientErrorNames.has(error.name)) return true
+  if (typeof error.code === 'string' && transientNetworkErrorCodes.has(error.code)) return true
   if (error.name !== 'TransactionCanceledException' || !Array.isArray(error.CancellationReasons)) return false
   const codes = error.CancellationReasons.map((reason) => isRecord(reason) && typeof reason.Code === 'string' ? reason.Code : undefined)
   return codes.some((code) => code !== undefined && transientCancellationCodes.has(code)) &&

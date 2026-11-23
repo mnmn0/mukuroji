@@ -480,14 +480,15 @@ export function isAgentUsageBucketInRun(bucket: Pick<AgentUsageBucket, 'bucketSt
  * @param buckets - Buckets to add.
  * @param includeCost - Whether the viewer may see the estimated cost.
  * @param hasMore - Whether more buckets existed than were read.
- * @returns The summary, or undefined when there is nothing to report.
+ * @returns The summary, or undefined when nothing was found and nothing was left unread.
  */
 export function summarizeAgentUsage(
   buckets: readonly Pick<AgentUsageBucket, 'model' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens' | 'costMicroUsd' | 'requestCount'>[],
   includeCost: boolean,
   hasMore: boolean,
 ): AgentRunUsage | undefined {
-  if (buckets.length === 0) return undefined
+  // An empty read that stopped early still reports that some usage was not read.
+  if (buckets.length === 0 && !hasMore) return undefined
   const models = new Set<string>()
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 0, costMicroUsd: 0 }
   for (const bucket of buckets) {

@@ -104,7 +104,7 @@ export const factoryBoardMessages = {
   'factoryBoard.analytics.interventionsColumn': 'Interventions',
   'factoryBoard.analytics.usageHeading': 'Token usage',
   'factoryBoard.analytics.usageHint': 'Adds up what agents sent over OpenTelemetry for the runs that finished in the period. Only Team managers see the estimated cost.',
-  'factoryBoard.analytics.usagePartial': 'There are many runs, so only the newest ones are added up.',
+  'factoryBoard.analytics.usagePartial': 'A read limit was reached, so some runs or usage are not included.',
   'factoryBoard.analytics.usageProjectsHeading': 'By Project',
   'factoryBoard.analytics.usageNoProject': 'No Project',
   'factoryBoard.analytics.usageWorkItemsHeading': 'Tasks with the most tokens',

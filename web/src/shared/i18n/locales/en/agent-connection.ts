@@ -70,6 +70,6 @@ export const agentConnectionMessages = {
   'agents.connect.usageInstanceHint': 'When set, the MCP server and the usage export both carry this ID, and the runs of the task show their tokens. Use a different ID for each session you run at the same time. Close any run in progress with the old settings before you change the ID.',
   'agents.connect.usageInstanceInvalid': 'Use up to 64 letters, digits, ., _, or -.',
   'agents.connect.usageSnippetLabel': 'Token usage settings to add to {location}',
-  'agents.connect.usageNote': 'The token is not written here; otelHeadersHelper builds the header from MUKUROJI_MCP_TOKEN. Sending usage needs work-items:write, which the token already has.',
+  'agents.connect.usageNote': 'The token is not written here; otelHeadersHelper builds the header from MUKUROJI_MCP_TOKEN. Sending usage needs work-items:write, which the token already has. Claude Code adds this header to every OpenTelemetry destination it sends to, so do not add these settings if you already send metrics or traces to another collector: the token would reach that collector too.',
   'agents.connect.usageWindowsNote': 'otelHeadersHelper is a POSIX shell command. On Windows, start Claude Code from WSL or Git Bash.',
 } as const

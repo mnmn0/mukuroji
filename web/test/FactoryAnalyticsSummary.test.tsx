@@ -124,6 +124,6 @@ describe('Factory analytics summary', () => {
     expect(render()).not.toContain('factory-analytics-usage')
     const { usage } = factoryAnalyticsWithUsageFixture
     if (!usage) throw new Error('The fixture has usage.')
-    expect(render({ ...factoryAnalyticsWithUsageFixture, usage: { ...usage, runsHasMore: true } })).toContain('新しい Run から一部だけ')
+    expect(render({ ...factoryAnalyticsWithUsageFixture, usage: { ...usage, runsHasMore: true } })).toContain('読み込み上限に達したため')
   })
 })

@@ -235,6 +235,9 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 }
 ```
 
+- Claude Code は `otelHeadersHelper` の header を、logs だけでなく metrics・traces を含むすべての
+  OpenTelemetry の送信先に付けます。metrics や traces を別の collector に送っている環境でこの設定を足すと、
+  Mukuroji の token がその collector にも渡ります。その場合は設定しないでください。
 - `OTEL_LOGS_EXPORT_INTERVAL` を 60 秒にすると request 数が減ります（既定は 5 秒）。metrics の exporter は
   設定しません。Mukuroji は logs の `claude_code.api_request` だけを読みます。
 - Mukuroji が読むのはトークン数、推定費用、model、時刻、`mukuroji.agent_instance` だけで、prompt や tool の
