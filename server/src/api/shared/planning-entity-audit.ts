@@ -270,12 +270,21 @@ function excerpt(value: string) {
 /**
  * Creates the Planning entity activity response with the public audit event projection.
  *
- * @param page - Audit event page of one Planning entity.
- * @returns Activity page whose events carry only the public audit event fields.
+ * @param page - Audit event page of one Planning entity, already filtered for the reader by
+ *   `redactPlanningEntityAuditReferences`.
+ * @returns Activity page whose events carry the public audit event fields and a visible related entity.
  */
 export function toPlanningEntityActivityPageView(page: AuditEventPage) {
   return {
-    events: page.events.map((event) => toAuditEventView(event)),
+    events: page.events.map((event) => {
+      const view = toAuditEventView(event)
+      // The page holds events already filtered by `redactPlanningEntityAuditReferences`, so a
+      // remaining related entity is one the reader can see; it names the other dependency end.
+      const relatedEntityId = event.metadata?.relatedEntityId
+      return typeof relatedEntityId === 'string'
+        ? { ...view, metadata: { ...view.metadata, relatedEntityId } }
+        : view
+    }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
 }

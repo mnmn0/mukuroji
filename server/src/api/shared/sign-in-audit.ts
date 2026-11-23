@@ -101,7 +101,7 @@ export async function recordSignInFailed(
       'system',
     )
     await writeSignInEvent(context, 'auth.sign-in-failed', `email:${subject}`, {
-      reason,
+      signInFailure: reason,
       ...(domain ? { emailDomain: domain } : {}),
     })
     rememberFailureKey(key)

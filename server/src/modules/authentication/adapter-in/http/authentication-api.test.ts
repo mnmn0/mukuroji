@@ -822,7 +822,7 @@ test('records repeated rejected sign-ins once per window without the address or 
   expect(failures[0]).toMatchObject({
     workspaceId: 'workspace#production',
     actor: { kind: 'system' },
-    metadata: { reason: 'invalid-credentials', emailDomain: 'example.com' },
+    metadata: { signInFailure: 'invalid-credentials', emailDomain: 'example.com' },
   })
   const serialized = JSON.stringify(failures[0])
   expect(serialized).not.toContain('guess@example.com')

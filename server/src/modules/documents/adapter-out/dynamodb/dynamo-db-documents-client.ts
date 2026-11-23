@@ -4342,7 +4342,6 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       entityId: document.id,
       ...(event.target === undefined ? {} : { target: event.target }),
       action: event.action,
-      occurredAt: document.updatedAt,
       changes: createAuditFieldChanges(
         event.previous,
         event.eventType === 'document.created' || event.previous !== undefined ? document : undefined,

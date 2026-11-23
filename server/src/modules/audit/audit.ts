@@ -1584,24 +1584,44 @@ export function toAuditEventView(value: unknown) {
 const publicAuditMetadataFields = new Set([
   'adapter',
   'acceptedCommentId',
+  // Number of further Customer graph changes folded into one event; a count only.
+  'additionalChanges',
+  'assignmentId',
+  // Session authentication methods of a sign-in, such as `pwd` or `SOFTWARE_TOKEN_MFA`.
+  'authenticationMethods',
   'commentId',
   'contextItemId',
+  'customerId',
+  'dependencyId',
+  'dependencyRole',
+  // Domain part only of a rejected sign-in address; the address itself is never stored.
+  'emailDomain',
   'eventCount',
   'exportId',
   'filtered',
   'filtersDigest',
+  'format',
   'fromPart',
+  'issueId',
   'kind',
   'memberId',
   'memberKey',
+  'mergedIntoId',
   'partCount',
   'projectId',
+  'requestId',
   'roleId',
   'rootCommentId',
   // Operator runtime-control switches (scripts/runtime-control.ts); holds no secret or tenant data.
   'runtimeControl',
   'scopeKind',
+  'shareId',
+  // Enumerated cause of a rejected sign-in (`invalid-credentials` / `invalid-mfa-code`).
+  'signInFailure',
   'teamId',
+  'timeOffId',
+  'urlChanged',
+  'versionId',
 ])
 
 function createAuditMetadataView(metadata: AuditObject | undefined) {

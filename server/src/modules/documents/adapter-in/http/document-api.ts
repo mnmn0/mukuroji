@@ -25,7 +25,7 @@ import type {
   WhiteboardContent,
   WhiteboardObjectStyle,
 } from '@mukuroji/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { resolveTrustedClientAddress } from '../../../../infrastructure/http/trusted-request-source'
 import {
@@ -1247,7 +1247,8 @@ function createDocumentAuditContext(
         displayName: principal.displayName,
       },
       idempotencyKey: idempotencyKey
-        ? `${c.req.method} ${path} ${idempotencyKey}`
+        // A digest keeps any key the Document store accepts within the audit key length limit.
+        ? `document-request:${createHash('sha256').update(`${c.req.method}\0${path}\0${idempotencyKey}`).digest('hex')}`
         : randomUUID(),
       request: {
         method: c.req.method,
