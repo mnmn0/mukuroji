@@ -144,6 +144,7 @@ describe('PortfolioDashboardView', () => {
         teams={teams}
         onCompareMonthChange={() => undefined}
         onOpenProject={() => undefined}
+        onRetry={() => undefined}
         onSaveSnapshot={() => undefined}
       />,
     )
@@ -155,6 +156,7 @@ describe('PortfolioDashboardView', () => {
     expect(html).toContain('No access')
     expect(html).toContain('data-testid="portfolio-save-snapshot"')
     expect(html).toContain('+30pt since then')
+    expect(html).toContain('data-testid="portfolio-retry"')
   })
 })
 

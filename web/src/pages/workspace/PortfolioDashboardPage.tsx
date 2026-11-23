@@ -1,22 +1,24 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { PORTFOLIO_WORKSPACE_TEAM_LIMIT, previousPortfolioMonth } from '@mukuroji/contracts'
-import { saveTeamPortfolioSnapshot } from '../../features/portfolio-dashboard/api/portfolio'
 import {
   createPortfolioDashboardModel,
   listPortfolioDashboardErrors,
 } from '../../features/portfolio-dashboard/model/portfolioDashboard'
+import { useSaveTeamPortfolioSnapshots } from '../../features/portfolio-dashboard/mutations/useSaveTeamPortfolioSnapshots'
 import {
   usePortfolioDashboard,
   usePortfolioSnapshots,
 } from '../../features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../../features/portfolio-dashboard/ui/PortfolioDashboardView'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectOverviewPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+
+/** How often the page checks whether the local date has changed. */
+const CALENDAR_CHECK_INTERVAL_MS = 60_000
 
 /** Number of past months offered for comparison. */
 const COMPARE_MONTH_COUNT = 12
@@ -49,6 +51,27 @@ function readLocalCalendar(now: Date, timeZone: string) {
 }
 
 /**
+ * Keeps the local date and month current while the page stays open, so a save after midnight
+ * on the last day of a month targets the new month and forecasts use the new day.
+ *
+ * @param timeZone - IANA timezone.
+ * @returns `YYYY-MM-DD` and `YYYY-MM`.
+ */
+function useLocalCalendar(timeZone: string) {
+  const [calendar, setCalendar] = useState(() => readLocalCalendar(new Date(), timeZone))
+  useEffect(() => {
+    const refresh = () => {
+      const next = readLocalCalendar(new Date(), timeZone)
+      setCalendar((current) => current.today === next.today ? current : next)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, CALENDAR_CHECK_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [timeZone])
+  return calendar
+}
+
+/**
  * Renders the Workspace portfolio (PMO) dashboard route.
  *
  * Each Team's portfolio is read on its own through `GET /api/teams/:teamId/portfolio`, so one
@@ -61,7 +84,7 @@ export function PortfolioDashboardPage() {
   const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const timeZone = useMemo(readBrowserTimeZone, [])
-  const calendar = useMemo(() => readLocalCalendar(new Date(), timeZone), [timeZone])
+  const calendar = useLocalCalendar(timeZone)
   const compareMonthOptions = useMemo(() => {
     const months: string[] = []
     let month = calendar.month
@@ -72,9 +95,6 @@ export function PortfolioDashboardPage() {
     return [calendar.month, ...months]
   }, [calendar.month])
   const [compareMonth, setCompareMonth] = useState<string | undefined>(() => previousPortfolioMonth(calendar.month))
-  const [isSavingSnapshot, setIsSavingSnapshot] = useState(false)
-  const [snapshotMessage, setSnapshotMessage] = useState<string>()
-  const [snapshotSaveErrors, setSnapshotSaveErrors] = useState<readonly unknown[]>([])
   const teamIds = useMemo(() => workspace.teams.map((team) => team.id), [workspace.teams])
   const accessToken = workspace.canLoadWorkspaceData ? workspace.accessToken : undefined
   const reads = usePortfolioDashboard(accessToken, teamIds, timeZone, workspace.softwareFactoryEnabled)
@@ -94,30 +114,26 @@ export function PortfolioDashboardPage() {
     .filter((read) => read.portfolio?.viewer.canCaptureSnapshot === true)
     .map((read) => read.teamId)
 
-  /** Saves this month's snapshot of every Team the reader manages as a whole. */
-  const saveSnapshots = async () => {
-    const token = workspace.accessToken
-    if (!token || capturableTeamIds.length === 0) return
-    setIsSavingSnapshot(true)
-    setSnapshotMessage(undefined)
-    setSnapshotSaveErrors([])
-    const failed: string[] = []
-    const errors: unknown[] = []
-    for (const teamId of capturableTeamIds) {
-      try {
-        await saveTeamPortfolioSnapshot(token, teamId, calendar.month, timeZone, createMutationRequestContext())
-      } catch (error) {
-        errors.push(error)
-        failed.push(workspace.teams.find((team) => team.id === teamId)?.name ?? teamId)
-      }
-    }
-    setIsSavingSnapshot(false)
-    setSnapshotSaveErrors(errors)
-    const savedCount = capturableTeamIds.length - failed.length
-    setSnapshotMessage(failed.length > 0
-      ? t('portfolioDashboard.snapshot.failed').replace('{teams}', failed.join(', '))
-      : t('portfolioDashboard.snapshot.saved').replace('{count}', String(savedCount)))
-    if (compareMonth === calendar.month) void snapshots.mutate()
+  const snapshotSave = useSaveTeamPortfolioSnapshots({
+    accessToken: workspace.accessToken,
+    timeZone,
+    resolveCurrentMonth: () => readLocalCalendar(new Date(), timeZone).month,
+    onSaved: (month) => {
+      if (compareMonth === month) void snapshots.mutate()
+    },
+  })
+  const teamName = (teamId: string) => workspace.teams.find((team) => team.id === teamId)?.name ?? teamId
+  const snapshotResult = snapshotSave.result
+  const snapshotMessage = snapshotResult === undefined
+    ? undefined
+    : snapshotResult.failedTeamIds.length > 0
+      ? t('portfolioDashboard.snapshot.failed').replace('{teams}', snapshotResult.failedTeamIds.map(teamName).join(', '))
+      : t('portfolioDashboard.snapshot.saved').replace('{count}', String(snapshotResult.savedTeamIds.length))
+  /** Reads every Team, the compared snapshots, and Planning health again after a failure. */
+  const retry = () => {
+    void reads.mutate()
+    if (compareMonth) void snapshots.mutate()
+    if (planning.error) void planning.mutate()
   }
 
   const sessionErrors = [
@@ -125,7 +141,7 @@ export function PortfolioDashboardPage() {
     planning.error,
     snapshots.error,
     ...listPortfolioDashboardErrors(reads.data?.teams ?? [], snapshots.data ?? []),
-    ...snapshotSaveErrors,
+    ...snapshotSave.errors,
   ]
   const isLoading = workspace.isLoading || (Boolean(accessToken) && reads.data === undefined && !reads.error)
   return (
@@ -134,6 +150,9 @@ export function PortfolioDashboardPage() {
         {reads.error ? (
           <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
             {t('portfolioDashboard.error.loading')}
+            <button className="workbench-button-secondary ml-3 min-h-8 px-3 text-sm font-semibold" type="button" onClick={retry}>
+              {t('portfolioDashboard.retry')}
+            </button>
           </p>
         ) : null}
         {reads.data?.tooManyTeams ? (
@@ -145,7 +164,7 @@ export function PortfolioDashboardPage() {
           canSaveSnapshot={capturableTeamIds.length > 0}
           compareMonthOptions={compareMonthOptions}
           isPlanningUnavailable={Boolean(planning.error)}
-          isSavingSnapshot={isSavingSnapshot}
+          isSavingSnapshot={snapshotSave.isSaving}
           locale={workspace.locale}
           model={model}
           showAgentRuns={workspace.softwareFactoryEnabled}
@@ -153,7 +172,8 @@ export function PortfolioDashboardPage() {
           teams={workspace.teams}
           onCompareMonthChange={setCompareMonth}
           onOpenProject={(teamId, projectId) => navigate(createProjectOverviewPath(projectId, teamId))}
-          onSaveSnapshot={() => void saveSnapshots()}
+          onRetry={retry}
+          onSaveSnapshot={() => void snapshotSave.save(capturableTeamIds)}
           {...(compareMonth ? { compareMonth } : {})}
           {...(snapshotMessage ? { snapshotMessage } : {})}
         />

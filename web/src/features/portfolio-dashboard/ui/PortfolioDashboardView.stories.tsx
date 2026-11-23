@@ -123,6 +123,7 @@ const meta = {
     teams,
     onCompareMonthChange: () => undefined,
     onOpenProject: () => undefined,
+    onRetry: () => undefined,
     onSaveSnapshot: () => undefined,
   },
 } satisfies Meta<typeof PortfolioDashboardView>

@@ -8,6 +8,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.openFromDashboard': 'ポートフォリオで比べる',
   'portfolioDashboard.loading': 'Team ごとの集計を読み込んでいます。',
   'portfolioDashboard.error.loading': 'ポートフォリオを読み込めませんでした。',
+  'portfolioDashboard.retry': '再読み込み',
   'portfolioDashboard.error.teams': '次の Team は読み込めませんでした: {teams}',
   'portfolioDashboard.error.tooLarge': '次の Team は Project が多すぎるため表示していません: {teams}',
   'portfolioDashboard.error.tooManyTeams': 'Team が {limit} を超えているため一覧を表示できません。',

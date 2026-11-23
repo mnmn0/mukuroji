@@ -8,6 +8,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.openFromDashboard': 'Compare in Portfolio',
   'portfolioDashboard.loading': 'Loading each Team’s figures.',
   'portfolioDashboard.error.loading': 'The portfolio could not be loaded.',
+  'portfolioDashboard.retry': 'Reload',
   'portfolioDashboard.error.teams': 'These Teams could not be loaded: {teams}',
   'portfolioDashboard.error.tooLarge': 'These Teams have too many Projects to list: {teams}',
   'portfolioDashboard.error.tooManyTeams': 'The Workspace has more than {limit} Teams, so the list cannot be shown.',

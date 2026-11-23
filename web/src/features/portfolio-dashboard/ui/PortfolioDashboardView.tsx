@@ -56,6 +56,8 @@ export type PortfolioDashboardViewProps = {
   onSaveSnapshot: () => void
   /** Opens a Project overview. */
   onOpenProject: (teamId: string, projectId: string) => void
+  /** Reads the failed Teams, snapshots, and Agent Run counts again. */
+  onRetry: () => void
 }
 
 /** Badge tokens of reported health. */
@@ -188,6 +190,7 @@ export function PortfolioDashboardView({
   model,
   onCompareMonthChange,
   onOpenProject,
+  onRetry,
   onSaveSnapshot,
   showAgentRuns,
   snapshotMessage,
@@ -291,6 +294,11 @@ export function PortfolioDashboardView({
       {notices.length > 0 ? (
         <div className="grid gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800" role="status">
           {notices.map((notice) => <p key={notice}>{notice}</p>)}
+          <div>
+            <button className="workbench-button-secondary min-h-8 px-3 text-sm font-semibold" data-testid="portfolio-retry" type="button" onClick={onRetry}>
+              {t('portfolioDashboard.retry')}
+            </button>
+          </div>
         </div>
       ) : null}
       {hiddenNotices.length > 0 ? (
