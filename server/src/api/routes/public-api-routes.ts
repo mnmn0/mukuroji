@@ -330,6 +330,10 @@ async function readAccessibleWorkItemExportPage(
     }
     const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
       .filter((access) => projectAccessAllows(access, 'viewer'))
+    if (
+      fieldFilters.assignedProjectId !== undefined &&
+      !teamProjectAccesses.some((access) => access.projectId === fieldFilters.assignedProjectId)
+    ) return []
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []

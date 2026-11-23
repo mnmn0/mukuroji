@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   isWorkItemProgressPercent,
+  WORK_ITEM_IMPORT_MAX_BYTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -4328,13 +4329,13 @@ function readImportContent(value: unknown) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > 2 * 1024 * 1024 ||
+    new TextEncoder().encode(value).byteLength > WORK_ITEM_IMPORT_MAX_BYTES ||
     value.includes('\u0000')
   ) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import content must contain between 1 byte and 2 MiB of UTF-8 text.',
+      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text.`,
     )
   }
   return value

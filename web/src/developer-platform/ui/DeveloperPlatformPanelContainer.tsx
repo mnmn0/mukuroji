@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import {
   createMutationFingerprint,
@@ -46,7 +46,6 @@ import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuth
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
 import { exportDeveloperWorkItems } from '../queries/developerExport'
 import {
-  isRunningImportStatus,
   useAvailableDeveloperConnectorProviders,
   useDeveloperImportProgress,
   useDeveloperPlatformResources,
@@ -116,18 +115,14 @@ export function DeveloperPlatformPanelContainer({
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
   const latestImport = resources ? selectLatestImport(resources.imports) : undefined
+  // A job that ended while its progress was read refreshes the job list, which holds its report.
   const { data: latestImportProgress } = useDeveloperImportProgress(
     mutationSession.accessToken,
     latestImport,
+    () => {
+      if (resourceKey) void mutateCache(resourceKey)
+    },
   )
-  // A job that ended while its progress was read refreshes the job list, which holds its report.
-  const latestImportEnded = latestImport !== undefined &&
-    isRunningImportStatus(latestImport.status) &&
-    latestImportProgress?.jobId === latestImport.id &&
-    !isRunningImportStatus(latestImportProgress.status)
-  useEffect(() => {
-    if (latestImportEnded && resourceKey) void mutateCache(resourceKey)
-  }, [latestImportEnded, mutateCache, resourceKey])
   const {
     data: availableConnectorProviders,
     error: availableConnectorProvidersError,

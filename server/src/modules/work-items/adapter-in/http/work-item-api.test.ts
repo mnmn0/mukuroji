@@ -1192,7 +1192,10 @@ test('narrows the developer export to one Team, Project, and status', async () =
     additionalTeams: [{
       id: 'other-team',
       name: 'Other Team',
-      projects: [{ id: 'other-project', name: 'Other Project', tone: 'blue' as const }],
+      projects: [
+        { id: 'other-project', name: 'Other Project', tone: 'blue' as const },
+        { id: 'secret-project', name: 'Secret Project', tone: 'blue' as const },
+      ],
     }],
     projectAccesses: [
       { projectId: 'refero', role: 'manager' },
@@ -1226,6 +1229,14 @@ test('narrows the developer export to one Team, Project, and status', async () =
   })
   expect(hidden.status).toBe(200)
   expect(await hidden.json()).toEqual({ items: [], hasMore: false })
+  expect(calls.publicIssuePageReads).toEqual([])
+
+  // A Project the caller cannot view, in a Team they can, also gives an empty export.
+  const hiddenProject = await app.request('/api/developer/exports?assignedProjectId=secret-project', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hiddenProject.status).toBe(200)
+  expect(await hiddenProject.json()).toEqual({ items: [], hasMore: false })
   expect(calls.publicIssuePageReads).toEqual([])
 
   const invalid = await app.request('/api/developer/exports?teamId=bad%24team', {

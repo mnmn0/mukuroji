@@ -2369,6 +2369,45 @@ describe('public API router', () => {
     expect(validations).toBe(3)
   })
 
+  test('accepts an import source up to the import byte limit and rejects a larger one', async () => {
+    const platform = new InMemoryDeveloperPlatformStorage(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
+      () => new Date(NOW),
+    )
+    const validatedBytes: number[] = []
+    const workItems = createDefaultWorkItemService({
+      async dryRunImport(_principal, input) {
+        validatedBytes.push(new TextEncoder().encode(input.source.content).byteLength)
+        return { valid: true, totalRows: 1, validRows: 1, invalidRows: 0, errors: [], sample: [] }
+      },
+    })
+    const { router } = createTestRouter({ platform, workItems })
+    /** Sends a dry-run whose source holds the given number of bytes. */
+    const dryRun = (bytes: number, key: string) => router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: {
+          fileName: 'work-items.csv',
+          mediaType: 'text/csv',
+          content: `Title\n${'x'.repeat(bytes - 'Title\n'.length)}`,
+        },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      }),
+    })
+
+    expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
+    expect(validatedBytes).toEqual([3 * 1024 * 1024])
+    expect((await dryRun(8 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
+  })
+
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
     const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),

@@ -1481,6 +1481,12 @@ export type ImportJob = {
   error?: ApiProblem
 }
 
+/** Largest UTF-8 source, in bytes, that one Work Item import accepts. */
+export const WORK_ITEM_IMPORT_MAX_BYTES = 8 * 1024 * 1024
+
+/** Most source rows that one Work Item import accepts. */
+export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000
+
 /**
  * Progress of a Work Item import job. The worker creates every row first and then applies the
  * links between them (parents, dependencies, relations, and acceptance criteria).

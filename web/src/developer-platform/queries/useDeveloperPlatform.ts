@@ -118,11 +118,13 @@ const importProgressRefreshMilliseconds = 3_000
  *
  * @param accessToken - Access token for the Developer Platform API.
  * @param job - Latest import job, if any.
+ * @param onJobEnded - Called when a job the list shows as running is read as ended.
  * @returns SWR state holding the job's progress.
  */
 export function useDeveloperImportProgress(
   accessToken: string | undefined,
   job: ImportJob | undefined,
+  onJobEnded?: () => void,
 ) {
   const running = job !== undefined && !job.dryRun && isRunningImportStatus(job.status)
   const key = accessToken && job && !job.dryRun
@@ -138,6 +140,10 @@ export function useDeveloperImportProgress(
         running && (latest === undefined || isRunningImportStatus(latest.status))
           ? importProgressRefreshMilliseconds
           : 0,
+      // A job read as running in the job list that has now ended lets the caller refresh that list.
+      onSuccess: (latest) => {
+        if (running && latest.jobId === job.id && !isRunningImportStatus(latest.status)) onJobEnded?.()
+      },
     },
   )
 }
@@ -148,6 +154,6 @@ export function useDeveloperImportProgress(
  * @param status - Import job status.
  * @returns Whether the job is queued, validating, or running.
  */
-export function isRunningImportStatus(status: ImportJob['status']) {
+function isRunningImportStatus(status: ImportJob['status']) {
   return status === 'queued' || status === 'validating' || status === 'running'
 }
