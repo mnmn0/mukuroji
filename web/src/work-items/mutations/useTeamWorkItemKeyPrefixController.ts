@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import type { TeamWorkItemKeyPrefixSettings } from '@mukuroji/contracts'
 import { TeamIssuesApiError, updateTeamWorkItemKeyPrefix } from '../../issues/api'
-import { workItemKeyPrefixesKey } from '../../issues/queries/workItemKeyPrefixesContext'
+import { revalidateWorkItemKeyPrefixes } from '../../issues/queries/workItemKeyPrefixesCache'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { teamWorkItemKeyPrefixKey, useTeamWorkItemKeyPrefix } from '../queries/useTeamWorkItemKeyPrefix'
 
@@ -70,7 +70,7 @@ export function useTeamWorkItemKeyPrefixController(
         )
         await mutate(key, saved, { revalidate: false })
         // Key links in this tab start linking the new prefix without waiting for a focus change.
-        void mutate(workItemKeyPrefixesKey(accessToken))
+        void revalidateWorkItemKeyPrefixes()
         setSaveStates((states) => ({ ...states, [savedTeamId]: { isSaving: false, result: 'saved' } }))
       } catch (caught) {
         const code = caught instanceof TeamIssuesApiError ? caught.code : undefined

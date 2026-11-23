@@ -1,7 +1,8 @@
 import { useMemo, type ReactNode } from 'react'
 import useSWR from 'swr'
 import { getWorkItemKeyPrefixes } from '../api/workItems'
-import { WorkItemKeyPrefixesContext, workItemKeyPrefixesKey } from './workItemKeyPrefixesContext'
+import { WorkItemKeyPrefixesContext } from './workItemKeyPrefixesContext'
+import { workItemKeyPrefixesKey } from './workItemKeyPrefixesCache'
 
 /** Props of {@link WorkItemKeyPrefixesProvider}. */
 export type WorkItemKeyPrefixesProviderProps = {
@@ -13,8 +14,8 @@ export type WorkItemKeyPrefixesProviderProps = {
 
 /**
  * Loads the Workspace's Work Item key prefixes and shares them with key links below. The list is
- * read again when the window regains focus, so a Team that got its first key since is linked. A
- * prefix change made in this tab reads it again right away.
+ * read again when the window regains focus, and right away after a Work Item is created or a
+ * Team's prefix changes in this tab, so a Team that got its first key since is linked.
  *
  * @param props - Access token and children.
  * @returns The children inside the prefix context.

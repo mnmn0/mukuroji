@@ -1,16 +1,6 @@
 import { createContext, useContext } from 'react'
 
 /**
- * Builds the SWR key of the Workspace's Work Item key prefix list.
- *
- * @param accessToken - Session access token.
- * @returns The scope-bound cache key.
- */
-export function workItemKeyPrefixesKey(accessToken: string) {
-  return ['work-item-key-prefixes', accessToken] as const
-}
-
-/**
  * Key prefixes that exist in the Workspace, or undefined while they are unknown. Unknown keeps
  * the earlier behaviour of linking every key-shaped word, so a failed load never hides links.
  */
