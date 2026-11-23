@@ -310,7 +310,8 @@ async function readPublicReport(c: Context) {
           scope.teamId,
           scope.projectId,
         )
-        return source !== undefined && !source.archived
+        // A Team archive leaves its Projects' rows active, so the Team is checked too.
+        return source !== undefined && !source.archived && !source.teamArchived
       },
     },
   )

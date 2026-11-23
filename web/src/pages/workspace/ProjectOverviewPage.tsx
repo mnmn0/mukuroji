@@ -7,6 +7,7 @@ import { useProjectDocuments } from '../../documents/queries/useProjectDocuments
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
+import { PlanningApiError } from '../../planning/api/errors'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import { isActiveProjectAssignmentCandidate, ProjectDirectoryApiError } from '../../projects/api'
 import {
@@ -159,7 +160,8 @@ export function ProjectOverviewPage() {
   // A failed read must not turn into a report that silently lacks the section, so the report
   // waits for a retry. Only a denied read (and the Work Item list limit) leaves its section out,
   // because those do not change on a retry and the creator cannot see that data either.
-  const reportReadFailed = Boolean(planning.error) ||
+  const isPlanningDenied = planning.error instanceof PlanningApiError && planning.error.status === 403
+  const reportReadFailed = (Boolean(planning.error) && !isPlanningDenied) ||
     (Boolean(workItems.error) && workItemsError !== 'limit') ||
     raidError === 'load' ||
     resolveDocumentsError(projectDocuments.error, actionItemsQuery.error) === 'load'
@@ -173,7 +175,7 @@ export function ProjectOverviewPage() {
   // The report reads more rows than the overview widgets show, and only once it is opened.
   const report = useMemo(() => {
     if (!isReportOpen || !team || !project || !projectId || reportReadFailed) return undefined
-    if (planning.data === undefined) return undefined
+    if (planning.data === undefined && !isPlanningDenied) return undefined
     if (workItems.isLoading || raidLog.isLoading || projectDocuments.isLoading || actionItemsQuery.isLoading) return undefined
     const today = toLocalDate(new Date())
     const activeMembers = (members.data ?? []).filter(isActiveProjectAssignmentCandidate)
@@ -208,6 +210,7 @@ export function ProjectOverviewPage() {
   }, [
     actionItemsQuery.data,
     actionItemsQuery.isLoading,
+    isPlanningDenied,
     isReportOpen,
     members.data,
     planning.data,

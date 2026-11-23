@@ -302,6 +302,7 @@ export const projectsMessages = {
   'projects.statusReport.share.copied': 'Copied',
   'projects.statusReport.share.list': 'Links',
   'projects.statusReport.share.retry': 'Retry',
+  'projects.statusReport.share.recipientsError': 'The customers and contacts could not be loaded. You can still create a link without a recipient.',
   'projects.statusReport.share.empty': 'No links yet.',
   'projects.statusReport.share.status.open': 'Open',
   'projects.statusReport.share.status.revoked': 'Revoked',

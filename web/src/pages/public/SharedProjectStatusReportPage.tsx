@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams } from 'react-router'
-import { exportPublicProjectStatusReportPdf } from '../../projects/api/statusReports'
 import { createProjectStatusReportFileName } from '../../projects/model/projectStatusReport'
+import { usePublicProjectStatusReportPdf } from '../../projects/mutations/usePublicProjectStatusReportPdf'
 import { usePublicProjectStatusReport } from '../../projects/queries/usePublicProjectStatusReport'
 import { saveProjectStatusReportFile } from '../../projects/ui/useProjectStatusReportPrint'
 import { SharedProjectStatusReportScreen } from '../../projects/ui/SharedProjectStatusReportScreen'
@@ -16,6 +16,7 @@ export function SharedProjectStatusReportPage() {
   const token = useParams().shareToken ?? ''
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const { published, isLoading, isUnavailable, hasFailed, isRetrying, retry } = usePublicProjectStatusReport(token)
+  const pdf = usePublicProjectStatusReportPdf(token)
   return (
     <SharedProjectStatusReportScreen
       hasFailed={hasFailed}
@@ -26,7 +27,7 @@ export function SharedProjectStatusReportPage() {
       onDownloadPdf={async () => {
         if (!published) return
         saveProjectStatusReportFile(
-          await exportPublicProjectStatusReportPdf(token),
+          await pdf.download(),
           createProjectStatusReportFileName(published.report, 'pdf'),
         )
       }}

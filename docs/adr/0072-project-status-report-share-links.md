@@ -24,7 +24,7 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
   「ほかにも未完了の項目があるかもしれません」と書く。読めなかったことを「なし」に見せない。
 - レポートの元になる読み込み（Planning・Work Item・RAID log・ドキュメントと宿題）が再試行で直りうる理由で
   失敗したときは、web はレポートを作らず、出力と共有を止めて再読み込みを促す。section が黙って欠けた
-  snapshot を出さないため。403（読む権限がない）と Work Item の件数上限は再試行で変わらず、作成者もその
+  snapshot を出さないため。403（読む権限がない。Planning の 403 では健康状態と予定）と Work Item の件数上限は再試行で変わらず、作成者もその
   データを見られないので、その section を外して作る。
 - レポートには原価・予算の section を入れていない（予算の section は #345 の予算・EVM のあとで足す）。
   confidential cost を出すかの選択はその時点で加える。
@@ -52,7 +52,7 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
 ### 公開 API と無効化
 
 - `GET /api/public/project-status/:token`（と `/pdf`）はサインインなしで呼べる。token の形が違う、知らない、取り消し済み、
-  期限切れ、Workspace が閉鎖済み（`enforceActiveTenantForWorkspace`）、Project が archive 済みまたは存在しない、の
+  期限切れ、Workspace が閉鎖済み（`enforceActiveTenantForWorkspace`）、Project またはその Team が archive 済み、Project が存在しない、の
   いずれも同じ 404 を返し、どの理由かを区別させない。応答は `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、
   `X-Robots-Tag: noindex` を付ける。
 - 期限は 1〜90 日。1 Project あたり有効なリンクは 50 件、保存する share row は取り消し済みを含めて 300 件までとする。

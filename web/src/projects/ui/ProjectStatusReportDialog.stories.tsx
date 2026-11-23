@@ -92,6 +92,16 @@ export const ShareListFailed: Story = {
   },
 }
 
+/** A failed customer read is shown with a retry instead of an empty recipient list. */
+export const RecipientsFailed: Story = {
+  beforeEach: () => installStoryFetch((path) => path.endsWith('/status-shares')
+    ? Response.json({ shares: projectStatusShareFixtures })
+    : Response.json({ code: 'Unavailable', message: 'Unavailable.' }, { status: 503 })),
+  play: async ({ canvasElement }) => {
+    await expect(await within(canvasElement).findByTestId('project-status-share-recipients-retry')).toBeEnabled()
+  },
+}
+
 /** The report waits for the overview data. */
 export const Loading: Story = {
   args: { report: undefined },

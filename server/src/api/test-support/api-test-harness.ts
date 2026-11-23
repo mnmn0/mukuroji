@@ -2664,6 +2664,7 @@ function configureFakeProjectClients(
         const state = structuredClone(readProjectCharterState(teamId, projectId))
         return {
           archived: archivedDirectoryKeys.has(key),
+          teamArchived: archivedDirectoryKeys.has(teamId),
           state,
           project: { ...project, lifecycleState: state.lifecycleState },
           englishName: project.name,

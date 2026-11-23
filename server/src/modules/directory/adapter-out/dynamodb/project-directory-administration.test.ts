@@ -604,6 +604,7 @@ test('adds Project renames, archives, and restores to the charter revision of th
     project: { id: 'live', name: 'live 日本語' },
     englishName: 'live English',
     archived: false,
+    teamArchived: false,
     sourceRevision: 9,
   })
   await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toMatchObject({
@@ -704,6 +705,7 @@ test('keeps the search sources of Projects under an archived Team', async () => 
   // A rename committed before the Team archive is still projected.
   await expect(client.getProjectSearchSource(directoryId, 'alpha', 'kept')).resolves.toMatchObject({
     archived: false,
+    teamArchived: true,
   })
 })
 

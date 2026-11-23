@@ -7,6 +7,7 @@ import {
 } from '@mukuroji/contracts'
 import { useId, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/locales/ja'
+import { CustomerApiError } from '../../customers/api'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { ProjectDirectoryApiError } from '../api/errors'
 import { exportProjectStatusReportPdf } from '../api/statusReports'
@@ -253,6 +254,10 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
   }
 
   const customers = recipients.customers.data?.customers ?? []
+  // A 403 only means the caller may not pick a customer; any other failure is shown with a retry,
+  // so a failed read never looks like an empty customer list.
+  const customersFailed = isRetryableRecipientError(recipients.customers.error)
+  const customerFailed = isRetryableRecipientError(recipients.customer.error)
   const contacts = recipients.customer.data?.contacts.filter((contact) => contact.status === 'active') ?? []
 
   return (
@@ -334,6 +339,23 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
               </label>
             ) : null}
           </>
+        ) : null}
+        {customersFailed || customerFailed ? (
+          <div className="grid justify-items-start gap-2" data-testid="project-status-share-recipients-failed" role="alert">
+            <p className="text-sm font-semibold text-red-700">{t('projects.statusReport.share.recipientsError')}</p>
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              data-testid="project-status-share-recipients-retry"
+              disabled={recipients.customers.isValidating || recipients.customer.isValidating}
+              onClick={() => {
+                if (customersFailed) void recipients.customers.mutate()
+                if (customerFailed) void recipients.customer.mutate()
+              }}
+              type="button"
+            >
+              {t('projects.statusReport.share.retry')}
+            </button>
+          </div>
         ) : null}
         <button
           className="workbench-button-primary min-h-10 px-4"
@@ -472,4 +494,14 @@ function describeShareError(error: unknown, fallback: MessageKey): MessageKey {
   if (error.code === 'ProjectStatusShareCustomerForbidden') return 'projects.statusReport.error.customerForbidden'
   if (error.status === 400) return 'projects.statusReport.error.invalid'
   return fallback
+}
+
+/**
+ * Decides whether a failed recipient read should offer a retry.
+ *
+ * @param error - Error of the customer list or customer detail read.
+ * @returns `true` for a failure other than a permission denial.
+ */
+function isRetryableRecipientError(error: unknown) {
+  return error !== undefined && !(error instanceof CustomerApiError && error.status === 403)
 }
