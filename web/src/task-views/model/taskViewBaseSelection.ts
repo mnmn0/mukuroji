@@ -13,7 +13,7 @@ export type TaskViewBaseSelection = {
   explicitlySelectedView?: SavedTaskView
   /** Personal default, used only without an explicit URL selection. */
   personalDefault?: SavedTaskView
-  /** Team default, used only without an explicit URL selection. */
+  /** Team or Project default, used only without an explicit URL selection. */
   teamDefault?: SavedTaskView
   /** Saved view that supplies the base definition, if any. */
   activeSavedView?: SavedTaskView
@@ -39,7 +39,9 @@ export function selectTaskViewBase(
     : savedViews.find((view) => view.preference.isPersonalDefault)
   const teamDefault = hasExplicitSelection
     ? undefined
-    : savedViews.find((view) => view.preference.isTeamDefault)
+    : savedViews.find((view) =>
+        view.preference.isTeamDefault || view.preference.isProjectDefault
+      )
   const activeSavedView = viewId ? explicitlySelectedView : personalDefault ?? teamDefault
   return {
     ...(explicitlySelectedView ? { explicitlySelectedView } : {}),
