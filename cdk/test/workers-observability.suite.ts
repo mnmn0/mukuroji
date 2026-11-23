@@ -3121,9 +3121,10 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         JSON.stringify(statement.Resource)
           .includes('TenantAdministrationTable621D59EB');
     });
+    // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
     expect(tenantEntitlementStatement).toEqual(expect.objectContaining({
       Effect: 'Allow',
-      Action: 'dynamodb:GetItem',
+      Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     }));
   }
   for (const policyPrefix of [

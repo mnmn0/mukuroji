@@ -3,6 +3,8 @@ import {
   DEFAULT_WORK_ITEM_TYPE,
   createAnalyticsProjectNames,
   createSearchWorkItemTypeKey,
+  type AnalyticsDelivery,
+  type AnalyticsDeliveryListResponse,
   type AnalyticsExportLocale,
   type AnalyticsQueryInput,
   type AnalyticsReport,
@@ -38,6 +40,7 @@ import {
   analyticsSnapshotReadMilestones,
   analyticsQueryReadsPlanningGroups,
   analyticsSnapshotReadPlanningGroups,
+  MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -66,6 +69,7 @@ import {
   getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
+  requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
@@ -361,6 +365,73 @@ async function readAnalyticsExportConfigurationNames(
   return { workItemTypes, customFields }
 }
 
+/**
+ * Lists the scheduled deliveries to the authenticated principal, newest first (ADR 0064).
+ *
+ * Each delivery is kept only while the caller can read its report now, with the same rule as the
+ * report list, and shows the report's current name. Opening the snapshot checks its permission
+ * scope again, so a delivery whose scope changed still cannot be read.
+ *
+ * @param principal - Authenticated principal; only its own deliveries are read.
+ * @param limit - Page size, 1 to 50; 20 when omitted.
+ * @param cursor - Cursor of a previous page.
+ * @returns The deliveries and the next cursor.
+ */
+async function listAnalyticsHttpDeliveries(
+  principal: WorkspacePrincipal,
+  limit: string | undefined,
+  cursor: string | undefined,
+): Promise<AnalyticsDeliveryListResponse> {
+  const page = await workItemDependencies.analytics.listRecipientDeliveries(
+    principal.directoryId,
+    principal.userKey,
+    readAnalyticsDeliveryListLimit(limit),
+    readAnalyticsReportListCursor(cursor),
+  )
+  const context = await createWorkspaceSearchContext(principal)
+  const reports = new Map<string, Promise<AnalyticsReport | undefined>>()
+  const deliveries: AnalyticsDelivery[] = []
+  for (const delivery of page.deliveries) {
+    let report = reports.get(delivery.reportId)
+    if (report === undefined) {
+      report = workItemDependencies.analytics.getReport(principal.directoryId, delivery.reportId)
+      reports.set(delivery.reportId, report)
+    }
+    const current = await report
+    if (current === undefined || !canReadAnalyticsReport(principal, context, current)) continue
+    deliveries.push({
+      reportId: delivery.reportId,
+      reportName: current.name,
+      snapshotId: delivery.snapshotId,
+      format: delivery.format,
+      deliveredAt: delivery.deliveredAt,
+    })
+  }
+  return {
+    deliveries,
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+  }
+}
+
+/**
+ * Reads the page size of the delivery list.
+ *
+ * @param value - `limit` query parameter.
+ * @returns The page size.
+ */
+function readAnalyticsDeliveryListLimit(value: string | undefined) {
+  if (value === undefined) return 20
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsInput',
+      `Analytics delivery list limit must be an integer between 1 and ${MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE}.`,
+    )
+  }
+  return parsed
+}
+
 /** Lists Analytics reports visible to the authenticated principal. */
 async function listAnalyticsHttpReports(
   principal: WorkspacePrincipal,
@@ -394,6 +465,7 @@ async function createAnalyticsHttpReport(
     principal,
     normalized.visibility,
     normalized.teamId,
+    normalized.projectId,
     principal.userKey,
   )
   return await workItemDependencies.analytics.createReport(
@@ -418,6 +490,7 @@ async function updateAnalyticsHttpReport(
     principal,
     normalized.visibility ?? current.visibility,
     normalized.teamId === null ? undefined : normalized.teamId ?? current.teamId,
+    normalized.projectId === null ? undefined : normalized.projectId ?? current.projectId,
     current.ownerMemberKey,
   )
   return await workItemDependencies.analytics.updateReport(principal.directoryId, reportId, normalized)
@@ -1282,15 +1355,25 @@ async function requireAnalyticsReportWrite(
     principal,
     report.visibility,
     report.teamId,
+    report.projectId,
     report.ownerMemberKey,
   )
 }
 
-/** Personal/team/shared report の作成・更新・削除 policy を適用します。 */
+/**
+ * Applies the create, update, and delete policy of a personal, Team, Project, or shared report.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param visibility - Visibility the report has or will have.
+ * @param teamId - Team of a Team report, or the owner Team of a Project report.
+ * @param projectId - Project of a Project report.
+ * @param ownerMemberKey - Owner of the report.
+ */
 async function requireAnalyticsVisibilityWrite(
   principal: WorkspacePrincipal,
   visibility: unknown,
   teamId: unknown,
+  projectId: unknown,
   ownerMemberKey: string,
 ) {
   if (visibility === 'personal') {
@@ -1339,6 +1422,14 @@ async function requireAnalyticsVisibilityWrite(
     await requireTeamPermission(principal, normalizedTeamId, 'manager')
     return
   }
+  if (visibility === 'project') {
+    await requireAnalyticsProjectReportWrite(
+      principal,
+      readAnalyticsIdentifier(teamId, 'Analytics report Team ID'),
+      readAnalyticsIdentifier(projectId, 'Analytics report Project ID'),
+    )
+    return
+  }
   if (visibility === 'shared') {
     if (principal.enterprisePermissions !== undefined) {
       if (hasEnterpriseWorkspacePermission(principal, 'workspace.manage')) return
@@ -1356,6 +1447,46 @@ async function requireAnalyticsVisibilityWrite(
     'InvalidAnalyticsReport',
     'Analytics report visibility is invalid.',
   )
+}
+
+/**
+ * Requires management of the Project that a Project report is shared with.
+ *
+ * The Project must be an active Project of the named Team. A Project manager, or an Enterprise
+ * principal who manages the Team or every Team, may change the report.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project the report is shared with.
+ */
+async function requireAnalyticsProjectReportWrite(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+) {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  const team = directory.teams.find((candidate) => candidate.id === teamId)
+  if (!team?.projects.some((project) => project.id === projectId)) {
+    throw new ProjectDataError(
+      404,
+      'ProjectNotFound',
+      `Project "${projectId}" was not found in Team "${teamId}".`,
+    )
+  }
+  if (
+    principal.enterprisePermissions !== undefined && (
+      hasEnterpriseWorkspacePermission(principal, 'teams.manage') ||
+      principal.enterpriseTeamAccesses?.some((access) =>
+        access.teamId === teamId && access.permissions.includes('teams.manage')
+      ) === true
+    )
+  ) {
+    return
+  }
+  await requireProjectPermission(principal, projectId, 'manager', teamId)
 }
 
 /** Analytics route identifier を path/storage keyに安全な形式へ制限します。 */
@@ -1623,6 +1754,7 @@ export function registerAnalyticsRoutes(routeApp: Hono): void {
     executeEvidence: executeAnalyticsHttpEvidence,
     createExport: createAnalyticsHttpExport,
     listReports: listAnalyticsHttpReports,
+    listDeliveries: listAnalyticsHttpDeliveries,
     createReport: createAnalyticsHttpReport,
     updateReport: updateAnalyticsHttpReport,
     deleteReport: deleteAnalyticsHttpReport,

@@ -28,7 +28,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       },
       customers: unavailable(), auditEvents: unavailable(),
       enterpriseSessionActivity: unavailable(), enterpriseIdentityProviderConnectionTester: unsupported,
-      tenantAdministration: unavailable(), nationalHolidays: unavailable(), tenantExportDownload: unavailable(), tenantLifecycleEnforcement: unavailable(),
+      tenantAdministration: unavailable(), nationalHolidays: unavailable(), workCalendars: unavailable(), tenantExportDownload: unavailable(), tenantLifecycleEnforcement: unavailable(),
     },
     workItems: {
       planning: new DynamoDbPlanningClient(planningTable, client, undefined, false),
@@ -37,7 +37,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(planningTable, client),
       teamIssues: unavailable(), realtimeTickets: unavailable(), fileProofing: unavailable(), notifications: unavailable(), pushSubscriptions: unavailable(), teamReminderSettings: unavailable(), agentRuns: unavailable(),
       focusState: unavailable(), workspaceSearch: unavailable(), documents: unavailable(), workspaceSearchProjectionEnabled: false,
-      workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
+      workItemConfigurations: unavailable(), projectRaidLogs: unavailable(), weeklyReports: unavailable(), scheduleBaselines: unavailable(), cycleScheduleBaselines: unavailable(), updateFeedDigest: unavailable(), inboxDigestSettings: unavailable(),
       requestIntake: unavailable(), triage: unavailable(), analytics: unavailable(), collections: unavailable(),
     },
     operational: { recordRuntimeControl: unsupported, readiness: unavailable(), runtimeControl: unavailable(), recordAccess: unsupported, recordError: unsupported, recordClientError: unsupported },

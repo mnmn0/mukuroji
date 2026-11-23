@@ -50,6 +50,7 @@ import {
   updateAnalyticsReport,
 } from '../../analytics/api'
 import {
+  useAnalyticsDeliveries,
   useAnalyticsQuery,
   useAnalyticsReports,
 } from '../../analytics/queries/useAnalyticsQueries'
@@ -195,6 +196,17 @@ export function ReportsPage() {
     key: reportsKey,
   } = useAnalyticsReports(accessToken, Boolean(user && !currentUserError))
   const reports = reportResponse?.reports ?? emptyReports
+  // A failed delivery read shows an error with a retry next to the reports, which stay usable.
+  const {
+    deliveries,
+    error: deliveriesError,
+    hasMore: hasMoreDeliveries,
+    loadMore: loadMoreDeliveries,
+    retry: retryDeliveries,
+  } = useAnalyticsDeliveries(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const searchParamString = searchParams.toString()
   const parsedRouteState = useMemo<AnalyticsRouteState | null | undefined>(() => {
     if (searchParamString.length === 0) return undefined
@@ -556,6 +568,7 @@ export function ReportsPage() {
             name: input.name,
             schedule: input.schedule ?? null,
             teamId: input.teamId ?? null,
+            projectId: input.projectId ?? null,
             timeZone: input.timeZone,
             visibility: input.visibility,
             widgets: input.widgets,
@@ -574,6 +587,8 @@ export function ReportsPage() {
       }),
       { revalidate: false },
     )
+    // Deliveries carry the report name and readability, so read them again.
+    void retryDeliveries()
     setHasStartedAdHoc(false)
     commitRouteState({
       asOf: undefined,
@@ -610,6 +625,8 @@ export function ReportsPage() {
       { reports: remainingReports },
       { revalidate: false },
     )
+    // The deleted report's deliveries leave the list.
+    void retryDeliveries()
     const nextReport = remainingReports[0]
     if (nextReport) {
       commitRouteState({
@@ -840,6 +857,32 @@ export function ReportsPage() {
           locale={locale}
           noticeMessage={noticeMessage}
           reports={reports}
+          {...(deliveries ? { deliveries } : {})}
+          deliveriesFailed={Boolean(deliveriesError)}
+          hasMoreDeliveries={hasMoreDeliveries}
+          onLoadMoreDeliveries={() => {
+            void loadMoreDeliveries()
+          }}
+          onRetryDeliveries={() => {
+            void retryDeliveries()
+          }}
+          onOpenDelivery={(delivery) => {
+            const report = reports.find((item) => item.id === delivery.reportId)
+            if (!report) return
+            // Evidence belongs to the report on screen; drop it and its request before switching.
+            closeEvidence()
+            setHasStartedAdHoc(false)
+            commitRouteState({
+              asOf: undefined,
+              builder: false,
+              filter: report.filter,
+              forecastBaseline: report.forecastBaseline,
+              forecastWeighting: report.forecastWeighting,
+              reportId: report.id,
+              snapshotId: delivery.snapshotId,
+              timezone: report.timeZone,
+            }, false)
+          }}
           selectedReportId={selectedReport?.id}
           selectedSnapshotId={routeState.snapshotId}
           snapshot={snapshot}

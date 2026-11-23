@@ -70,6 +70,7 @@ const noTaskViewCapabilities: SavedTaskViewCapabilities = {
   canWrite: false,
   canManageSharedViews: false,
   canSetTeamDefault: false,
+  canSetProjectDefault: false,
   writableTeamIds: [],
   writableProjectScopes: [],
 }
@@ -1478,6 +1479,7 @@ test('task view endpoints forward the complete lifecycle with current permission
       isDefault: false,
       isPersonalDefault: false,
       isTeamDefault: false,
+      isProjectDefault: false,
     },
     createdAt: '2026-08-09T00:00:00.000Z',
     updatedAt: '2026-08-09T00:00:00.000Z',
@@ -1858,6 +1860,7 @@ test('task view relation resolution strongly authorizes targets with bounded req
             isDefault: false,
             isPersonalDefault: false,
             isTeamDefault: false,
+            isProjectDefault: false,
           },
           createdAt: '2026-08-09T00:00:00.000Z',
           updatedAt: '2026-08-09T00:00:00.000Z',
@@ -1976,6 +1979,7 @@ test('Project-scoped Enterprise readers see Project and viewer task views withou
       isDefault: false,
       isPersonalDefault: false,
       isTeamDefault: false,
+      isProjectDefault: false,
     },
     createdAt: '2026-08-09T00:00:00.000Z',
     updatedAt: '2026-08-09T00:00:00.000Z',
@@ -2078,6 +2082,7 @@ test('Project-scoped Enterprise writers can mutate Project Work Item views but c
       isDefault: false,
       isPersonalDefault: false,
       isTeamDefault: false,
+      isProjectDefault: false,
     },
     createdAt: '2026-08-09T00:00:00.000Z',
     updatedAt: '2026-08-09T00:00:00.000Z',
@@ -2213,6 +2218,7 @@ test('Enterprise task view mutations stay inside each authoritative writable Pro
             isDefault: false,
             isPersonalDefault: false,
             isTeamDefault: false,
+            isProjectDefault: false,
           },
           createdAt: '2026-08-09T00:00:00.000Z',
           updatedAt: '2026-08-09T00:00:00.000Z',
@@ -2486,4 +2492,106 @@ test('keeps a committed mutation successful when search document construction fa
   } finally {
     console.error = originalConsoleError
   }
+})
+
+test('task view endpoints accept cross-Project work-items views and Project defaults per Project', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'roadmap', name: 'Roadmap', tone: 'green' },
+    ],
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      { projectId: 'roadmap', role: 'member' },
+    ],
+  })
+  const createInputs: CreateTaskViewRequest[] = []
+  setTestAppDependencies({
+    workspaceSearch: createWorkspaceSearchFake({
+      async createTaskView(input) {
+        createInputs.push(input)
+        throw new WorkspaceSearchError(409, 'TaskViewConflict', 'Stop after capture.')
+      },
+    }),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const layout = {
+    mode: 'table',
+    group: { field: 'project', direction: 'asc' },
+    sort: [],
+    columns: [{ field: 'title' }],
+    density: 'comfortable',
+    displayOptions: { showCompleted: false },
+  }
+
+  const workItemsResponse = await app.request('/api/task-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Across Projects',
+      visibility: 'team',
+      teamId: 'core-team',
+      definition: {
+        surface: 'work-items',
+        scope: { kind: 'workspace' },
+        filters: {
+          projectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
+          involvement: 'mine',
+          contributorUserIds: ['demo@example.com'],
+          contributorJobRoles: [{ teamId: 'core-team', jobRoleId: 'designer' }],
+        },
+        layout,
+      },
+    }),
+  })
+  const projectDefaultResponse = await app.request('/api/task-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Refero default',
+      visibility: 'team',
+      teamId: 'core-team',
+      defaultSource: 'project',
+      definition: {
+        surface: 'project',
+        scope: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+        filters: {},
+        layout,
+      },
+    }),
+  })
+  const malformedResponse = await app.request('/api/task-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Malformed',
+      visibility: 'personal',
+      definition: {
+        surface: 'work-items',
+        scope: { kind: 'workspace' },
+        filters: { involvement: 'everyone' },
+        layout,
+      },
+    }),
+  })
+
+  expect([workItemsResponse.status, projectDefaultResponse.status, malformedResponse.status])
+    .toEqual([409, 409, 400])
+  expect(createInputs[0]?.input.definition).toMatchObject({
+    surface: 'work-items',
+    filters: {
+      projectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
+      involvement: 'mine',
+      contributorUserIds: ['demo@example.com'],
+      contributorJobRoles: [{ teamId: 'core-team', jobRoleId: 'designer' }],
+    },
+  })
+  expect(createInputs[1]?.input.defaultSource).toBe('project')
+  // Managing Refero does not reach Roadmap of the same Team.
+  expect([...createInputs[1]?.access.manageableProjectScopeKeys ?? []])
+    .toEqual(['core-team\0refero'])
 })

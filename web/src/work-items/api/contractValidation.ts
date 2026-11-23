@@ -118,7 +118,8 @@ function isCalendarPolicy(value: unknown): boolean {
     Array.isArray(value.workingWeekdays) &&
     value.workingWeekdays.length > 0 &&
     value.workingWeekdays.every((entry) => typeof entry === 'string' && weekdays.has(entry)) &&
-    isStringArray(value.holidays)
+    isStringArray(value.holidays) &&
+    (value.calendarSource === undefined || value.calendarSource === 'shared')
 }
 
 /**

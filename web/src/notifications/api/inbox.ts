@@ -50,6 +50,10 @@ export type InboxNotification = {
    */
   title?: string
   /**
+   * Short key such as `ABC-123` of the target Work Item, when it has one.
+   */
+  workItemKey?: string
+  /**
    * 通知内容を補足する安全な要約です。
    */
   summary?: string

@@ -6,6 +6,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of a submitted weekly report. */
 export type SubmittedWeeklyReportProps = {
@@ -72,6 +73,7 @@ function SubmittedItemList({ items, t, title }: SubmittedItemListProps) {
  * @returns Submitted report.
  */
 export function SubmittedWeeklyReport({ formatters, submission, t }: SubmittedWeeklyReportProps) {
+  const categories = useTimeEntryCategories()
   return (
     <article className="grid min-w-0 gap-3" data-testid="submitted-weekly-report">
       <p className="text-sm font-semibold text-[var(--workbench-text)]">
@@ -112,7 +114,7 @@ export function SubmittedWeeklyReport({ formatters, submission, t }: SubmittedWe
           ))}
           {submission.indirectTime.map((row) => (
             <li className="flex min-w-0 justify-between gap-3" key={`indirect-${row.category}`}>
-              <span className="min-w-0 break-words">{describeTimeEntrySubject(t, { category: row.category }, {})}</span>
+              <span className="min-w-0 break-words">{describeTimeEntrySubject(t, { category: row.category }, {}, categories)}</span>
               <span className="tabular-nums">{formatMinutes(row.minutes)}</span>
             </li>
           ))}

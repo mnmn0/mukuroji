@@ -6,6 +6,8 @@ import {
   createAnalyticsExportInput,
   deleteAnalyticsReport,
   exportAnalytics,
+  getAnalyticsDeliveries,
+  getRecentAnalyticsDeliveries,
   getAnalyticsEvidence,
   getAnalyticsReports,
   getAnalyticsSnapshots,
@@ -325,6 +327,72 @@ describe('Analytics API', () => {
       locale: 'en',
       snapshotId: 'snapshot-1',
     })
+  })
+})
+
+describe('Analytics deliveries API', () => {
+  test('reads the caller\'s deliveries', async () => {
+    const requests = installFetchRecorder(() => ({
+      deliveries: [
+        {
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        },
+      ],
+      nextCursor: 'next-page',
+    }))
+    expect(await getAnalyticsDeliveries('token-1', 'cursor-1')).toEqual({
+      deliveries: [{
+        reportId: 'weekly',
+        reportName: 'Weekly delivery',
+        snapshotId: 'snapshot-1',
+        format: 'pdf',
+        deliveredAt: '2026-07-13T00:00:00.000Z',
+      }],
+      nextCursor: 'next-page',
+    })
+    expect(requests[0]?.url).toContain('/analytics/deliveries?limit=20&cursor=cursor-1')
+  })
+
+  test('follows the cursor past pages of reports the user can no longer read', async () => {
+    const delivery = {
+      reportId: 'weekly',
+      reportName: 'Weekly delivery',
+      snapshotId: 'snapshot-1',
+      format: 'pdf',
+      deliveredAt: '2026-07-13T00:00:00.000Z',
+    }
+    const requests = installFetchRecorder((url) => url.includes('cursor=page-2')
+      ? { deliveries: [delivery] }
+      : { deliveries: [], nextCursor: 'page-2' })
+    expect(await getRecentAnalyticsDeliveries('token-1')).toEqual({ deliveries: [delivery] })
+    expect(requests).toHaveLength(2)
+  })
+
+  test('stops following empty pages after a bound', async () => {
+    const requests = installFetchRecorder(() => ({ deliveries: [], nextCursor: 'again' }))
+    expect(await getRecentAnalyticsDeliveries('token-1', 'start')).toEqual({ deliveries: [], nextCursor: 'again' })
+    expect(requests).toHaveLength(5)
+    // The read starts from the given cursor and keeps the last cursor for the next read.
+    expect(requests[0]?.url).toContain('cursor=start')
+  })
+
+  test('accepts an empty list', async () => {
+    installFetchRecorder(() => ({ deliveries: [] }))
+    expect(await getAnalyticsDeliveries('token-1')).toEqual({ deliveries: [] })
+  })
+
+  test('fails instead of showing an empty list when the response is malformed', async () => {
+    for (const body of [{}, { deliveries: [{ reportId: 'broken' }] }, 'not json']) {
+      installFetchRecorder(() => body)
+      await expect(getAnalyticsDeliveries('token-1')).rejects.toMatchObject({
+        status: 502,
+        code: 'InvalidAnalyticsResponse',
+      })
+    }
   })
 })
 
