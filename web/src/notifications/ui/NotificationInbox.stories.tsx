@@ -6,6 +6,7 @@ import {
   notificationInboxControllerFixture,
   overdueMessageNotificationFixture,
 } from '../fixtures'
+import type { InboxNotification } from '../api'
 import { NotificationInbox } from './NotificationInbox'
 
 /** Inbox rows with their event labels, reasons, and localized summaries. */
@@ -57,7 +58,7 @@ export const BlockerClearedEnglish: Story = {
 }
 
 /** The stored English summary of the coded notification, as an older row without a code has it. */
-const { message: _overdueMessage, ...legacyOverdueNotification } = overdueMessageNotificationFixture
+const legacyOverdueNotification: InboxNotification = { ...overdueMessageNotificationFixture, message: undefined }
 
 /** Inbox controller that lists a coded overdue notification and the same notification without its code. */
 const messageSummaryController = {

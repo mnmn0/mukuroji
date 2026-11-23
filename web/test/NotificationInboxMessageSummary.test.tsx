@@ -36,7 +36,7 @@ describe('notification summary from a message code', () => {
   })
 
   test('falls back to the stored text for rows without a code', () => {
-    const { message: _message, ...withoutCode } = overdueNotification
+    const withoutCode: InboxNotification = { ...overdueNotification, message: undefined }
     expect(render(withoutCode, 'ja')).toContain('Work Item &quot;リリース手順を作る&quot; is overdue.')
   })
 })
