@@ -129,7 +129,7 @@ test('lets an owner grant and revoke system administrator access with an audit r
   const granted = await sendChange('sato@example.com', { systemAdministrator: true })
 
   expect(granted.status).toBe(200)
-  expect(await granted.json()).toEqual({ systemAdministrator: true, changed: true })
+  expect(await granted.json()).toEqual({ systemAdministrator: true })
   expect(group.has('sato@example.com')).toBe(true)
 
   const revoked = await sendChange('sato@example.com', { systemAdministrator: false })
@@ -144,7 +144,7 @@ test('lets an owner grant and revoke system administrator access with an audit r
   expect(recorded[0].auditContext?.workspaceId).toBe(workspaceId)
 })
 
-test('leaves a member who already has the requested state unchanged and unrecorded', async () => {
+test('records a request for the state the member already has without changing Cognito', async () => {
   configureFakeProjectClients(true)
   const { calls } = installSystemAdministratorGroup(['sato@example.com'])
   const recorded = recordActions()
@@ -152,9 +152,9 @@ test('leaves a member who already has the requested state unchanged and unrecord
   const response = await sendChange('sato@example.com', { systemAdministrator: true })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ systemAdministrator: true, changed: false })
+  expect(await response.json()).toEqual({ systemAdministrator: true })
   expect(calls).toEqual([])
-  expect(recorded).toEqual([])
+  expect(recorded.map(({ action }) => action)).toEqual(['system-administrator-granted'])
 })
 
 test('refuses system administrator changes to administrators who are not owners', async () => {

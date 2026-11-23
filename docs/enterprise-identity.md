@@ -332,7 +332,8 @@ request ごとに現在の group を読んで判定します。Workspace owner �
   （`403 WorkspaceRoleDenied`、`409 WorkspaceSelfSystemAdministratorChange`）。
 - 対象は active member で、Cognito user の directory 属性がこの Workspace と一致する必要があります
   （`409 MemberSystemAdministratorUnavailable`）。guest には付与できません（`409 WorkspaceGuestSystemAdministrator`）。
-- すでに要求どおりなら何も書かずに `changed: false` を返します。
+- すでに要求どおりでも audit と進捗 record は書いて完了にし、Cognito は変えません（同じ key の遅れた再送が、
+  その間の別の変更を戻さないため）。
 - audit event `member.system-administrator-granted|revoked` と進捗 record を、actor と対象の version の
   ConditionCheck と同じ transaction で書いてから Cognito を変えます。同じ Idempotency-Key の再送は、管理者による
   password・MFA リセットと同じく、完了済みなら何もせず、Cognito を変え始めた後なら繰り返しません。

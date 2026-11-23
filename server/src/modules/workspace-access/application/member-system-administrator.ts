@@ -75,8 +75,6 @@ export type MemberSystemAdministratorInput = {
 export type MemberSystemAdministratorResult = {
   /** Whether the member is a system administrator afterwards. */
   systemAdministrator: boolean
-  /** Whether this request changed the group; false when the member already had that state. */
-  changed: boolean
 }
 
 /** How many times the use case tries to mark a finished change as completed. */
@@ -88,12 +86,13 @@ const completionAttempts = 3
  * System administrators stay the members of the configured Cognito groups. The change is
  * recorded in the audit log before the group changes and marked completed after it, with the
  * same progress record the administrator credential resets use, so a retry with the same
- * idempotency key does not repeat a change that finished or may have started. A member who
- * already has the requested state is left as is and nothing is recorded.
+ * idempotency key does not repeat a change that finished or may have started. A request for
+ * the state the member already has is recorded and completed too, without changing the group,
+ * so that a late retry of it cannot undo a change another owner made in between.
  *
  * @param ports - Member, identity, and audit ports.
  * @param input - Actor, member, requested state, and audit context.
- * @returns The state afterwards, and whether this request changed it.
+ * @returns The state afterwards.
  * @throws WorkspaceAccessError 404 when the member is not active, 409 when the member's account
  *   belongs to another directory, and the authority errors of the record step.
  */
@@ -108,7 +107,7 @@ export async function changeMemberSystemAdministrator(
   const action: WorkspaceMemberSystemAdministratorAction = input.systemAdministrator
     ? 'system-administrator-granted'
     : 'system-administrator-revoked'
-  const result = { systemAdministrator: input.systemAdministrator, changed: true }
+  const result = { systemAdministrator: input.systemAdministrator }
 
   const progress = await ports.readActionProgress(
     input.workspaceId,
@@ -119,6 +118,7 @@ export async function changeMemberSystemAdministrator(
   if (progress === 'completed') {
     return result
   }
+  let alreadyApplied = false
   if (progress === 'none') {
     if (!await ports.isAccountInWorkspace(input.workspaceId, member.memberKey)) {
       throw new WorkspaceAccessError(
@@ -127,9 +127,7 @@ export async function changeMemberSystemAdministrator(
         'This member\'s sign-in account belongs to another Workspace.',
       )
     }
-    if (await ports.isSystemAdministrator(member.memberKey) === input.systemAdministrator) {
-      return { ...result, changed: false }
-    }
+    alreadyApplied = await ports.isSystemAdministrator(member.memberKey) === input.systemAdministrator
   }
 
   const claim = await ports.recordAction(
@@ -143,11 +141,13 @@ export async function changeMemberSystemAdministrator(
     return result
   }
 
-  await ports.markActionApplying(input.workspaceId, member.memberKey, action, input.auditContext)
-  if (input.systemAdministrator) {
-    await ports.addSystemAdministrator(member.memberKey)
-  } else {
-    await ports.removeSystemAdministrator(member.memberKey)
+  if (!alreadyApplied) {
+    await ports.markActionApplying(input.workspaceId, member.memberKey, action, input.auditContext)
+    if (input.systemAdministrator) {
+      await ports.addSystemAdministrator(member.memberKey)
+    } else {
+      await ports.removeSystemAdministrator(member.memberKey)
+    }
   }
 
   let lastError: unknown

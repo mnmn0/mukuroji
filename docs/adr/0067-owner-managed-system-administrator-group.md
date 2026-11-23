@@ -22,7 +22,8 @@ group を操作するしかなかった。#429 の完了条件「AWS の操作�
   - 対象は同じ Workspace の active member で、Cognito user の directory 属性がこの Workspace と一致すること。
     別 Workspace に属する account を、この Workspace の owner が system administrator にできないようにする。
   - guest は付与できない。解除は guest でもできる。
-  - すでに要求どおりの状態なら何も書かずに `changed: false` を返す。
+  - すでに要求どおりの状態でも audit と進捗 record は書いて完了にし、Cognito は変えない。同じ key の遅れた再送が、
+    その間に別の owner がした変更を戻さないようにするため。
 - 監査と再送は管理者による password・MFA リセットと同じ仕組みを使う。`member.system-administrator-granted|revoked`
   の audit event と進捗 record を、actor（owner の version）と対象（active・version）の ConditionCheck と同じ
   transaction で書き、Cognito を変える直前に `applying`、変えた後に `completed` にする。同じ Idempotency-Key の

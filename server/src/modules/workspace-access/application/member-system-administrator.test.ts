@@ -78,8 +78,21 @@ test('records, marks, changes, and completes a grant in that order', async () =>
 
   const result = await changeMemberSystemAdministrator(ports, input)
 
-  expect(result).toEqual({ systemAdministrator: true, changed: true })
+  expect(result).toEqual({ systemAdministrator: true })
   expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'add', 'complete'])
+})
+
+test('records a request for the current state without changing the group, so a late retry is a no-op', async () => {
+  const { ports, steps } = createPorts('none', {
+    isSystemAdministrator: async () => {
+      steps.push('read-group')
+      return true
+    },
+  })
+
+  await changeMemberSystemAdministrator(ports, input)
+
+  expect(steps).toEqual(['directory', 'read-group', 'record', 'complete'])
 })
 
 test('does not change the group again for a replay of a completed change', async () => {
@@ -108,7 +121,7 @@ test('reports a failed completion mark without failing the finished change', asy
 
   const result = await changeMemberSystemAdministrator(ports, input)
 
-  expect(result.changed).toBe(true)
+  expect(result.systemAdministrator).toBe(true)
   expect(steps.at(-1)).toBe('report')
 })
 

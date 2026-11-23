@@ -96,8 +96,6 @@ export type WorkspaceMemberSystemAdministratorRequest = {
 export type WorkspaceMemberSystemAdministratorResponse = {
   /** Whether the member is a system administrator afterwards. */
   systemAdministrator: boolean
-  /** Whether the request changed the member; false when the member already had that state. */
-  changed: boolean
 }
 
 /** MFA part of the security policy preview, present when the change turns MFA on. */
