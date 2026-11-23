@@ -29,6 +29,7 @@ export type AnalyticsExportArtifact = {
  * @param locale - Export label に利用する locale です。
  * @param query - Live viewer の再現可能な query です。
  * @param snapshotId - 表示中 immutable snapshot の任意 ID です。
+ * @param titleReportId - Live query の PDF 見出しに名前を使う、開いている保存済み report の任意 ID です。
  * @returns Snapshot または live query の一方だけを参照する export input です。
  */
 export function createAnalyticsExportInput(
@@ -36,10 +37,10 @@ export function createAnalyticsExportInput(
   locale: string,
   query: AnalyticsQueryInput,
   snapshotId?: string,
+  titleReportId?: string,
 ): AnalyticsExportInput {
-  return snapshotId
-    ? { format, locale, snapshotId }
-    : { format, locale, query }
+  if (snapshotId) return { format, locale, snapshotId }
+  return titleReportId ? { format, locale, query, titleReportId } : { format, locale, query }
 }
 
 const analyticsApiBaseUrl = resolveApiBaseUrl()

@@ -314,6 +314,17 @@ describe('Analytics API', () => {
       locale: 'en',
       query,
     })
+    expect(createAnalyticsExportInput('pdf', 'en', query, undefined, 'report-1')).toEqual({
+      format: 'pdf',
+      locale: 'en',
+      query,
+      titleReportId: 'report-1',
+    })
+    expect(createAnalyticsExportInput('pdf', 'en', query, 'snapshot-1', 'report-1')).toEqual({
+      format: 'pdf',
+      locale: 'en',
+      snapshotId: 'snapshot-1',
+    })
   })
 })
 

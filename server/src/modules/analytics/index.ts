@@ -25,9 +25,14 @@ export {
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
 export {
+  ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
   analyticsQueryReadsMilestones,
+  analyticsQueryReadsPlanningGroups,
+  analyticsSnapshotReadPlanningGroups,
+  type AnalyticsPlanningGroupEntity,
+  type AnalyticsPlanningGroups,
   analyticsSnapshotReadMilestones,
   calculateAnalyticsNextRunAt,
   compareDynamoDbStringSortKeys,

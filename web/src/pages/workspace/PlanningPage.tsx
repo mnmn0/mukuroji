@@ -712,7 +712,8 @@ export function PlanningPage() {
             ? (milestone) => (
                 <PlanningMilestoneWatchContainer
                   accessToken={accessToken}
-                  canWatch={canMutatePlanningContent}
+                  // Everyone who can see the Milestone may watch it, including read-only members.
+                  canWatch={Boolean(user)}
                   entityId={milestone.id}
                   key={milestone.id}
                   labels={labels.milestoneWatch}

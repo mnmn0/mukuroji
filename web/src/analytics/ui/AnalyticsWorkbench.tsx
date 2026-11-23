@@ -6,12 +6,15 @@ import type {
   AnalyticsEvidenceItem,
   AnalyticsEvidenceResponse,
   AnalyticsFilter,
+  AnalyticsGroupBy,
+  AnalyticsGroupLabelLookup,
   AnalyticsMetricKey,
   AnalyticsReport,
   AnalyticsSchedule,
   AnalyticsSnapshot,
   AnalyticsSnapshotRecord,
   AnalyticsVisualization,
+  AnalyticsTableRow,
   AnalyticsWeighting,
   AnalyticsWidget,
   AnalyticsWidgetResult,
@@ -20,6 +23,7 @@ import type {
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   WORKSPACE_CALENDAR_PERIOD_PRESETS,
+  resolveAnalyticsGroupLabel,
   type WorkspaceCalendarPeriodPreset,
 } from '@mukuroji/contracts'
 import {
@@ -35,6 +39,10 @@ import {
   type MessageKey,
 } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
+import {
+  createAnalyticsDisplayNames,
+  createAnalyticsGroupLabelLookup,
+} from '../model/groupLabels'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { AnalyticsExportFormat } from '../api'
 import {
@@ -53,6 +61,7 @@ import {
   selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../model/periodPresets'
+import { mergeAnalyticsAssigneeDraft } from '../model/assigneeFilter'
 import { listAnalyticsScheduleWeekdays } from '../model/scheduleWeekdays'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
@@ -143,6 +152,10 @@ export type AnalyticsWorkbenchProps = {
   teams: ProjectDirectoryTeam[]
   /** Team-qualified Work Item Type options available across the visible Teams. */
   workItemTypes?: AnalyticsWorkItemTypeOption[]
+  /** Members whose names replace member keys and that the assignee and recipient pickers offer. */
+  members?: readonly AnalyticsMemberOption[]
+  /** Custom fields the custom field pickers offer; field IDs are typed while this is empty. */
+  customFields?: readonly AnalyticsCustomFieldOption[]
   /**
    * Report 一覧または snapshot の初回読み込み中表示です。
    */
@@ -261,6 +274,30 @@ export type AnalyticsWorkbenchProps = {
    * Load error を再試行する callback です。
    */
   onRetry?: () => void
+}
+
+/** Stable empty member list, so the default does not change the group label lookup each render. */
+const emptyMembers: readonly AnalyticsMemberOption[] = []
+
+/** Stable empty custom field list for the default prop value. */
+const emptyCustomFields: readonly AnalyticsCustomFieldOption[] = []
+
+/** One custom field the Analytics pickers offer. */
+export type AnalyticsCustomFieldOption = {
+  /** Custom field definition ID. */
+  id: string
+  /** Field name people choose by. */
+  label: string
+}
+
+/** One member whose name Analytics shows in place of the member key. */
+export type AnalyticsMemberOption = {
+  /** Normalized member key, which Work Items store as the assignee. */
+  id: string
+  /** Email address, shown when the member has no name. */
+  email: string
+  /** Display name. */
+  name?: string
 }
 
 /** One Team-qualified Work Item Type option shown by Analytics filters. */
@@ -400,6 +437,8 @@ export function AnalyticsWorkbench({
   evidenceMetric,
   teams,
   workItemTypes = [],
+  members = emptyMembers,
+  customFields = emptyCustomFields,
   isLoading = false,
   isLoadingMoreSnapshots = false,
   isEvidenceLoading = false,
@@ -432,9 +471,12 @@ export function AnalyticsWorkbench({
   onRetry,
 }: AnalyticsWorkbenchProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const workItemTypeLabels = useMemo(
-    () => new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
-    [workItemTypes],
+  const groupLabelLookup = useMemo(
+    () => createAnalyticsGroupLabelLookup(
+      createAnalyticsDisplayNames(teams, workItemTypes, members),
+      t,
+    ),
+    [members, t, teams, workItemTypes],
   )
   const selectedReport = reports.find((report) => report.id === selectedReportId)
   const [draftId] = useState(
@@ -668,6 +710,8 @@ export function AnalyticsWorkbench({
         forecastBaseline={forecastBaseline}
         {...(forecastWeighting ? { forecastWeighting } : {})}
         t={t}
+        customFields={customFields}
+        members={members}
         teams={teams}
         timeZone={timeZone}
         workItemTypes={workItemTypes}
@@ -702,6 +746,7 @@ export function AnalyticsWorkbench({
       >
         {builder ? (
           <AnalyticsBuilderPanel
+            customFields={customFields}
             description={draftDescription}
             name={draftName}
             selectedTeamId={draftTeamId}
@@ -750,7 +795,7 @@ export function AnalyticsWorkbench({
                         snapshot={snapshot}
                         t={t}
                         widget={widgets.find((widget) => widget.id === result.widgetId)}
-                        workItemTypeLabels={workItemTypeLabels}
+                        groupLabelLookup={groupLabelLookup}
                         onOpenEvidence={onOpenEvidence}
                       />
                     ))}
@@ -789,6 +834,7 @@ export function AnalyticsWorkbench({
           // report covers the week just ended.
           defaultDayOfWeek={calendarSettings?.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay}
           initialSchedule={reportSchedule}
+          members={members}
           isTeamVisibilityValid={isTeamVisibilityValid}
           reportName={selectedReport?.name ?? draftName}
           t={t}
@@ -902,9 +948,11 @@ function SnapshotMetadata({
 function AnalyticsFilterToolbar({
   calendarSettings,
   calendarSettingsFailed,
+  customFields,
   filter,
   forecastBaseline,
   forecastWeighting,
+  members,
   onFilterChange,
   onForecastBaselineChange,
   onForecastWeightingChange,
@@ -917,6 +965,10 @@ function AnalyticsFilterToolbar({
 }: {
   calendarSettings?: AnalyticsPeriodCalendar
   calendarSettingsFailed: boolean
+  /** Custom fields the custom field filter offers. */
+  customFields: readonly AnalyticsCustomFieldOption[]
+  /** Members the assignee filter offers. */
+  members: readonly AnalyticsMemberOption[]
   onRetryCalendarSettings?: () => void
   filter: AnalyticsFilter
   forecastBaseline?: AnalyticsDateRange
@@ -950,12 +1002,29 @@ function AnalyticsFilterToolbar({
     workItemTypes.map((type) => ({ label: type.label, value: type.filterValue })),
     filter.workItemTypeIds,
   )
+  const memberOptions = createAnalyticsMemberOptions(members)
+  const memberIds = new Set(memberOptions.map((option) => option.value))
+  // Assignees outside the member list, such as departed members, stay reachable by email.
+  const pickedAssigneeIds = members.length > 0
+    ? filter.assigneeUserIds?.filter((id) => memberIds.has(id)) ?? []
+    : []
+  const otherAssigneeIds = members.length > 0
+    ? filter.assigneeUserIds?.filter((id) => !memberIds.has(id)) ?? []
+    : filter.assigneeUserIds ?? []
   const assigneeDraft = useDebouncedDraft(
-    filter.assigneeUserIds?.join(', ') ?? '',
-    (value) => onFilterChange?.({
-      ...filter,
-      assigneeUserIds: splitValues(value),
-    }),
+    otherAssigneeIds.join(', '),
+    (value, editedFrom) => {
+      onFilterChange?.({
+        ...filter,
+        assigneeUserIds: mergeAnalyticsAssigneeDraft(
+          filter.assigneeUserIds,
+          pickedAssigneeIds,
+          value,
+          editedFrom,
+          members.length === 0,
+        ),
+      })
+    },
   )
   const timeZoneDraft = useDebouncedDraft(
     timeZone,
@@ -1037,22 +1106,41 @@ function AnalyticsFilterToolbar({
             testId="analytics-project-filter"
             onChange={(projectIds) => onFilterChange?.({ ...filter, projectIds })}
           />
-          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('analytics.filter.assignee')}
-            <input
-              className="workbench-input min-h-10 px-3"
-              placeholder={t('analytics.filter.assigneePlaceholder')}
-              value={assigneeDraft.value}
-              onBlur={assigneeDraft.flush}
-              onChange={(event) => assigneeDraft.update(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  assigneeDraft.flush()
-                }
+          {members.length > 0 ? (
+            <AnalyticsMultiSelectFilter
+              allLabel={t('analytics.filter.allAssignees')}
+              label={t('analytics.filter.assignee')}
+              noneLabel={t('analytics.filter.noAssignees')}
+              options={memberOptions}
+              selectedValues={filter.assigneeUserIds === undefined ? undefined : pickedAssigneeIds}
+              testId="analytics-assignee-filter"
+              onChange={(picked) => {
+                // "All assignees" lifts the restriction, including the typed assignees.
+                onFilterChange?.({
+                  ...filter,
+                  assigneeUserIds: picked === undefined
+                    ? undefined
+                    : [...new Set([...picked, ...otherAssigneeIds])],
+                })
               }}
             />
-          </label>
+          ) : null}
+          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {members.length > 0 ? t('analytics.filter.assigneeOther') : t('analytics.filter.assignee')}
+              <input
+                className="workbench-input min-h-10 px-3"
+                placeholder={t('analytics.filter.assigneePlaceholder')}
+                value={assigneeDraft.value}
+                onBlur={assigneeDraft.flush}
+                onChange={(event) => assigneeDraft.update(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    assigneeDraft.flush()
+                  }
+                }}
+              />
+            </label>
           <AnalyticsMultiSelectFilter
             allLabel={t('analytics.filter.allStatuses')}
             label={t('analytics.filter.status')}
@@ -1081,6 +1169,7 @@ function AnalyticsFilterToolbar({
           <div className="mt-3 grid grid-cols-[repeat(4,minmax(170px,1fr))_auto] items-end gap-3 max-[1180px]:grid-cols-2 max-[760px]:grid-cols-1">
             <div className="col-span-full">
               <AnalyticsCustomFieldFilters
+                fields={customFields}
                 filters={filter.customFields}
                 t={t}
                 onChange={(customFields) => onFilterChange?.({
@@ -1357,10 +1446,13 @@ function AnalyticsMultiSelectFilter({
 }
 
 function AnalyticsCustomFieldFilters({
+  fields,
   filters = [],
   onChange,
   t,
 }: {
+  /** Custom fields to pick from; field IDs are typed while this is empty. */
+  fields: readonly AnalyticsCustomFieldOption[]
   filters?: AnalyticsCustomFieldFilter[]
   onChange: (filters: AnalyticsCustomFieldFilter[] | undefined) => void
   t: ReturnType<typeof createTranslator>
@@ -1387,6 +1479,7 @@ function AnalyticsCustomFieldFilters({
           {filters.map((customFilter, index) => (
             <AnalyticsCustomFieldFilterRow
               customFilter={customFilter}
+              fields={fields}
               index={index}
               key={`${index}:${customFilter.fieldId}:${customFilter.operator}`}
               t={t}
@@ -1425,15 +1518,28 @@ function AnalyticsCustomFieldFilters({
           setNewValue('')
         }}
       >
-        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.customFieldId')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            placeholder={t('analytics.filter.customFieldIdPlaceholder')}
-            value={newFieldId}
-            onChange={(event) => setNewFieldId(event.target.value)}
-          />
-        </label>
+        {fields.length > 0 ? (
+          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('analytics.filter.customFieldName')}
+            <AnalyticsCustomFieldSelect
+              className="workbench-input min-h-10 px-3"
+              fields={fields}
+              t={t}
+              value={newFieldId}
+              onSelect={setNewFieldId}
+            />
+          </label>
+        ) : (
+          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('analytics.filter.customFieldId')}
+            <input
+              className="workbench-input min-h-10 px-3"
+              placeholder={t('analytics.filter.customFieldIdPlaceholder')}
+              value={newFieldId}
+              onChange={(event) => setNewFieldId(event.target.value)}
+            />
+          </label>
+        )}
         <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('analytics.filter.customFieldOperator')}
           <select
@@ -1476,12 +1582,15 @@ function AnalyticsCustomFieldFilters({
 
 function AnalyticsCustomFieldFilterRow({
   customFilter,
+  fields,
   index,
   onChange,
   onRemove,
   t,
 }: {
   customFilter: AnalyticsCustomFieldFilter
+  /** Custom fields to pick from; the field ID is typed while this is empty. */
+  fields: readonly AnalyticsCustomFieldOption[]
   index: number
   onChange: (filter: AnalyticsCustomFieldFilter) => void
   onRemove: () => void
@@ -1516,21 +1625,34 @@ function AnalyticsCustomFieldFilterRow({
       className="grid grid-cols-[minmax(140px,1fr)_minmax(170px,1fr)_minmax(140px,1fr)_auto] items-end gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-2 max-[900px]:grid-cols-2 max-[600px]:grid-cols-1"
       data-testid={`analytics-custom-field-filter-${index}`}
     >
-      <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-        {t('analytics.filter.customFieldId')}
-        <input
-          className="workbench-input min-h-10 px-3"
-          value={fieldIdDraft.value}
-          onBlur={fieldIdDraft.flush}
-          onChange={(event) => fieldIdDraft.update(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              fieldIdDraft.flush()
-            }
-          }}
-        />
-      </label>
+      {fields.length > 0 ? (
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.filter.customFieldName')}
+          <AnalyticsCustomFieldSelect
+            className="workbench-input min-h-10 px-3"
+            fields={fields}
+            t={t}
+            value={customFilter.fieldId}
+            onSelect={(fieldId) => onChange({ ...customFilter, fieldId })}
+          />
+        </label>
+      ) : (
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.filter.customFieldId')}
+          <input
+            className="workbench-input min-h-10 px-3"
+            value={fieldIdDraft.value}
+            onBlur={fieldIdDraft.flush}
+            onChange={(event) => fieldIdDraft.update(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                fieldIdDraft.flush()
+              }
+            }}
+          />
+        </label>
+      )}
       <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
         {t('analytics.filter.customFieldOperator')}
         <select
@@ -1598,6 +1720,7 @@ function AnalyticsCustomFieldFilterRow({
 }
 
 function AnalyticsBuilderPanel({
+  customFields,
   description,
   name,
   onDescriptionChange,
@@ -1611,6 +1734,8 @@ function AnalyticsBuilderPanel({
   visibility,
   widgets,
 }: {
+  /** Custom fields the custom field group picker offers. */
+  customFields: readonly AnalyticsCustomFieldOption[]
   description: string
   name: string
   onDescriptionChange: (description: string) => void
@@ -1728,6 +1853,7 @@ function AnalyticsBuilderPanel({
       <div className="mt-5 grid gap-3">
         {widgets.map((widget, index) => (
           <AnalyticsWidgetEditor
+            customFields={customFields}
             index={index}
             key={widget.id}
             t={t}
@@ -1753,6 +1879,7 @@ function AnalyticsBuilderPanel({
 }
 
 function AnalyticsWidgetEditor({
+  customFields,
   index,
   onChange,
   onMove,
@@ -1761,6 +1888,8 @@ function AnalyticsWidgetEditor({
   total,
   widget,
 }: {
+  /** Custom fields to pick from; the field ID is typed while this is empty. */
+  customFields: readonly AnalyticsCustomFieldOption[]
   index: number
   onChange: (widget: AnalyticsWidget) => void
   onMove: (direction: -1 | 1) => void
@@ -1873,6 +2002,9 @@ function AnalyticsWidgetEditor({
               'assignee',
               'status',
               'work-item-type',
+              'priority',
+              'cycle',
+              'milestone',
               'custom-field',
             ]).map((dimension) => (
               <option key={dimension} value={dimension}>
@@ -1892,7 +2024,22 @@ function AnalyticsWidgetEditor({
           </select>
         </label>
       </div>
-      {group === 'custom-field' ? (
+      {group === 'custom-field' && customFields.length > 0 ? (
+        <label className="mt-2 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('analytics.builder.customField')}
+          <AnalyticsCustomFieldSelect
+            className="workbench-input min-h-9 px-2"
+            fields={customFields}
+            required
+            t={t}
+            value={customFieldId}
+            onSelect={(fieldId) => onChange({
+              ...widget,
+              groupBy: { customFieldId: fieldId, dimension: 'custom-field' },
+            })}
+          />
+        </label>
+      ) : group === 'custom-field' ? (
         <label className="mt-2 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('analytics.builder.customFieldId')}
           <input
@@ -1998,6 +2145,7 @@ function AnalyticsMetricCard({
 }
 
 function AnalyticsResultWidget({
+  groupLabelLookup,
   locale,
   onOpenEvidence,
   periodEnd,
@@ -2005,8 +2153,9 @@ function AnalyticsResultWidget({
   snapshot,
   t,
   widget,
-  workItemTypeLabels,
 }: {
+  /** Resolves group labels to names in the current locale. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
   /** Requested period end (before the API clips it to `asOf`), where a burndown ideal reaches zero. */
@@ -2015,7 +2164,6 @@ function AnalyticsResultWidget({
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
   widget?: AnalyticsWidget
-  workItemTypeLabels: ReadonlyMap<string, string>
 }) {
   const widgetType = widget?.type ?? (result.rows.length > 0 ? 'table' : 'chart')
   const size = readWidgetSize(widget)
@@ -2027,7 +2175,8 @@ function AnalyticsResultWidget({
   const points = normalizeWidgetPoints(
     result,
     snapshot.timeZone,
-    widget?.groupBy?.dimension === 'work-item-type' ? workItemTypeLabels : undefined,
+    widget?.groupBy,
+    groupLabelLookup,
   )
 
   return (
@@ -2060,13 +2209,10 @@ function AnalyticsResultWidget({
         ) : null}
         {widgetType === 'table' ? (
           <AnalyticsTable
+            groupBy={widget?.groupBy}
+            groupLabelLookup={groupLabelLookup}
             result={result}
             t={t}
-            workItemTypeLabels={
-              widget?.groupBy?.dimension === 'work-item-type'
-                ? workItemTypeLabels
-                : undefined
-            }
           />
         ) : result.metric === 'milestone-trend' && result.series.length > 0 ? (
           <AnalyticsMilestoneTrendChart
@@ -2316,13 +2462,17 @@ function isDrawableChartValue(value: number | null): value is number {
 }
 
 function AnalyticsTable({
+  groupBy,
+  groupLabelLookup,
   result,
   t,
-  workItemTypeLabels,
 }: {
+  /** Dimension the widget groups by. */
+  groupBy: AnalyticsGroupBy | undefined
+  /** Resolves Team, Project, and Work Item Type names. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   result: AnalyticsWidgetResult
   t: ReturnType<typeof createTranslator>
-  workItemTypeLabels?: ReadonlyMap<string, string>
 }) {
   const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 6)
 
@@ -2353,11 +2503,13 @@ function AnalyticsTable({
           {result.rows.map((row) => (
             <tr className="border-b border-[var(--workbench-border)]" key={row.id}>
               <th className="px-3 py-3 font-semibold" scope="row">
-                {workItemTypeLabels?.get(row.label) ?? row.label}
+                {groupBy?.dimension === 'work-item-type'
+                  ? groupLabelLookup.workItemType?.(row.label) ?? row.label
+                  : row.label}
               </th>
               {columns.map((column) => (
                 <td className="px-3 py-3 tabular-nums text-[var(--workbench-muted)]" key={column}>
-                  {formatTableValue(row.values[column])}
+                  {formatTableValue(resolveTableValueName(column, row.values, groupLabelLookup))}
                 </td>
               ))}
             </tr>
@@ -2541,6 +2693,7 @@ function AnalyticsScheduleDialog({
   defaultDayOfWeek,
   initialSchedule,
   isTeamVisibilityValid,
+  members,
   onClose,
   onSave,
   reportName,
@@ -2551,6 +2704,8 @@ function AnalyticsScheduleDialog({
   defaultDayOfWeek: number
   initialSchedule?: AnalyticsSchedule
   isTeamVisibilityValid: boolean
+  /** Members the recipient picker offers; recipients are typed while this is empty. */
+  members: readonly AnalyticsMemberOption[]
   onClose: () => void
   onSave: (schedule: AnalyticsSchedule | null) => Promise<void> | void
   reportName: string
@@ -2558,6 +2713,9 @@ function AnalyticsScheduleDialog({
   timeZone: string
 }) {
   const [isSaving, setIsSaving] = useState(false)
+  // The recipient control is fixed while the dialog is open, so a member list that loads late
+  // never replaces recipients already being edited; reopening the dialog shows the picker.
+  const [recipientMembers] = useState(members)
   const [frequency, setFrequency] = useState(
     initialSchedule?.frequency ?? 'weekly',
   )
@@ -2591,9 +2749,7 @@ function AnalyticsScheduleDialog({
             const frequency = readScheduleFrequency(data.get('frequency'))
             const dayOfWeek = Number(data.get('dayOfWeek'))
             const dayOfMonth = Number(data.get('dayOfMonth'))
-            const recipientMemberKeys = splitValues(
-              String(data.get('recipients') || ''),
-            ) ?? []
+            const recipientMemberKeys = readScheduleRecipients(data)
             if (!isTeamVisibilityValid) {
               setValidationMessage(t('analytics.schedule.teamRequired'))
               return
@@ -2669,10 +2825,18 @@ function AnalyticsScheduleDialog({
               </select>
             </label>
           </div>
-          <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-            {t('analytics.schedule.recipients')}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={initialSchedule?.recipientMemberKeys.join(', ') ?? ''} name="recipients" placeholder={t('analytics.schedule.recipientsPlaceholder')} required />
-          </label>
+          {recipientMembers.length > 0 ? (
+            <AnalyticsRecipientPicker
+              initialRecipients={initialSchedule?.recipientMemberKeys ?? []}
+              members={recipientMembers}
+              t={t}
+            />
+          ) : (
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('analytics.schedule.recipients')}
+              <textarea className="workbench-input min-h-20 p-3" defaultValue={initialSchedule?.recipientMemberKeys.join(', ') ?? ''} name="recipientsOther" placeholder={t('analytics.schedule.recipientsPlaceholder')} required />
+            </label>
+          )}
           {validationMessage ? (
             <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
               {validationMessage}
@@ -2708,6 +2872,130 @@ function AnalyticsScheduleDialog({
       </section>
     </div>
   )
+}
+
+/**
+ * Lets people pick schedule recipients from the members by name, and type others who are not
+ * listed. Members already saved as recipients stay checked even when they are no longer listed.
+ *
+ * @param props - Picker props.
+ * @param props.initialRecipients - Member keys saved on the schedule.
+ * @param props.members - Members to pick from.
+ * @param props.t - Translator for labels.
+ * @returns The recipient fieldset; checked boxes submit as `recipients`, typed keys as `recipientsOther`.
+ */
+function AnalyticsRecipientPicker({
+  initialRecipients,
+  members,
+  t,
+}: {
+  initialRecipients: readonly string[]
+  members: readonly AnalyticsMemberOption[]
+  t: ReturnType<typeof createTranslator>
+}) {
+  const options = includeSelectedFilterOptions(createAnalyticsMemberOptions(members), initialRecipients)
+  const initial = new Set(initialRecipients)
+  return (
+    <fieldset className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]" data-testid="analytics-recipient-picker">
+      <legend>{t('analytics.schedule.recipients')}</legend>
+      <div className="workbench-input grid max-h-40 gap-1 overflow-y-auto p-2">
+        {options.map((option) => (
+          <label
+            className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm font-medium hover:bg-[var(--workbench-surface-muted)]"
+            key={option.value}
+          >
+            <input
+              className="h-4 w-4 shrink-0 accent-[var(--workbench-primary)]"
+              defaultChecked={initial.has(option.value)}
+              name="recipients"
+              type="checkbox"
+              value={option.value}
+            />
+            <span className="truncate" title={option.value}>{option.label}</span>
+          </label>
+        ))}
+      </div>
+      <label className="mt-1 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('analytics.schedule.recipientsOther')}
+        <input className="workbench-input min-h-10 px-3" name="recipientsOther" />
+      </label>
+    </fieldset>
+  )
+}
+
+/**
+ * Picks a custom field by name. A saved field ID that is no longer offered stays selectable under
+ * its ID so that opening the form does not change it.
+ *
+ * @param props - Select props.
+ * @param props.className - Select class names.
+ * @param props.fields - Custom fields to offer.
+ * @param props.onSelect - Receives the chosen field ID.
+ * @param props.required - Whether the form requires a field.
+ * @param props.t - Translator for the placeholder option.
+ * @param props.value - Selected field ID, or an empty string.
+ * @returns The select element.
+ */
+function AnalyticsCustomFieldSelect({
+  className,
+  fields,
+  onSelect,
+  required = false,
+  t,
+  value,
+}: {
+  className: string
+  fields: readonly AnalyticsCustomFieldOption[]
+  onSelect: (fieldId: string) => void
+  required?: boolean
+  t: ReturnType<typeof createTranslator>
+  value: string
+}) {
+  const options = includeSelectedFilterOptions(
+    fields.map((field) => ({ label: field.label, value: field.id })),
+    value ? [value] : [],
+  )
+  return (
+    <select
+      className={className}
+      required={required}
+      value={value}
+      onChange={(event) => {
+        if (event.target.value) onSelect(event.target.value)
+      }}
+    >
+      <option disabled value="">{t('analytics.filter.customFieldChoose')}</option>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>{option.label}</option>
+      ))}
+    </select>
+  )
+}
+
+/**
+ * Converts members into picker options labelled by name, or by email for members without one.
+ *
+ * @param members - Members to offer.
+ * @returns Options sorted by label.
+ */
+function createAnalyticsMemberOptions(members: readonly AnalyticsMemberOption[]) {
+  return members
+    .map((member) => ({ label: member.name?.trim() || member.email, value: member.id }))
+    .sort((left, right) => left.label.localeCompare(right.label))
+}
+
+/**
+ * Reads the schedule recipients from the picked members and the typed keys, without duplicates.
+ *
+ * @param data - Schedule form data.
+ * @returns Recipient member keys.
+ */
+function readScheduleRecipients(data: FormData) {
+  const picked = data.getAll('recipients').flatMap((value) =>
+    typeof value === 'string' && value ? [value] : []
+  )
+  const typed = splitValues(String(data.get('recipientsOther') || '')) ?? []
+  return [...new Set([...picked, ...typed])]
 }
 
 function AnalyticsLoadingState({ t }: { t: ReturnType<typeof createTranslator> }) {
@@ -2754,10 +3042,20 @@ function createEvidenceInput(
   } satisfies AnalyticsEvidenceInput
 }
 
+/**
+ * Converts a widget result into chart points, with group labels resolved to names.
+ *
+ * @param result - Widget result.
+ * @param timeZone - Time zone of calendar buckets.
+ * @param groupBy - Dimension the widget groups by.
+ * @param groupLabelLookup - Resolves group keys to names.
+ * @returns Chart points.
+ */
 function normalizeWidgetPoints(
   result: AnalyticsWidgetResult,
   timeZone: string,
-  workItemTypeLabels?: ReadonlyMap<string, string>,
+  groupBy: AnalyticsGroupBy | undefined,
+  groupLabelLookup: AnalyticsGroupLabelLookup,
 ) {
   if (result.series.length > 0) {
     return result.series.map((point, index) => ({
@@ -2770,7 +3068,7 @@ function normalizeWidgetPoints(
 
   return result.groups.map((group) => ({
     key: group.key,
-    label: workItemTypeLabels?.get(group.key) ?? group.label,
+    label: resolveAnalyticsGroupLabel(groupBy, group, groupLabelLookup),
     sampleSize: group.sampleSize,
     value: group.value,
   }))
@@ -2874,6 +3172,29 @@ function formatBucketLabel(from: string, to: string, timeZone: string) {
   return fromDate === toDate ? fromDate : `${fromDate} – ${toDate}`
 }
 
+/**
+ * Replaces the Team and Project IDs of table rows with their names.
+ *
+ * @param column - Table column key.
+ * @param values - Row values; the row's Team qualifies its Project ID.
+ * @param lookup - Resolves Team and Project names.
+ * @returns The name for a known Team or Project ID, otherwise the value.
+ */
+function resolveTableValueName(
+  column: string,
+  values: AnalyticsTableRow['values'],
+  lookup: AnalyticsGroupLabelLookup,
+) {
+  const value = values[column]
+  if (typeof value !== 'string') return value
+  if (column === 'teamId') return lookup.team?.(value) ?? value
+  if (column === 'projectId') {
+    return lookup.project?.(value, typeof values.teamId === 'string' ? values.teamId : undefined) ??
+      value
+  }
+  return value
+}
+
 function formatTableValue(value: string | number | boolean | null | undefined) {
   if (value === null || value === undefined || value === '') return '—'
   if (typeof value === 'boolean') return value ? '✓' : '—'
@@ -2904,6 +3225,9 @@ function formatAnalyticsWarning(
   }
   if (warning === 'Milestone history is not available for this run.') {
     return t('analytics.warning.milestoneHistoryUnavailable')
+  }
+  if (warning === 'Cycle and Milestone membership is not available for this run.') {
+    return t('analytics.warning.planningGroupsUnavailable')
   }
   const milestonesWithoutHistory = /^(\d+) Milestone\(s\) have no recorded date history; their current date is shown since creation\.$/u
     .exec(warning)
@@ -2946,14 +3270,25 @@ function formatCustomFieldFilterValue(
   return Array.isArray(value) ? value.join(', ') : String(value ?? '')
 }
 
+/**
+ * Keeps a text input's draft and commits it after the user pauses typing.
+ *
+ * @param sourceValue - Value shown while the user is not editing.
+ * @param onCommit - Receives the draft and the source value the user started editing from.
+ * @param delayMilliseconds - Pause before the draft is committed.
+ * @returns The draft value with update and flush handlers.
+ */
 function useDebouncedDraft(
   sourceValue: string,
-  onCommit: (value: string) => void,
+  onCommit: (value: string, editedFrom: string) => void,
   delayMilliseconds = 400,
 ) {
   const [value, setValue] = useState(sourceValue)
   const valueRef = useRef(sourceValue)
+  const editedFromRef = useRef(sourceValue)
   const isDirtyRef = useRef(false)
+  // Bumped after each commit so the draft resyncs even when the source string did not change.
+  const [commitCount, setCommitCount] = useState(0)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const commitRef = useRef(onCommit)
 
@@ -2964,9 +3299,10 @@ function useDebouncedDraft(
   useEffect(() => {
     if (!isDirtyRef.current) {
       valueRef.current = sourceValue
+      editedFromRef.current = sourceValue
       setValue(sourceValue)
     }
-  }, [sourceValue])
+  }, [sourceValue, commitCount])
 
   useEffect(() => () => {
     if (timeoutRef.current !== undefined) {
@@ -2981,7 +3317,8 @@ function useDebouncedDraft(
       timeoutRef.current = undefined
     }
     isDirtyRef.current = false
-    commitRef.current(valueRef.current)
+    commitRef.current(valueRef.current, editedFromRef.current)
+    setCommitCount((count) => count + 1)
   }, [])
 
   const update = useCallback((nextValue: string) => {
@@ -2994,7 +3331,8 @@ function useDebouncedDraft(
     timeoutRef.current = setTimeout(() => {
       timeoutRef.current = undefined
       isDirtyRef.current = false
-      commitRef.current(nextValue)
+      commitRef.current(nextValue, editedFromRef.current)
+      setCommitCount((count) => count + 1)
     }, delayMilliseconds)
   }, [delayMilliseconds])
 

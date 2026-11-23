@@ -4116,7 +4116,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
 
       try {
         const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-        requireWorkspaceBusinessWrite(principal)
+        // Anyone who can read the Milestone may watch it: watching only delivers what they can
+        // already read, and every notification rechecks that access.
         const snapshot = await workItemDependencies.planning.get(
           principal.directoryId,
           await readPlanningWorkItemState(principal),

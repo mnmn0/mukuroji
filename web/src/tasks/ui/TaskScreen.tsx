@@ -451,6 +451,8 @@ export type TaskScreenProps = {
   canManageProjectMembers?: boolean
   /** Checks whether the current user may correct one Work Item's recorded actual dates. */
   canCorrectActualDates?: (task: CanonicalWorkItem) => boolean
+  /** Whether the current user may add and remove external links of Work Items. */
+  canManageExternalLinks?: boolean
   /** Project charter section rendered on the permissions tab. */
   projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
@@ -651,6 +653,7 @@ export function TaskScreen({
   canAccessTriage = false,
   canManageProjectMembers = false,
   canCorrectActualDates,
+  canManageExternalLinks = false,
   projectCharterPanel,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
@@ -3942,6 +3945,7 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
+                  canManageExternalLinks={canManageExternalLinks}
                   canCorrectActualDates={!isRetainedDetail &&
                     renderedDetailTask !== undefined &&
                     (canCorrectActualDates?.(renderedDetailTask) ?? false)}

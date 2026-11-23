@@ -955,6 +955,25 @@ test('lets a reader watch a visible Milestone and nothing else', async () => {
   expect(calls).toHaveLength(3)
 })
 
+test('lets a guest who can read a Milestone watch it', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const watched = { subscribed: true, explicit: true, automatic: false, reasons: ['manual'], watcherCount: 1 }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({ subscribe: async () => watched, unsubscribe: async () => watched }),
+  })
+
+  const response = await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'PUT')
+  expect(response.status).toBe(200)
+  expect((await response.json()).watch.subscribed).toBe(true)
+})
+
 test('reports a changed authorization fence on a Milestone watch as a conflict', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',

@@ -49,6 +49,7 @@ GET  /api/notifications?filter=all|unread|read|archived|snoozed&type=...&limit=.
 GET  /api/notifications/unread-count
 PATCH /api/notifications/{notificationId}
 POST /api/notifications/mark-all-read
+POST /api/notifications/bulk
 GET  /api/notification-preferences
 PUT  /api/notification-preferences
 GET  /api/teams/{teamId}/notification-reminders
@@ -91,7 +92,32 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - quiet hours: enabled、start、end、IANA time zone
 - reminder days（`reminderDays`）: 自分あての期限前通知・超過の再通知・未更新の督促・工数の督促の日数（下の [リマインドの日数](#リマインドの日数)）。PUT で `reminderDays` を省略すると保存済みの値を残し、空 object を送ると消します。項目を知らない古い client が保存しても消えないようにするためです
 
+- category channels（`categoryChannels`）: 通知の種類ごとに切ったチャネル（下の [種類ごとの配信先とミュート](#種類ごとの配信先とミュート)）。保存するのは `false` だけです
+- mutes（`mutes`）: ミュートした Project（`projectKeys`、Project ID は Team の中でだけ一意なので `<teamId>#<projectId>` で持つ）・Team（`teamIds`）を各 100 件までと、ミュート中も届ける mention・承認の切り替え（既定はどちらも届ける）
+
+`categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします。`categoryChannels` か `mutes` を持つ row は、ほかの項目が壊れている場合も同じです（読み替えると、ミュートした通知が届いてしまうため）。
+
 in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+
+### 種類ごとの配信先とミュート
+
+通知は受信者ごとに 1 つの種類（category）に入ります。分類は `server/src/modules/notifications/domain/notification-routing.ts` の `classifyNotificationCategory` が持ち、受信者の reasons を `mention`、`approval`、`assignment`、`due`、`status`、`comment`、`reminder` の順に見て、どれにも当たらなければ event type で決めます（`approval.*` は reasons より先に承認とします）。種類は `mention`・`approval`・`assignment`・`status`・`due`・`comment`・`planning`・`reminder`・`other` です。
+
+あるチャネルに届くのは、チャネル全体の switch が on、その種類でチャネルが切られていない、ミュートされていない、のすべてを満たすときです。ミュートは notification の `teamId` と `projectId` の組が `projectKeys` に、または `teamId` が `teamIds` に含まれるときで、種類が mention か approval で対応する切り替えが on なら除きます。
+
+- 投影（`createNotificationProjectionDeliveryState`）: 種類やミュートで in-app に届かない通知は archived row として保存し、unread には入れません（アーカイブの一覧には出ます）。全体の in-app switch が off のときは従来どおり `inAppVisible: false` で一覧にも出しません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
+- 外部 channel の送信（`deliverDueChannelNotifications`）: 送る直前に強整合で読んだ preference で同じ判定をやり直し、投影後に種類を切ったりミュートしたりした通知は `suppressed` にします
+- 更新ダイジェスト（`update-feed.digest`、種類は other）: Inbox に書く時点で同じ判定を使い、in-app に届かなければ archived row にします
+- 判定は受信者本人の設定で配信を減らすだけで、受信者の選び方と閲覧権限の確認は変えません
+
+### Inbox の一括操作
+
+```http
+POST /api/notifications/bulk
+{ "action": "mark-read" | "mark-unread" | "archive" | "restore", "notificationIds": ["..."] }
+```
+
+1 回に 50 件まで受け付け、同じ ID は 1 回だけ処理します。各通知は `PATCH /api/notifications/{notificationId}` と同じ所有者・現在権限・version の確認を通り、4 件ずつ並行して更新します。更新できなかった通知は request 全体を失敗にせず、`failures` に `{ id, status, code }` で返します。処理は `application/bulk-notification-update.ts` が持ち、route は入力の検証と response の変換だけを行います。response は `{ notifications, failures, unreadCount }` です。storage の障害など NotificationError でない失敗は request 全体を失敗にします。Web は選択を 50 件ずつに分けて送り、失敗した通知を選択に残します。
 
 ## Web Push の購読
 
@@ -275,7 +301,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 
 ### Milestone の watch
 
-Milestone の watcher は（[ADR 0063](adr/0063-planning-milestone-watcher-key.md)）collaboration entity key `<workspaceId>#planning-entity#<encodeURIComponent(entityId)>` に保存し、`GET|PUT|DELETE /api/planning/entities/:entityId/watch` で読み書きします。呼び出した人が見られる、archive されていない Milestone だけが対象で、見えない entity は `404`、Milestone 以外は `400`、archive 済みは `409` です。Enterprise では Milestone を読むのに `planning.read` が要ります。watch の変更（`PUT` / `DELETE`）は Planning 更新や Work Item の watch と同じく業務データを書き込める member に限り、guest と読み取りの permission だけを持つ Enterprise member は `403` です。
+Milestone の watcher は（[ADR 0063](adr/0063-planning-milestone-watcher-key.md)）collaboration entity key `<workspaceId>#planning-entity#<encodeURIComponent(entityId)>` に保存し、`GET|PUT|DELETE /api/planning/entities/:entityId/watch` で読み書きします。呼び出した人が見られる、archive されていない Milestone だけが対象で、見えない entity は `404`、Milestone 以外は `400`、archive 済みは `409` です。Milestone を閲覧できる人は、guest や読み取りの permission だけの Enterprise member（`planning.read`）も含めて watch できます（`PUT` / `DELETE` も同じ）。watch は閲覧できるものの通知を受け取るだけで、通知ごとに閲覧権限を確かめ直すためです。
 
 - Planning entity の更新 audit のうち、Milestone の `status` が `completed` になった更新は `planning-entity.milestone-completed`、ベースラインか予測の日付が変わった更新は `planning-entity.milestone-rescheduled` になります。同じ更新で両方が変わった場合は完了です。どちらも `planning-entity.` の prefix のままなので、活動と Milestone の予定日推移はほかの更新と同じように読みます
 - event は `notificationCandidates` を空で持ち、projection が現在の watcher を `watcher` として加えます。変更した本人には送りません。Project watcher には送りません
