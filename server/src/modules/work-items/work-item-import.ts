@@ -693,13 +693,16 @@ async function processQueueRecord(
       )
     }
     const sliceDeadline = addSeconds(claimedAt, WORK_ITEM_IMPORT_SLICE_SECONDS).getTime()
+    const sliceStartCheckpoint = checkpointRow
     /**
      * Hands the rest of the job to a new queue message once this invocation's slice time is used.
-     * The lease is released first, so the next invocation can claim the job at once.
+     * The lease is released first, so the next invocation can claim the job at once. An invocation
+     * that has not recorded a step yet keeps going, so every slice moves the job forward.
      *
      * @returns Whether this invocation stops here.
      */
     const yieldWhenSliceEnds = async () => {
+      if (checkpointRow === sliceStartCheckpoint) return false
       if (dependencies.now().getTime() < sliceDeadline) return false
       await dependencies.executions.releaseClaim(execution.workspaceId, execution.jobId, leaseOwner)
       await dependencies.queue.enqueue({

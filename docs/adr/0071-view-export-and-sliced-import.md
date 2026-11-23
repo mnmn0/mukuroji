@@ -30,7 +30,8 @@ import は、毎回 timeout して retry を使い切る。
    残した値。
 4. **時間で区切る処理**: worker は claim してから 10 分（`WORK_ITEM_IMPORT_SLICE_SECONDS`）を過ぎたら、
    次の行や link に進む前に lease を外し、同じ job の message を queue に積んで今の message を正常終了する。
-   次の実行は checkpoint の次の手順から続ける。lease を先に外すので、次の実行がすぐ claim できる。
+   次の実行は checkpoint の次の手順から続ける。1 回の実行は少なくとも 1 手順を記録してから区切るので、
+   検証が長くかかっても job は必ず進む。lease を先に外すので、次の実行がすぐ claim できる。
    message を積めなかったときは今の message を retry にする（checkpoint があるので重複は起きない）。
    worker の role に import queue への `sqs:SendMessage` を足す。
 5. **進捗**: worker は検証のたびに行と link の数を execution に `plannedSteps` として残す。

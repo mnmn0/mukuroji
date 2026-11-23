@@ -199,6 +199,34 @@ describe('durable Work Item import', () => {
     expect(fixture.queued).toHaveLength(1)
   })
 
+  test('records at least one step before it hands the job to a new message', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-slow-start')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    fixture.queued.length = 0
+    const created: number[] = []
+    let clock = new Date('2026-07-18T00:00:00.000Z').getTime()
+    let reads = 0
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Passes the slice time right after the claim, as a slow validation would. */
+      now() {
+        reads += 1
+        clock += reads === 2 ? WORK_ITEM_IMPORT_SLICE_SECONDS * 1_000 : 1_000
+        return new Date(clock)
+      },
+      async createWorkItem(request) {
+        created.push(request.row)
+      },
+    })
+
+    const result = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(result).toEqual({ batchItemFailures: [] })
+    expect(created).toEqual([1])
+    expect(fixture.execution?.checkpointRow).toBe(1)
+    expect(fixture.queued).toEqual([{ workspaceId: 'workspace-1', jobId }])
+  })
+
   test('retries the message when the next slice cannot be queued', async () => {
     const fixture = createFixture()
     const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-slice-queue')
