@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
+import type { NotificationMessageLocale } from '@mukuroji/contracts'
+import type { NotificationLocaleReader } from '../../application/channel-delivery'
 import type { SlackDelivery, SlackSendResult } from '../../application/slack-delivery'
+import { DEFAULT_NOTIFICATION_LOCALE, resolveNotificationSummaryText } from '../../domain/notification-summary'
 import { formatNotificationHeading, resolveNotificationLinks } from '../notification-links'
 
 /**
@@ -26,12 +29,14 @@ export type SlackSecretReader = (secretId: string) => Promise<string | undefined
  * @param send - Timeout-aware HTTP boundary, replaceable in offline tests.
  * @param appOrigin - Web application origin for the Work Item key and Inbox links; without it the
  *   message carries text only.
+ * @param readLocale - Recipient language reader; without one the summary is written in Japanese.
  * @returns Recipient-bound notification sender.
  */
 export function createSlackNotificationSender(
   readSecret: SlackSecretReader,
   send: SlackFetch = fetch,
   appOrigin?: string,
+  readLocale: NotificationLocaleReader = async () => DEFAULT_NOTIFICATION_LOCALE,
 ) {
   return async (delivery: SlackDelivery): Promise<SlackSendResult> => {
     let secret: string | undefined
@@ -45,10 +50,19 @@ export function createSlackNotificationSender(
       !/^https:\/\/hooks\.slack(?:-gov)?\.com\/services\/[A-Za-z0-9]+\/[A-Za-z0-9]+\/[A-Za-z0-9]+$/.test(secret.trim())
     ) return { succeeded: false, retryable: false, code: 'SlackDestinationInvalid' }
 
+    let locale: NotificationMessageLocale
+    const localeDeadline = AbortSignal.timeout(5_000)
+    try {
+      locale = await readLocale(delivery, localeDeadline)
+    } catch {
+      return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
+    }
+    // A reader that outlived its deadline never posts; the lease may already belong to a newer claim.
+    if (localeDeadline.aborted) return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
     const notification = delivery.notification
     const text = [
       formatNotificationHeading(notification) || 'Mukuroji',
-      notification.summary,
+      resolveNotificationSummaryText(notification, locale),
       notification.reasons.join(', '),
     ].filter(Boolean).join('\n').slice(0, 3_000)
     const links = appOrigin ? resolveNotificationLinks(notification, appOrigin) : undefined

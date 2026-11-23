@@ -53,10 +53,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
     },
     {
       Effect: 'Allow', Action: 'dynamodb:Query',
-      Resource: [
-        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
-        { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
-      ],
+      Resource: { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
     },
     {
       Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
@@ -64,6 +61,8 @@ test('Slack notifications use the sparse due queue with bounded execution and re
         { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
         { 'Fn::GetAtt': ['EnterpriseIdentityTable7491FB7A', 'Arn'] },
         { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
+        // Directory memberships are queried; GetItem reads the recipient's language preference.
+        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
         { 'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
         { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
@@ -118,6 +117,11 @@ test('Email notifications drain their own sparse queue and send only as the conf
     }),
     expect.objectContaining({
       Effect: 'Allow', Action: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminListGroupsForUser'],
+    }),
+    // The recipient's language preference is a single directory row.
+    expect.objectContaining({
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: expect.arrayContaining([{ 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] }]),
     }),
   ]));
   template.hasResourceProperties('AWS::Lambda::Function', {
