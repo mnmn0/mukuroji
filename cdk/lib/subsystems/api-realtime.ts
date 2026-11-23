@@ -67,6 +67,11 @@ export interface ApiTransportsAndRealtimeInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable queues exposed through API configuration. */
   readonly workerChannels: WorkerChannels;
+  /**
+   * Comma-separated origins the app is served from. Same-origin browser error reports from
+   * these origins are accepted even when `ApiAllowedOrigins` lists only local origins.
+   */
+  readonly webBrowserOrigins: string;
 }
 
 /**
@@ -309,6 +314,7 @@ function bindApiRuntimeConfiguration(
     'Complete API runtime configuration, updated in place on each revision.',
     {
       ALLOWED_ORIGINS: apiAllowedOrigins.valueAsString,
+      WEB_APP_ORIGINS: input.webBrowserOrigins,
       AUTOMATION_INBOUND_WEBHOOK_BASE_URL: httpApi.apiEndpoint,
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID:
         input.runtimeControls.applicationId,
