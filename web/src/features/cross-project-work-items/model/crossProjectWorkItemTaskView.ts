@@ -91,13 +91,11 @@ export function crossProjectWorkItemStateToTaskViewDefinition(
   base: TaskViewDefinition,
 ): TaskViewDefinition {
   // The list owns these four filters. Any other filter of the definition is kept as it is.
-  const {
-    projectScopes: _projectScopes,
-    involvement: _involvement,
-    contributorUserIds: _contributorUserIds,
-    contributorJobRoles: _contributorJobRoles,
-    ...otherFilters
-  } = base.filters
+  const otherFilters: TaskViewFilters = { ...base.filters }
+  delete otherFilters.projectScopes
+  delete otherFilters.involvement
+  delete otherFilters.contributorUserIds
+  delete otherFilters.contributorJobRoles
   const filters: TaskViewFilters = {
     ...otherFilters,
     ...(state.projects.length > 0
