@@ -3,7 +3,7 @@ import {
   PROJECT_RAID_TITLE_MAX_LENGTH,
   type CuratedContextItem,
 } from '@mukuroji/contracts'
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useSaveProjectRaidEntry } from './useSaveProjectRaidEntry'
 
 /** Work Item whose curated risks may be promoted to its Project's log. */
@@ -28,6 +28,11 @@ export type ProjectRiskPromotion = {
   promote: (item: CuratedContextItem) => Promise<void>
   /** Application path of the Project log, in the Project's permissions tab. */
   logPath: string
+  /**
+   * Curated risks already added to the log while this Work Item stays open. It outlives the
+   * decisions tab, so switching collaboration tabs does not offer the same risk again.
+   */
+  promotedItemIds: ReadonlySet<string>
 }
 
 /**
@@ -49,7 +54,8 @@ function truncate(text: string, maxLength: number) {
  * Returns the promotion of a Work Item's curated risks to its Project's risk log.
  *
  * The new risk starts with medium probability and impact, so the owner rates it in the log. A
- * retried failed promotion of the same item reuses its Idempotency-Key, so it is not added twice.
+ * retried failed promotion of the same item reuses its Idempotency-Key, so it is not added twice,
+ * and a promoted item is remembered for as long as the hook's owner stays mounted.
  *
  * @param scope - Session, Team, Project, and Work Item.
  * @returns The promotion, or `undefined` when the Work Item has no Project or session.
@@ -61,6 +67,7 @@ export function usePromoteProjectRisk({
   workItemId,
 }: ProjectRiskPromotionScope): ProjectRiskPromotion | undefined {
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId: projectId ?? '' })
+  const [promotedItemIds, setPromotedItemIds] = useState<ReadonlySet<string>>(() => new Set())
   const promote = useCallback(async (item: CuratedContextItem) => {
     const description = item.body.trim()
     await save(undefined, {
@@ -72,8 +79,13 @@ export function usePromoteProjectRisk({
       relatedWorkItemIds: [workItemId],
       status: 'open',
     })
+    setPromotedItemIds((current) => new Set(current).add(item.id))
   }, [save, workItemId])
   if (!accessToken || !teamId || !projectId) return undefined
   const search = new URLSearchParams({ teamId, tab: 'permissions' })
-  return { promote, logPath: `/projects/${encodeURIComponent(projectId)}/issues?${search.toString()}` }
+  return {
+    promote,
+    logPath: `/projects/${encodeURIComponent(projectId)}/issues?${search.toString()}`,
+    promotedItemIds,
+  }
 }

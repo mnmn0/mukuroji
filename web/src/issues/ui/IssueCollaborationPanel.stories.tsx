@@ -1108,7 +1108,7 @@ export const RiskPromotion: Story = {
   args: {
     controller: riskPromotionController,
     defaultTab: 'decisions',
-    riskPromotion: { promote: fn(async () => undefined), logPath: '/projects/refero/issues?teamId=core-team&tab=permissions' },
+    riskPromotion: { promote: fn(async () => undefined), logPath: '/projects/refero/issues?teamId=core-team&tab=permissions', promotedItemIds: new Set<string>() },
   },
   decorators: [withRouter],
   play: async ({ args, canvasElement }) => {
@@ -1138,6 +1138,7 @@ export const RiskPromotionFailed: Story = {
         throw new Error('Forbidden')
       }),
       logPath: '/projects/refero/issues?teamId=core-team&tab=permissions',
+      promotedItemIds: new Set<string>(),
     },
   },
   decorators: [withRouter],
@@ -1146,5 +1147,27 @@ export const RiskPromotionFailed: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Project のリスクに登録' }))
     await expect(await canvas.findByRole('alert')).toHaveTextContent('Project のリスクに登録できませんでした。')
     await expect(canvas.getByRole('button', { name: 'Project のリスクに登録' })).toBeEnabled()
+  },
+}
+
+/**
+ * A risk promoted earlier while the Work Item stayed open, for example before switching tabs, is
+ * shown as registered instead of offered again.
+ */
+export const RiskAlreadyPromoted: Story = {
+  args: {
+    controller: riskPromotionController,
+    defaultTab: 'decisions',
+    riskPromotion: {
+      promote: fn(async () => undefined),
+      logPath: '/projects/refero/issues?teamId=core-team&tab=permissions',
+      promotedItemIds: new Set([activeRiskFixture.id]),
+    },
+  },
+  decorators: [withRouter],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('Project のリスクに登録しました。')).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Project のリスクに登録' })).toBeNull()
   },
 }
