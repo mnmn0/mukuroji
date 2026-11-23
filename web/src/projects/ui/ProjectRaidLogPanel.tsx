@@ -20,7 +20,6 @@ import { ProjectDirectoryApiError } from '../api/errors'
 import { ProjectChangeRequestScheduleConflictError } from '../model/projectChangeRequestDecision'
 import {
   createProjectRaidLogCsv,
-  downloadProjectRaidLogCsv,
   labelProjectRaidReference,
   type ProjectRaidReferenceOption,
 } from '../model/projectRaidLogExport'
@@ -30,6 +29,7 @@ import {
   ScheduleChangesField,
   type ProjectChangeRequestDecisionChoice,
 } from './ProjectChangeRequestControls'
+import { downloadProjectRaidLogCsv } from './downloadProjectRaidLogCsv'
 
 /** Props of the Project risk, issue, and change request log panel. */
 export type ProjectRaidLogPanelProps = {
