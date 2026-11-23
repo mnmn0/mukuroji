@@ -92,3 +92,35 @@ test('パスワード再設定は確認コードを送り、新しいパスワ�
   await expect(page.getByRole('heading', { name: 'パスワードを再設定しました' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'ログインへ進む' })).toBeVisible()
 })
+
+test('Issue #349: 社外共有リンクはサインインなしで読み取り専用のレポートを表示し、無効なら理由を区別しない', async ({ page }) => {
+  await page.route('**/api/public/project-status/valid-token', async (route) => {
+    await route.fulfill({
+      json: {
+        report: {
+          schemaVersion: 1,
+          locale: 'ja',
+          projectName: 'Refero 導入',
+          teamName: 'Core',
+          asOf: '2026-11-23T00:00:00.000Z',
+          health: { health: 'at-risk', risk: 'medium', summary: '検収の日程を調整中です。', publishedAt: '2026-11-22T00:00:00.000Z' },
+        },
+        expiresAt: '2026-12-23T00:00:00.000Z',
+      },
+    })
+  })
+  await page.route('**/api/public/project-status/revoked-token', async (route) => {
+    await route.fulfill({ status: 404, json: { code: 'ProjectStatusShareNotFound', message: 'Not found.' } })
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  await page.goto('/share/project-status/valid-token')
+  const report = page.getByTestId('project-status-report')
+  await expect(report.getByRole('heading', { level: 1 })).toContainText('Refero 導入')
+  await expect(report).toContainText('検収の日程を調整中です。')
+  await expect(page.getByTestId('project-status-report-progress')).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+
+  await page.goto('/share/project-status/revoked-token')
+  await expect(page.getByTestId('shared-project-status-unavailable')).toBeVisible()
+})

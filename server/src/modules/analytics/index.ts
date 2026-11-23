@@ -41,6 +41,7 @@ export {
   createAnalyticsEvidenceCursor,
   createAnalyticsNextDeliveryAtRecordKey,
   createAnalyticsPdf,
+  createAnalyticsTextPdf,
   createAnalyticsPermissionScopeHash,
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,

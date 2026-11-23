@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { DocumentsApiError } from '../../documents/api/errors'
 import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
@@ -19,8 +19,10 @@ import {
   summarizeProjectOverviewRaid,
   summarizeProjectOverviewWorkItems,
 } from '../../projects/model/projectOverview'
+import { buildProjectStatusReport, PROJECT_STATUS_REPORT_ROW_LIMIT } from '../../projects/model/projectStatusReport'
 import { useProjectMembers } from '../../projects/queries/useProjectMembers'
 import { useProjectRaidLog } from '../../projects/queries/useProjectRaidLog'
+import { ProjectStatusReportDialog } from '../../projects/ui/ProjectStatusReportDialog'
 import {
   ProjectOverviewView,
   type ProjectOverviewAgentRunsError,
@@ -153,6 +155,61 @@ export function ProjectOverviewPage() {
     [members.data],
   )
 
+  const [isReportOpen, setIsReportOpen] = useState(false)
+  // The report reads more rows than the overview widgets show, and only once it is opened.
+  const report = useMemo(() => {
+    if (!isReportOpen || !team || !project || !projectId) return undefined
+    if (planning.data === undefined && !planning.error) return undefined
+    if (workItems.isLoading || raidLog.isLoading || projectDocuments.isLoading || actionItemsQuery.isLoading) return undefined
+    const today = toLocalDate(new Date())
+    const activeMembers = (members.data ?? []).filter(isActiveProjectAssignmentCandidate)
+    return buildProjectStatusReport({
+      locale: workspace.locale === 'en' ? 'en' : 'ja',
+      projectName: project.name,
+      teamName: team.name,
+      asOf: new Date(),
+      updateTarget: planning.data ? findProjectOverviewUpdateTarget(planning.data.updateTargets, team.id, projectId) : undefined,
+      schedule: planning.data
+        ? selectProjectOverviewSchedule(planning.data.entities, team.id, projectId, PROJECT_STATUS_REPORT_ROW_LIMIT)
+        : undefined,
+      workItemSummary,
+      raid: raidLog.data
+        ? summarizeProjectOverviewRaid(raidLog.data.entries, today, PROJECT_STATUS_REPORT_ROW_LIMIT)
+        : undefined,
+      actionItems: actionItemsQuery.data
+        ? summarizeProjectOverviewActionItems(
+            actionItemsQuery.data.items,
+            {
+              failedDocumentCount: actionItemsQuery.data.failedCount,
+              hasMoreDocuments: projectDocuments.hasMore,
+              skippedDocumentCount: actionItemsQuery.data.skippedCount,
+            },
+            activeMembers,
+            today,
+            PROJECT_STATUS_REPORT_ROW_LIMIT,
+          )
+        : undefined,
+      members: activeMembers,
+    })
+  }, [
+    actionItemsQuery.data,
+    actionItemsQuery.isLoading,
+    isReportOpen,
+    members.data,
+    planning.data,
+    planning.error,
+    project,
+    projectDocuments.hasMore,
+    projectDocuments.isLoading,
+    projectId,
+    raidLog.data,
+    raidLog.isLoading,
+    team,
+    workItemSummary,
+    workItems.isLoading,
+    workspace.locale,
+  ])
+
   return (
     <WorkspaceRouteContent
       isLoading={workspace.isLoading}
@@ -175,6 +232,16 @@ export function ProjectOverviewPage() {
           agentRunsError={agentRunsError}
           documents={documents}
           documentsError={documentsError}
+          headerActions={team && project ? (
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              data-testid="project-overview-status-report"
+              onClick={() => setIsReportOpen(true)}
+              type="button"
+            >
+              {t('projects.statusReport.open')}
+            </button>
+          ) : undefined}
           isActionItemsLoading={projectDocuments.isLoading || actionItemsQuery.isLoading}
           isAgentRunsLoading={agentRunBoard.isLoading}
           isDocumentsLoading={isBacklinksLoading || projectDocuments.isLoading}
@@ -210,6 +277,16 @@ export function ProjectOverviewPage() {
           workItemSummary={workItemSummary}
           workItemsError={workItemsError}
         />
+        {isReportOpen && team && projectId ? (
+          <ProjectStatusReportDialog
+            accessToken={workspace.accessToken}
+            onClose={() => setIsReportOpen(false)}
+            projectId={projectId}
+            report={report}
+            t={t}
+            teamId={team.id}
+          />
+        ) : null}
       </div>
     </WorkspaceRouteContent>
   )

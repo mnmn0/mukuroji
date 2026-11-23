@@ -1548,8 +1548,33 @@ export function createAnalyticsPdf(
 ) {
   const normalized = normalizeSnapshot(snapshot)
   const exportLocale = normalizeAnalyticsExportLocale(locale)
-  const lines = createAnalyticsPdfLines(normalized, exportLocale, context)
-    .flatMap((line) => wrapAnalyticsPdfLine(line, exportLocale))
+  return renderAnalyticsTextPdf(createAnalyticsPdfLines(normalized, exportLocale, context), exportLocale)
+}
+
+/**
+ * Writes plain text lines as a multi-page PDF with the Analytics fonts.
+ *
+ * Other features, such as the Project status report, reuse the Analytics renderer through this
+ * function so that every PDF export embeds the same Japanese font subset and falls back to the
+ * viewer's Japanese font for characters outside it.
+ *
+ * @param lines - Unwrapped lines; leading spaces indent a line and its continuation lines.
+ * @param locale - Label locale tag, which selects the primary font; English when unknown.
+ * @returns PDF bytes starting with `%PDF-1.4`.
+ */
+export function createAnalyticsTextPdf(lines: readonly string[], locale?: string) {
+  return renderAnalyticsTextPdf(lines, normalizeAnalyticsExportLocale(locale))
+}
+
+/**
+ * Lays out text lines on pages and assembles the PDF objects.
+ *
+ * @param sourceLines - Unwrapped lines.
+ * @param exportLocale - Normalized export locale.
+ * @returns PDF bytes.
+ */
+function renderAnalyticsTextPdf(sourceLines: readonly string[], exportLocale: AnalyticsExportLocale) {
+  const lines = sourceLines.flatMap((line) => wrapAnalyticsPdfLine(line, exportLocale))
   const pageLines = Array.from(
     { length: Math.ceil(lines.length / PDF_LINES_PER_PAGE) },
     (_, index) => lines.slice(

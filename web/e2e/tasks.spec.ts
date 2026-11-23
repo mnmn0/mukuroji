@@ -4177,6 +4177,55 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
   })
 
+  test('Issue #349: 概要から進捗レポートを開き、Markdown を保存して社外共有リンクを発行する', async ({ page }) => {
+    const shares: unknown[] = []
+    let createdBody: unknown
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        createdBody = route.request().postDataJSON()
+        const share = {
+          id: 'share-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          label: '顧客A 定例',
+          sections: ['health', 'schedule'],
+          showPeopleNames: false,
+          expiresAt: '2026-12-01T00:00:00.000Z',
+          createdAt: '2026-11-23T00:00:00.000Z',
+          createdByMemberKey: 'member-demo',
+          reportAsOf: '2026-11-23T00:00:00.000Z',
+          viewCount: 0,
+        }
+        shares.unshift(share)
+        await route.fulfill({ status: 201, json: { share, url: '/share/project-status/token-value' } })
+        return
+      }
+      await route.fulfill({ json: { shares } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+
+    const download = page.waitForEvent('download')
+    await dialog.getByTestId('project-status-report-export-markdown').click()
+    expect((await download).suggestedFilename()).toMatch(/\.md$/)
+
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A 定例')
+    await share.getByRole('checkbox', { name: '進捗' }).uncheck()
+    await share.getByTestId('project-status-share-create').click()
+    await expect(share.getByTestId('project-status-share-url')).toHaveValue(/\/share\/project-status\/token-value$/)
+    await expect(share.getByTestId('project-status-share-list')).toContainText('顧客A 定例')
+    expect(createdBody).toMatchObject({
+      label: '顧客A 定例',
+      showPeopleNames: false,
+      sections: expect.not.arrayContaining(['progress']),
+    })
+  })
+
   test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {
     const agentRunRequests: string[] = []
     page.on('request', (request) => {

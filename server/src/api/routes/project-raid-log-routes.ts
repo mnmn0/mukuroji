@@ -7,23 +7,20 @@ import {
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
 } from '../../modules/project-raid-log'
-import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { workItemDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
-  canAccessAssignedProject,
-  canWorkspaceBusinessWrite,
   createApiMutationContext,
-  hasEnterprisePermissionAtResource,
-  requireTeamPermission,
   requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
-  type WorkspacePrincipal,
 } from '../shared/project-access'
-import { resolveEnterpriseProjectRole } from '../shared/enterprise-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import type { TeamPermissionContext } from '../shared/workspace-access'
+import {
+  canWriteTeamProject,
+  createTeamProjectCallerAuthorization,
+  requireTeamProjectRead,
+} from '../shared/team-project-access'
 
 /**
  * Registers the Project risk, issue, and change request log endpoints.
@@ -42,14 +39,14 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
-      await requireProjectRead(principal, teamId, projectId)
+      await requireTeamProjectRead(principal, teamId, projectId)
       const log = await readProjectRaidLogUseCase(
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
       )
       return c.json({
         ...log,
-        viewer: { canEdit: await canEditProjectRaidLog(principal, teamId, projectId) },
+        viewer: { canEdit: await canWriteTeamProject(principal, teamId, projectId) },
       } satisfies ProjectRaidLogResponse)
     } catch (error) {
       return toProjectRaidLogErrorResponse(c, error)
@@ -64,8 +61,8 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireProjectRead(principal, teamId, projectId)
-      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
+      await requireTeamProjectRead(principal, teamId, projectId)
+      if (!await canWriteTeamProject(principal, teamId, projectId)) {
         throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
       }
       const body = await readJson<unknown>(c.req)
@@ -76,7 +73,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
+          callerAuthorization: await createTeamProjectCallerAuthorization(principal, teamId, projectId, 'ProjectRaidLogAuthorizationUnavailable'),
           auditContext,
           entryId: createEntryId(teamId, projectId, auditContext.actor.id, auditContext.idempotencyKeyHash),
           creationFingerprint: auditContext.requestFingerprint,
@@ -98,8 +95,8 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       if (!entryId) throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Entry ID is required.')
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireProjectRead(principal, teamId, projectId)
-      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
+      await requireTeamProjectRead(principal, teamId, projectId)
+      if (!await canWriteTeamProject(principal, teamId, projectId)) {
         throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
       }
       const body = await readJson<unknown>(c.req)
@@ -111,7 +108,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
+          callerAuthorization: await createTeamProjectCallerAuthorization(principal, teamId, projectId, 'ProjectRaidLogAuthorizationUnavailable'),
           auditContext,
           updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
           updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
@@ -138,49 +135,6 @@ function readLogRoute(c: Context) {
     throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Team ID and Project ID are required.')
   }
   return { teamId, projectId }
-}
-
-/**
- * Requires the Project to belong to the Team and the principal to see it.
- *
- * A Project outside the Team and a Project the principal may not see both answer 404, so the
- * response does not reveal which Projects exist.
- *
- * @param principal - Authenticated principal.
- * @param teamId - Team that owns the Project.
- * @param projectId - Project ID.
- */
-async function requireProjectRead(principal: WorkspacePrincipal, teamId: string, projectId: string) {
-  const context = await requireTeamPermission(principal, teamId, 'viewer')
-  const inTeam = context.team.projects.some((project) => project.id === projectId)
-  if (!inTeam || !canAccessAssignedProject(principal, context, projectId, 'viewer')) {
-    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
-  }
-}
-
-/**
- * Builds the commit-time fences that fail a log write when the caller lost access or the Team
- * or Project was archived after the request was authorized.
- *
- * @param principal - Authenticated principal.
- * @param teamId - Team that owns the Project.
- * @param projectId - Project whose log is changed.
- * @returns The condition checks.
- * @throws ProjectDataError 503 when the directory cannot build the active-reference fences.
- */
-async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: string, projectId: string) {
-  const { projectDirectory } = workspaceDependencies
-  if (!projectDirectory.createActiveReferenceConditionChecks) {
-    throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'Project access cannot be verified.')
-  }
-  return [
-    ...createPlanningCallerAuthorizationConditionChecks(
-      principal,
-      [],
-      principal.principalKind !== 'service-account',
-    ),
-    ...await projectDirectory.createActiveReferenceConditionChecks(principal.directoryId, teamId, projectId),
-  ]
 }
 
 /**
@@ -212,55 +166,6 @@ function createUpdateKey(entryId: string, actorId: string, idempotencyKeyHash: s
   return createHash('sha256')
     .update(JSON.stringify(['project-raid-entry-update-key', entryId, actorId, idempotencyKeyHash]))
     .digest('hex')
-}
-
-/**
- * Tells whether the principal may change a Project log: a writable Workspace session, member
- * access to the Project resolved at the Team write level (so a Team-wide grant such as an
- * Enterprise Team member keeps its effective role), and, for an Enterprise principal,
- * `projects.write` on the Project.
- *
- * @remarks
- * The Enterprise Project accesses on the principal carry the role of the current route's
- * permission, so on a read they are viewer even for a Project member. Once `projects.write`
- * holds on this Project, the check uses the role that grant gives, the same role a write
- * request resolves, so the read reports the access the write will get.
- *
- * @param principal - Authenticated principal.
- * @param teamId - Team that owns the Project.
- * @param projectId - Project ID.
- * @returns Whether the principal may add and edit entries.
- */
-async function canEditProjectRaidLog(principal: WorkspacePrincipal, teamId: string, projectId: string) {
-  if (!canWorkspaceBusinessWrite(principal)) return false
-  let writer = principal
-  if (principal.enterprisePermissions !== undefined) {
-    if (!hasEnterprisePermissionAtResource(principal, 'projects.write', {
-      workspaceId: principal.directoryId,
-      kind: 'project',
-      targetId: projectId,
-      parentTeamId: teamId,
-    })) {
-      return false
-    }
-    writer = {
-      ...principal,
-      enterpriseProjectAccesses: [
-        ...(principal.enterpriseProjectAccesses ?? []).filter((access) =>
-          access.projectId !== projectId || (access.teamId !== undefined && access.teamId !== teamId)
-        ),
-        { teamId, projectId, role: resolveEnterpriseProjectRole(['projects.write']) },
-      ],
-    }
-  }
-  let context: TeamPermissionContext
-  try {
-    context = await requireTeamPermission(writer, teamId, 'member')
-  } catch (error) {
-    if (error instanceof ProjectDataError && error.status === 403) return false
-    throw error
-  }
-  return canAccessAssignedProject(writer, context, projectId, 'member')
 }
 
 /**

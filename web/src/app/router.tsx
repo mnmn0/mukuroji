@@ -245,6 +245,10 @@ export const appRoutes: RouteObject[] = [
         lazy: lazyPage(async () => (await import('../documents/SharedDocumentPage')).SharedDocumentPage),
       },
       {
+        path: '/share/project-status/:shareToken',
+        lazy: lazyPage(async () => (await import('../pages/public/SharedProjectStatusReportPage')).SharedProjectStatusReportPage),
+      },
+      {
         path: '*',
         element: <NotFoundPage />,
       },
