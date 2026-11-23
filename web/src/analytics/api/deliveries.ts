@@ -57,6 +57,33 @@ export async function getAnalyticsDeliveries(
   }
 }
 
+/** Pages read at most while skipping pages whose deliveries are all of unreadable reports. */
+const maxSkippedDeliveryPages = 5
+
+/**
+ * Reads the first page that holds a delivery, following the cursor past pages the server emptied
+ * because the user can no longer read their reports.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param signal - Signal that aborts the requests.
+ * @returns The first non-empty page, or the last page read when none holds a delivery.
+ * @throws AnalyticsApiError when a request fails or a response is malformed.
+ */
+export async function getRecentAnalyticsDeliveries(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<AnalyticsDeliveryListResponse> {
+  let page = await getAnalyticsDeliveries(accessToken, undefined, signal)
+  for (
+    let skipped = 1;
+    page.deliveries.length === 0 && page.nextCursor !== undefined && skipped < maxSkippedDeliveryPages;
+    skipped += 1
+  ) {
+    page = await getAnalyticsDeliveries(accessToken, page.nextCursor, signal)
+  }
+  return page
+}
+
 /**
  * Creates the error for a success response that does not hold a valid delivery list.
  *

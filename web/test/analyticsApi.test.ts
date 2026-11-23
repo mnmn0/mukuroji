@@ -7,6 +7,7 @@ import {
   deleteAnalyticsReport,
   exportAnalytics,
   getAnalyticsDeliveries,
+  getRecentAnalyticsDeliveries,
   getAnalyticsEvidence,
   getAnalyticsReports,
   getAnalyticsSnapshots,
@@ -354,6 +355,27 @@ describe('Analytics deliveries API', () => {
       nextCursor: 'next-page',
     })
     expect(requests[0]?.url).toContain('/analytics/deliveries?limit=20&cursor=cursor-1')
+  })
+
+  test('follows the cursor past pages of reports the user can no longer read', async () => {
+    const delivery = {
+      reportId: 'weekly',
+      reportName: 'Weekly delivery',
+      snapshotId: 'snapshot-1',
+      format: 'pdf',
+      deliveredAt: '2026-07-13T00:00:00.000Z',
+    }
+    const requests = installFetchRecorder((url) => url.includes('cursor=page-2')
+      ? { deliveries: [delivery] }
+      : { deliveries: [], nextCursor: 'page-2' })
+    expect(await getRecentAnalyticsDeliveries('token-1')).toEqual({ deliveries: [delivery] })
+    expect(requests).toHaveLength(2)
+  })
+
+  test('stops following empty pages after a bound', async () => {
+    const requests = installFetchRecorder(() => ({ deliveries: [], nextCursor: 'again' }))
+    expect(await getRecentAnalyticsDeliveries('token-1')).toEqual({ deliveries: [], nextCursor: 'again' })
+    expect(requests).toHaveLength(5)
   })
 
   test('accepts an empty list', async () => {

@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getAnalyticsDeliveries } from '../api/deliveries'
+import { getRecentAnalyticsDeliveries } from '../api/deliveries'
 import { getAnalyticsReports } from '../api/reports'
 
 const analyticsQueryConfig = {
@@ -33,13 +33,13 @@ export function useAnalyticsReports(accessToken?: string, enabled = true) {
  *
  * @param accessToken - Analytics API access token.
  * @param enabled - Whether to read once the current user is known.
- * @returns SWR state of the first delivery page, newest first.
+ * @returns SWR state of the first page that holds a delivery, newest first.
  */
 export function useAnalyticsDeliveries(accessToken?: string, enabled = true) {
   const key = accessToken && enabled
     ? ['analytics-deliveries', accessToken] as const
     : null
-  return useSWR(key, ([, token]) => getAnalyticsDeliveries(token), analyticsQueryConfig)
+  return useSWR(key, ([, token]) => getRecentAnalyticsDeliveries(token), analyticsQueryConfig)
 }
 
 /**
