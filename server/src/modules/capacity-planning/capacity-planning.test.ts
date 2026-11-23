@@ -1,13 +1,18 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
   type ResourceAssignment,
+  type UpdateResourceRequestInput,
   type WorkloadMemberProfile,
 } from '@mukuroji/contracts'
 import {
   buildWorkloadSnapshot,
+  CapacityPlanningError,
   CapacityPlanningService,
   createDefaultWorkingSchedule,
+  DynamoDbCapacityPlanningRepository,
   InMemoryCapacityPlanningRepository,
   pruneCapacityPlanningState,
   upgradeLegacyTimeOff,
@@ -748,16 +753,24 @@ describe('capacity planning reviews and retention', () => {
       workspaceId: 'workspace-1', teamId: 'team-1', title: 'Release', skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03',
       requestedMinutes: 480, confidential: false, expectedTeamRevision: 1, actorMemberId: 'manager-1',
     })
-    await service.createAssignment({
+    const assignment = await service.createAssignment({
       workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, memberId: 'member-2', skillIds: [],
       fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 480, plannedEffortMinutes: 480, confidential: false,
       status: 'tentative', expectedTeamRevision: 2, actorMemberId: 'manager-1',
     })
-
-    const canceled = await service.updateRequest({
+    const cancel: UpdateResourceRequestInput = {
       workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
       expectedRevision: 2, expectedTeamRevision: 3, actorMemberId: 'manager-1',
-    }, { canViewConfidential: true }, { auditContext })
+    }
+
+    // An assignment the caller did not authorize, such as one added since it checked, stops the cascade.
+    await expect(service.updateRequest(cancel, { canViewConfidential: true, authorizedAssignmentIds: new Set() }))
+      .rejects.toMatchObject({ code: 'ResourceRequestAssignmentsChanged' })
+    expect(await service.listActiveRequestAssignments('workspace-1', 'team-1', request.id)).toEqual([assignment])
+    const canceled = await service.updateRequest(cancel, {
+      canViewConfidential: true,
+      authorizedAssignmentIds: new Set([assignment.id]),
+    }, { auditContext })
     const state = await repository.getState('workspace-1', 'team-1')
 
     expect(canceled.status).toBe('canceled')
@@ -766,6 +779,112 @@ describe('capacity planning reviews and retention', () => {
       ['workload.assignment.canceled', [{ memberKey: 'member-2', reason: 'workload-assignment' }]],
       ['workload.request.canceled', undefined],
     ])
+  })
+
+  test('records a cascade too large to audit one by one as one event that notifies every member', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-3', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 1, actorMemberId: 'member-3',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Migration', skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03',
+      requestedMinutes: 99 * 60, confidential: false, expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    })
+    const ids = new Set<string>()
+    for (let index = 0; index < 99; index += 1) {
+      const assignment = await service.createAssignment({
+        workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, memberId: index % 2 === 0 ? 'member-2' : 'member-3',
+        skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 1, plannedEffortMinutes: 1,
+        confidential: false, status: 'tentative', expectedTeamRevision: 3 + index, actorMemberId: 'manager-1',
+      })
+      ids.add(assignment.id)
+    }
+    const current = await service.getRequest('workspace-1', 'team-1', request.id)
+
+    await service.updateRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
+      expectedRevision: current.revision, expectedTeamRevision: 102, actorMemberId: 'manager-1',
+    }, { canViewConfidential: true, authorizedAssignmentIds: ids }, { auditContext })
+    const events = repository.auditLog.at(-1)?.events ?? []
+
+    // State Put plus two events stays far below the 100-item transaction limit.
+    expect(events.map((event) => event.eventType)).toEqual(['workload.assignment.canceled', 'workload.request.canceled'])
+    expect(events[0]?.metadata).toMatchObject({
+      requestId: request.id,
+      assignmentIds: [...ids],
+      notificationCandidates: [
+        { memberKey: 'member-2', reason: 'workload-assignment' },
+        { memberKey: 'member-3', reason: 'workload-assignment' },
+      ],
+    })
+  })
+
+  test('reports a replayed audit event as a duplicate and keeps other transaction failures as errors', async () => {
+    const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1', credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }))
+    const repository = new DynamoDbCapacityPlanningRepository('capacity', client, 'audit-events')
+    const state: CapacityPlanningState = { revision: 2, profiles: [], requests: [], assignments: [] }
+    const audit = {
+      context: auditContext,
+      events: [{
+        directoryId: 'workspace-1', eventType: 'workload.request.created', entityType: 'team-workload', entityId: 'team-1',
+        action: 'resource_request_created',
+      }],
+    }
+    /** Builds a transaction cancellation with the given item reasons. */
+    const canceled = (...codes: string[]) => Object.assign(new Error('Transaction cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: codes.map((Code) => ({ Code })),
+    })
+    const save = async (error: Error) => {
+      const send = spyOn(client, 'send').mockImplementation(async () => { throw error })
+      try {
+        return await repository.saveState('workspace-1', 'team-1', state, 1, audit).then(() => undefined, (cause: unknown) => cause)
+      } finally {
+        send.mockRestore()
+      }
+    }
+
+    expect(await save(canceled('ConditionalCheckFailed', 'None'))).toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    expect(await save(canceled('None', 'ConditionalCheckFailed'))).toMatchObject({ code: 'CapacityPlanningDuplicateRequest' })
+    const conflict = await save(canceled('None', 'TransactionConflict'))
+    expect(conflict).not.toBeInstanceOf(CapacityPlanningError)
+    expect(conflict).toMatchObject({ name: 'TransactionCanceledException' })
+    expect(await save(canceled('ThrottlingError', 'ConditionalCheckFailed'))).not.toBeInstanceOf(CapacityPlanningError)
+  })
+
+  test('derives request fulfillment again after pruning an old assignment', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const state = await repository.getState('workspace-1', 'team-1')
+    const timestamp = '2025-01-01T00:00:00.000Z'
+    const assignment = (id: string, fromDate: string, toDate: string): ResourceAssignment => ({
+      id, workspaceId: 'workspace-1', teamId: 'team-1', requestId: 'request-1', memberId: 'member-2', skillIds: [],
+      fromDate, toDate, allocationMinutes: 300, plannedEffortMinutes: 300, confidential: false, status: 'confirmed',
+      revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    })
+    await repository.saveState('workspace-1', 'team-1', {
+      ...state,
+      revision: 2,
+      requests: [{
+        id: 'request-1', workspaceId: 'workspace-1', teamId: 'team-1', title: 'Long run', skillIds: [], fromDate: '2025-01-01',
+        toDate: '2026-09-30', requestedMinutes: 600, confidential: false, status: 'filled', revision: 3,
+        createdAt: timestamp, updatedAt: timestamp,
+      }],
+      assignments: [assignment('old', '2025-01-01', '2025-01-31'), assignment('recent', '2026-08-03', '2026-08-03')],
+    }, 1)
+
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-3', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 2, actorMemberId: 'member-3',
+    })
+    const saved = await repository.getState('workspace-1', 'team-1')
+
+    expect(saved.assignments.map((row) => row.id)).toEqual(['recent'])
+    expect(saved.requests[0]).toMatchObject({ status: 'partially-filled', revision: 4 })
   })
 
   test('reads time off saved before approval existed as approved so capacity does not change', () => {

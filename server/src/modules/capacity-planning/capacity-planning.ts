@@ -42,6 +42,16 @@ const MAX_STATE_BYTES = 350_000
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 /** Days after their end date that canceled, rejected, and empty request rows are kept. */
 const CLOSED_ROW_RETENTION_DAYS = 30
+/**
+ * Most audit events one Team write may carry: DynamoDB transactions hold at most 100 items and
+ * the Team state Put is one of them.
+ */
+const MAX_AUDIT_EVENTS_PER_WRITE = 99
+/**
+ * Most assignments a request cancellation audits one by one; with the request's own event they
+ * stay within `MAX_AUDIT_EVENTS_PER_WRITE`. Larger cascades are recorded as one event.
+ */
+const MAX_ITEMIZED_CASCADE_EVENTS = MAX_AUDIT_EVENTS_PER_WRITE - 1
 /** Days after their end date that any row is kept; longer than the widest snapshot range. */
 const PAST_ROW_RETENTION_DAYS = 400
 /** Audit entity type for Team workload changes. */
@@ -546,7 +556,8 @@ export class CapacityPlanningService {
    * assignments are canceled in the same write. Canceled requests are read-only.
    *
    * @param input - Changed request fields, an optional cancel status, and expected revisions.
-   * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
+   * @param access - Whether the actor may see confidential requests, where hidden requests are
+   *   reported as missing, and which assignments the caller authorized for a cascading cancel.
    * @param options - Request audit context.
    * @returns The saved request.
    */
@@ -555,6 +566,11 @@ export class CapacityPlanningService {
     access: {
       /** Whether the actor may read and change confidential requests. */
       canViewConfidential: boolean
+      /**
+       * Assignments whose Project and member the caller verified for this actor. A cascading
+       * cancel is refused when any active assignment of the request is missing from it.
+       */
+      authorizedAssignmentIds?: ReadonlySet<string>
     },
     options: CapacityPlanningMutationOptions = {},
   ): Promise<ResourceRequest> {
@@ -591,15 +607,27 @@ export class CapacityPlanningService {
             'Some assignments that fill this resource request are confidential. Ask a manager who can see them to cancel it.',
           )
         }
-        for (const assignment of activeAssignments) {
-          const canceled: ResourceAssignment = {
-            ...assignment,
-            status: 'canceled',
-            revision: assignment.revision + 1,
-            updatedAt: timestamp,
-          }
-          replaceById(state.assignments, canceled, 'id')
-          events.push(createAssignmentAuditEvent(input, assignment, canceled))
+        if (activeAssignments.some((assignment) => access.authorizedAssignmentIds?.has(assignment.id) !== true)) {
+          throw new CapacityPlanningError(
+            409,
+            'ResourceRequestAssignmentsChanged',
+            'The assignments that fill this resource request changed. Reload and try again.',
+          )
+        }
+        const canceledAssignments = activeAssignments.map((assignment): ResourceAssignment => ({
+          ...assignment,
+          status: 'canceled',
+          revision: assignment.revision + 1,
+          updatedAt: timestamp,
+        }))
+        for (const canceled of canceledAssignments) replaceById(state.assignments, canceled, 'id')
+        if (canceledAssignments.length <= MAX_ITEMIZED_CASCADE_EVENTS) {
+          activeAssignments.forEach((assignment, index) => {
+            const canceled = canceledAssignments[index]
+            if (canceled) events.push(createAssignmentAuditEvent(input, assignment, canceled))
+          })
+        } else {
+          events.push(createCascadeCancelAuditEvent(input, current.id, canceledAssignments))
         }
       } else if (input.status === 'canceled' && activeAssignments.length > 0) {
         throw new CapacityPlanningError(
@@ -677,6 +705,23 @@ export class CapacityPlanningService {
       events.push(createAssignmentAuditEvent(input, undefined, assignment))
       return assignment
     }, options)
+  }
+
+  /**
+   * Lists the active assignments that fill a request, for transport-layer authorization of a
+   * cascading cancel.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param requestId - Request identifier.
+   * @returns Assignments of the request that are not canceled.
+   */
+  async listActiveRequestAssignments(workspaceId: string, teamId: string, requestId: string): Promise<ResourceAssignment[]> {
+    validateIdentifier(workspaceId, 'Workspace ID')
+    validateIdentifier(teamId, 'Team ID')
+    validateIdentifier(requestId, 'Request ID')
+    const state = await this.repository.getState(workspaceId, teamId)
+    return clone(state.assignments.filter((assignment) => assignment.requestId === requestId && assignment.status !== 'canceled'))
   }
 
   /** Reads one Team assignment for transport-layer authorization. */
@@ -835,8 +880,13 @@ export class CapacityPlanningService {
     const next = clone(current)
     const events: MutationAuditEventInput[] = []
     const result = mutate(next, events)
+    if (events.length > MAX_AUDIT_EVENTS_PER_WRITE) {
+      throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'This workload change touches too many rows to save at once.')
+    }
     const now = this.now()
     pruneCapacityPlanningState(next, now.toISOString().slice(0, 10))
+    // Pruning can drop an old assignment of a kept request, so its fulfillment is derived again.
+    refreshRequestStatuses(next, now.toISOString())
     next.revision = current.revision + 1
     next.updatedAt = now.toISOString()
     if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
@@ -955,7 +1005,7 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
       if (isConditionalFailure(error) || isStateConditionCanceled(error)) {
         throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
       }
-      if (isTransactionCanceled(error)) {
+      if (isAuditConditionCanceled(error)) {
         throw new CapacityPlanningError(409, 'CapacityPlanningDuplicateRequest', 'This workload change was already recorded. Reload and try again.')
       }
       throw error
@@ -1666,6 +1716,36 @@ function createAssignmentAuditEvent(
 }
 
 /**
+ * Records a request cancellation that canceled more assignments than one write can audit one by
+ * one, as a single event that lists every canceled assignment and notifies each assigned member.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param requestId - Canceled request.
+ * @param canceled - Assignments canceled with the request.
+ * @returns The audit event input.
+ */
+function createCascadeCancelAuditEvent(
+  scope: WorkloadAuditScope,
+  requestId: string,
+  canceled: readonly ResourceAssignment[],
+): MutationAuditEventInput {
+  const memberIds = [...new Set(canceled.map((assignment) => assignment.memberId))]
+  return createWorkloadAuditEvent(scope, {
+    eventType: 'workload.assignment.canceled',
+    action: 'resource_assignment_canceled',
+    target: { type: 'resource-request', id: requestId },
+    changes: undefined,
+    summary: `${canceled.length} assignments canceled with their request`,
+    recipients: memberIds.map((memberKey) => ({ memberKey, reason: 'workload-assignment' })),
+    metadata: {
+      requestId,
+      assignmentIds: canceled.map((assignment) => assignment.id),
+      status: 'canceled',
+    },
+  })
+}
+
+/**
  * Builds a Team workload audit event whose recipients, other than the actor, get a notification.
  *
  * @param scope - Workspace, Team, and actor.
@@ -1963,6 +2043,20 @@ function isStateConditionCanceled(error: unknown): boolean {
   if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
   const [stateReason] = error.CancellationReasons
   return isRecord(stateReason) && stateReason.Code === 'ConditionalCheckFailed'
+}
+
+/**
+ * Checks whether a canceled transaction failed only because an audit event already exists, which
+ * means the same idempotency key was replayed. Throttling, transaction conflicts, and other
+ * cancellations stay infrastructure errors so they are logged and can be retried.
+ */
+function isAuditConditionCanceled(error: unknown): boolean {
+  if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const [, ...auditReasons] = error.CancellationReasons
+  const failedAudit = auditReasons.some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
+  const onlyConditionsFailed = error.CancellationReasons.every((reason) =>
+    isRecord(reason) && (reason.Code === undefined || reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed'))
+  return failedAudit && onlyConditionsFailed
 }
 
 /** Clones a value at the repository boundary. */

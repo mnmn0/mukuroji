@@ -216,7 +216,23 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
       }
       const body = asRecord(await dependencies.readJson(context.req))
-      const access = { canViewConfidential: visibility.canViewConfidential }
+      const cancelAssignments = body.cancelAssignments === undefined
+        ? undefined
+        : readRequiredBoolean(body.cancelAssignments, 'Cancel assignments')
+      const authorizedAssignmentIds = new Set<string>()
+      if (cancelAssignments === true) {
+        // Each assignment can belong to another Project or member than the request, so the cascade
+        // checks every one as the single assignment PATCH would.
+        const assignments = await dependencies.getCapacityPlanning().listActiveRequestAssignments(principal.directoryId, teamId, requestId)
+        for (const projectId of new Set(assignments.flatMap((assignment) => assignment.projectId ? [assignment.projectId] : []))) {
+          await dependencies.verifyProject(principal, teamId, projectId, 'manager')
+        }
+        for (const memberId of new Set(assignments.map((assignment) => assignment.memberId))) {
+          await dependencies.verifyMember(principal, teamId, memberId, permission)
+        }
+        for (const assignment of assignments) authorizedAssignmentIds.add(assignment.id)
+      }
+      const access = { canViewConfidential: visibility.canViewConfidential, authorizedAssignmentIds }
       const result = await dependencies.getCapacityPlanning().updateRequest({
         workspaceId: principal.directoryId,
         teamId,
@@ -229,7 +245,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(body.requestedMinutes === undefined ? {} : { requestedMinutes: readRequiredInteger(body.requestedMinutes, 'Requested minutes') }),
         ...(body.confidential === undefined ? {} : { confidential: readRequiredBoolean(body.confidential, 'Confidential') }),
         ...(body.status === undefined ? {} : { status: readRequestCancelStatus(body.status) }),
-        ...(body.cancelAssignments === undefined ? {} : { cancelAssignments: readRequiredBoolean(body.cancelAssignments, 'Cancel assignments') }),
+        ...(cancelAssignments === undefined ? {} : { cancelAssignments }),
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,

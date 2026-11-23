@@ -36,6 +36,8 @@ manager が「空いていない」と判断した後に休暇が取り消され
 - cell に、仮（`tentative`）の割当の分だけを `tentativeAllocatedMinutes` として返す（`allocatedMinutes` には仮も含む）。
 - 依頼を取り消すときに `cancelAssignments: true` を送ると、その依頼を埋める割当を同じ書き込みで取り消す。
   confidential を見られない manager が、見えない confidential の割当を巻き込む取消は `409` で断る。
+- 巻き込む割当は依頼と別の Project やメンバーに属しうるので、API は割当ごとに単独の割当 PATCH と同じ確認
+  （Project の manager 権限とメンバーの可視性）をしてから取り消す。確認した後に割当が増えていれば `409` で断る。
 
 ### 監査と通知
 
@@ -44,7 +46,13 @@ manager が「空いていない」と判断した後に休暇が取り消され
   休暇の理由と confidential な依頼のタイトルは差分で伏せる。
 - 通知は既存の audit projection に任せる。休暇の変更は本人へ（理由 `time-off-review`）、割当の変更は割当の前後のメンバーへ
   （理由 `workload-assignment`、通知の分類は「割り当て」）、metadata の `notificationCandidates` で知らせる。操作した本人には送らない。受け手の権限は projection が
-  Team（割当に Project があれば Project）で確かめる。
+  Team（割当に Project があれば Project）で確かめる。Project のない Team の workload event は、要員 API と同じく
+  Team の Project のどれか 1 つを読めれば外部チャネル（メール・push・Slack）にも配信する（Analytics の Team レポートと同じ扱い）。
+- DynamoDB の transaction は 100 item までなので、1 回の書き込みの audit event は 99 件までにする。
+  依頼の取消で 99 件を超える割当を巻き込むときは、取り消した割当の ID と通知先をまとめた 1 件の event にする。
+- transaction の取消は、audit event の条件だけが失敗したとき（同じ idempotency key の再送）に `409 CapacityPlanningDuplicateRequest`、
+  Team の revision が失敗したときに `409 CapacityPlanningRevisionConflict` を返す。throttling や transaction conflict は
+  基盤のエラーのまま返し、記録して再試行できるようにする。
 - 監査を書く書き込みだけ TransactWrite にする。IAM は既存の capacity table の `PutItem` と audit table の書き込み権限で足りる。
 
 ### row の整理
@@ -54,6 +62,8 @@ manager が「空いていない」と判断した後に休暇が取り消され
 - `canceled` / `rejected` の休暇・割当と `canceled` の依頼で、終了日から 30 日を過ぎたもの
 - 状態にかかわらず、終了日から 400 日を過ぎたもの（snapshot の最大期間 366 日より長い）
 - ただし、残る割当が参照する依頼は残す
+
+古い割当を消すと依頼の充足（`open` / `partially-filled` / `filled`）が変わりうるので、整理の後に残った割当から求め直す。
 
 整理は別の job を作らず、書き込みの中で行う。書き込みのない Team の record は小さいままなので問題にならない。
 監査ログには変更が残るので、消した row の履歴は audit から辿れる。

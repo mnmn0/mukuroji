@@ -38,7 +38,7 @@ const emptyDataSource: CapacityPlanningDataSource = {
 }
 
 /** Creates a router with deterministic authentication and an in-memory service. */
-function createFixture(options: { allowManager?: boolean; canViewConfidential?: boolean } = {}) {
+function createFixture(options: { allowManager?: boolean; canViewConfidential?: boolean; deniedProjectIds?: string[] } = {}) {
   const calls: string[] = []
   const repository = new InMemoryCapacityPlanningRepository()
   const service = new CapacityPlanningService(
@@ -69,6 +69,9 @@ function createFixture(options: { allowManager?: boolean; canViewConfidential?: 
     createAuditContext: () => auditContext,
     verifyProject: async (_value, teamId, projectId, minimum) => {
       calls.push(`project:${teamId}:${projectId}:${minimum}`)
+      if (options.deniedProjectIds?.includes(projectId)) {
+        throw new CapacityPlanningError(403, 'ProjectPermissionDenied', 'project manager required')
+      }
     },
     verifyWorkItem: async () => undefined,
     getCapacityPlanning: () => service,
@@ -256,6 +259,32 @@ describe('createCapacityPlanningRouter', () => {
       'permission:team-1:manager',
       'project:team-1:project-1:manager',
     ])
+  })
+
+  test('checks the Project of every assignment before canceling them with a Team-wide request', async () => {
+    const { calls, router, service } = createFixture({ deniedProjectIds: ['project-b'] })
+    const request = await seedRequest(service)
+    await service.saveMemberProfile({
+      workspaceId: principal.directoryId, teamId: 'team-1', memberId: 'member-2', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 1, actorMemberId: 'member-2',
+    })
+    await service.createAssignment({
+      workspaceId: principal.directoryId, teamId: 'team-1', requestId: request.id, projectId: 'project-b', memberId: 'member-2',
+      skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 60, plannedEffortMinutes: 60,
+      confidential: false, status: 'tentative', expectedTeamRevision: 2, actorMemberId: principal.userKey,
+    })
+    const current = await service.getRequest(principal.directoryId, 'team-1', request.id)
+    calls.length = 0
+    const response = await router.request(`/api/teams/team-1/workload/requests/${request.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer workload-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'canceled', cancelAssignments: true, expectedRevision: current.revision, expectedTeamRevision: 3 }),
+    })
+
+    expect(await response.json()).toEqual({ code: 'ProjectPermissionDenied' })
+    expect(calls).toContain('project:team-1:project-b:manager')
+    expect(await service.listActiveRequestAssignments(principal.directoryId, 'team-1', request.id)).toHaveLength(1)
+    expect((await service.getRequest(principal.directoryId, 'team-1', request.id)).status).not.toBe('canceled')
   })
 
   test('rejects a resource request change from a non-manager or an unsupported status', async () => {
