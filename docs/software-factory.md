@@ -9,9 +9,10 @@ Codex、Kiro など）が [Coding Agent MCP](coding-agent-mcp.md) を通じて�
 介在し、作業の証拠が mukuroji に残る状態を指す。
 
 Software factory は deploy 時の任意 module である（CDK context `mukuroji:softwareFactory`、既定は off。
-[ADR 0029](adr/0029-software-factory-deploy-switch.md)）。off の deploy では API が Agent Run、Team の agent 設定、
-本人用 agent token の発行を `503 SoftwareFactoryNotDeployed` で断り、Agent Run triage job は動かず、Web は入口を
-表示しない。Public API の Work Item の読み書きは off でも使える。
+[ADR 0029](adr/0029-software-factory-deploy-switch.md)）。off の deploy では API が Agent Run と Team の agent 設定を
+`503 SoftwareFactoryNotDeployed` で断り、Agent Run triage job は動かず、Web は入口を表示しない。Public API の
+Work Item の読み書きと本人用 token の発行・再発行・失効は off でも使える。本人用 token は MCP の Workspace profile
+（[`docs/coding-agent-mcp.md`](coding-agent-mcp.md)）で Workspace を読むのにも使うためである。
 
 Phase 1 の範囲は次の 5 つである。
 

@@ -48,6 +48,16 @@ import {
   type ProjectTemplateWorkItemOutlineResult,
 } from '../model/projectTemplateWorkItems'
 import {
+  formatProjectTemplateDependencyLines,
+  formatProjectTemplatePlanningOutline,
+  parseProjectTemplateDependencyLines,
+  parseProjectTemplatePlanningOutline,
+  type ProjectTemplateDependencyLinesErrorReason,
+  type ProjectTemplateDependencyLinesResult,
+  type ProjectTemplatePlanningOutlineErrorReason,
+  type ProjectTemplatePlanningOutlineResult,
+} from '../model/projectTemplatePlanning'
+import {
   createRecurringSchedule,
   currentDateInTimeZone,
   dayOfMonthFromLocalDate,
@@ -176,6 +186,23 @@ const projectTemplateWorkItemOutlineErrorKeys: Record<ProjectTemplateWorkItemOut
   days: 'automation.template.project.workItemsError.days',
   limit: 'automation.template.project.workItemsError.limit',
   depth: 'automation.template.project.workItemsError.depth',
+}
+
+const projectTemplatePlanningOutlineErrorKeys: Record<ProjectTemplatePlanningOutlineErrorReason, MessageKey> = {
+  format: 'automation.template.project.planningError.format',
+  indent: 'automation.template.project.planningError.indent',
+  title: 'automation.template.project.planningError.title',
+  days: 'automation.template.project.planningError.days',
+  limit: 'automation.template.project.planningError.limit',
+}
+
+const projectTemplateDependencyLinesErrorKeys: Record<ProjectTemplateDependencyLinesErrorReason, MessageKey> = {
+  format: 'automation.template.project.dependenciesError.format',
+  reference: 'automation.template.project.dependenciesError.reference',
+  self: 'automation.template.project.dependenciesError.self',
+  hierarchy: 'automation.template.project.dependenciesError.hierarchy',
+  duplicate: 'automation.template.project.dependenciesError.duplicate',
+  limit: 'automation.template.project.dependenciesError.limit',
 }
 
 const projectTemplateToneLabelKeys: Record<AutomationProjectTemplateTone, MessageKey> = {
@@ -796,7 +823,7 @@ export function AutomationTemplateEditor({
   const [projectPayload, setProjectPayload] = useState<AutomationProjectTemplatePayload>({
     tone: 'blue',
   })
-  const [workItemOutline, setWorkItemOutline] = useState('')
+  const outlines = useProjectTemplateOutlines()
   const [workflowPayload, setWorkflowPayload] = useState<WorkflowDefinition>(
     () => createDefaultAutomationWorkflowTemplatePayload(locale),
   )
@@ -804,17 +831,13 @@ export function AutomationTemplateEditor({
     () => parseAutomationTemplatePayload(payloadJson),
     [payloadJson],
   )
-  const workItemOutlineResult = useMemo(
-    () => parseProjectTemplateWorkItemOutline(workItemOutline),
-    [workItemOutline],
-  )
   const payloadError = 'error' in payloadResult
     ? t(templatePayloadErrorLabelKeys[payloadResult.error])
     : undefined
   const payloadIsValid = kind === 'work-item'
     ? !payloadError
     : kind === 'project'
-      ? isAutomationProjectTemplatePayloadValid(projectPayload) && 'workItems' in workItemOutlineResult
+      ? isAutomationProjectTemplatePayloadValid(projectPayload) && outlines.isValid
       : isAutomationWorkflowTemplatePayloadValid(workflowPayload)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -825,12 +848,9 @@ export function AutomationTemplateEditor({
     await submitAutomationEditorCreate(
       () => {
         if (kind === 'project') {
-          if (!('workItems' in workItemOutlineResult)) return
-          return onCreate(createAutomationTemplateEditorInput(
-            name,
-            kind,
-            withProjectTemplateWorkItems(projectPayload, workItemOutlineResult),
-          ))
+          const payload = outlines.applyTo(projectPayload)
+          if (!payload) return
+          return onCreate(createAutomationTemplateEditorInput(name, kind, payload))
         }
         if (kind === 'workflow') {
           return onCreate(createAutomationTemplateEditorInput(name, kind, workflowPayload))
@@ -843,7 +863,7 @@ export function AutomationTemplateEditor({
         setName('')
         setPayloadJson('{}')
         setProjectPayload({ tone: 'blue' })
-        setWorkItemOutline('')
+        outlines.reset()
         setWorkflowPayload(createDefaultAutomationWorkflowTemplatePayload(locale))
       },
     )
@@ -888,11 +908,9 @@ export function AutomationTemplateEditor({
       ) : kind === 'project' ? (
         <ProjectTemplatePayloadFields
           locale={locale}
+          outlines={outlines}
           payload={projectPayload}
-          workItemOutline={workItemOutline}
-          workItemOutlineResult={workItemOutlineResult}
           onChange={setProjectPayload}
-          onWorkItemOutlineChange={setWorkItemOutline}
         />
       ) : (
         <WorkflowTemplatePayloadFields
@@ -944,13 +962,7 @@ export function AutomationTemplateUpdateEditor({
   const [projectPayload, setProjectPayload] = useState<AutomationProjectTemplatePayload>(() =>
     template.kind === 'project' ? structuredClone(template.payload) : { tone: 'blue' }
   )
-  const [workItemOutline, setWorkItemOutline] = useState(() =>
-    template.kind === 'project' ? formatProjectTemplateWorkItemOutline(template.payload.workItems) : ''
-  )
-  const workItemOutlineResult = useMemo(
-    () => parseProjectTemplateWorkItemOutline(workItemOutline),
-    [workItemOutline],
-  )
+  const outlines = useProjectTemplateOutlines(template.kind === 'project' ? template.payload : undefined)
   const [workflowPayload, setWorkflowPayload] = useState<WorkflowDefinition>(() =>
     template.kind === 'workflow'
       ? structuredClone(template.payload)
@@ -966,16 +978,14 @@ export function AutomationTemplateUpdateEditor({
   const payloadIsValid = template.kind === 'work-item'
     ? !payloadError
     : template.kind === 'project'
-      ? isAutomationProjectTemplatePayloadValid(projectPayload) && 'workItems' in workItemOutlineResult
+      ? isAutomationProjectTemplatePayloadValid(projectPayload) && outlines.isValid
       : isAutomationWorkflowTemplatePayloadValid(workflowPayload)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!name.trim() || !payloadIsValid) return
     const payload = template.kind === 'project'
-      ? 'workItems' in workItemOutlineResult
-        ? withProjectTemplateWorkItems(projectPayload, workItemOutlineResult)
-        : undefined
+      ? outlines.applyTo(projectPayload)
       : template.kind === 'workflow'
         ? workflowPayload
         : 'payload' in payloadResult
@@ -1031,11 +1041,9 @@ export function AutomationTemplateUpdateEditor({
       ) : template.kind === 'project' ? (
         <ProjectTemplatePayloadFields
           locale={locale}
+          outlines={outlines}
           payload={projectPayload}
-          workItemOutline={workItemOutline}
-          workItemOutlineResult={workItemOutlineResult}
           onChange={setProjectPayload}
-          onWorkItemOutlineChange={setWorkItemOutline}
         />
       ) : (
         <WorkflowTemplatePayloadFields
@@ -1115,26 +1123,24 @@ function WorkItemTemplatePayloadField({
 function ProjectTemplatePayloadFields({
   locale,
   onChange,
-  onWorkItemOutlineChange,
+  outlines,
   payload,
-  workItemOutline,
-  workItemOutlineResult,
 }: {
   /** 表示 locale です。 */
   locale: Locale
   /** Project payload 更新 callback です。 */
   onChange: (payload: AutomationProjectTemplatePayload) => void
-  /** Called with the edited WBS outline text. */
-  onWorkItemOutlineChange: (value: string) => void
+  /** WBS, Phase / Milestone, and dependency text being edited, with their parsed results. */
+  outlines: ProjectTemplateOutlines
   /** 編集中 Project payload です。 */
   payload: AutomationProjectTemplatePayload
-  /** WBS outline text being edited. */
-  workItemOutline: string
-  /** Parsed WBS outline, or the first problem in it. */
-  workItemOutlineResult: ProjectTemplateWorkItemOutlineResult
 }) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const outlineMessageId = useId()
+  const planningMessageId = useId()
+  const dependencyMessageId = useId()
+  const { workItemOutline, workItemOutlineResult, planningOutline, planningOutlineResult } = outlines
+  const { dependencyLines, dependencyLinesResult } = outlines
   const tone = payload.tone ?? 'blue'
   return (
     <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-4">
@@ -1186,7 +1192,7 @@ function ProjectTemplatePayloadFields({
           placeholder={t('automation.template.project.workItemsPlaceholder')}
           spellCheck={false}
           value={workItemOutline}
-          onChange={(event) => onWorkItemOutlineChange(event.target.value)}
+          onChange={(event) => outlines.setWorkItemOutline(event.target.value)}
         />
       </label>
       <p
@@ -1201,24 +1207,164 @@ function ProjectTemplatePayloadFields({
             .replace('{line}', String(workItemOutlineResult.line))
           : t('automation.template.project.workItemsHint')}
       </p>
+      <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('automation.template.project.planning')}
+        <textarea
+          aria-describedby={planningMessageId}
+          aria-invalid={'error' in planningOutlineResult}
+          className="workbench-input min-h-24 px-3 py-2 font-mono text-[var(--workbench-text)]"
+          data-testid="automation-template-project-planning"
+          placeholder={t('automation.template.project.planningPlaceholder')}
+          spellCheck={false}
+          value={planningOutline}
+          onChange={(event) => outlines.setPlanningOutline(event.target.value)}
+        />
+      </label>
+      <p
+        className={'error' in planningOutlineResult
+          ? 'text-xs font-semibold text-fg-red-700'
+          : 'text-xs font-medium leading-5 text-[var(--workbench-muted)]'}
+        id={planningMessageId}
+        role={'error' in planningOutlineResult ? 'alert' : undefined}
+      >
+        {'error' in planningOutlineResult
+          ? t(projectTemplatePlanningOutlineErrorKeys[planningOutlineResult.error])
+            .replace('{line}', String(planningOutlineResult.line))
+          : t('automation.template.project.planningHint')}
+      </p>
+      <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('automation.template.project.dependencies')}
+        <textarea
+          aria-describedby={dependencyMessageId}
+          aria-invalid={'error' in dependencyLinesResult}
+          className="workbench-input min-h-20 px-3 py-2 font-mono text-[var(--workbench-text)]"
+          data-testid="automation-template-project-dependencies"
+          placeholder={t('automation.template.project.dependenciesPlaceholder')}
+          spellCheck={false}
+          value={dependencyLines}
+          onChange={(event) => outlines.setDependencyLines(event.target.value)}
+        />
+      </label>
+      <p
+        className={'error' in dependencyLinesResult
+          ? 'text-xs font-semibold text-fg-red-700'
+          : 'text-xs font-medium leading-5 text-[var(--workbench-muted)]'}
+        id={dependencyMessageId}
+        role={'error' in dependencyLinesResult ? 'alert' : undefined}
+      >
+        {'error' in dependencyLinesResult
+          ? t(projectTemplateDependencyLinesErrorKeys[dependencyLinesResult.error])
+            .replace('{line}', String(dependencyLinesResult.line))
+          : t('automation.template.project.dependenciesHint')}
+      </p>
     </fieldset>
   )
 }
 
+/** WBS, Phase / Milestone, and dependency text of a Project template editor, with parsed results. */
+type ProjectTemplateOutlines = {
+  /** WBS outline text. */
+  workItemOutline: string
+  /** Parsed WBS outline, or its first problem. */
+  workItemOutlineResult: ProjectTemplateWorkItemOutlineResult
+  /** Replaces the WBS outline text. */
+  setWorkItemOutline: (value: string) => void
+  /** Phase / Milestone outline text. */
+  planningOutline: string
+  /** Parsed Phase / Milestone outline, or its first problem. */
+  planningOutlineResult: ProjectTemplatePlanningOutlineResult
+  /** Replaces the Phase / Milestone outline text. */
+  setPlanningOutline: (value: string) => void
+  /** Dependency text. */
+  dependencyLines: string
+  /** Parsed dependencies, or their first problem. */
+  dependencyLinesResult: ProjectTemplateDependencyLinesResult
+  /** Replaces the dependency text. */
+  setDependencyLines: (value: string) => void
+  /** Whether every text parses. */
+  isValid: boolean
+  /** Clears every text. */
+  reset: () => void
+  /** Returns the payload with the parsed WBS, Planning, and dependencies, or undefined while any text is invalid. */
+  applyTo: (payload: AutomationProjectTemplatePayload) => AutomationProjectTemplatePayload | undefined
+}
+
 /**
- * Replaces a Project payload's WBS with the parsed outline, dropping it when the outline is empty.
+ * Holds the text fields a Project template editor writes its WBS, Phases, Milestones, and
+ * dependencies in.
  *
- * @param payload - Project fields being edited.
- * @param outline - Successfully parsed WBS outline.
- * @returns Payload to save.
+ * @param initialPayload - Saved payload to start from, or undefined for a new template.
+ * @returns The text, parsed results, and helpers.
  */
-function withProjectTemplateWorkItems(
-  payload: AutomationProjectTemplatePayload,
-  outline: Extract<ProjectTemplateWorkItemOutlineResult, { workItems: unknown }>,
-): AutomationProjectTemplatePayload {
-  const fields = { ...payload }
-  delete fields.workItems
-  return outline.workItems.length > 0 ? { ...fields, workItems: outline.workItems } : fields
+function useProjectTemplateOutlines(initialPayload?: AutomationProjectTemplatePayload): ProjectTemplateOutlines {
+  const [workItemOutline, setWorkItemOutline] = useState(() =>
+    formatProjectTemplateWorkItemOutline(initialPayload?.workItems)
+  )
+  const [planningOutline, setPlanningOutline] = useState(() =>
+    formatProjectTemplatePlanningOutline(initialPayload?.phases, initialPayload?.milestones)
+  )
+  const [dependencyLines, setDependencyLines] = useState(() =>
+    formatProjectTemplateDependencyLines(initialPayload?.dependencies)
+  )
+  const workItemOutlineResult = useMemo(
+    () => parseProjectTemplateWorkItemOutline(workItemOutline),
+    [workItemOutline],
+  )
+  const planningOutlineResult = useMemo(
+    () => parseProjectTemplatePlanningOutline(planningOutline),
+    [planningOutline],
+  )
+  const dependencyLinesResult = useMemo(
+    () => parseProjectTemplateDependencyLines(
+      dependencyLines,
+      'workItems' in workItemOutlineResult ? workItemOutlineResult.workItems : [],
+    ),
+    [dependencyLines, workItemOutlineResult],
+  )
+  const isValid = 'workItems' in workItemOutlineResult &&
+    'phases' in planningOutlineResult &&
+    'dependencies' in dependencyLinesResult
+  return {
+    workItemOutline,
+    workItemOutlineResult,
+    setWorkItemOutline,
+    planningOutline,
+    planningOutlineResult,
+    setPlanningOutline,
+    dependencyLines,
+    dependencyLinesResult,
+    setDependencyLines,
+    isValid,
+    reset() {
+      setWorkItemOutline('')
+      setPlanningOutline('')
+      setDependencyLines('')
+    },
+    applyTo(payload) {
+      if (
+        !('workItems' in workItemOutlineResult) ||
+        !('phases' in planningOutlineResult) ||
+        !('dependencies' in dependencyLinesResult)
+      ) {
+        return undefined
+      }
+      const fields = { ...payload }
+      delete fields.workItems
+      delete fields.phases
+      delete fields.milestones
+      delete fields.dependencies
+      const { workItems } = workItemOutlineResult
+      const { phases, milestones } = planningOutlineResult
+      const { dependencies } = dependencyLinesResult
+      return {
+        ...fields,
+        ...(workItems.length > 0 ? { workItems } : {}),
+        ...(dependencies.length > 0 ? { dependencies } : {}),
+        ...(phases.length > 0 ? { phases } : {}),
+        ...(milestones.length > 0 ? { milestones } : {}),
+      }
+    },
+  }
 }
 
 function WorkflowTemplatePayloadFields({

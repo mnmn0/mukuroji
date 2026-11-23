@@ -366,7 +366,7 @@ export function buildStackOutputs(
     value: resources.tenantOperationDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'WebUrl', {
-    description: 'Canonical app URL: the custom WebDomainName when configured, otherwise the CloudFront domain.',
+    description: 'Canonical app URL: the custom domain from the mukuroji:webDomainName context when set, otherwise the CloudFront domain.',
     value: resources.webOrigin,
   });
   new cdk.CfnOutput(scope, 'WebBucketName', {
@@ -376,7 +376,7 @@ export function buildStackOutputs(
     value: resources.webDistribution.distributionId,
   });
   new cdk.CfnOutput(scope, 'WebDistributionDomainName', {
-    description: 'CloudFront domain that a custom WebDomainName points to when DNS is managed outside the stack.',
+    description: 'CloudFront domain that the custom domain points to when DNS is managed outside the stack.',
     value: resources.webDistribution.distributionDomainName,
   });
   new cdk.CfnOutput(scope, 'ApiGatewayUrl', {

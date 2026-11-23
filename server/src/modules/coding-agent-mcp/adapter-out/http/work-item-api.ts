@@ -1,17 +1,19 @@
 import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
-  AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+  AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
-  AgentCatalog, AgentDocument, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument,
+  AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument,
   AgentWorkItemApi,
 } from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
+import { createPublicApiRequest, pageSchema } from './public-api-request'
 
-const identifier = z.string().min(1).max(256).refine((value) => value !== '.' && value !== '..')
+/** Public API identifier: bounded, non-empty, and never a dot path segment. */
+export const identifier = z.string().min(1).max(256).refine((value) => value !== '.' && value !== '..')
 const category = z.enum(['backlog', 'unstarted', 'started', 'completed', 'canceled'])
 const customValue = z.union([z.string(), z.number().finite(), z.boolean(), z.array(z.string()).max(100)])
 const effortMinutes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
@@ -34,7 +36,8 @@ const scheduleSchema = z.discriminatedUnion('mode', [
     ...scheduleBase, mode: z.literal('milestone'), startDate: z.iso.date(), endDate: z.iso.date(), durationDays: z.literal(0),
   }),
 ])
-const taskSchema: z.ZodType<AgentTask> = z.object({
+/** Validates a Work Item as the Public API returns it. */
+export const taskSchema: z.ZodType<AgentTask> = z.object({
   id: identifier, teamId: identifier, revision: z.number().int().positive(),
   title: z.string(), description: z.string().optional(), assigneeUserId: identifier,
   assignedProjectId: identifier.optional(), workflowStatusId: identifier,
@@ -67,11 +70,13 @@ const hierarchySchema = z.object({
   parentWorkItemId: identifier.nullable(), childWorkItemIds: z.array(identifier),
   wbsNumber: z.string().regex(/^[1-9][0-9]*(\.[1-9][0-9]*)*$/u).optional(),
 })
-const keySchema = z.object({
+/** Validates the response of `GET /api/v1/work-items/{workItemId}/key`. */
+export const keySchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, createdAt: z.iso.datetime(),
   key: z.string().refine(isCanonicalWorkItemKey).optional(),
 })
-const catalogSchema: z.ZodType<AgentCatalog> = z.object({
+/** Validates a Team's Work Item Type catalog. */
+export const catalogSchema: z.ZodType<AgentCatalog> = z.object({
   teamId: identifier, configurationRevision: z.number().int().nonnegative(),
   workItemTypes: z.array(z.object({
     id: identifier, name: z.string(),
@@ -84,7 +89,8 @@ const catalogSchema: z.ZodType<AgentCatalog> = z.object({
     customFields: z.array(z.record(z.string(), z.unknown())),
   })),
 })
-const commentSchema = z.object({
+/** Validates one Work Item comment. */
+export const commentSchema = z.object({
   id: identifier, actorUserId: identifier, body: z.string(), createdAt: z.iso.datetime(),
 })
 const runSchema: z.ZodType<AgentRunRecord> = z.object({
@@ -138,71 +144,6 @@ const documentSchema: z.ZodType<AgentDocument> = z.object({
   schemaVersion: z.literal(1), id: identifier, kind: z.enum(['page', 'template']), title: z.string(),
   revision: z.number().int().positive(), updatedAt: z.iso.datetime(), format: z.literal('markdown'), content: z.string(),
 })
-const problemSchema = z.object({
-  status: z.number().int(), code: z.string(), retryable: z.boolean(),
-  errors: z.array(z.object({ code: z.string() })).max(20).optional(),
-})
-/** Safe guidance for Agent Run fence reasons; remote detail text is never forwarded. */
-const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string> = {
-  agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.',
-  agent_run_not_active: 'Your Agent Run is no longer active for this task (finished, released by a person, or taken over by another instance). Stop working on it and report the situation to the user.',
-  agent_run_forbidden: 'Only the task assignee can start or operate an Agent Run with this credential. Check MUKUROJI_MCP_ASSIGNEE_ID and the credential owner.',
-  invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
-  agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
-  invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
-  not_resumable: 'This task is not in a status the Team allows agents to resume from (agentSettings.resumableStatusIds in get_configuration). Do not continue it; ask the user.',
-  not_ready: 'This task is not ready for agents: it is not in a Ready status, or the Team requires acceptance criteria and the task has none (check get_task and the agentSettings acceptance criteria field in get_configuration). Do not start it; pick another task with get_next_task or ask the user.',
-}
-
-/** Reads a bounded response while always releasing its stream, including on overflow. */
-async function readBody(response: Response, maximumBytes: number): Promise<string> {
-  if (!response.body) throw new AgentTaskError('invalid_response', 'The public API returned an empty response.')
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
-  try {
-    for (;;) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      size += chunk.value.byteLength
-      if (size > maximumBytes) throw new AgentTaskError('response_limit', 'API response exceeded the size limit. Reduce the page size or task content.')
-      chunks.push(chunk.value)
-    }
-  } finally {
-    await reader.cancel()
-  }
-  const bytes = new Uint8Array(size)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
-  return new TextDecoder().decode(bytes)
-}
-
-/** Extracts only allowlisted codes and retry metadata; remote messages and malformed bodies remain private. */
-async function readProblem(response: Response) {
-  if (![400, 403, 409].includes(response.status) || !response.headers.get('content-type')?.includes('application/problem+json')) {
-    await response.body?.cancel()
-    return undefined
-  }
-  try {
-    const parsed = problemSchema.safeParse(JSON.parse(await readBody(response, 64 * 1024)))
-    if (!parsed.success || parsed.data.status !== response.status) return undefined
-    const reason = AGENT_RUN_PROBLEM_REASONS.find((candidate) => parsed.data.errors?.some((error) => error.code === candidate))
-    return {
-      idempotencyConflict: response.status === 409 && parsed.data.code === 'idempotency_conflict',
-      retryable: parsed.data.retryable,
-      ...(reason === undefined ? {} : { reason }),
-    }
-  } catch {
-    return undefined
-  }
-}
-
-/** Creates a validated page schema that rejects missing or contradictory cursors. */
-function pageSchema<T>(item: z.ZodType<T>): z.ZodType<AgentPage<T>> {
-  return z.object({ items: z.array(item).max(100), hasMore: z.boolean(), nextCursor: z.string().min(1).optional() })
-    .refine((page) => page.hasMore === (page.nextCursor !== undefined))
-}
-
 /** Trusted operator configuration for the single remote origin used by this process. */
 export type AgentApiConfiguration = {
   /** Origin of the Mukuroji deployment, with no path, query, or embedded credentials. */
@@ -223,61 +164,10 @@ export function createAgentWorkItemApi(
   config: AgentApiConfiguration,
   fetcher: (url: URL, init: RequestInit) => Promise<Response> = fetch,
 ): AgentWorkItemApi {
-  const origin = new URL(config.origin)
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)
-  if (origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash ||
-      (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && local))) {
-    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_URL must be an HTTPS origin; HTTP is allowed only on loopback.')
-  }
-  if (!config.token || /\s/.test(config.token) || config.token.length > 8192 || !identifier.safeParse(config.teamId).success) {
+  if (!identifier.safeParse(config.teamId).success) {
     throw new AgentTaskError('configuration', 'A valid API token and Team ID are required.')
   }
-
-  /** Sends a bounded public API request without following credential-bearing redirects. */
-  async function request<T>(path: string, schema: z.ZodType<T>, method = 'GET', body?: unknown, key?: string, query: Record<string, string | number | undefined> = {}): Promise<T> {
-    const url = new URL(`/api/v1/${path}`, origin)
-    url.searchParams.set('teamId', config.teamId)
-    for (const [name, value] of Object.entries(query)) {
-      if (value !== undefined) url.searchParams.set(name, String(value))
-    }
-    try {
-      const response = await fetcher(url, {
-        method, redirect: 'error', signal: AbortSignal.timeout(15_000),
-        headers: {
-          Authorization: `Bearer ${config.token}`, Accept: 'application/json',
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(key === undefined ? {} : { 'Idempotency-Key': key }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      })
-      if (!response.ok) {
-        const problem = await readProblem(response)
-        const retry = response.headers.get('Retry-After')
-        const retrySeconds = retry && /^\d{1,6}$/.test(retry) ? Number(retry) : undefined
-        if (problem?.reason) {
-          throw new AgentTaskError(problem.reason, `Public API returned HTTP ${response.status}. ${reasonMessages[problem.reason]}`)
-        }
-        const idempotencyRetry = problem?.idempotencyConflict === true && problem.retryable
-        const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'forbidden' :
-          response.status === 404 ? 'not_found' : response.status === 409 ? (problem?.idempotencyConflict ? 'idempotency_conflict' : 'conflict') :
-          response.status === 429 ? 'rate_limited' : response.status >= 500 ? 'unavailable' : 'invalid_request'
-        throw new AgentTaskError(code,
-          `Public API returned HTTP ${response.status}. ${idempotencyRetry ? 'The original operation is still in progress. Retry only the identical arguments and idempotencyKey.' : code === 'conflict' ? 'Reload the task; for an uncertain previous response retry the identical arguments and idempotencyKey.' : 'Check the credential, task access, and current workflow/field requirements.'}`,
-          idempotencyRetry || response.status === 429 || response.status >= 500, retrySeconds)
-      }
-      if (!response.headers.get('content-type')?.includes('application/json') || !response.body) {
-        await response.body?.cancel()
-        throw new AgentTaskError('invalid_response', 'The public API did not return JSON.')
-      }
-      const parsed = schema.safeParse(JSON.parse(await readBody(response, 2 * 1024 * 1024)))
-      if (!parsed.success) throw new AgentTaskError('invalid_response', 'The public API response did not match the supported contract.')
-      return parsed.data
-    } catch (error) {
-      if (error instanceof AgentTaskError) throw error
-      if (error instanceof SyntaxError) throw new AgentTaskError('invalid_response', 'The public API returned malformed JSON.')
-      throw new AgentTaskError('transport', 'The API request failed or timed out. Retry mutations only with identical arguments and the same idempotencyKey.', true)
-    }
-  }
+  const request = createPublicApiRequest(config, fetcher)
 
   /** Checks that a run belongs to the configured Team before exposing it. */
   function scopedRun(run: AgentRunRecord, runId?: string): AgentRunRecord {

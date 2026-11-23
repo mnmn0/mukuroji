@@ -86,6 +86,7 @@ const SAFE_API_ROUTE_AREAS = new Set([
   'auth',
   'automation',
   'bulk-operations',
+  'client-errors',
   'developer',
   'document-backlinks',
   'documents',
@@ -225,6 +226,65 @@ export function recordApiError(
       : {}),
     ...(observation.traceId ? { traceId: observation.traceId } : {}),
     observedAt: new Date(observation.observedAtMilliseconds).toISOString(),
+  }))
+}
+
+/**
+ * One validated browser error report, ready for the operational log.
+ */
+export interface ClientErrorObservation {
+  /** Correlation identifier of the report request at this API boundary. */
+  readonly correlationId: string
+  /** Report ID the browser generated and showed to the user. */
+  readonly reportId: string
+  /** Kind of browser error. */
+  readonly kind: string
+  /** Route pattern that was showing, without entity identifiers. */
+  readonly route: string
+  /** Commit of the Web build, when reported. */
+  readonly webCommitSha?: string
+  /** Constructor name of the thrown value, when reported. */
+  readonly errorName?: string
+  /** HTTP status of a route error response, when reported. */
+  readonly status?: number
+  /** Millisecond Unix timestamp captured when the report was accepted. */
+  readonly observedAtMilliseconds: number
+}
+
+/**
+ * Writes an Embedded Metric Format record for one browser error report.
+ *
+ * Every field was validated against a fixed pattern before it gets here, and the record carries
+ * no client address, message, stack, URL, or page content.
+ *
+ * @param observation - Validated browser error report.
+ * @param sink - Optional destination used by tests or the runtime console.
+ */
+export function recordClientError(
+  observation: ClientErrorObservation,
+  sink: StructuredApiLogSink = writeStandardError,
+): void {
+  sink(JSON.stringify({
+    _aws: {
+      Timestamp: observation.observedAtMilliseconds,
+      CloudWatchMetrics: [{
+        Namespace: 'Mukuroji/Web',
+        Dimensions: [['Service']],
+        Metrics: [{ Name: 'ClientErrorCount', Unit: 'Count' }],
+      }],
+    },
+    event: 'web.client.error',
+    service: 'mukuroji-web',
+    Service: 'mukuroji-web',
+    correlationId: observation.correlationId,
+    reportId: observation.reportId,
+    kind: observation.kind,
+    route: observation.route,
+    ...(observation.webCommitSha ? { webCommitSha: observation.webCommitSha } : {}),
+    ...(observation.errorName ? { errorName: observation.errorName } : {}),
+    ...(observation.status === undefined ? {} : { status: observation.status }),
+    observedAt: new Date(observation.observedAtMilliseconds).toISOString(),
+    ClientErrorCount: 1,
   }))
 }
 
