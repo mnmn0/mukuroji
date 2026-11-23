@@ -62,8 +62,14 @@ import {
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  changeTeamWorkItemKeyPrefix,
+  listWorkItemKeyPrefixes,
+  readTeamWorkItemKeyPrefixState,
   readWorkItemKeyLocation,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './work-item-key-registry'
 import {
   deriveWorkItemScheduleDueDate,
@@ -1419,6 +1425,28 @@ export type TeamIssuesClient = {
     directoryId: string,
     key: string,
   ): Promise<WorkItemKeyLocation | undefined>
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]>
+  /**
+   * Reads a Team's current key prefix and earlier prefixes, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Sets the key prefix of a Team's new Work Items; the caller authorizes the Team first.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -4038,6 +4066,57 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Lists the key prefixes reserved in a Workspace with their Teams.
+   *
+   * The caller must keep only the Teams it may reveal before returning the prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  async listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]> {
+    await this.ensureLocalTables()
+    try {
+      return await listWorkItemKeyPrefixes(this.documentClient, this.issueTableName, directoryId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads a Team's current key prefix and earlier prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  async getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await readTeamWorkItemKeyPrefixState(this.documentClient, this.issueTableName, directoryId, teamId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Sets the key prefix of a Team's new Work Items.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  async changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await changeTeamWorkItemKeyPrefix(this.documentClient, this.issueTableName, input)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * Reads one Work Item row with a strongly consistent read.
    *
    * @param directoryId - Workspace ID.
@@ -5744,8 +5823,9 @@ function isMatchingIdempotentWorkItemCreate(
     ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
-    issue.dueDate === expected.dueDate &&
-    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
+    // The due date of a shared date range is its end date, which the calendar may move (see below).
+    (followsSharedCalendarRange(expected.schedule) || issue.dueDate === expected.dueDate) &&
+    idempotentCreateSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
@@ -5799,6 +5879,52 @@ function workItemSchedulesEqual(
 ): boolean {
   return JSON.stringify(normalizeWorkItemSchedule(left)) ===
     JSON.stringify(normalizeWorkItemSchedule(right))
+}
+
+/**
+ * Compares the schedules of an idempotent create and its stored Work Item.
+ *
+ * @param stored - Schedule of the stored Work Item.
+ * @param requested - Schedule of the create request being retried.
+ * @returns Whether both identify the same create.
+ */
+function idempotentCreateSchedulesEqual(stored: WorkItemSchedule, requested: WorkItemSchedule): boolean {
+  return JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(stored))) ===
+    JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(requested)))
+}
+
+/**
+ * Checks whether a schedule is a date range that follows the shared calendar.
+ *
+ * @param schedule - Schedule of a create request.
+ * @returns Whether the calendar in force when it is created places its end date.
+ */
+function followsSharedCalendarRange(schedule: WorkItemSchedule): boolean {
+  return schedule.mode === 'date-range' && schedule.calendarPolicy.calendarSource === 'shared'
+}
+
+/**
+ * Reduces a schedule to what identifies an idempotent create.
+ *
+ * A schedule that follows the shared calendar takes its rules, and the working days counted on
+ * them, from the calendar saved when it is created (ADR 0058). A retry after that calendar changed
+ * resolves other rules for the same request, and a date range whose working days ran out keeps
+ * its duration, so its end date moves. For such a schedule only the mode, the start date (or the
+ * fixed deadline or milestone dates) and the planned effort identify it.
+ *
+ * @param schedule - Normalized schedule.
+ * @returns The schedule, or its identifying fields when it follows the shared calendar.
+ */
+function toComparableWorkItemSchedule(schedule: WorkItemSchedule): unknown {
+  if (schedule.calendarPolicy.calendarSource !== 'shared') return schedule
+  return {
+    mode: schedule.mode,
+    calendarSource: 'shared',
+    ...(schedule.mode === 'due-date' ? { dueDate: schedule.dueDate } : {}),
+    ...(schedule.mode === 'date-range' ? { startDate: schedule.startDate } : {}),
+    ...(schedule.mode === 'milestone' ? { startDate: schedule.startDate, endDate: schedule.endDate } : {}),
+    ...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes }),
+  }
 }
 
 function readOptionalString(value: unknown, message: string) {

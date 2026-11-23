@@ -1076,6 +1076,13 @@ async function mockAuthenticatedTaskPage(
   })
 
   await page.route('**/api/work-items**', async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/work-items/key-prefixes')) {
+      const keys = [...Object.values(taskResponsesByProject).flat(), ...Object.values(teamIssuesByTeam).flat()]
+        .map((issue) => issue.key)
+        .filter((key): key is string => typeof key === 'string')
+      await route.fulfill({ json: { prefixes: [...new Set(keys.map((key) => key.replace(/-\d+$/u, '')))].sort() } })
+      return
+    }
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -5559,6 +5566,19 @@ test.describe('authenticated task page', () => {
       }
       await route.fulfill({
         json: { fiscalYearStartMonth: 1, weekStartDay: 1, workingWeekdays: ['monday'], holidays: [] },
+      })
+    })
+    // The Team and Project calendar reads succeed, so the notice is about the Workspace calendar.
+    const policy = { workingWeekdays: ['monday'], holidays: [], timeZone: 'Asia/Tokyo', calendarSource: 'shared' }
+    await page.route((url) => /^\/api\/teams\/[^/]+\/work-calendar$/.test(url.pathname), async (route) => {
+      await route.fulfill({
+        json: {
+          scope: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+          changeAdjustment: 'keep-duration',
+          resolvedPolicy: policy,
+          inheritedPolicy: policy,
+          canManage: false,
+        },
       })
     })
     await setScheduleFixtureClock(page)

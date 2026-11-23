@@ -42,7 +42,7 @@ import {
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
 import {
   evaluateWeeklyReportReminders,
-  resolveWeeklyReportReminderRun,
+  resolveWeeklyReportReminderRuns,
   toWeeklyReportReminderTiming,
   weeklyReportWeekStart,
   type WeeklyReportReminderCandidate,
@@ -611,27 +611,30 @@ export async function runNotificationSchedule(
     const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
     for (const workspaceId of workspaceIds) {
       const settings = await weeklyReportReader.readWorkspaceSettings(workspaceId)
-      const timing = toWeeklyReportReminderTiming(settings.reminders)
-      const run = timing ? resolveWeeklyReportReminderRun(now, timing) : undefined
-      if (!run) continue
-      const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)
-      for (const roster of await weeklyReportReader.readTeamRosters(workspaceId)) {
-        const memberKeys = [...new Set(roster.projects.flatMap((project) =>
-          project.writers.map((writer) => writer.memberKey)))]
-        if (memberKeys.length === 0) continue
-        const submitted = await weeklyReportReader.readSubmittedMembers(
-          workspaceId,
-          roster.teamId,
-          memberKeys,
-          weekStart,
-        )
-        for (const candidate of evaluateWeeklyReportReminders(roster, run.kind, weekStart, submitted)) {
-          await putScheduledAuditEvent(
-            options.documentClient,
-            auditEventsTableName,
-            createWeeklyReportReminderAuditEvent(candidate, now, auditRetentionDays, options.requestId),
-            result,
+      const timing = toWeeklyReportReminderTiming(settings.reminders, settings.timeZone)
+      const runs = timing ? resolveWeeklyReportReminderRuns(now, timing) : []
+      if (runs.length === 0) continue
+      const rosters = await weeklyReportReader.readTeamRosters(workspaceId)
+      for (const run of runs) {
+        const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)
+        for (const roster of rosters) {
+          const memberKeys = [...new Set(roster.projects.flatMap((project) =>
+            project.writers.map((writer) => writer.memberKey)))]
+          if (memberKeys.length === 0) continue
+          const submitted = await weeklyReportReader.readSubmittedMembers(
+            workspaceId,
+            roster.teamId,
+            memberKeys,
+            weekStart,
           )
+          for (const candidate of evaluateWeeklyReportReminders(roster, run.kind, weekStart, submitted)) {
+            await putScheduledAuditEvent(
+              options.documentClient,
+              auditEventsTableName,
+              createWeeklyReportReminderAuditEvent(candidate, now, auditRetentionDays, options.requestId),
+              result,
+            )
+          }
         }
       }
     }

@@ -14,6 +14,7 @@ import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
+import { WorkItemKeyPrefixPanelContainer } from '../../work-items/ui/WorkItemKeyPrefixPanelContainer'
 import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAccessPanel'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -22,6 +23,8 @@ import { EnterpriseSecuritySettingsLink } from '../../workspace/ui/EnterpriseSec
 import { SettingsSectionNav } from '../../workspace/ui/SettingsSectionNav'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 import { TenantAdministrationPanelContainer } from '../../workspace/ui/TenantAdministrationPanel'
+import { WorkCalendarPanelContainer } from '../../workspace/ui/WorkCalendarPanelContainer'
+import { WorkspaceWorkCalendarAdjustment } from '../../workspace/ui/WorkspaceWorkCalendarAdjustment'
 
 /**
  * Renders the settings routes: `/settings` and `/settings/personal` for personal settings,
@@ -135,10 +138,16 @@ export function SettingsPage() {
                   locale={workspace.locale}
                 />
                 {workspace.canManageWorkspaceConfiguration ? (
-                  <TenantAdministrationPanelContainer
-                    accessToken={workspace.accessToken}
-                    locale={workspace.locale}
-                  />
+                  <>
+                    <TenantAdministrationPanelContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
+                    <WorkspaceWorkCalendarAdjustment
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
+                  </>
                 ) : null}
                 {workspace.canManageWorkspaceConfiguration ? (
                   <DirectoryAdministrationPanelContainer
@@ -180,6 +189,16 @@ export function SettingsPage() {
                 workspace.canManageWorkspaceConfiguration
               }
               canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
+              locale={workspace.locale}
+              teams={workspace.teams}
+            />
+            <WorkCalendarPanelContainer
+              accessToken={workspace.accessToken}
+              locale={workspace.locale}
+              teams={workspace.teams}
+            />
+            <WorkItemKeyPrefixPanelContainer
+              accessToken={workspace.accessToken}
               locale={workspace.locale}
               teams={workspace.teams}
             />

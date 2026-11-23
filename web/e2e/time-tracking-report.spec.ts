@@ -14,6 +14,8 @@ type TimeReportMockState = {
   exportQueries: URLSearchParams[]
   /** Bodies of budget saves. */
   budgetBodies: unknown[]
+  /** Bodies of time entry check saves. */
+  policyBodies: unknown[]
   /** Whether the member manages the whole Team and so sees the rate card. */
   canManageRateCard: boolean
   /** Saved Team rate card. */
@@ -66,6 +68,7 @@ async function mockTimeReport(page: Page, isManager: boolean, canManageRateCard 
     canManageRateCard,
     rateCard: { schemaVersion: 1, workspaceId: 'workspace-demo', teamId: 'core-team', currency: 'JPY', memberRates: [], jobRoleRates: [], revision: 0 },
     rateCardBodies: [],
+    policyBodies: [],
   }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
   await page.addInitScript(() => {
@@ -133,6 +136,17 @@ async function mockTimeReport(page: Page, isManager: boolean, canManageRateCard 
     }
     return route.fulfill({ json: { budget: state.budget } })
   })
+  await page.route((url) => url.pathname === '/api/teams/core-team/time-entry-policy', (route) => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON()
+      state.policyBodies.push(body)
+      return route.fulfill({ json: { policy: {
+        overlap: body.overlap, dailyLimit: body.dailyLimit, dailyLimitMinutes: body.dailyLimitMinutes,
+        teamId: 'core-team', revision: body.expectedRevision + 1, updatedAt: '2026-11-10T01:00:00.000Z',
+      }, canEdit: true } })
+    }
+    return route.fulfill({ json: { policy: { overlap: 'off', dailyLimit: 'off', dailyLimitMinutes: 600, teamId: 'core-team', revision: 0 }, canEdit: state.isManager } })
+  })
   return state
 }
 
@@ -173,6 +187,14 @@ test.describe('time tracking report', () => {
 
     await budget.getByRole('button', { name: 'Report this period' }).click()
     await expect(page).toHaveURL(/from=2026-11-01&to=2026-11-30&groupBy=user/u)
+
+    const checks = page.getByTestId('time-entry-policy-panel')
+    await checks.getByLabel('Overlapping time').selectOption('reject')
+    await checks.getByLabel('Daily total limit').selectOption('warn')
+    await checks.getByLabel('Limit (hours)').fill('8')
+    await checks.getByRole('button', { name: 'Save checks' }).click()
+    await expect(checks.getByText('Time entry checks saved.')).toBeVisible()
+    expect(state.policyBodies.at(-1)).toEqual({ overlap: 'reject', dailyLimit: 'warn', dailyLimitMinutes: 480, expectedRevision: 0 })
   })
 
   test('a manager of the whole Team sets rates by job role and by member', async ({ page }) => {
@@ -200,6 +222,9 @@ test.describe('time tracking report', () => {
     await expect(table).toContainText('12:30')
     await expect(table.getByRole('columnheader', { name: 'Actual cost' })).toHaveCount(0)
     await expect(page.getByTestId('time-budget-panel')).toHaveCount(0)
+    const checks = page.getByTestId('time-entry-policy-panel')
+    await expect(checks.getByLabel('Overlapping time')).toBeDisabled()
+    await expect(checks.getByRole('button', { name: 'Save checks' })).toHaveCount(0)
     await expect(page.getByTestId('time-rate-card-panel')).toHaveCount(0)
   })
 })

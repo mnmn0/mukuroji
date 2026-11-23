@@ -211,14 +211,14 @@ test('writes bilingual invitation and verification email that link to the app', 
   expect(adminCreateUser).toContain('仮パスワードの有効期限は 7 日です');
   expect(adminCreateUser).toContain('The temporary password expires in 7 days');
   expect(adminCreateUser).toContain('/login');
-  // The link follows the canonical app URL, the custom domain when one is configured.
-  expect(adminCreateUser).toContain('"WebCustomDomainConfigured"');
+  // Without a custom domain the link follows the CloudFront domain.
+  expect(adminCreateUser).toMatch(/"WebDistribution[0-9A-F]+","DomainName"/);
 
   const verification = JSON.stringify(properties.VerificationMessageTemplate);
   expect(verification).toContain('Mukuroji の確認コード / Your Mukuroji verification code');
   expect(verification).toContain('{####}');
   expect(verification).toContain('/forgot-password');
-  expect(verification).toContain('"WebCustomDomainConfigured"');
+  expect(verification).toMatch(/"WebDistribution[0-9A-F]+","DomainName"/);
   // CloudFormation sends the legacy fields too, so they carry the same text.
   expect(properties.VerificationMessageTemplate).toEqual(expect.objectContaining({
     EmailSubject: properties.EmailVerificationSubject,
