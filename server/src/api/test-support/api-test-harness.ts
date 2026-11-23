@@ -2465,6 +2465,17 @@ function configureFakeProjectClients(
           ],
         }
       },
+      async bindTeamGrantRequest() {},
+      async addProjectMemberIfAbsent(directoryId, _teamId, projectId, memberKey, input) {
+        if (memberKey.trim().toLowerCase() === 'demo@example.com') return { added: false }
+        calls.memberUpdates.push({
+          directoryId,
+          memberKey,
+          projectId,
+          role: String(input.role),
+        })
+        return { added: true }
+      },
       async updateProjectMember(directoryId, projectId, memberKey, input) {
         calls.memberUpdates.push({
           directoryId,
@@ -2567,6 +2578,11 @@ function configureFakeProjectClients(
         calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
 
         return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
+      },
+      async updateTeamProfile(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'updateTeamProfile', directoryId, teamId, input })
+
+        return { teamId, description: '説明', leaderMemberKey: 'leader-user', profileRevision: 1 }
       },
       async renameProject(directoryId, teamId, projectId, input) {
         calls.directoryAdministration.push({

@@ -1,6 +1,12 @@
 import {
+  isAddDirectoryTeamMemberResponse,
   isDirectoryAdministrationResponse,
   isDirectoryArchiveImpactResponse,
+  isUpdateDirectoryTeamProfileResponse,
+  type AddDirectoryTeamMemberInput,
+  type AddDirectoryTeamMemberResponse,
+  type UpdateDirectoryTeamProfileInput,
+  type UpdateDirectoryTeamProfileResponse,
   type DirectoryAdministrationTeam,
   type DirectoryArchiveImpactResponse,
   type DirectoryArchiveImpactTarget,
@@ -81,6 +87,64 @@ export async function renameDirectoryTeam(
     { method: 'PATCH', body: JSON.stringify(input) },
     mutationContext,
   )
+}
+
+/**
+ * Replaces the description and leader of a Team.
+ *
+ * @param accessToken - Bearer token of the administrator.
+ * @param teamId - Team to update.
+ * @param input - New description and leader.
+ * @param mutationContext - Idempotency context of the mutation.
+ * @returns The stored profile and its revision.
+ */
+export async function updateDirectoryTeamProfile(
+  accessToken: string,
+  teamId: string,
+  input: UpdateDirectoryTeamProfileInput,
+  mutationContext: MutationRequestContext,
+): Promise<UpdateDirectoryTeamProfileResponse> {
+  const data = await sendDirectoryAdministrationRequest(
+    `/teams/${encodeURIComponent(teamId)}/profile`,
+    accessToken,
+    { method: 'PATCH', body: JSON.stringify(input) },
+    mutationContext,
+  )
+
+  if (!isUpdateDirectoryTeamProfileResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
+}
+
+/**
+ * Adds a Workspace member to every active Project of a Team, keeping existing roles.
+ *
+ * @param accessToken - Bearer token of the administrator.
+ * @param teamId - Team whose Projects the member joins.
+ * @param input - Member and the Project role to grant.
+ * @param mutationContext - Idempotency context of the mutation.
+ * @returns The Projects the member was added to and the ones they already belonged to.
+ */
+export async function addDirectoryTeamMember(
+  accessToken: string,
+  teamId: string,
+  input: AddDirectoryTeamMemberInput,
+  mutationContext: MutationRequestContext,
+): Promise<AddDirectoryTeamMemberResponse> {
+  const data = await sendDirectoryAdministrationRequest(
+    `/teams/${encodeURIComponent(teamId)}/members`,
+    accessToken,
+    { method: 'POST', body: JSON.stringify(input) },
+    mutationContext,
+  )
+
+  if (!isAddDirectoryTeamMemberResponse(data)) {
+    throw new ProjectDirectoryApiError(502, 'projects.error.loading')
+  }
+
+  return data
 }
 
 /**

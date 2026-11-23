@@ -698,6 +698,17 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/profile',
+    permission: 'teams.manage',
+  },
+  // Adding a member to every Project of a Team is a Team-wide administration, like a rename.
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/members',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
     pathPattern: '/api/teams/:teamId',
     permission: 'teams.manage',
   },

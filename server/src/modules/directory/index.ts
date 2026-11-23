@@ -10,6 +10,7 @@ export {
   type CreateProjectResponse,
   type CreateTeamRequestBody,
   type CreateTeamResponse,
+  type DirectoryAuthorizationConditionChecks,
   type Locale,
   type ProjectAccessEntry,
   type ProjectCreatorContext,
@@ -22,6 +23,7 @@ export {
   type ProjectMembersResponse,
   type ProjectRole,
   type ProjectSearchSource,
+  type TeamGrantRequest,
   type TeamSearchSource,
   type RemoveProjectMemberResponse,
   type UpdateProjectMemberRequestBody,
@@ -58,3 +60,10 @@ export {
   type ProjectCharterStore,
   type ResolvedProjectCharterPerson,
 } from './application/project-charter-use-cases'
+export {
+  addMemberToTeamProjectsUseCase,
+  type TeamMemberGrantCaller,
+  type TeamMemberGrantInput,
+  type TeamMemberGrantMember,
+  type TeamMemberGrantPorts,
+} from './application/team-member-grant-use-case'
