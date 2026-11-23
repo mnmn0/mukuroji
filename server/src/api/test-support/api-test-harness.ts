@@ -1986,6 +1986,18 @@ function configureFakeProjectClients(
         ]
     return issues
   }
+  /** Prefix states saved through the fake `changeTeamWorkItemKeyPrefix`, by Team ID. */
+  const changedTeamKeyPrefixes = new Map<string, TeamWorkItemKeyPrefixState>()
+  /**
+   * Reads a Team's prefix state from saved changes, then the fixture, then the empty default.
+   *
+   * @param teamId - Team ID.
+   * @returns The Team's current fake prefix state.
+   */
+  const readFakeTeamKeyPrefix = (teamId: string): TeamWorkItemKeyPrefixState =>
+    changedTeamKeyPrefixes.get(teamId)
+      ?? options.teamWorkItemKeyPrefixes?.[teamId]
+      ?? { lastNumber: 0, previousPrefixes: [] }
   const createFakeTeamIssues = (teamId: string) =>
     Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -3123,16 +3135,19 @@ function configureFakeProjectClients(
         return [...(options.workItemKeyPrefixes ?? [])]
       },
       async getTeamWorkItemKeyPrefix(_directoryId, teamId) {
-        return options.teamWorkItemKeyPrefixes?.[teamId] ?? { lastNumber: 0, previousPrefixes: [] }
+        return readFakeTeamKeyPrefix(teamId)
       },
       async changeTeamWorkItemKeyPrefix(input) {
         calls.keyPrefixChanges.push(input)
-        const current = options.teamWorkItemKeyPrefixes?.[input.teamId] ?? { lastNumber: 0, previousPrefixes: [] }
+        const current = readFakeTeamKeyPrefix(input.teamId)
         const next: TeamWorkItemKeyPrefixState = {
           keyPrefix: input.keyPrefix,
           lastNumber: current.lastNumber,
-          previousPrefixes: current.keyPrefix ? [current.keyPrefix] : [],
+          previousPrefixes: current.keyPrefix && !current.previousPrefixes.includes(current.keyPrefix)
+            ? [...current.previousPrefixes, current.keyPrefix]
+            : current.previousPrefixes,
         }
+        changedTeamKeyPrefixes.set(input.teamId, next)
         return next
       },
       async getProjectIssues(directoryId, projectId, readOptions) {

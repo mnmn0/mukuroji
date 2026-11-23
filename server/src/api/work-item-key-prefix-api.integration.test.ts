@@ -59,6 +59,17 @@ test('lets a Team manager change the prefix, fenced by authorization checks and 
     keyPrefix: 'CORE',
     expectedKeyPrefix: 'CT',
   })])
+
+  const reread = await app.request('/api/teams/core-team/work-item-key-prefix', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(await reread.json()).toEqual({
+    teamId: 'core-team',
+    keyPrefix: 'CORE',
+    previousPrefixes: ['CT'],
+    lastNumber: 7,
+    canManage: true,
+  })
 })
 
 test.each([

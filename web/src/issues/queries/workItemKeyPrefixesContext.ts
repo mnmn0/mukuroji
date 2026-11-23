@@ -14,3 +14,19 @@ export const WorkItemKeyPrefixesContext = createContext<ReadonlySet<string> | un
 export function useWorkItemKeyPrefixes(): ReadonlySet<string> | undefined {
   return useContext(WorkItemKeyPrefixesContext)
 }
+
+/**
+ * Chooses the prefixes to share from the latest load. SWR keeps the last list when a later load
+ * fails, but that list may miss a prefix changed since, so a failed load falls back to unknown.
+ *
+ * @param prefixes - Last loaded prefixes, if any.
+ * @param loadError - Error of the latest load, if it failed.
+ * @returns The known prefixes, or undefined when they are not loaded or the latest load failed.
+ */
+export function selectLinkableWorkItemKeyPrefixes(
+  prefixes: readonly string[] | undefined,
+  loadError: unknown,
+): ReadonlySet<string> | undefined {
+  if (loadError !== undefined || prefixes === undefined) return undefined
+  return new Set(prefixes)
+}

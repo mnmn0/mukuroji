@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { appRoutes } from '../src/app/router'
 import { getWorkItemByKey, getWorkItemKeyPrefixes, TeamIssuesApiError, type TeamIssue } from '../src/issues/api'
 import { loadWorkItemKeyLocation } from '../src/issues/queries/useWorkItemKeyLocation'
-import { WorkItemKeyPrefixesContext } from '../src/issues/queries/workItemKeyPrefixesContext'
+import { selectLinkableWorkItemKeyPrefixes, WorkItemKeyPrefixesContext } from '../src/issues/queries/workItemKeyPrefixesContext'
 import { findWorkItemKeys, readWorkItemKeyInput } from '../src/work-items/model/workItemKeys'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { WorkItemKeyActions } from '../src/issues/ui/WorkItemKeyActions'
@@ -43,6 +43,14 @@ describe('Work Item keys in text', () => {
 })
 
 describe('Work Item key prefixes', () => {
+  test('falls back to linking every key when a reload fails after a successful load', () => {
+    expect(selectLinkableWorkItemKeyPrefixes(undefined, undefined)).toBeUndefined()
+    expect(selectLinkableWorkItemKeyPrefixes([], undefined)).toEqual(new Set())
+    expect(selectLinkableWorkItemKeyPrefixes(['PT'], undefined)).toEqual(new Set(['PT']))
+    // SWR keeps the earlier list beside the error after the Team prefix changed and the reload failed.
+    expect(selectLinkableWorkItemKeyPrefixes([], new Error('503'))).toBeUndefined()
+  })
+
   test('finds only keys whose prefix exists when prefixes are known', () => {
     const prefixes = new Set(['PT', 'BACK'])
     expect(findWorkItemKeys('UTF-8, PT-12, ISO-8601 and BACK-3', prefixes).map((match) => match.key))

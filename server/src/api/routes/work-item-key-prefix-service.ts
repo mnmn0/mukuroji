@@ -7,6 +7,7 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../../modules/audit/audit'
+import { ProjectDataError } from '../../modules/directory'
 import { createWorkItemKeyPrefixCandidates, type TeamWorkItemKeyPrefixState } from '../../modules/work-items'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
@@ -56,8 +57,15 @@ export async function changeTeamWorkItemKeyPrefix(
   request: UpdateTeamWorkItemKeyPrefixRequest,
   mutationContext: MutationAuditContext,
 ): Promise<TeamWorkItemKeyPrefixSettings> {
-  const before = await workItemDependencies.teamIssues.getTeamWorkItemKeyPrefix(principal.directoryId, teamId)
-  const auditPut = createKeyPrefixAuditPut(mutationContext, principal, teamId, before.keyPrefix, request.keyPrefix)
+  // The registry saves only when the stored prefix equals `expectedKeyPrefix`, so that value is
+  // the prefix the change actually replaced.
+  const auditPut = createKeyPrefixAuditPut(
+    mutationContext,
+    principal,
+    teamId,
+    request.expectedKeyPrefix ?? undefined,
+    request.keyPrefix,
+  )
   const saved = await workItemDependencies.teamIssues.changeTeamWorkItemKeyPrefix({
     directoryId: principal.directoryId,
     teamId,
@@ -79,7 +87,8 @@ export async function changeTeamWorkItemKeyPrefix(
 }
 
 /**
- * Reports whether the principal may change the Team's prefix, without throwing.
+ * Reports whether the principal may change the Team's prefix. A permission denial returns false;
+ * other failures, such as a failed directory read, are thrown.
  *
  * @param principal - Authenticated Workspace principal.
  * @param teamId - Team ID.
@@ -98,8 +107,10 @@ async function canManageTeam(principal: WorkspacePrincipal, teamId: string): Pro
   try {
     await requireTeamPermission({ ...principal, enterpriseRouteAuthorizedAtResource: false }, teamId, 'manager')
     return true
-  } catch {
-    return false
+  } catch (error) {
+    // Only a denial means "cannot manage"; a failed directory read must still fail the request.
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
   }
 }
 

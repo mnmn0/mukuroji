@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from 'react'
 import useSWR from 'swr'
 import { getWorkItemKeyPrefixes } from '../api/workItems'
-import { WorkItemKeyPrefixesContext } from './workItemKeyPrefixesContext'
+import { selectLinkableWorkItemKeyPrefixes, WorkItemKeyPrefixesContext } from './workItemKeyPrefixesContext'
 import { workItemKeyPrefixesKey } from './workItemKeyPrefixesCache'
 
 /** Props of {@link WorkItemKeyPrefixesProvider}. */
@@ -15,18 +15,19 @@ export type WorkItemKeyPrefixesProviderProps = {
 /**
  * Loads the Workspace's Work Item key prefixes and shares them with key links below. The list is
  * read again when the window regains focus, and right away after a Work Item is created or a
- * Team's prefix changes in this tab, so a Team that got its first key since is linked.
+ * Team's prefix changes in this tab, so a Team that got its first key since is linked. When a
+ * load fails, every key-shaped word is linked again, since the last list may be out of date.
  *
  * @param props - Access token and children.
  * @returns The children inside the prefix context.
  */
 export function WorkItemKeyPrefixesProvider({ accessToken, children }: WorkItemKeyPrefixesProviderProps) {
-  const { data } = useSWR(
+  const { data, error } = useSWR(
     accessToken ? workItemKeyPrefixesKey(accessToken) : null,
     ([, token]) => getWorkItemKeyPrefixes(token),
     { shouldRetryOnError: false },
   )
-  const prefixes = useMemo(() => data ? new Set(data) : undefined, [data])
+  const prefixes = useMemo(() => selectLinkableWorkItemKeyPrefixes(data, error), [data, error])
   return (
     <WorkItemKeyPrefixesContext.Provider value={prefixes}>
       {children}
