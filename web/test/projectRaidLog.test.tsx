@@ -1,7 +1,8 @@
-import { describe, expect, test } from 'bun:test'
-import type { ProjectRaidEntry } from '@mukuroji/contracts'
+import { afterEach, describe, expect, test } from 'bun:test'
+import type { ProjectRaidEntry, ProjectRaidEntryInput } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ProjectRaidLogPanel } from '../src/projects/ui/ProjectRaidLogPanel'
+import { useSaveProjectRaidEntry } from '../src/projects/mutations/useSaveProjectRaidEntry'
 import { createProjectRaidLogCsv } from '../src/projects/model/projectRaidLogExport'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -148,5 +149,47 @@ describe('createProjectRaidLogCsv', () => {
     const [header, row] = csv.split('\r\n')
     expect(header).toBe('"種類","タイトル","状態","重大度","確率","影響","担当者","見直し期限","関連","内容","対応","登録","更新","クローズ"')
     expect(row).toBe(`"リスク","'=HYPERLINK(""x"")","未解決","high","4","4","佐藤","2026-12-01","CT-1 設計","","","2026-11-19T00:00:00.000Z","2026-11-19T00:00:00.000Z",""`)
+  })
+})
+
+describe('saving Project log entries', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('keeps the Idempotency-Key of each failed save when another save runs in between', async () => {
+    const keys: string[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+      return new Response('{}', { status: 503 })
+    }
+    let save: ReturnType<typeof useSaveProjectRaidEntry> | undefined
+
+    /**
+     * Captures the save function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      save = useSaveProjectRaidEntry({ accessToken: 'token', teamId: 'core-team', projectId: 'refero' })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    /**
+     * Builds an open risk with a title.
+     *
+     * @param title - Entry title.
+     * @returns The input.
+     */
+    const risk = (title: string): ProjectRaidEntryInput => ({ kind: 'risk', title, probability: 3, impact: 3, status: 'open' })
+    await expect(save?.(undefined, risk('A'))).rejects.toThrow()
+    await expect(save?.(undefined, risk('B'))).rejects.toThrow()
+    await expect(save?.(undefined, risk('A'))).rejects.toThrow()
+    expect(keys).toHaveLength(3)
+    expect(keys[0]).not.toBe('')
+    expect(keys[1]).not.toBe(keys[0])
+    expect(keys[2]).toBe(keys[0])
   })
 })
