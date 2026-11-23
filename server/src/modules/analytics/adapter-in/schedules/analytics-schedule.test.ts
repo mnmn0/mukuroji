@@ -1732,6 +1732,64 @@ test('reprocesses the occurrence when a semantic report edit wins the first CAS'
     .toHaveLength(2)
 }, 10_000)
 
+test('reprocesses the occurrence when a concurrent edit moves a Project report to another Project', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const shared = await createScheduledReport(repository, ['recipient@example.com'])
+  const report = await repository.createReport('workspace-1', 'owner@example.com', {
+    id: 'project-report',
+    name: 'project-report',
+    visibility: 'project',
+    teamId: 'team-1',
+    projectId: 'project-a',
+    timeZone: shared.timeZone,
+    filter: shared.filter,
+    widgets: shared.widgets,
+    ...(shared.schedule === undefined ? {} : { schedule: shared.schedule }),
+  })
+  const originalUpdate = repository.updateReport.bind(repository)
+  let raced = false
+  repository.updateReport = async (workspaceId, reportId, input) => {
+    if (!raced) {
+      raced = true
+      await originalUpdate(workspaceId, reportId, {
+        expectedRevision: input.expectedRevision,
+        projectId: 'project-b',
+      })
+      throw new AnalyticsError(
+        409,
+        'AnalyticsRevisionConflict',
+        'Analytics report changed. Reload and try again.',
+      )
+    }
+    return await originalUpdate(workspaceId, reportId, input)
+  }
+  const renderedProjects: Array<string | undefined> = []
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renderedProjects.push(input.report.projectId)
+      return createRenderedSnapshot(input.report, input.recipientMemberKey)
+    },
+    entitlement: enabledAnalyticsEntitlement,
+    renderArtifact: async () => {},
+    notifyDelivery: async () => {},
+  }
+
+  await processDueAnalyticsReport(report, NOW, dependencies)
+  const moved = await repository.getReport(report.workspaceId, report.id)
+  // The Project change is a new delivery definition, so the occurrence is not advanced past it.
+  expect(moved?.schedule?.nextRunAt).toBe(SCHEDULED_FOR)
+
+  await processDueAnalyticsReport(moved!, NOW, dependencies)
+
+  expect(renderedProjects).toEqual(['project-a', 'project-b'])
+}, 10_000)
+
 test('does not overwrite a schedule cursor changed by a concurrent edit', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['recipient@example.com'])

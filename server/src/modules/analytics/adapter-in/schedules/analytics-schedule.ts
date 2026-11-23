@@ -1310,6 +1310,8 @@ function createAnalyticsDeliveryDefinitionHash(report: AnalyticsReport) {
       ownerMemberKey: report.ownerMemberKey,
       visibility: report.visibility,
       teamId: report.teamId,
+      // Leave the key out for non-Project reports so their existing hashes stay the same.
+      ...(report.projectId === undefined ? {} : { projectId: report.projectId }),
       timeZone: report.timeZone,
       filter: report.filter,
       forecastBaseline: report.forecastBaseline,
