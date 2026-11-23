@@ -20,7 +20,8 @@ Rejected entries return to `rejected` and can be edited and submitted again. A m
 - `GET /api/teams/:teamId/timesheet` returns daily and Monday-based weekly rows using the requested IANA timezone. `canManageTeam` tells whether the caller manages time in the Team, and so which entries the rows total (see [Who sees which time](#who-sees-which-time)).
 - `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, Work Item, or work category (`groupBy=category`).
 - `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
-- `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
+- `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets. A budget carries its `teamId`; a Project budget is stored under `TIME_BUDGET#project#<teamId>#<projectId>` because Project IDs are unique only within their Team, and a Team budget under `TIME_BUDGET#team#<teamId>`.
+- `GET /api/teams/:teamId/projects/:projectId/budget-report` and `.../budget-report/export` (CSV) return the Project budget against actual report with earned value figures. See [Project budget report and earned value](#project-budget-report-and-earned-value).
 
 All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
 
@@ -47,6 +48,18 @@ Reopening requires a non-empty `reason` and removes the close. Both operations w
 Only a caller who manages every Project of the Team (a system administrator or a direct enterprise Team grant with `teams.manage`) may close or reopen; a manager of only some Projects receives `TimePeriodCloseDenied`. Every member of the Team can list the closed months.
 
 The entry write transaction also rechecks the close row of every month its intervals can touch in any timezone, so a close or reopen that lands between the check and the write cancels the write with `409 TimePeriodClosed`; the client reloads and retries. Member and role rate cards, the Workspace default currency, and per-period budgets from #398 are not implemented yet.
+
+## Project budget report and earned value
+
+`GET /api/teams/:teamId/projects/:projectId/budget-report?from=YYYY-MM-DD&to=YYYY-MM-DD&timeZone=<IANA>&interval=day|week` returns a `ProjectBudgetReport` (`@mukuroji/contracts`). Only a Project manager may read it (a system administrator, a direct Team grant, or the manager role on that Team Project); others get `403 ProjectBudgetForbidden`, and a Project outside the Team or without any role gets `404 ProjectNotFound`. `timeZone` defaults to `UTC` and `interval` to `day`; a range with more than 400 days (or 400 weeks) is `400 InvalidProjectBudgetReportRequest`. Nothing is stored: the report is calculated on each read from the Project budget, the active schedule baseline, the current Work Items of the Team (archived ones included), and the time entries of the Project. The decisions behind the rules are in [ADR 0065](adr/0065-project-budget-report-and-evm.md).
+
+- `asOf` is today in `timeZone`, clamped to `from`..`to`. Actual minutes and cost count entries of the Project in every status by the local date they start on, from `from` through `asOf`. `uncostedMinutes` are minutes of entries without a rate. `actualCostByCurrency` keeps every currency; `budgetConsumedPercent` uses only the budget currency.
+- BAC is the sum of the baseline's `plannedEffortMinutes`, leaving out Work Items that are canceled now (`canceledEffortMinutes`). PV spreads each baseline Work Item's effort evenly over the calendar days from its planned start to its planned end; one with only an end date plans everything on it, and one without an end date plans nothing (`unscheduledEffortMinutes`). EV is each baseline Work Item's effort times its current progress under the Team `progressMode`; a deleted Work Item earns nothing. SPI = EV / PV, CPI = EV / AC, EAC = BAC / CPI, ETC = EAC − AC, VAC = BAC − EAC; an index whose divisor is zero is omitted. `earnedValue` is `null` without a baseline or without baseline effort.
+- With a budget, `earnedValue.money` repeats the figures in the budget currency: PV and EV are the effort figures times the budget amount per baseline minute, AC is the actual cost in the budget currency, and EAC is the budget divided by the money CPI.
+- `points` holds one cumulative point per day or Monday-based week (clipped to the range) with PV in minutes and, with a budget, in money; actual minutes and cost are absent for buckets that start after `asOf`. EV is not reconstructed for past dates.
+- The CSV export starts with a summary row (budget, BAC, PV, EV, AC, SPI, CPI, EAC in minutes and money) followed by one row per point.
+
+Expense entries other than time, budget threshold notifications and Automation triggers, Analytics metrics and widgets for earned value, and the PMO dashboard widget are still open in #345.
 
 ## Write access and manager scope
 
@@ -85,4 +98,4 @@ One limit to keep in mind when rolling this out:
 
 Members whose draft or rejected entries stay unsubmitted get a daily-checked Inbox reminder; the number of days is a Team and personal notification setting (see [Notifications](notifications.md#工数の督促)).
 
-Every Web mutation sends an `Idempotency-Key`. A request that does not reach the API, an in-progress duplicate, or a 5xx keeps the same key so repeating the action after reconnecting cannot record it twice; a revision conflict reloads every time tracking query before the member retries. Project budgets, summary reports, and CSV export do not have screens yet.
+Every Web mutation sends an `Idempotency-Key`. A request that does not reach the API, an in-progress duplicate, or a 5xx keeps the same key so repeating the action after reconnecting cannot record it twice; a revision conflict reloads every time tracking query before the member retries. Team and Project budgets are edited in the 集計 view; the Project budget report is on the Project overview.

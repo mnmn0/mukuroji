@@ -5,6 +5,7 @@ import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries
 import { useProjectActionItems } from '../../documents/queries/useProjectActionItems'
 import { useProjectDocuments } from '../../documents/queries/useProjectDocuments'
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { ProjectBudgetReportSection } from '../../features/time-tracking/ui/ProjectBudgetReportSection'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
@@ -210,6 +211,17 @@ export function ProjectOverviewPage() {
           workItemSummary={workItemSummary}
           workItemsError={workItemsError}
         />
+        {team && project ? (
+          <div className="mt-5">
+            <ProjectBudgetReportSection
+              accessToken={workspace.accessToken}
+              enabled={canRead}
+              locale={workspace.locale}
+              projectId={project.id}
+              teamId={team.id}
+            />
+          </div>
+        ) : null}
       </div>
     </WorkspaceRouteContent>
   )

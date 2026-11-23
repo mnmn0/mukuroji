@@ -88,6 +88,7 @@ async function mockTimeReport(page: Page, isManager: boolean): Promise<TimeRepor
     state.budget = {
       schemaVersion: 1,
       workspaceId: 'workspace-demo',
+      teamId: 'core-team',
       scopeType: 'team',
       scopeId: 'core-team',
       amountMinor: body.amountMinor,
