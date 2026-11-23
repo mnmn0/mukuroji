@@ -572,13 +572,6 @@ export function TaskPage() {
       teams,
     ],
   )
-  // Related Work Items must belong to the Project's own Team, which the log routes are scoped to.
-  const raidWorkItemOptions = useMemo(
-    () => tasks
-      .filter((task) => task.teamId === interactionTeamId)
-      .map((task) => ({ id: task.id, label: task.key ? `${task.key} ${task.title}` : task.title })),
-    [interactionTeamId, tasks],
-  )
   const workspaceId = (
     user?.attributes['custom:workspace_id'] ??
     user?.attributes['custom:directory_id'] ??
@@ -2151,7 +2144,6 @@ export function TaskPage() {
             enabled={Boolean(user && !currentUserError)}
             ownerOptions={raidOwnerOptions}
             projectId={projectId}
-            workItemOptions={raidWorkItemOptions}
             t={t}
             teamId={interactionTeamId}
             onSessionError={(error, requestAccessToken) => {
