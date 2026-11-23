@@ -21,12 +21,14 @@ import type {
   WorkloadTimeOff,
   WorkingSchedule,
   WorkItemScheduleCalendarPolicy,
+  WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   createWorkspaceWorkItemCalendarPolicy,
   isWorkloadCalendarSource,
+  workspaceWeekContaining,
 } from '@mukuroji/contracts'
 
 const TEAM_RECORD_PREFIX = 'CAPACITY#TEAM#'
@@ -140,6 +142,8 @@ export type WorkloadSnapshotInput = {
    * every day off. The default Workspace calendar is used when omitted.
    */
   workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /** Day weekly buckets start on, from 0 (Sunday) to 6. Monday is used when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
 }
 
 /** Input for a what-if calculation that never persists. */
@@ -254,6 +258,7 @@ export function buildWorkloadSnapshot(
       toDate,
       input.granularity,
       remainingEffortByAssignmentId,
+      input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     )
   )
 
@@ -874,6 +879,7 @@ function calculateMemberSummary(
   toDate: string,
   granularity: CapacityPlanningGranularity,
   remainingEffortByAssignmentId: ReadonlyMap<string, number>,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadMemberSummary {
   const dates = listCalendarDates(fromDate, toDate)
   const daily = new Map<string, DailyWorkload>()
@@ -897,7 +903,7 @@ function calculateMemberSummary(
       : assignment.plannedEffortMinutes
     distributeMinutes(daily, distributionDates, remaining, 'remainingEffortMinutes')
   }
-  const cells = aggregateCells(daily, granularity)
+  const cells = aggregateCells(daily, granularity, weekStartDay)
   return {
     memberId: profile.memberId,
     ...(profile.displayName ? { displayName: profile.displayName } : {}),
@@ -923,10 +929,11 @@ function calculateMemberSummary(
 function aggregateCells(
   daily: ReadonlyMap<string, DailyWorkload>,
   granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadCell[] {
   const groups = new Map<string, { fromDate: string; toDate: string; value: DailyWorkload }>()
   for (const [date, value] of daily) {
-    const bucket = bucketFor(date, granularity)
+    const bucket = bucketFor(date, granularity, weekStartDay)
     const current = groups.get(bucket.fromDate)
     if (!current) {
       groups.set(bucket.fromDate, { fromDate: bucket.fromDate, toDate: bucket.toDate, value: { ...value } })
@@ -1151,8 +1158,19 @@ function calculateRemainingEffortByAssignment(
   return result
 }
 
-/** Returns the Monday-first bucket containing one local date. */
-function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fromDate: string; toDate: string } {
+/**
+ * Returns the day, week, or month bucket containing one local date.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param granularity - Bucket size.
+ * @param weekStartDay - Day a week bucket starts on.
+ * @returns The first and last local dates of the bucket.
+ */
+function bucketFor(
+  date: string,
+  granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
+): { fromDate: string; toDate: string } {
   if (granularity === 'day') return { fromDate: date, toDate: date }
   if (granularity === 'month') {
     const [year, month] = date.split('-').map(Number)
@@ -1162,10 +1180,8 @@ function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fr
       toDate: `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${lastDay.toString().padStart(2, '0')}`,
     }
   }
-  const day = new Date(`${date}T12:00:00Z`).getUTCDay()
-  const mondayOffset = day === 0 ? -6 : 1 - day
-  const fromDate = addCalendarDays(date, mondayOffset)
-  return { fromDate, toDate: addCalendarDays(fromDate, 6) }
+  const week = workspaceWeekContaining(date, weekStartDay)
+  return { fromDate: week.from, toDate: week.to }
 }
 
 /** Finds the UTC instant corresponding to local midnight, including DST changes. */

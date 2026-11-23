@@ -11,10 +11,11 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
-import type {
-  NotificationCategoryChannels,
-  NotificationMutes,
-  PersonalNotificationReminderDays,
+import {
+  isCanonicalWorkItemKey,
+  type NotificationCategoryChannels,
+  type NotificationMutes,
+  type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
 import {
@@ -136,6 +137,8 @@ export type NotificationItem = {
   actorLabel?: string
   /** 対象 Work Item などの表示タイトルです。 */
   title?: string
+  /** Short key such as `ABC-123` of the target Work Item, when it has one. */
+  workItemKey?: string
   /** Event の安全な短い概要です。 */
   summary?: string
   /** App 内で対象を開く相対 path です。 */
@@ -1198,6 +1201,7 @@ export function toNotificationItem(
       ? { actorLabel: readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId) }
       : {}),
     ...(readText(value.title) ? { title: readText(value.title) } : {}),
+    ...(isCanonicalWorkItemKey(value.workItemKey) ? { workItemKey: value.workItemKey } : {}),
     ...(readText(value.summary) ? { summary: readText(value.summary) } : {}),
     ...(deepLink?.startsWith('/') && !deepLink.startsWith('//') ? { deepLink } : {}),
     ...(readText(value.teamId) ? { teamId: readText(value.teamId) } : {}),

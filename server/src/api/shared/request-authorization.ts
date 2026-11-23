@@ -345,6 +345,9 @@ const enterpriseRoutePermissionRules = [
   { method: 'PUT', pathPattern: '/api/planning/update-feed/digest', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/digest/inbox', permission: 'planning.read' },
   { method: 'POST', pathPattern: '/api/planning/update-feed/digest/preview', permission: 'planning.read' },
+  // Watching a Milestone only subscribes the caller to what the caller can already read.
+  { method: 'PUT', pathPattern: '/api/planning/entities/:entityId/watch', permission: 'planning.read' },
+  { method: 'DELETE', pathPattern: '/api/planning/entities/:entityId/watch', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -684,6 +687,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/teams/:teamId/project-order',
+    permission: 'teams.manage',
+  },
+  // Changing the key prefix of a Team's new Work Items is a Team setting.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/work-item-key-prefix',
     permission: 'teams.manage',
   },
   {

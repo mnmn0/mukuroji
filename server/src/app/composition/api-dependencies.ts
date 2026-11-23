@@ -19,6 +19,9 @@ import {
 import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
 } from '@mukuroji/contracts'
@@ -160,6 +163,10 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import {
+  DynamoDbCycleScheduleBaselineStore,
+  InMemoryCycleScheduleBaselineStore,
+} from '../../modules/planning'
+import {
   DynamoDbProjectScheduleBaselineStore,
   DynamoDbTeamIssuesClient,
   InMemoryProjectScheduleBaselineStore,
@@ -196,6 +203,7 @@ import {
   DynamoDbTimeTrackingRepository,
   InMemoryTimeTrackingRepository,
   TimeTrackingService,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
 import {
@@ -359,9 +367,13 @@ export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
  * Creates the configured durable time tracking service.
  *
  * @param idempotency - Optional shared receipt store used for mutation replay.
+ * @param categories - Optional Workspace work category reader; the built-in categories when omitted.
  * @returns A configured time tracking service.
  */
-export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyPort): TimeTrackingService {
+export function createTimeTrackingService(
+  idempotency?: TimeTrackingIdempotencyPort,
+  categories?: TimeTrackingCategorySource,
+): TimeTrackingService {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
   const tableName = config.environment.ANALYTICS_TABLE_NAME
@@ -383,6 +395,7 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
         retentionDays: getConfiguredAuditRetentionDays(),
       },
       ...(idempotency ? { idempotency } : {}),
+      ...(categories ? { categories } : {}),
       estimates: {
         async listPlannedEffort(workspaceId, teamId) {
           // Archived Work Items keep their estimate, because their recorded time still counts in reports.
@@ -649,6 +662,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    cycleScheduleBaselines: new DynamoDbCycleScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -1806,13 +1824,25 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  */
 export function createProductionAppDependencies(): AppDependencies {
   const developerPlatform = createProductionDeveloperPlatformDependencies()
+  const workspace = createProductionWorkspaceDependencies()
   const timeTrackingService = createTimeTrackingService(
     createTimeTrackingIdempotencyPort(
       developerPlatform.idempotency,
       developerPlatform.transactions,
     ),
+    {
+      // Only a missing profile means the defaults; any other read failure propagates.
+      readCategories: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
+          DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readTimeZone: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
+          DEFAULT_WORKSPACE_TIME_ZONE,
+      readWeekStartDay: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.weekStartDay ??
+          DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+    },
   )
-  const workspace = createProductionWorkspaceDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
@@ -1916,6 +1946,7 @@ export function createTestAppDependencies(): AppDependencies {
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
+      cycleScheduleBaselines: new InMemoryCycleScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
@@ -2047,6 +2078,7 @@ export function overrideAppDependencies(
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
+      ...(overrides.cycleScheduleBaselines ? { cycleScheduleBaselines: overrides.cycleScheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
       ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),

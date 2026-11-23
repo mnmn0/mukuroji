@@ -202,10 +202,14 @@ export {
   type WorkItemAuthorizationSnapshot,
 } from './adapter-out/dynamodb/work-item-client'
 export {
+  isWorkItemKeyPrefix,
   isWorkItemKeyRegistryRecord,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './adapter-out/dynamodb/work-item-key-registry'
-export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
+export { createWorkItemKeyPrefixCandidates, deriveWorkItemKeyPrefix } from './domain/work-item-key'
 export {
   DynamoDbProjectScheduleBaselineStore,
   InMemoryProjectScheduleBaselineStore,
