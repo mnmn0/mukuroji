@@ -3236,6 +3236,9 @@ function configureFakeProjectClients(
             ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
               ? { contributorAssignments: input.contributorAssignments }
               : {}),
+            ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria)
+              ? { acceptanceCriteria: input.acceptanceCriteria }
+              : {}),
             creatorMemberKey: actorUserId,
             workflowSchemaVersion: 1,
             workflowStatusId: String(input.workflowStatusId),

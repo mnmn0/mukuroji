@@ -10,6 +10,8 @@ import {
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
   type UpdateAutomationInboundWebhookEndpointInput,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
+  WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_TITLE_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import {
@@ -44,6 +46,7 @@ export function validateCreateAutomationTemplateInput(
   switch (input.kind) {
     case 'work-item': {
       assertOnlyKeys(payload, [
+        'acceptanceCriteria',
         'assignedProjectId',
         'assigneeUserId',
         'customFieldValues',
@@ -98,6 +101,9 @@ export function validateCreateAutomationTemplateInput(
           payload.customFieldValues,
           'Work Item template custom field values',
         )
+      const acceptanceCriteria = payload.acceptanceCriteria === undefined
+        ? undefined
+        : validateWorkItemTemplateAcceptanceCriteria(payload.acceptanceCriteria)
       if (
         payload.priority !== undefined &&
         payload.priority !== 'low' &&
@@ -112,6 +118,7 @@ export function validateCreateAutomationTemplateInput(
         enabled,
         payload: {
           title,
+          ...(acceptanceCriteria === undefined || acceptanceCriteria.length === 0 ? {} : { acceptanceCriteria }),
           ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
           ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
           ...(customFieldValues === undefined ? {} : { customFieldValues }),
@@ -196,6 +203,35 @@ export function validateCreateAutomationTemplateInput(
       }
     }
   }
+}
+
+/**
+ * Validates the acceptance criteria texts of a Work Item template.
+ *
+ * Each text follows the Work Item acceptance criterion rule, so a valid template always creates a
+ * valid Work Item.
+ *
+ * @param value - Untrusted `acceptanceCriteria` payload value.
+ * @returns Trimmed criterion texts in order.
+ */
+function validateWorkItemTemplateAcceptanceCriteria(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw invalidInput('Work Item template acceptance criteria must be an array of text.')
+  }
+  if (value.length > WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT) {
+    throw invalidInput(
+      `Work Item template can have at most ${WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT} acceptance criteria.`,
+    )
+  }
+  return value.map((candidate) => {
+    const text = typeof candidate === 'string' ? candidate.trim() : ''
+    if (!text || text.length > WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH) {
+      throw invalidInput(
+        `Each Work Item template acceptance criterion needs text of 1 to ${WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH} characters.`,
+      )
+    }
+    return text
+  })
 }
 
 /**

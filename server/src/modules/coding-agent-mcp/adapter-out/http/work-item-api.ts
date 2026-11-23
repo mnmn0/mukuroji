@@ -88,6 +88,12 @@ export const catalogSchema: z.ZodType<AgentCatalog> = z.object({
     }),
     customFields: z.array(z.record(z.string(), z.unknown())),
   })),
+  // Older servers do not list templates.
+  templates: z.array(z.object({
+    id: identifier, version: z.number().int().positive(), name: z.string(), title: z.string(),
+    description: z.string().optional(), workItemTypeId: identifier.optional(), workflowStatusId: identifier.optional(),
+    priority: z.enum(['high', 'medium', 'low']).optional(), acceptanceCriteria: z.array(z.string()),
+  })).default([]),
 })
 /** Validates one Work Item comment. */
 export const commentSchema = z.object({

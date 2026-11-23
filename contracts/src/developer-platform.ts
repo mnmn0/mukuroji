@@ -3,6 +3,7 @@ import {
   type CanonicalWorkItem,
   type CreateWorkItemInput,
   type WorkItemPatch,
+  type WorkItemPriority,
   type WorkItemSchedule,
 } from './work-items'
 import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
@@ -1527,11 +1528,23 @@ export type ListPublicWorkItemsRequest = {
  *
  * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments' | 'schedule'> & {
+export type CreatePublicWorkItemRequest = Omit<
+  CreateWorkItemInput,
+  'contributorAssignments' | 'acceptanceCriteria' | 'schedule' | 'priority'
+> & {
   /**
    * Work Item を所有する Team ID です。
    */
   teamId: string
+  /**
+   * Work Item template to start from, listed in `PublicWorkItemTypeCatalog.templates`. Fields sent in
+   * the body win; the template fills an omitted description, Work Item Type, workflow status, and
+   * priority, adds its custom field values under the sent ones, and gives the Work Item its
+   * acceptance criteria as new unmet criteria.
+   */
+  templateId?: string
+  /** Priority of the Work Item; required unless `templateId` is sent, and `medium` when neither sets it. */
+  priority?: WorkItemPriority
   /**
    * Complete schedule with its calendar policy. When it is left out, the Work Item uses the
    * Workspace working calendar (working weekdays, company holidays, and national holidays) and is
@@ -1614,6 +1627,35 @@ export type PublicWorkItemTypeCatalog = {
   configurationRevision: number
   /** Active Work Item Types available for creation. */
   workItemTypes: PublicWorkItemTypeSchema[]
+  /** Enabled Work Item templates that can create a Work Item in this Team, by name. */
+  templates: PublicWorkItemTemplate[]
+}
+
+/**
+ * Work Item template offered for creation by the Public API.
+ *
+ * Only the values a template fills on create are listed; its assignee, Project, and schedule are
+ * left out because the create body sets them.
+ */
+export type PublicWorkItemTemplate = {
+  /** Template ID to send as `templateId`. */
+  id: string
+  /** Current template version. */
+  version: number
+  /** Template display name. */
+  name: string
+  /** Title the template suggests. */
+  title: string
+  /** Description the template fills when the body has none. */
+  description?: string
+  /** Work Item Type the template fills when the body has none. */
+  workItemTypeId?: string
+  /** Workflow status the template fills when the body has none. */
+  workflowStatusId?: string
+  /** Priority the template fills when the body has none. */
+  priority?: WorkItemPriority
+  /** Acceptance criteria texts the new Work Item starts with; empty when none. */
+  acceptanceCriteria: string[]
 }
 
 /**

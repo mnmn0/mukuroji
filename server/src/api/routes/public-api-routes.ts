@@ -7,7 +7,12 @@ import {
   type ApiProblem,
   type CanonicalWorkItem,
   type PublicWorkItem,
+  type AutomationTemplate,
+  type AutomationValue,
+  type CreatePublicWorkItemRequest,
   type CreateWorkItemInput,
+  type CustomFieldValue,
+  type PublicWorkItemTemplate,
   type PublicWorkItemTypeCatalog,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
@@ -147,7 +152,9 @@ import {
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
+import { readNewWorkItemAcceptanceCriteria } from '../shared/work-item-acceptance-criteria'
 import {
+  automationDependencies,
   developerPlatformDependencies,
   initializeLegacyTenantAdministration,
   requireAppDependencies,
@@ -880,6 +887,7 @@ async function createCanonicalPublicWorkItem(
       ...configuredBody,
       assigneeUserId,
       ...withContributorAssignmentChange(configuredBody, contributorChange),
+      acceptanceCriteria: readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria),
       ...(idempotentCreate
         ? {
             idempotentIssueId: idempotentCreate.issueId,
@@ -906,6 +914,132 @@ async function createCanonicalPublicWorkItem(
 }
 
 /**
+ * Fills a Public API create body from the Work Item template it names.
+ *
+ * Values sent in the body win. The template fills an omitted description, Work Item Type, workflow
+ * status, and priority, puts its custom field values under the sent ones, and turns its acceptance
+ * criteria into new unmet criteria. A template's assignee, Project, Team, and schedule are not used:
+ * the body sets them. The merged values are validated by the regular create path.
+ *
+ * @param workspaceId - Workspace of the credential.
+ * @param teamId - Team that will own the Work Item.
+ * @param input - Validated create body without its Team ID.
+ * @returns The create input with the template applied and no `templateId`.
+ * @throws PublicApiServiceError (404) when the template is missing, disabled, not a Work Item
+ * template, or bound to another Team.
+ */
+async function applyPublicWorkItemTemplate(
+  workspaceId: string,
+  teamId: string,
+  input: Omit<CreatePublicWorkItemRequest, 'teamId'>,
+): Promise<PublicCreateWorkItemInput> {
+  const { templateId, priority, ...fields } = input
+  if (templateId === undefined) return { ...fields, priority: priority ?? 'medium' }
+  const template = await automationDependencies.ruleTemplates.getTemplate(workspaceId, templateId)
+  if (!template || !isPublicWorkItemTemplateFor(template, teamId)) {
+    throw new PublicApiServiceError(404, 'not_found', 'The Work Item template was not found for this Team.')
+  }
+  const payload = template.payload
+  const templateFieldValues = readTemplateCustomFieldValues(payload.customFieldValues)
+  return {
+    ...fields,
+    ...(fields.description === undefined && payload.description !== undefined
+      ? { description: payload.description }
+      : {}),
+    ...(fields.workItemTypeId === undefined && payload.workItemTypeId !== undefined
+      ? { workItemTypeId: payload.workItemTypeId }
+      : {}),
+    ...(fields.workflowStatusId === undefined && payload.workflowStatusId !== undefined
+      ? { workflowStatusId: payload.workflowStatusId }
+      : {}),
+    priority: priority ?? payload.priority ?? 'medium',
+    ...(templateFieldValues === undefined
+      ? {}
+      : { customFieldValues: { ...templateFieldValues, ...fields.customFieldValues } }),
+    ...(payload.acceptanceCriteria === undefined || payload.acceptanceCriteria.length === 0
+      ? {}
+      : { acceptanceCriteria: payload.acceptanceCriteria.map((text) => ({ text })) }),
+  }
+}
+
+/**
+ * Tells whether a template is an enabled Work Item template that may create Work Items in a Team.
+ *
+ * @param template - Current template version.
+ * @param teamId - Team that would own the Work Item.
+ * @returns Whether the template can be offered and used for the Team.
+ */
+function isPublicWorkItemTemplateFor(
+  template: AutomationTemplate,
+  teamId: string,
+): template is Extract<AutomationTemplate, { kind: 'work-item' }> {
+  return template.kind === 'work-item' &&
+    template.enabled &&
+    (template.payload.teamId === undefined || template.payload.teamId === teamId)
+}
+
+/**
+ * Reads template custom field values as Work Item custom field values.
+ *
+ * The create path then checks them against the Team's field definitions as it does for a body.
+ *
+ * @param values - Template custom field values, if any.
+ * @returns Values keyed by field ID, or undefined when the template has none.
+ * @throws PublicApiServiceError (409) when a value has no custom field value shape.
+ */
+function readTemplateCustomFieldValues(
+  values: Readonly<Record<string, AutomationValue>> | undefined,
+): Record<string, CustomFieldValue> | undefined {
+  if (values === undefined) return undefined
+  const result: Record<string, CustomFieldValue> = {}
+  for (const [fieldId, value] of Object.entries(values)) {
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+    ) {
+      result[fieldId] = value
+    } else {
+      throw new PublicApiServiceError(
+        409,
+        'conflict',
+        `The Work Item template has an invalid value for custom field "${fieldId}".`,
+      )
+    }
+  }
+  return result
+}
+
+/**
+ * Lists the Work Item templates a Team can create from, for the Public API catalog.
+ *
+ * @param workspaceId - Workspace whose templates are read.
+ * @param teamId - Team the catalog is for.
+ * @returns Enabled Work Item templates for the Team, by name.
+ */
+async function listPublicWorkItemTemplates(
+  workspaceId: string,
+  teamId: string,
+): Promise<PublicWorkItemTemplate[]> {
+  const templates = await automationDependencies.ruleTemplates.listTemplates(workspaceId)
+  return templates
+    .filter((template) => isPublicWorkItemTemplateFor(template, teamId))
+    .sort((first, second) => first.name.localeCompare(second.name) || first.id.localeCompare(second.id))
+    .map((template) => ({
+      id: template.id,
+      version: template.version,
+      name: template.name,
+      title: template.payload.title,
+      ...(template.payload.description === undefined ? {} : { description: template.payload.description }),
+      ...(template.payload.workItemTypeId === undefined ? {} : { workItemTypeId: template.payload.workItemTypeId }),
+      ...(template.payload.workflowStatusId === undefined ? {} : { workflowStatusId: template.payload.workflowStatusId }),
+      ...(template.payload.priority === undefined ? {} : { priority: template.payload.priority }),
+      acceptanceCriteria: [...(template.payload.acceptanceCriteria ?? [])],
+    }))
+}
+
+/**
  * Builds the authorized, creation-oriented Work Item Type catalog for one Team.
  *
  * @param teamId - Team whose configuration was resolved.
@@ -917,6 +1051,7 @@ function createPublicWorkItemTypeCatalog(
   teamId: string,
   resolvedConfiguration: ResolvedWorkItemConfiguration,
   accessibleProjectIds: ReadonlySet<string> | undefined,
+  templates: PublicWorkItemTemplate[],
 ): PublicWorkItemTypeCatalog {
   const configuration = resolvedConfiguration.configuration
   const types = [...(configuration.workItemTypes ?? [])]
@@ -956,6 +1091,7 @@ function createPublicWorkItemTypeCatalog(
           customFields,
         }
       }),
+    templates,
   }
 }
 
@@ -1519,6 +1655,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         teamId,
         resolvedConfiguration,
         accessibleProjectIds,
+        await listPublicWorkItemTemplates(principal.directoryId, teamId),
       )
     },
 
@@ -1607,7 +1744,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     async authorizeCreate(credential, input) {
-      const { teamId, ...workItemInput } = input
+      const { teamId, ...requestInput } = input
+      const workItemInput = await applyPublicWorkItemTemplate(credential.workspaceId, teamId, requestInput)
       rejectInternalPublicCreateWorkItemFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
@@ -1629,7 +1767,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     async create(credential, input, context) {
-      const { teamId, ...workItemInput } = input
+      const { teamId, ...requestInput } = input
+      const workItemInput = await applyPublicWorkItemTemplate(credential.workspaceId, teamId, requestInput)
       rejectInternalPublicCreateWorkItemFields(workItemInput)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
@@ -1659,12 +1798,13 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemInput,
         context,
         '/api/v1/work-items',
+        // The request as sent, not the template it names, identifies a retry.
         createPublicApiWorkItemCreateIdentity(
           credential.workspaceId,
           readCredentialPrincipalKey(credential),
           context,
           teamId,
-          workItemInput,
+          requestInput,
         ),
         authorization.authorizationSnapshot,
       ))
@@ -3295,7 +3435,7 @@ function createPublicApiWorkItemCreateIdentity(
   credentialId: string,
   context: PublicMutationContext,
   teamId: string,
-  input: PublicCreateWorkItemInput,
+  input: PublicCreateWorkItemInput | Omit<CreatePublicWorkItemRequest, 'teamId'>,
 ): IdempotentWorkItemCreate {
   const requestIdentity =
     `${workspaceId}\n${credentialId}\n${context.idempotencyKey}\n${teamId}`

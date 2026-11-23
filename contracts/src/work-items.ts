@@ -18,7 +18,11 @@ import {
   type WorkspaceCalendarSettings,
   type WorkspaceCalendarWeekday,
 } from './workspace-calendar'
-import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
+import type {
+  WorkItemAcceptanceCriterion,
+  WorkItemAcceptanceCriterionCreateInput,
+  WorkItemAcceptanceCriterionInput,
+} from './work-item-acceptance-criteria'
 import type {
   TriageEntryEvent,
   TriagePermissionVisibility,
@@ -675,6 +679,11 @@ export type CreateWorkItemInput = {
   assigneeUserId: string
   /** Contributors to plan for the new Work Item; new assignments never carry an ID. */
   contributorAssignments?: WorkItemContributorAssignmentCreateInput[]
+  /**
+   * Acceptance criteria to start the new Work Item with, in order. Entries never carry an ID; the
+   * server assigns one to each criterion.
+   */
+  acceptanceCriteria?: WorkItemAcceptanceCriterionCreateInput[]
   /** Stable Work Item Type selected for the new Work Item. */
   workItemTypeId?: string
   /**

@@ -307,7 +307,10 @@ import {
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
-import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
+import {
+  readAcceptanceCriteriaChange,
+  readNewWorkItemAcceptanceCriteria,
+} from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
 import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
@@ -4727,6 +4730,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         resolvedConfiguration,
         [],
       )
+      const acceptanceCriteria = readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria)
       const response = await hydrateCreateTeamIssueResponse(
         await workItemDependencies.teamIssues.createTeamIssue(
           principal.directoryId,
@@ -4735,6 +4739,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            acceptanceCriteria,
             ...newWorkItemProjectFence,
           },
           principal.userKey,

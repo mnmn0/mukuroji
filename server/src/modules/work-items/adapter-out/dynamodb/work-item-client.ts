@@ -1023,6 +1023,11 @@ export type PublicCreateTeamIssueRequestBody = {
   assigneeUserId?: unknown
   /** Contributor assignments already normalized by the API handler. */
   contributorAssignments?: unknown
+  /**
+   * Acceptance criteria. The API handler replaces client input with the normalized list (server
+   * IDs included) before it reaches the adapter.
+   */
+  acceptanceCriteria?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -2422,6 +2427,9 @@ export class DynamoDbTeamIssuesClient {
     const contributorAssignments = input.contributorAssignments === undefined
       ? []
       : readNormalizedContributorAssignments(input.contributorAssignments)
+    const acceptanceCriteria = input.acceptanceCriteria === undefined
+      ? []
+      : readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -2568,6 +2576,9 @@ export class DynamoDbTeamIssuesClient {
       if (contributorAssignments.length > 0) {
         item.contributorAssignments = contributorAssignments
       }
+      if (acceptanceCriteria.length > 0) {
+        item.acceptanceCriteria = acceptanceCriteria
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -2614,6 +2625,7 @@ export class DynamoDbTeamIssuesClient {
           'assignedProjectId',
           'assigneeUserId',
           'contributorAssignments',
+          'acceptanceCriteria',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',

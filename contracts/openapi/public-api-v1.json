@@ -1421,6 +1421,7 @@
             "description": "Deadline for a Work Item created without schedule; it gets a due-date schedule under the Workspace working calendar. Cannot be combined with schedule."
           },
           "priority": {
+            "description": "Required unless templateId is sent; medium when neither the body nor the template sets it.",
             "enum": [
               "high",
               "medium",
@@ -1439,6 +1440,10 @@
           "teamId": {
             "type": "string"
           },
+          "templateId": {
+            "description": "Work Item template to start from, listed in the work-item-types catalog templates. Body fields win; the template fills an omitted description, workItemTypeId, workflowStatusId, and priority, adds its custom field values under the sent ones, and gives the Work Item its acceptance criteria as new unmet criteria. An unknown, disabled, or other-Team template returns 404.",
+            "type": "string"
+          },
           "title": {
             "maxLength": 256,
             "minLength": 1,
@@ -1454,8 +1459,7 @@
         "required": [
           "teamId",
           "title",
-          "assigneeUserId",
-          "priority"
+          "assigneeUserId"
         ],
         "type": "object"
       },
@@ -2836,6 +2840,61 @@
         ],
         "type": "object"
       },
+      "PublicWorkItemTemplate": {
+        "additionalProperties": false,
+        "description": "Work Item template offered for creation. Its assignee, Project, and schedule are left out because the create body sets them.",
+        "properties": {
+          "acceptanceCriteria": {
+            "description": "Acceptance criteria texts the new Work Item starts with; empty when none.",
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Template ID to send as templateId.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
+          "workflowStatusId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "name",
+          "title",
+          "acceptanceCriteria"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemTypeCatalog": {
         "additionalProperties": false,
         "properties": {
@@ -2845,6 +2904,13 @@
           },
           "teamId": {
             "type": "string"
+          },
+          "templates": {
+            "description": "Enabled Work Item templates that can create a Work Item in this Team, by name.",
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkItemTemplate"
+            },
+            "type": "array"
           },
           "workItemTypes": {
             "items": {
@@ -2856,7 +2922,8 @@
         "required": [
           "teamId",
           "configurationRevision",
-          "workItemTypes"
+          "workItemTypes",
+          "templates"
         ],
         "type": "object"
       },

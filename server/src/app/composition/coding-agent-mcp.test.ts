@@ -345,6 +345,28 @@ test('create_task leaves the schedule to the server so the Workspace working cal
   }
 }, 30_000)
 
+test('create_task sends a template and leaves its priority to the server unless one is given', async () => {
+  const fake = startFakeApi()
+  let client: Client | undefined
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    for (const input of [{ templateId: 'release-check' }, { templateId: 'release-check', priority: 'low' }, {}]) {
+      const created = await call(client, 'create_task', { title: 'Release', idempotencyKey: crypto.randomUUID(), ...input })
+      expect(created.isError).toBe(false)
+    }
+
+    expect(fake.createBodies).toHaveLength(3)
+    expect(fake.createBodies[0]).toMatchObject({ templateId: 'release-check' })
+    expect(fake.createBodies[0]).not.toHaveProperty('priority')
+    expect(fake.createBodies[1]).toMatchObject({ templateId: 'release-check', priority: 'low' })
+    expect(fake.createBodies[2]).toMatchObject({ priority: 'medium' })
+    expect(fake.createBodies[2]).not.toHaveProperty('templateId')
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+  }
+}, 30_000)
+
 test('the distributable Node bundle serves the same tools over stdio', async () => {
   // Runs the script behind `bun run mcp:build`, which produces the distributable bundle.
   const outdir = await mkdtemp(join(tmpdir(), 'mukuroji-mcp-bundle-'))

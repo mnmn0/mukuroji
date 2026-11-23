@@ -180,6 +180,7 @@ import {
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
 import { createDependencyFencedWorkItemAuthorizationSnapshot } from '../shared/work-item-schedule'
+import { readNewWorkItemAcceptanceCriteria } from '../shared/work-item-acceptance-criteria'
 import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
@@ -1988,7 +1989,11 @@ async function executeAutomationWorkItemCreate(
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,
     teamId,
-    { ...configuredBody, ...newWorkItemProjectFence },
+    {
+      ...configuredBody,
+      acceptanceCriteria: readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria),
+      ...newWorkItemProjectFence,
+    },
     `automation:${context.execution.ruleId}`,
     createAutomationMutationContext(context, values),
   )

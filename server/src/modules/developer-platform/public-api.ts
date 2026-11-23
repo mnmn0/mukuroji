@@ -3589,8 +3589,10 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'dueDate',
     'priority',
     'workItemTypeId',
+    'templateId',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
+  const templateId = body.templateId === undefined ? undefined : readIdentifier(body.templateId, 'templateId')
   if (body.schedule !== undefined && body.dueDate !== undefined) {
     throw new PublicApiServiceError(400, 'validation_failed', 'Send schedule or dueDate, not both.')
   }
@@ -3601,7 +3603,9 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     // Without a schedule the server uses the Workspace working calendar.
     ...(body.schedule === undefined ? {} : { schedule: readPublicWorkItemSchedule(body.schedule) }),
     ...(body.dueDate === undefined ? {} : { dueDate: readIsoDate(body.dueDate, 'dueDate') }),
-    priority: readPriority(body.priority),
+    // A template may supply the priority, so it is optional only with a template.
+    ...(body.priority === undefined && templateId !== undefined ? {} : { priority: readPriority(body.priority) }),
+    ...(templateId === undefined ? {} : { templateId }),
     ...(description !== undefined ? { description } : {}),
     ...(body.assignedProjectId !== undefined
       ? { assignedProjectId: readIdentifier(body.assignedProjectId, 'assignedProjectId') }
