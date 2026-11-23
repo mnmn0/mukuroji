@@ -38,6 +38,7 @@ import { readBearerAccessToken } from '../shared/http'
 import {
   canAccessAssignedProject,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireAssignedProjectPermission,
   requireTeamConfigurationAdministration,
   requireTeamPermission,
@@ -507,9 +508,18 @@ async function canManageCalendar(
   scope: StoredWorkCalendarScope,
 ): Promise<boolean> {
   // An Enterprise caller's route authorization on GET proves only `teams.read`; the change routes
-  // also require `teams.manage`, so without it the calendar is read-only whatever else holds.
-  if (principal.enterprisePermissions !== undefined && !principal.enterprisePermissions.includes('teams.manage')) {
-    return false
+  // also require `teams.manage`, so it is evaluated at the calendar's own Team or Project, where a
+  // Project-scoped grant can hold it although the Team grant of this request does not.
+  if (principal.enterprisePermissions !== undefined) {
+    const resource = scope.kind === 'team'
+      ? { workspaceId: principal.directoryId, kind: 'team' as const, targetId: scope.teamId }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project' as const,
+          targetId: scope.projectId,
+          parentTeamId: scope.teamId,
+        }
+    if (!hasEnterprisePermissionAtResource(principal, 'teams.manage', resource)) return false
   }
   try {
     await requireCalendarManager(principal, context, scope)

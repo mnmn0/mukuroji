@@ -91,6 +91,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
 
 - Work Item の critical path は、日付範囲の Work Item を policy の稼働日数（`durationDays`）で数える。
 - Planning entity の critical path は、forecast（無ければ baseline）の日付範囲を Workspace の稼働カレンダーで数えた稼働日数（最小 1）で数える。
+  この calendar はメモリ上でだけ使うので、保存する Work Item の policy のような休日数の上限を掛けず、会社の休日と祝日をすべて使う。
 - 期限・期限超過は policy の time zone で今日を決めて期限日と比べる。期限日は policy の休日を避けて置かれているので、休日は使わない。
   Team・Project のカレンダーが policy に写るので、期限と critical path は同じカレンダーで判定される。
 

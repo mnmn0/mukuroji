@@ -7,7 +7,7 @@ import {
   type WorkItemDependencyEndpoint,
   type EnterprisePermissionId,
 } from '@mukuroji/contracts'
-import { readWorkspaceCalendarInputs, resolveWorkCalendarPolicyFrom } from './workspace-calendar'
+import { readWorkspaceWorkloadCalendarPolicy } from './workspace-calendar'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -557,13 +557,13 @@ export async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
   scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
-  const [response, calendarInputs] = await Promise.all([
+  const [response, workspacePolicy] = await Promise.all([
     readAccessibleWorkItems(principal, false, scope),
-    readWorkspaceCalendarInputs(principal.directoryId),
+    readWorkspaceWorkloadCalendarPolicy(principal.directoryId),
   ])
   // Planning entities belong to the Workspace, so their critical path counts the Workspace
-  // calendar's working days (ADR 0058).
-  const workspacePolicy = resolveWorkCalendarPolicyFrom(calendarInputs, undefined, undefined)
+  // calendar's working days (ADR 0058). The policy stays in memory, so it keeps every day off
+  // rather than the capped set a stored Work Item schedule holds.
   return {
     workingCalendar: {
       workingWeekdays: workspacePolicy.workingWeekdays,
