@@ -201,10 +201,9 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
     try {
       const body = await readJsonBody(c)
       const adjustment = readAdjustment(body)
-      const expectedValue: unknown = readRecord(body).expectedCalendar
-      const expectedCalendar = expectedValue === undefined ? undefined : readWorkspaceCalendarSettings(expectedValue)
-      if (expectedValue !== undefined && !expectedCalendar) {
-        throw invalidRequest('expectedCalendar is not valid Workspace calendar settings.')
+      const expectedCalendar = readWorkspaceCalendarSettings(readRecord(body).expectedCalendar)
+      if (!expectedCalendar) {
+        throw invalidRequest('expectedCalendar must be the previewed Workspace calendar settings.')
       }
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)

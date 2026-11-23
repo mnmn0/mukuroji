@@ -132,10 +132,11 @@ export type ApplyWorkspaceWorkCalendarInput = {
   /** How Work Items that follow the Workspace calendar keep their dates. */
   adjustment: WorkCalendarAdjustment
   /**
-   * Saved Workspace calendar settings the caller previewed. When they no longer match the saved
-   * settings, nothing is rewritten and the apply fails with a conflict.
+   * Saved Workspace calendar settings the caller previewed. Required, so every apply rewrites only
+   * what was previewed: when they no longer match the saved settings, nothing is rewritten and the
+   * apply fails with a conflict.
    */
-  expectedCalendar?: WorkspaceCalendarSettings
+  expectedCalendar: WorkspaceCalendarSettings
 }
 
 /** Body of `POST /api/workspace/work-calendar/preview`. */

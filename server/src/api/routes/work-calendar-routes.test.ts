@@ -334,7 +334,10 @@ test('applies the saved Workspace calendar only to Work Items whose rules differ
       },
     },
   ])
-  const response = await request('/api/workspace/work-calendar/apply', 'POST', { adjustment: 'keep-duration' })
+  const response = await request('/api/workspace/work-calendar/apply', 'POST', {
+    adjustment: 'keep-duration',
+    expectedCalendar: DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  })
   expect(response.status).toBe(200)
   const result = await response.json() as WorkCalendarChangeResult
   // A Workspace change leaves rows without a calendar source alone.

@@ -244,14 +244,12 @@ export class InMemoryWorkCalendarStore implements WorkCalendarStore {
   /**
    * Creates the store.
    *
-   * @param holdsAuthorizationFences - Evaluates the authorization fences of a save. The authorization
-   *   rows live in DynamoDB, which this store cannot read, so by default every fence holds; a test
-   *   injects a check to stand in for the transaction's condition checks.
+   * @param holdsAuthorizationFences - Evaluates the authorization fences of a save, standing in for
+   *   the transaction's condition checks. The authorization rows live in DynamoDB, which this store
+   *   cannot read, so every composition states the check it uses.
    */
   constructor(
-    private readonly holdsAuthorizationFences: (
-      fences: readonly WorkCalendarAuthorizationFence[],
-    ) => boolean = () => true,
+    private readonly holdsAuthorizationFences: (fences: readonly WorkCalendarAuthorizationFence[]) => boolean,
   ) {}
 
   /** @inheritdoc */

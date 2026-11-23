@@ -1933,7 +1933,9 @@ export function createTestAppDependencies(): AppDependencies {
       tenantAdministration,
       // Tests have no synced list, so the bundled national holidays are used.
       nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
-      workCalendars: new InMemoryWorkCalendarStore(),
+      // Test authorization does not change during a request, so every fence holds; tests of a
+      // revoked fence build their own store.
+      workCalendars: new InMemoryWorkCalendarStore(() => true),
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },

@@ -69,6 +69,8 @@ export function useWorkCalendarChange(
     const generation = requestGeneration.current
     setIsBusy(true)
     setErrorKey(undefined)
+    // An earlier preview stands for another draft or calendar, so a failed preview must not show it.
+    setImpact(undefined)
     try {
       const previewed = await previewWorkCalendarChange(accessToken, teamId, input)
       if (generation === requestGeneration.current) setImpact(previewed)

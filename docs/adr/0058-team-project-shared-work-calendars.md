@@ -116,7 +116,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   - タスク詳細で個別に決めた規則も `calendarSource` を持たないので、旧来の Work Item と見分けられない。
     その規則が変更前のカレンダーとまったく同じなら、Team・Project の変更で取り込まれる（個別の規則を区別して残す値は持たない。
     既存の行を見分ける手段が無く、移行できないため）。
-  - Workspace の apply は、プレビューした保存済みの設定（`expectedCalendar`）が今の設定と違えば何も書き換えずに 409 を返す。
+  - Workspace の apply は、プレビューした保存済みの設定（必須の `expectedCalendar`。省くと 400）が今の設定と違えば何も書き換えずに 409 を返す。
   - 日程 dependency の伝播は従来どおり暦日の lag で動かす。critical path は lag を稼働日の差として足す。
   - カレンダーの変更による日程の書き換えは日程 dependency を伝播させず、依存先の確認も求めない。
     書き換えで dependency の制約を満たさなくなった Work Item は、Planning の派生 summary の constraint conflict として表示される
