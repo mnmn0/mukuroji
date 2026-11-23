@@ -9,9 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(548)
-  expect(new Set(inventory).size).toBe(544)
-  expect(inventory).toContain('POST /api/notifications/bulk')
+  expect(inventory).toHaveLength(551)
+  expect(new Set(inventory).size).toBe(547)
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
@@ -117,6 +116,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/time-periods')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/close')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/reopen')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-tracking/settings')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-rate-card')
+  expect(inventory).toContain('PUT /api/teams/:teamId/time-rate-card')
   expect(inventory).toContain('POST /api/teams/:teamId/time-entries/:entryId/return')
   expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
@@ -143,6 +145,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '7c6029b1445d6fc21136a7927e9083b7136c66a5fa053bf5d3922b704639eca7',
+    '4f3038ad1a266f97d8f69a4a5c9ce8897f54de1a886bf67c9db8eb491c7985c8',
   )
 })
