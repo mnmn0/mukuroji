@@ -36,12 +36,13 @@ import {
   type WorkItemDuplicateDraft,
   type WorkItemTemplate,
 } from '../model/workItemDuplicate'
-import {
-  createNewAcceptanceCriterionDraftRows,
-  readAcceptanceCriteriaDraftSubmission,
-} from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
-import type { AcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
+import {
+  createNewWorkItemAcceptanceCriteriaDraft,
+  keepInheritedAcceptanceCriteria,
+  type AcceptanceCriteriaDraft,
+} from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemTemplatePicker } from './WorkItemTemplatePicker'
 
 /**
@@ -102,9 +103,7 @@ export function CreateIssuePanel({
   const formId = useId()
   const draftCriteria = duplicateDraft?.acceptanceCriteria ?? []
   const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState<AcceptanceCriteriaDraft>(() =>
-    draftCriteria.length > 0
-      ? { rows: createNewAcceptanceCriterionDraftRows(draftCriteria), nextRowNumber: draftCriteria.length + 1 }
-      : { nextRowNumber: 1 })
+    createNewWorkItemAcceptanceCriteriaDraft(draftCriteria))
   const [selectedProjectId, setSelectedProjectId] = useState(
     resolveInitialProjectId(projects, canCreateUnassignedIssue, duplicateDraft?.assignedProjectId),
   )
@@ -386,7 +385,12 @@ export function CreateIssuePanel({
         ) : null}
         <WorkItemAcceptanceCriteriaEditor
           criteria={undefined}
-          draftState={{ draft: acceptanceCriteriaDraft, setDraft: setAcceptanceCriteriaDraft }}
+          draftState={{
+            draft: acceptanceCriteriaDraft,
+            // Canceling an edit restores the criteria the draft started with.
+            setDraft: (update) => setAcceptanceCriteriaDraft((current) =>
+              keepInheritedAcceptanceCriteria(typeof update === 'function' ? update(current) : update, draftCriteria)),
+          }}
           formId={formId}
           locale={locale}
         />

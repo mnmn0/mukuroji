@@ -31,12 +31,13 @@ import {
   type WorkItemTemplate,
 } from '../../issues/model/workItemDuplicate'
 import { WorkItemTemplatePicker } from '../../issues/ui/WorkItemTemplatePicker'
-import {
-  createNewAcceptanceCriterionDraftRows,
-  readAcceptanceCriteriaDraftSubmission,
-} from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
-import type { AcceptanceCriteriaDraft } from '../../work-items/ui/useAcceptanceCriteriaDraft'
+import {
+  createNewWorkItemAcceptanceCriteriaDraft,
+  keepInheritedAcceptanceCriteria,
+  type AcceptanceCriteriaDraft,
+} from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import {
   resolveTaskPriority,
   taskPriorities,
@@ -146,9 +147,7 @@ export function CreateTaskPanel({
   const duplicateDraft = context?.duplicate
   const draftCriteria = duplicateDraft?.acceptanceCriteria ?? []
   const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState<AcceptanceCriteriaDraft>(() =>
-    draftCriteria.length > 0
-      ? { rows: createNewAcceptanceCriterionDraftRows(draftCriteria), nextRowNumber: draftCriteria.length + 1 }
-      : { nextRowNumber: 1 })
+    createNewWorkItemAcceptanceCriteriaDraft(draftCriteria))
   const duplicatedContributors = duplicateDraft?.contributorAssignments ?? []
   const [carriesContributors, setCarriesContributors] = useState(true)
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
@@ -765,7 +764,9 @@ export function CreateTaskPanel({
               draft: acceptanceCriteriaDraft,
               setDraft: (update) => {
                 markDirty()
-                setAcceptanceCriteriaDraft(update)
+                // Canceling an edit restores the criteria the draft started with.
+                setAcceptanceCriteriaDraft((current) =>
+                  keepInheritedAcceptanceCriteria(typeof update === 'function' ? update(current) : update, draftCriteria))
               },
             }}
             formId="create-task-form"
