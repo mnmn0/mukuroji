@@ -11,11 +11,14 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
   type EnterpriseIdentitySnapshot,
+  type EnterprisePermissionId,
   type EnterpriseSecurityPolicy,
 } from '@mukuroji/contracts'
 import {
   cleanupDeletedFileProjection,
   authorizeNotificationDelivery,
+  isCurrentPlanningMilestoneNotification,
+  type PlanningMilestoneNotificationRevalidator,
   createNotificationDeliveryAuthorizationCache,
   createCuratedContextSearchParentCondition,
   createDynamoBatchItemFailure,
@@ -2731,6 +2734,167 @@ describe('collaboration projection pure helpers', () => {
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
+  })
+
+  test('tells the current watchers who can read a Milestone that it was completed', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const watcherKeys = ['watcher@example.com', 'editor@example.com', 'outsider@example.com']
+    let watching = new Set(watcherKeys)
+    const currentMilestone = {
+      workspaceId: 'workspace-1', recordKey: 'ENTITY#beta-launch', entryType: 'planning-entity',
+      id: 'beta-launch', type: 'milestone', teamId: 'core', projectId: 'platform',
+    }
+    let milestone: Record<string, unknown> | undefined = currentMilestone
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'watcher@example.com', role: 'viewer' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'editor@example.com', role: 'member' },
+    ]
+    const entityKey = 'workspace-1#planning-entity#beta-launch'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        const table = command.input.TableName
+        const recordKey = String(command.input.Key?.recordKey)
+        if (table === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        if (table === 'PLANNING_TABLE_NAME') {
+          return recordKey === 'ENTITY#beta-launch' ? { Item: milestone, $metadata: {} } : { $metadata: {} }
+        }
+        if (table === 'COLLABORATION_TABLE_NAME') {
+          const memberKey = recordKey.slice('WATCHER#'.length)
+          return command.input.Key?.entityKey === entityKey && watching.has(memberKey)
+            ? { Item: { entityKey, recordKey, entryType: 'watcher', memberKey, state: 'subscribed', updatedAt: '2026-07-12T11:00:00.000Z' }, $metadata: {} }
+            : { $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') {
+          return {
+            Items: command.input.ExpressionAttributeValues?.[':entityKey'] === entityKey
+              ? [...watching].map((memberKey) => ({ entityKey, recordKey: `WATCHER#${memberKey}`, entryType: 'watcher', memberKey, state: 'subscribed' }))
+              : [],
+            $metadata: {},
+          }
+        }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') return { Items: directory, $metadata: {} }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    const planningMilestones: PlanningMilestoneNotificationRevalidator = {
+      async readCurrentMilestoneScope(workspaceId, entityId) {
+        if (workspaceId !== 'workspace-1' || entityId !== 'beta-launch' || !milestone) return undefined
+        if (milestone.archivedAt !== undefined) return undefined
+        return { teamId: String(milestone.teamId), projectId: String(milestone.projectId) }
+      },
+      isWatching: async (workspaceId, entityId, memberKey) =>
+        workspaceId === 'workspace-1' && entityId === 'beta-launch' && watching.has(memberKey),
+    }
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => createRealtimeEnterpriseSnapshot() },
+      planningMilestones,
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'planning-entity.milestone-completed' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'planning-entity' }, entityId: { S: 'beta-launch' }, action: { S: 'updated' },
+        occurredAt: { S: '2026-07-12T12:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'editor@example.com' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
+          deepLink: { S: '/planning/timeline?entityId=beta-launch' }, notificationTitle: { S: 'Beta launch' },
+          notificationCandidates: { L: [] },
+        } },
+      } },
+    })
+    const projected = (eventId: string) => notifications.filter((item) => item.eventId === eventId).map((item) => item.recipientMemberKey)
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('completed')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      // The editor is not told about their own change, and a watcher without Project access is skipped.
+      expect(projected('completed')).toEqual(['watcher@example.com'])
+      expect(notifications[0]).toMatchObject({
+        entityId: 'beta-launch', reasons: ['watcher'], deepLink: '/planning/timeline?entityId=beta-launch', title: 'Beta launch',
+      })
+
+      // A Milestone moved to another Project, or archived, since the change is not reported.
+      milestone = { ...currentMilestone, projectId: 'other' }
+      await processCollaborationProjectionBatch({ Records: [record('moved')] }, dependencies)
+      milestone = { ...currentMilestone, archivedAt: '2026-07-12T12:30:00.000Z' }
+      await processCollaborationProjectionBatch({ Records: [record('archived')] }, dependencies)
+      milestone = undefined
+      await processCollaborationProjectionBatch({ Records: [record('deleted')] }, dependencies)
+      expect([projected('moved'), projected('archived'), projected('deleted')]).toEqual([[], [], []])
+      milestone = currentMilestone
+
+      // Slack and Email recheck the Milestone and the watch right before they send.
+      const cache = createNotificationDeliveryAuthorizationCache()
+      cache.expiresAt = Date.now() + 60_000
+      cache.directories.set('workspace-1', Promise.resolve(directory))
+      const queued = createProjectionEvent({
+        eventType: 'planning-entity.milestone-completed', entityId: 'beta-launch', teamId: 'core', projectId: 'platform',
+        notificationCandidates: [{ memberKey: 'watcher@example.com', reason: 'watcher' }],
+      })
+      const identity = dependencies.enterpriseIdentity
+      /** Runs the Milestone recheck and the shared recipient authorization, as the senders do. */
+      const deliverable = async () =>
+        await isCurrentPlanningMilestoneNotification(queued, planningMilestones, 'watcher@example.com') &&
+        await authorizeNotificationDelivery(queued, 'watcher@example.com', identity, cache)
+      expect(await deliverable()).toBe(true)
+      watching = new Set(['editor@example.com'])
+      expect(await deliverable()).toBe(false)
+      watching = new Set(watcherKeys)
+      milestone = { ...currentMilestone, projectId: 'other' }
+      expect(await deliverable()).toBe(false)
+      milestone = currentMilestone
+      // Without the reader, Milestone notifications fail closed; other events are untouched.
+      expect(await isCurrentPlanningMilestoneNotification(queued, undefined, 'watcher@example.com')).toBe(false)
+      expect(await isCurrentPlanningMilestoneNotification({ ...queued, eventType: 'comment.created' }, undefined)).toBe(true)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('asks Milestone notification recipients for Planning read access', () => {
+    const event = createProjectionEvent({
+      eventType: 'planning-entity.milestone-rescheduled', entityId: 'beta-launch', teamId: 'core', projectId: 'platform',
+      notificationCandidates: [{ memberKey: 'watcher@example.com', reason: 'watcher' }],
+    })
+    expect(createSubscribedWatcherScopes(event)).toEqual([
+      { entityKey: 'workspace-1#planning-entity#beta-launch', reason: 'watcher' },
+    ])
+    expect(createSubscribedWatcherScopes({ ...event, entityId: undefined })).toEqual([])
+    const snapshot = (permissions: EnterprisePermissionId[]) => createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:reader', name: 'Reader', permissions,
+        guestAssignable: false, revision: 1, createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'reader', principalKind: 'member',
+        principalId: 'watcher@example.com', roleId: 'custom:reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }],
+    })
+    expect(resolveEnterpriseNotificationAuthorization(event, 'watcher@example.com', 'member', snapshot(['planning.read']), 'core', [], true))
+      .toEqual({ authoritative: true, allowed: true })
+    expect(resolveEnterpriseNotificationAuthorization(event, 'watcher@example.com', 'member', snapshot(['documents.read']), 'core', [], true))
+      .toEqual({ authoritative: true, allowed: false })
   })
 
   test('projects a timesheet reminder for a member whose Project access is an Enterprise role only', async () => {

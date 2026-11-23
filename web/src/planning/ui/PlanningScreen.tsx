@@ -78,6 +78,7 @@ import {
   PlanningEntityDetailTabs,
   type PlanningEntityDetailTabsLabels,
 } from './PlanningEntityDetailTabs'
+import type { PlanningMilestoneWatchLabels } from './PlanningMilestoneWatch'
 import type { PlanningEntityActivityLabels } from './PlanningEntityActivityPanel'
 import {
   collectPlanningOwnerCandidates,
@@ -228,6 +229,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   entityDetailTabs: PlanningEntityDetailTabsLabels
   /** Selected entity の活動 tab の文言です。 */
   entityActivity: PlanningEntityActivityLabels
+  /** 選択中の Milestone の watch 操作の文言です。 */
+  milestoneWatch: PlanningMilestoneWatchLabels
   /** Cycle のベースラインの文言です。 */
   cycleBaseline: CycleScheduleBaselineLabels
   /** Portfolio section の見出しです。 */
@@ -430,6 +433,8 @@ export type PlanningScreenProps = {
   renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** 選択中の entity の活動 tab を描きます。省略すると tab を出さず編集欄だけを表示します。 */
   renderEntityActivity?: (entity: PlanningEntity) => ReactNode
+  /** 選択中の Milestone の watch 操作を編集欄の上に描きます。省略すると表示しません。 */
+  renderMilestoneWatch?: (milestone: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
@@ -561,6 +566,7 @@ export function PlanningScreen({
   renderCycleBaseline,
   renderCycleBurndown,
   renderEntityActivity,
+  renderMilestoneWatch,
   snapshot,
   updateCollaboration,
   updateBaselineDelays,
@@ -897,13 +903,18 @@ export function PlanningScreen({
                       : undefined}
                   />
                 )
-                return renderEntityActivity ? (
+                const watch = renderMilestoneWatch && selectedEntity.type === 'milestone' &&
+                  !selectedEntity.archivedAt
+                  ? renderMilestoneWatch(selectedEntity)
+                  : null
+                const detail = renderEntityActivity ? (
                   <PlanningEntityDetailTabs
                     details={editor}
                     labels={labels.entityDetailTabs}
                     renderActivity={() => renderEntityActivity(selectedEntity)}
                   />
                 ) : editor
+                return watch ? <div className="grid gap-3">{watch}{detail}</div> : detail
               })() : null}
               <CreateEntityPanel
                 canCreateInScope={canCreateInScope}

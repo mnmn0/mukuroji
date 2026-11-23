@@ -600,6 +600,8 @@ export const workspaceMessages = {
   'workspace.inbox.event.timesheet': '工数の提出',
   'workspace.inbox.reason.timesheet': '未提出の工数',
   'workspace.inbox.event.weeklyReport': '週報の提出',
+  'workspace.inbox.event.milestoneCompleted': 'Milestone の完了',
+  'workspace.inbox.event.milestoneRescheduled': 'Milestone の予定変更',
   'workspace.inbox.reason.weeklyReport': '未提出の週報',
   'workspace.inbox.reason.weeklyReportEscalation': 'メンバーの週報が未提出',
   'workspace.settings.notifications.remindersTitle': 'リマインドの日数',

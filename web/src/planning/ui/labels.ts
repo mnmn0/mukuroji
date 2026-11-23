@@ -178,6 +178,15 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       activity: t('planning.detail.activity'),
     },
     entityActivity: createPlanningEntityActivityLabels(t, locale),
+    milestoneWatch: {
+      watch: t('planning.milestoneWatch.watch'),
+      watching: t('planning.milestoneWatch.watching'),
+      watcherCount: (count: number) =>
+        t('planning.milestoneWatch.watcherCount').replace('{count}', count.toLocaleString(locale)),
+      description: t('planning.milestoneWatch.description'),
+      error: t('planning.milestoneWatch.error'),
+      retry: t('planning.action.retry'),
+    },
     cycleBaseline: {
       title: t('planning.cycle.baseline.title'),
       hint: t('planning.cycle.baseline.hint'),
@@ -333,6 +342,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     exportHistory: t('planning.action.exportHistory'),
     addComment: t('planning.action.addComment'),
     commentPlaceholder: t('planning.field.commentPlaceholder'),
+    mentionSuggestions: t('planning.field.mentionSuggestions'),
     reaction: t('planning.field.reaction'),
     watcherCount: (count) => t('planning.field.watcherCount').replace(
       '{count}',

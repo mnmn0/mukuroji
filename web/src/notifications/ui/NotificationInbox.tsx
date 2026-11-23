@@ -643,6 +643,12 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.startsWith('weekly-report.')) {
     return 'workspace.inbox.event.weeklyReport'
   }
+  if (normalizedEventType === 'planning-entity.milestone-completed') {
+    return 'workspace.inbox.event.milestoneCompleted'
+  }
+  if (normalizedEventType === 'planning-entity.milestone-rescheduled') {
+    return 'workspace.inbox.event.milestoneRescheduled'
+  }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
