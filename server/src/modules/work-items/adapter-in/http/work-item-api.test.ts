@@ -1420,6 +1420,44 @@ test('summarizes accessible Work Items per Team and Project', async () => {
   ])
 })
 
+test('labels Work Item assignees with the name on their Workspace member row', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+  })
+
+  const summary = await app.request('/api/work-items/summary', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const list = await app.request('/api/work-items?limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(summary.status).toBe(200)
+  expect((await summary.json()).buckets[0].assignees).toEqual([{ id: 'sato@example.com', label: '佐藤 改名' }])
+  expect(list.status).toBe(200)
+  const assigned = (await list.json()).workItems
+    .filter((workItem: { assigneeUserId?: string }) => workItem.assigneeUserId === 'sato@example.com')
+  expect(assigned.length).toBeGreaterThan(0)
+  expect(assigned.every((workItem: { assigneeName?: string }) => workItem.assigneeName === '佐藤 改名')).toBe(true)
+})
+
+test('falls back to the assignee email when the Workspace member cleared the name', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': null },
+  })
+
+  const summary = await app.request('/api/work-items/summary', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(summary.status).toBe(200)
+  expect((await summary.json()).buckets[0].assignees).toEqual([
+    { id: 'sato@example.com', label: 'sato@example.com' },
+  ])
+})
+
 test('creates a team-owned issue after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 

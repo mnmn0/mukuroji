@@ -299,6 +299,7 @@ import {
 } from '../shared/work-item-actual-dates'
 import {
   projectAccessAllows,
+  readWorkspaceMemberNames,
   requireActiveWorkspaceAssignee,
   type TeamPermissionContext,
   validateRequestRoutingTarget,
@@ -2422,8 +2423,8 @@ async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) 
   } satisfies CognitoUsersResponse
 }
 
-async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
-  const profiles = await readIssueAssigneeProfiles(response.issues)
+async function hydrateTeamIssuesResponse(response: TeamIssuesResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.issues)
 
   return {
     ...response,
@@ -2431,8 +2432,8 @@ async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
   } satisfies TeamIssuesResponse
 }
 
-async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
-  const profiles = await readIssueAssigneeProfiles(response.issues)
+async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.issues)
 
   return {
     ...response,
@@ -2441,7 +2442,7 @@ async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
 }
 
 async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId: string) {
-  const profiles = await readIssueAssigneeProfiles(response.workItems)
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.workItems)
   const hydratedItems = response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles))
   const scopes = hydratedItems.map((workItem) => ({
     workspaceId: directoryId,
@@ -2505,7 +2506,7 @@ async function hydrateTeamIssueDetailResponse(
   response: TeamIssueDetailResponse,
   directoryId: string,
 ) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
   const issue = hydrateTeamIssue(response.issue, profiles)
   const approvalSummary = await readWorkItemApprovalSummary(directoryId, issue)
 
@@ -2528,16 +2529,16 @@ async function readWorkItemApprovalSummary(directoryId: string, workItem: TeamIs
   return hasApprovalSummaryContent(summary) ? summary : undefined
 }
 
-async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
 
   return {
     issue: hydrateTeamIssue(response.issue, profiles),
   } satisfies CreateTeamIssueResponse
 }
 
-async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
 
   return {
     issue: hydrateTeamIssue(response.issue, profiles),
@@ -3213,8 +3214,15 @@ function compareWorkItemScheduleEvaluationRevisions(
   return createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
 }
 
-async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
-  return readAssigneeProfiles(issues.map((issue) => issue.assigneeUserId).filter(isDefined))
+/**
+ * Reads the assignee profiles of Work Items.
+ *
+ * @param directoryId - Workspace ID, whose member rows hold the display names.
+ * @param issues - Work Items whose assignees to read.
+ * @returns Profiles keyed by assignee ID.
+ */
+async function readIssueAssigneeProfiles(directoryId: string, issues: TeamIssueResponseItem[]) {
+  return readAssigneeProfiles(directoryId, issues.map((issue) => issue.assigneeUserId).filter(isDefined))
 }
 
 /**
@@ -3223,7 +3231,7 @@ async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
  * @param assigneeIds - Assignee user IDs, possibly repeated.
  * @returns Profiles keyed by assignee ID.
  */
-async function readAssigneeProfiles(assigneeIds: readonly string[]) {
+async function readAssigneeProfiles(directoryId: string, assigneeIds: readonly string[]) {
   const profiles = new Map<string, CognitoUserProfile>()
   const userIds = new Set(assigneeIds.filter(Boolean))
 
@@ -3241,7 +3249,20 @@ async function readAssigneeProfiles(assigneeIds: readonly string[]) {
       }
     },
   )
+  if (profiles.size === 0) return profiles
 
+  // Members rename themselves on their Workspace member row (ADR 0074), so Cognito keeps the name
+  // from sign-up. The member row's name wins, and a cleared name falls back to the email.
+  const workspaceNames = await readWorkspaceMemberNames(directoryId)
+  for (const [userId, profile] of profiles) {
+    const key = profile.email.trim().toLowerCase()
+    if (!workspaceNames.has(key)) continue
+    const name = workspaceNames.get(key)
+    const next: CognitoUserProfile = { ...profile }
+    if (name === undefined) delete next.name
+    else next.name = name
+    profiles.set(userId, next)
+  }
   return profiles
 }
 
@@ -3943,7 +3964,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           occurredAt: triageOccurredAt,
           transactItems: triageAcceptance.transactItems,
         },
-      ))
+      ), principal.directoryId)
       await projectWorkItemSearchDocumentBestEffort(
         principal.directoryId,
         created.issue,
@@ -4330,6 +4351,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
       const summary = await summarizeAccessibleWorkItems(principal, contexts, new Date())
       const profiles = await readAssigneeProfiles(
+        principal.directoryId,
         summary.buckets.flatMap((bucket) => bucket.assignees.map((assignee) => assignee.id)),
       )
       return c.json({
@@ -4649,7 +4671,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         const hydrated = await hydrateTeamIssuesResponse({
           teamId: context.team.id,
           issues: page.issues,
-        })
+        }, principal.directoryId)
         return c.json({
           teamId: hydrated.teamId,
           issues: hydrated.issues,
@@ -4664,7 +4686,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           scope,
           isReadable,
         ),
-      }))
+      }, principal.directoryId))
     } catch (error) {
       if (error instanceof CognitoServiceError) {
         return toCognitoDirectoryErrorResponse(c, error)
@@ -4744,7 +4766,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),
-        ),
+        ), principal.directoryId,
       )
       await projectWorkItemSearchDocumentBestEffort(
         principal.directoryId,
@@ -5262,7 +5284,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...actualDateRequest.correction,
             expectedRevision,
           }),
-        ),
+        ), principal.directoryId,
       )
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,
@@ -6038,7 +6060,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
 
       if (pageQuery.paged) {
         const page = await readScopedWorkItemPage(principal.directoryId, scope, pageQuery)
-        const hydrated = await hydrateProjectIssuesResponse({ projectId, issues: page.issues })
+        const hydrated = await hydrateProjectIssuesResponse({ projectId, issues: page.issues }, principal.directoryId)
         return c.json({
           projectId,
           issues: hydrated.issues,
@@ -6050,7 +6072,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const response = await hydrateProjectIssuesResponse({
         projectId,
         issues: await readScopedWorkItemsWithinLegacyLimit(principal.directoryId, scope),
-      })
+      }, principal.directoryId)
       return c.json({
         ...response,
         canReadCustomerImpact,

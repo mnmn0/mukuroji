@@ -1446,6 +1446,8 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Display names on Workspace member rows that differ from Cognito; null clears the name. */
+    workspaceMemberNames?: Record<string, string | null>
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
     /** Custom fields returned by the resolved Work Item configuration. */
@@ -1904,7 +1906,9 @@ function configureFakeProjectClients(
     memberKey,
     email: memberKey,
     // Members start with the Cognito name they signed up with, as reconciliation copies it.
-    name: createFakeCognitoProfile(memberKey).name,
+    name: options.workspaceMemberNames && memberKey in options.workspaceMemberNames
+      ? options.workspaceMemberNames[memberKey] ?? undefined
+      : createFakeCognitoProfile(memberKey).name,
     role: memberKey === 'demo@example.com'
       ? workspaceRole
       : options.guestWorkspaceMemberKeys?.includes(memberKey)
