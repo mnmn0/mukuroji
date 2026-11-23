@@ -816,16 +816,23 @@ export async function createProjectTemplatePlanningEntities(
     const authorizationConditionChecks = await createProjectTemplateAuthorizationConditionChecks(principal)
     const workItemState = await readPlanningWorkItemState(scopedPrincipal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
-    // The parent was checked before the Project was created; check it again on the graph the
-    // writes are guarded by, so a parent moved or archived since is a conflict to retry.
-    try {
-      await requireProjectTemplatePlanningParent(principal, snapshot.entities, target.teamId, parentId)
-    } catch (error) {
-      if (error instanceof AutomationError || (error instanceof PlanningError && error.status < 500)) {
-        throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    /**
+     * Checks the parent again on a snapshot the writes are guarded by, so a parent moved or
+     * archived since the Project was created is a conflict to retry.
+     *
+     * @param current - The Planning snapshot whose revision the next write expects.
+     */
+    const requireParentOnSnapshot = async (current: typeof snapshot): Promise<void> => {
+      try {
+        await requireProjectTemplatePlanningParent(principal, current.entities, target.teamId, parentId)
+      } catch (error) {
+        if (error instanceof AutomationError || (error instanceof PlanningError && error.status < 500)) {
+          throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+        }
+        throw error
       }
-      throw error
     }
+    await requireParentOnSnapshot(snapshot)
     /** Whether an existing entity was archived or moved out of the application's scope. */
     const isOutOfScope = (entity: PlanningEntity) => entity.archivedAt !== undefined ||
       entity.teamId !== scope.teamId ||
@@ -884,6 +891,8 @@ export async function createProjectTemplatePlanningEntities(
         // unless it has been archived or moved since, as for one found in the first snapshot.
         if (!(error instanceof PlanningError) || error.code !== 'PlanningEntityExists') throw error
         snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
+        // Later writes expect this revision, so the parent has to hold on it as well.
+        await requireParentOnSnapshot(snapshot)
         const reread = snapshot.entities.find((candidate) => candidate.id === id)
         if (reread === undefined || isOutOfScope(reread)) archivedIndexes.add(entity.index)
         existingCount += 1

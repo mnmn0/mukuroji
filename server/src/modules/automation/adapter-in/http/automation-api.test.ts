@@ -3781,6 +3781,100 @@ test('resumes Project template Planning after its Phase moved, leaving the Phase
   ])
 })
 
+test('treats a Planning parent moved during an existing-entity re-read as a conflict to retry', async () => {
+  const template = createProjectTemplateWithPlanning()
+  // An archived Phase followed by a top-level Milestone, so Planning goes on after the re-read.
+  template.payload = {
+    nameJa: '計画付きプロジェクト',
+    tone: 'blue',
+    phases: [{ title: '準備', startOffsetWorkingDays: 0, durationWorkingDays: 5 }],
+    milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+  }
+  const now = '2026-07-16T00:00:00.000Z'
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_parent_moved',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = [
+    { id: 'other-project', name: '別プロジェクト', tone: 'blue' },
+  ]
+  configureFakeProjectClients(true, {
+    teamProjects,
+    projectAccesses: [
+      { projectId: 'application_project_parent_moved', role: 'manager', teamId: 'core-team' },
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+    ],
+    async projectCreateHook() {
+      teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+    },
+  })
+  configureProjectTemplatePlanningFakes(planning)
+  // The Phase's ID is taken by an archive, and the roadmap moves into a Project meanwhile.
+  const create = planning.create.bind(planning)
+  planning.create = async (...args) => {
+    if (args[1].id === 'application_project_parent_moved_plan_0') {
+      const current = await planning.get('user#demo@example.com', { workItems: [] })
+      await planning.move(
+        'user#demo@example.com',
+        'roadmap-1',
+        { parentId: 'portfolio-1', teamId: 'core-team', projectId: 'other-project', expectedRevision: current.revision },
+        { workItems: [] },
+      )
+      throw new PlanningError(409, 'PlanningEntityExists', 'A Planning entity with this ID already exists.')
+    }
+    return create(...args)
+  }
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
+        application = { ...candidate, status: 'running', revision: candidate.revision + 1, runnerLeaseExpiresAt: leaseExpiresAt }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+
+  const response = await app.request(`/api/automation/templates/${template.id}/applications`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'apply-project-parent-moved',
+    },
+    body: JSON.stringify({ target: application.target }),
+  })
+
+  expect(await response.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(application.status).toBe('pending')
+  // The top-level Milestone was not created under the moved roadmap.
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities.some((entity) => entity.id.startsWith('application_project_parent_moved_'))).toBe(false)
+})
+
 test('refuses a new Project template application whose accepted preview is stale', async () => {
   const template = createProjectTemplateWithPlanning()
   const planning = new InMemoryPlanningClient()
