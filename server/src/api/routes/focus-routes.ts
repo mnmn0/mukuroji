@@ -21,7 +21,7 @@ import {
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError, type ProjectDirectoryResponse } from '../../modules/directory'
 import { getConfiguredDynamoDbEndpoint } from '../../modules/audit/audit'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
@@ -2183,8 +2183,11 @@ type FocusProjectLogRead = {
 }
 
 /**
- * Reads the open Project log entries the viewer owns, from Projects the viewer can see and has a
- * Project role in, since an owner must be a member of the Project.
+ * Reads the open Project log entries the viewer owns, from every Project whose log the viewer may
+ * read. Enterprise access is evaluated as `projects.read` on each Project of the directory, since
+ * the Project accesses of a Focus request come from its own `work-items.read` and would leave out
+ * a Project granted only `projects.read`. Other viewers keep their Project roles, as an owner
+ * must be a member of the Project.
  *
  * Every such Project is read, a few at a time. A log that cannot be read is reported as an
  * incomplete result instead of an empty one, so the rest of the Focus queue still loads and the
@@ -2196,20 +2199,12 @@ type FocusProjectLogRead = {
 async function readFocusProjectLogSources(
   principal: WorkspacePrincipal,
 ): Promise<FocusProjectLogRead> {
-  const directory = await filterReadableProjectDirectory(
-    principal,
-    await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja'),
-  )
-  const accesses = (await getEffectiveProjectAccessList(principal))
-    .filter((access) => projectAccessAllows(access, 'viewer'))
-  const projects = directory.teams.flatMap((team) => team.projects
-    .filter((project) => accesses.some((access) =>
-      access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
-    ))
-    .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
-    // Focus itself only needs `work-items.read`, while the Project log needs `projects.read`, as
-    // its own GET does, so Enterprise access is checked again for each Project.
-    .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
+  const fullDirectory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const projects = principal.enterpriseAuthorizationEvaluation !== undefined && !principal.isSystemAdmin
+    ? fullDirectory.teams.flatMap((team) => team.projects
+      .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+      .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
+    : await readLegacyFocusProjectLogProjects(principal, fullDirectory)
   let incomplete = false
   const sources = await mapInOrderWithConcurrency(projects, FOCUS_PROJECT_LOG_READ_CONCURRENCY, async (project) => {
     try {
@@ -2229,6 +2224,29 @@ async function readFocusProjectLogSources(
     }
   })
   return { sources: sources.flat(), incomplete }
+}
+
+/**
+ * Lists the Projects whose log a viewer without Enterprise authorization may read: Projects of the
+ * visible directory where the viewer holds a Project role.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param fullDirectory - Whole Project directory of the Workspace.
+ * @returns Team, Project, and Project name of each readable Project log.
+ */
+async function readLegacyFocusProjectLogProjects(
+  principal: WorkspacePrincipal,
+  fullDirectory: ProjectDirectoryResponse,
+): Promise<Array<Omit<FocusProjectLogSource, 'entry'>>> {
+  const directory = await filterReadableProjectDirectory(principal, fullDirectory)
+  const accesses = (await getEffectiveProjectAccessList(principal))
+    .filter((access) => projectAccessAllows(access, 'viewer'))
+  return directory.teams.flatMap((team) => team.projects
+    .filter((project) => accesses.some((access) =>
+      access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
+    ))
+    .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+    .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
 }
 
 /**
