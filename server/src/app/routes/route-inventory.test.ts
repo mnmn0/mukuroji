@@ -9,8 +9,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(553)
-  expect(new Set(inventory).size).toBe(549)
+  expect(inventory).toHaveLength(554)
+  expect(new Set(inventory).size).toBe(550)
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/raid-log')
+  expect(inventory).toContain('POST /api/client-errors')
+  expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
@@ -97,7 +100,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/me')
   expect(inventory).toContain('GET /api/v1/teams')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/members')
-  expect(inventory).toContain('GET /api/v1/projects/:projectId/raid-log')
   expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
@@ -147,6 +149,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '7252a6a68d841233799c3990627ae4995fbb06f7431dcbf9a1d0403b2eb97973',
+    '512f43289afa3d67b54e40d90f89f6bb07128dadfbe03636ac7d78dde7c21d0e',
   )
 })
