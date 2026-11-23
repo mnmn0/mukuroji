@@ -178,6 +178,42 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       activity: t('planning.detail.activity'),
     },
     entityActivity: createPlanningEntityActivityLabels(t, locale),
+    cycleBaseline: {
+      title: t('planning.cycle.baseline.title'),
+      hint: t('planning.cycle.baseline.hint'),
+      none: t('planning.cycle.baseline.none'),
+      loading: t('planning.cycle.baseline.loading'),
+      loadError: t('planning.cycle.baseline.loadError'),
+      retry: t('planning.cycle.baseline.retry'),
+      picker: t('planning.cycle.baseline.picker'),
+      option: (name, capturedAt) => {
+        const date = formatPlanningUpdateDate(capturedAt, undefined, locale)
+        return name ? `${name} · ${date}` : date
+      },
+      name: t('planning.cycle.baseline.name'),
+      namePlaceholder: t('planning.cycle.baseline.namePlaceholder'),
+      capture: t('planning.cycle.baseline.capture'),
+      capturing: t('planning.cycle.baseline.capturing'),
+      captureError: t('planning.cycle.baseline.captureError'),
+      committed: (count) => t('planning.cycle.baseline.committed').replace('{count}', String(count)),
+      stillIn: (count) => t('planning.cycle.baseline.stillIn').replace('{count}', String(count)),
+      added: (count) => t('planning.cycle.baseline.added').replace('{count}', String(count)),
+      removed: (count) => t('planning.cycle.baseline.removed').replace('{count}', String(count)),
+      hidden: (count) => t('planning.cycle.baseline.hidden').replace('{count}', String(count)),
+      effortDelta: (minutes) => {
+        if (minutes === 0) return t('planning.cycle.baseline.effortSame')
+        // Below 0.1 h the hours would round to 0, so show minutes to keep a real change visible.
+        if (Math.abs(minutes) < 6) {
+          return t(minutes > 0 ? 'planning.cycle.baseline.effortMoreMinutes' : 'planning.cycle.baseline.effortLessMinutes')
+            .replace('{minutes}', String(Math.abs(minutes)))
+        }
+        const hours = String(Math.round(Math.abs(minutes) / 6) / 10)
+        return t(minutes > 0 ? 'planning.cycle.baseline.effortMore' : 'planning.cycle.baseline.effortLess').replace('{hours}', hours)
+      },
+      slippedTitle: t('planning.cycle.baseline.slippedTitle'),
+      slippedDays: (days) => t('planning.cycle.baseline.slippedDays').replace('{days}', String(days)),
+      slippedNone: t('planning.cycle.baseline.slippedNone'),
+    },
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),
