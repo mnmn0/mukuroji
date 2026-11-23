@@ -375,8 +375,11 @@ export type PlanningUpdateCollaborationController = {
   onExport?: () => void | Promise<void>
   /** Adds a comment to one immutable update. */
   onAddComment?: (updateId: string, bodyMarkdown: string) => void | Promise<void>
-  /** Records the current viewer's reviewer acknowledgement on one unacknowledged update. */
-  onAcknowledge?: (updateId: string) => void | Promise<void>
+  /**
+   * Records the current viewer's reviewer acknowledgement on one unacknowledged update, with the
+   * optional remark as the acknowledgement comment. Rejects when the acknowledgement fails.
+   */
+  onAcknowledge?: (updateId: string, bodyMarkdown?: string) => void | Promise<void>
   /** Toggles one supported reaction on an immutable update. */
   onToggleReaction?: (updateId: string, reaction: string) => void | Promise<void>
 }

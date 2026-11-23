@@ -577,16 +577,21 @@ export function PlanningPage() {
    * Records the current viewer's reviewer acknowledgement as an acknowledgement comment.
    *
    * @param updateId - Immutable update that the viewer acknowledges.
+   * @param bodyMarkdown - Optional reviewer remark; a standard sentence is used without one.
+   * @throws The mutation error after showing it, so the caller keeps the remark.
    */
-  const acknowledgePlanningUpdate = async (updateId: string) => {
+  const acknowledgePlanningUpdate = async (updateId: string, bodyMarkdown?: string) => {
     const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
     if (!accessToken || !selectedUpdateTarget || !update || update.acknowledgement) return
+    const body = bodyMarkdown ?? t('planning.updateHistory.acknowledgeComment')
+    const mentionMemberKeys = extractPlanningUpdateCommentMentions(body)
     const input = {
       acknowledgement: true as const,
-      body: t('planning.updateHistory.acknowledgeComment'),
+      body,
       id: createPlanningClientId('planning-update-acknowledgement'),
       target: selectedUpdateTarget,
       updateVersion: update.version,
+      ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
     }
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
@@ -617,6 +622,7 @@ export function PlanningPage() {
         return
       }
       setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+      throw error
     } finally {
       setIsUpdateCollaborationPending(false)
     }

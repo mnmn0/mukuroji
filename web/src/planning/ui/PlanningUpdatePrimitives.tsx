@@ -1550,17 +1550,6 @@ export function PlanningStatusUpdateLedger({
                         : labels.acknowledgementPending(acknowledgement.reviewerMemberKey)}
                     </span>
                   ) : null}
-                  {acknowledgement && !acknowledgement.acknowledgedAt && onAcknowledge ? (
-                    <button
-                      className="workbench-button-primary min-h-9 px-3"
-                      data-testid="planning-update-acknowledge"
-                      disabled={collaborationIsPending}
-                      onClick={() => void onAcknowledge(update.id)}
-                      type="button"
-                    >
-                      {labels.acknowledge}
-                    </button>
-                  ) : null}
                   <span className="workbench-badge">{labels.immutable}</span>
                 </div>
               </div>
@@ -1682,7 +1671,7 @@ export function PlanningStatusUpdateLedger({
                   ))}
                 </div>
               ) : null}
-              {onAddComment ? (
+              {onAddComment || onAcknowledge ? (
                 <form
                   className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
                   onSubmit={(event) => {
@@ -1691,7 +1680,7 @@ export function PlanningStatusUpdateLedger({
                     const bodyMarkdown = readOptionalText(
                       new FormData(form).get('comment'),
                     )
-                    if (bodyMarkdown) {
+                    if (bodyMarkdown && onAddComment) {
                       void submitPlanningUpdateCommentAndReset(
                         onAddComment,
                         update.id,
@@ -1724,6 +1713,30 @@ export function PlanningStatusUpdateLedger({
                   >
                     {labels.addComment}
                   </button>
+                  {acknowledgement && !acknowledgement.acknowledgedAt && onAcknowledge ? (
+                    <button
+                      className="workbench-button-primary min-h-9 px-3"
+                      data-testid="planning-update-acknowledge"
+                      disabled={
+                        collaborationIsPending ||
+                        collaborationIsLoading ||
+                        Boolean(collaborationErrorMessage)
+                      }
+                      onClick={(event) => {
+                        // The reviewer's remark in the comment box becomes the acknowledgement comment.
+                        const form = event.currentTarget.form
+                        const bodyMarkdown = form
+                          ? readOptionalText(new FormData(form).get('comment'))
+                          : undefined
+                        void Promise.resolve(onAcknowledge(update.id, bodyMarkdown))
+                          .then(() => form?.reset())
+                          .catch(() => undefined)
+                      }}
+                      type="button"
+                    >
+                      {labels.acknowledge}
+                    </button>
+                  ) : null}
                 </form>
               ) : null}
             </article>

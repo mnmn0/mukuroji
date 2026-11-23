@@ -305,6 +305,38 @@ describe('Planning update reviewer acknowledgement', () => {
     expect(markup).toContain('Reviewed · manager@example.com · ')
   })
 
+  test('offers the acknowledge action beside the comment box only on pending reviews', () => {
+    const summary = planningSnapshotFixture.updateTargets.find((candidate) =>
+      candidate.target.type === 'initiative' &&
+      candidate.target.entityId === 'initiative-onboarding'
+    )
+    if (!summary) throw new Error('Missing onboarding update target fixture.')
+    const markup = renderToStaticMarkup(
+      <PlanningStatusUpdateLedger
+        collaboration={{
+          acknowledgementsByUpdateId: {
+            'update-initiative-1': {
+              reviewerMemberKey: 'manager@example.com',
+              acknowledgedAt: '2026-07-09T00:00:00.000Z',
+            },
+            'update-initiative-2': { reviewerMemberKey: 'manager@example.com' },
+          },
+          commentsByUpdateId: {},
+          isLoading: false,
+          isPending: false,
+          onAcknowledge: () => undefined,
+          reactionsByUpdateId: {},
+        }}
+        labels={labels}
+        updateView={createPlanningTargetUpdateView(summary, planningUpdateHistoryFixture)}
+      />,
+    )
+    expect(markup.split('data-testid="planning-update-acknowledge"')).toHaveLength(2)
+    expect(markup.indexOf('name="comment"')).toBeLessThan(
+      markup.indexOf('data-testid="planning-update-acknowledge"'),
+    )
+  })
+
   test('renders no acknowledgement badge without a configured reviewer', () => {
     const summary = planningSnapshotFixture.updateTargets[0]
     if (!summary) throw new Error('Missing update target fixture.')
