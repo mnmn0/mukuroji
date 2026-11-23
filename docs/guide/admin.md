@@ -283,7 +283,7 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 表示されます。既定の deploy では Factory board、Work Item の「エージェントへ引き継ぐ」と Run 履歴も
 表示されず、API は Agent Run 系の操作を `503 SoftwareFactoryNotDeployed` で断ります
 （[`cdk/README.md`](../../cdk/README.md#optional-modules)）。**agent を接続** と自分用 token の発行は off でも使え、
-設定例は Workspace を読むだけの Workspace profile になります。
+設定例は Team を固定しない Workspace profile になります。
 
 - 「リース時間（分）」: agent が作業を確保しておける時間（5〜240分、既定30分）。
   期限切れ後に同じ担当者の別インスタンスが引き継ぐことを許可するかも選べます。

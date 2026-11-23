@@ -63,7 +63,7 @@ export const agentConnectionMessages = {
   'agents.connect.clientNote.kiro': 'Kiro IDE は初回に MUKUROJI_MCP_TOKEN の利用を確認します。許可するか、設定の「Mcp Approved Env Vars」に追加してください。',
   'agents.connect.verifyTitle': '接続を確認',
   'agents.connect.verifyDescription': 'クライアントを再起動し、MCP の一覧に mukuroji-tasks が出ることを確認します（claude mcp get mukuroji-tasks、codex mcp list、Kiro の MCP 一覧）。続けて agent に get_configuration を呼ばせ、担当者があなたになっていれば、get_next_task から自分のタスクに着手できます。',
-  'agents.connect.workspaceProfileNote': 'Software factory が無効な環境なので、Workspace を読む設定（Workspace profile）だけを書きます。Team や Project、Work Item、コメントを読めますが、タスクの着手や Agent Run はできません。',
+  'agents.connect.workspaceProfileNote': 'Software factory が無効な環境なので、Workspace を読む設定（Workspace profile）だけを書きます。Team や Project、Work Item、コメントを読み、Work Item の作成・更新やコメントもできますが、タスクの着手や Agent Run はできません。',
   'agents.connect.verifyWorkspaceDescription': 'クライアントを再起動し、MCP の一覧に mukuroji が出ることを確認します（claude mcp get mukuroji、codex mcp list、Kiro の MCP 一覧）。続けて agent に whoami を呼ばせ、あなたのメールが返れば、list_teams と list_issues で Workspace を読めます。',
   'agents.connect.windowsNote': 'Windows では node が PATH にあることを確認してください。パスの区切りは設定例のとおり \\ のままで構いません。',
   'agents.connect.usageInstanceLabel': 'トークン使用量を送る instance ID（任意）',

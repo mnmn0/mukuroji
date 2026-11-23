@@ -43,6 +43,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   Team を固定せずに `whoami`、`list_teams`、`list_projects`、`list_users`、`list_issue_statuses`、`list_issues`、
   `get_issue`、`list_comments` の読み取りツールを公開します。`get_issue` と `list_comments` は `ABC-123` 形式の key だけで
   Work Item を指せます。既定の profile（`tasks`）のツールと設定は変わりません。
+- Workspace profile に書き込みのツール `save_issue`（`id` なしで作成、`id` ありで更新）と `save_comment` を追加しました。
+  更新には `expectedRevision`、書き込みには UUID の `idempotencyKey` が要ります。`MUKUROJI_MCP_READ_ONLY=true` で外せます。
 - server API: `GET /api/v1/me`、`GET /api/v1/teams`、`GET /api/v1/projects/{projectId}/members`、
   `GET /api/v1/work-item-keys/{key}` を追加しました。scope は `work-items:read` で、request ごとに credential 所有者の
   現在の権限で評価します。読めない Work Item の key は、存在しない key と同じ 404 です。

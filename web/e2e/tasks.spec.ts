@@ -4221,7 +4221,7 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/teams/core-team/factory')
     await expect(page).toHaveURL('/teams/core-team/issues')
-    // Personal tokens stay available for the Workspace MCP profile, which only reads.
+    // Personal tokens stay available for the Workspace MCP profile.
     await page.route('**/api/developer/me/agent-connection', async (route) => {
       await route.fulfill({
         json: {
