@@ -160,6 +160,10 @@ Service worker は `push` を受けると payload（`PushNotificationPayload`: `
 payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
 それ以外はインボックスを開きます。通知の click では、focus 中の app window を優先して再利用し、遷移できない場合（`navigate` が失敗または `null` を返した場合）は新しい window を開きます。
 
+## Work Item key の表示
+
+Work Item を対象にした通知は、projection が通知を書くときに強整合で読んだ現在の Work Item row から key（`ABC-123`）を取り、notification row の `workItemKey` に保存します。audit metadata の値は使いません。key は変わらないので、後から Work Item が移動しても表示はそのままです。Inbox は title の前に key を表示し、Email は件名と本文の先頭を `ABC-123 タイトル` にして本文に key のページの URL を足し、Slack は本文の先頭に key を付けてリンクを付けます。key を持たない Work Item（key 導入前に作られたもの）と、Work Item 以外の通知には key を出しません。
+
 ## Slack 配信
 
 通知設定の **Slack** を有効にして保存すると、その後に発生する担当・メンション・返信・期限などの既存通知を、同じ受信者のSlack送信先にも配信します。`channels.slack` を省略した既存API clientと保存済み設定は無効として扱います。Inboxを無効にしてもSlackだけの配信は可能です。有効化時刻をサーバーで保存し、auditの投影が遅れても、それより古いイベントはSlackへ送りません。設定の頻度変更ではこの時刻を保持し、無効化後の再有効化では更新します。送信直前も現在の有効化時刻を確認するため、以前の配信待ち通知が再有効化で復活することはありません。有効化時刻も旧設定の保存時刻も不明な場合は配信せず、設定の再保存で時刻を確定します。
@@ -180,7 +184,7 @@ CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する
 
 通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
 
-60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
+60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
 
@@ -218,7 +222,7 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 - 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
 - SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
 
-Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `WebDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
+Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `cdk/cdk.json` の `mukuroji:webDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
 
 ### 宛先と抑止
 

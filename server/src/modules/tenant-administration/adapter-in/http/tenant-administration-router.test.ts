@@ -609,6 +609,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
     holidays: [],
     publicHolidays: 'japan',
+    timeZone: 'Asia/Tokyo',
   })
   // Reading must not initialize tenant state on a member's behalf.
   expect(ensureCalls).toEqual([])
@@ -621,6 +622,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
       holidays: ['2027-01-01'],
       publicHolidays: 'none',
+      timeZone: 'Asia/Tokyo',
     },
   })
   const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
@@ -633,6 +635,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
     holidays: ['2027-01-01'],
     publicHolidays: 'none',
+    timeZone: 'Asia/Tokyo',
   })
 
   const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
@@ -667,6 +670,7 @@ test('sends the national holiday dates the server uses with the calendar setting
 
   expect(await response.json()).toMatchObject({
     publicHolidays: 'japan',
+    timeZone: 'Asia/Tokyo',
     nationalHolidayDates: ['2027-01-01', '2028-01-01'],
   })
 })
@@ -844,6 +848,7 @@ test('keeps calendar settings changes behind administration and validates them',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: [],
       publicHolidays: 'japan',
+      timeZone: 'Asia/Tokyo',
     },
   }])
 
@@ -856,6 +861,7 @@ test('keeps calendar settings changes behind administration and validates them',
         workingWeekdays: ['saturday', 'monday', 'monday', 'tuesday'],
         holidays: ['2027-05-03', '2027-01-01', '2027-05-03'],
         publicHolidays: 'none',
+        timeZone: 'Asia/Tokyo',
       },
     }),
     headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
@@ -872,6 +878,7 @@ test('keeps calendar settings changes behind administration and validates them',
       workingWeekdays: ['monday', 'tuesday', 'saturday'],
       holidays: ['2027-01-01', '2027-05-03'],
       publicHolidays: 'none',
+      timeZone: 'Asia/Tokyo',
     },
   })
 })

@@ -28,13 +28,12 @@ import {
 } from '../src/task-views/model/taskViewUrlState'
 
 const scope: TaskViewScope = {
-  kind: 'project',
-  projectId: 'refero',
+  kind: 'team',
   teamId: 'core-team',
 }
 const identity = {
   scope,
-  surface: 'project',
+  surface: 'team',
 } satisfies Parameters<typeof parseTaskViewUrlState>[1]
 const builtInDefinition = createDefinition('built in', 'table')
 const teamDefault = createSavedView('team-default', 'team default', 'board', {
@@ -52,6 +51,7 @@ const originalFetch = globalThis.fetch
 const writableTaskViewCapabilities = {
   canManageSharedViews: true,
   canSetTeamDefault: true,
+  canSetProjectDefault: false,
   canWrite: true,
   writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
   writableTeamIds: ['core-team'],
@@ -175,6 +175,7 @@ describe('useTaskViewController resolution', () => {
       {
         canManageSharedViews: false,
         canSetTeamDefault: false,
+        canSetProjectDefault: false,
         canWrite: false,
         writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
         writableTeamIds: ['core-team'],
@@ -212,6 +213,7 @@ describe('useTaskViewController resolution', () => {
       {
         canManageSharedViews: false,
         canSetTeamDefault: false,
+        canSetProjectDefault: false,
         canWrite: true,
         writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
         writableTeamIds: ['core-team'],
@@ -253,7 +255,7 @@ describe('useTaskViewController resolution', () => {
     expect(parsed.state).toEqual({
       schemaVersion: 1,
       scope,
-      surface: 'project',
+      surface: 'team',
       viewId: BUILT_IN_TASK_VIEW_ID,
     })
     expect(committed.get('tab')).toBe('activity')
@@ -315,6 +317,7 @@ describe('useTaskViewController resolution', () => {
         isDefault: true,
         isPersonalDefault: true,
         isTeamDefault: true,
+        isProjectDefault: false,
       },
       revision: 2,
     } satisfies SavedTaskView
@@ -521,6 +524,7 @@ describe('useTaskViewController resolution', () => {
         isDefault: true,
         isPersonalDefault: true,
         isTeamDefault: true,
+        isProjectDefault: false,
       },
     } satisfies SavedTaskView
 
@@ -534,11 +538,13 @@ describe('useTaskViewController resolution', () => {
       isDefault: true,
       isPersonalDefault: true,
       isTeamDefault: true,
+      isProjectDefault: false,
     })
     expect(reconciled.find((view) => view.id === personalDefault.id)?.preference).toMatchObject({
       isDefault: false,
       isPersonalDefault: false,
       isTeamDefault: false,
+      isProjectDefault: false,
     })
     expect(reconciled.find((view) => view.id === personalDefault.id)?.preference.defaultSource)
       .toBeUndefined()
@@ -558,6 +564,7 @@ describe('useTaskViewController resolution', () => {
         isDefault: true,
         isPersonalDefault: false,
         isTeamDefault: true,
+        isProjectDefault: false,
       },
     }])
   })
@@ -746,14 +753,14 @@ function createInput(searchParams: URLSearchParams): UseTaskViewControllerInput 
     onSearchParamsChange: () => undefined,
     searchParams,
     scope,
-    surface: 'project',
+    surface: 'team',
   }
 }
 
 /** Creates one permission-safe Project definition for precedence tests. */
 function createDefinition(keyword: string, mode: TaskViewDefinition['layout']['mode']): TaskViewDefinition {
   return {
-    surface: 'project',
+    surface: 'team',
     scope,
     filters: { keyword },
     layout: {
@@ -803,6 +810,55 @@ describe('continueTaskViewLayoutMode', () => {
     // Another Project waits for its own saved views instead of reading a whole list.
     expect(continueTaskViewLayoutMode(undefined, last, 'launch')).toBeUndefined()
     expect(continueTaskViewLayoutMode(undefined, undefined, 'refero')).toBeUndefined()
+  })
+})
+
+describe('reconcileSavedTaskViews on a Project scope', () => {
+  test('keeps a Project default as the Project default after a personal default moves', () => {
+    const projectScope: TaskViewScope = { kind: 'project', projectId: 'refero', teamId: 'core-team' }
+    const projectView = (id: string, preference: Partial<SavedTaskView['preference']>) => {
+      const view = createSavedView(id, id, 'table', { isDefault: false })
+      return {
+        ...view,
+        definition: { ...view.definition, surface: 'project', scope: projectScope },
+        preference: { ...view.preference, ...preference },
+      } satisfies SavedTaskView
+    }
+    const projectDefault = projectView('project-default', {
+      defaultSource: 'project',
+      isDefault: true,
+      isProjectDefault: true,
+    })
+    const other = projectView('other', {})
+    const personal = {
+      ...other,
+      preference: {
+        ...other.preference,
+        defaultSource: 'personal',
+        isDefault: true,
+        isPersonalDefault: true,
+      },
+    } satisfies SavedTaskView
+
+    const withPersonal = reconcileSavedTaskViews([projectDefault, other], {
+      type: 'replace',
+      view: personal,
+    })
+    expect(withPersonal.find((view) => view.id === 'project-default')?.preference).toMatchObject({
+      isDefault: false,
+      isProjectDefault: true,
+      isTeamDefault: false,
+    })
+
+    const withoutPersonal = reconcileSavedTaskViews(withPersonal, {
+      type: 'replace',
+      view: other,
+    })
+    expect(withoutPersonal.find((view) => view.id === 'project-default')?.preference).toMatchObject({
+      defaultSource: 'project',
+      isDefault: true,
+      isProjectDefault: true,
+    })
   })
 })
 
@@ -882,6 +938,7 @@ function createSavedView(
       favorite: false,
       isPersonalDefault: preference.defaultSource === 'personal',
       isTeamDefault: preference.defaultSource === 'team',
+      isProjectDefault: preference.defaultSource === 'project',
       pinned: false,
     },
     revision: 1,
