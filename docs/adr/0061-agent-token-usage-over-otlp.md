@@ -41,7 +41,9 @@ Shinji の方針は「なるべく安く」。
 - **保存**：Agent Runs table に置く。usage の行は partition `<directoryId>#agent-usage#member#<memberKey>`、
   sort key `<bucket 開始時刻>#<instance hash>#<model>` で、`UpdateItem` の `ADD` で足す。再送で二重に数えない
   よう、export の内容から作った ID の受領行（partition `...#agent-usage-batch#member#<memberKey>`）を同じ
-  transaction で条件付き `Put` する。99 bucket ごとに 1 transaction とし、受領行も分ける。table に TTL
+  transaction で条件付き `Put` する。99 bucket ごとに 1 transaction とし、受領行も分ける。ID と bucket の区切りは、
+  受信時刻で受け付けの窓から外れた event も含めた export の全 event から作り、再送までに event が 7 日を過ぎても
+  同じ受領行に当たるようにする。table に TTL
   attribute `usageExpiresAt` を追加し、usage の行は 400 日、受領行は 2 日で消す。どの行も `workspaceId` を
   持つので、Workspace の削除・export の既存の対象に入る。
 - **見せ方**：Web の Work Item の Run 一覧 API が、Run ごとの `usage` と、返した Run の合計 `usageTotal` を返す。

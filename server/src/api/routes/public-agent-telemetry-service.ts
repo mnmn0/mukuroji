@@ -1,7 +1,7 @@
 import {
   AgentTelemetryFormatError,
   deriveAgentTelemetryBatchId,
-  groupAgentUsageBuckets,
+  layoutAgentUsageBuckets,
   parseAgentTelemetryLogs,
 } from '../../modules/agent-runs'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
@@ -42,8 +42,10 @@ export function createCanonicalPublicAgentTelemetryService(now: () => Date = () 
       const result = await workItemDependencies.agentRunUsage.recordBatch(
         principal.directoryId,
         principal.userKey,
-        deriveAgentTelemetryBatchId(principal.userKey, parsed.events),
-        groupAgentUsageBuckets(parsed.events),
+        // The ID and the chunk layout come from the export itself, not from what the receive time
+        // still accepts, so a retry near the age limit finds the first attempt's receipts.
+        deriveAgentTelemetryBatchId(principal.userKey, parsed.wellFormedEvents),
+        layoutAgentUsageBuckets(parsed.wellFormedEvents, parsed.events),
         receivedAt,
       )
       return { rejectedRecords: parsed.rejectedRecords, duplicate: result === 'duplicate' }

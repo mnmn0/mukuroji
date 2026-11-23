@@ -2829,6 +2829,16 @@ describe('Agent telemetry usage', () => {
     }
   }
 
+  /**
+   * Reads the resource logs of an export built by {@link usageExport}.
+   *
+   * @param body - Export.
+   * @returns Its resource logs.
+   */
+  function readResourceLogs(body: Record<string, unknown>): unknown[] {
+    return Array.isArray(body.resourceLogs) ? body.resourceLogs : []
+  }
+
   test('attributes received usage to the run of the same member and instance, with cost only for managers', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
     const held = createHeldRun('task-1', 'laptop')
@@ -2860,6 +2870,23 @@ describe('Agent telemetry usage', () => {
     setTestAppDependencies({ agentRunUsage: usage })
     const managed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
     expect(await managed.json()).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
+  })
+
+  test('recognizes a retried export after one of its events aged out of the accepted window', async () => {
+    configureUnstartedAssignedWorkItem()
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    let clock = new Date('2026-11-22T18:00:00.000Z')
+    const telemetry = createCanonicalPublicAgentTelemetryService(() => clock)
+    const old = usageExport(new Date(clock.getTime() - 7 * 86_400_000 + 1_000), 'laptop')
+    const fresh = usageExport(new Date(clock.getTime() - 20_000), 'laptop')
+    const body = { resourceLogs: [...readResourceLogs(old), ...readResourceLogs(fresh)] }
+    const telemetryCredential = { ...credential, scopes: [...credential.scopes, 'agent-telemetry:write' as const] }
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    // The response was lost and the exporter retries after the old event left the 7-day window.
+    clock = new Date(clock.getTime() + 5_000)
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 1, duplicate: true })
+    expect([...usage.buckets.values()].reduce((sum, bucket) => sum + bucket.inputTokens, 0)).toBe(200)
   })
 
   test('refuses an export that is not an OTLP logs request', async () => {

@@ -8,6 +8,7 @@ import {
   formatUsageBucketStart,
   groupAgentUsageBuckets,
   isAgentUsageBucketInRun,
+  layoutAgentUsageBuckets,
   parseAgentTelemetryLogs,
   summarizeAgentUsage,
   summarizeFactoryUsage,
@@ -189,6 +190,15 @@ describe('agent usage buckets and run attribution', () => {
     expect(summarizeAgentUsage([], true, false)).toBeUndefined()
     expect(combineAgentRunUsage([withCost, undefined, withCost])).toMatchObject({ inputTokens: 720, estimatedCostMicroUsd: 75_000, hasMore: true })
     expect(combineAgentRunUsage([undefined])).toBeUndefined()
+  })
+
+  test('keeps the bucket slots of an export when fewer of its events are accepted', () => {
+    const all = groupAgentUsageBuckets(events)
+    const layout = layoutAgentUsageBuckets(events, events.slice(1))
+    expect(layout).toHaveLength(all.length)
+    expect(layout.filter((bucket) => bucket !== undefined).length).toBeLessThanOrEqual(all.length)
+    expect(layoutAgentUsageBuckets(events, [])).toEqual(all.map(() => undefined))
+    expect(layoutAgentUsageBuckets(events, events)).toEqual(all)
   })
 
   test('derives the same batch ID for a retried export and a different one for other events', () => {

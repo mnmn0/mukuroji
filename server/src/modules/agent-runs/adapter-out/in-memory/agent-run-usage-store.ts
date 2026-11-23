@@ -14,11 +14,12 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   readonly #receipts = new Set<string>()
 
   /** @inheritdoc */
-  async recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly AgentUsageBucket[]): Promise<'recorded' | 'duplicate'> {
+  async recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly (AgentUsageBucket | undefined)[]): Promise<'recorded' | 'duplicate'> {
     const receipt = `${directoryId}|${memberKey}|${batchId}`
     if (this.#receipts.has(receipt)) return 'duplicate'
     this.#receipts.add(receipt)
     for (const bucket of buckets) {
+      if (!bucket) continue
       const key = `${agentUsagePartition(directoryId, memberKey)}|${agentUsageRecordKey(bucket)}`
       const saved = this.buckets.get(key)
       this.buckets.set(key, saved

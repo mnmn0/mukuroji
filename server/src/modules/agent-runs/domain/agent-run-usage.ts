@@ -58,6 +58,12 @@ export type AgentUsageEvent = {
 export type ParsedAgentTelemetry = {
   /** Accepted usage events. */
   events: AgentUsageEvent[]
+  /**
+   * Usage events that are well formed, including those outside the accepted time window. They
+   * depend only on the export, not on the receive time, so a retried export gets the same batch ID
+   * and bucket layout even after one of its events left the window.
+   */
+  wellFormedEvents: AgentUsageEvent[]
   /** Usage records that were malformed or outside the accepted time window. */
   rejectedRecords: number
 }
@@ -263,6 +269,7 @@ function readInstanceHash(value: string | number | boolean | undefined): string 
 export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTelemetry {
   if (!isRecord(body)) throw new AgentTelemetryFormatError('The body must be an OTLP ExportLogsServiceRequest object.')
   const events: AgentUsageEvent[] = []
+  const wellFormedEvents: AgentUsageEvent[] = []
   let rejectedRecords = 0
   let recordCount = 0
   const oldest = now.getTime() - AGENT_TELEMETRY_MAX_EVENT_AGE_DAYS * 86_400_000
@@ -299,14 +306,14 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           ? readNonNegativeNumber(attributes.get('cost_usd'), maximumCostUsdPerRequest)
           : costMicros === undefined ? undefined : costMicros / 1_000_000
         if (
-          occurredAtMs === undefined || occurredAtMs < oldest || occurredAtMs > newest ||
+          occurredAtMs === undefined ||
           inputTokens === undefined || outputTokens === undefined ||
           cacheReadTokens === undefined || cacheCreationTokens === undefined || costUsd === undefined
         ) {
           rejectedRecords += 1
           continue
         }
-        events.push({
+        const event: AgentUsageEvent = {
           // A record attribute wins, so one exporter can serve several instances.
           instanceIdHash: readInstanceHash(
             attributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE) ?? resourceAttributes.get(AGENT_TELEMETRY_INSTANCE_ATTRIBUTE),
@@ -318,11 +325,17 @@ export function parseAgentTelemetryLogs(body: unknown, now: Date): ParsedAgentTe
           cacheReadTokens,
           cacheCreationTokens,
           costMicroUsd: Math.round(costUsd * 1_000_000),
-        })
+        }
+        wellFormedEvents.push(event)
+        if (occurredAtMs < oldest || occurredAtMs > newest) {
+          rejectedRecords += 1
+          continue
+        }
+        events.push(event)
       }
     }
   }
-  return { events, rejectedRecords }
+  return { events, wellFormedEvents, rejectedRecords }
 }
 
 /**
@@ -370,11 +383,39 @@ export function groupAgentUsageBuckets(events: readonly AgentUsageEvent[]): Agen
 }
 
 /**
- * Derives a stable ID for one export from its member and accepted events, so a retried export is
- * recognized and not counted twice.
+ * Lays out an export's buckets by its well-formed events and fills each slot with the accepted
+ * usage of that bucket. Slots of buckets whose events all fell outside the time window stay empty,
+ * so the slots, and the transaction chunks built from them, do not move when a retry of the same
+ * export accepts fewer events.
+ *
+ * @param wellFormedEvents - Well-formed usage events, inside the time window or not.
+ * @param acceptedEvents - Accepted usage events, a subset of the well-formed ones.
+ * @returns One slot per well-formed bucket in key order: the accepted bucket, or undefined.
+ */
+export function layoutAgentUsageBuckets(
+  wellFormedEvents: readonly AgentUsageEvent[],
+  acceptedEvents: readonly AgentUsageEvent[],
+): (AgentUsageBucket | undefined)[] {
+  const accepted = new Map(groupAgentUsageBuckets(acceptedEvents).map((bucket) => [agentUsageBucketKey(bucket), bucket]))
+  return groupAgentUsageBuckets(wellFormedEvents).map((bucket) => accepted.get(agentUsageBucketKey(bucket)))
+}
+
+/**
+ * Builds the key that identifies a bucket within a member's usage.
+ *
+ * @param bucket - Bucket.
+ * @returns `<bucket start>#<instance hash>#<model>`.
+ */
+function agentUsageBucketKey(bucket: Pick<AgentUsageBucket, 'bucketStart' | 'instanceIdHash' | 'model'>): string {
+  return `${bucket.bucketStart}#${bucket.instanceIdHash}#${bucket.model}`
+}
+
+/**
+ * Derives a stable ID for one export from its member and well-formed events, so a retried export is
+ * recognized and not counted twice, even when the receive time has moved an event out of the window.
  *
  * @param memberKey - Member that sent the export.
- * @param events - Accepted usage events in export order.
+ * @param events - Well-formed usage events in export order.
  * @returns Lowercase hexadecimal SHA-256 digest.
  */
 export function deriveAgentTelemetryBatchId(memberKey: string, events: readonly AgentUsageEvent[]): string {

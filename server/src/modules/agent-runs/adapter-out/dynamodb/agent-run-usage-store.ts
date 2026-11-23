@@ -46,7 +46,7 @@ export interface AgentRunUsageStore {
    * @param now - Receive time.
    * @returns Whether the export was added or was already added.
    */
-  recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly AgentUsageBucket[], now: Date): Promise<'recorded' | 'duplicate'>
+  recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly (AgentUsageBucket | undefined)[], now: Date): Promise<'recorded' | 'duplicate'>
   /**
    * Reads a member's buckets of one agent instance that start in a range. The member's other
    * instances share the partition, so at most {@link AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR} times
@@ -189,10 +189,14 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly AgentUsageBucket[], now: Date): Promise<'recorded' | 'duplicate'> {
+  async recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly (AgentUsageBucket | undefined)[], now: Date): Promise<'recorded' | 'duplicate'> {
     let recorded = false
     // Each chunk has its own receipt, so a retry after a partial failure adds only the missing chunks.
+    // Empty slots keep the chunk boundaries of the export; a chunk with nothing to add is skipped.
     for (let start = 0, chunk = 0; start < buckets.length; start += bucketsPerTransaction, chunk += 1) {
+      const chunkBuckets = buckets.slice(start, start + bucketsPerTransaction)
+        .filter((bucket): bucket is AgentUsageBucket => bucket !== undefined)
+      if (chunkBuckets.length === 0) continue
       const items: NonNullable<TransactWriteCommandInput['TransactItems']> = [
         {
           Put: {
@@ -208,7 +212,7 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
             ConditionExpression: 'attribute_not_exists(recordKey)',
           },
         },
-        ...buckets.slice(start, start + bucketsPerTransaction).map((bucket) => ({
+        ...chunkBuckets.map((bucket) => ({
           Update: {
             TableName: this.#tableName,
             Key: { directoryTeamId: agentUsagePartition(directoryId, memberKey), recordKey: agentUsageRecordKey(bucket) },

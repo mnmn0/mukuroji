@@ -94,6 +94,7 @@ export {
   formatUsageBucketStart,
   groupAgentUsageBuckets,
   isAgentUsageBucketInRun,
+  layoutAgentUsageBuckets,
   parseAgentTelemetryLogs,
   summarizeAgentUsage,
   summarizeFactoryUsage,
