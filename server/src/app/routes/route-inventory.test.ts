@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(550)
-  expect(new Set(inventory).size).toBe(546)
+  expect(inventory).toHaveLength(553)
+  expect(new Set(inventory).size).toBe(549)
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
@@ -20,6 +20,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
+  expect(inventory).toContain('GET /api/workload')
+  expect(inventory).toContain('GET /api/time-tracking/my-timesheet')
+  expect(inventory).toContain('POST /api/time-tracking/my-timesheet/submit')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
@@ -144,6 +147,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'a6665b277e7c0529a269b56fd4797ffe76db92acee11f4a624db784a6063b918',
+    'f411bb539fe75557bda3304c567b383e918265b6cf33c041444cebe2db665990',
   )
 })
