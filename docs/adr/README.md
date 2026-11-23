@@ -85,3 +85,4 @@
 | [0062](0062-analytics-project-report-visibility.md) | Analytics report の共有範囲に Project を足し、Team と Project の組で読み書きを判定する | 提案 |
 | [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |
 | [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |
+| [0080](0080-team-grant-request-receipt.md) | Team 全体へのメンバー追加の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける | 提案 |

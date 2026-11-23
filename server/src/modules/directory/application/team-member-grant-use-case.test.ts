@@ -34,7 +34,7 @@ type Grant = {
 type PortOptions = {
   /** Whether the member is no longer active in the Workspace. */
   inactive?: boolean
-  /** Whether the request's idempotency key already granted a Project with another input. */
+  /** Whether the request's idempotency key was already bound to another input. */
   reusedKey?: boolean
 }
 
@@ -65,7 +65,7 @@ function createPorts(
       memberVersion += 1
       return { added: true }
     },
-    requireUnusedGrantRequest: async () => {
+    bindGrantRequest: async () => {
       if (options.reusedKey) {
         throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
       }
@@ -157,6 +157,14 @@ test('refuses a reused idempotency key with another input before any grant', asy
     workspaceId: 'ws', teamId: 'core', member, role: 'viewer', caller,
   })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
   expect(grants).toEqual([])
+
+  // The key is bound even when the member already belongs to every Project.
+  const everywhere = createPorts(team.projects.map((project) => project.id), () => true, [], {
+    reusedKey: true,
+  })
+  await expect(addMemberToTeamProjectsUseCase(everywhere.ports, {
+    workspaceId: 'ws', teamId: 'core', member, role: 'viewer', caller,
+  })).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
 })
 
 test('refuses an inactive member even when the Team has no active Project', async () => {

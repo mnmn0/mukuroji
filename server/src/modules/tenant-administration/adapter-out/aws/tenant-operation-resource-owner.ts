@@ -503,6 +503,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         'recordKey',
         workspaceSelector('workspaceId', 'equals', 'FENCE#'),
       ),
+      // Team-wide grant receipts bind idempotency keys in one sidecar partition per Workspace
+      // (ADR 0080). New targets go last so queued jobs keep their indexes.
+      exactSidecarTarget(
+        'team-grant-requests',
+        this.config.projectDirectoryTableName,
+        'directoryId',
+        'entryKey',
+        encodedWorkspaceSelector('directoryId', 'equals', 'TEAM_GRANT_REQUEST#'),
+      ),
     ]
   }
 

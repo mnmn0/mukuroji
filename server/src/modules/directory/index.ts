@@ -23,6 +23,7 @@ export {
   type ProjectMembersResponse,
   type ProjectRole,
   type ProjectSearchSource,
+  type TeamGrantRequest,
   type TeamSearchSource,
   type RemoveProjectMemberResponse,
   type UpdateProjectMemberRequestBody,

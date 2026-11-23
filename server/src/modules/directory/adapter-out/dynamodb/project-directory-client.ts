@@ -387,11 +387,6 @@ type ProjectMemberItem = {
    */
   role: ProjectRole
   /**
-   * Idempotency key hash and request fingerprint of the Team-wide grant that created the row,
-   * joined by `:`, so a retry under the same key with another input is refused.
-   */
-  grantRequestKey?: string
-  /**
    * member item の作成日時です。
    */
   createdAt: string
@@ -446,6 +441,30 @@ type MemberPreferencesItem = MemberPreferenceValues & {
   revision: number
   /** ISO 8601 timestamp of the latest successful replacement. */
   updatedAt: string
+}
+
+/** Idempotency key and input of one Team-wide member grant. */
+export type TeamGrantRequest = {
+  /** Hash of the caller's idempotency key, scoped to the Workspace and the caller. */
+  idempotencyKeyHash: string
+  /** Fingerprint of the request the key was first used with. */
+  requestFingerprint: string
+}
+
+/** Receipt binding a Team-wide grant's idempotency key to its input, in a sidecar partition. */
+type TeamGrantRequestItem = {
+  /** Sidecar partition of the Workspace's grant receipts. */
+  directoryId: string
+  /** `KEY#` and the idempotency key hash. */
+  entryKey: string
+  /** Sidecar row discriminator. */
+  entryType: 'team-grant-request'
+  /** Workspace that owns the receipt. */
+  workspaceId: string
+  /** Fingerprint of the request the key was first used with. */
+  requestFingerprint: string
+  /** ISO 8601 timestamp of the latest accepted use of the key. */
+  createdAt: string
 }
 
 /** Webhook grant から強整合確認する Team / Project source locator です。 */
@@ -927,7 +946,6 @@ export type ProjectDirectoryClient = {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @param grantRequestKey - Idempotency key hash and request fingerprint of the Team-wide grant.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   addProjectMemberIfAbsent(
@@ -939,15 +957,14 @@ export type ProjectDirectoryClient = {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
-    grantRequestKey?: string,
   ): Promise<{ added: boolean }>
   /**
-   * Refuses a Team-wide grant whose idempotency key already granted a Project with another input.
+   * Binds the idempotency key of a Team-wide grant to its input before any Project is written.
    *
    * @param directoryId - Workspace directory identifier.
-   * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the grant.
    */
-  requireUnusedProjectGrantRequest(directoryId: string, grantRequestKey: string): Promise<void>
+  bindTeamGrantRequest(directoryId: string, grantRequest: TeamGrantRequest): Promise<void>
   /**
    * DynamoDB から project member role を削除します。
    */
@@ -2048,7 +2065,6 @@ export class DynamoDbProjectDirectoryClient {
    * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @param grantRequestKey - Idempotency key hash and request fingerprint of the Team-wide grant.
    * @returns Whether the role was added; false when the member already belonged to the Project.
    */
   async addProjectMemberIfAbsent(
@@ -2060,7 +2076,6 @@ export class DynamoDbProjectDirectoryClient {
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
-    grantRequestKey?: string,
   ): Promise<{ added: boolean }> {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -2069,7 +2084,6 @@ export class DynamoDbProjectDirectoryClient {
     const role = readProjectRole(input.role)
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId, teamId)
-    requireUnusedGrantRequestKey(items, grantRequestKey)
     if (hasActiveProjectMember(items, projectId, normalizedMemberKey)) {
       return { added: false }
     }
@@ -2086,7 +2100,6 @@ export class DynamoDbProjectDirectoryClient {
       email,
       name,
       role,
-      ...(grantRequestKey === undefined ? {} : { grantRequestKey }),
       createdAt: updatedAt,
       updatedAt,
     }
@@ -2143,7 +2156,6 @@ export class DynamoDbProjectDirectoryClient {
         const latest = await this.readValidDirectoryItems(directoryId, true)
         this.requireActiveProject(latest, projectId, teamId)
         if (hasActiveProjectMember(latest, projectId, normalizedMemberKey)) {
-          requireUnusedGrantRequestKey(latest, grantRequestKey)
           return { added: false }
         }
       }
@@ -2171,15 +2183,45 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
-   * Refuses a Team-wide grant whose idempotency key already granted a Project with another input,
-   * before any Project is written.
+   * Binds the idempotency key of a Team-wide grant to its input before any Project is written.
+   *
+   * The receipt is written with a condition that only the same input may meet, so of two requests
+   * under one key with different inputs only the first proceeds, even when they run concurrently,
+   * and a retry of the same input passes again.
    *
    * @param directoryId - Workspace directory identifier.
-   * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the grant.
    */
-  async requireUnusedProjectGrantRequest(directoryId: string, grantRequestKey: string): Promise<void> {
-    const items = await this.readValidDirectoryItems(directoryId, true)
-    requireUnusedGrantRequestKey(items, grantRequestKey)
+  async bindTeamGrantRequest(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
+    const item: TeamGrantRequestItem = {
+      directoryId: createTeamGrantRequestDirectoryId(directoryId),
+      entryKey: `KEY#${grantRequest.idempotencyKeyHash}`,
+      entryType: 'team-grant-request',
+      workspaceId: directoryId,
+      requestFingerprint: grantRequest.requestFingerprint,
+      createdAt: new Date().toISOString(),
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(#entryKey) OR #requestFingerprint = :requestFingerprint',
+            ExpressionAttributeNames: {
+              '#entryKey': 'entryKey',
+              '#requestFingerprint': 'requestFingerprint',
+            },
+            ExpressionAttributeValues: { ':requestFingerprint': grantRequest.requestFingerprint },
+          },
+        }],
+      }))
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+      throw toProjectDataError(error)
+    }
   }
 
   /**
@@ -5187,41 +5229,13 @@ function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string
 }
 
 /**
- * Refuses a grant when the same idempotency key already granted a Project with another input, as
- * a retry under one key must repeat the same request.
+ * Creates the sidecar partition of a Workspace's Team-wide grant receipts.
  *
- * Every member row of the Workspace is checked, whatever its Project, member, or archive state, so
- * a retry that changes the member or follows an archived Project is refused too.
- *
- * @param items - Directory rows of the Workspace.
- * @param grantRequestKey - Idempotency key hash and request fingerprint, joined by `:`.
+ * @param workspaceId - Workspace that owns the receipts.
+ * @returns A partition key that cannot overlap canonical directory rows.
  */
-function requireUnusedGrantRequestKey(
-  items: ProjectDirectoryItem[],
-  grantRequestKey: string | undefined,
-) {
-  if (grantRequestKey === undefined) return
-  const keyHash = readGrantRequestKeyHash(grantRequestKey)
-  const reused = items.some((item) =>
-    item.entryType === 'project-member' &&
-    item.grantRequestKey !== undefined &&
-    item.grantRequestKey !== grantRequestKey &&
-    readGrantRequestKeyHash(item.grantRequestKey) === keyHash
-  )
-  if (reused) {
-    throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
-  }
-}
-
-/**
- * Reads the idempotency key hash part of a grant request key.
- *
- * @param grantRequestKey - Idempotency key hash and request fingerprint, joined by `:`.
- * @returns The idempotency key hash.
- */
-function readGrantRequestKeyHash(grantRequestKey: string) {
-  const separator = grantRequestKey.indexOf(':')
-  return separator === -1 ? grantRequestKey : grantRequestKey.slice(0, separator)
+function createTeamGrantRequestDirectoryId(workspaceId: string) {
+  return `TEAM_GRANT_REQUEST#${encodeURIComponent(workspaceId)}`
 }
 
 /**
@@ -6000,7 +6014,6 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       (value.email === undefined || typeof value.email === 'string') &&
       (value.name === undefined || typeof value.name === 'string') &&
       isProjectRole(value.role) &&
-      (value.grantRequestKey === undefined || typeof value.grantRequestKey === 'string') &&
       typeof value.createdAt === 'string' &&
       typeof value.updatedAt === 'string' &&
       (value.archivedAt === undefined || typeof value.archivedAt === 'string')

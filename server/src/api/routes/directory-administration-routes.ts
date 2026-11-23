@@ -147,7 +147,10 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
             // Project so a retry keeps each event ID however the Team's Projects change.
             createAuditContext: (projectId) => deriveMutationAuditPartContext(auditContext, projectId),
             // A retry under the same key with another role is refused instead of mixing roles.
-            grantRequestKey: `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`,
+            grantRequest: {
+              idempotencyKeyHash: auditContext.idempotencyKeyHash,
+              requestFingerprint: auditContext.requestFingerprint,
+            },
           },
         ),
         {

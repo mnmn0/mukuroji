@@ -38,8 +38,8 @@ export type TeamMemberGrantPorts<TFence, TAudit> = {
     auditContext: TAudit,
     authorizationFences: TFence[],
   ): Promise<{ added: boolean }>
-  /** Refuses a retry whose idempotency key already granted a Project with another input. */
-  requireUnusedGrantRequest(workspaceId: string): Promise<void>
+  /** Binds the request's idempotency key to its input, refusing a key used with another input. */
+  bindGrantRequest(workspaceId: string): Promise<void>
   /** Reads the current version of an active Workspace member, refusing an inactive one. */
   readActiveMemberVersion(workspaceId: string, memberKey: string): Promise<number>
   /** Tells whether the caller may grant roles on a Project. */
@@ -119,10 +119,11 @@ export async function addMemberToTeamProjectsUseCase<TFence, TAudit>(
     addedProjectIds: [],
     existingProjectIds: [],
   }
-  // A retry under the same key must repeat the same request, or grants would mix roles.
-  await ports.requireUnusedGrantRequest(workspaceId)
   // An inactive member is refused even when the Team has no active Project to add them to.
   let nextReadVersion: number | undefined = await ports.readActiveMemberVersion(workspaceId, member.id)
+  // A retry under the same key must repeat the same request, or grants would mix roles. The key
+  // is bound before the first grant, and also when no grant is needed.
+  await ports.bindGrantRequest(workspaceId)
   // A caller adding themselves keeps the membership version they were authorized with, advanced
   // only by their own grants, so a change to their membership in between still fails.
   const addsSelf = caller.membership !== undefined &&
