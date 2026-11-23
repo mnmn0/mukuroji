@@ -17,6 +17,7 @@ export function createTaskViewOption(view: SavedTaskView): TaskViewOption {
     id: view.id,
     isPersonalDefault: view.preference.isPersonalDefault,
     isTeamDefault: view.preference.isTeamDefault,
+    isProjectDefault: view.preference.isProjectDefault,
     name: view.name,
     pinned: view.preference.pinned,
     ...(view.teamId ? { teamId: view.teamId } : {}),
