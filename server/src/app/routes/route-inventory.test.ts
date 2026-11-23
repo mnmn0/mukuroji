@@ -95,6 +95,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/me')
   expect(inventory).toContain('GET /api/v1/teams')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/members')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/raid-log')
   expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
