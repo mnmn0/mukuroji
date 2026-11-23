@@ -139,6 +139,51 @@ describe('automation event handler', () => {
     ]])
   })
 
+  test('marks the Document elements of a completed Work Item done even when Automation is disabled', async () => {
+    const client = createAutomationEventPort({
+      async listRules() {
+        throw new Error('Disabled Automation must not read rules.')
+      },
+    })
+    const reflected: unknown[] = []
+    const processor = createAutomationEventProcessor(
+      client,
+      {
+        async isAutomationEnabled() {
+          return false
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      {
+        async reflectWorkItemCompletion(input) {
+          reflected.push(input)
+        },
+      },
+    )
+    const completion = {
+      eventId: 'event-document-completion',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+    }
+
+    await processor.process({ ...completion, metadata: { completionTransition: true, teamId: 'core', issueId: 'ISSUE-1' } })
+    await processor.process({ ...completion, metadata: { completionReopened: true, teamId: 'core', issueId: 'ISSUE-1' } })
+    await processor.process({ ...completion, eventType: 'work-item.created', metadata: { completionTransition: true, teamId: 'core', issueId: 'ISSUE-1' } })
+
+    expect(reflected).toEqual([{
+      actorId: 'system:work-item-completion',
+      eventId: 'event-document-completion',
+      workItemId: 'team/core/issue/ISSUE-1',
+      workspaceId: 'workspace-1',
+    }])
+    await expect(processor.process({ ...completion, metadata: { completionTransition: true, teamId: 'core/x', issueId: 'ISSUE-1' } }))
+      .rejects.toMatchObject({ code: 'AutomationOutboxEventMalformed' })
+  })
+
   test('invalidates Customer completion candidates when a Work Item reopens', async () => {
     const client = createAutomationEventPort({
       async listRules() {
