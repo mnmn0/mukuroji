@@ -55,7 +55,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
-import type { TeamPermissionContext } from '../shared/workspace-access'
+import { readWorkspaceMemberNames, type TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Checks whether the principal manages the Team.
@@ -518,16 +518,23 @@ export async function listWebTeamAgentRunBoard(
   })
   const boardItems = items.flatMap((item) => item ? [item] : [])
   const profiles = await readBoardAssigneeProfiles({ correlationId, teamId }, boardItems.map((item) => item.workItem.assigneeUserId))
+  // Members rename themselves on their Workspace member row (ADR 0074); Cognito keeps the
+  // sign-up name, so the member row's name wins and a cleared one shows the email.
+  const workspaceNames = profiles.size > 0
+    ? await readWorkspaceMemberNames(principal.directoryId)
+    : new Map<string, string | undefined>()
   return {
     generatedAt: now.toISOString(),
     items: boardItems.map((item) => {
       const profile = profiles.get(item.workItem.assigneeUserId)
       if (!profile) return item
+      const memberKey = profile.email.trim().toLowerCase()
+      const name = workspaceNames.has(memberKey) ? workspaceNames.get(memberKey) : profile.name
       return {
         ...item,
         workItem: {
           ...item.workItem,
-          ...(profile.name === undefined || profile.name === '' ? {} : { assigneeName: profile.name }),
+          ...(name === undefined || name === '' ? {} : { assigneeName: name }),
           ...(profile.email === '' ? {} : { assigneeEmail: profile.email }),
         },
       }

@@ -1442,6 +1442,20 @@ test('labels Work Item assignees with the name on their Workspace member row', a
   expect(assigned.every((workItem: { assigneeName?: string }) => workItem.assigneeName === '佐藤 改名')).toBe(true)
 })
 
+test('lists assignee candidates with the name on their Workspace member row', async () => {
+  configureFakeProjectClients(true, {
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+  })
+
+  const response = await app.request('/api/projects/refero/users', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const users: Array<{ id: string; name?: string }> = (await response.json()).users
+  expect(users.find((user) => user.id === 'sato@example.com')?.name).toBe('佐藤 改名')
+})
+
 test('falls back to the assignee email when the Workspace member cleared the name', async () => {
   configureFakeProjectClients(true, {
     teamIssueCount: 4,

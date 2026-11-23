@@ -2396,9 +2396,10 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
 async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) {
   const input = readCognitoUsersInput(c, directoryId)
   const limit = clampCognitoPageLimit(input.limit)
-  const activeMemberKeys = new Set(
-    (await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)).map((member) => member.memberKey),
-  )
+  const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)
+  const activeMemberKeys = new Set(activeMembers.map((member) => member.memberKey))
+  // The member row holds the display name members set (ADR 0074); Cognito keeps the sign-up name.
+  const memberNames = new Map(activeMembers.map((member) => [member.memberKey, member.name?.trim() || undefined]))
   const users: CognitoUserProfile[] = []
   let paginationToken = input.paginationToken
 
@@ -2412,7 +2413,11 @@ async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) 
     users.push(
       ...response.users
         .filter((user) => activeMemberKeys.has(user.id))
-        .map((user) => ({ ...user, workspaceStatus: 'active' as const })),
+        .map((user) => {
+          const { name: _signUpName, ...identity } = user
+          const name = memberNames.get(user.id)
+          return { ...identity, ...(name ? { name } : {}), workspaceStatus: 'active' as const }
+        }),
     )
     paginationToken = response.nextToken
   } while (users.length < limit && paginationToken)
@@ -4489,7 +4494,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             {
               ...body,
               email: profile.email,
-              name: profile.name,
+              // The member row holds the display name members set (ADR 0074).
+              name: workspaceMember.name?.trim() || undefined,
             },
             workspaceMember.version,
             createApiMutationContext(c, principal, {

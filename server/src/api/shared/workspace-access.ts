@@ -260,7 +260,7 @@ function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
  * @param directoryId - Owning Workspace directory identifier.
  * @param userId - Candidate assignee identifier.
  * @param dependencies - Ports used to read membership and identity state.
- * @returns The current Cognito profile.
+ * @returns The current Cognito profile, with the display name from the Workspace member row.
  */
 export async function requireActiveWorkspaceAssignee(
   directoryId: string,
@@ -278,7 +278,11 @@ export async function requireActiveWorkspaceAssignee(
     )
   }
 
-  return dependencies.cognito.getUserProfile(userId)
+  const profile = await dependencies.cognito.getUserProfile(userId)
+  // The member row holds the display name members set (ADR 0074); Cognito keeps the sign-up name.
+  const name = member.name?.trim()
+  const { name: _signUpName, ...identity } = profile
+  return name ? { ...identity, name } : identity
 }
 
 /**
