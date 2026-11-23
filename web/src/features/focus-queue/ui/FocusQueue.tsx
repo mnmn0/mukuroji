@@ -382,8 +382,13 @@ export function FocusQueue({
         <FocusUpdateDeadlines deadlines={response.updateDeadlines} locale={locale} t={t} />
       ) : null}
 
-      {response?.projectLogEntries && response.projectLogEntries.length > 0 ? (
-        <FocusProjectLogEntries entries={response.projectLogEntries} t={t} />
+      {response ? (
+        <FocusProjectLogEntries
+          entries={response.projectLogEntries ?? []}
+          incomplete={response.projectLogIncomplete === true}
+          onRetry={onRetry}
+          t={t}
+        />
       ) : null}
 
       <div

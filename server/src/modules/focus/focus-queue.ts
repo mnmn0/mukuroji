@@ -151,6 +151,8 @@ export type CreateFocusQueueInput = {
    * the logs were not read, which leaves the Project log list empty.
    */
   projectLogSources?: readonly FocusProjectLogSource[]
+  /** Whether the log of at least one Project could not be read. */
+  projectLogIncomplete?: boolean
   /**
    * Optional authoritative semantic relation graphs with source occurrence evidence.
    * Relation-only blockers are omitted when this evidence is unavailable.
@@ -429,6 +431,7 @@ export function createFocusQueue(input: CreateFocusQueueInput): FocusQueueRespon
       viewerMemberKey,
       toWorkspaceLocalDate(now),
     ),
+    ...(input.projectLogIncomplete ? { projectLogIncomplete: true } : {}),
     effectivePolicies,
     teamPolicies,
     ...(userPolicy === undefined ? {} : { userPolicy: cloneFocusPolicy(userPolicy) }),

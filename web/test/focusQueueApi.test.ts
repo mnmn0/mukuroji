@@ -72,6 +72,17 @@ describe('Focus queue API', () => {
     )
     expect((await getFocusQueue('focus-token')).projectLogEntries).toEqual([entry])
 
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, projectLogEntries: [], projectLogIncomplete: true }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).projectLogIncomplete).toBe(true)
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, projectLogIncomplete: 'yes' }),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+
     for (const invalid of [{ ...entry, deepLink: '//evil.example/x' }, { ...entry, reason: 'late' }, { ...entry, severity: 'huge' }]) {
       globalThis.fetch = async () => new Response(
         JSON.stringify({ ...focusQueueResponseFixture, projectLogEntries: [invalid] }),

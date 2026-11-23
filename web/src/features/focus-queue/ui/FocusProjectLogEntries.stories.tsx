@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
-import { expect, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { focusProjectLogEntriesFixture } from '../fixtures'
 import { FocusProjectLogEntries } from './FocusProjectLogEntries'
@@ -39,6 +39,20 @@ export const JapaneseMobile: Story = {
   args: { t: createTranslator('ja') },
   globals: { viewport: { value: 'mobile1', isRotated: false } },
 }
+
+/** One Project log could not be read: the panel says entries may be missing and offers a retry. */
+export const Incomplete: Story = {
+  args: { entries: focusProjectLogEntriesFixture.slice(0, 1), incomplete: true, onRetry: fn() },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Some Project logs could not be loaded')
+    await userEvent.click(canvas.getByRole('button', { name: 'Reload' }))
+    await expect(args.onRetry).toHaveBeenCalledOnce()
+  },
+}
+
+/** Every log failed and nothing was read: the failure still shows instead of an empty panel. */
+export const IncompleteWithoutEntries: Story = { args: { entries: [], incomplete: true, onRetry: fn() } }
 
 /** Nothing the viewer owns needs attention, so the panel renders nothing. */
 export const NothingToReview: Story = { args: { entries: [] } }

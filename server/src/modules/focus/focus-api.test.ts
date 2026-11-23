@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import {
   NotificationError,
   type NotificationClient,
@@ -2564,4 +2564,31 @@ test('lists overdue Project log entries the viewer owns only in Projects the vie
     reviewDueDate: '2020-01-01',
     deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
   }])
+  expect(body.projectLogIncomplete).toBeUndefined()
+})
+
+test('reports an incomplete Project log list instead of an empty one when a log cannot be read', async () => {
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const store = new InMemoryProjectRaidLogStore()
+  store.listOpenOwnedBy = async () => {
+    throw new Error('ProvisionedThroughputExceededException')
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+  const warn = spyOn(console, 'warn').mockImplementation(() => undefined)
+
+  try {
+    const response = await focusRequest('/api/focus')
+
+    expect(response.status).toBe(200)
+    const body: unknown = await response.json()
+    if (!isRecord(body)) throw new Error('Expected a Focus response.')
+    expect(body.projectLogEntries).toEqual([])
+    expect(body.projectLogIncomplete).toBe(true)
+  } finally {
+    warn.mockRestore()
+  }
 })
