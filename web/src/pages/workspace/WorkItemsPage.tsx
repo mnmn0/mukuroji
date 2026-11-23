@@ -80,21 +80,30 @@ export function WorkItemsPage() {
     surface: 'work-items',
   })
   const { effectiveDefinition, setEffectiveDefinition } = taskViewController
-  const state = useMemo(
-    () => taskViewDefinitionToCrossProjectWorkItemState(effectiveDefinition),
-    [effectiveDefinition],
-  )
-  // A link from before saved views carries the list state in its own parameters. It becomes a
-  // temporary change of the current view once, and those parameters leave the URL.
+  // A link from before saved views carries the list state in its own parameters. Whenever the URL
+  // has them, the list renders that state, and the parameters are rewritten into a temporary change
+  // of the current view so the URL keeps one source of truth.
   const legacyState = useMemo(() => readLegacyCrossProjectWorkItemState(searchParams), [searchParams])
-  const convertedLegacyParams = useRef(false)
+  const state = useMemo(
+    () => legacyState ?? taskViewDefinitionToCrossProjectWorkItemState(effectiveDefinition),
+    [effectiveDefinition, legacyState],
+  )
+  // Rewriting the URL syncs the browser location, an external system. It runs for every URL that
+  // still has the older parameters, including one reached by Back/Forward, and ends once they leave.
+  // Each such URL is rewritten once, so renders before the rewrite lands do not queue more of them.
+  const convertedLegacySearch = useRef<string | undefined>(undefined)
   useEffect(() => {
-    if (!legacyState || convertedLegacyParams.current) return
-    convertedLegacyParams.current = true
+    if (!legacyState) {
+      convertedLegacySearch.current = undefined
+      return
+    }
+    const search = searchParams.toString()
+    if (convertedLegacySearch.current === search) return
+    convertedLegacySearch.current = search
     setEffectiveDefinition(
       crossProjectWorkItemStateToTaskViewDefinition(legacyState, effectiveDefinition),
     )
-  }, [effectiveDefinition, legacyState, setEffectiveDefinition])
+  }, [effectiveDefinition, legacyState, searchParams, setEffectiveDefinition])
   const serverFilter = useMemo(() => createCrossProjectWorkItemServerFilter(state), [state])
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,

@@ -261,6 +261,28 @@ test('Issue #381: an older link with list parameters opens as a temporary change
   await expect(page).not.toHaveURL(/layout=board/)
 })
 
+test('Issue #381: an older link reached by Back/Forward on the same page is converted too', async ({ page }) => {
+  await mockWorkspace(page)
+
+  await page.goto('/work-items?layout=board')
+  await expect(page.getByTestId('cross-project-work-items-layout-board')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page).not.toHaveURL(/layout=board/)
+
+  // A history entry with older parameters reached without reloading the page.
+  await page.evaluate(() => {
+    // The router keeps its own index in the history state, so the entry carries the next one.
+    const current: unknown = window.history.state
+    const idx = typeof current === 'object' && current !== null && 'idx' in current && typeof current.idx === 'number'
+      ? current.idx
+      : 0
+    window.history.pushState({ idx: idx + 1, key: 'legacy-link', usr: null }, '', '/work-items?layout=gantt')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  })
+  await expect(page.getByTestId('cross-project-work-items-layout-gantt')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page).toHaveURL(/view\.override=/)
+  await expect(page).not.toHaveURL(/layout=gantt/)
+})
+
 test('Issue #381: a failed Work Item read shows the load notice instead of an empty list', async ({ page }) => {
   await mockWorkspace(page)
   let failRead = true
