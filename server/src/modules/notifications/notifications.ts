@@ -13,7 +13,9 @@ import {
 import { getConfiguredDynamoDbEndpoint } from '../audit'
 import {
   isCanonicalWorkItemKey,
+  parseNotificationMessage,
   type NotificationCategoryChannels,
+  type NotificationMessage,
   type NotificationMutes,
   type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
@@ -141,6 +143,8 @@ export type NotificationItem = {
   workItemKey?: string
   /** Event の安全な短い概要です。 */
   summary?: string
+  /** System が書いた概要の code と値です。読む人の言語で文にします。 */
+  message?: NotificationMessage
   /** App 内で対象を開く相対 path です。 */
   deepLink?: string
   /** 対象 Team ID です。 */
@@ -1191,6 +1195,7 @@ export function toNotificationItem(
     return undefined
   }
   const deepLink = readText(value.deepLink)
+  const message = parseNotificationMessage(value.message)
   return {
     id: encodeNotificationIdentifier(recipientKey, notificationKey),
     eventId,
@@ -1203,6 +1208,7 @@ export function toNotificationItem(
     ...(readText(value.title) ? { title: readText(value.title) } : {}),
     ...(isCanonicalWorkItemKey(value.workItemKey) ? { workItemKey: value.workItemKey } : {}),
     ...(readText(value.summary) ? { summary: readText(value.summary) } : {}),
+    ...(message ? { message } : {}),
     ...(deepLink?.startsWith('/') && !deepLink.startsWith('//') ? { deepLink } : {}),
     ...(readText(value.teamId) ? { teamId: readText(value.teamId) } : {}),
     ...(readText(value.projectId) ? { projectId: readText(value.projectId) } : {}),

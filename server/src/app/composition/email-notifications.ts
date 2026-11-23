@@ -12,9 +12,12 @@ import {
   type ChannelDelivery,
   type EmailRecipientLookup,
 } from '../../modules/notifications'
+import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import { createMemberNotificationLocaleReader } from './notification-locale'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
+import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
@@ -91,10 +94,12 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
     fileTableName,
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
+    planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const ses = new SESv2Client({ region })
   const send = createEmailNotificationSender({
     sender, appOrigin,
+    readLocale: createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)),
     readRecipient: createCognitoEmailRecipientReader(documentClient, workspaceAccessTableName, userPoolId, new CognitoIdentityProviderClient({ region })),
     async sendEmail(message, signal) {
       await ses.send(new SendEmailCommand({

@@ -60,6 +60,9 @@ export const workspaceDependencies: WorkspaceDependencies = {
   get nationalHolidays() {
     return requireAppDependencies().workspace.nationalHolidays
   },
+  get workCalendars() {
+    return requireAppDependencies().workspace.workCalendars
+  },
   get tenantExportDownload() {
     return requireAppDependencies().workspace.tenantExportDownload
   },
@@ -257,6 +260,31 @@ export interface AutomationActionExecutorDependencies {
   workspaceSearchProjectionEnabled: boolean
   /** Provides the template-version read required by Automation actions. */
   automation: Pick<AutomationRuleTemplatePort, 'getTemplateVersion'>
+  /** Provides the calendars a Work Item that follows the shared calendar takes (ADR 0058). */
+  workCalendarSources: WorkCalendarSources
+}
+
+/** Stores the shared Team and Project calendar resolution reads (ADR 0058). */
+export type WorkCalendarSources = {
+  /** Reads the Workspace profile that holds the Workspace calendar. */
+  tenantAdministration: Pick<WorkspaceDependencies['tenantAdministration'], 'getProfile'>
+  /** Lists the synced national holiday dates. */
+  nationalHolidays: WorkspaceDependencies['nationalHolidays']
+  /** Reads Team and Project calendars. */
+  workCalendars: Pick<WorkspaceDependencies['workCalendars'], 'listTeam'>
+}
+
+/** Calendar reads resolved from the current request binding. */
+export const ambientWorkCalendarSources: WorkCalendarSources = {
+  get tenantAdministration() {
+    return workspaceDependencies.tenantAdministration
+  },
+  get nationalHolidays() {
+    return workspaceDependencies.nationalHolidays
+  },
+  get workCalendars() {
+    return workspaceDependencies.workCalendars
+  },
 }
 
 /** Automation action executor dependencies resolved from the current request binding. */
@@ -303,6 +331,7 @@ export const ambientAutomationActionExecutorDependencies: AutomationActionExecut
   get automation() {
     return automationDependencies.ruleTemplates
   },
+  workCalendarSources: ambientWorkCalendarSources,
 }
 
 /** Initializes a legacy tenant once from the authoritative active membership table. */

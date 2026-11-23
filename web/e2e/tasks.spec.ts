@@ -2692,6 +2692,10 @@ async function mockAnalyticsReportsPage(
     },
   )
 
+  await page.route(/.*\/api\/analytics\/deliveries(?:\?.*)?$/, async (route) => {
+    await route.fulfill({ json: { deliveries: [] } })
+  })
+
   await page.route(
     /.*\/api\/analytics\/reports\/[^/]+\/snapshots(?:\?.*)?$/,
     async (route) => {
@@ -5562,6 +5566,19 @@ test.describe('authenticated task page', () => {
       }
       await route.fulfill({
         json: { fiscalYearStartMonth: 1, weekStartDay: 1, workingWeekdays: ['monday'], holidays: [] },
+      })
+    })
+    // The Team and Project calendar reads succeed, so the notice is about the Workspace calendar.
+    const policy = { workingWeekdays: ['monday'], holidays: [], timeZone: 'Asia/Tokyo', calendarSource: 'shared' }
+    await page.route((url) => /^\/api\/teams\/[^/]+\/work-calendar$/.test(url.pathname), async (route) => {
+      await route.fulfill({
+        json: {
+          scope: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+          changeAdjustment: 'keep-duration',
+          resolvedPolicy: policy,
+          inheritedPolicy: policy,
+          canManage: false,
+        },
       })
     })
     await setScheduleFixtureClock(page)

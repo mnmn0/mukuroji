@@ -50,6 +50,7 @@ import {
 } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
 } from '../../modules/collaboration/collaboration'
@@ -111,6 +112,7 @@ import {
   hasUnqualifiedEnterpriseProjectScope,
   qualifyEnterpriseProjectScopes,
 } from '../shared/enterprise-access'
+import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
 import {
@@ -752,6 +754,29 @@ function createPlanningEntityRouteAuditTransaction(
   )
 }
 
+/**
+ * Finds a Milestone the caller can watch in the caller's filtered Planning snapshot.
+ *
+ * @param snapshot - Planning snapshot already filtered to the caller's readable scopes.
+ * @param entityId - Untrusted route entity ID.
+ * @returns The visible, unarchived Milestone.
+ * @throws PlanningError 404 when the entity is hidden or missing, 400 when it is not a Milestone,
+ *   and 409 when it is archived.
+ */
+function requireWatchablePlanningMilestone(snapshot: PlanningSnapshot, entityId: string | undefined) {
+  const normalizedEntityId = readPlanningRouteId(entityId, 'Planning entity ID')
+  const entity = snapshot.entities.find((candidate) => candidate.id === normalizedEntityId)
+  if (!entity) {
+    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+  }
+  if (entity.type !== 'milestone') {
+    throw new PlanningError(400, 'PlanningEntityNotWatchable', 'Only a Milestone can be watched.')
+  }
+  if (entity.archivedAt !== undefined) {
+    throw new PlanningError(409, 'PlanningEntityArchived', 'An archived Milestone cannot be watched.')
+  }
+  return entity
+}
 
 /**
  * Composes the feed reader with current directory and Planning authorization.
@@ -3968,6 +3993,83 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           : await workItemDependencies.collaboration.unsubscribe(mutationInput)
         return c.json({ watch })
       } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
+        return toPlanningErrorResponse(c, error)
+      }
+    })
+  }
+
+  /** Current user の Milestone watcher state を返します。 */
+  routeApp.get('/api/planning/entities/:entityId/watch', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const snapshot = await workItemDependencies.planning.get(
+        principal.directoryId,
+        await readPlanningWorkItemState(principal),
+      )
+      const milestone = requireWatchablePlanningMilestone(
+        filterPlanningSnapshotForPrincipal(principal, snapshot),
+        c.req.param('entityId'),
+      )
+      const watch = await workItemDependencies.collaboration.getWatcherState({
+        entityKey: createPlanningEntityCollaborationEntityKey(principal.directoryId, milestone.id),
+        memberKey: principal.userKey,
+      })
+      return c.json({ watch })
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  for (const planningEntityWatchMethod of ['PUT', 'DELETE'] as const) {
+    /** Milestone の watcher を subscribe/unsubscribe します。完了と予定変更が Inbox に届きます。 */
+    routeApp.on(planningEntityWatchMethod, '/api/planning/entities/:entityId/watch', async (c) => {
+      const accessToken = readBearerAccessToken(c)
+      if (!accessToken) {
+        return c.json({ message: 'Bearer token is required.' }, 401)
+      }
+
+      try {
+        const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+        // Anyone who can read the Milestone may watch it: watching only delivers what they can
+        // already read, and every notification rechecks that access.
+        const snapshot = await workItemDependencies.planning.get(
+          principal.directoryId,
+          await readPlanningWorkItemState(principal),
+        )
+        const milestone = requireWatchablePlanningMilestone(
+          filterPlanningSnapshotForPrincipal(principal, snapshot),
+          c.req.param('entityId'),
+        )
+        const mutationInput = {
+          workspaceId: principal.directoryId,
+          entityKey: createPlanningEntityCollaborationEntityKey(principal.directoryId, milestone.id),
+          planningEntityId: milestone.id,
+          memberKey: principal.userKey,
+          ...(milestone.teamId === undefined ? {} : { teamId: milestone.teamId }),
+          ...(milestone.projectId === undefined ? {} : { projectId: milestone.projectId }),
+          authorizationConditionChecks: [
+            ...createPlanningCallerAuthorizationConditionChecks(principal),
+            createPlanningRevisionConditionCheck(principal.directoryId, snapshot.revision),
+          ],
+          auditContext: createApiMutationContext(c, principal, {
+            planningEntityId: milestone.id,
+            method: planningEntityWatchMethod,
+          }),
+        }
+        const watch = planningEntityWatchMethod === 'PUT'
+          ? await workItemDependencies.collaboration.subscribe(mutationInput)
+          : await workItemDependencies.collaboration.unsubscribe(mutationInput)
+        return c.json({ watch })
+      } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
         return toPlanningErrorResponse(c, error)
       }
     })

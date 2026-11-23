@@ -1,4 +1,9 @@
-import type { NotificationBulkAction, NotificationBulkFailure } from '@mukuroji/contracts'
+import {
+  parseNotificationMessage,
+  type NotificationBulkAction,
+  type NotificationBulkFailure,
+  type NotificationMessage,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -57,6 +62,10 @@ export type InboxNotification = {
    * 通知内容を補足する安全な要約です。
    */
   summary?: string
+  /**
+   * System が書いた要約の code と値です。表示言語で文にし、読めない場合は `summary` を使います。
+   */
+  message?: NotificationMessage
   /**
    * 通知対象へ遷移するアプリ内 path です。
    */
@@ -180,10 +189,10 @@ const defaultNotificationsApiErrorMessage = 'Unable to complete the notification
  * @param options - filter、type、pagination 条件です。
  * @returns 通知 page と実未読件数です。
  */
-export function getNotifications(
+export async function getNotifications(
   accessToken: string,
   options: GetNotificationsOptions = {},
-) {
+): Promise<NotificationPage> {
   const query = new URLSearchParams()
 
   query.set('filter', options.filter ?? 'all')
@@ -197,10 +206,11 @@ export function getNotifications(
     query.set('cursor', options.cursor)
   }
 
-  return requestJson<NotificationPage>(
+  const page = await requestJson<NotificationPage>(
     `${notificationsApiBaseUrl}/notifications?${query.toString()}`,
     accessToken,
   )
+  return { ...page, notifications: page.notifications.map(normalizeInboxNotification) }
 }
 
 /**
@@ -227,13 +237,13 @@ export async function getNotificationUnreadCount(accessToken: string) {
  * @param mutationContext - retry 間で共有する mutation context です。
  * @returns 更新後の通知です。
  */
-export function updateNotification(
+export async function updateNotification(
   notificationId: string,
   accessToken: string,
   input: UpdateNotificationInput,
   mutationContext: MutationRequestContext,
-) {
-  return requestJson<InboxNotification>(
+): Promise<InboxNotification> {
+  const notification = await requestJson<InboxNotification>(
     `${notificationsApiBaseUrl}/notifications/${encodeURIComponent(notificationId)}`,
     accessToken,
     {
@@ -245,6 +255,20 @@ export function updateNotification(
       method: 'PATCH',
     },
   )
+  return normalizeInboxNotification(notification)
+}
+
+/**
+ * Keeps a notification's summary message only when this client can read it, so a code from a
+ * newer server or a malformed value falls back to the stored summary text.
+ *
+ * @param notification - Notification from an API response.
+ * @returns The notification with a validated message, or without one.
+ */
+function normalizeInboxNotification(notification: InboxNotification): InboxNotification {
+  const { message: rawMessage, ...rest } = notification
+  const message = parseNotificationMessage(rawMessage)
+  return message ? { ...rest, message } : rest
 }
 
 /** Result of one bulk Inbox request. */
@@ -302,7 +326,11 @@ function parseBulkUpdateNotificationsResponse(body: unknown): BulkUpdateNotifica
     Array.isArray(body.failures) && body.failures.every(isBulkFailure) &&
     typeof body.unreadCount === 'number' && Number.isInteger(body.unreadCount) && body.unreadCount >= 0
   ) {
-    return { notifications: body.notifications, failures: body.failures, unreadCount: body.unreadCount }
+    return {
+      notifications: body.notifications.map(normalizeInboxNotification),
+      failures: body.failures,
+      unreadCount: body.unreadCount,
+    }
   }
   throw new NotificationsApiError(502, 'The bulk notification response was not understood.', 'InvalidBulkNotificationResponse')
 }

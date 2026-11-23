@@ -22,6 +22,7 @@ import {
 } from '../src/features/time-tracking/reportFixtures'
 import { TimeBudgetPanel } from '../src/features/time-tracking/ui/TimeBudgetPanel'
 import { TimeReport } from '../src/features/time-tracking/ui/TimeReport'
+import { TimeEntryCategoryContext } from '../src/features/time-tracking/ui/timeEntryCategoryContext'
 import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../src/shared/routing/paths'
@@ -295,6 +296,26 @@ describe('time report views', () => {
     expect(markup).toContain('Meeting')
     expect(markup).toContain('Uncategorized')
     expect(resolveTimeReportGroupBy('category')).toBe('category')
+  })
+
+  test('keeps a Workspace name that matches a built-in key, and the server name of an unknown key', () => {
+    const summary = {
+      ...timeReportFixtureMemberSummary,
+      groupBy: 'category' as const,
+      groups: [
+        { key: 'meeting', label: 'meeting', minutes: 120, billableMinutes: 0, entryCount: 1 },
+        { key: 'custom-sales', label: 'Sales support', minutes: 60, billableMinutes: 0, entryCount: 1 },
+      ],
+    }
+    const settings = { categories: [{ key: 'meeting', label: 'meeting', active: true }] }
+    const markup = renderToStaticMarkup(
+      <TimeEntryCategoryContext value={settings}>
+        <TimeReport {...reportProps} groupBy="category" summary={summary} />
+      </TimeEntryCategoryContext>,
+    )
+    expect(markup).toContain('>meeting<')
+    expect(markup).not.toContain('Meeting')
+    expect(markup).toContain('Sales support')
   })
 
   test('refuses a period that ends before it starts', () => {

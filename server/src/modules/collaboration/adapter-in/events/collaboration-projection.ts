@@ -17,7 +17,14 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
-import { isCanonicalWorkItemKey, type EnterpriseIdentitySnapshot, type EnterprisePermissionId, type TriageEntry } from '@mukuroji/contracts'
+import {
+  isCanonicalWorkItemKey,
+  parseNotificationMessage,
+  type EnterpriseIdentitySnapshot,
+  type EnterprisePermissionId,
+  type NotificationMessage,
+  type TriageEntry,
+} from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
@@ -30,6 +37,7 @@ import type {
   CollaborationRealtimePublisher,
 } from '../../application/ports/realtime-publisher'
 import {
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
   createProjectCollaborationEntityKey,
@@ -140,6 +148,8 @@ export type AuditProjectionEvent = {
   workItemKey?: string
   /** Audit event の安全な短い概要です。 */
   summary?: string
+  /** Code and values of the system-written summary, so readers can show it in their language. */
+  notificationMessage?: NotificationMessage
   /** Scheduled due/overdue event が対象にした date-only 期限です。 */
   dueDate?: string
   /** Work Item `updatedAt` that a scheduled stale reminder was computed from. */
@@ -216,6 +226,34 @@ export interface CollaborationProjectionDependencies {
   timesheetReminders?: TimesheetReminderRevalidator
   /** Revalidates weekly report reminders; without it every weekly report reminder is dropped. */
   weeklyReportReminders?: WeeklyReportReminderRevalidator
+  /** Rereads Milestones and their watches; without it every Milestone notification is dropped. */
+  planningMilestones?: PlanningMilestoneNotificationRevalidator
+}
+
+/** Reads the current state a Milestone notification depends on. */
+export type PlanningMilestoneNotificationRevalidator = {
+  /**
+   * Strongly reads a Milestone's current scope.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param entityId - Milestone ID.
+   * @returns The Team and Project, or undefined when it is gone, archived, or not a Milestone.
+   */
+  readCurrentMilestoneScope(workspaceId: string, entityId: string): Promise<{
+    /** Team of the Milestone. */
+    teamId?: string
+    /** Project of the Milestone. */
+    projectId?: string
+  } | undefined>
+  /**
+   * Strongly reads whether a member still watches a Milestone.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param entityId - Milestone ID.
+   * @param memberKey - Normalized member key.
+   * @returns Whether the member's watch is subscribed.
+   */
+  isWatching(workspaceId: string, entityId: string, memberKey: string): Promise<boolean>
 }
 
 /** A `ConditionCheck` transaction item written together with a projected notification. */
@@ -512,6 +550,33 @@ const planningUpdateActivityEventTypes = new Set([
   ...planningUpdatePublishEventTypes,
   'planning-update.commented',
 ])
+/**
+ * Milestone updates that notify the Milestone's current watchers. Kept as literals so this Lambda
+ * does not bundle the API; they must match the event types the Planning entity audit writes.
+ */
+const planningMilestoneNotificationEventTypes = new Set([
+  'planning-entity.milestone-completed',
+  'planning-entity.milestone-rescheduled',
+])
+
+/**
+ * Reports whether a notification shows Planning content, so its recipients need Planning read
+ * (or write, for an owner's due reminder) access instead of Work Item access.
+ *
+ * @param event - Notification source event.
+ * @returns True for scheduled Planning, update activity, and Milestone notifications.
+ */
+function isPlanningContentNotification(
+  event: Pick<AuditProjectionEvent, 'planningNotificationKind'> & Partial<Pick<AuditProjectionEvent, 'eventType'>>,
+) {
+  return event.planningNotificationKind !== undefined || (
+    event.eventType !== undefined && (
+      planningUpdateActivityEventTypes.has(event.eventType) ||
+      planningMilestoneNotificationEventTypes.has(event.eventType)
+    )
+  )
+}
+
 /**
  * Scheduled Analytics report delivery to one recipient. Kept as a literal so this Lambda does not
  * bundle the Analytics module; it must match the event type the Analytics notifier writes.
@@ -819,6 +884,10 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
+  if (!(await isCurrentPlanningMilestoneNotification(authorizationEvent, dependencies.planningMilestones))) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
 
   // A timesheet reminder is fenced on the entry it was revalidated against, so a submission that
   // lands before the save cancels it and the stream retry drops the reminder.
@@ -1121,7 +1190,8 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
   if (
     !supportsCollaborationWatcherNotifications(event.eventType) &&
-    !notifiesWorkItemChangeWatchers(event)
+    !notifiesWorkItemChangeWatchers(event) &&
+    !planningMilestoneNotificationEventTypes.has(event.eventType)
   ) {
     return []
   }
@@ -1183,6 +1253,15 @@ export function createSubscribedWatcherScopes(
     | 'workspaceId'
   >,
 ) {
+  if (planningMilestoneNotificationEventTypes.has(event.eventType)) {
+    // Only the Milestone's own watchers; Project watchers follow comments, not Planning edits.
+    return event.entityId
+      ? [{
+          entityKey: createPlanningEntityCollaborationEntityKey(event.workspaceId, event.entityId),
+          reason: 'watcher',
+        }]
+      : []
+  }
   if (workItemChangeWatcherEventTypes.has(event.eventType)) {
     // Project watchers follow comments, not every field change of each Work Item.
     return event.scopeKey ? [{ entityKey: event.scopeKey, reason: 'watcher' }] : []
@@ -1632,6 +1711,7 @@ export function createNotificationProjectionItem(
     title: event.notificationTitle,
     workItemKey: event.workItemKey,
     summary: event.summary,
+    ...(event.notificationMessage ? { message: event.notificationMessage } : {}),
     reasons: candidate.reasons,
     deliveryChannels: deliveryState.deliveryChannels,
     deliveryAfter: deliveryState.deliveryAfter,
@@ -2190,8 +2270,7 @@ export function resolveEnterpriseNotificationAuthorization(
 
   const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' ||
     event.planningNotificationKind === 'overdue')
-  const planningContent = event.planningNotificationKind !== undefined ||
-    (event.eventType !== undefined && planningUpdateActivityEventTypes.has(event.eventType))
+  const planningContent = isPlanningContentNotification(event)
   const permissions: EnterprisePermissionId[] = planningContent
     ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
     : [contentPermission]
@@ -2496,7 +2575,7 @@ async function isEligibleRecipient(
     permissionCeiling = boundary.permissionCeiling
     const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
     const permissions: EnterprisePermissionId[] =
-      event.planningNotificationKind || planningUpdateActivityEventTypes.has(event.eventType)
+      isPlanningContentNotification(event)
       ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
       : [contentPermission]
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
@@ -2511,8 +2590,7 @@ async function isEligibleRecipient(
   if (
     enterpriseIdentity &&
     (
-      event.planningNotificationKind !== undefined ||
-      planningUpdateActivityEventTypes.has(event.eventType) ||
+      isPlanningContentNotification(event) ||
       // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
       event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
       // Weekly report reminders are fenced the same way as timesheet reminders.
@@ -2748,6 +2826,7 @@ export async function authorizeNotificationDelivery(
     ? createCurrentPlanningUpdateActivityScopeEvent(scoped, planningScope)
     : undefined
   if (planningActivity && !currentPlanningActivityEvent) return false
+  // Milestone notifications are rechecked by the caller, which owns the Milestone and watch reader.
   const current = planningScope.checked && !planningActivity
     ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
     : scoped
@@ -2935,6 +3014,33 @@ async function readCurrentWorkItemScope(
 }
 
 /**
+ * Rechecks a Milestone notification against the Milestone it was written for and, for one
+ * recipient, against that recipient's current watch.
+ *
+ * The Milestone must still exist, be a Milestone, be unarchived, and sit in the Team / Project the
+ * event captured; a Milestone moved since then is not reported, so its title never reaches readers
+ * of only one of the two scopes. Other events pass.
+ *
+ * @param event - Notification source event.
+ * @param revalidator - Milestone and watch reader; without it every Milestone notification is dropped.
+ * @param memberKey - Recipient whose watch is rechecked, when one is known.
+ * @returns Whether the event may still be delivered.
+ */
+export async function isCurrentPlanningMilestoneNotification(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'workspaceId' | 'entityId' | 'teamId' | 'projectId'>,
+  revalidator: PlanningMilestoneNotificationRevalidator | undefined,
+  memberKey?: string,
+): Promise<boolean> {
+  if (!planningMilestoneNotificationEventTypes.has(event.eventType)) return true
+  const { entityId, workspaceId } = event
+  if (!revalidator || !entityId) return false
+  const scope = await revalidator.readCurrentMilestoneScope(workspaceId, entityId)
+  if (!scope || scope.teamId !== event.teamId || scope.projectId !== event.projectId) return false
+  return memberKey === undefined ||
+    await revalidator.isWatching(workspaceId, entityId, memberKey.trim().toLowerCase())
+}
+
+/**
  * Strongly reads the canonical Planning update target and Initiative scope for scheduled, publish, and comment events.
  *
  * @param event - Parsed audit event that may represent a Planning scheduled notification.
@@ -3085,6 +3191,7 @@ export function parseAuditProjectionEvent(
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
     summary: readString(value.summary),
+    notificationMessage: parseNotificationMessage(metadata.notificationMessage),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
     daysUntilDue: readOptionalDaysUntilDue(metadata.daysUntilDue),

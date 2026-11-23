@@ -15,6 +15,7 @@ import { TimeEntryForm } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
 import {
   createTimeTrackingFormatters,
+  describeSavedTimeEntry,
   describeTimeTrackingFailure,
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
@@ -397,9 +398,9 @@ export function WorkItemTimePanel({
             fixedWorkItemId={workItemId}
             onCancel={() => setIsCreating(false)}
             onSave={async (input) => {
-              await onCreateEntry(input)
+              const saved = await onCreateEntry(input)
               setIsCreating(false)
-              setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+              setMessage({ tone: 'status', text: describeSavedTimeEntry(t, formatters, t('timeTracking.entry.created'), saved) })
             }}
             t={t}
           />
@@ -416,7 +417,13 @@ export function WorkItemTimePanel({
           <TimeEntryList
             entries={entries}
             formatters={formatters}
-            {...(readOnly ? {} : { onSubmit: onSubmitEntry, onUpdate: onUpdateEntry })}
+            {...(readOnly ? {} : {
+              onSubmit: onSubmitEntry,
+              onUpdate: async (entry: TimeEntry, input: TimeEntryDraftInput) => {
+                const saved = await onUpdateEntry(entry, input)
+                setMessage({ tone: 'status', text: describeSavedTimeEntry(t, formatters, t('timeTracking.entry.updated'), saved) })
+              },
+            })}
             showDate
             {...(rejectionReasons ? { rejectionReasons } : {})}
             t={t}

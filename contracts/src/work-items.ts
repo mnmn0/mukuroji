@@ -110,7 +110,17 @@ export type WorkItemScheduleCalendarPolicy = {
   workingWeekdays: WorkItemScheduleWeekday[]
   /** Local `YYYY-MM-DD` dates excluded from working-duration calculations. */
   holidays: string[]
+  /**
+   * Where the rules come from (ADR 0058). `shared` means the fields are a copy of the Team or
+   * Project calendar the Work Item inherits, refreshed when that calendar changes. Omitted means
+   * the Work Item keeps its own rules (an individual override, and every row stored before shared
+   * calendars existed).
+   */
+  calendarSource?: WorkItemScheduleCalendarSource
 }
+
+/** Origin of a Work Item calendar policy: `shared` follows the Team or Project calendar. */
+export type WorkItemScheduleCalendarSource = 'shared'
 
 /**
  * Default calendar policy used when a caller creates a new Work Item schedule.
