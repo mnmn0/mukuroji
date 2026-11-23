@@ -14,7 +14,7 @@ import {
   summarizeFactoryUsage,
   UNKNOWN_AGENT_INSTANCE_HASH,
 } from './domain/agent-run-usage'
-import { DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
+import { AGENT_USAGE_BATCH_RECEIPT_DAYS, DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
 import { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
 
 const now = new Date('2026-11-22T18:00:00.000Z')
@@ -135,6 +135,16 @@ describe('agent telemetry parsing', () => {
     ]), now)
     expect(parsed.rejectedRecords).toBe(6)
     expect(parsed.events).toHaveLength(1)
+  })
+
+  test('accepts nothing from an export resent after its receipt expired', () => {
+    // The newest event the receiver accepts is 5 minutes ahead; the receipt outlives the window for it.
+    const exported = exportOf([apiRequest('2026-11-22T18:05:00Z'), apiRequest('2026-11-15T18:00:01Z')])
+    expect(parseAgentTelemetryLogs(exported, now).events).toHaveLength(2)
+    const receiptExpired = new Date(now.getTime() + AGENT_USAGE_BATCH_RECEIPT_DAYS * 86_400_000)
+    const resent = parseAgentTelemetryLogs(exported, receiptExpired)
+    expect(resent.events).toEqual([])
+    expect(groupAgentUsageBuckets(resent.events)).toEqual([])
   })
 
   test('refuses bodies that are not log exports', () => {
