@@ -1046,25 +1046,33 @@ test('refuses a Team-wide grant retried under the same key with another input', 
     createTeamRow('alpha', 10),
     createProjectRow('alpha', 10, 'refero', 1),
     createProjectRow('alpha', 10, 'billing', 2),
+    createProjectRow('alpha', 10, 'old', 3, { archivedAt: '2026-06-06T00:00:00.000Z' }),
     { ...createProjectMemberRow('refero', 'sato@example.com'), grantRequestKey: 'key-hash:member-request' },
+    { ...createProjectMemberRow('old', 'sato@example.com'), grantRequestKey: 'archived-hash:member-request' },
   ]
   const { client, transactions } = createClient(rows)
   const input = { role: 'viewer', email: 'sato@example.com' }
 
   // The same request repeats; another key is a separate request.
-  await expect(client.requireUnusedProjectGrantRequest(
-    directoryId, ['refero', 'billing'], 'Sato@example.com', 'key-hash:member-request',
-  )).resolves.toBeUndefined()
-  await expect(client.requireUnusedProjectGrantRequest(
-    directoryId, ['refero', 'billing'], 'sato@example.com', 'other-hash:viewer-request',
-  )).resolves.toBeUndefined()
-  // The same key with another role is refused before Billing is written.
-  await expect(client.requireUnusedProjectGrantRequest(
-    directoryId, ['refero', 'billing'], 'sato@example.com', 'key-hash:viewer-request',
-  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  await expect(client.requireUnusedProjectGrantRequest(directoryId, 'key-hash:member-request'))
+    .resolves.toBeUndefined()
+  await expect(client.requireUnusedProjectGrantRequest(directoryId, 'other-hash:viewer-request'))
+    .resolves.toBeUndefined()
+  // The same key with another role or member is refused before Billing is written, and so is a
+  // key whose only earlier grant is in a Project archived since.
+  for (const reused of ['key-hash:viewer-request', 'key-hash:other-member-request', 'archived-hash:viewer-request']) {
+    await expect(client.requireUnusedProjectGrantRequest(directoryId, reused))
+      .rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  }
   await expect(client.addProjectMemberIfAbsent(
     directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, [], 'key-hash:viewer-request',
   )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  // A member not yet in Billing is not inserted under a reused key either.
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'billing', 'tanaka@example.com', { role: 'viewer', email: 'tanaka@example.com' },
+    3, undefined, [], 'key-hash:other-member-request',
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  expect(transactions()).toHaveLength(0)
 
   await client.addProjectMemberIfAbsent(
     directoryId, 'alpha', 'billing', 'sato@example.com', input, 3, undefined, [], 'key-hash:member-request',

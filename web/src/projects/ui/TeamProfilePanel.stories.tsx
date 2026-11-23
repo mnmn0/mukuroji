@@ -165,6 +165,30 @@ export const SavedAfterReload: Story = {
   },
 }
 
+/** Choosing no leader and saving keeps the leader cleared after the reload. */
+export const ClearedLeaderAfterReload: Story = {
+  render: (args) => <SavingTeamProfilePanel {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.selectOptions(canvas.getByLabelText('リーダー'), '')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(await canvas.findByText('保存しました。')).toBeVisible()
+    await expect(canvas.getByLabelText('リーダー')).toHaveValue('')
+  },
+}
+
+/** Choosing another leader and saving shows that member as the leader after the reload. */
+export const ChangedLeaderAfterReload: Story = {
+  render: (args) => <SavingTeamProfilePanel {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.selectOptions(canvas.getByLabelText('リーダー'), 'suzuki@example.com')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(await canvas.findByText('保存しました。')).toBeVisible()
+    await expect(canvas.getByLabelText('リーダー')).toHaveValue('suzuki@example.com')
+  },
+}
+
 /**
  * Lets the story stand in for another administrator who saves the Team in the background.
  *

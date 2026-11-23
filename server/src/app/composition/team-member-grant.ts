@@ -34,13 +34,8 @@ export function createTeamMemberGrantPorts(
     getDirectoryAdministration: (workspaceId) => projectDirectory.getDirectoryAdministration(workspaceId),
     addProjectMemberIfAbsent: (...args) =>
       projectDirectory.addProjectMemberIfAbsent(...args, request.grantRequestKey),
-    requireUnusedGrantRequest: (workspaceId, projectIds, memberKey) =>
-      projectDirectory.requireUnusedProjectGrantRequest(
-        workspaceId,
-        projectIds,
-        memberKey,
-        request.grantRequestKey,
-      ),
+    requireUnusedGrantRequest: (workspaceId) =>
+      projectDirectory.requireUnusedProjectGrantRequest(workspaceId, request.grantRequestKey),
     async readActiveMemberVersion(workspaceId, memberKey) {
       const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
       if (!member) {

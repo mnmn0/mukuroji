@@ -942,20 +942,12 @@ export type ProjectDirectoryClient = {
     grantRequestKey?: string,
   ): Promise<{ added: boolean }>
   /**
-   * Refuses a Team-wide grant whose idempotency key already granted one of the Projects with
-   * another input.
+   * Refuses a Team-wide grant whose idempotency key already granted a Project with another input.
    *
    * @param directoryId - Workspace directory identifier.
-   * @param projectIds - Projects the grant covers.
-   * @param memberKey - Member being added.
    * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
    */
-  requireUnusedProjectGrantRequest(
-    directoryId: string,
-    projectIds: readonly string[],
-    memberKey: string,
-    grantRequestKey: string,
-  ): Promise<void>
+  requireUnusedProjectGrantRequest(directoryId: string, grantRequestKey: string): Promise<void>
   /**
    * DynamoDB から project member role を削除します。
    */
@@ -2077,8 +2069,8 @@ export class DynamoDbProjectDirectoryClient {
     const role = readProjectRole(input.role)
     const items = await this.readValidDirectoryItems(directoryId, true)
     this.requireActiveProject(items, projectId, teamId)
+    requireUnusedGrantRequestKey(items, grantRequestKey)
     if (hasActiveProjectMember(items, projectId, normalizedMemberKey)) {
-      requireUnusedGrantRequestKey(items, [projectId], normalizedMemberKey, grantRequestKey)
       return { added: false }
     }
 
@@ -2151,7 +2143,7 @@ export class DynamoDbProjectDirectoryClient {
         const latest = await this.readValidDirectoryItems(directoryId, true)
         this.requireActiveProject(latest, projectId, teamId)
         if (hasActiveProjectMember(latest, projectId, normalizedMemberKey)) {
-          requireUnusedGrantRequestKey(latest, [projectId], normalizedMemberKey, grantRequestKey)
+          requireUnusedGrantRequestKey(latest, grantRequestKey)
           return { added: false }
         }
       }
@@ -2179,22 +2171,15 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
-   * Refuses a Team-wide grant whose idempotency key already granted one of the Projects with
-   * another input, before any Project is written.
+   * Refuses a Team-wide grant whose idempotency key already granted a Project with another input,
+   * before any Project is written.
    *
    * @param directoryId - Workspace directory identifier.
-   * @param projectIds - Projects the grant covers.
-   * @param memberKey - Member being added.
    * @param grantRequestKey - Idempotency key hash and request fingerprint of the grant.
    */
-  async requireUnusedProjectGrantRequest(
-    directoryId: string,
-    projectIds: readonly string[],
-    memberKey: string,
-    grantRequestKey: string,
-  ): Promise<void> {
+  async requireUnusedProjectGrantRequest(directoryId: string, grantRequestKey: string): Promise<void> {
     const items = await this.readValidDirectoryItems(directoryId, true)
-    requireUnusedGrantRequestKey(items, projectIds, normalizeProjectMemberKey(memberKey), grantRequestKey)
+    requireUnusedGrantRequestKey(items, grantRequestKey)
   }
 
   /**
@@ -5202,27 +5187,23 @@ function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string
 }
 
 /**
- * Refuses a grant when the same idempotency key already granted one of the Projects with another
- * input, as a retry under one key must repeat the same request.
+ * Refuses a grant when the same idempotency key already granted a Project with another input, as
+ * a retry under one key must repeat the same request.
+ *
+ * Every member row of the Workspace is checked, whatever its Project, member, or archive state, so
+ * a retry that changes the member or follows an archived Project is refused too.
  *
  * @param items - Directory rows of the Workspace.
- * @param projectIds - Projects the grant covers.
- * @param memberKey - Normalized member key.
  * @param grantRequestKey - Idempotency key hash and request fingerprint, joined by `:`.
  */
 function requireUnusedGrantRequestKey(
   items: ProjectDirectoryItem[],
-  projectIds: readonly string[],
-  memberKey: string,
   grantRequestKey: string | undefined,
 ) {
   if (grantRequestKey === undefined) return
   const keyHash = readGrantRequestKeyHash(grantRequestKey)
   const reused = items.some((item) =>
     item.entryType === 'project-member' &&
-    projectIds.includes(item.projectId) &&
-    item.memberKey === memberKey &&
-    isActiveDirectoryItem(item) &&
     item.grantRequestKey !== undefined &&
     item.grantRequestKey !== grantRequestKey &&
     readGrantRequestKeyHash(item.grantRequestKey) === keyHash
