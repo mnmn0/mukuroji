@@ -363,6 +363,11 @@ export type TaskViewAccessScope = {
   writableTeamIds: ReadonlySet<string>
   /** Current viewer が管理できる Team ID です。 */
   manageableTeamIds: ReadonlySet<string>
+  /**
+   * Current viewer が Project の既定 view を設定できる `${teamId}\0${projectId}` 形式の
+   * Team-qualified Project key です。
+   */
+  manageableProjectScopeKeys: ReadonlySet<string>
   /** Current viewer が参照できる Project ID です。 */
   projectIds: ReadonlySet<string>
   /** Current viewer が task view scope を更新できる Project ID です。 */
@@ -811,7 +816,7 @@ type ResolvedTaskViewDefault = {
   /** Team default identifier for the resolved scope. */
   teamViewId?: string
   /** Source that supplied the effective default. */
-  source: 'personal' | 'team' | 'built-in'
+  source: 'personal' | 'team' | 'project' | 'built-in'
 }
 
 /** Search cursor の scope-bound payload です。 */
@@ -2706,7 +2711,16 @@ export class DynamoDbWorkspaceSearchClient {
     requireTaskViewWriteAccess(request.access)
     const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
     const ownerUserId = requireText(request.access.viewerUserId, 'Task view owner ID')
-    const normalized = normalizeCreateTaskViewInput(request.input)
+    const normalizedInput = normalizeCreateTaskViewInput(request.input)
+    const normalized = {
+      ...normalizedInput,
+      defaultSource: normalizedInput.defaultSource === undefined
+        ? undefined
+        : toStoredTaskViewDefaultOwner(
+            normalizedInput.defaultSource,
+            normalizedInput.definition.scope,
+          ),
+    }
     requireCanCreateTaskView(
       normalized.visibility,
       normalized.teamId,
@@ -2872,6 +2886,12 @@ export class DynamoDbWorkspaceSearchClient {
     const visibility = input.visibility ?? current.visibility
     const teamId = input.teamId === null ? undefined : input.teamId ?? current.teamId
     const definition = input.definition ?? current.definition
+    const defaultSource = input.defaultSource === undefined || input.defaultSource === null
+      ? input.defaultSource
+      : toStoredTaskViewDefaultOwner(input.defaultSource, definition.scope)
+    const clearDefaultSource = input.clearDefaultSource === undefined
+      ? undefined
+      : toStoredTaskViewDefaultOwner(input.clearDefaultSource, definition.scope)
     const defaultContextChanged =
       visibility !== current.visibility ||
       teamId !== current.teamId ||
@@ -2978,10 +2998,10 @@ export class DynamoDbWorkspaceSearchClient {
       input.favorite,
       input.pinned,
     ))
-    const nextDefaultRecordKey = input.defaultSource === 'personal' ||
-        input.defaultSource === 'team'
+    const nextDefaultRecordKey = defaultSource === 'personal' ||
+        defaultSource === 'team'
       ? createTaskViewDefaultRecordKey(
-          input.defaultSource,
+          defaultSource,
           actorUserId,
           teamId,
           definition.surface,
@@ -2994,6 +3014,23 @@ export class DynamoDbWorkspaceSearchClient {
         previousDefault?.viewId === viewId &&
         previousDefault.recordKey !== nextDefaultRecordKey
       ) {
+        // Moving a view out of its shared context removes the shared default that points at it, so
+        // the actor must be allowed to clear that default, as when clearing it explicitly.
+        if (
+          previousDefault.ownerType === 'team' &&
+          (!previousDefault.teamId ||
+            !canManageTaskViewSharedDefault(
+              current.definition.scope,
+              previousDefault.teamId,
+              request.access,
+            ))
+        ) {
+          throw new WorkspaceSearchError(
+            403,
+            'TaskViewAccessDenied',
+            'Team task view default management is denied.',
+          )
+        }
         transactItems.push(createTaskViewDefaultGuardTransactionItem(
           this.tableName,
           workspaceId,
@@ -3008,9 +3045,9 @@ export class DynamoDbWorkspaceSearchClient {
         previousDefaultRecordKeysToDelete.add(previousDefault.recordKey)
       }
     }
-    if (input.defaultSource === 'personal' || input.defaultSource === 'team') {
+    if (defaultSource === 'personal' || defaultSource === 'team') {
       requireCanSetTaskViewDefault(
-        input.defaultSource,
+        defaultSource,
         visibility,
         teamId,
         definition,
@@ -3021,7 +3058,7 @@ export class DynamoDbWorkspaceSearchClient {
           TableName: this.tableName,
           Item: createStoredTaskViewDefault(
             workspaceId,
-            input.defaultSource,
+            defaultSource,
             request.access.viewerUserId,
             teamId,
             definition.surface,
@@ -3031,7 +3068,7 @@ export class DynamoDbWorkspaceSearchClient {
           ),
         },
       })
-    } else if (input.defaultSource === null || input.clearDefaultSource !== undefined) {
+    } else if (defaultSource === null || clearDefaultSource !== undefined) {
       const [personalDefault, teamDefault] = await Promise.all([
         this.getTaskViewDefault(
           workspaceId,
@@ -3052,13 +3089,13 @@ export class DynamoDbWorkspaceSearchClient {
             )
           : Promise.resolve(undefined),
       ])
-      const sourceToClear = input.clearDefaultSource ?? (
+      const sourceToClear = clearDefaultSource ?? (
         personalDefault?.viewId === viewId ? 'personal' : 'team'
       )
       if (
         sourceToClear === 'team' &&
         (!teamId ||
-          (!request.access.isSystemAdmin && !request.access.manageableTeamIds.has(teamId)))
+          !canManageTaskViewSharedDefault(definition.scope, teamId, request.access))
       ) {
         throw new WorkspaceSearchError(
           403,
@@ -3087,7 +3124,7 @@ export class DynamoDbWorkspaceSearchClient {
         teamId &&
         teamDefault?.viewId === viewId &&
         !previousDefaultRecordKeysToDelete.has(teamDefault.recordKey) &&
-        (request.access.isSystemAdmin || request.access.manageableTeamIds.has(teamId))
+        canManageTaskViewSharedDefault(definition.scope, teamId, request.access)
       ) {
         transactItems.push(createTaskViewDefaultGuardTransactionItem(
           this.tableName,
@@ -3345,7 +3382,7 @@ export class DynamoDbWorkspaceSearchClient {
     ]
     if (
       current.teamId &&
-      (request.access.isSystemAdmin || request.access.manageableTeamIds.has(current.teamId))
+      canManageTaskViewSharedDefault(context.scope, current.teamId, request.access)
     ) {
       transactItems.push(createTaskViewDefaultGuardTransactionItem(
         this.tableName,
@@ -3764,7 +3801,7 @@ export class DynamoDbWorkspaceSearchClient {
 
     let teamViewId: string | undefined
     const teamId = getTaskViewScopeTeamId(scope)
-    if (teamId && access.teamIds.has(teamId)) {
+    if (teamId && access.teamIds.has(teamId) && canHaveTaskViewSharedDefault(scope)) {
       const teamDefault = await this.getTaskViewDefault(
         workspaceId,
         'team',
@@ -3796,7 +3833,9 @@ export class DynamoDbWorkspaceSearchClient {
         source: 'personal',
       }
     }
-    if (teamViewId) return { viewId: teamViewId, teamViewId, source: 'team' }
+    if (teamViewId) {
+      return { viewId: teamViewId, teamViewId, source: getTaskViewSharedDefaultSource(scope) }
+    }
     return { source: 'built-in' }
   }
 
@@ -4047,6 +4086,35 @@ async function sanitizeTaskViewDefinition(
             access.readableWorkItemTypeIds,
             warnings,
           ),
+        }),
+    ...(definition.filters.projectScopes === undefined
+      ? {}
+      : {
+          projectScopes: definition.filters.projectScopes.filter((projectScope) => {
+            if (access.projectScopeKeys.has(
+              createTaskViewProjectScopeKey(projectScope.teamId, projectScope.projectId),
+            )) return true
+            addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+            return false
+          }),
+        }),
+    ...(definition.filters.contributorUserIds === undefined
+      ? {}
+      : {
+          contributorUserIds: retainTaskViewReferenceIds(
+            definition.filters.contributorUserIds,
+            access.readableActorIds,
+            warnings,
+          ),
+        }),
+    ...(definition.filters.contributorJobRoles === undefined
+      ? {}
+      : {
+          contributorJobRoles: definition.filters.contributorJobRoles.filter((jobRole) => {
+            if (access.teamIds.has(jobRole.teamId)) return true
+            addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+            return false
+          }),
         }),
     ...(definition.filters.workflowStatuses === undefined
       ? {}
@@ -4802,7 +4870,10 @@ async function toSavedTaskView(
   const sanitized = await sanitizeTaskViewDefinition(stored.definition, access)
   const isDefault = resolvedDefault.viewId === stored.id
   const isPersonalDefault = resolvedDefault.personalViewId === stored.id
-  const isTeamDefault = resolvedDefault.teamViewId === stored.id
+  const isSharedDefault = resolvedDefault.teamViewId === stored.id
+  const isProjectScope = stored.definition.scope.kind === 'project'
+  const isTeamDefault = isSharedDefault && !isProjectScope
+  const isProjectDefault = isSharedDefault && isProjectScope
   return {
     schemaVersion: TASK_VIEW_SCHEMA_VERSION,
     id: stored.id,
@@ -4820,6 +4891,7 @@ async function toSavedTaskView(
       isDefault,
       isPersonalDefault,
       isTeamDefault,
+      isProjectDefault,
       ...(isDefault ? { defaultSource: resolvedDefault.source } : {}),
     },
     createdAt: stored.createdAt,
@@ -4876,6 +4948,7 @@ function createTaskViewListCapabilities(
       canWrite: false,
       canManageSharedViews: false,
       canSetTeamDefault: false,
+      canSetProjectDefault: false,
       writableTeamIds: [],
       writableProjectScopes: [],
     }
@@ -4892,7 +4965,15 @@ function createTaskViewListCapabilities(
     canWrite,
     canManageSharedViews: canWrite && access.canManageSharedViews,
     canSetTeamDefault: Boolean(
-      canWrite && scopeTeamId && access.manageableTeamIds.has(scopeTeamId),
+      canWrite &&
+      scope.kind === 'team' &&
+      canManageTaskViewSharedDefault(scope, scope.teamId, access),
+    ),
+    canSetProjectDefault: Boolean(
+      canWrite &&
+      scope.kind === 'project' &&
+      scope.teamId &&
+      canManageTaskViewSharedDefault(scope, scope.teamId, access),
     ),
     writableTeamIds,
     writableProjectScopes: createTaskViewListWritableProjectScopes(scope, access),
@@ -5029,7 +5110,7 @@ function requireCanCreateTaskView(
 
 /** Requires authority to assign a personal or Team default marker. */
 function requireCanSetTaskViewDefault(
-  defaultSource: SavedTaskViewDefaultSource | undefined,
+  defaultSource: StoredTaskViewDefaultOwner | undefined,
   visibility: SavedViewVisibility,
   teamId: string | undefined,
   definition: TaskViewDefinition,
@@ -5041,7 +5122,7 @@ function requireCanSetTaskViewDefault(
     visibility !== 'team' ||
     !teamId ||
     scopeTeamId !== teamId ||
-    (!access.isSystemAdmin && !access.manageableTeamIds.has(teamId))
+    !canManageTaskViewSharedDefault(definition.scope, teamId, access)
   ) {
     throw new WorkspaceSearchError(
       403,
@@ -5350,10 +5431,30 @@ function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
   const surface = requireTaskViewSurface(definition.surface)
   const scope = normalizeTaskViewScope(definition.scope)
   validateTaskViewSurfaceScope(surface, scope)
+  const filters = normalizeTaskViewFilters(definition.filters)
+  if (
+    surface !== 'work-items' &&
+    (
+      filters.projectScopes !== undefined ||
+      filters.involvement !== undefined ||
+      filters.contributorUserIds !== undefined ||
+      filters.contributorJobRoles !== undefined
+    )
+  ) {
+    invalidTaskView('Cross-Project task view filters need the work-items surface.')
+  }
+  // The Work Item list filters by one contributor and one job role, so a view never keeps values
+  // the list would not apply.
+  if (
+    (filters.contributorUserIds?.length ?? 0) > 1 ||
+    (filters.contributorJobRoles?.length ?? 0) > 1
+  ) {
+    invalidTaskView('Task view contributor filters accept one value each.')
+  }
   return {
     surface,
     scope,
-    filters: normalizeTaskViewFilters(definition.filters),
+    filters,
     layout: normalizeTaskViewLayout(definition.layout),
   }
 }
@@ -5389,7 +5490,9 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
         ? scope.kind === 'team'
         : surface === 'my-tasks' || surface === 'focus'
           ? scope.kind === 'viewer'
-          : false
+          : surface === 'work-items'
+            ? scope.kind === 'workspace'
+            : false
   if (!valid) invalidTaskView('Task view surface and scope do not match.')
 }
 
@@ -5423,12 +5526,36 @@ function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   const dueDatePreset = filters.dueDatePreset === undefined
     ? undefined
     : requireTaskViewDueDatePreset(filters.dueDatePreset)
+  const projectScopes = filters.projectScopes === undefined
+    ? undefined
+    : normalizeTaskViewTeamQualifiedPairs(
+        filters.projectScopes,
+        'projectId',
+        'Task view Project scopes',
+      ).map(({ teamId, id }) => ({ teamId, projectId: id }))
+  const contributorJobRoles = filters.contributorJobRoles === undefined
+    ? undefined
+    : normalizeTaskViewTeamQualifiedPairs(
+        filters.contributorJobRoles,
+        'jobRoleId',
+        'Task view contributor job roles',
+      ).map(({ teamId, id }) => ({ teamId, jobRoleId: id }))
+  const contributorUserIds = filters.contributorUserIds === undefined
+    ? undefined
+    : normalizeTaskViewStringList(filters.contributorUserIds, 'Task view contributor user IDs')
+  if (filters.involvement !== undefined && filters.involvement !== 'mine') {
+    return invalidTaskView('Task view involvement is invalid.')
+  }
   return {
     ...base,
     ...(workflowStatuses ? { workflowStatuses } : {}),
     ...(workflowCategories ? { workflowCategories } : {}),
     ...(priorities ? { priorities } : {}),
     ...(dueDatePreset ? { dueDatePreset } : {}),
+    ...(projectScopes ? { projectScopes } : {}),
+    ...(filters.involvement === 'mine' ? { involvement: 'mine' as const } : {}),
+    ...(contributorUserIds ? { contributorUserIds } : {}),
+    ...(contributorJobRoles ? { contributorJobRoles } : {}),
     ...(filters.includeArchived === undefined
       ? {}
       : { includeArchived: requireBoolean(filters.includeArchived, 'Task view include archived') }),
@@ -5465,6 +5592,49 @@ function normalizeTaskViewWorkflowStatuses(
     createTaskViewWorkflowStatusKey(value.teamId, value.workItemTypeId, value.statusId),
     value,
   ])).values()]
+}
+
+/**
+ * Validates and deduplicates a bounded list of Team-qualified identifiers.
+ *
+ * @param values - Untrusted list of `{ teamId, <idKey> }` records.
+ * @param idKey - Property holding the Team-local identifier.
+ * @param label - Field label used in validation errors.
+ * @returns Unique pairs in their first-occurrence order.
+ */
+function normalizeTaskViewTeamQualifiedPairs(
+  values: unknown,
+  idKey: 'projectId' | 'jobRoleId',
+  label: string,
+): { teamId: string, id: string }[] {
+  if (!Array.isArray(values) || values.length > 100) {
+    return invalidTaskView(`${label} are invalid.`)
+  }
+  const normalized = values.map((value) => {
+    if (!isRecordValue(value)) return invalidTaskView(`${label} are invalid.`)
+    return {
+      teamId: requireText(value.teamId, `${label} Team ID`, 256),
+      id: requireText(value[idKey], `${label} ID`, 256),
+    }
+  })
+  return [...new Map(normalized.map((value) => [
+    createTaskViewProjectScopeKey(value.teamId, value.id),
+    value,
+  ])).values()]
+}
+
+/**
+ * Validates and deduplicates a bounded list of opaque task view identifiers.
+ *
+ * @param values - Untrusted identifier list.
+ * @param label - Field label used in validation errors.
+ * @returns Unique identifiers in their first-occurrence order.
+ */
+function normalizeTaskViewStringList(values: unknown, label: string): string[] {
+  if (!Array.isArray(values) || values.length > 100) {
+    return invalidTaskView(`${label} are invalid.`)
+  }
+  return [...new Set(values.map((value) => requireText(value, label, 512)))]
 }
 
 /** Validates and deduplicates a bounded string enum list. */
@@ -5575,7 +5745,8 @@ function requireTaskViewSurface(value: unknown): TaskViewSurface {
     value === 'team' ||
     value === 'my-tasks' ||
     value === 'focus' ||
-    value === 'triage'
+    value === 'triage' ||
+    value === 'work-items'
   ) return value
   return invalidTaskView('Task view surface is invalid.')
 }
@@ -5620,8 +5791,78 @@ function requireTaskViewSortDirection(
 
 /** Reads one mutable default source from an untrusted boundary. */
 function requireSavedTaskViewDefaultSource(value: unknown): SavedTaskViewDefaultSource {
-  if (value === 'personal' || value === 'team') return value
+  if (value === 'personal' || value === 'team' || value === 'project') return value
   return invalidTaskView('Task view default source is invalid.')
+}
+
+/**
+ * Maps a public default source onto the stored marker owner for one resource scope.
+ *
+ * A Project default is stored as the shared marker of its Team-qualified Project scope, so the
+ * marker key stays unique per Project. A Team default applies only to a Team scope, and a Project
+ * default only to a Team-qualified Project scope.
+ *
+ * @param source - Validated public default source.
+ * @param scope - Resource scope of the task view whose default is assigned or cleared.
+ * @returns The stored marker owner type.
+ */
+function toStoredTaskViewDefaultOwner(
+  source: SavedTaskViewDefaultSource,
+  scope: TaskViewScope,
+): StoredTaskViewDefaultOwner {
+  if (source === 'personal') return 'personal'
+  if (source === 'team' && scope.kind === 'team') return 'team'
+  if (source === 'project' && scope.kind === 'project' && scope.teamId) return 'team'
+  return invalidTaskView('Task view default source does not match its scope.')
+}
+
+/**
+ * Returns whether a resource scope can carry a Team or Project default.
+ *
+ * @param scope - Task view resource scope.
+ * @returns Whether a shared default marker may apply to the scope.
+ */
+function canHaveTaskViewSharedDefault(scope: TaskViewScope): boolean {
+  return scope.kind === 'team' || (scope.kind === 'project' && scope.teamId !== undefined)
+}
+
+/**
+ * Names the public source of the shared default for one resource scope.
+ *
+ * @param scope - Task view resource scope that carries a shared default.
+ * @returns `project` for a Project scope and `team` otherwise.
+ */
+function getTaskViewSharedDefaultSource(scope: TaskViewScope): 'team' | 'project' {
+  return scope.kind === 'project' ? 'project' : 'team'
+}
+
+/**
+ * Checks whether the current viewer may assign or clear the shared default of one scope.
+ *
+ * A Team default needs Team management. A Project default needs management of that exact
+ * Team-qualified Project, which Team managers also hold, so managing another Project of the same
+ * Team is not enough.
+ *
+ * @param scope - Resource scope whose shared default changes.
+ * @param teamId - Team that owns the shared default marker.
+ * @param access - Current viewer authorization.
+ * @returns Whether the shared default may be managed.
+ */
+function canManageTaskViewSharedDefault(
+  scope: TaskViewScope,
+  teamId: string,
+  access: TaskViewAccessScope,
+): boolean {
+  if (!canHaveTaskViewSharedDefault(scope) || getTaskViewScopeTeamId(scope) !== teamId) {
+    return false
+  }
+  if (access.isSystemAdmin) return true
+  if (scope.kind === 'project') {
+    return access.manageableProjectScopeKeys.has(
+      createTaskViewProjectScopeKey(teamId, scope.projectId),
+    )
+  }
+  return access.manageableTeamIds.has(teamId)
 }
 
 /**

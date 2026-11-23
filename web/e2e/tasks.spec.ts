@@ -793,6 +793,7 @@ async function mockAuthenticatedTaskPage(
         capabilities: {
           canManageSharedViews: true,
           canSetTeamDefault: true,
+          canSetProjectDefault: false,
           canWrite: true,
           writableProjectScopes: projectDirectory.flatMap((team) => team.projects.map((project) => ({
             projectId: project.id,
@@ -15099,6 +15100,7 @@ test.describe('authenticated task page', () => {
           capabilities: {
             canManageSharedViews: false,
             canSetTeamDefault: false,
+            canSetProjectDefault: false,
             canWrite: false,
             writableProjectScopes: [],
             writableTeamIds: [],

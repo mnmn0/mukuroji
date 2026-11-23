@@ -48,7 +48,6 @@ const meta = {
     memberLabels: new Map([['demo@example.com', 'Demo User']]),
     memberOptions: [{ id: 'demo@example.com', label: 'Demo User' }],
     onChangeState: changeState,
-    onCopyLink: async () => true,
     onOpenWorkItem: fn(),
     onRetry: fn(),
     projectOptions: createCrossProjectWorkItemProjectOptions(projectDirectoryFixtures),
