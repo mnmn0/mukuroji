@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fn, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { timeTrackingFixtureMemberNames } from '../fixtures'
 import {
@@ -22,14 +22,17 @@ import { createTimeTrackingFormatters } from './timeTrackingText'
 function TimeReportView(props: TimeReportProps & {
   /** Whether the member may see budgets. */
   showBudget: boolean
+  /** First month of the Workspace fiscal year offered to the budget editor. */
+  fiscalYearStartMonth?: number
 }) {
-  const { showBudget, ...reportProps } = props
+  const { fiscalYearStartMonth, showBudget, ...reportProps } = props
   return (
     <div className="grid min-w-0 gap-6">
       <TimeReport {...reportProps} />
       {showBudget ? (
         <TimeBudgetPanel
           defaultCurrency="JPY"
+          fiscalYearStartMonth={fiscalYearStartMonth}
           locale={reportProps.locale}
           onChangeScope={fn()}
           onRetry={fn()}
@@ -91,6 +94,24 @@ export const Member: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.queryByRole('columnheader', { name: '実績コスト' })).toBeNull()
     await expect(canvas.queryByRole('heading', { name: '予算と実績' })).toBeNull()
+  },
+}
+
+/**
+ * Budget editor in a Workspace whose fiscal year starts in April: picking a fiscal year fills the
+ * budget period with its first and last day.
+ */
+export const FiscalYearBudgetPeriod: Story = {
+  args: { fiscalYearStartMonth: 4 },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '予算を編集' }))
+    const select = canvas.getByTestId('time-budget-fiscal-year-select')
+    const fiscalYear = canvas.getAllByRole('option').find((option) => option.textContent?.startsWith('2026年度'))
+    await expect(fiscalYear).toBeDefined()
+    await userEvent.selectOptions(select, '2026')
+    await expect(canvas.getByLabelText('期間の開始日（任意）')).toHaveValue('2026-04-01')
+    await expect(canvas.getByLabelText('期間の終了日（任意）')).toHaveValue('2027-03-31')
   },
 }
 
