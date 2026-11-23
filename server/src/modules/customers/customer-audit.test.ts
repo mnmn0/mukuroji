@@ -114,3 +114,46 @@ test('marks a Contact merge from its operation marker even when no Request moved
     metadata: { customerId: customer.id, mergedIntoId: target.id },
   })])
 })
+
+test('records a Request message edit and a Request merge without the message', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('w', 'member-1', { ...customerInput, name: 'Acme' })
+  const first = await client.createRequest('w', 'member-1', {
+    customerId: customer.id,
+    source: { kind: 'email', canNotify: true },
+    originalMessage: 'First message',
+    receivedAt: NOW.toISOString(),
+    importance: 'normal',
+  })
+  const second = await client.createRequest('w', 'member-1', {
+    customerId: customer.id,
+    source: { kind: 'email', canNotify: true },
+    originalMessage: 'Second message',
+    receivedAt: NOW.toISOString(),
+    importance: 'normal',
+  })
+  const before = client.readWorkspaceState('w')
+  await client.updateRequest('w', first.id, 'member-1', { expectedRevision: first.revision, originalMessage: 'Edited message' })
+  const edited = client.readWorkspaceState('w')
+  const editEvents = createCustomerAuditEvents('w', before, edited)
+  expect(editEvents).toEqual([expect.objectContaining({
+    eventType: 'customer-request.updated',
+    entityId: first.id,
+    changes: [{ field: 'originalMessage', before: '[REDACTED]', after: '[REDACTED]', redacted: true }],
+  })])
+  expect(JSON.stringify(editEvents)).not.toContain('message')
+
+  const source = await client.getRequest('w', first.id)
+  const target = await client.getRequest('w', second.id)
+  await client.mergeRequest('w', first.id, 'member-1', {
+    targetRequestId: second.id,
+    sourceExpectedRevision: source.revision,
+    targetExpectedRevision: target.revision,
+  })
+  const mergeEvents = createCustomerAuditEvents('w', edited, client.readWorkspaceState('w'))
+  expect(mergeEvents).toContainEqual(expect.objectContaining({
+    eventType: 'customer-request.merged',
+    entityId: first.id,
+    metadata: expect.objectContaining({ mergedIntoId: second.id }),
+  }))
+})

@@ -11,6 +11,12 @@ const CUSTOMER_REDACTED_FIELDS = ['notes']
 /** Contact fields whose change is recorded without the value, because they identify a person. */
 const CONTACT_REDACTED_FIELDS = ['name', 'email', 'phone']
 
+/**
+ * Customer Request fields whose change is recorded without the value: the message itself, and
+ * source and external references whose links can carry provider tokens.
+ */
+const REQUEST_REDACTED_FIELDS = ['originalMessage', 'sourceReference', 'externalReference']
+
 /** One audited record kind of the Customer graph. */
 type CustomerAuditKind<T> = {
   /** Event type and entity type prefix, such as `customer-contact`. */
@@ -94,7 +100,7 @@ export function createCustomerAuditEvents(
     ...requestChanges.map((change) => {
       const merged = after.requests.get(change.entityId)?.mergedIntoRequestId
       return merged && before.requests.get(change.entityId)?.mergedIntoRequestId !== merged
-        ? { ...change, action: 'merged' as const, metadata: { ...change.metadata, mergedIntoRequestId: merged } }
+        ? { ...change, action: 'merged' as const, metadata: { ...change.metadata, mergedIntoId: merged } }
         : change
     }),
     ...viewChanges,
@@ -147,7 +153,7 @@ const CONTACT_KIND: CustomerAuditKind<CustomerContact> = {
   ownerCustomerId: (contact: CustomerContact) => contact.customerId,
 }
 
-/** Audited Customer Request fields; the original message is never recorded. */
+/** Audited Customer Request fields; the original message and source references are recorded only as changed. */
 const REQUEST_KIND: CustomerAuditKind<CustomerRequest> = {
   entityType: 'customer-request',
   fields: (request: CustomerRequest) => ({
@@ -155,10 +161,19 @@ const REQUEST_KIND: CustomerAuditKind<CustomerRequest> = {
     contactId: request.contactId,
     importance: request.importance,
     status: request.status,
+    receivedAt: request.receivedAt,
+    originalMessage: request.originalMessage,
     sourceKind: request.source.kind,
+    sourceProvider: request.source.provider,
+    sourceCanNotify: request.source.canNotify,
+    sourceReference: request.source.referenceId === undefined && request.source.permalink === undefined
+      ? undefined
+      : JSON.stringify([request.source.referenceId ?? null, request.source.permalink ?? null]),
+    externalReference: request.externalReference ? JSON.stringify(request.externalReference) : undefined,
     workItemLinks: request.workItemLinks.map((link) => `${link.teamId}/${link.workItemId}`).sort(),
     projectLinks: request.projectLinks.map((link) => link.projectId).sort(),
   }),
+  redactFields: REQUEST_REDACTED_FIELDS,
   ownerCustomerId: (request: CustomerRequest) => request.customerId,
   contactId: (request: CustomerRequest) => request.contactId,
 }
