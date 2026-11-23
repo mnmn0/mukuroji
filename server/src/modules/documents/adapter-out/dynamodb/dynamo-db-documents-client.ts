@@ -4235,6 +4235,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         input.workspaceId,
         documentId,
         input.eventId,
+        input.workItemId,
       )
       const scopeElementKeys = scope === undefined ? undefined : new Set(scope.elementKeys)
       const planned = planWorkItemCompletionOperations(
@@ -4382,12 +4383,14 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
    * @param workspaceId - Workspace partition.
    * @param documentId - Document the event changes.
    * @param eventId - Completion event ID.
+   * @param workItemId - Completed Work Item the scope must belong to.
    * @returns The recorded scope, or undefined before the event's first attempt.
    */
   private async getWorkItemCompletionScope(
     workspaceId: string,
     documentId: string,
     eventId: string,
+    workItemId: string,
   ): Promise<StoredWorkItemCompletionScope | undefined> {
     const result = await this.client.send(new GetCommand({
       TableName: this.tableName,
@@ -4398,7 +4401,10 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     if (item === undefined) return undefined
     // A damaged scope must not widen or narrow what a redelivered event
     // changes, so the event fails and is retried instead.
-    const elementKeys = isRecord(item) && item.entryType === 'work-item-completion-scope'
+    const elementKeys = isRecord(item) &&
+        item.entryType === 'work-item-completion-scope' &&
+        item.documentId === documentId &&
+        item.workItemId === workItemId
       ? item.elementKeys
       : undefined
     if (

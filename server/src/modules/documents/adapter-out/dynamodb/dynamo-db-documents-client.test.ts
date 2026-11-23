@@ -2749,12 +2749,18 @@ test('fails a completion whose stored scope is damaged', async () => {
   const scope = memory.items().find((item) => item.entryType === 'work-item-completion-scope')
   if (scope === undefined) throw new Error('Expected a stored completion scope.')
   expect(scope.elementKeys).toEqual([])
-  memory.put({ ...scope, elementKeys: ['object:note-1', 7] })
+  for (const damaged of [
+    { ...scope, elementKeys: ['object:note-1', 7] },
+    { ...scope, documentId: 'other-document' },
+    { ...scope, workItemId: 'team/team-a/issue/work-item-2' },
+  ]) {
+    memory.put(damaged)
 
-  await expect(client.reflectWorkItemCompletion(completion)).rejects.toMatchObject({
-    status: 503,
-    code: 'InvalidStoredDocumentData',
-  })
+    await expect(client.reflectWorkItemCompletion(completion)).rejects.toMatchObject({
+      status: 503,
+      code: 'InvalidStoredDocumentData',
+    })
+  }
 })
 
 test('completes more linked notes than one operation batch holds', async () => {
