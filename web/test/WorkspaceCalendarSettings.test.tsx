@@ -51,6 +51,7 @@ const snapshot = {
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
       holidays: ['2027-01-01', '2027-05-03'],
       publicHolidays: 'none',
+      timeZone: 'America/New_York',
     },
     status: 'active',
     revision: 2,
@@ -82,13 +83,14 @@ describe('Workspace calendar settings', () => {
       workingWeekdays: ['tuesday', 'monday'],
       holidays: ['2027-05-03', '2027-01-01'],
     })
-    // Settings saved before national holidays existed use the Japanese ones.
+    // Settings saved before national holidays and the time zone existed use the Japanese ones.
     expect(await getWorkspaceCalendarSettings('token-1')).toEqual({
       fiscalYearStartMonth: 4,
       weekStartDay: 1,
       workingWeekdays: ['monday', 'tuesday'],
       holidays: ['2027-01-01', '2027-05-03'],
       publicHolidays: 'japan',
+      timeZone: 'Asia/Tokyo',
     })
     expect(urls[0]?.endsWith('/workspace/calendar-settings')).toBe(true)
 
@@ -110,6 +112,11 @@ describe('Workspace calendar settings', () => {
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
 
     mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, publicHolidays: 'us' })
+    await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
+
+    mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, timeZone: 'America/New_York' })
+    expect((await getWorkspaceCalendarSettings('token-1')).timeZone).toBe('America/New_York')
+    mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, timeZone: 'Mars/Olympus' })
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
   })
 
@@ -151,6 +158,8 @@ describe('Workspace calendar settings', () => {
     expect(html).toContain('休日 2027-05-03 を削除')
     expect(html).toContain('日本の祝日を休日にする')
     expect(html).not.toMatch(/data-testid="tenant-public-holidays"[^>]*checked/u)
+    // The Workspace time zone is edited with the working calendar.
+    expect(html).toMatch(/data-testid="tenant-time-zone"[^>]*value="America\/New_York"/u)
   })
 
   test('edits working weekdays and holidays without leaving the Workspace without working days', () => {
@@ -183,9 +192,10 @@ describe('Workspace calendar settings', () => {
   })
 
   test('maps the Workspace calendar to the policy new Work Items use', () => {
+    // New Work Items take the Workspace time zone.
     expect(createWorkspaceTaskScheduleCalendarPolicy(snapshot.profile.calendar)).toEqual({
       holidays: ['2027-01-01', '2027-05-03'],
-      timeZone: 'Asia/Tokyo',
+      timeZone: 'America/New_York',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
     })
     // With the Japanese national holidays on, they are days off next to the company holidays.
