@@ -2165,7 +2165,7 @@ test('does not fall back to legacy ACLs for an Enterprise-managed recipient', as
   })
 })
 
-test('requires member access for the escalation recipient when it is the fallback reviewer', async () => {
+test('requires the reviewer, including the fallback escalation recipient, to be able to acknowledge', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'owner',
     projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }],
@@ -2184,6 +2184,15 @@ test('requires member access for the escalation recipient when it is the fallbac
       principalKind: 'member',
       principalId: 'owner@example.com',
       roleId: 'project:member',
+      scope,
+      source: 'direct',
+    },
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'lead-project-manager',
+      principalKind: 'member',
+      principalId: 'lead@example.com',
+      roleId: 'project:manager',
       scope,
       source: 'direct',
     },
@@ -2227,10 +2236,18 @@ test('requires member access for the escalation recipient when it is the fallbac
     code: 'PlanningUpdateRecipientAccessDenied',
   })
 
-  // A viewer may still receive escalations once a member reviews the updates.
-  const explicitReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+  // Acknowledging posts an update comment, which needs Planning write; `project:member` lacks it.
+  const workItemOnlyReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
     target,
     cadence: { ...cadence, reviewerMemberKey: 'owner@example.com' },
+    expectedRevision: 0,
+  })
+  expect(workItemOnlyReviewer.status).toBe(409)
+
+  // A viewer may still receive escalations once a Planning writer reviews the updates.
+  const explicitReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, reviewerMemberKey: 'lead@example.com' },
     expectedRevision: 0,
   })
   expect(explicitReviewer.status).toBe(200)

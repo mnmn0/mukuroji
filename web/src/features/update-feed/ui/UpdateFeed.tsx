@@ -66,7 +66,7 @@ export function UpdateFeed({ controls, response, view, locale, t, loading, faile
             <Link className="break-words text-base font-semibold text-fg-slate-900 underline-offset-4 hover:underline" to={updateFeedTargetPath(entry.target)}>{entry.title}</Link>
             <span className="text-app-meta text-fg-slate-500">{t(`updates.target.${entry.target.type}`)}</span>
             {entry.readState ? <span className={`text-app-meta font-semibold ${entry.readState.read ? 'text-fg-slate-500' : 'text-fg-teal-800'}`}>{t(entry.readState.read ? 'updates.read' : 'updates.unread')}</span> : null}
-            {entry.acknowledgement ? <span className="text-app-meta font-semibold text-fg-teal-800" data-testid="update-feed-acknowledged">{t('updates.acknowledged').replace('{reviewer}', entry.acknowledgement.memberKey)}</span> : null}
+            {entry.acknowledgement ? <span className="min-w-0 break-all text-app-meta font-semibold text-fg-teal-800" data-testid="update-feed-acknowledged">{t('updates.acknowledged').replace('{reviewer}', entry.acknowledgement.memberKey)}</span> : null}
           </div>
           <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-app-meta">
             <div className="flex gap-1"><dt className="text-fg-slate-500">{t('updates.health')}</dt><dd className={entry.health === 'off-track' || entry.health === 'at-risk' ? 'font-semibold text-fg-amber-800' : 'font-semibold text-fg-slate-700'}>{t(`planning.health.${entry.health}`)}</dd></div>

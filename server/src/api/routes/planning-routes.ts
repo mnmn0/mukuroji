@@ -579,6 +579,9 @@ function requireAuthorizedPlanningWorkItemRevision(
  * @param target - Cadence target being configured.
  * @param memberKeyValue - Candidate update owner or escalation recipient.
  * @param minimumRole - Member for publishers and viewer for escalation recipients.
+ * @param enterprisePermission - Enterprise permission the recipient's future action needs. Defaults
+ * to Work Item write for members and read for viewers; reviewers pass `planning.write` because
+ * acknowledging posts an update comment.
  */
 async function requirePlanningCadenceRecipientTargetPermission(
   principal: WorkspacePrincipal,
@@ -586,6 +589,7 @@ async function requirePlanningCadenceRecipientTargetPermission(
   target: PlanningUpdateTarget,
   memberKeyValue: unknown,
   minimumRole: Extract<ProjectRole, 'viewer' | 'member'>,
+  enterprisePermission?: 'planning.write',
 ): Promise<WorkspaceMember> {
   const member = await requirePlanningActiveOwner(principal, memberKeyValue)
   const memberKey = member.memberKey.toLowerCase()
@@ -663,7 +667,8 @@ async function requirePlanningCadenceRecipientTargetPermission(
     ) || qualifiedGroupMappings.some((mapping) => mapping.enabled)
   if (suppressLegacyWorkspaceRole) {
     const candidateAccess = evaluateEnterpriseAccess({
-      permission: minimumRole === 'member' ? 'work-items.write' : 'work-items.read',
+      permission: enterprisePermission ??
+        (minimumRole === 'member' ? 'work-items.write' : 'work-items.read'),
       principal: {
         kind: 'member',
         principalId: memberKey,
@@ -3388,6 +3393,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
                 input.target,
                 cadenceReviewerMemberKey,
                 'member',
+                'planning.write',
               )]
             : []),
         ])
