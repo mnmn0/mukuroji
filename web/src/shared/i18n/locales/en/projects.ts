@@ -277,6 +277,8 @@ export const projectsMessages = {
   'projects.statusReport.export.markdown': 'Markdown',
   'projects.statusReport.export.pptx': 'PowerPoint',
   'projects.statusReport.export.exporting': 'Exporting…',
+  'projects.statusReport.error.load': 'Some of the information the report uses could not be loaded. Load it again so the report is not exported with parts missing.',
+  'projects.statusReport.error.retry': 'Load again',
   'projects.statusReport.error.export': 'The report could not be exported. Try again later.',
   'projects.statusReport.section.health': 'Status',
   'projects.statusReport.section.schedule': 'Milestones and delays',

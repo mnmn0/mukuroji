@@ -4178,6 +4178,12 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #349: 概要から進捗レポートを開き、Markdown を保存して社外共有リンクを発行する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
     const shares: unknown[] = []
     let createdBody: unknown
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
@@ -4224,6 +4230,36 @@ test.describe('authenticated task page', () => {
       showPeopleNames: false,
       sections: expect.not.arrayContaining(['progress']),
     })
+  })
+
+  test('Issue #349: レポートに使う情報を読み込めなかったら書き出させず、読み込み直すと出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    let raidReads = 0
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      raidReads += 1
+      if (raidReads === 1) {
+        await route.fulfill({ status: 503, json: { error: 'ProjectRaidLogUnavailable', message: 'unavailable' } })
+        return
+      }
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-load-error')).toBeVisible()
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeDisabled()
+    await expect(dialog.getByTestId('project-status-share-create')).toBeDisabled()
+
+    await dialog.getByTestId('project-status-report-retry').click()
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
   })
 
   test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {

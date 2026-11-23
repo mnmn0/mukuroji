@@ -97,6 +97,11 @@ export const Loading: Story = {
   args: { report: undefined },
 }
 
+/** A read the report needs failed, so export and sharing wait for a retry. */
+export const LoadFailed: Story = {
+  args: { report: undefined, hasReportError: true, onRetryReport: () => undefined },
+}
+
 /** A failed PDF export shows an error and leaves the other formats available. */
 export const ExportFailed: Story = {
   play: async ({ canvasElement }) => {

@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { createTranslator, localeOptions, type Locale } from '../../shared/i18n/i18n'
 import { BrandMark } from '../../shared/ui/BrandMark'
-import { ProjectStatusReportDocument, useProjectStatusReportPrint } from './ProjectStatusReportDocument'
+import { ProjectStatusReportDocument } from './ProjectStatusReportDocument'
+import { useProjectStatusReportPrint } from './useProjectStatusReportPrint'
 
 /** Props of {@link SharedProjectStatusReportScreen}. */
 export type SharedProjectStatusReportScreenProps = {

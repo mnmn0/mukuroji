@@ -156,10 +156,24 @@ export function ProjectOverviewPage() {
   )
 
   const [isReportOpen, setIsReportOpen] = useState(false)
+  // A failed read must not turn into a report that silently lacks the section, so the report
+  // waits for a retry. Only a denied read (and the Work Item list limit) leaves its section out,
+  // because those do not change on a retry and the creator cannot see that data either.
+  const reportReadFailed = Boolean(planning.error) ||
+    (Boolean(workItems.error) && workItemsError !== 'limit') ||
+    raidError === 'load' ||
+    resolveDocumentsError(projectDocuments.error, actionItemsQuery.error) === 'load'
+  const retryReport = () => {
+    if (planning.error) void planning.mutate()
+    if (workItems.error) void workItems.mutate()
+    if (raidLog.error) void raidLog.mutate()
+    if (projectDocuments.error) void projectDocuments.refresh()
+    else if (actionItemsQuery.error) void actionItemsQuery.mutate()
+  }
   // The report reads more rows than the overview widgets show, and only once it is opened.
   const report = useMemo(() => {
-    if (!isReportOpen || !team || !project || !projectId) return undefined
-    if (planning.data === undefined && !planning.error) return undefined
+    if (!isReportOpen || !team || !project || !projectId || reportReadFailed) return undefined
+    if (planning.data === undefined) return undefined
     if (workItems.isLoading || raidLog.isLoading || projectDocuments.isLoading || actionItemsQuery.isLoading) return undefined
     const today = toLocalDate(new Date())
     const activeMembers = (members.data ?? []).filter(isActiveProjectAssignmentCandidate)
@@ -197,13 +211,13 @@ export function ProjectOverviewPage() {
     isReportOpen,
     members.data,
     planning.data,
-    planning.error,
     project,
     projectDocuments.hasMore,
     projectDocuments.isLoading,
     projectId,
     raidLog.data,
     raidLog.isLoading,
+    reportReadFailed,
     team,
     workItemSummary,
     workItems.isLoading,
@@ -280,7 +294,9 @@ export function ProjectOverviewPage() {
         {isReportOpen && team && projectId ? (
           <ProjectStatusReportDialog
             accessToken={workspace.accessToken}
+            hasReportError={reportReadFailed}
             onClose={() => setIsReportOpen(false)}
+            onRetryReport={retryReport}
             projectId={projectId}
             report={report}
             t={t}

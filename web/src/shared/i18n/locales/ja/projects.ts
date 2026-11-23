@@ -275,6 +275,8 @@ export const projectsMessages = {
   'projects.statusReport.export.markdown': 'Markdown',
   'projects.statusReport.export.pptx': 'PowerPoint',
   'projects.statusReport.export.exporting': '書き出し中…',
+  'projects.statusReport.error.load': 'レポートに使う情報の一部を読み込めませんでした。欠けたまま書き出さないよう、読み込み直してください。',
+  'projects.statusReport.error.retry': '読み込み直す',
   'projects.statusReport.error.export': '書き出せませんでした。時間をおいてもう一度お試しください。',
   'projects.statusReport.section.health': '状況',
   'projects.statusReport.section.schedule': 'マイルストーンと遅延',

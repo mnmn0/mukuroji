@@ -16,11 +16,8 @@ import {
 } from '../model/projectStatusReport'
 import { useProjectStatusShareActions } from '../mutations/useProjectStatusShareActions'
 import { useProjectStatusShareRecipients, useProjectStatusShares } from '../queries/useProjectStatusShares'
-import {
-  ProjectStatusReportDocument,
-  saveProjectStatusReportFile,
-  useProjectStatusReportPrint,
-} from './ProjectStatusReportDocument'
+import { ProjectStatusReportDocument } from './ProjectStatusReportDocument'
+import { saveProjectStatusReportFile, useProjectStatusReportPrint } from './useProjectStatusReportPrint'
 
 /** Props of {@link ProjectStatusReportDialog}. */
 export type ProjectStatusReportDialogProps = {
@@ -30,8 +27,12 @@ export type ProjectStatusReportDialogProps = {
   teamId: string
   /** Project the report is about. */
   projectId: string
-  /** Report built from the overview, or `undefined` while its data loads. */
+  /** Report built from the overview, or `undefined` while its data loads or after a read failed. */
   report?: ProjectStatusReport
+  /** Whether a read the report needs failed, so it cannot be exported or shared yet. */
+  hasReportError?: boolean
+  /** Reads the failed report data again. */
+  onRetryReport?: () => void
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
   /** Closes the dialog. */
@@ -60,7 +61,16 @@ const SECTION_LABELS: Record<ProjectStatusReportSection, MessageKey> = {
  * @param props - Session, Project, report, labels, and close callback.
  * @returns The modal dialog.
  */
-export function ProjectStatusReportDialog({ accessToken, teamId, projectId, report, t, onClose }: ProjectStatusReportDialogProps) {
+export function ProjectStatusReportDialog({
+  accessToken,
+  teamId,
+  projectId,
+  report,
+  hasReportError = false,
+  onRetryReport,
+  t,
+  onClose,
+}: ProjectStatusReportDialogProps) {
   const titleId = useId()
   const dialogRef = useModalFocus<HTMLElement>(onClose)
   const { print, portal } = useProjectStatusReportPrint()
@@ -153,9 +163,25 @@ export function ProjectStatusReportDialog({ accessToken, teamId, projectId, repo
                 <p className="text-sm font-semibold text-red-700" role="alert">{t('projects.statusReport.error.export')}</p>
               ) : null}
               <div className="rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface)] p-5">
-                {report
-                  ? <ProjectStatusReportDocument report={report} />
-                  : <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('projects.statusReport.loading')}</p>}
+                {report ? (
+                  <ProjectStatusReportDocument report={report} />
+                ) : hasReportError ? (
+                  <div className="grid justify-items-start gap-3" data-testid="project-status-report-load-error" role="alert">
+                    <p className="text-sm font-semibold text-red-700">{t('projects.statusReport.error.load')}</p>
+                    {onRetryReport ? (
+                      <button
+                        className="workbench-button-secondary min-h-10 px-4"
+                        data-testid="project-status-report-retry"
+                        onClick={onRetryReport}
+                        type="button"
+                      >
+                        {t('projects.statusReport.error.retry')}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('projects.statusReport.loading')}</p>
+                )}
               </div>
             </div>
             <ShareLinks accessToken={accessToken} projectId={projectId} report={report} t={t} teamId={teamId} />
@@ -398,9 +424,11 @@ type ShareRowProps = {
  * @returns The list item.
  */
 function ShareRow({ share, isRevoking, onRevoke, t }: ShareRowProps) {
+  // The expiry is judged against the time the row appeared, so a re-render never flips it.
+  const [now] = useState(() => Date.now())
   const state = share.revokedAt !== undefined
     ? 'revoked'
-    : Date.parse(share.expiresAt) <= Date.now()
+    : Date.parse(share.expiresAt) <= now
       ? 'expired'
       : 'open'
   return (

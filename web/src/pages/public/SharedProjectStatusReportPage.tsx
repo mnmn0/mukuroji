@@ -3,7 +3,7 @@ import { useParams } from 'react-router'
 import { exportPublicProjectStatusReportPdf } from '../../projects/api/statusReports'
 import { createProjectStatusReportFileName } from '../../projects/model/projectStatusReport'
 import { usePublicProjectStatusReport } from '../../projects/queries/usePublicProjectStatusReport'
-import { saveProjectStatusReportFile } from '../../projects/ui/ProjectStatusReportDocument'
+import { saveProjectStatusReportFile } from '../../projects/ui/useProjectStatusReportPrint'
 import { SharedProjectStatusReportScreen } from '../../projects/ui/SharedProjectStatusReportScreen'
 import { getInitialLocale, setLocalePreference, type Locale } from '../../shared/i18n/i18n'
 
