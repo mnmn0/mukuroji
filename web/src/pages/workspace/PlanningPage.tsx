@@ -55,6 +55,7 @@ import {
   updateWorkItemScheduleDependency,
   subscribePlanningUpdateWatch,
   unsubscribePlanningUpdateWatch,
+  PlanningApiError,
 } from '../../planning/api'
 import {
   createMissingPlanningTargetUpdateView,
@@ -137,6 +138,9 @@ export function PlanningPage() {
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   // Retries of a create or duplicate whose outcome is unknown must resend the same body and key.
   const entityCreationRetries = useRef(createPlanningEntityCreationRetryTracker()).current
+  // An unresolved acknowledgement keeps its comment ID, so retrying the same remark replays the
+  // committed request instead of sending a second acknowledgement.
+  const pendingAcknowledgementIds = useRef(new Map<string, string>()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
@@ -587,10 +591,18 @@ export function PlanningPage() {
     if (!accessToken || !selectedUpdateTarget || !update || update.acknowledgement) return
     const body = bodyMarkdown ?? t('planning.updateHistory.acknowledgeComment')
     const mentionMemberKeys = extractPlanningUpdateCommentMentions(body)
+    const retryKey = JSON.stringify([
+      createPlanningUpdateTargetKey(selectedUpdateTarget),
+      update.version,
+      body,
+    ])
+    const commentId = pendingAcknowledgementIds.get(retryKey) ??
+      createPlanningClientId('planning-update-acknowledgement')
+    pendingAcknowledgementIds.set(retryKey, commentId)
     const input = {
       acknowledgement: true as const,
       body,
-      id: createPlanningClientId('planning-update-acknowledgement'),
+      id: commentId,
       target: selectedUpdateTarget,
       updateVersion: update.version,
       ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
@@ -603,6 +615,7 @@ export function PlanningPage() {
         JSON.stringify(input),
         (context) => createPlanningUpdateComment(accessToken, input, context),
       )
+      pendingAcknowledgementIds.delete(retryKey)
       try {
         await Promise.all([
           updateHistory.mutate(),
@@ -621,6 +634,12 @@ export function PlanningPage() {
       if (sessionErrorAction?.redirectTo) {
         if (sessionErrorAction.clearSession) clearAuthSession()
         navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      if (error instanceof PlanningApiError && error.code === 'PlanningUpdateAlreadyAcknowledged') {
+        // Another tab or a lost response already recorded it; show the recorded acknowledgement.
+        pendingAcknowledgementIds.delete(retryKey)
+        await Promise.all([updateHistory.mutate(), updateAnnotations.mutate()]).catch(() => undefined)
         return
       }
       setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
