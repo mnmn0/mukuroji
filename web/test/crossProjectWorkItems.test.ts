@@ -137,6 +137,13 @@ describe('filterCrossProjectWorkItems', () => {
     expect(ids({ openOnly: false })).toEqual(['a1', 'a2', 'b1', 'o1', 'n1'])
   })
 
+  test('keeps nothing when a saved view chose only Projects the viewer cannot read', () => {
+    const state = { ...defaultCrossProjectWorkItemListState, projectsUnavailable: true }
+    // Readable Work Items exist, but the view's Project condition must not widen to them.
+    expect(filterCrossProjectWorkItems(workItems, defaultCrossProjectWorkItemListState, [])).not.toEqual([])
+    expect(filterCrossProjectWorkItems(workItems, state, [])).toEqual([])
+  })
+
   test('keeps only the selected Team-qualified Projects', () => {
     expect(ids({ projects: [{ teamId: 'core', projectId: 'alpha' }], openOnly: false })).toEqual(['a1', 'a2'])
     expect(ids({ projects: [{ teamId: 'ops', projectId: 'alpha' }, { teamId: 'core', projectId: 'beta' }], openOnly: false }))

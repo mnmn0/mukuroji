@@ -37,6 +37,7 @@ const editableTeamView: TaskViewOption = {
   id: 'delivery-review',
   isPersonalDefault: false,
   isTeamDefault: true,
+  isProjectDefault: false,
   name: 'Delivery review',
   pinned: true,
   teamId: 'core-team',
@@ -48,6 +49,7 @@ const readOnlySharedView: TaskViewOption = {
   id: 'workspace-roadmap',
   isPersonalDefault: false,
   isTeamDefault: false,
+  isProjectDefault: false,
   name: 'Workspace roadmap',
   pinned: false,
   visibility: 'shared',
@@ -164,6 +166,20 @@ describe('TaskViewToolbar', () => {
     expect(renderToolbar({ canSetTeamDefault: true })).toContain(
       'data-can-set-team-default="true"',
     )
+  })
+
+  test('fails closed when Project-default permission is omitted', () => {
+    expect(renderToolbar({})).toContain('data-can-set-project-default="false"')
+    expect(renderToolbar({ canSetProjectDefault: true })).toContain(
+      'data-can-set-project-default="true"',
+    )
+  })
+
+  test('keeps only the saved-view lifecycle when a surface turns its settings off', () => {
+    expect(renderToolbar({})).toContain(t('taskViews.settings'))
+    const html = renderToolbar({ supportsSettings: false })
+    expect(html).not.toContain(t('taskViews.settings'))
+    expect(html).toContain(t('taskViews.saveAs'))
   })
 
   test('renders lossless column, grouping, sort, and implemented display controls', () => {

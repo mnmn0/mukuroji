@@ -2,9 +2,11 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   authorizeNotificationDelivery,
   createNotificationDeliveryAuthorizationCache,
+  isCurrentPlanningMilestoneNotification,
   readTimesheetReminderFence,
   readWeeklyReportReminderFence,
   type AuditProjectionEvent,
+  type PlanningMilestoneNotificationRevalidator,
   type TimesheetReminderRevalidator,
   type WeeklyReportReminderRevalidator,
 } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
@@ -31,6 +33,11 @@ export type NotificationDeliveryAuthorizationTables = {
    * reminder and escalation is suppressed, so a reminder for a submitted week is never sent.
    */
   weeklyReportReminders?: WeeklyReportReminderRevalidator
+  /**
+   * Rereads a Milestone notification's Milestone and the recipient's watch before it is sent;
+   * without it every Milestone notification is suppressed.
+   */
+  planningMilestones?: PlanningMilestoneNotificationRevalidator
 }
 
 /**
@@ -55,6 +62,8 @@ export function createProductionNotificationDeliveryAuthorizer(
     if (!(await readTimesheetReminderFence(event, tables.timesheetReminders)).current) return false
     // Likewise the author may have submitted the weekly report since the schedule scanned the week.
     if (!(await readWeeklyReportReminderFence(event, tables.weeklyReportReminders)).current) return false
+    // A Milestone may have been archived or moved, or the recipient may have stopped watching it.
+    if (!await isCurrentPlanningMilestoneNotification(event, tables.planningMilestones, delivery.memberKey)) return false
     return authorizeNotificationDelivery(event, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
     (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId), readApproval)
   }

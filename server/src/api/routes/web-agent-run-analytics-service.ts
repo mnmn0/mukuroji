@@ -3,13 +3,16 @@ import {
   FACTORY_ANALYTICS_MAX_PERIOD_DAYS,
   FACTORY_ANALYTICS_MAX_REPORTS_PER_WORK_ITEM,
   FACTORY_ANALYTICS_MAX_RUNS_PER_WORK_ITEM,
+  FACTORY_ANALYTICS_MAX_USAGE_RUNS,
   FACTORY_ANALYTICS_MAX_WORK_ITEMS,
+  FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
   type TeamFactoryAnalyticsResponse,
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
   calculateFactoryAnalytics,
   createAgentRunIntegrityError,
+  summarizeFactoryUsage,
   toAgentRunReport,
   type AgentRunFinishedGroup,
   type FactoryAnalyticsReportFacts,
@@ -17,9 +20,11 @@ import {
 } from '../../modules/agent-runs'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
+import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { canAccessAssignedProject, requireTeamPermission, type WorkspacePrincipal } from '../shared/project-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
+import { isTeamManager } from './web-agent-run-service'
 
 /** Largest page the Agent Run store returns. */
 const analyticsPageSize = 100
@@ -112,6 +117,14 @@ async function readFinishedRunWorkItemIds(
   return { workItemIds: [...workItemIds], hasMore: cursor !== undefined }
 }
 
+/** Fields of a visible Work Item that the usage breakdown shows. */
+type VisibleWorkItem = {
+  /** Work Item title. */
+  title: string
+  /** Project of the Work Item, when it has one. */
+  projectId?: string
+}
+
 /**
  * Checks strongly that the viewer can see a Work Item. A deleted Work Item is left out; an archived one
  * keeps counting, because its runs still happened.
@@ -120,14 +133,14 @@ async function readFinishedRunWorkItemIds(
  * @param permission - Viewer's Team permission context.
  * @param teamId - Team ID.
  * @param workItemId - Work Item ID.
- * @returns True when the Work Item exists and its Project is visible to the viewer.
+ * @returns The Work Item's title and Project when it exists and its Project is visible to the viewer.
  */
-async function canViewWorkItem(
+async function readVisibleWorkItem(
   principal: WorkspacePrincipal,
   permission: TeamPermissionContext,
   teamId: string,
   workItemId: string,
-): Promise<boolean> {
+): Promise<VisibleWorkItem | undefined> {
   try {
     const { issue } = await workItemDependencies.teamIssues.getTeamIssueDetail(
       principal.directoryId,
@@ -135,9 +148,10 @@ async function canViewWorkItem(
       workItemId,
       { consistentIssueRead: true, includeEvents: false },
     )
-    return canAccessAssignedProject(principal, permission, issue.assignedProjectId, 'viewer')
+    if (!canAccessAssignedProject(principal, permission, issue.assignedProjectId, 'viewer')) return undefined
+    return { title: issue.title, ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }) }
   } catch (error) {
-    if (isTeamIssueNotFoundError(error)) return false
+    if (isTeamIssueNotFoundError(error)) return undefined
     throw error
   }
 }
@@ -180,7 +194,7 @@ async function readWorkItemHistory(
 /**
  * Calculates the Factory analytics of a Team for anyone who can view the Team: the runs that finished
  * in the period on Work Items the viewer can see, with their outcome rates, rework, interventions,
- * and station dwell times. Token and cost usage are not read. Every source is read up to a fixed
+ * station dwell times, and the telemetry usage of those runs. Every source is read up to a fixed
  * bound and the response says when it stopped early; store cursors never leave the server.
  *
  * @param principal - Viewer.
@@ -201,16 +215,17 @@ export async function getWebTeamFactoryAnalytics(
   ])
   const workItemIds = [...new Set([...failed.workItemIds, ...other.workItemIds])].sort()
   const evaluatedIds = workItemIds.slice(0, FACTORY_ANALYTICS_MAX_WORK_ITEMS)
-  const histories = await mapInOrderWithConcurrency(evaluatedIds, analyticsReadConcurrency, async (workItemId) =>
-    await canViewWorkItem(principal, permission, teamId, workItemId)
-      ? await readWorkItemHistory(principal, teamId, workItemId)
-      : undefined
-  )
+  const histories = await mapInOrderWithConcurrency(evaluatedIds, analyticsReadConcurrency, async (workItemId) => {
+    const workItem = await readVisibleWorkItem(principal, permission, teamId, workItemId)
+    return workItem ? { workItemId, workItem, history: await readWorkItemHistory(principal, teamId, workItemId) } : undefined
+  })
+  const visible = histories.flatMap((entry) => entry ? [entry] : [])
   const { historyHasMore, ...result } = calculateFactoryAnalytics({
     from: period.from,
     to: period.to,
-    histories: histories.flatMap((history) => history ? [history] : []),
+    histories: visible.map((entry) => entry.history),
   })
+  const usage = await readPeriodUsage(principal, teamId, period, visible)
   return {
     generatedAt: now.toISOString(),
     from: new Date(period.from).toISOString(),
@@ -219,5 +234,41 @@ export async function getWebTeamFactoryAnalytics(
     finishedRunsHasMore: failed.hasMore || other.hasMore,
     workItemsHasMore: workItemIds.length > evaluatedIds.length,
     historyHasMore,
+    ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/**
+ * Adds up the telemetry usage of the newest runs that finished in the period, up to
+ * {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS}. The estimated cost is read only for Team managers.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param period - Validated period.
+ * @param workItems - Visible Work Items with their run histories.
+ * @returns The period's usage, or undefined when no run has usage.
+ */
+async function readPeriodUsage(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  period: FactoryAnalyticsPeriod,
+  workItems: readonly { workItemId: string; workItem: VisibleWorkItem; history: FactoryAnalyticsWorkItemHistory }[],
+): Promise<TeamFactoryAnalyticsResponse['usage']> {
+  const runs = workItems.flatMap(({ workItemId, workItem, history }) => history.runs.flatMap((run) => {
+    const finishedAt = run.finishedAt === undefined ? Number.NaN : Date.parse(run.finishedAt)
+    return finishedAt >= period.from && finishedAt <= period.to ? [{ run, workItemId, workItem, finishedAt }] : []
+  })).sort((left, right) => right.finishedAt - left.finishedAt || (left.run.runId < right.run.runId ? -1 : 1))
+  if (runs.length === 0) return undefined
+  const evaluated = runs.slice(0, FACTORY_ANALYTICS_MAX_USAGE_RUNS)
+  const includeCost = await isTeamManager(principal, teamId)
+  const usages = await mapInOrderWithConcurrency(evaluated, analyticsReadConcurrency, ({ run }) =>
+    readAgentRunUsage(principal.directoryId, run, includeCost))
+  return summarizeFactoryUsage(
+    evaluated.flatMap(({ workItemId, workItem }, index) => {
+      const usage = usages[index]
+      return usage ? [{ workItemId, title: workItem.title, ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }), usage }] : []
+    }),
+    FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS,
+    runs.length > evaluated.length,
+  )
 }

@@ -109,6 +109,13 @@ export const JustIssued: Story = {
   },
 }
 
+/** Claude Code with an instance ID, so the page also shows the token usage settings. */
+export const WithUsage: Story = {
+  args: {
+    choices: { client: 'claude-code', teamId: 'team-core', shell: 'posix', mcpPath: '', usageInstanceId: 'laptop-claude-1' },
+  },
+}
+
 /** Windows with Codex selected. */
 export const WindowsCodex: Story = {
   args: {

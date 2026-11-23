@@ -10,7 +10,7 @@ Software factory は deploy 時に選ぶ任意の機能です（CDK context `muk
 off の環境では Factory board とヘルプの coding agent ガイドが表示されず、agent にタスクを着手させることは
 できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
 
-off の環境でも **agent を接続** から自分用 token を発行できます。このとき設定例は、Workspace を読むだけの
+off の環境でも **agent を接続** から自分用 token を発行できます。このとき設定例は、Team を固定しない
 Workspace profile（下の「Workspace 全体を読む」）になります。on の環境で発行した token も、off に切り替えた後に
 失効するまで Work Item の読み書きに使えます。不要になった token は **agent を接続** の「発行済みの token」から
 **失効** します。
@@ -65,8 +65,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 `MUKUROJI_MCP_PROFILE` を知らず、Team ID と member ID がないため起動しません。対応版が GitHub Release に
 出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
-ように頼むと、`get_issue` や `list_issues` で読みます。今は読み取りだけで、タスクの作成・更新は後続の変更で追加します。
-読める範囲は token の持ち主が Web で見られる範囲と同じです。Software factory が off の環境では、
+ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
+`save_issue` と `save_comment` で書き込みます。読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
+読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
 
 ## agent に作業させる
@@ -96,6 +97,26 @@ agent は要件として読みますが、Document に書かれていること�
 引き継ぎ文には受け入れ条件と着手できるかの判断に加えて、作業中の Agent Run（実行中か停止中か、Run ID、
 エージェント名）と、タスクに紐づく閲覧できる Document のタイトルとパスが入ります。Document の本文は入りません。
 別のエージェントの Run が作業中なら、引き継ぎ文は着手しないよう伝えます。
+
+### タスクにかかったトークンを見る
+
+Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タスク詳細の **Agent Run** 欄に、Run ごとの
+トークン数と、そのタスクで使ったトークンの合計（入力・出力・キャッシュ読み取り・キャッシュ書き込み、model）が
+表示されます。Team の管理者には推定費用（Claude Code の見積もり）も表示されます。設定のしかたは
+[coding agent MCP の「トークン使用量の送信」](../coding-agent-mcp.md#トークン使用量の送信claude-codeopentelemetry)
+を見てください。
+
+- 値は、Run が動いていた間に同じ agent（instance ID）から届いた分を時刻で割り当てたものです。Run を始める前や
+  終えた後の会話の分は、どのタスクにも入りません。
+- 送られるのはトークン数・推定費用・model 名・時刻だけで、prompt や会話の内容は保存されません。
+- 送信には MCP に設定している自分用 token をそのまま使います（`work-items:write`）。Claude Code はこの token を
+  すべての OpenTelemetry の送信先に付けるので、metrics や traces を別の collector に送っている場合は設定しないで
+  ください。
+- **agent を接続** で Claude Code を選び、「トークン使用量を送る instance ID」を入力すると、MCP の登録コマンドと
+  `~/.claude/settings.json` に足す設定が作られます。
+- Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
+  タスクが表示されます。
+- 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
 
 ### 止まったタスクを再開する
 
@@ -137,7 +158,8 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 - ランタイム別の成功率・手戻り率・介入
 
 見られるのは自分が閲覧できるプロジェクトのタスクだけです。件数が多く読み込み上限に達したときは、
-集計に含まれていない Run があることを表示します。token 数や費用はまだ集計しません。
+集計に含まれていない Run があることを表示します。期間内に終わった Run のトークン数も合計します（推定費用は Team の
+管理者だけに表示）。Run や使用量が読み込み上限に達したときは、合計に含まれていない分があることを表示します。
 
 「停滞」は、リース時間内に `heartbeat` が届かなかった Run です。自動では止まらず、担当も変わりません。
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。

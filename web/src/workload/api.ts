@@ -1,6 +1,8 @@
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
+  isWorkloadCalendarSource,
   type CapacityPlanningGranularity,
+  type WorkloadCalendarSource,
   type ResourceAssignmentStatus,
   type WorkloadMemberSummary,
   type WorkloadHoliday,
@@ -31,7 +33,9 @@ export type SaveWorkloadProfileRequest = {
   role?: string
   /** Skill identifiers used by resource matching. */
   skills: string[]
-  /** IANA timezone used for local capacity dates. */
+  /** Whether the profile inherits the Workspace calendar or keeps its own. */
+  calendarSource: WorkloadCalendarSource
+  /** IANA timezone used for local capacity dates when the profile keeps its own calendar. */
   timeZone: string
   /** Recurring weekday schedule. */
   schedule: WorkingSchedule
@@ -415,6 +419,8 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
   return value.members.every((member): member is WorkloadMemberSummary => isRecord(member) &&
     typeof member.memberId === 'string' &&
     typeof member.timeZone === 'string' &&
+    (member.effectiveTimeZone === undefined || typeof member.effectiveTimeZone === 'string') &&
+    (member.calendarSource === undefined || isWorkloadCalendarSource(member.calendarSource)) &&
     Array.isArray(member.skills) && member.skills.every((skill) => typeof skill === 'string') &&
     isWorkingSchedule(member.schedule) &&
     Array.isArray(member.holidays) && member.holidays.every(isWorkloadHoliday) &&

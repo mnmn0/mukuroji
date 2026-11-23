@@ -221,6 +221,7 @@ export async function createWorkspaceSearchContext(
         : hasEnterpriseWorkspacePermission(principal, 'workspace.write')
     )
   const enterpriseManageableTeamIds = new Set<string>()
+  const enterpriseManageableProjectScopeKeys = new Set<string>()
   const enterpriseWritableTeamIds = new Set<string>()
   const enterpriseWritableProjectIds = new Set<string>()
   const enterpriseWritableProjectScopeKeys = new Set<string>()
@@ -255,6 +256,29 @@ export async function createWorkspaceSearchContext(
         }).allowed
       )
       if (canManageTeam || canManageProject) enterpriseManageableTeamIds.add(team.id)
+      for (const project of team.projects) {
+        // A Project default needs management of that exact Project; Team managers hold it too.
+        if (
+          canManageTeam ||
+          evaluateEnterpriseAccess({
+            permission: 'projects.manage',
+            principal: enterpriseEvaluation.principal,
+            assignments: enterpriseEvaluation.assignments,
+            customRoles: enterpriseEvaluation.snapshot.customRoles,
+            groupMappings: enterpriseEvaluation.groupMappings,
+            resource: {
+              workspaceId: principal.directoryId,
+              kind: 'project',
+              targetId: project.id,
+              parentTeamId: team.id,
+            },
+          }).allowed
+        ) {
+          enterpriseManageableProjectScopeKeys.add(
+            createTaskViewProjectScopeKey(team.id, project.id),
+          )
+        }
+      }
       if (evaluateEnterpriseAccess({
         permission: 'work-items.write',
         principal: enterpriseEvaluation.principal,
@@ -310,6 +334,18 @@ export async function createWorkspaceSearchContext(
             })
           : []),
       ].filter((teamId) => readableTeamIds.has(teamId)))
+  const manageableProjectScopeKeys = new Set(
+    canManageReadableTaskViewTeams
+      ? readableProjectScopeKeys
+      : (principal.enterprisePermissions !== undefined
+          ? [...enterpriseManageableProjectScopeKeys]
+          : projectScopeAccesses.flatMap((access) => {
+              if (!projectAccessAllows(access, 'manager')) return []
+              const teamId = resolveProjectAccessTeamId(access, directory)
+              return teamId ? [createTaskViewProjectScopeKey(teamId, access.projectId)] : []
+            })
+        ).filter((scopeKey) => readableProjectScopeKeys.has(scopeKey)),
+  )
   const writableTeamIds = new Set(
     principal.isSystemAdmin
       ? readableTeamIds
@@ -405,6 +441,7 @@ export async function createWorkspaceSearchContext(
       teamIds: readableTeamIds,
       writableTeamIds,
       manageableTeamIds,
+      manageableProjectScopeKeys,
       projectIds: readableProjectIds,
       writableProjectIds,
       projectScopeKeys: readableProjectScopeKeys,

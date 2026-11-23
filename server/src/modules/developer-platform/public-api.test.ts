@@ -45,6 +45,7 @@ import {
   type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicAgentRunService,
+  type PublicAgentTelemetryService,
   type PublicDocumentService,
   type PublicDirectoryService,
   type PublicWorkItemService,
@@ -235,6 +236,8 @@ function createTestRouter(input: {
   workItems?: PublicWorkItemService
   /** Agent Run service used by Agent Run route tests. */
   agentRuns?: PublicAgentRunService
+  /** Agent telemetry receiver used by telemetry route tests. */
+  agentTelemetry?: PublicAgentTelemetryService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
   /** Directory service used by Team, Project member, and key route tests. */
@@ -267,6 +270,7 @@ function createTestRouter(input: {
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
+    ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
@@ -3779,6 +3783,40 @@ describe('public Agent Run routes', () => {
     const unconfigured = createTestRouter({ platform })
     expect((await unconfigured.router.request('/v1/agent-context?teamId=team-1', { headers })).status).toBe(503)
     expect((await unconfigured.router.request('/v1/agent-settings?teamId=team-1', { headers })).status).toBe(503)
+  })
+
+  test('receives OTLP JSON logs with work-items:write and reports partial success', async () => {
+    const received: unknown[] = []
+    const { platform, router } = createTestRouter({ agentTelemetry: {
+      async ingestLogs(_credential, body) {
+        received.push(body)
+        if (received.length === 3) throw new AgentRunError('temporarily_unavailable', 'Throttled.')
+        return { rejectedRecords: received.length === 1 ? 0 : 2, duplicate: false }
+      },
+    } })
+    const body = JSON.stringify({ resourceLogs: [] })
+    const telemetryKey = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${telemetryKey.secret}`, 'Content-Type': 'application/json' }
+    const accepted = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(accepted.status).toBe(200)
+    expect(await accepted.json()).toEqual({})
+    const partial = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(await partial.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } })
+    // OTLP exporters retry only 429, 502, 503, and 504, so a transient storage failure is a 503.
+    const throttled = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(throttled.status).toBe(503)
+    const protobuf = await router.request('/v1/agent-telemetry/v1/logs', {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-protobuf' }, body: 'binary',
+    })
+    expect(protobuf.status).toBe(415)
+    const readOnlyKey = await createApiKey(platform, ['work-items:read'])
+    const unscoped = await router.request('/v1/agent-telemetry/v1/logs', {
+      method: 'POST', headers: { ...headers, Authorization: `Bearer ${readOnlyKey.secret}` }, body,
+    })
+    expect(unscoped.status).toBe(403)
+    expect(received).toHaveLength(3)
+    const unconfigured = createTestRouter({ platform })
+    expect((await unconfigured.router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })).status).toBe(503)
   })
 
   test('lists runs for one instance by hash and rejects unknown states', async () => {
