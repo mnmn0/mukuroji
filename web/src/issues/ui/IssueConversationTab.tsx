@@ -4,6 +4,8 @@ import type { AcceptedResolution } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
+import { useMarkdownAttachmentUpload } from '../../files/mutations/useMarkdownAttachmentUpload'
+import { MarkdownAttachmentControls } from '../../files/ui/MarkdownAttachmentControls'
 import { CheckCircleIcon } from '../../shared/ui/icons'
 import type {
   CreateTeamIssueCommentInput,
@@ -654,6 +656,7 @@ export function IssueConversationTab({
         ) : null}
         {canCreateComment ? (
           <CommentComposer
+            artifacts={artifacts}
             key="root-comment-composer"
             labelKey="collaboration.composer.label"
             members={members}
@@ -1325,7 +1328,7 @@ function CommentCard({
               {hasEditConflict ? (
                 <div className="mb-2 grid gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-fg-amber-950" role="status">
                   <p className="font-semibold">{t('collaboration.error.conflictLatest')}</p>
-                  <SafeCommentBody bodyMarkdown={bodyMarkdown} />
+                  <SafeCommentBody attachments={artifacts ? { controller: artifacts, t } : undefined} bodyMarkdown={bodyMarkdown} />
                   <button
                     className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold underline underline-offset-2"
                     disabled={pendingSlotLifetimes.edit !== undefined}
@@ -1337,6 +1340,7 @@ function CommentCard({
                 </div>
               ) : null}
               <CommentComposer
+                artifacts={artifacts}
                 draft={editDraft}
                 externallySubmitting={pendingSlotLifetimes.edit !== undefined}
                 key={`edit-${comment.id}`}
@@ -1374,7 +1378,11 @@ function CommentCard({
             </p>
           ) : (
             <>
-              <SafeCommentBody bodyMarkdown={bodyMarkdown} className="mt-2" />
+              <SafeCommentBody
+                attachments={artifacts ? { controller: artifacts, t } : undefined}
+                bodyMarkdown={bodyMarkdown}
+                className="mt-2"
+              />
               {renderDetails?.(comment)}
             </>
           )}
@@ -1521,6 +1529,7 @@ function CommentCard({
           {isReplying && replyDraft && isReplyDraftWritable(replyDraft, controller, readOnlyMessage) ? (
             <div className="mt-3 rounded-md border border-tone-c6e8e3 bg-tone-f4fbfa p-3">
               <CommentComposer
+                artifacts={artifacts}
                 draft={replyDraft}
                 externallySubmitting={pendingSlotLifetimes.reply !== undefined}
                 key={`reply-${comment.id}`}
@@ -1980,6 +1989,10 @@ function CommentFileAttachments({
  */
 type CommentComposerProps = {
   /**
+   * File controller of the Work Item; pasted or dropped files are uploaded to it.
+   */
+  artifacts?: FileArtifactsController
+  /**
    * textarea に表示する label key です。
    */
   labelKey: MessageKey
@@ -2022,6 +2035,7 @@ type CommentComposerProps = {
  * @returns Comment composer form.
  */
 function CommentComposer({
+  artifacts,
   draft,
   externallySubmitting = false,
   labelKey,
@@ -2040,6 +2054,37 @@ function CommentComposer({
   const submitInFlightRef = useRef(false)
   const currentBodyMarkdown = draft.bodyMarkdown
   const currentMentionMemberKeys = draft.mentionMemberKeys
+  const latestDraftRef = useRef(draft)
+
+  useEffect(() => {
+    latestDraftRef.current = draft
+  }, [draft])
+
+  /** Inserts an uploaded file's reference at the cursor, reading the newest body text. */
+  const insertAttachment = (markdown: string) => {
+    const latest = latestDraftRef.current
+    const body = latest.bodyMarkdown
+    const textarea = textareaRef.current
+    const start = Math.min(textarea?.selectionStart ?? body.length, body.length)
+    const end = Math.min(textarea?.selectionEnd ?? start, body.length)
+    const before = body.slice(0, start)
+    const prefix = before && !before.endsWith('\n') ? '\n' : ''
+    const insertion = `${prefix}${markdown}\n`
+    const nextBody = `${before}${insertion}${body.slice(end)}`
+    const nextDraft = { ...latest, bodyMarkdown: nextBody }
+    latestDraftRef.current = nextDraft
+    onDraftChange({ bodyMarkdown: nextBody, mentionMemberKeys: latest.mentionMemberKeys })
+    onTyping()
+    requestAnimationFrame(() => {
+      const cursor = start + insertion.length
+      textarea?.setSelectionRange(cursor, cursor)
+    })
+  }
+  const attachmentUpload = useMarkdownAttachmentUpload({
+    controller: artifacts,
+    disabled: isSubmitting || externallySubmitting,
+    onInsert: insertAttachment,
+  })
 
   /** Applies one atomic body-and-mention update to the persistent composer slot. */
   const updateDraft = (
@@ -2176,7 +2221,10 @@ function CommentComposer({
       {isPreviewing ? (
         <div className="min-h-20 rounded-md border border-[var(--workbench-border)] bg-surface px-3 py-2.5">
           {currentBodyMarkdown.trim() ? (
-            <SafeCommentBody bodyMarkdown={currentBodyMarkdown} />
+            <SafeCommentBody
+              attachments={artifacts ? { controller: artifacts, t } : undefined}
+              bodyMarkdown={currentBodyMarkdown}
+            />
           ) : (
             <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('collaboration.preview.empty')}</p>
           )}
@@ -2197,6 +2245,9 @@ function CommentComposer({
             onClick={(event) => setMentionQuery(
               readMentionAtCursor(event.currentTarget.value, event.currentTarget.selectionStart)?.query,
             )}
+            onDragOver={attachmentUpload.handleDragOver}
+            onDrop={attachmentUpload.handleDrop}
+            onPaste={attachmentUpload.handlePaste}
             name="body"
             placeholder={t('collaboration.composer.placeholder')}
             ref={textareaRef}
@@ -2236,10 +2287,11 @@ function CommentComposer({
           ) : null}
         </label>
       )}
+      <MarkdownAttachmentControls t={t} upload={attachmentUpload} />
       <div className="flex flex-wrap items-center gap-2">
         <button
           className="workbench-button-primary min-h-[44px] px-3 text-xs disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isSubmitting || externallySubmitting || !currentBodyMarkdown.trim()}
+          disabled={isSubmitting || externallySubmitting || attachmentUpload.isUploading || !currentBodyMarkdown.trim()}
           type="submit"
         >
           {t(isSubmitting || externallySubmitting ? 'collaboration.saving' : submitKey)}

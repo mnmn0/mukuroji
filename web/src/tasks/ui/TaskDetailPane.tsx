@@ -109,6 +109,7 @@ import { WorkItemKeyActions } from '../../issues/ui/WorkItemKeyActions'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
+import { MarkdownDescriptionField } from '../../issues/ui/MarkdownDescriptionField'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -1179,16 +1180,17 @@ export function TaskDetailPane({
             className="contents"
             disabled={isReadOnly || isWorkItemMutationPending}
           >
-            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.detail.description')}
-              <textarea
-                className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={seededDescription}
-                form={editorFormId}
-                key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
-                name="description"
-              />
-            </label>
+            <MarkdownDescriptionField
+              artifacts={artifacts}
+              defaultValue={seededDescription}
+              disabled={isReadOnly || isWorkItemMutationPending}
+              form={editorFormId}
+              key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
+              label={t('tasks.detail.description')}
+              name="description"
+              readOnly={isReadOnly}
+              t={t}
+            />
           </fieldset>
         )
       case 'custom-fields':

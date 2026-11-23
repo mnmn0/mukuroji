@@ -51,6 +51,7 @@ import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
 import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
+import { MarkdownDescriptionField } from './MarkdownDescriptionField'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -997,16 +998,17 @@ function IssueDetailContent({
             className="contents"
             disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('issues.create.description')}
-              <textarea
-                className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue.description}
-                form={editorFormId}
-                key={editorIdentity + ':description'}
-                name="description"
-              />
-            </label>
+            <MarkdownDescriptionField
+              artifacts={artifacts}
+              defaultValue={issue.description}
+              disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+              form={editorFormId}
+              key={editorIdentity + ':description'}
+              label={t('issues.create.description')}
+              name="description"
+              readOnly={isIssueReadOnly}
+              t={t}
+            />
             {renderMentionedWorkItemKeys()}
           </fieldset>
         )

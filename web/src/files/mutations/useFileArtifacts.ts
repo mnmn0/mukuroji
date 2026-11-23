@@ -106,6 +106,10 @@ export type FileUploadOptions = {
    * 認証済み guest にも file read を許可するかどうかです。
    */
   guestAccess?: boolean
+  /**
+   * Called once per file after its upload is completed, with the stored file and version.
+   */
+  onUploaded?: (file: FileAttachment, version: FileVersion) => void
 }
 
 /**
@@ -328,7 +332,7 @@ export function useFileArtifacts({
         hasCreatedUploadSession = true
 
         await putPresignedFile(session.upload, selectedFile)
-        await runMutation(
+        const completed = await runMutation(
           operationToken,
           `file:upload-complete:${scopeKey}:${session.file.id}:${session.version.id}`,
           JSON.stringify([session.file.id, session.version.id]),
@@ -350,6 +354,7 @@ export function useFileArtifacts({
                 context,
               ),
         )
+        options.onUploaded?.(completed.file, completed.version)
       }
 
       return true

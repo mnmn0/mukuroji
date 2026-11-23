@@ -989,7 +989,7 @@ describe('independent task views', () => {
     )
 
     expect(orderedHtml.indexOf('スケジュール種別')).toBeLessThan(orderedHtml.indexOf('data-testid="task-detail-overview"'))
-    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明<textarea'))
+    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明</label>'))
     expect(overviewlessHtml).not.toContain('data-testid="task-detail-overview"')
     expect(overviewlessHtml).toContain('data-testid="task-detail-work-item-type"')
     expect(overviewlessHtml).toContain('name="workItemTypeId"')
