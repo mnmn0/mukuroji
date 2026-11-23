@@ -878,15 +878,24 @@ export class CapacityPlanningService {
       throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
     }
     const next = clone(current)
+    const now = this.now()
+    const today = now.toISOString().slice(0, 10)
+    // Prune first so the mutation, its result, and its audit events see the request fulfillment
+    // that is saved: pruning can drop an old assignment of a kept request. Readers never saw the
+    // pruned rows' effect as a change, so the derived status moves without a new request revision
+    // and the revision the caller read still matches.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
     const events: MutationAuditEventInput[] = []
     const result = mutate(next, events)
     if (events.length > MAX_AUDIT_EVENTS_PER_WRITE) {
       throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'This workload change touches too many rows to save at once.')
     }
-    const now = this.now()
-    pruneCapacityPlanningState(next, now.toISOString().slice(0, 10))
-    // Pruning can drop an old assignment of a kept request, so its fulfillment is derived again.
-    refreshRequestStatuses(next, now.toISOString())
+    // Rows the mutation itself closed or moved may already be past retention. Canceled rows no
+    // longer count toward fulfillment, so this normally leaves request statuses unchanged; the
+    // stored state stays consistent even when it does not.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
     next.revision = current.revision + 1
     next.updatedAt = now.toISOString()
     if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
@@ -1479,8 +1488,21 @@ function requireRequest(state: CapacityPlanningState, requestId: string): Resour
   return request
 }
 
-/** Refreshes request status from the allocation committed against it. */
-function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string): void {
+/**
+ * Refreshes request status from the allocation committed against it.
+ *
+ * @param state - State to update in place.
+ * @param timestamp - Time recorded on a changed request.
+ * @param options - Whether a changed request gets a new revision; retention pruning keeps it.
+ */
+function refreshRequestStatuses(
+  state: CapacityPlanningState,
+  timestamp: string,
+  options: {
+    /** Whether to increment the revision of a request whose status changes. */
+    bumpRevision: boolean
+  } = { bumpRevision: true },
+): void {
   for (const request of state.requests) {
     if (request.status === 'canceled') continue
     const assigned = state.assignments
@@ -1490,7 +1512,7 @@ function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string)
     if (status !== request.status) {
       request.status = status
       request.updatedAt = timestamp
-      request.revision += 1
+      if (options.bumpRevision) request.revision += 1
     }
   }
 }

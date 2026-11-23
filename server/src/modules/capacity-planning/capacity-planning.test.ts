@@ -870,21 +870,24 @@ describe('capacity planning reviews and retention', () => {
       ...state,
       revision: 2,
       requests: [{
-        id: 'request-1', workspaceId: 'workspace-1', teamId: 'team-1', title: 'Long run', skillIds: [], fromDate: '2025-01-01',
+        id: 'request-1', workspaceId: 'workspace-1', teamId: 'team-1', title: 'Long run', skillIds: [], fromDate: '2025-11-01',
         toDate: '2026-09-30', requestedMinutes: 600, confidential: false, status: 'filled', revision: 3,
         createdAt: timestamp, updatedAt: timestamp,
       }],
       assignments: [assignment('old', '2025-01-01', '2025-01-31'), assignment('recent', '2026-08-03', '2026-08-03')],
     }, 1)
 
-    await service.saveMemberProfile({
-      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-3', skills: [], timeZone: 'UTC',
-      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 2, actorMemberId: 'member-3',
-    })
+    const changed = await service.updateRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: 'request-1', title: 'Long run, phase 2',
+      expectedRevision: 3, expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    }, { canViewConfidential: true }, { auditContext })
     const saved = await repository.getState('workspace-1', 'team-1')
 
     expect(saved.assignments.map((row) => row.id)).toEqual(['recent'])
-    expect(saved.requests[0]).toMatchObject({ status: 'partially-filled', revision: 4 })
+    // The response and audit event describe the request as saved, so the next change does not conflict.
+    expect(saved.requests[0]).toMatchObject({ status: 'partially-filled', revision: 4, title: 'Long run, phase 2' })
+    expect(changed).toEqual(saved.requests[0])
+    expect(repository.auditLog.at(-1)?.events[0]?.changes).not.toContainEqual(expect.objectContaining({ field: 'status' }))
   })
 
   test('reads time off saved before approval existed as approved so capacity does not change', () => {
