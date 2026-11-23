@@ -104,6 +104,15 @@ test('opting into Inbox digests creates a missing tenant profile once, from the 
   expect(initialized[0]).toEndWith(':demo@example.com')
 })
 
+test('withdrawing Inbox consent never initializes the tenant profile', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect(initialized).toEqual([])
+})
+
 test('manual digest preferences and preview use authenticated identity and reject guests', async () => {
   configureFakeProjectClients(true)
   const path = '/api/planning/update-feed/digest'

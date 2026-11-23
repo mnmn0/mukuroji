@@ -153,6 +153,11 @@ test('lets the Inbox digest job find due members through its sparse index only',
     .flatMap((policy): unknown[] => policy.Properties.PolicyDocument.Statement);
 
   expect(JSON.stringify(statements)).toContain('/index/InboxDigestDueIndex');
+  expect(statements).toContainEqual(expect.objectContaining({
+    Action: 'dynamodb:DeleteItem',
+    Condition: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['SYSTEM#INBOX_DIGEST'] } },
+    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^PlanningTable/u), 'Arn'] },
+  }));
   expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
     .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
   expect(statements).toContainEqual(expect.objectContaining({

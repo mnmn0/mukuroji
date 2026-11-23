@@ -293,12 +293,19 @@ export function defineInboxDigestJob(input: ScheduleWorkerInput): ScheduledJobGr
         actions: [
           'dynamodb:BatchGetItem',
           'dynamodb:ConditionCheckItem',
-          'dynamodb:DeleteItem',
           'dynamodb:GetItem',
           'dynamodb:PutItem',
           'dynamodb:Query',
         ],
         resources: [planningTable.tableArn],
+      }));
+      // Deletes only remove settled deferred rows from the worker's own system partition.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:DeleteItem'],
+        resources: [planningTable.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['SYSTEM#INBOX_DIGEST'] },
+        },
       }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
@@ -329,7 +336,8 @@ export function defineInboxDigestJob(input: ScheduleWorkerInput): ScheduledJobGr
         }));
       }
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminListGroupsForUser'],
+        // Current groups decide whether the member is a system administrator.
+        actions: ['cognito-idp:AdminListGroupsForUser'],
         resources: [cognitoUserPoolArn],
       }));
     },

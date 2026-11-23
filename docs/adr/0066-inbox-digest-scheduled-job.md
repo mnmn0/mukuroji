@@ -29,16 +29,18 @@ worker が期日の来たメンバーを探す `InboxDigestDueIndex` は Plannin
    checkpoint が保持して次の実行で再試行するため、dispatcher の再試行は使わない（shard の 90 秒 lease と競合しない）。
    runtime control は既存の `notification-schedule` を使う。
 3. IAM は job 専用の managed policy にせず、role の inline policy（`policy: 'shared-role'`）に入れる。
-   Planning は `GetItem`・`BatchGetItem`・`Query`・`PutItem`・`DeleteItem`・`ConditionCheckItem`、index は `Query` だけ。
+   Planning は `GetItem`・`BatchGetItem`・`Query`・`PutItem`・`ConditionCheckItem`、`DeleteItem` は worker の system partition
+   （`SYSTEM#INBOX_DIGEST`）だけ、index は `Query` だけ。
    Notifications は `GetItem`・`PutItem`・`ConditionCheckItem`。Workspace access・Enterprise identity・tenant administration・
    Project directory・Collaboration は `GetItem`・`BatchGetItem`・`Query`・`ConditionCheckItem`、Cognito は
-   `AdminGetUser`・`AdminListGroupsForUser`。`Scan` と `UpdateItem` は与えない。
+   `AdminListGroupsForUser` だけ。`Scan` と `UpdateItem` は与えない。
 4. 配信の on/off は CloudFormation parameter `InboxDigestDeliveryEnabled`（既定 `true`）で決め、環境変数
    `INBOX_DIGEST_WORKER_ENABLED` として渡す。`false` にすると同意は保存されたまま何も配らない。止める手段は
    この parameter と runtime control の2つ。
 5. 配信の transaction は tenant profile が存在して active であることを条件にする（profile の無い Workspace に
    配らない既存の設計を変えない）。招待も tenant 設定の表示もしていない Workspace には profile がまだ無いため、
-   受信トレイ配信の設定を保存する API が、profile の無い Workspace では Workspace の owner で profile を作ってから保存する。
+   受信トレイ配信をオンにする保存のときだけ、profile の無い Workspace では Workspace の owner で profile を作ってから保存する
+   （オフにする保存は tenant の読み取りに左右されない）。
 
 ## 検討した選択肢
 
