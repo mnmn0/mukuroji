@@ -11,6 +11,7 @@ import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewDocuments,
   selectProjectOverviewSchedule,
+  summarizeProjectOverviewActionItems,
   summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
   summarizeProjectOverviewRaid,
@@ -445,6 +446,34 @@ describe('ProjectOverviewView', () => {
     expect(denied).toContain('Your Team role cannot view agent runs.')
     expect(denied).not.toContain('>Reload</button>')
     expect(bounded).toContain('reached its read limit')
+  })
+
+  test('offers a retry when only some pages of action items could not be read', () => {
+    const item = { blockId: 'b', documentId: 'doc', documentTitle: 'Minutes', itemId: '1', text: 'Send the agenda' }
+    const partial = renderOverview({
+      actionItems: summarizeProjectOverviewActionItems(
+        [item],
+        { failedDocumentCount: 2, hasMoreDocuments: false, skippedDocumentCount: 0 },
+        [],
+        '2026-06-10',
+      ),
+      onRetryActionItems: () => undefined,
+    })
+    const unscanned = renderOverview({
+      actionItems: summarizeProjectOverviewActionItems(
+        [],
+        { failedDocumentCount: 0, hasMoreDocuments: true, skippedDocumentCount: 0 },
+        [],
+        '2026-06-10',
+      ),
+      onRetryActionItems: () => undefined,
+    })
+
+    expect(partial).toContain('Send the agenda')
+    expect(partial).toContain('2 pages could not be read')
+    expect(partial).toContain('>Reload</button>')
+    expect(unscanned).toContain('Only recently updated pages are read')
+    expect(unscanned).not.toContain('>Reload</button>')
   })
 
   test('shows the log and Document read states in their own widgets', () => {

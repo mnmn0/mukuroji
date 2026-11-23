@@ -1,4 +1,8 @@
-import type { PersonalNotificationReminderDays } from '@mukuroji/contracts'
+import type {
+  NotificationCategoryChannels,
+  NotificationMutes,
+  PersonalNotificationReminderDays,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -71,6 +75,13 @@ export type NotificationPreferences = {
    * whole object on save keeps the saved overrides, and an empty object clears them.
    */
   reminderDays?: PersonalNotificationReminderDays
+  /**
+   * Channels turned off per notification category. Omitting it on save keeps the saved
+   * settings, and an empty object clears them.
+   */
+  categoryChannels?: NotificationCategoryChannels
+  /** Muted Projects and Teams. Omitting it on save keeps the saved mutes. */
+  mutes?: NotificationMutes
   /**
    * optimistic concurrency に使う version です。
    */
