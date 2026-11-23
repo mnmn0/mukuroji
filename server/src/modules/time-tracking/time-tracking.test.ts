@@ -445,6 +445,34 @@ describe('TimeTrackingService', () => {
     expect(retry).toEqual(first)
   })
 
+  test('replays an entry whose currency came from a Workspace default that changed between retries', async () => {
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-02T12:00:00.000Z'),
+      createId: (() => {
+        let id = 0
+        return () => `id-${++id}`
+      })(),
+      idempotency: createIdempotencyStore(),
+    })
+    const request = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: true,
+      source: 'manual' as const,
+      idempotencyKey: 'create-1',
+    }
+    const first = await service.createEntry({ ...request, currency: 'EUR', currencyFromWorkspaceDefault: true }, false)
+    const retry = await service.createEntry({ ...request, currency: 'USD', currencyFromWorkspaceDefault: true }, false)
+    expect(retry).toEqual(first)
+    // A currency the client named is still part of the request.
+    await expect(service.createEntry({ ...request, currency: 'USD' }, false))
+      .rejects.toMatchObject({ code: 'IdempotencyKeyConflict' })
+  })
+
   test('records a categorized date-and-minutes entry and reports it by category', async () => {
     const { service } = createFixture()
     const meeting = await service.createEntry({

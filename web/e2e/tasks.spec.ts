@@ -4185,7 +4185,7 @@ test.describe('authenticated task page', () => {
     const agentRunRequests: string[] = []
     page.on('request', (request) => {
       const { pathname } = new URL(request.url())
-      if (pathname.startsWith('/api/') && /\/agent-(runs?|settings|connection)/.test(pathname)) {
+      if (pathname.startsWith('/api/') && /\/agent-(runs?|settings)/.test(pathname)) {
         agentRunRequests.push(request.url())
       }
     })
@@ -4213,9 +4213,22 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/teams/core-team/factory')
     await expect(page).toHaveURL('/teams/core-team/issues')
+    // Personal tokens stay available for the Workspace MCP profile, which only reads.
+    await page.route('**/api/developer/me/agent-connection', async (route) => {
+      await route.fulfill({
+        json: {
+          memberId: 'demo@example.com',
+          canIssue: true,
+          policy: { selfIssuanceEnabled: true },
+          scopes: ['work-items:read', 'work-items:write'],
+          maxLifetimeDays: 90,
+          apiKeys: [],
+        },
+      })
+    })
     await page.goto('/settings/agent-connection')
-    await expect(page).toHaveURL('/settings/personal')
-    await expect(page.getByTestId('agent-connection-settings-link')).toHaveCount(0)
+    await expect(page).toHaveURL('/settings/agent-connection')
+    await expect(page.getByTestId('agent-connection-workspace-profile')).toBeVisible()
     expect(agentRunRequests).toEqual([])
   })
 

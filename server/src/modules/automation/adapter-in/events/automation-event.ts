@@ -78,6 +78,26 @@ export interface CustomerCompletionNotificationPreparation {
   ): Promise<unknown>
 }
 
+/** Marks Document elements linked to a completed Work Item as done. */
+export interface DocumentWorkItemCompletionReflection {
+  /**
+   * Checks the checklist items and marks the Whiteboard notes that were turned
+   * into the completed Work Item.
+   *
+   * @param input Workspace, canonical Work Item ID, completion event ID, and actor.
+   * @returns A promise that resolves after every linked Document is updated.
+   */
+  reflectWorkItemCompletion(input: {
+    workspaceId: string
+    workItemId: string
+    eventId: string
+    actorId: string
+  }): Promise<unknown>
+}
+
+/** Service identity recorded as the editor of Documents changed by a completion. */
+export const DOCUMENT_COMPLETION_REFLECTION_ACTOR_ID = 'system:work-item-completion'
+
 /** Focused Rule-read and execution capabilities required by event delivery. */
 export type AutomationEventPort = AutomationExecutionServicePort &
   Pick<AutomationRuleTemplatePort, 'listRules'>
@@ -156,6 +176,7 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
  * @param engine - Rule execution engine.
  * @param workItems - Optional canonical Work Item reader used for hydration.
  * @param customerCompletionNotifications - Optional durable Customer fallback.
+ * @param documentCompletion - Optional reflection of completions into linked Documents.
  * @returns A durable Automation event processor.
  */
 export function createAutomationEventProcessor(
@@ -167,6 +188,7 @@ export function createAutomationEventProcessor(
   ),
   workItems?: AutomationWorkItemReader,
   customerCompletionNotifications?: CustomerCompletionNotificationPreparation,
+  documentCompletion?: DocumentWorkItemCompletionReflection,
 ): AutomationEventProcessor {
   return {
     async process(event) {
@@ -174,6 +196,7 @@ export function createAutomationEventProcessor(
         event,
         customerCompletionNotifications,
       )
+      await reflectWorkItemCompletionInDocuments(event, documentCompletion)
       if (!await entitlement.isAutomationEnabled(event.workspaceId)) return
       const rules = await client.listRules(event.workspaceId)
       const hydratedEvent = await hydrateAutomationWorkItem(event, workItems)
@@ -234,6 +257,45 @@ async function prepareCustomerCompletionNotificationsFromAudit(
     workItemId,
     'automation-customer-completion-projection',
   )
+}
+
+/**
+ * Marks the checklist items and Whiteboard notes turned into a Work Item as
+ * done when the durable audit event records its completion.
+ *
+ * It runs for every Workspace whether or not Automation is enabled, because
+ * the link was made in the Document, not by an Automation Rule. Reopening the
+ * Work Item does not uncheck anything; people may have checked the item for
+ * their own reasons. A failure rejects so the stream retries the record.
+ *
+ * @param event Parsed Audit event from the durable stream.
+ * @param reflection Optional Document reflection dependency.
+ * @returns A promise that resolves after the Documents are updated.
+ */
+async function reflectWorkItemCompletionInDocuments(
+  event: AutomationEvent,
+  reflection: DocumentWorkItemCompletionReflection | undefined,
+): Promise<void> {
+  if (
+    reflection === undefined ||
+    event.eventType !== 'work-item.updated' ||
+    event.metadata?.completionTransition !== true
+  ) return
+  const teamId = readText(event.metadata.teamId)
+  const issueId = readText(event.metadata.issueId) ?? readText(event.metadata.workItemId)
+  if (!teamId || !issueId || teamId.includes('/') || issueId.includes('/')) {
+    throw new AutomationError(
+      'invalid-input',
+      'AutomationOutboxEventMalformed',
+      'Work Item completion audit event is missing the Work Item scope.',
+    )
+  }
+  await reflection.reflectWorkItemCompletion({
+    actorId: DOCUMENT_COMPLETION_REFLECTION_ACTOR_ID,
+    eventId: event.eventId,
+    workItemId: `team/${teamId}/issue/${issueId}`,
+    workspaceId: event.workspaceId,
+  })
 }
 
 async function hydrateAutomationWorkItem(
