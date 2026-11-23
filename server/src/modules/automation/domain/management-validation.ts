@@ -10,6 +10,10 @@ import {
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
   type UpdateAutomationInboundWebhookEndpointInput,
+  type WorkItemContributionStatus,
+  type WorkItemContributorAssignmentCreateInput,
+  WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_TITLE_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import {
@@ -46,6 +50,7 @@ export function validateCreateAutomationTemplateInput(
       assertOnlyKeys(payload, [
         'assignedProjectId',
         'assigneeUserId',
+        'contributorAssignments',
         'customFieldValues',
         'description',
         'priority',
@@ -72,6 +77,9 @@ export function validateCreateAutomationTemplateInput(
         payload.assigneeUserId,
         'Work Item template assignee user ID',
       )
+      const contributorAssignments = payload.contributorAssignments === undefined
+        ? undefined
+        : validateTemplateContributorAssignments(payload.contributorAssignments)
       const description = readOptionalTemplateString(
         payload.description,
         'Work Item template description',
@@ -114,6 +122,9 @@ export function validateCreateAutomationTemplateInput(
           title,
           ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
           ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+          ...(contributorAssignments === undefined || contributorAssignments.length === 0
+            ? {}
+            : { contributorAssignments }),
           ...(customFieldValues === undefined ? {} : { customFieldValues }),
           ...(description === undefined ? {} : { description }),
           ...(payload.priority === undefined ? {} : { priority: payload.priority }),
@@ -436,6 +447,65 @@ function invalidInput(message: string) {
 }
 
 /** Narrows an unknown value to a record or throws a validation error. */
+/**
+ * Validates the contributors a Work Item template starts its Work Items with.
+ *
+ * Only the shape is checked here. Job roles and members are checked against the Team's current
+ * configuration and membership when a Work Item is created from the template, as for any create.
+ *
+ * @param value - Untrusted contributor list.
+ * @returns The normalized contributor list.
+ * @throws AutomationError when the list or an entry is malformed.
+ */
+function validateTemplateContributorAssignments(value: unknown): WorkItemContributorAssignmentCreateInput[] {
+  if (!Array.isArray(value) || value.length > WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT) {
+    throw invalidInput(
+      `Work Item template contributors must be a list of at most ${WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT} entries.`,
+    )
+  }
+  return value.map((entry) => {
+    const record = requireRecord(entry, 'Work Item template contributor')
+    assertOnlyKeys(record, ['jobRoleId', 'memberUserId', 'plannedEffortMinutes', 'status'], 'Work Item template contributor')
+    const memberUserId = record.memberUserId === undefined
+      ? undefined
+      : requireBoundedText(record.memberUserId, 'Work Item template contributor member', 256).toLowerCase()
+    const jobRoleId = record.jobRoleId === undefined
+      ? undefined
+      : requireBoundedText(record.jobRoleId, 'Work Item template contributor job role', 128)
+    if (memberUserId === undefined && jobRoleId === undefined) {
+      throw invalidInput('Work Item template contributor needs a member or a job role.')
+    }
+    const plannedEffortMinutes = record.plannedEffortMinutes
+    if (
+      plannedEffortMinutes !== undefined &&
+      (typeof plannedEffortMinutes !== 'number' || !Number.isSafeInteger(plannedEffortMinutes) ||
+        plannedEffortMinutes < 0 || plannedEffortMinutes > WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)
+    ) {
+      throw invalidInput('Work Item template contributor planned effort is invalid.')
+    }
+    const status = record.status
+    if (status !== undefined && !isContributionStatus(status)) {
+      throw invalidInput('Work Item template contributor status is invalid.')
+    }
+    return {
+      ...(memberUserId === undefined ? {} : { memberUserId }),
+      ...(jobRoleId === undefined ? {} : { jobRoleId }),
+      ...(plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }),
+      ...(status === undefined ? {} : { status }),
+    }
+  })
+}
+
+/**
+ * Narrows a value to a contributor progress state.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value is `planned`, `in-progress`, or `done`.
+ */
+function isContributionStatus(value: unknown): value is WorkItemContributionStatus {
+  return value === 'planned' || value === 'in-progress' || value === 'done'
+}
+
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw invalidInput(`${label} must be an object.`)
   return value

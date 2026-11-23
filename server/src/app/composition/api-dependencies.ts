@@ -413,6 +413,9 @@ function createCapacityPlanningDataSource(
         workItemId: effort.workItemId,
         ...(effort.plannedEffortMinutes === undefined ? {} : { estimateMinutes: effort.plannedEffortMinutes }),
         ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+        ...(effort.projectId ? { projectId: effort.projectId } : {}),
+        ...(effort.window ? { window: effort.window } : {}),
+        ...(effort.contributors ? { contributors: effort.contributors } : {}),
       }))
     },
   }

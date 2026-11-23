@@ -118,6 +118,11 @@ export function TeamWorkloadView({
                 {t('workload.redacted').replace('{count}', String(snapshot.redactedAssignmentCount))}
               </span>
             ) : null}
+            {snapshot?.contributorShares && snapshot.contributorShares.length > 0 ? (
+              <span className="text-xs font-semibold text-[var(--workbench-muted)]" data-testid="team-workload-contributor-shares">
+                {t('workload.contributorShares').replace('{count}', String(snapshot.contributorShares.length))}
+              </span>
+            ) : null}
           </div>
           <div className="overflow-x-auto" tabIndex={0}>
             <table className="min-w-[720px] w-full border-collapse text-left" data-testid="team-workload-heatmap">

@@ -10,12 +10,16 @@ import {
   type BulkOperationItemResult,
   type BulkOperationPreview,
   type BulkOperationRequest,
+  type BulkReassignMemberAction,
   type CreateWebhookTriageEntryInput,
   type UpdateAutomationRuleInput,
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
   type WorkItemConfiguration,
+  type WorkItemContributorAssignment,
+  type WorkItemContributorAssignmentInput,
   type WorkflowStatusCategory,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -180,6 +184,10 @@ import {
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
 import { createDependencyFencedWorkItemAuthorizationSnapshot } from '../shared/work-item-schedule'
+import {
+  readContributorAssignmentChange,
+  withContributorAssignmentChange,
+} from '../shared/work-item-contributors'
 import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
@@ -981,6 +989,11 @@ function createApiBulkOperationAdapter(
         configurationConditionChecks,
         ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
       }
+    } else if (action.type === 'reassign-member') {
+      body = {
+        ...createBulkReassignMemberPatch(loaded.detail.issue, action),
+        expectedRevision: loaded.item.expectedRevision,
+      }
     } else {
       body = normalizeTeamIssueInput(
         {
@@ -997,18 +1010,36 @@ function createApiBulkOperationAdapter(
       )
     }
 
-    const configuredBody = action.type === 'archive'
+    const configuration = action.type === 'archive'
+      ? undefined
+      : await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+          principal.directoryId,
+          loaded.item.teamId,
+        )
+    const preparedBody = configuration === undefined
       ? body
       : await prepareConfiguredUpdateWorkItem(
           principal.directoryId,
           loaded.item.teamId,
           loaded.detail.issue,
           body,
-          await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-            principal.directoryId,
-            loaded.item.teamId,
-          ),
+          configuration,
         )
+    // Only a member reassignment changes contributors; newly assigned members are fenced in the write.
+    const configuredBody = configuration === undefined || action.type !== 'reassign-member'
+      ? preparedBody
+      : {
+          ...preparedBody,
+          ...withContributorAssignmentChange(
+            preparedBody,
+            await readContributorAssignmentChange(
+              principal.directoryId,
+              preparedBody,
+              configuration,
+              loaded.detail.issue.contributorAssignments ?? [],
+            ),
+          ),
+        }
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
@@ -1249,7 +1280,7 @@ function createApiBulkOperationAdapter(
         throw error
       }
       const undoInput: Record<string, unknown> = {
-        ...item.undoPayload,
+        ...restoreBulkUndoContributorIds(item.undoPayload, loaded.detail.issue),
         expectedRevision: item.resultingRevision,
       }
       const actualDateRequest = readWorkItemActualDateCorrection(undoInput)
@@ -1265,18 +1296,36 @@ function createApiBulkOperationAdapter(
           'member',
         )
       }
-      const configuredBody = operation.action.type === 'archive'
+      const undoConfiguration = operation.action.type === 'archive'
+        ? undefined
+        : await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+            principal.directoryId,
+            item.teamId,
+          )
+      const preparedUndoBody = undoConfiguration === undefined
         ? normalizedBody
         : await prepareConfiguredUpdateWorkItem(
             principal.directoryId,
             item.teamId,
             loaded.detail.issue,
             normalizedBody,
-            await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-              principal.directoryId,
-              item.teamId,
-            ),
+            undoConfiguration,
           )
+      // Restoring the previous contributors re-validates every member they bring back.
+      const configuredBody = undoConfiguration === undefined || operation.action.type !== 'reassign-member'
+        ? preparedUndoBody
+        : {
+            ...preparedUndoBody,
+            ...withContributorAssignmentChange(
+              preparedUndoBody,
+              await readContributorAssignmentChange(
+                principal.directoryId,
+                preparedUndoBody,
+                undoConfiguration,
+                loaded.detail.issue.contributorAssignments ?? [],
+              ),
+            ),
+          }
       if ('assigneeUserId' in configuredBody) {
         await requireActiveWorkspaceAssignee(
           principal.directoryId,
@@ -1560,6 +1609,12 @@ function createBulkUndoPayload(
   action: BulkOperationRequest['action'],
   issue: TeamIssueResponseItem,
 ): Record<string, AutomationValue> {
+  if (action.type === 'reassign-member') {
+    return {
+      assigneeUserId: issue.assigneeUserId,
+      contributorAssignments: (issue.contributorAssignments ?? []).map(toAutomationContributorAssignment),
+    }
+  }
   if (action.type === 'move') {
     return { assignedProjectId: issue.assignedProjectId ?? null }
   }
@@ -1597,11 +1652,119 @@ function withoutBulkUndoActualDates(
   return fields
 }
 
+/**
+ * Builds the owner and contributor changes that hand a member's open work to another member.
+ *
+ * The owner moves when it is the source member. Each contributor share of the source member that
+ * is not `done` moves to the target member; when the target member already contributes, the
+ * moved share is merged into theirs (planned effort added, capped at the contributor limit) so
+ * the same person never holds two shares. A `done` share stays as the record of who did it.
+ *
+ * @param issue - Current Work Item.
+ * @param action - Normalized reassignment action.
+ * @returns The update fields to apply.
+ * @throws AutomationError when the source member holds nothing open on the Work Item.
+ */
+export function createBulkReassignMemberPatch(
+  issue: Pick<TeamIssueResponseItem, 'assigneeUserId' | 'contributorAssignments'>,
+  action: Pick<BulkReassignMemberAction, 'fromMemberUserId' | 'toMemberUserId'>,
+): { assigneeUserId?: string, contributorAssignments?: WorkItemContributorAssignmentInput[] } {
+  const from = action.fromMemberUserId
+  const to = action.toMemberUserId
+  const movesOwner = issue.assigneeUserId.trim().toLowerCase() === from
+  const current = issue.contributorAssignments ?? []
+  const moving = current.filter((assignment) => assignment.memberUserId === from && assignment.status !== 'done')
+  if (!movesOwner && moving.length === 0) {
+    throw new AutomationError(
+      'conflict',
+      'BulkReassignMemberNotInvolved',
+      'The member no longer owns or contributes to this Work Item.',
+    )
+  }
+  if (moving.length === 0) return { assigneeUserId: to }
+  const target = current.find((assignment) => assignment.memberUserId === to)
+  const contributorAssignments: WorkItemContributorAssignmentInput[] = []
+  for (const assignment of current) {
+    if (assignment.memberUserId === from && assignment.status !== 'done') {
+      if (target === undefined) contributorAssignments.push({ ...assignment, memberUserId: to })
+      continue
+    }
+    if (target !== undefined && assignment.assignmentId === target.assignmentId) {
+      const movedEffort = moving.reduce((total, share) => total + (share.plannedEffortMinutes ?? 0), 0)
+      const plannedEffortMinutes = Math.min(
+        (assignment.plannedEffortMinutes ?? 0) + movedEffort,
+        WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
+      )
+      contributorAssignments.push({
+        ...assignment,
+        ...(assignment.plannedEffortMinutes === undefined && movedEffort === 0 ? {} : { plannedEffortMinutes }),
+        // Taking over unfinished work reopens a share its holder had already finished.
+        ...(assignment.status === 'done' ? { status: 'in-progress' } : {}),
+      })
+      continue
+    }
+    contributorAssignments.push({ ...assignment })
+  }
+  return {
+    ...(movesOwner ? { assigneeUserId: to } : {}),
+    contributorAssignments,
+  }
+}
+
+/**
+ * Converts a stored contributor assignment into an Automation value for a Bulk undo payload.
+ *
+ * @param assignment - Stored contributor assignment.
+ * @returns The same fields as a plain Automation record.
+ */
+function toAutomationContributorAssignment(assignment: WorkItemContributorAssignment): Record<string, AutomationValue> {
+  return {
+    assignmentId: assignment.assignmentId,
+    status: assignment.status,
+    ...(assignment.memberUserId === undefined ? {} : { memberUserId: assignment.memberUserId }),
+    ...(assignment.jobRoleId === undefined ? {} : { jobRoleId: assignment.jobRoleId }),
+    ...(assignment.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: assignment.plannedEffortMinutes }),
+  }
+}
+
+/**
+ * Drops assignment IDs that no longer exist from a Bulk undo payload's contributors.
+ *
+ * A reassignment that merged a share into the target member's removed that share's ID, and an
+ * update must not name an unknown ID, so the restored share is submitted as a new assignment.
+ *
+ * @param payload - Stored Bulk undo payload.
+ * @param issue - Current Work Item.
+ * @returns The payload with only current assignment IDs kept.
+ */
+function restoreBulkUndoContributorIds(
+  payload: Record<string, AutomationValue>,
+  issue: Pick<TeamIssueResponseItem, 'contributorAssignments'>,
+): Record<string, AutomationValue> {
+  const contributors = payload.contributorAssignments
+  if (!Array.isArray(contributors)) return payload
+  const currentIds = new Set((issue.contributorAssignments ?? []).map((assignment) => assignment.assignmentId))
+  return {
+    ...payload,
+    contributorAssignments: contributors.map((assignment) => {
+      if (!isRecord(assignment) || typeof assignment.assignmentId !== 'string' ||
+        currentIds.has(assignment.assignmentId)) return assignment
+      const { assignmentId: _removed, ...rest } = assignment
+      return rest
+    }),
+  }
+}
+
 function isBulkActionApplied(
   issue: TeamIssueResponseItem,
   action: BulkOperationRequest['action'],
 ) {
   if (action.type === 'edit') return isAutomationPatchApplied(issue, action.patch)
+  if (action.type === 'reassign-member') {
+    return issue.assigneeUserId.trim().toLowerCase() !== action.fromMemberUserId &&
+      !(issue.contributorAssignments ?? []).some((assignment) =>
+        assignment.memberUserId === action.fromMemberUserId && assignment.status !== 'done')
+  }
   if (action.type === 'move') {
     return automationValuesEqual(issue.assignedProjectId ?? null, action.targetProjectId)
   }
@@ -1970,14 +2133,15 @@ async function executeAutomationWorkItemCreate(
     readAssignedProjectId(normalizedBody.assignedProjectId),
     dependencies.projectDirectory,
   )
+  const configuration = await dependencies.workItemConfigurations.getTeamConfiguration(
+    context.execution.workspaceId,
+    teamId,
+  )
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
     normalizedBody,
-    await dependencies.workItemConfigurations.getTeamConfiguration(
-      context.execution.workspaceId,
-      teamId,
-    ),
+    configuration,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(
@@ -1985,10 +2149,21 @@ async function executeAutomationWorkItemCreate(
     assignee,
     dependencies,
   )
+  // Template contributors are checked like any create: current job roles, active members fenced in the write.
+  const contributorChange = await readContributorAssignmentChange(
+    context.execution.workspaceId,
+    configuredBody,
+    configuration,
+    [],
+  )
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,
     teamId,
-    { ...configuredBody, ...newWorkItemProjectFence },
+    {
+      ...configuredBody,
+      ...withContributorAssignmentChange(configuredBody, contributorChange),
+      ...newWorkItemProjectFence,
+    },
     `automation:${context.execution.ruleId}`,
     createAutomationMutationContext(context, values),
   )

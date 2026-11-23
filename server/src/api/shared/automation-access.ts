@@ -39,6 +39,7 @@ import {
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
+import { readContributorAssignmentChange } from './work-item-contributors'
 
 /**
  * Builds the create-boundary body from merged Automation values.
@@ -55,6 +56,7 @@ export function createAutomationWorkItemCreateBody(
     ...(idempotencyResourceId === undefined ? {} : { idempotencyResourceId }),
     assignedProjectId: values.assignedProjectId,
     assigneeUserId: values.assigneeUserId,
+    ...(values.contributorAssignments === undefined ? {} : { contributorAssignments: values.contributorAssignments }),
     customFieldValues: values.customFieldValues,
     description: values.description,
     priority: values.priority,
@@ -402,6 +404,8 @@ async function validateAutomationWorkItemConfigurationUsage(
       directoryId,
       readTeamIssueAssigneeUserId(configuredBody),
     )
+    // A template's contributors must keep naming job roles and members the Team can still use.
+    await readContributorAssignmentChange(directoryId, configuredBody, { configuration }, [])
   }
 
   /**

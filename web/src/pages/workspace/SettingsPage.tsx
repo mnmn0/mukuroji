@@ -133,6 +133,7 @@ export function SettingsPage() {
                 <WorkspaceAccessPanelContainer
                   accessToken={workspace.accessToken}
                   locale={workspace.locale}
+                  workspaceId={workspace.workspaceId}
                 />
                 {workspace.canManageWorkspaceConfiguration ? (
                   <TenantAdministrationPanelContainer

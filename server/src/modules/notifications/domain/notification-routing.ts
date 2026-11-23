@@ -47,7 +47,7 @@ export type NotificationRouting = {
 const reasonCategories: ReadonlyArray<readonly [NotificationCategory, ReadonlySet<string>]> = [
   ['mention', new Set(['mention'])],
   ['approval', new Set(['approval-requested', 'approval-cancelled'])],
-  ['assignment', new Set(['assignment', 'triage-assignment'])],
+  ['assignment', new Set(['assignment', 'contributor', 'triage-assignment'])],
   ['due', new Set([
     'due', 'due-soon', 'overdue', 'overdue-reminder', 'stale', 'schedule-change', 'due-date-change', 'baseline-slip',
   ])],

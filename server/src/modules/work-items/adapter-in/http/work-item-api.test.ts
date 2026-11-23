@@ -1390,6 +1390,29 @@ test('narrows Work Items to the caller as owner or contributor', async () => {
   expect(body.nextCursor).toBeUndefined()
 })
 
+test('narrows Work Items to a named member as owner or contributor for a handover', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 3,
+    issueContributorAssignments: [{
+      assignmentId: 'assignment-1',
+      memberUserId: 'leaver@example.com',
+      status: 'planned',
+    }],
+  })
+
+  const response = await app.request('/api/work-items?member=Leaver@Example.com&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual(['onboarding-friction'])
+
+  const combined = await app.request('/api/work-items?member=leaver@example.com&involvement=mine&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(combined.status).toBe(400)
+})
+
 test('summarizes accessible Work Items per Team and Project', async () => {
   const calls = configureFakeProjectClients(true, {
     inaccessibleTeamIssueCount: 1,

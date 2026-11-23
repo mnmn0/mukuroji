@@ -163,6 +163,31 @@ describe('Automation editors', () => {
     }
   })
 
+  test('reads the contributors a Work Item template starts with', () => {
+    const schedule = {
+      calendarPolicy: {
+        holidays: [],
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      },
+      mode: 'unscheduled',
+    }
+    const parse = (contributorAssignments: unknown) => parseAutomationTemplatePayload(JSON.stringify({
+      contributorAssignments,
+      schedule,
+      title: 'Release',
+    }))
+
+    expect(parse([{ jobRoleId: 'qa', plannedEffortMinutes: 240 }, { memberUserId: 'dev@example.com' }])).toMatchObject({
+      payload: {
+        contributorAssignments: [{ jobRoleId: 'qa', plannedEffortMinutes: 240 }, { memberUserId: 'dev@example.com' }],
+      },
+    })
+    for (const invalid of [[{}], [{ jobRoleId: 'qa', plannedEffortMinutes: 1.5 }], [{ jobRoleId: 'qa', extra: true }], {}]) {
+      expect(parse(invalid)).toEqual({ error: 'invalid-value' })
+    }
+  })
+
   test('accepts nullable Project assignment and string Work Item template fields', () => {
     expect(parseAutomationTemplatePayload(JSON.stringify({
       assignedProjectId: null,

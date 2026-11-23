@@ -25,6 +25,17 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 日次 cell を Monday-first の week、または calendar month に集約できます。member ごとに timezone が異なっても availability は member の local date で再現されます。
 
+## Contributor の予定工数
+
+Work Item の Contributor（#239）の予定工数は、capacity planning の state に保存せず、snapshot のたびに canonical Work Item から読みます。
+
+- 数える分担は、member が決まっていて、`done` でなく、予定工数が 1 分以上ある分担です。Work Item が完了・キャンセル済み、archive 済み、日程なしの場合は数えません。ロールだけの分担は member の capacity に載せられないので数えません。
+- 分担は Work Item の日程（範囲なら開始日〜終了日、期限だけなら期限日）に、予定工数を allocation と planned effort の両方として、assignment と同じ規則で配分します。
+- その member が同じ Work Item の canceled でない resource assignment を持つ場合は（confidential を含め）、assignment が正本なので分担は数えません。
+- Work Item の残工数は従来どおり Work Item ごとに1つの source から決め、resource assignment と Contributor の分担に planned effort で加重配分します。分担を足しても見積は二重に数えません。
+- workload profile のない member、閲覧できない Project の Work Item の分担は数えません。
+- snapshot の `contributorShares` に数えた分担を返します。`assignments` には入らず、heatmap で移動できません。
+
 ## Resource requests and assignments
 
 `ResourceRequest` は project、role、skill、期間、requested effort、confidential flag を持ちます。assignment の allocation 合計に応じて `open`、`partially-filled`、`filled` を導出します。Team manager は（Project 付きの request は、その Project の manager でもある場合に） `PATCH /api/teams/:teamId/workload/requests/:requestId` で title、role、skill、期間、requested effort、confidential flag を変更し、`status: "canceled"` で取り消せます。request の `expectedRevision` と Team の `expectedTeamRevision` を検証し、stale write は `409` で拒否します。取消は、その request を埋める assignment がすべて `canceled` のときだけ受け付け（残っていれば `409 ResourceRequestHasActiveAssignments`）、取り消した request は変更できず、新しい assignment の追加や紐づく assignment の再有効化も `409 ResourceRequestCanceled` で拒否します。confidential な request は、confidential を見られない manager には `404` を返します。

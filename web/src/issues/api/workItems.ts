@@ -221,6 +221,7 @@ function createWorkspaceWorkItemPageUrl(request: WorkspaceWorkItemPageRequest): 
   const filter = request.filter ?? {}
   if (request.includeArchived) searchParams.set('includeArchived', 'true')
   if (filter.involvement) searchParams.set('involvement', filter.involvement)
+  if (filter.memberUserId) searchParams.set('member', filter.memberUserId)
   if (filter.teamId) searchParams.set('teamId', filter.teamId)
   if (filter.projectId) searchParams.set('projectId', filter.projectId)
   for (const category of filter.statusCategories ?? []) {

@@ -18,6 +18,12 @@ export type WorkspaceWorkItemInvolvement = 'mine'
 export type WorkspaceWorkItemListFilter = {
   /** `mine` keeps Work Items whose accountable owner or a contributor is the caller. */
   involvement?: WorkspaceWorkItemInvolvement
+  /**
+   * Keeps Work Items whose accountable owner or a contributor is this member, as the
+   * `member` query parameter. Used to find a member's work before handing it over; it
+   * cannot be combined with `involvement`. It only narrows what the caller can already read.
+   */
+  memberUserId?: string
   /** Keeps Work Items owned by this Team. The server then reads only that Team partition. */
   teamId?: string
   /** Keeps Work Items assigned to this Project. */

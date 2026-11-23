@@ -216,6 +216,56 @@ describe('capacity planning calculations', () => {
     expect(unestimated.members.map((member) => member.remainingEffortMinutes)).toEqual([600, 600])
   })
 
+  test('counts Work Item contributor shares in member workload without doubling planned work', () => {
+    const secondMember = createProfile('member-2', 'UTC')
+    const state = createState([profile, secondMember], [
+      // member-2 already plans their part of work-item-1, so their contributor share is not counted again.
+      { ...createAssignment('assignment-b', false), memberId: 'member-2', workItemId: 'work-item-1', plannedEffortMinutes: 120, allocationMinutes: 120 },
+    ])
+    const snapshot = buildWorkloadSnapshot(state, [], [
+      {
+        workItemId: 'work-item-1',
+        estimateMinutes: 480,
+        window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+        contributors: [
+          { assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-2', memberId: 'member-2', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-3', memberId: 'outside-team', plannedEffortMinutes: 60 },
+        ],
+      },
+      {
+        workItemId: 'unscheduled',
+        contributors: [{ assignmentId: 'share-4', memberId: 'member-1', plannedEffortMinutes: 60 }],
+      },
+    ], createInput())
+
+    expect(snapshot.contributorShares).toEqual([{
+      workItemId: 'work-item-1',
+      assignmentId: 'share-1',
+      memberId: 'member-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      plannedEffortMinutes: 360,
+    }])
+    expect(snapshot.assignments.map((assignment) => assignment.id)).toEqual(['assignment-b'])
+    expect(snapshot.members.map((member) => member.allocatedMinutes)).toEqual([360, 120])
+    expect(snapshot.members.map((member) => member.plannedEffortMinutes)).toEqual([360, 120])
+    // The Work Item estimate is shared by planned effort and never added on top of it.
+    expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([360, 120])
+  })
+
+  test('leaves out contributor shares of a Project the reader cannot see', () => {
+    const snapshot = buildWorkloadSnapshot(createState([profile]), [], [{
+      workItemId: 'work-item-1',
+      projectId: 'secret',
+      window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+      contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 60 }],
+    }], createInput({ visibleProjectIds: new Set(['public']) }))
+
+    expect(snapshot.contributorShares).toEqual([])
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+  })
+
   test('bounds the snapshot time-entry query by the visible assignment horizon', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     await repository.saveState(

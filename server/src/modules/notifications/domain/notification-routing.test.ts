@@ -31,6 +31,7 @@ const classificationCases: Array<[{ eventType: string, reasons: string[] }, Noti
     [{ eventType: 'timesheet.submission-reminder', reasons: ['timesheet'] }, 'reminder'],
     [{ eventType: 'weekly-report.submission-escalation', reasons: ['weekly-report-escalation'] }, 'reminder'],
     [{ eventType: 'analytics.report.delivered', reasons: ['recipient'] }, 'other'],
+    [{ eventType: 'work-item.updated', reasons: ['contributor'] }, 'assignment'],
 ]
 
 describe('classifyNotificationCategory', () => {

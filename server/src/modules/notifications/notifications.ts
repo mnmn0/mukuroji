@@ -889,6 +889,19 @@ export function requiresCurrentWorkItemAssignee(notification: Pick<NotificationI
   )
 }
 
+/**
+ * Identifies notifications that only tell a member they joined a Work Item as a contributor.
+ *
+ * Such a notification stops being shown or delivered once the member no longer holds a
+ * contributor share of the Work Item, just as owner-only notifications follow the current owner.
+ *
+ * @param notification - Recipient-specific reasons shared by Inbox and external delivery.
+ * @returns Whether the recipient must still be a current contributor.
+ */
+export function requiresCurrentWorkItemContributor(notification: Pick<NotificationItem, 'reasons'>): boolean {
+  return notification.reasons.length > 0 && notification.reasons.every((reason) => reason === 'contributor')
+}
+
 /** Workspace/member を Notifications table の recipient partition key に変換します。 */
 export function createNotificationRecipientKey(workspaceId: string, memberKey: string) {
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`

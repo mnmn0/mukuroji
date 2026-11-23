@@ -2638,6 +2638,7 @@ export class DynamoDbTeamIssuesClient {
           notificationTitle: title,
           notificationCandidates: [
             { memberKey: assigneeUserId, reason: 'assignment' },
+            ...createContributorNotificationCandidates(item, []),
           ],
           afterRevision: item.revision,
         },
@@ -6061,11 +6062,11 @@ export function createTeamIssueDeepLink(teamId: string, issueId: string) {
 export function createWorkItemNotificationCandidates(
   before: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
   after: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
 ) {
   const candidates: Array<{ memberKey: string; reason: string }> = []
@@ -6090,7 +6091,39 @@ export function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.creatorMemberKey, reason: 'creator' })
   }
 
-  return candidates
+  return [
+    ...candidates,
+    ...createContributorNotificationCandidates(after, before.contributorAssignments ?? []),
+  ]
+}
+
+/**
+ * Notifies the members who newly take a share of a Work Item as contributors.
+ *
+ * A contributor hears only that they joined the work: status, schedule, and reminder
+ * notifications stay with the accountable owner, and approvals and watchers keep their own
+ * reasons. A member counts as newly added when they had no contributor entry before the change;
+ * the owner and a member added with a share already `done` are left out, so a contributor
+ * entry never doubles the owner's notifications.
+ *
+ * @param after - Work Item after the change.
+ * @param previous - Contributors stored before the change; empty for a new Work Item.
+ * @returns One `contributor` candidate per newly added member.
+ */
+export function createContributorNotificationCandidates(
+  after: Pick<TeamIssueItem, 'assigneeUserId' | 'contributorAssignments'>,
+  previous: readonly WorkItemContributorAssignment[],
+): Array<{ memberKey: string; reason: string }> {
+  const previousMembers = new Set(previous.flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId.toLowerCase()]))
+  const owner = after.assigneeUserId.trim().toLowerCase()
+  return (after.contributorAssignments ?? []).flatMap((assignment) => {
+    const memberKey = assignment.memberUserId?.toLowerCase()
+    if (!memberKey || memberKey === owner || previousMembers.has(memberKey) || assignment.status === 'done') {
+      return []
+    }
+    return [{ memberKey, reason: 'contributor' }]
+  })
 }
 
 /**

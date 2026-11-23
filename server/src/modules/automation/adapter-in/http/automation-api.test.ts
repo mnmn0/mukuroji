@@ -606,6 +606,98 @@ test('fences a bulk Project move with the Planning revision', async () => {
   expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ planningRevision: 0 })
 })
 
+test('hands a member\'s ownership over through a bulk reassignment', async () => {
+  const calls = configureFakeProjectClients(true)
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', { headers })
+  const detail = await detailResponse.json() as { issue: { assigneeUserId: string, revision: number } }
+  const request = {
+    action: {
+      type: 'reassign-member',
+      fromMemberUserId: detail.issue.assigneeUserId,
+      toMemberUserId: 'demo@example.com',
+    },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: detail.issue.revision,
+    }],
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string, canApply: boolean }
+  expect(preview.canApply).toBe(true)
+
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as { id: string }
+  expect(applied).toMatchObject({
+    status: 'succeeded',
+    items: [{
+      status: 'succeeded',
+      undoable: true,
+    }],
+  })
+  expect(calls.issueUpdates).toHaveLength(1)
+  const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
+  expect(stored?.items[0]?.undoPayload).toEqual({
+    assigneeUserId: detail.issue.assigneeUserId,
+    contributorAssignments: [],
+  })
+})
+
+test('refuses a bulk reassignment to the same member and fails items the member is not on', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const items = [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }]
+  const sameMember = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      action: { type: 'reassign-member', fromMemberUserId: 'a@example.com', toMemberUserId: 'A@example.com' },
+      items,
+    }),
+  })
+  expect(sameMember.status).toBe(400)
+
+  const notInvolved = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      action: { type: 'reassign-member', fromMemberUserId: 'nobody@example.com', toMemberUserId: 'demo@example.com' },
+      items,
+    }),
+  })
+  expect(notInvolved.status).toBe(200)
+  expect(await notInvolved.json()).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', errorCode: 'BulkReassignMemberNotInvolved' }],
+  })
+})
+
 test('fences bulk Project-move undo with the Planning revision', async () => {
   const calls = configureFakeProjectClients(true, {
     detailAssignedProjectId: 'project-2',

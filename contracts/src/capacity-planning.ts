@@ -231,6 +231,30 @@ export type WorkloadMemberSummary = {
 }
 
 /** A workload snapshot with all visibility filtering already applied. */
+/**
+ * A Work Item contributor share counted in a member's workload.
+ *
+ * Read from the Work Item, never stored by capacity planning: the share's planned effort is
+ * reserved on the member over the Work Item's schedule. A share is left out when the member
+ * already has a resource assignment for the same Work Item, so the same work is not counted twice.
+ */
+export type WorkloadContributorShare = {
+  /** Canonical Work Item identifier. */
+  workItemId: string
+  /** Contributor assignment ID within the Work Item. */
+  assignmentId: string
+  /** Contributing member. */
+  memberId: string
+  /** Project of the Work Item, when assigned. */
+  projectId?: string
+  /** Inclusive local start date: the schedule's start, or its due date. */
+  fromDate: string
+  /** Inclusive local end date: the schedule's end, or its due date. */
+  toDate: string
+  /** Planned effort of the share in minutes, also reserved as allocation. */
+  plannedEffortMinutes: number
+}
+
 export type WorkloadSnapshot = {
   /** Contract schema version. */
   schemaVersion: typeof CAPACITY_PLANNING_SCHEMA_VERSION
@@ -250,6 +274,11 @@ export type WorkloadSnapshot = {
   requests: ResourceRequest[]
   /** Visible assignments. */
   assignments: ResourceAssignment[]
+  /**
+   * Work Item contributor shares counted in the member rows besides `assignments`; absent from
+   * servers that predate contributor workload.
+   */
+  contributorShares?: WorkloadContributorShare[]
   /** Number of assignments hidden by confidential visibility. */
   redactedAssignmentCount: number
   /** Number of requests hidden by confidential visibility. */

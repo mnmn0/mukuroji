@@ -14,6 +14,7 @@ import type {
   UpdateResourceAssignmentInput,
   UpdateResourceRequestInput,
   WorkloadCell,
+  WorkloadContributorShare,
   WorkloadHoliday,
   WorkloadMemberProfile,
   WorkloadMemberSummary,
@@ -63,6 +64,19 @@ export type WorkloadEstimate = {
   estimateMinutes?: number
   /** Recorded remaining effort, or 0 for a completed or canceled Work Item, when known. */
   remainingEffortMinutes?: number
+  /** Project of the Work Item, when assigned. */
+  projectId?: string
+  /** Local dates over which contributor shares are placed; absent when unscheduled. */
+  window?: { fromDate: string, toDate: string }
+  /** Unfinished contributor shares of decided members with planned effort. */
+  contributors?: Array<{
+    /** Contributor assignment ID within the Work Item. */
+    assignmentId: string
+    /** Contributing member. */
+    memberId: string
+    /** Planned effort of the share in minutes. */
+    plannedEffortMinutes: number
+  }>
 }
 
 /** Read-only source data needed to reconcile capacity with actual time. */
@@ -222,8 +236,20 @@ export function buildWorkloadSnapshot(
   )
   const actualByWorkItemId = aggregateActualMinutesByWorkItem(actualByMember)
   const estimateByWorkItemId = new Map(estimates.map((estimate) => [estimate.workItemId, estimate]))
+  const contributorShares = listWorkloadContributorShares(
+    estimates,
+    state.assignments,
+    profileByMemberId,
+    isProjectVisible,
+  )
+  // Contributor shares count like assignments in the member rows, but stay out of `assignments`
+  // because they belong to the Work Item and cannot be moved here.
+  const countedAssignments = [
+    ...visibleAssignments,
+    ...contributorShares.map((share) => toContributorWorkloadAssignment(share, input, generatedAt)),
+  ]
   const remainingEffortByAssignmentId = calculateRemainingEffortByAssignment(
-    visibleAssignments,
+    countedAssignments,
     actualByWorkItemId,
     estimateByWorkItemId,
     fromDate,
@@ -233,7 +259,7 @@ export function buildWorkloadSnapshot(
   const members = profiles.map((profile) =>
     calculateMemberSummary(
       profile,
-      visibleAssignments.filter((assignment) => assignment.memberId === profile.memberId),
+      countedAssignments.filter((assignment) => assignment.memberId === profile.memberId),
       actualByMember.get(profile.memberId) ?? { byDate: new Map(), byWorkItemId: new Map() },
       fromDate,
       toDate,
@@ -252,10 +278,91 @@ export function buildWorkloadSnapshot(
     members,
     requests: visibleRequests.map(clone),
     assignments: visibleAssignments.map(clone),
+    contributorShares,
     redactedAssignmentCount,
     redactedRequestCount,
     revision: state.revision,
     generatedAt,
+  }
+}
+
+/**
+ * Lists the Work Item contributor shares counted in the visible members' workload.
+ *
+ * A share is counted for a member with a workload profile on a scheduled, visible Work Item. It
+ * is left out when that member has any resource assignment for the same Work Item that is not
+ * canceled, confidential ones included, because the assignment already plans that member's part
+ * and counting both would double the same work.
+ *
+ * @param estimates - Canonical Work Item estimates with their contributor shares.
+ * @param assignments - Every stored resource assignment of the Team.
+ * @param profileByMemberId - Visible member profiles.
+ * @param isProjectVisible - Project visibility of the reader.
+ * @returns The counted shares, ordered by Work Item and assignment ID.
+ */
+function listWorkloadContributorShares(
+  estimates: readonly WorkloadEstimate[],
+  assignments: readonly ResourceAssignment[],
+  profileByMemberId: ReadonlyMap<string, WorkloadMemberProfile>,
+  isProjectVisible: (projectId: string | undefined) => boolean,
+): WorkloadContributorShare[] {
+  const plannedMembers = new Set(assignments.flatMap((assignment) =>
+    assignment.workItemId === undefined || assignment.status === 'canceled'
+      ? []
+      : [`${assignment.workItemId}\0${assignment.memberId}`]))
+  return estimates.flatMap((estimate) => {
+    const window = estimate.window
+    if (!window || !isProjectVisible(estimate.projectId)) return []
+    return (estimate.contributors ?? []).flatMap((contributor) =>
+      !profileByMemberId.has(contributor.memberId) ||
+        plannedMembers.has(`${estimate.workItemId}\0${contributor.memberId}`)
+        ? []
+        : [{
+            workItemId: estimate.workItemId,
+            assignmentId: contributor.assignmentId,
+            memberId: contributor.memberId,
+            ...(estimate.projectId ? { projectId: estimate.projectId } : {}),
+            fromDate: window.fromDate,
+            toDate: window.toDate,
+            plannedEffortMinutes: contributor.plannedEffortMinutes,
+          }])
+  }).sort((left, right) =>
+    left.workItemId.localeCompare(right.workItemId) || left.assignmentId.localeCompare(right.assignmentId))
+}
+
+/**
+ * Expresses a contributor share as a read-only assignment for the workload calculation.
+ *
+ * The share's planned effort is both its allocation and its planned effort, so a member's
+ * contributor work shows up against their capacity like a resource assignment does.
+ *
+ * @param share - Contributor share counted in the workload.
+ * @param input - Snapshot scope.
+ * @param generatedAt - Snapshot time used for the timestamps.
+ * @returns An assignment that is never stored or returned.
+ */
+function toContributorWorkloadAssignment(
+  share: WorkloadContributorShare,
+  input: Pick<WorkloadSnapshotInput, 'workspaceId' | 'teamId'>,
+  generatedAt: string,
+): ResourceAssignment {
+  return {
+    id: `contributor:${share.workItemId}:${share.assignmentId}`,
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    ...(share.projectId ? { projectId: share.projectId } : {}),
+    workItemId: share.workItemId,
+    memberId: share.memberId,
+    skillIds: [],
+    fromDate: share.fromDate,
+    toDate: share.toDate,
+    allocationMinutes: share.plannedEffortMinutes,
+    plannedEffortMinutes: share.plannedEffortMinutes,
+    confidential: false,
+    status: 'confirmed',
+    revision: 0,
+    createdAt: generatedAt,
+    updatedAt: generatedAt,
   }
 }
 
