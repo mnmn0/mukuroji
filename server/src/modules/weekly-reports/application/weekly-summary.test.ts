@@ -6,7 +6,7 @@ import {
   type WorkItemSchedule,
 } from '@mukuroji/contracts'
 import { describe, expect, test } from 'bun:test'
-import { buildTeamWeeklySummary, type WeeklySummaryWorkItem } from './weekly-summary'
+import { buildTeamMonthlySummary, buildTeamWeeklySummary, type WeeklySummaryWorkItem } from './weekly-summary'
 
 /** Week used by the tests, Monday to Sunday. */
 const WEEK = '2026-11-16'
@@ -163,5 +163,48 @@ describe('buildTeamWeeklySummary', () => {
     const completed = summarize(workItems).scopes[0]?.completed
     expect(completed?.count).toBe(WEEKLY_SUMMARY_SECTION_ITEM_LIMIT + 5)
     expect(completed?.items).toHaveLength(WEEKLY_SUMMARY_SECTION_ITEM_LIMIT)
+  })
+})
+
+describe('buildTeamMonthlySummary', () => {
+  /**
+   * Builds the November 2026 summary with the given Work Items.
+   *
+   * @param workItems - Readable Work Items.
+   * @param today - Local date of the computation.
+   * @returns The summary.
+   */
+  const summarizeMonth = (workItems: WeeklySummaryWorkItem[], today = '2026-11-25') => buildTeamMonthlySummary({
+    teamId: 'core-team',
+    month: '2026-11',
+    now: new Date(`${today}T03:00:00.000Z`),
+    projectIds: ['refero'],
+    baselines: new Map([['refero', baseline({ late: '2026-11-10', octLate: '2026-10-01' })]]),
+    workItems,
+    localToday: () => today,
+  })
+
+  test('counts the whole calendar month and the month before', () => {
+    const summary = summarizeMonth([
+      item('first', { statusCategory: 'completed', actualEndDate: '2026-11-01' }),
+      item('last', { statusCategory: 'completed', actualEndDate: '2026-11-30', schedule: milestone('2026-11-30') }),
+      item('october', { statusCategory: 'completed', actualEndDate: '2026-10-31' }),
+      item('december', { statusCategory: 'completed', actualEndDate: '2026-12-01' }),
+      item('late', { schedule: createDefaultDueDateWorkItemSchedule('2026-11-20') }),
+    ])
+    expect(summary).toMatchObject({ month: '2026-11', periodStart: '2026-11-01', periodEnd: '2026-11-30' })
+    expect(summary.totals).toEqual({ completed: 2, delayed: 1, overdue: 1, milestonesReached: 1 })
+    // October: one completion; the open late Work Item was not yet due, but is behind its baseline.
+    expect(summary.previousTotals).toEqual({ completed: 1, delayed: 1, overdue: 0, milestonesReached: 0 })
+    expect(summary.scopes[0]?.completed.items.map((entry) => entry.workItemId)).toEqual(['first', 'last'])
+  })
+
+  test('judges overdue by the end of a past month, not by today', () => {
+    const summary = summarizeMonth([
+      item('dueOctober', { schedule: createDefaultDueDateWorkItemSchedule('2026-10-15') }),
+      item('dueDecember', { schedule: createDefaultDueDateWorkItemSchedule('2026-12-15') }),
+    ])
+    expect(summary.totals.overdue).toBe(1)
+    expect(summary.previousTotals.overdue).toBe(1)
   })
 })
