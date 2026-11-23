@@ -47,6 +47,10 @@ function createFixture(options: { allowManager?: boolean; canViewConfidential?: 
       }
       return {}
     },
+    listWorkloadTeams: async () => {
+      calls.push('teams')
+      return [{ teamId: 'team-1', name: 'Team 1', permission: {} }]
+    },
     getWorkloadVisibility: async () => ({ canViewConfidential: options.canViewConfidential ?? false }),
     verifyMember: async () => undefined,
     canManageMember: async (_value, _teamId, memberId) => memberId === principal.userKey,
@@ -95,6 +99,19 @@ describe('createCapacityPlanningRouter', () => {
     expect(unauthorized.status).toBe(401)
     expect(authorized.status).toBe(200)
     expect(calls).toEqual(['authenticate:workload-token', 'permission:team-1:viewer'])
+  })
+
+  test('reads the Workspace workload over the Teams the caller may view', async () => {
+    const { calls, router } = createFixture()
+    const unauthorized = await router.request('/api/workload?from=2026-08-03&to=2026-08-03&granularity=day')
+    const response = await router.request('/api/workload?from=2026-08-03&to=2026-08-03&granularity=day', {
+      headers: { Authorization: 'Bearer workload-token' },
+    })
+
+    expect(unauthorized.status).toBe(401)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ teams: [{ teamId: 'team-1', name: 'Team 1' }], members: [] })
+    expect(calls).toEqual(['authenticate:workload-token', 'teams'])
   })
 
   test('requires manager permission for resource requests', async () => {

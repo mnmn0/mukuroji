@@ -34,6 +34,11 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   requireTeamPermission(principal: Principal, teamId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Returns whether the principal may view confidential rates and costs. */
   canManageRates(principal: Principal, teamId: string): Promise<boolean>
+  /**
+   * Lists the Teams in which the principal holds at least the given role, for the personal
+   * timesheet across Teams. Teams without that access are left out.
+   */
+  listTimeTrackingTeams(principal: Principal, minimum: 'viewer' | 'member'): Promise<Array<{ teamId: string; name: string }>>
   /** Returns the Project allowlist visible inside the selected Team. */
   getAccessibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /**
@@ -264,46 +269,13 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const minimum = action === 'submit' ? 'member' : 'manager'
       return await withTeam(context, dependencies, minimum, async (principal, teamId, canManage) => {
         const body = asRecord(await dependencies.readJson(context.req))
-        const from = readRequiredString(body.from, 'Period start')
-        const to = readRequiredString(body.to, 'Period end')
-        const accessibleProjectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
         const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
-        const projectIds = action === 'submit'
-          ? accessibleProjectIds
-          : intersectProjectIds(accessibleProjectIds, managedProjectIds)
-        const entries = await dependencies.getTimeTracking().listAllEntries({
-          workspaceId: principal.directoryId,
-          teamId,
-          from,
-          to,
-          userId: action === 'submit' ? principal.userKey : undefined,
-          ...(projectIds ? { projectIds, includeUnassigned: true } : {}),
+        const { updated, failedEntryIds } = await runTimesheetAction(dependencies, principal, teamId, canManage, {
+          action,
+          from: readRequiredString(body.from, 'Period start'),
+          to: readRequiredString(body.to, 'Period end'),
+          ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
         })
-        const eligible = entries.filter((entry) => action === 'submit'
-          ? entry.status === 'draft' || entry.status === 'rejected'
-          : action === 'lock'
-            ? entry.status === 'approved'
-            : entry.status === 'submitted')
-        const projectIdsToVerify = [...new Set(eligible.flatMap((entry) => entry.projectId ? [entry.projectId] : []))]
-        for (const projectId of projectIdsToVerify) await dependencies.verifyProject(principal, teamId, projectId, minimum)
-        const updated: TimeEntry[] = []
-        const failedEntryIds: string[] = []
-        for (const entry of eligible) {
-          try {
-            updated.push(await dependencies.getTimeTracking().transitionEntry({
-              workspaceId: principal.directoryId,
-              teamId,
-              entryId: entry.id,
-              actorUserId: principal.userKey,
-              canApprove: canManage,
-              expectedRevision: entry.revision,
-              action,
-              ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
-            }))
-          } catch {
-            failedEntryIds.push(entry.id)
-          }
-        }
         return context.json({
           count: updated.length,
           failedEntryIds,
@@ -448,6 +420,64 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
+  router.get('/api/time-tracking/my-timesheet', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      const teams = await dependencies.listTimeTrackingTeams(principal, 'viewer')
+      const results = await Promise.all(teams.map(async (team) => {
+        const input = readReportInput(context, principal.directoryId, team.teamId, false)
+        input.projectIds = await dependencies.getAccessibleProjectIds(principal, team.teamId)
+        // Only the caller's own time, whatever the caller manages in the Team.
+        input.viewer = { userId: principal.userKey, canManage: false }
+        const [timesheet, entries] = await Promise.all([
+          dependencies.getTimeTracking().createTimesheet(input),
+          dependencies.getTimeTracking().listAllEntries({
+            workspaceId: principal.directoryId,
+            teamId: team.teamId,
+            from: input.from,
+            to: input.to,
+            userId: principal.userKey,
+            ...(input.projectIds ? { projectIds: input.projectIds, includeUnassigned: true } : {}),
+          }),
+        ])
+        return {
+          teamId: team.teamId,
+          name: team.name,
+          timesheet: { ...timesheet, canManageTeam: false },
+          entries: entries.map((entry) => redactEntry(entry, false)),
+        }
+      }))
+      const timeZone = context.req.query('timeZone') ?? 'UTC'
+      return context.json({ timeZone, teams: results })
+    })
+  })
+
+  router.post('/api/time-tracking/my-timesheet/submit', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      const body = asRecord(await dependencies.readJson(context.req))
+      const from = readRequiredString(body.from, 'Period start')
+      const to = readRequiredString(body.to, 'Period end')
+      const teams = await dependencies.listTimeTrackingTeams(principal, 'member')
+      const results = []
+      for (const team of teams) {
+        const { updated, failedEntryIds } = await runTimesheetAction(
+          dependencies,
+          principal,
+          team.teamId,
+          false,
+          { action: 'submit', from, to },
+        )
+        results.push({ teamId: team.teamId, count: updated.length, failedEntryIds })
+      }
+      const failedEntryIds = results.flatMap((result) => result.failedEntryIds)
+      return context.json({
+        count: results.reduce((total, result) => total + result.count, 0),
+        failedEntryIds,
+        partialFailure: failedEntryIds.length > 0,
+        teams: results,
+      })
+    })
+  })
+
   router.get('/api/teams/:teamId/time-tracking/summary', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
@@ -534,6 +564,82 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   })
 
   return router
+}
+
+/** A week-wide timesheet lifecycle operation over one period. */
+type TimesheetActionInput = {
+  /** Lifecycle operation applied to every eligible entry. */
+  action: 'submit' | 'approve' | 'reject' | 'lock'
+  /** Period start. */
+  from: string
+  /** Period end. */
+  to: string
+  /** Rejection reason, when given. */
+  reason?: string
+}
+
+/**
+ * Applies a lifecycle operation to every eligible entry of a Team in a period.
+ *
+ * Submit takes the caller's own draft and rejected entries in visible Projects and outside any
+ * Project; the other operations take entries in the Projects the caller manages. Each entry is
+ * attempted, and the ones that fail are returned for a later retry.
+ *
+ * @param dependencies - Router dependencies.
+ * @param principal - Authenticated caller whose Team permission was already checked.
+ * @param teamId - Team whose entries change.
+ * @param canManage - Whether the caller manages time in the Team.
+ * @param input - Operation and period.
+ * @returns The updated entries and the IDs of entries that could not be changed.
+ */
+async function runTimesheetAction<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+  canManage: boolean,
+  input: TimesheetActionInput,
+): Promise<{ updated: TimeEntry[]; failedEntryIds: string[] }> {
+  const { action } = input
+  const minimum = action === 'submit' ? 'member' : 'manager'
+  const accessibleProjectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+  const managedProjectIds = action === 'submit' ? undefined : await dependencies.getManagedProjectIds(principal, teamId)
+  const projectIds = action === 'submit'
+    ? accessibleProjectIds
+    : intersectProjectIds(accessibleProjectIds, managedProjectIds)
+  const entries = await dependencies.getTimeTracking().listAllEntries({
+    workspaceId: principal.directoryId,
+    teamId,
+    from: input.from,
+    to: input.to,
+    userId: action === 'submit' ? principal.userKey : undefined,
+    ...(projectIds ? { projectIds, includeUnassigned: true } : {}),
+  })
+  const eligible = entries.filter((entry) => action === 'submit'
+    ? entry.status === 'draft' || entry.status === 'rejected'
+    : action === 'lock'
+      ? entry.status === 'approved'
+      : entry.status === 'submitted')
+  const projectIdsToVerify = [...new Set(eligible.flatMap((entry) => entry.projectId ? [entry.projectId] : []))]
+  for (const projectId of projectIdsToVerify) await dependencies.verifyProject(principal, teamId, projectId, minimum)
+  const updated: TimeEntry[] = []
+  const failedEntryIds: string[] = []
+  for (const entry of eligible) {
+    try {
+      updated.push(await dependencies.getTimeTracking().transitionEntry({
+        workspaceId: principal.directoryId,
+        teamId,
+        entryId: entry.id,
+        actorUserId: principal.userKey,
+        canApprove: canManage,
+        expectedRevision: entry.revision,
+        action,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      }))
+    } catch {
+      failedEntryIds.push(entry.id)
+    }
+  }
+  return { updated, failedEntryIds }
 }
 
 /** Runs an operation after bearer authentication and, for mutations, the business write check. */

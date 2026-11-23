@@ -1,6 +1,7 @@
 import {
   GetCommand,
   PutCommand,
+  QueryCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import type {
@@ -14,6 +15,7 @@ import type {
   UpdateResourceAssignmentInput,
   UpdateResourceRequestInput,
   WorkloadCell,
+  WorkloadCellStatus,
   WorkloadHoliday,
   WorkloadMemberProfile,
   WorkloadMemberSummary,
@@ -21,6 +23,12 @@ import type {
   WorkloadTimeOff,
   WorkingSchedule,
   WorkItemScheduleCalendarPolicy,
+  WorkspaceWorkloadCell,
+  WorkspaceWorkloadMember,
+  WorkspaceWorkloadProjectShare,
+  WorkspaceWorkloadSnapshot,
+  WorkspaceWorkloadTeam,
+  WorkspaceWorkloadTeamShare,
 } from '@mukuroji/contracts'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
@@ -92,6 +100,8 @@ export type CapacityPlanningDataSource = {
 export interface CapacityPlanningRepository {
   /** Reads the current Team state. */
   getState(workspaceId: string, teamId: string): Promise<CapacityPlanningState>
+  /** Reads every Team state saved in the Workspace, for Workspace-wide totals. */
+  listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]>
   /** Saves the state using the previous Team revision as a CAS condition. */
   saveState(
     workspaceId: string,
@@ -113,6 +123,46 @@ export type CapacityPlanningState = {
   assignments: ResourceAssignment[]
   /** Last update timestamp. */
   updatedAt?: string
+}
+
+/** One Team's stored capacity planning state, read for Workspace-wide totals. */
+export type TeamCapacityPlanningState = {
+  /** Team that owns the state. */
+  teamId: string
+  /** Stored state. */
+  state: CapacityPlanningState
+}
+
+/** Visibility of one Team in a Workspace workload read, resolved by the HTTP adapter. */
+export type WorkspaceWorkloadTeamVisibility = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** Member allowlist for the caller in this Team. Undefined means every member. */
+  visibleMemberIds?: ReadonlySet<string>
+  /** Project allowlist for the caller in this Team. Undefined means every Project. */
+  visibleProjectIds?: ReadonlySet<string>
+  /** Whether confidential assignments in this Team may be shown in detail. */
+  canViewConfidential: boolean
+}
+
+/** Input for a Workspace workload read after HTTP authorization has been performed. */
+export type WorkspaceWorkloadSnapshotInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Inclusive local start date. */
+  fromDate: string
+  /** Inclusive local end date. */
+  toDate: string
+  /** Requested output granularity. */
+  granularity: CapacityPlanningGranularity
+  /** Member whose own confidential assignments stay visible. */
+  viewerMemberId: string
+  /** Teams the caller may view, with each Team's visibility; other Teams count only in totals. */
+  teams: readonly WorkspaceWorkloadTeamVisibility[]
+  /** Workspace calendar that inheriting profiles follow; the default calendar when omitted. */
+  workspaceCalendar?: WorkItemScheduleCalendarPolicy
 }
 
 /** Input for a workload read after HTTP authorization has been performed. */
@@ -140,6 +190,11 @@ export type WorkloadSnapshotInput = {
    * every day off. The default Workspace calendar is used when omitted.
    */
   workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /**
+   * Every Team state of the Workspace, this Team's included. When given, each cell also carries
+   * the member's Workspace-wide capacity, allocation, and status.
+   */
+  workspaceTeamStates?: readonly TeamCapacityPlanningState[]
 }
 
 /** Input for a what-if calculation that never persists. */
@@ -256,6 +311,13 @@ export function buildWorkloadSnapshot(
       remainingEffortByAssignmentId,
     )
   )
+  if (input.workspaceTeamStates) {
+    const dates = listCalendarDates(fromDate, toDate)
+    for (const member of members) {
+      const daily = buildMemberWorkspaceDaily(member.memberId, input.workspaceTeamStates, workspaceCalendar, dates)
+      if (daily) applyWorkspaceTotals(member, daily, input.granularity)
+    }
+  }
 
   return {
     schemaVersion: CAPACITY_PLANNING_SCHEMA_VERSION,
@@ -342,7 +404,10 @@ export class CapacityPlanningService {
   /** Reads a capacity snapshot with member and confidential visibility already applied. */
   async getSnapshot(input: WorkloadSnapshotInput): Promise<WorkloadSnapshot> {
     const range = validateDateRange(input.fromDate, input.toDate)
-    const state = await this.repository.getState(input.workspaceId, input.teamId)
+    const [state, workspaceTeamStates] = await Promise.all([
+      this.repository.getState(input.workspaceId, input.teamId),
+      this.repository.listStates(input.workspaceId),
+    ])
     const timeEntryRange = getTimeEntryQueryRange(state, input, range)
     const [entries, estimates] = await Promise.all([
       this.dataSource.listTimeEntries({
@@ -353,7 +418,25 @@ export class CapacityPlanningService {
       }),
       this.dataSource.listEstimates(input.workspaceId, input.teamId),
     ])
-    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
+    return buildWorkloadSnapshot(
+      state,
+      entries,
+      estimates,
+      { ...input, workspaceTeamStates: replaceTeamState(workspaceTeamStates, input.teamId, state) },
+      this.now().toISOString(),
+    )
+  }
+
+  /**
+   * Reads the Workspace-wide workload of the members the caller may see in the given Teams.
+   *
+   * @param input - Range, granularity, and the Teams the caller may view with their visibility.
+   * @returns Members with Workspace-wide capacity, total allocation, and visible breakdowns.
+   */
+  async getWorkspaceSnapshot(input: WorkspaceWorkloadSnapshotInput): Promise<WorkspaceWorkloadSnapshot> {
+    validateDateRange(input.fromDate, input.toDate)
+    const teamStates = await this.repository.listStates(input.workspaceId)
+    return buildWorkspaceWorkloadSnapshot(teamStates, input, this.now().toISOString())
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
@@ -742,6 +825,14 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
     return clone(this.states.get(stateKey(workspaceId, teamId)) ?? emptyState())
   }
 
+  /** Reads isolated clones of every Team state in the Workspace. */
+  async listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]> {
+    const prefix = stateKey(workspaceId, '')
+    return [...this.states.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, state]) => ({ teamId: key.slice(prefix.length), state: clone(state) }))
+  }
+
   /** Saves a Team state after checking the expected revision. */
   async saveState(
     workspaceId: string,
@@ -780,6 +871,29 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
     }))
     if (!response.Item) return emptyState()
     return readState(response.Item, workspaceId, teamId)
+  }
+
+  /** Reads every Team state of the Workspace partition, following pagination. */
+  async listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]> {
+    const states: TeamCapacityPlanningState[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': TEAM_RECORD_PREFIX },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const recordKey = item.recordKey
+        if (typeof recordKey !== 'string' || !recordKey.startsWith(TEAM_RECORD_PREFIX)) continue
+        const teamId = recordKey.slice(TEAM_RECORD_PREFIX.length)
+        states.push({ teamId, state: readState(item, workspaceId, teamId) })
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return states
   }
 
   /** Writes a Team state using a revision condition. */
@@ -939,9 +1053,7 @@ function aggregateCells(
   }
   return [...groups.values()].sort((left, right) => left.fromDate.localeCompare(right.fromDate)).map((group) => {
     const varianceMinutes = group.value.capacityMinutes - group.value.allocatedMinutes
-    const status = group.value.capacityMinutes === 0
-      ? group.value.allocatedMinutes > 0 ? 'over' : 'unavailable'
-      : varianceMinutes < 0 ? 'over' : varianceMinutes === 0 ? 'balanced' : 'under'
+    const status = calculateCellStatus(group.value.capacityMinutes, group.value.allocatedMinutes)
     return {
       fromDate: group.fromDate,
       toDate: group.toDate,
@@ -951,11 +1063,346 @@ function aggregateCells(
       plannedEffortMinutes: group.value.plannedEffortMinutes,
       actualMinutes: group.value.actualMinutes,
       remainingEffortMinutes: group.value.remainingEffortMinutes,
-      utilizationPercent: group.value.capacityMinutes === 0
-        ? group.value.allocatedMinutes > 0 ? 100 : 0
-        : Math.round((group.value.allocatedMinutes / group.value.capacityMinutes) * 100),
+      utilizationPercent: calculateUtilizationPercent(group.value.capacityMinutes, group.value.allocatedMinutes),
       varianceMinutes,
       status,
+    }
+  })
+}
+
+/**
+ * Classifies a bucket by comparing allocation with capacity.
+ *
+ * @param capacityMinutes - Available minutes in the bucket.
+ * @param allocatedMinutes - Reserved minutes in the bucket.
+ * @returns `unavailable` with no capacity and no demand, otherwise under, balanced, or over.
+ */
+function calculateCellStatus(capacityMinutes: number, allocatedMinutes: number): WorkloadCellStatus {
+  if (capacityMinutes === 0) return allocatedMinutes > 0 ? 'over' : 'unavailable'
+  const varianceMinutes = capacityMinutes - allocatedMinutes
+  return varianceMinutes < 0 ? 'over' : varianceMinutes === 0 ? 'balanced' : 'under'
+}
+
+/**
+ * Expresses allocation as a share of capacity.
+ *
+ * @param capacityMinutes - Available minutes in the bucket.
+ * @param allocatedMinutes - Reserved minutes in the bucket.
+ * @returns The rounded percentage; 100 when demand meets no capacity.
+ */
+function calculateUtilizationPercent(capacityMinutes: number, allocatedMinutes: number): number {
+  if (capacityMinutes === 0) return allocatedMinutes > 0 ? 100 : 0
+  return Math.round((allocatedMinutes / capacityMinutes) * 100)
+}
+
+/** Daily minutes one active assignment reserves for a member, inside the selected range. */
+type WorkspaceAssignmentLoad = {
+  /** Team that owns the assignment. */
+  teamId: string
+  /** Stored assignment. */
+  assignment: ResourceAssignment
+  /** Reserved minutes per selected local date. */
+  minutesByDate: Map<string, number>
+}
+
+/** A member's Workspace-wide daily capacity and every Team's daily allocation. */
+type MemberWorkspaceDaily = {
+  /** Display name from the first Team profile that has one. */
+  displayName?: string
+  /** Role from the first Team profile that has one. */
+  role?: string
+  /** Smallest capacity of the member's Team profiles on each selected date. */
+  capacityByDate: Map<string, number>
+  /** Active assignments overlapping the range, with their daily minutes. */
+  loads: WorkspaceAssignmentLoad[]
+}
+
+/**
+ * Computes one member's Workspace-wide daily capacity and allocation from every Team state.
+ *
+ * Capacity on a date is the smallest capacity any of the member's Team profiles gives, so time off
+ * or a day off saved in one Team lowers the member's capacity everywhere. Each assignment is spread
+ * the way its own Team's view spreads it: over the dates its Team profile makes available, or the
+ * member's first profile when that Team has none.
+ *
+ * @param memberId - Member to compute.
+ * @param teamStates - Every Team state of the Workspace.
+ * @param workspaceCalendar - Workspace calendar applied to inheriting profiles.
+ * @param dates - Selected local dates, in order.
+ * @returns The daily values, or `undefined` when no Team has a profile for the member.
+ */
+function buildMemberWorkspaceDaily(
+  memberId: string,
+  teamStates: readonly TeamCapacityPlanningState[],
+  workspaceCalendar: WorkItemScheduleCalendarPolicy,
+  dates: readonly string[],
+): MemberWorkspaceDaily | undefined {
+  const profileByTeamId = new Map<string, WorkloadMemberProfile>()
+  for (const { teamId, state } of teamStates) {
+    const profile = state.profiles.find((candidate) => candidate.memberId === memberId)
+    if (profile) profileByTeamId.set(teamId, resolveEffectiveProfile(profile, workspaceCalendar))
+  }
+  const profiles = [...profileByTeamId.values()]
+  const firstProfile = profiles[0]
+  if (!firstProfile) return undefined
+  const capacityByDate = new Map(dates.map((date) => [
+    date,
+    Math.min(...profiles.map((profile) => calculateAvailableMinutes(profile, date))),
+  ]))
+  const firstDate = dates[0] ?? ''
+  const lastDate = dates.at(-1) ?? ''
+  const loads: WorkspaceAssignmentLoad[] = []
+  for (const { teamId, state } of teamStates) {
+    for (const assignment of state.assignments) {
+      if (
+        assignment.memberId !== memberId ||
+        assignment.status === 'canceled' ||
+        assignment.toDate < firstDate ||
+        assignment.fromDate > lastDate
+      ) continue
+      const profile = profileByTeamId.get(teamId) ?? firstProfile
+      const distributionDates = chooseDistributionDates(profile, listCalendarDates(assignment.fromDate, assignment.toDate))
+      loads.push({
+        teamId,
+        assignment,
+        minutesByDate: distributeMinutesOverDates(distributionDates, assignment.allocationMinutes, capacityByDate),
+      })
+    }
+  }
+  const displayName = profiles.find((profile) => profile.displayName)?.displayName
+  const role = profiles.find((profile) => profile.role)?.role
+  return {
+    ...(displayName ? { displayName } : {}),
+    ...(role ? { role } : {}),
+    capacityByDate,
+    loads,
+  }
+}
+
+/**
+ * Spreads minutes evenly over dates, keeping only the dates inside the selected range.
+ *
+ * @param dates - Dates the minutes are spread over.
+ * @param minutes - Minutes to spread; remainder minutes go to the earliest dates.
+ * @param selected - Selected dates; minutes on other dates are dropped.
+ * @returns Minutes per selected date.
+ */
+function distributeMinutesOverDates(
+  dates: readonly string[],
+  minutes: number,
+  selected: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const result = new Map<string, number>()
+  if (dates.length === 0 || minutes === 0) return result
+  const base = Math.floor(minutes / dates.length)
+  let remainder = minutes % dates.length
+  for (const date of dates) {
+    const value = base + (remainder > 0 ? 1 : 0)
+    remainder -= 1
+    if (selected.has(date) && value > 0) result.set(date, value)
+  }
+  return result
+}
+
+/**
+ * Adds a member's Workspace-wide capacity, allocation, and status to each Team view cell.
+ *
+ * @param member - Team view row, changed in place.
+ * @param daily - The member's Workspace-wide daily values.
+ * @param granularity - Granularity of the row's cells.
+ */
+function applyWorkspaceTotals(
+  member: WorkloadMemberSummary,
+  daily: MemberWorkspaceDaily,
+  granularity: CapacityPlanningGranularity,
+): void {
+  const totals = new Map<string, { capacityMinutes: number; allocatedMinutes: number }>()
+  for (const [date, capacityMinutes] of daily.capacityByDate) {
+    const bucket = bucketFor(date, granularity).fromDate
+    const current = totals.get(bucket) ?? { capacityMinutes: 0, allocatedMinutes: 0 }
+    current.capacityMinutes += capacityMinutes
+    current.allocatedMinutes += sum(daily.loads, (load) => load.minutesByDate.get(date) ?? 0)
+    totals.set(bucket, current)
+  }
+  for (const cell of member.cells) {
+    const total = totals.get(cell.fromDate) ?? { capacityMinutes: 0, allocatedMinutes: 0 }
+    cell.workspaceCapacityMinutes = total.capacityMinutes
+    cell.workspaceAllocatedMinutes = total.allocatedMinutes
+    cell.workspaceStatus = calculateCellStatus(total.capacityMinutes, total.allocatedMinutes)
+  }
+  member.workspaceOverloaded = member.cells.some((cell) => cell.workspaceStatus === 'over')
+}
+
+/**
+ * Returns the Team states with one Team's state replaced by a fresher read.
+ *
+ * @param teamStates - Every Team state of the Workspace.
+ * @param teamId - Team whose state was read separately.
+ * @param state - The separately read state.
+ * @returns The Team states, with that Team's state replaced or added.
+ */
+function replaceTeamState(
+  teamStates: readonly TeamCapacityPlanningState[],
+  teamId: string,
+  state: CapacityPlanningState,
+): TeamCapacityPlanningState[] {
+  return [...teamStates.filter((candidate) => candidate.teamId !== teamId), { teamId, state }]
+}
+
+/** Running totals of one Workspace workload bucket. */
+type WorkspaceBucketTotals = {
+  /** Inclusive bucket start date. */
+  fromDate: string
+  /** Inclusive bucket end date. */
+  toDate: string
+  /** Workspace-wide capacity. */
+  capacityMinutes: number
+  /** Allocation of every Team. */
+  allocatedMinutes: number
+  /** Visible allocation per Team ID. */
+  teams: Map<string, number>
+  /** Visible allocation per Team and Project key. */
+  projects: Map<string, WorkspaceWorkloadProjectShare>
+}
+
+/**
+ * Builds the Workspace-wide workload of the members the caller may see.
+ *
+ * A member appears when a viewable Team has a profile for them and the Team's member allowlist
+ * includes them. Totals count every active assignment of every Team; the Team and Project
+ * breakdowns count only assignments of viewable Teams that the Team's Project and confidential
+ * rules let the caller see, and the rest is reported as hidden allocation.
+ *
+ * @param teamStates - Every Team state of the Workspace.
+ * @param input - Range, granularity, viewer, and viewable Teams with their visibility.
+ * @param generatedAt - Generation timestamp.
+ * @returns The Workspace workload snapshot.
+ */
+export function buildWorkspaceWorkloadSnapshot(
+  teamStates: readonly TeamCapacityPlanningState[],
+  input: WorkspaceWorkloadSnapshotInput,
+  generatedAt = new Date().toISOString(),
+): WorkspaceWorkloadSnapshot {
+  const { fromDate, toDate } = validateDateRange(input.fromDate, input.toDate)
+  const dates = listCalendarDates(fromDate, toDate)
+  const workspaceCalendar = input.workspaceCalendar ??
+    createWorkspaceWorkItemCalendarPolicy(DEFAULT_WORKSPACE_CALENDAR_SETTINGS)
+  const stateByTeamId = new Map(teamStates.map((teamState) => [teamState.teamId, teamState.state]))
+  const visibilityByTeamId = new Map(input.teams.map((team) => [team.teamId, team]))
+  const teamIdsByMemberId = new Map<string, string[]>()
+  for (const team of input.teams) {
+    for (const profile of stateByTeamId.get(team.teamId)?.profiles ?? []) {
+      if (team.visibleMemberIds !== undefined && !team.visibleMemberIds.has(profile.memberId)) continue
+      teamIdsByMemberId.set(profile.memberId, [...teamIdsByMemberId.get(profile.memberId) ?? [], team.teamId])
+    }
+  }
+  const members: WorkspaceWorkloadMember[] = []
+  for (const [memberId, teamIds] of teamIdsByMemberId) {
+    const daily = buildMemberWorkspaceDaily(memberId, teamStates, workspaceCalendar, dates)
+    if (!daily) continue
+    const cells = aggregateWorkspaceCells(daily, input.granularity, (load) => {
+      const team = visibilityByTeamId.get(load.teamId)
+      if (!team) return false
+      const { assignment } = load
+      return (team.visibleProjectIds === undefined ||
+        assignment.projectId === undefined ||
+        team.visibleProjectIds.has(assignment.projectId)) &&
+        (!assignment.confidential || team.canViewConfidential || assignment.memberId === input.viewerMemberId)
+    })
+    members.push({
+      memberId,
+      ...(daily.displayName ? { displayName: daily.displayName } : {}),
+      ...(daily.role ? { role: daily.role } : {}),
+      teamIds,
+      cells,
+      capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
+      allocatedMinutes: sum(cells, (cell) => cell.allocatedMinutes),
+      overloaded: cells.some((cell) => cell.status === 'over'),
+    })
+  }
+  members.sort((left, right) =>
+    Number(right.overloaded) - Number(left.overloaded) ||
+    (left.displayName ?? left.memberId).localeCompare(right.displayName ?? right.memberId) ||
+    left.memberId.localeCompare(right.memberId)
+  )
+  const teams: WorkspaceWorkloadTeam[] = input.teams.map((team) => ({ teamId: team.teamId, name: team.name }))
+  return {
+    schemaVersion: CAPACITY_PLANNING_SCHEMA_VERSION,
+    workspaceId: input.workspaceId,
+    fromDate,
+    toDate,
+    granularity: input.granularity,
+    teams,
+    members,
+    generatedAt,
+  }
+}
+
+/**
+ * Groups a member's Workspace-wide daily values into buckets with visible breakdowns.
+ *
+ * @param daily - The member's Workspace-wide daily values.
+ * @param granularity - Output granularity.
+ * @param isVisible - Whether the caller may see one assignment in the breakdowns.
+ * @returns Buckets in date order.
+ */
+function aggregateWorkspaceCells(
+  daily: MemberWorkspaceDaily,
+  granularity: CapacityPlanningGranularity,
+  isVisible: (load: WorkspaceAssignmentLoad) => boolean,
+): WorkspaceWorkloadCell[] {
+  const buckets = new Map<string, WorkspaceBucketTotals>()
+  const bucketOf = (date: string): WorkspaceBucketTotals => {
+    const range = bucketFor(date, granularity)
+    const current = buckets.get(range.fromDate)
+    if (current) return current
+    const created: WorkspaceBucketTotals = {
+      fromDate: range.fromDate,
+      toDate: range.toDate,
+      capacityMinutes: 0,
+      allocatedMinutes: 0,
+      teams: new Map(),
+      projects: new Map(),
+    }
+    buckets.set(range.fromDate, created)
+    return created
+  }
+  for (const [date, capacityMinutes] of daily.capacityByDate) bucketOf(date).capacityMinutes += capacityMinutes
+  for (const load of daily.loads) {
+    const visible = isVisible(load)
+    for (const [date, minutes] of load.minutesByDate) {
+      const bucket = bucketOf(date)
+      bucket.allocatedMinutes += minutes
+      if (!visible) continue
+      bucket.teams.set(load.teamId, (bucket.teams.get(load.teamId) ?? 0) + minutes)
+      const projectKey = `${load.teamId}\0${load.assignment.projectId ?? ''}`
+      const project = bucket.projects.get(projectKey) ?? {
+        teamId: load.teamId,
+        ...(load.assignment.projectId ? { projectId: load.assignment.projectId } : {}),
+        allocatedMinutes: 0,
+      }
+      project.allocatedMinutes += minutes
+      bucket.projects.set(projectKey, project)
+    }
+  }
+  return [...buckets.values()].sort((left, right) => left.fromDate.localeCompare(right.fromDate)).map((bucket) => {
+    const teams: WorkspaceWorkloadTeamShare[] = [...bucket.teams.entries()]
+      .map(([teamId, allocatedMinutes]) => ({ teamId, allocatedMinutes }))
+      .sort((left, right) => right.allocatedMinutes - left.allocatedMinutes || left.teamId.localeCompare(right.teamId))
+    const projects = [...bucket.projects.values()]
+      .sort((left, right) => right.allocatedMinutes - left.allocatedMinutes)
+    return {
+      fromDate: bucket.fromDate,
+      toDate: bucket.toDate,
+      label: bucket.fromDate,
+      capacityMinutes: bucket.capacityMinutes,
+      allocatedMinutes: bucket.allocatedMinutes,
+      utilizationPercent: calculateUtilizationPercent(bucket.capacityMinutes, bucket.allocatedMinutes),
+      varianceMinutes: bucket.capacityMinutes - bucket.allocatedMinutes,
+      status: calculateCellStatus(bucket.capacityMinutes, bucket.allocatedMinutes),
+      teams,
+      projects,
+      hiddenAllocatedMinutes: bucket.allocatedMinutes - sum(teams, (team) => team.allocatedMinutes),
     }
   })
 }

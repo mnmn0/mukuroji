@@ -278,3 +278,45 @@ export type TimeSheet = {
    */
   canManageTeam: boolean
 }
+
+/** The caller's own time in one Team of the personal timesheet. */
+export type MyTimesheetTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** The caller's own daily and weekly totals in the Team. */
+  timesheet: TimeSheet
+  /** The caller's own entries in the period, without money fields. */
+  entries: TimeEntry[]
+}
+
+/** The caller's own time across every Team they can view, for one period. */
+export type MyTimesheet = {
+  /** IANA timezone used to split intervals. */
+  timeZone: string
+  /** One row per Team, in directory order. */
+  teams: MyTimesheetTeam[]
+}
+
+/** Result of submitting one Team's part of the personal timesheet. */
+export type MyTimesheetSubmitTeamResult = {
+  /** Team identifier. */
+  teamId: string
+  /** Entries submitted in the Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+}
+
+/** Result of submitting the caller's draft and rejected time in every Team at once. */
+export type MyTimesheetSubmitResult = {
+  /** Entries submitted across every Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+  /** Whether any entry failed. */
+  partialFailure: boolean
+  /** Per-Team results, in directory order. */
+  teams: MyTimesheetSubmitTeamResult[]
+}

@@ -44,9 +44,22 @@ Team member 画面では、稼働プロファイル、time off、resource reques
 - confidential assignment / request は Team manager と assignment の本人だけが内容を見られます。非許可 viewer には行を返さず、snapshot の `redactedAssignmentCount` / `redactedRequestCount` だけを返します。
 - guest は workload API の Team access を持たず、capacity planning の mutation は実行できません。
 
+## Workspace-wide totals
+
+A member can have a profile and assignments in several Teams. Every Team view cell also carries the member's Workspace-wide totals, and `GET /api/workload` lists them for every member the caller may see across Teams ([ADR 0068](adr/0068-workspace-workload-across-teams.md)).
+
+- `workspaceCapacityMinutes`: on each local date, the smallest capacity any of the member's Team profiles gives (after the Workspace calendar for inheriting profiles), so time off or a day off saved in one Team lowers the capacity everywhere.
+- `workspaceAllocatedMinutes`: the allocation of every non-canceled assignment of the member in every Team, spread the way its own Team spreads it (over the dates that Team's profile makes available). It includes confidential assignments and assignments in Teams the viewer cannot see, as totals only.
+- `workspaceStatus` uses the same rule as `status` on those totals, and the member's `workspaceOverloaded` is true when any cell is `over`. The Web colors a Team view cell as over and shows 他 Team を含めて超過 when only the Workspace totals are over.
+
+`GET /api/workload?from&to&granularity` reads every Team record of the Workspace partition in one paginated Query. It includes the Teams the caller may view (`teams.read` / Project viewer, as for the Team route; Workspace guests are denied) and, in each, the members that Team's workload visibility allows; Workspace owners / admins see every Team and member. Each cell returns the Workspace-wide capacity and total allocation, the allocation per viewable Team and per Project (`projects[].projectId` absent for Team-wide work), and `hiddenAllocatedMinutes`: allocation the caller may not see in detail, which is confidential assignments they are not allowed to see, Projects they cannot view, and Teams they cannot view. Actual time is not part of this view; each Team view still reports it. When a member's profiles use different time zones, each Team's dates are compared as local dates without conversion.
+
+Changing an assignment still happens in its own Team. Assigning a member of another Team, and moving the storage from one record per Team to rows per member and period, are not implemented: one Team record stays within the 350 KB budget for the expected Workspace size (about 50 members), and the Workspace view reads all of them with one Query.
+
 ## HTTP surface
 
 - `GET /api/teams/:teamId/workload?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month`
+- `GET /api/workload?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month`
 - `PUT /api/teams/:teamId/workload/profiles/:memberId`
 - `PUT /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId`
 - `POST /api/teams/:teamId/workload/requests`

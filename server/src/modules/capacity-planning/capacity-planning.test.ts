@@ -839,3 +839,134 @@ function createInput(overrides: Partial<Parameters<typeof buildWorkloadSnapshot>
     ...overrides,
   }
 }
+
+/** Re-scopes a profile fixture to another Team. */
+function inTeam<T extends { teamId: string }>(value: T, teamId: string): T {
+  return { ...value, teamId }
+}
+
+/** Saves one Team state per entry and returns a service reading them. */
+async function createWorkspaceService(states: Record<string, CapacityPlanningState>) {
+  const repository = new InMemoryCapacityPlanningRepository()
+  for (const [teamId, state] of Object.entries(states)) await repository.saveState('workspace-1', teamId, state, 0)
+  return new CapacityPlanningService(
+    repository,
+    { listTimeEntries: async () => [], listEstimates: async () => [] },
+    { now: () => new Date('2026-08-01T00:00:00.000Z') },
+  )
+}
+
+describe('Workspace-wide workload', () => {
+  const twoTeams = () => ({
+    'team-1': createState([profile], [createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300)]),
+    'team-2': createState(
+      [inTeam(profile, 'team-2')],
+      [inTeam({ ...createAssignment('assignment-2', false, '2026-08-03', '2026-08-03', 300), projectId: 'project-2' }, 'team-2')],
+    ),
+  })
+
+  test('marks a member over in both Team views when two Teams together exceed capacity', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    for (const teamId of ['team-1', 'team-2']) {
+      const snapshot = await service.getSnapshot(createInput({ teamId }))
+      const cell = snapshot.members[0]?.cells[0]
+      expect(cell).toMatchObject({
+        allocatedMinutes: 300,
+        status: 'under',
+        workspaceCapacityMinutes: 480,
+        workspaceAllocatedMinutes: 600,
+        workspaceStatus: 'over',
+      })
+      expect(snapshot.members[0]?.workspaceOverloaded).toBe(true)
+    }
+  })
+
+  test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+
+    expect(snapshot.teams).toEqual([{ teamId: 'team-1', name: 'Team 1' }])
+    expect(snapshot.members).toHaveLength(1)
+    expect(snapshot.members[0]).toMatchObject({ memberId: 'member-1', teamIds: ['team-1'], overloaded: true })
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({
+      capacityMinutes: 480,
+      allocatedMinutes: 600,
+      status: 'over',
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      projects: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
+  test('keeps confidential rows and invisible Projects out of the breakdown for a Team viewer', async () => {
+    const service = await createWorkspaceService({
+      'team-1': createState([profile], [
+        { ...createAssignment('secret', true, '2026-08-03', '2026-08-03', 120), projectId: 'project-1' },
+        { ...createAssignment('other-project', false, '2026-08-03', '2026-08-03', 60), projectId: 'project-9' },
+        { ...createAssignment('visible', false, '2026-08-03', '2026-08-03', 30), projectId: 'project-1' },
+      ]),
+    })
+    const read = async (canViewConfidential: boolean) => await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{
+        teamId: 'team-1',
+        name: 'Team 1',
+        visibleMemberIds: new Set(['member-1']),
+        visibleProjectIds: new Set(['project-1']),
+        canViewConfidential,
+      }],
+    })
+
+    expect((await read(false)).members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 210,
+      projects: [{ teamId: 'team-1', projectId: 'project-1', allocatedMinutes: 30 }],
+      hiddenAllocatedMinutes: 180,
+    })
+    expect((await read(true)).members[0]?.cells[0]).toMatchObject({
+      projects: [{ teamId: 'team-1', projectId: 'project-1', allocatedMinutes: 150 }],
+      hiddenAllocatedMinutes: 60,
+    })
+  })
+
+  test('uses the smallest capacity of the member profiles, so time off in one Team counts everywhere', async () => {
+    const service = await createWorkspaceService({
+      'team-1': createState([profile]),
+      'team-2': createState([{
+        ...inTeam(profile, 'team-2'),
+        timeOff: [{ id: 'pto', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'approved', revision: 1 }],
+      }]),
+    })
+
+    const snapshot = await service.getSnapshot(createInput({ teamId: 'team-1' }))
+
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({ capacityMinutes: 480, workspaceCapacityMinutes: 0 })
+  })
+
+  test('leaves out members the viewer cannot see in any viewable Team', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-09',
+      granularity: 'week',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-2', name: 'Team 2', visibleMemberIds: new Set(['viewer-1']), canViewConfidential: false }],
+    })
+
+    expect(snapshot.members).toEqual([])
+  })
+})
