@@ -136,6 +136,11 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
       requireWorkloadAccess(principal)
       return toWorkloadTeamPermission(principal, await requireTeamPermission(principal, teamId, minimum))
     },
+    // The directory lists only Teams that are not archived.
+    listActiveTeamIds: async (principal) => new Set(
+      (await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')).teams
+        .map((team) => team.id),
+    ),
     listWorkloadTeams: async (principal) => {
       requireWorkloadAccess(principal)
       return (await listPermittedTeams(principal, 'viewer')).map((context) => ({

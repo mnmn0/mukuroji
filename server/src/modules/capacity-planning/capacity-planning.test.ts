@@ -1010,6 +1010,25 @@ describe('Workspace-wide workload', () => {
     expect(snapshot.members[0]?.role).toBeUndefined()
   })
 
+  test('leaves archived Teams out of Workspace totals', async () => {
+    const service = await createWorkspaceService(twoTeams())
+    const activeTeamIds = new Set(['team-1'])
+
+    const teamSnapshot = await service.getSnapshot({ ...createInput({ teamId: 'team-1' }), activeTeamIds })
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ workspaceAllocatedMinutes: 300, workspaceStatus: 'under' })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+      activeTeamIds,
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300, hiddenAllocatedMinutes: 0 })
+  })
+
   test('leaves out members the viewer cannot see in any viewable Team', async () => {
     const service = await createWorkspaceService(twoTeams())
 

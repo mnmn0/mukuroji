@@ -163,6 +163,11 @@ export type WorkspaceWorkloadSnapshotInput = {
   teams: readonly WorkspaceWorkloadTeamVisibility[]
   /** Workspace calendar that inheriting profiles follow; the default calendar when omitted. */
   workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /**
+   * Teams that are not archived. Records of other Teams stay stored but count nowhere; every
+   * stored Team counts when omitted.
+   */
+  activeTeamIds?: ReadonlySet<string>
 }
 
 /** Input for a workload read after HTTP authorization has been performed. */
@@ -195,6 +200,11 @@ export type WorkloadSnapshotInput = {
    * the member's Workspace-wide capacity, allocation, and status.
    */
   workspaceTeamStates?: readonly TeamCapacityPlanningState[]
+  /**
+   * Teams that are not archived, for the Workspace-wide totals; every stored Team counts when
+   * omitted. The Team being read always counts.
+   */
+  activeTeamIds?: ReadonlySet<string>
 }
 
 /** Input for a what-if calculation that never persists. */
@@ -422,7 +432,14 @@ export class CapacityPlanningService {
       state,
       entries,
       estimates,
-      { ...input, workspaceTeamStates: replaceTeamState(workspaceTeamStates, input.teamId, state) },
+      {
+        ...input,
+        workspaceTeamStates: replaceTeamState(
+          filterActiveTeamStates(workspaceTeamStates, input.activeTeamIds),
+          input.teamId,
+          state,
+        ),
+      },
       this.now().toISOString(),
     )
   }
@@ -435,7 +452,7 @@ export class CapacityPlanningService {
    */
   async getWorkspaceSnapshot(input: WorkspaceWorkloadSnapshotInput): Promise<WorkspaceWorkloadSnapshot> {
     validateDateRange(input.fromDate, input.toDate)
-    const teamStates = await this.repository.listStates(input.workspaceId)
+    const teamStates = filterActiveTeamStates(await this.repository.listStates(input.workspaceId), input.activeTeamIds)
     return buildWorkspaceWorkloadSnapshot(teamStates, input, this.now().toISOString())
   }
 
@@ -1117,6 +1134,23 @@ type MemberWorkspaceDaily = {
   capacityByDate: Map<string, number>
   /** Active assignments overlapping the range, with their daily minutes. */
   loads: WorkspaceAssignmentLoad[]
+}
+
+/**
+ * Keeps the records of Teams that are not archived.
+ *
+ * An archived Team keeps its capacity record, but its profiles and allocations must no longer
+ * lower or add to its former members' Workspace-wide numbers.
+ *
+ * @param teamStates - Every stored Team state of the Workspace.
+ * @param activeTeamIds - Teams that are not archived, or undefined to keep every record.
+ * @returns The records of active Teams.
+ */
+function filterActiveTeamStates(
+  teamStates: readonly TeamCapacityPlanningState[],
+  activeTeamIds: ReadonlySet<string> | undefined,
+): TeamCapacityPlanningState[] {
+  return activeTeamIds ? teamStates.filter((teamState) => activeTeamIds.has(teamState.teamId)) : [...teamStates]
 }
 
 /**

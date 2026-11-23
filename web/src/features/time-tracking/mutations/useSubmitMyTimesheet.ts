@@ -62,8 +62,13 @@ export function useSubmitMyTimesheet(accessToken: string | undefined) {
     } catch {
       setNotice({ kind: 'error' })
     } finally {
-      setSubmitting(false)
-      await refresh()
+      // Stay busy until the timesheet is read again, so a second click cannot send the entries
+      // just submitted at their old revisions.
+      try {
+        await refresh()
+      } finally {
+        setSubmitting(false)
+      }
     }
   }, [accessToken, isSubmitting, refresh, runner])
   const clearNotice = useCallback(() => setNotice(undefined), [])

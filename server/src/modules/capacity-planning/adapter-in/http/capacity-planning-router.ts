@@ -82,6 +82,11 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
    * is used when omitted.
    */
   readWorkspaceCalendar?(principal: Principal): Promise<WorkItemScheduleCalendarPolicy>
+  /**
+   * Lists the Workspace Teams that are not archived, whatever the caller may view, so archived
+   * Teams' records stay out of Workspace-wide totals; every stored Team counts when omitted.
+   */
+  listActiveTeamIds?(principal: Principal): Promise<ReadonlySet<string>>
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps authentication, authorization, validation, and persistence failures to HTTP. */
@@ -111,6 +116,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
       })
       return context.json(snapshot)
     })
@@ -140,6 +146,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         viewerMemberId: principal.userKey,
         teams: visibilities,
         ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
       })
       return context.json(snapshot)
     })
@@ -356,12 +363,27 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
       })
       return context.json(result)
     })
   })
 
   return router
+}
+
+/**
+ * Reads the Teams that are not archived as optional snapshot input.
+ *
+ * @param principal - Authenticated caller.
+ * @param dependencies - Router dependencies.
+ * @returns `activeTeamIds` when the dependency is configured, otherwise nothing.
+ */
+async function readActiveTeamIdsInput<Principal extends CapacityPlanningPrincipal>(
+  principal: Principal,
+  dependencies: CapacityPlanningRouterDependencies<Principal>,
+): Promise<{ activeTeamIds?: ReadonlySet<string> }> {
+  return dependencies.listActiveTeamIds ? { activeTeamIds: await dependencies.listActiveTeamIds(principal) } : {}
 }
 
 /**
