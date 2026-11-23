@@ -147,6 +147,9 @@ export type WorkspaceIssueSaveInput = {
   idempotencyKey: string
 }
 
+/** Longest description `PATCH /api/v1/work-items/{id}` accepts; creation allows 100000. */
+const UPDATE_DESCRIPTION_MAX_LENGTH = 4096
+
 /** Work Item reference resolved to its Team and ID. */
 export type ResolvedIssueReference = {
   /** Team that owns the Work Item. */
@@ -322,6 +325,10 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       }
       if (input.dueDate !== undefined) {
         throw new AgentTaskError('invalid_request', 'dueDate can be set only when creating a Work Item.')
+      }
+      // The Public API accepts a long description only when creating; an update takes up to 4096 characters.
+      if (input.description !== undefined && input.description.length > UPDATE_DESCRIPTION_MAX_LENGTH) {
+        throw new AgentTaskError('invalid_request', `An updated description can be at most ${UPDATE_DESCRIPTION_MAX_LENGTH} characters.`)
       }
       const resolved = await resolveIssue(input.id, input.teamId)
       const patch: UpdatePublicWorkItemRequest = {

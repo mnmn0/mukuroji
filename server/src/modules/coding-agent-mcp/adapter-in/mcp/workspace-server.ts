@@ -90,7 +90,7 @@ export function createWorkspaceMcpServer(api: WorkspaceApi, readOnly = false): M
       id: issueReference.optional().describe('Work Item to update, by key such as ABC-123 or by ID with teamId. Omit to create.'),
       teamId: id.optional().describe('Team of a new Work Item, or of a Work Item ID.'),
       title: z.string().trim().min(1).max(256).optional(),
-      description: z.string().trim().min(1).max(100000).optional().describe('Full text; replaces the current description.'),
+      description: z.string().trim().min(1).max(100000).optional().describe('Full text; replaces the current description. Up to 100000 characters when creating, 4096 when updating.'),
       projectId: id.nullable().optional().describe('Project ID from list_projects; null removes the Work Item from its Project.'),
       assigneeId: id.optional().describe('Member ID from list_users, or me. A new Work Item defaults to me.'),
       statusId: id.optional().describe('Status ID from list_issue_statuses.'),
@@ -105,7 +105,7 @@ export function createWorkspaceMcpServer(api: WorkspaceApi, readOnly = false): M
   server.registerTool('save_comment', {
     description: 'Add a comment to a Work Item, by key (ABC-123) or by ID with teamId.',
     inputSchema: z.object({
-      issueId: issueReference, teamId: id.optional(), body: z.string().trim().min(1).max(100000), idempotencyKey,
+      issueId: issueReference, teamId: id.optional(), body: z.string().trim().min(1).max(4096).describe('Comment text, up to 4096 characters.'), idempotencyKey,
     }),
     annotations: writeAnnotations,
   }, ({ issueId, teamId, body, idempotencyKey: key }) => result(() => issues.saveComment(issueId, teamId, body, key)))

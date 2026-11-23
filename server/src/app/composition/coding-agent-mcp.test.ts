@@ -567,6 +567,11 @@ test('the workspace profile creates and updates Work Items and adds comments by 
     expect(withoutTitle.content).toMatchObject({ error: { code: 'invalid_request' } })
     const nothingToChange = await call(client, 'save_issue', { id: 'ABC-7', expectedRevision: 3, idempotencyKey: keys[1] })
     expect(nothingToChange.content).toMatchObject({ error: { code: 'invalid_request' } })
+    // The Public API takes up to 4096 characters for an updated description and for a comment.
+    const longUpdate = await call(client, 'save_issue', { id: 'ABC-7', expectedRevision: 3, description: 'x'.repeat(4097), idempotencyKey: keys[1] })
+    expect(longUpdate.content).toMatchObject({ error: { code: 'invalid_request' } })
+    const longComment = await call(client, 'save_comment', { issueId: 'ABC-7', body: 'x'.repeat(4097), idempotencyKey: keys[2] })
+    expect(longComment.isError).toBe(true)
     expect(fake.writes).toHaveLength(3)
   } finally {
     await client.close()

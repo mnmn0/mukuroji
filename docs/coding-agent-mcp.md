@@ -90,8 +90,8 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_issues` | Team の Work Item を Project・担当者（メンバー ID か `me`）・status・Type・更新時刻で絞ってページ取得 |
 | `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す。`teamId` を渡すと値は常に ID として読む（`task-1` のような古い ID を key と取り違えないため） |
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
-| `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ |
-| `save_comment` | Work Item にコメントを追加。key だけでも指せる |
+| `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ。`description` は作成時 100000 文字、更新時 4096 文字まで |
+| `save_comment` | Work Item にコメント（4096 文字まで）を追加。key だけでも指せる |
 
 書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
 更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
