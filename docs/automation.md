@@ -125,7 +125,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 2. Project を作る。このときは application 成功 receipt を Project transaction に含めない。前回の試行で作った Project（ID が application ID のもの）があれば、名前や色が変わっていてもそのまま使う。
 3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。その ID の Work Item が既にあれば、前回の試行の後で編集されていてもそのまま使う。
 4. 展開順に、子を親へ `parent` relation でつなぎ、兄弟の並び（hierarchy rank）を outline の順に保存する。連続して作った Work Item は sort order が同じになりうるため、作成順には頼らない。最上位の item は、それらの現在の rank のうち最小の位置から並べる。前回の試行の後で別の親へ移された item は動かさない。
-5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく、作ったばかりの Project が見えるよう directory を強い整合性で読んで確かめる。その ID の entity が既にあれば（archive 済みでも）そのまま残し、archive 済みの Phase の下の Milestone は作らない。
+5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく、作ったばかりの Project が見えるよう directory を強い整合性で読んで確かめる。Enterprise の権限は認証時に Project ごとに展開されるため、新しい Project では適用者の role をその Project で評価し直し、`planning.write` が許される場合だけ member として扱う。その ID の entity が既にあれば（archive 済みでも）そのまま残し、archive 済みの Phase の下の Milestone は作らない。
 6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item だけを ID で読み（Team の大きさに左右されず、前の試行の後に別の Project へ移されていてもよい）、今の所属で Planning API と同じ `manager` 権限を、強い整合性で読んだ directory に対して確かめる。書き込みは Planning API と同じく、確かめた時点から適用者の権限が変わっていないことを条件にする。既にある ID は飛ばす。
 7. 最後に application receipt を成功（`result.workItemCount`、`planningEntityCount`、`dependencyCount` 付き）で保存する。
 

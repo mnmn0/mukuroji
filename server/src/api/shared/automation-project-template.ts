@@ -51,6 +51,7 @@ import {
 import {
   createApiMutationContext,
   getEffectiveProjectScopeAccessList,
+  hasEnterprisePermissionAtResource,
   type WorkspacePrincipal,
 } from './project-access'
 import {
@@ -782,15 +783,16 @@ export async function createProjectTemplatePlanningEntities(
   }
   const scope = { teamId: target.teamId, projectId }
   try {
+    const scopedPrincipal = withEnterpriseAccessToNewProject(principal, target.teamId, projectId)
     await requirePlanningScopePermission(
-      principal,
+      scopedPrincipal,
       scope,
       'member',
       false,
-      await createConsistentProjectTemplateReadContext(principal),
+      await createConsistentProjectTemplateReadContext(scopedPrincipal),
     )
     await requirePlanningActiveOwner(principal, principal.userKey)
-    const workItemState = await readPlanningWorkItemState(principal, scope)
+    const workItemState = await readPlanningWorkItemState(scopedPrincipal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
     // Entities an earlier attempt created that someone archived since; their Milestones are left out.
     const archivedIndexes = new Set<number>()
@@ -940,6 +942,40 @@ export async function createProjectTemplateDependencies(
     }
   } catch (error) {
     throw toProjectTemplatePlanningError(error)
+  }
+}
+
+/**
+ * Adds the caller's Enterprise grant on the Project the application just created.
+ *
+ * An Enterprise principal's Project grants are listed when the request is authenticated, before
+ * the Project exists. This evaluates the caller's roles at the new Project, as the Planning write
+ * route would, and adds a member entry only when they allow `planning.write` there.
+ *
+ * @param principal - Workspace administrator applying the template.
+ * @param teamId - Team that owns the new Project.
+ * @param projectId - Project the application created.
+ * @returns The principal, with the new Project's grant when the evaluation allows it.
+ */
+function withEnterpriseAccessToNewProject(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): WorkspacePrincipal {
+  if (principal.isSystemAdmin || principal.enterpriseAuthorizationEvaluation === undefined) return principal
+  const allowed = hasEnterprisePermissionAtResource(principal, 'planning.write', {
+    workspaceId: principal.directoryId,
+    kind: 'project',
+    targetId: projectId,
+    parentTeamId: teamId,
+  })
+  if (!allowed) return principal
+  return {
+    ...principal,
+    enterpriseProjectAccesses: [
+      ...(principal.enterpriseProjectAccesses ?? []),
+      { projectId, teamId, role: 'member' },
+    ],
   }
 }
 
