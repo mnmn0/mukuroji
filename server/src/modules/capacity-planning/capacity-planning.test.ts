@@ -989,6 +989,27 @@ describe('Workspace-wide workload', () => {
     })
   })
 
+  test('labels a member only from the profiles of Teams the viewer may see', async () => {
+    const { displayName: _displayName, role: _role, ...unlabeled } = profile
+    const service = await createWorkspaceService({
+      'team-1': createState([unlabeled]),
+      'team-2': createState([{ ...inTeam(profile, 'team-2'), displayName: 'Secret name', role: 'Secret role' }]),
+    })
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+
+    expect(snapshot.members[0]?.memberId).toBe('member-1')
+    expect(snapshot.members[0]?.displayName).toBeUndefined()
+    expect(snapshot.members[0]?.role).toBeUndefined()
+  })
+
   test('leaves out members the viewer cannot see in any viewable Team', async () => {
     const service = await createWorkspaceService(twoTeams())
 

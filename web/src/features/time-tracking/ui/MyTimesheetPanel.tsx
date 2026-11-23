@@ -1,13 +1,8 @@
 import type { MyTimesheet } from '@mukuroji/contracts'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import type { MyTimesheetSubmitNotice } from '../model/myTimesheetSubmitNotice'
 import { formatMinutes } from '../model/timePeriod'
 
-/** Outcome of the last submission, shown under the button. */
-export type MyTimesheetSubmitNotice =
-  | { kind: 'submitted'; count: number }
-  | { kind: 'partial'; count: number; failed: number }
-  | { kind: 'nothing' }
-  | { kind: 'error' }
 
 /** Props of the personal timesheet across Teams. */
 export type MyTimesheetPanelProps = {

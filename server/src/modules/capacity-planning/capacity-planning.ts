@@ -1131,6 +1131,8 @@ type MemberWorkspaceDaily = {
  * @param teamStates - Every Team state of the Workspace.
  * @param workspaceCalendar - Workspace calendar applied to inheriting profiles.
  * @param dates - Selected local dates, in order.
+ * @param metadataTeamIds - Teams whose profiles may supply the display name and role, in order;
+ *   profiles of other Teams still count for capacity but never show their own labels.
  * @returns The daily values, or `undefined` when no Team has a profile for the member.
  */
 function buildMemberWorkspaceDaily(
@@ -1138,6 +1140,7 @@ function buildMemberWorkspaceDaily(
   teamStates: readonly TeamCapacityPlanningState[],
   workspaceCalendar: WorkItemScheduleCalendarPolicy,
   dates: readonly string[],
+  metadataTeamIds: readonly string[] = [],
 ): MemberWorkspaceDaily | undefined {
   const profileByTeamId = new Map<string, WorkloadMemberProfile>()
   for (const { teamId, state } of teamStates) {
@@ -1171,8 +1174,12 @@ function buildMemberWorkspaceDaily(
       })
     }
   }
-  const displayName = profiles.find((profile) => profile.displayName)?.displayName
-  const role = profiles.find((profile) => profile.role)?.role
+  const labelProfiles = metadataTeamIds.flatMap((teamId) => {
+    const profile = profileByTeamId.get(teamId)
+    return profile ? [profile] : []
+  })
+  const displayName = labelProfiles.find((profile) => profile.displayName)?.displayName
+  const role = labelProfiles.find((profile) => profile.role)?.role
   return {
     ...(displayName ? { displayName } : {}),
     ...(role ? { role } : {}),
@@ -1301,7 +1308,7 @@ export function buildWorkspaceWorkloadSnapshot(
   }
   const members: WorkspaceWorkloadMember[] = []
   for (const [memberId, teamIds] of teamIdsByMemberId) {
-    const daily = buildMemberWorkspaceDaily(memberId, teamStates, workspaceCalendar, dates)
+    const daily = buildMemberWorkspaceDaily(memberId, teamStates, workspaceCalendar, dates, teamIds)
     if (!daily) continue
     const cells = aggregateWorkspaceCells(daily, input.granularity, (load) => {
       const team = visibilityByTeamId.get(load.teamId)

@@ -2,7 +2,7 @@ import type { MyTimesheetSubmitRequest } from '@mukuroji/contracts'
 import { useCallback, useState } from 'react'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import { submitMyTimesheet } from '../api/myTimesheet'
-import type { MyTimesheetSubmitNotice } from '../ui/MyTimesheetPanel'
+import type { MyTimesheetSubmitNotice } from '../model/myTimesheetSubmitNotice'
 import { useRefreshTimeTrackingQueries } from './refreshTimeTrackingQueries'
 
 /**
