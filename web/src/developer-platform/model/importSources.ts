@@ -1,6 +1,6 @@
 import type { DeveloperImportFieldMapping, DeveloperImportFormat } from './transfers'
 import { MS_PROJECT_IMPORT_COLUMNS, readMsProjectXml } from './msProjectXml'
-import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from './spreadsheet'
+import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from '../../shared/lib/files/spreadsheet'
 
 /** File format chosen for an import; workbooks and MS Project files are sent as JSON rows. */
 export type DeveloperImportFileFormat = DeveloperImportFormat | 'xlsx' | 'msproject'

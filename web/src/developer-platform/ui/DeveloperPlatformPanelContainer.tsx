@@ -59,7 +59,7 @@ import type {
   DeveloperPlatformOption,
   DeveloperPlatformSection,
 } from './DeveloperPlatformView'
-import { triggerDeveloperExportDownload } from './developerExportDownload'
+import { triggerDeveloperExportDownload } from '../../shared/lib/files/fileDownload'
 
 /**
  * Props used to connect the Developer Platform panel to authenticated data.

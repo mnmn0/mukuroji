@@ -1481,8 +1481,11 @@ export type ImportJob = {
   error?: ApiProblem
 }
 
-/** Largest UTF-8 source, in bytes, that one Work Item import accepts. */
-export const WORK_ITEM_IMPORT_MAX_BYTES = 8 * 1024 * 1024
+/**
+ * Largest UTF-8 source, in bytes, that one Work Item import accepts. It leaves the JSON escaping
+ * and event envelope room within the 6 MB synchronous Lambda request payload.
+ */
+export const WORK_ITEM_IMPORT_MAX_BYTES = 4 * 1024 * 1024
 
 /** Most source rows that one Work Item import accepts. */
 export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000

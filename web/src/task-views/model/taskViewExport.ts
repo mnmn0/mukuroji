@@ -1,4 +1,4 @@
-import { createSpreadsheetWorkbook } from '../../developer-platform/model/spreadsheet'
+import { createSpreadsheetWorkbook } from '../../shared/lib/files/spreadsheet'
 
 /** File format of a view export. */
 export type TaskViewExportFormat = 'csv' | 'xlsx'

@@ -2404,7 +2404,7 @@ describe('public API router', () => {
 
     expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
     expect(validatedBytes).toEqual([3 * 1024 * 1024])
-    expect((await dryRun(8 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
+    expect((await dryRun(4 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
     expect(validatedBytes).toHaveLength(1)
   })
 

@@ -300,7 +300,7 @@ External link の削除は link、provider identity claim、link 固有の sync 
 
 ## CSV/JSON import と export
 
-Import は mapping の作成、dry-run、source の再送、report 確認の順に進める。1 回の source は 10,000 行・8 MB（UTF-8）まで（#394。以前は 1,000 行・2 MB）。超えると `413`（`ImportRowLimitExceeded` / `ImportPayloadTooLarge`）になる。
+Import は mapping の作成、dry-run、source の再送、report 確認の順に進める。1 回の source は 10,000 行・4 MB（UTF-8）まで（#394。以前は 1,000 行・2 MB）。超えると `413`（`ImportRowLimitExceeded` / `ImportPayloadTooLarge`）になる。
 
 1. UTF-8 の CSV または JSON source と、`sourceField` から canonical/custom `targetField` への mapping を送る。`schedule` に `calendarPolicy` がない行は Workspace の稼働カレンダーを使い、`date-range` で `durationDays` もない行はその稼働カレンダーで稼働日数を数える。
 2. `/api/developer/imports/dry-run` で parse、変換、required field、workflow status、custom field、Team/Project access を検証する。Dry-run は Work Item や ImportJob を保存せず、`totalRows`、`validRows`、`invalidRows`、row/field error と sample preview を返す。

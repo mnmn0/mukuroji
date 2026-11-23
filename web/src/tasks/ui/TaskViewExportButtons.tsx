@@ -1,5 +1,5 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
-import { triggerDeveloperExportDownload } from '../../developer-platform/ui/developerExportDownload'
+import { triggerDeveloperExportDownload } from '../../shared/lib/files/fileDownload'
 import {
   createTaskViewExportFile,
   taskViewExportFormats,

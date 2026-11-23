@@ -134,7 +134,9 @@ export function useDeveloperImportProgress(
     key,
     ([, token, jobId]) => getDeveloperImportProgress(token, jobId),
     {
-      shouldRetryOnError: false,
+      // A failed read is retried a few times, since polling pauses while the cache holds an error.
+      errorRetryCount: 5,
+      errorRetryInterval: importProgressRefreshMilliseconds,
       // Polls until the job ends; a finished job is read once for its final counts.
       refreshInterval: (latest) =>
         running && (latest === undefined || isRunningImportStatus(latest.status))

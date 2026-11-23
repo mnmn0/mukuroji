@@ -697,7 +697,9 @@ async function processQueueRecord(
     /**
      * Hands the rest of the job to a new queue message once this invocation's slice time is used.
      * The lease is released first, so the next invocation can claim the job at once. An invocation
-     * that has not recorded a step yet keeps going, so every slice moves the job forward.
+     * that has not recorded a step yet keeps going, so every slice moves the job forward. When the
+     * next message cannot be queued, the lease is claimed again so this message's retry, or its
+     * retry exhaustion, still owns the job.
      *
      * @returns Whether this invocation stops here.
      */
@@ -705,10 +707,24 @@ async function processQueueRecord(
       if (checkpointRow === sliceStartCheckpoint) return false
       if (dependencies.now().getTime() < sliceDeadline) return false
       await dependencies.executions.releaseClaim(execution.workspaceId, execution.jobId, leaseOwner)
-      await dependencies.queue.enqueue({
-        workspaceId: execution.workspaceId,
-        jobId: execution.jobId,
-      })
+      try {
+        await dependencies.queue.enqueue({
+          workspaceId: execution.workspaceId,
+          jobId: execution.jobId,
+        })
+      } catch (error) {
+        const reclaimedAt = dependencies.now()
+        const reclaimed = await dependencies.executions.claim(
+          execution.workspaceId,
+          execution.jobId,
+          leaseOwner,
+          addSeconds(reclaimedAt, WORK_ITEM_IMPORT_LEASE_SECONDS).toISOString(),
+          reclaimedAt.toISOString(),
+        )
+        // Another invocation already holds the job, so it continues the import.
+        if (!reclaimed) return true
+        throw error
+      }
       return true
     }
 

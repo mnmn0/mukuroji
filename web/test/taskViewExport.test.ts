@@ -5,7 +5,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
-import { readSpreadsheetWorkbook } from '../src/developer-platform/model/spreadsheet'
+import { readSpreadsheetWorkbook } from '../src/shared/lib/files/spreadsheet'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTaskTableExportTable } from '../src/tasks/model/taskTableExport'
 import { createTaskViewExportFile, escapeTaskViewCsvCell } from '../src/task-views/model/taskViewExport'

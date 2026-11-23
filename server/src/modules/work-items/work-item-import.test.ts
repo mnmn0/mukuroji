@@ -14,6 +14,7 @@ import {
   createDefaultWorkItemImportSourceStore,
 } from './work-item-import-aws'
 import {
+  WORK_ITEM_IMPORT_MAX_RECEIVE_COUNT,
   WORK_ITEM_IMPORT_SLICE_SECONDS,
   WorkItemImportError,
   createWorkItemImportJobId,
@@ -254,6 +255,36 @@ describe('durable Work Item import', () => {
     expect(fixture.execution?.status).toBe('running')
     expect(fixture.execution?.checkpointRow).toBe(1)
     expect(fixture.execution?.leaseOwner).toBeUndefined()
+  })
+
+  test('fails the job when the next slice cannot be queued on the last receive', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-slice-last')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    let clock = new Date('2026-07-18T00:00:00.000Z').getTime()
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Jumps past the slice time after the first row. */
+      now() {
+        clock += 1_000
+        return new Date(clock)
+      },
+      async createWorkItem() {
+        clock += WORK_ITEM_IMPORT_SLICE_SECONDS * 1_000
+      },
+      queue: {
+        async enqueue() {
+          throw new Error('queue unavailable')
+        },
+      },
+    })
+
+    const result = await processWorkItemImportBatch(
+      createSqsEvent(jobId, String(WORK_ITEM_IMPORT_MAX_RECEIVE_COUNT)),
+      dependencies,
+    )
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(fixture.execution?.status).toBe('failed')
   })
 
   test('finishes a retry near the Team link limit when a link was applied before its receipt', async () => {

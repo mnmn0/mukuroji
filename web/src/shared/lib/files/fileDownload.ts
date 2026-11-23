@@ -1,5 +1,5 @@
 /**
- * Browser primitives used to start and clean up a Developer Platform export.
+ * Browser primitives used to start and clean up a file download.
  */
 export type DeveloperExportDownloadEnvironment = {
   /** Creates an object URL for an exported Blob. */
