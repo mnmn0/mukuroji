@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
 import {
   InMemoryTimeTrackingRepository,
   TimeTrackingError,
   TimeTrackingService,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
 } from './time-tracking'
 
@@ -35,7 +37,7 @@ function createIdempotencyStore(): TimeTrackingIdempotencyPort {
 }
 
 /** Creates an isolated service fixture with deterministic IDs and clock values. */
-function createFixture() {
+function createFixture(categories?: TimeTrackingCategorySource) {
   let id = 0
   const repository = new InMemoryTimeTrackingRepository()
   /** Canonical Work Item estimates keyed by Workspace, Team, and Work Item. */
@@ -51,6 +53,7 @@ function createFixture() {
         ))
       },
     },
+    ...(categories ? { categories } : {}),
   })
   return { repository, service, plannedEffort }
 }
@@ -184,6 +187,62 @@ describe('TimeTrackingService', () => {
     ])
     expect(sheet.weeks).toHaveLength(1)
     expect(sheet.costsRedacted).toBe(true)
+  })
+
+  test('starts weekly timesheet and report buckets on the Workspace week start day', async () => {
+    const { service } = createFixture({
+      readCategories: async () => DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readWeekStartDay: async () => 0,
+    })
+    for (const [startAt, endAt] of [
+      ['2026-08-01T01:00:00.000Z', '2026-08-01T02:00:00.000Z'],
+      ['2026-08-02T01:00:00.000Z', '2026-08-02T03:00:00.000Z'],
+    ] as const) {
+      await service.createEntry({
+        workspaceId: 'workspace-1',
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        userId: 'member-1',
+        startAt,
+        endAt,
+        billable: true,
+        currency: 'USD',
+        source: 'manual',
+      }, false)
+    }
+    const input = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-07-26',
+      to: '2026-08-08',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'week',
+      includeCosts: false,
+    } as const
+    const sheet = await service.createTimesheet(input)
+    expect(sheet.weeks.map((week) => [week.key, week.minutes])).toEqual([
+      ['2026-07-26', 60],
+      ['2026-08-02', 120],
+    ])
+    const summary = await service.createSummary(input)
+    expect(summary.groups.map((group) => [group.key, group.minutes])).toEqual([
+      ['2026-07-26', 60],
+      ['2026-08-02', 120],
+    ])
+
+    const monday = createFixture()
+    await monday.service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T01:00:00.000Z',
+      endAt: '2026-08-02T02:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      source: 'manual',
+    }, false)
+    expect((await monday.service.createTimesheet(input)).weeks.map((week) => week.key)).toEqual(['2026-07-27'])
   })
 
   test('compares canonical Work Item estimates with project grouped actual time', async () => {
