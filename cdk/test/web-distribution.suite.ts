@@ -441,6 +441,8 @@ test('makes the custom domain the canonical app URL', () => {
   expect(emailJobs).toHaveLength(1);
   expect(emailJobs[0].Properties.Environment.Variables.NOTIFICATION_EMAIL_APP_ORIGIN)
     .toBe(customOrigin);
+  // The API runtime configuration lists both origins in WEB_APP_ORIGINS.
+  expect(JSON.stringify(template.toJSON())).toContain(`"${customOrigin},https://"`);
   const userPools = Object.values(template.findResources('AWS::Cognito::UserPool'));
   expect(JSON.stringify(userPools)).toContain(`${customOrigin}/login`);
   expect(JSON.stringify(userPools)).toContain(`${customOrigin}/forgot-password`);

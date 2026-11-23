@@ -401,11 +401,7 @@ export function buildWebDistribution(
 
   input.fileBucket.addCorsRule(createFileBucketBrowserCorsRule(browserOrigins));
 
-  const webBrowserOrigins = cdk.Token.asString(cdk.Fn.conditionIf(
-    customDomain.configured.logicalId,
-    `${customOrigin},${distributionOrigin}`,
-    distributionOrigin,
-  ));
+  const webBrowserOrigins = browserOrigins.join(',');
 
   return { webBucket, webDistribution, webOrigin, webBrowserOrigins };
 }
