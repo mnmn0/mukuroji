@@ -512,8 +512,7 @@ function replayCreate(
     expiresInDays !== input.expiresInDays ||
     share.customerId !== input.customerId ||
     share.contactId !== input.contactId ||
-    // The stored snapshot was redacted the same way, so an unchanged report serializes the same.
-    JSON.stringify(record.report) !== JSON.stringify(redactProjectStatusReport(input.report, input.scope))
+    canonicalReport(record.report) !== canonicalReport(redactProjectStatusReport(input.report, input.scope))
   ) {
     throw new ProjectDataError(
       409,
@@ -522,4 +521,16 @@ function replayCreate(
     )
   }
   return { share, url: `/share/project-status/${encodeURIComponent(token)}` }
+}
+
+/**
+ * Serializes a report in the field order the parser builds, so a stored snapshot and the same
+ * report redacted again compare equal however each object was put together.
+ *
+ * @param report - Report.
+ * @returns The canonical JSON.
+ */
+function canonicalReport(report: ProjectStatusReport) {
+  const parsed = parseProjectStatusReport(report)
+  return JSON.stringify(parsed.ok ? parsed.value : report)
 }
