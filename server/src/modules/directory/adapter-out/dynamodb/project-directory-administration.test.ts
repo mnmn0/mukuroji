@@ -83,8 +83,25 @@ function createClient(
   beforeTransaction?: () => void,
 ) {
   const sent: SentCommand[] = []
+  const receiptFingerprints = new Map<unknown, unknown>()
   const send = async (command: SentCommand) => {
     sent.push(command)
+    // Request receipts are written on their own and keep the first input of each key; the
+    // failures and races below target the directory transactions that follow them.
+    if (isReceiptTransaction(command.input.TransactItems)) {
+      const [put] = listItems(command.input.TransactItems)
+      const item: unknown = isRecord(put) && isRecord(put.Put) ? put.Put.Item : undefined
+      const entryKey = isRecord(item) ? item.entryKey : undefined
+      const fingerprint = isRecord(item) ? item.requestFingerprint : undefined
+      if (receiptFingerprints.has(entryKey) && receiptFingerprints.get(entryKey) !== fingerprint) {
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+        })
+      }
+      receiptFingerprints.set(entryKey, fingerprint)
+      return {}
+    }
     if ('TransactItems' in command.input) beforeTransaction?.()
     if ('KeyConditionExpression' in command.input) {
       const values = command.input.ExpressionAttributeValues
@@ -124,10 +141,26 @@ function createClient(
     'PlanningTable',
   )
   const transactions = () => sent
-    .filter((command) => 'TransactItems' in command.input)
+    .filter((command) => 'TransactItems' in command.input && !isReceiptTransaction(command.input.TransactItems))
+    .map((command) => command.input.TransactItems)
+  const receipts = () => sent
+    .filter((command) => isReceiptTransaction(command.input.TransactItems))
     .map((command) => command.input.TransactItems)
   const queryCount = () => sent.filter((command) => 'KeyConditionExpression' in command.input).length
-  return { client, transactions, queryCount }
+  return { client, transactions, receipts, queryCount }
+}
+
+/**
+ * Tells whether sent transaction items are a lone request receipt write.
+ *
+ * @param items - Transaction items as sent.
+ * @returns Whether the transaction only writes a `team-grant-request` receipt.
+ */
+function isReceiptTransaction(items: unknown) {
+  if (!Array.isArray(items) || items.length !== 1) return false
+  const [item]: unknown[] = items
+  const put = isRecord(item) ? item.Put : undefined
+  return isRecord(put) && isRecord(put.Item) && put.Item.entryType === 'team-grant-request'
 }
 
 /**
@@ -1076,13 +1109,13 @@ test('fences each Team-wide grant on its Team and Project still being active', a
 })
 
 test('binds a Team-wide grant key to its input with a conditional receipt', async () => {
-  const { client, transactions } = createClient([])
+  const { client, receipts } = createClient([])
   const grantRequest = { idempotencyKeyHash: 'key-hash', requestFingerprint: 'member-request' }
 
   await client.bindTeamGrantRequest(directoryId, grantRequest)
 
   // The receipt sits outside the directory partition, and only the same input meets its condition.
-  expect(transactions()).toEqual([[{
+  expect(receipts()).toEqual([[{
     Put: {
       TableName: 'DirectoryTable',
       Item: {
@@ -1100,7 +1133,7 @@ test('binds a Team-wide grant key to its input with a conditional receipt', asyn
   }]])
 
   // Against stored receipts, the first input wins: it may repeat, and another input is refused.
-  const receipts = new Map<string, string>()
+  const stored = new Map<string, string>()
   /**
    * Stores receipts and evaluates their write condition like DynamoDB does.
    *
@@ -1113,14 +1146,14 @@ test('binds a Team-wide grant key to its input with a conditional receipt', asyn
     if (!isRecord(item) || typeof item.entryKey !== 'string' || typeof item.requestFingerprint !== 'string') {
       throw new Error('Expected a receipt Put.')
     }
-    const stored = receipts.get(item.entryKey)
-    if (stored !== undefined && stored !== item.requestFingerprint) {
+    const fingerprint = stored.get(item.entryKey)
+    if (fingerprint !== undefined && fingerprint !== item.requestFingerprint) {
       throw Object.assign(new Error('Transaction was canceled.'), {
         name: 'TransactionCanceledException',
         CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
       })
     }
-    receipts.set(item.entryKey, item.requestFingerprint)
+    stored.set(item.entryKey, item.requestFingerprint)
     return {}
   }
   const stateful = new DynamoDbProjectDirectoryClient(
@@ -1143,13 +1176,6 @@ test('binds a Team-wide grant key to its input with a conditional receipt', asyn
     directoryId,
     { idempotencyKeyHash: 'other-hash', requestFingerprint: 'other-member-request' },
   )).resolves.toBeUndefined()
-
-  // A receipt of the same key with another input fails the condition, also under concurrency.
-  const reused = createClient([], false, {}, [], 0)
-  await expect(reused.client.bindTeamGrantRequest(
-    directoryId,
-    { idempotencyKeyHash: 'key-hash', requestFingerprint: 'viewer-request' },
-  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
 })
 
 test('does not check the leader twice when the caller leads the Team', async () => {
@@ -1214,9 +1240,26 @@ test('answers the same profile save sent twice at once as one success', async ()
     .rejects.toMatchObject({ status: 409 })
 })
 
+test('refuses a profile save under a key already used with another input', async () => {
+  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+  const input = { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+  await client.updateTeamProfile(
+    directoryId, 'alpha', input, createRestoreContext('profile-key', '/api/teams/alpha/profile'),
+  )
+
+  // The same key with another request is refused before the profile is written again.
+  await expect(client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { ...input, description: '別の説明', expectedProfileRevision: 1 },
+    createRestoreContext('profile-key', '/api/teams/alpha/profile/other'),
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  expect(transactions()).toHaveLength(1)
+})
+
 test('records the request of a profile save so its retry is recognized', async () => {
   const context = createRestoreContext('profile-key', '/api/teams/alpha/profile')
-  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+  const { client, transactions, receipts } = createClient([createTeamRow('alpha', 10)])
 
   await client.updateTeamProfile(
     directoryId,
@@ -1224,6 +1267,16 @@ test('records the request of a profile save so its retry is recognized', async (
     { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 },
     context,
   )
+
+  // The key is bound to this input before the profile is written.
+  expect(receipts()).toEqual([[{
+    Put: expect.objectContaining({
+      Item: expect.objectContaining({
+        entryKey: `KEY#${context.idempotencyKeyHash}`,
+        requestFingerprint: context.requestFingerprint,
+      }),
+    }),
+  }]])
 
   expect(transactions()[0]).toEqual(expect.arrayContaining([{
     Update: expect.objectContaining({

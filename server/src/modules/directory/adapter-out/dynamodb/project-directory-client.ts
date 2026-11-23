@@ -443,7 +443,7 @@ type MemberPreferencesItem = MemberPreferenceValues & {
   updatedAt: string
 }
 
-/** Idempotency key and input of one Team-wide member grant. */
+/** Idempotency key and input of one Team administration request, such as a Team-wide grant. */
 export type TeamGrantRequest = {
   /** Hash of the caller's idempotency key, scoped to the Workspace and the caller. */
   idempotencyKeyHash: string
@@ -451,7 +451,7 @@ export type TeamGrantRequest = {
   requestFingerprint: string
 }
 
-/** Receipt binding a Team-wide grant's idempotency key to its input, in a sidecar partition. */
+/** Receipt binding a Team administration request's idempotency key to its input, in a sidecar partition. */
 type TeamGrantRequestItem = {
   /** Sidecar partition of the Workspace's grant receipts. */
   directoryId: string
@@ -2193,6 +2193,17 @@ export class DynamoDbProjectDirectoryClient {
    * @param grantRequest - Idempotency key hash and request fingerprint of the grant.
    */
   async bindTeamGrantRequest(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
+    await this.bindTeamRequestKey(directoryId, grantRequest)
+  }
+
+  /**
+   * Writes the receipt that binds a Team administration request's idempotency key to its input.
+   * Team-wide grants and Team profile saves share the receipts, so one key names one request.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the request.
+   */
+  private async bindTeamRequestKey(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
     const item: TeamGrantRequestItem = {
       directoryId: createTeamGrantRequestDirectoryId(directoryId),
       entryKey: `KEY#${grantRequest.idempotencyKeyHash}`,
@@ -3218,6 +3229,14 @@ export class DynamoDbProjectDirectoryClient {
     const requestKey = auditContext
       ? `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`
       : undefined
+    // One key is one request: a key already used with another input is refused before anything
+    // else, whether or not audit events are stored (ADR 0080).
+    if (auditContext) {
+      await this.bindTeamRequestKey(directoryId, {
+        idempotencyKeyHash: auditContext.idempotencyKeyHash,
+        requestFingerprint: auditContext.requestFingerprint,
+      })
+    }
     // A retry of the request that stored the current revision, whose response was lost, is
     // answered as the success it was instead of as a conflict with itself.
     if (

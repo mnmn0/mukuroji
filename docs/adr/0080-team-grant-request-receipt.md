@@ -1,4 +1,4 @@
-# 0080. Team 全体へのメンバー追加の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける
+# 0080. Team の管理操作の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける
 
 - 状態: 提案
 - 日付: 2026-11-23
@@ -18,9 +18,14 @@
 - 書き込む所属行がないとき（全 Project に所属済み、または有効な Project がない）は、キーが残らない。
 - 所属行のロール変更や削除で、記録したキーが消える。
 
+Team のプロフィール保存も同じ問題を持つ。保存した Team 行に `profileRequestKey` を残して同じリクエストの再送を見分けるが、
+同じキーで別の入力（たとえば次の revision への別の保存）を拒否する仕組みはなく、監査 event を保存しない設定では
+両方が保存される。
+
 ## 決定
 
-- 付与を始める前に、Project Directory table に受付行を条件付きで書く。
+- Team 全体へのメンバー追加では付与を始める前に、Team のプロフィール保存では保存の判定より前に、
+  Project Directory table に受付行を条件付きで書く。2つの操作は同じ受付行を使うので、1つのキーは1つのリクエストを表す。
   - partition key `directoryId` は `TEAM_GRANT_REQUEST#<encodeURIComponent(workspaceId)>`、
     sort key `entryKey` は `KEY#<idempotencyKeyHash>` にする。
   - 属性は `entryType: 'team-grant-request'`、`workspaceId`、`requestFingerprint`、`createdAt`。
@@ -46,6 +51,6 @@
 
 ## 結果
 
-- 同じキーで別の入力の Team 全体への追加は、タイミングや既存の所属にかかわらず 409 になる。
+- 同じキーで別の入力の Team 全体への追加とプロフィール保存は、タイミングや既存の状態、監査 event の保存設定にかかわらず 409 になる。
 - 同じ入力の再送は受付行の条件を満たすので、残りの Project の追加を続けられる。
-- 受付行には TTL がなく、Workspace を削除するまで残る。1回の Team 全体への追加ごとに1行だけ増える。
+- 受付行には TTL がなく、Workspace を削除するまで残る。Team 全体への追加とプロフィール保存の1回ごとに1行だけ増える。
