@@ -1,6 +1,7 @@
 import type {
   ApplyAutomationTemplateInput,
   AutomationExecution,
+  AutomationProjectTemplateApplicationPreview,
   AutomationInboundWebhookEndpoint,
   AutomationInboundWebhookSecretResponse,
   AutomationRule,
@@ -33,6 +34,7 @@ import {
   countProjectTemplateWorkItems,
   formatLocalCalendarDate,
 } from '../model/projectTemplateWorkItems'
+import type { AutomationPlanningParentsState } from '../model/projectTemplatePlanning'
 
 const tabLabelKeys: Record<AutomationManagementTab, MessageKey> = {
   rules: 'automation.tab.rules',
@@ -166,6 +168,13 @@ export type AutomationManagementPanelProps = {
   onRefreshTemplateApplication?: (
     applicationId: string,
   ) => Promise<AutomationTemplateApplication>
+  /** Dry-runs a Project template application without writing anything. */
+  onPreviewTemplateApplication?: (
+    template: AutomationTemplate,
+    input: ApplyAutomationTemplateInput,
+  ) => Promise<AutomationProjectTemplateApplicationPreview>
+  /** Planning entities a template's Phases and Milestones can be placed under, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
   /** Recurring Work 作成 callback です。 */
   onCreateRecurringWork?: (input: CreateRecurringWorkInput) => Promise<unknown> | unknown
   /** Recurring Work active/paused 切替 callback です。 */
@@ -202,6 +211,8 @@ export function AutomationManagementPanel({
   onToggleTemplate,
   onUpdateTemplate,
   onRefreshTemplateApplication,
+  onPreviewTemplateApplication,
+  planningParents,
   readOnly = false,
   recurringWork,
   rules,
@@ -338,6 +349,8 @@ export function AutomationManagementPanel({
             onCreate={onCreateTemplate}
             onDuplicate={onDuplicateTemplate}
             onRefreshApplication={onRefreshTemplateApplication}
+            onPreviewApplication={onPreviewTemplateApplication}
+            planningParents={planningParents}
             onToggle={onToggleTemplate}
             onUpdate={onUpdateTemplate}
           />
@@ -491,6 +504,13 @@ type TemplatesTabProps = {
   onRefreshApplication?: (
     applicationId: string,
   ) => Promise<AutomationTemplateApplication>
+  /** Dry-runs a Project template application. */
+  onPreviewApplication?: (
+    template: AutomationTemplate,
+    input: ApplyAutomationTemplateInput,
+  ) => Promise<AutomationProjectTemplateApplicationPreview>
+  /** Planning parent candidates for template Phases and Milestones, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
 }
 
 function TemplatesTab({
@@ -500,6 +520,8 @@ function TemplatesTab({
   onCreate,
   onDuplicate,
   onRefreshApplication,
+  onPreviewApplication,
+  planningParents,
   onToggle,
   onUpdate,
   readOnly,
@@ -607,6 +629,8 @@ function TemplatesTab({
                   template={template}
                   workflowTargets={workflowTargets}
                   onApply={(input) => onApply(template, input)}
+                  planningParents={planningParents}
+                  onPreview={onPreviewApplication ? (input) => onPreviewApplication(template, input) : undefined}
                   onRefresh={onRefreshApplication}
                 />
               ) : null}
@@ -636,14 +660,23 @@ type AutomationTemplateApplicationEditorProps = {
   onRefresh?: (applicationId: string) => Promise<AutomationTemplateApplication>
   /** Story/test で表示する既存 receipt です。 */
   initialApplication?: AutomationTemplateApplication
+  /** Dry-runs the application; when given, applying a Project template waits for a clean preview. */
+  onPreview?: (input: ApplyAutomationTemplateInput) => Promise<AutomationProjectTemplateApplicationPreview>
+  /** Planning parent candidates for the template's Phases and Milestones, with their loading state. */
+  planningParents?: AutomationPlanningParentsState
+  /** Story/test で表示する既存 preview です。 */
+  initialPreview?: AutomationProjectTemplateApplicationPreview
 }
 
 /** Template application の target、immutable pin、durable result を表示します。 */
 export function AutomationTemplateApplicationEditor({
   initialApplication,
+  initialPreview,
   isApplying = false,
   locale,
   onApply,
+  planningParents,
+  onPreview,
   onRefresh,
   teams,
   template,
@@ -667,20 +700,80 @@ export function AutomationTemplateApplicationEditor({
   const targetsAvailable = template.kind === 'project'
     ? projectTargetValues.length > 0
     : workflowTargetValues.length > 0
-  const startDateIsValid = workItemCount === 0 || /^\d{4}-\d{2}-\d{2}$/u.test(startDate)
+  const planningEntityCount = template.kind === 'project'
+    ? countProjectTemplatePlanningEntities(template.payload)
+    : 0
+  const needsStartDate = workItemCount > 0 || planningEntityCount > 0
+  const startDateIsValid = !needsStartDate || /^\d{4}-\d{2}-\d{2}$/u.test(startDate)
+  const planningParentsFailed = planningParents?.failed === true
+  const [planningParentId, setPlanningParentId] = useState('')
+  const [preview, setPreview] = useState(initialPreview)
+  // A preview passed in by a story or test has no key and counts as current until it is replaced.
+  const [previewKey, setPreviewKey] = useState<string>()
+  const [isPreviewing, setIsPreviewing] = useState(false)
+  const [previewErrorMessage, setPreviewErrorMessage] = useState<string>()
+  const usableParents = (planningParents?.parents ?? []).filter((parent) =>
+    parent.teamId === undefined || parent.teamId === targetValue
+  )
+  const selectedParentId = usableParents.some((parent) => parent.id === planningParentId) ? planningParentId : ''
+  const planningParentIsValid = planningEntityCount === 0 || selectedParentId !== ''
+  const currentPreviewKey = createPreviewKey(
+    template.version,
+    targetValue,
+    needsStartDate ? startDate : undefined,
+    planningEntityCount > 0 ? selectedParentId : undefined,
+  )
+  const requiresPreview = template.kind === 'project' && onPreview !== undefined
+  const previewIsCurrent = preview !== undefined && preview.templateVersion === template.version &&
+    (previewKey === currentPreviewKey || (previewKey === undefined && preview === initialPreview))
+  const previewAllowsApply = !requiresPreview || (previewIsCurrent && preview.errors.length === 0)
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!targetsAvailable || !startDateIsValid) return
-    const input = createTemplateApplicationInput(
+  /** Builds the request for the current form values. */
+  function readInput() {
+    return createTemplateApplicationInput(
       template,
       targetValue,
       workflowTargets,
-      workItemCount > 0 ? startDate : undefined,
+      needsStartDate ? startDate : undefined,
+      planningEntityCount > 0 && selectedParentId ? selectedParentId : undefined,
     )
+  }
+
+  async function handlePreview() {
+    if (!onPreview || !targetsAvailable || !startDateIsValid) return
+    const input = readInput()
+    if (!input) return
+    // An earlier result no longer counts once a new preview starts, even if it fails.
+    setPreview(undefined)
+    setPreviewKey(undefined)
+    setIsPreviewing(true)
+    setPreviewErrorMessage(undefined)
+    try {
+      setPreview(await onPreview(input))
+      setPreviewKey(currentPreviewKey)
+    } catch {
+      setPreviewErrorMessage(t('automation.template.application.previewError'))
+    } finally {
+      setIsPreviewing(false)
+    }
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!targetsAvailable || !startDateIsValid || !planningParentIsValid || !previewAllowsApply) return
+    const input = readInput()
     if (!input) return
     try {
-      setApplication(await onApply(input))
+      // The server refuses a new application whose template or calendar changed since this preview.
+      setApplication(await onApply(requiresPreview && preview
+        ? {
+            ...input,
+            expectedPreview: {
+              templateVersion: preview.templateVersion,
+              calendarFingerprint: preview.calendarFingerprint,
+            },
+          }
+        : input))
     } catch {
       return
     }
@@ -732,7 +825,7 @@ export function AutomationTemplateApplicationEditor({
               ))}
         </select>
       </label>
-      {workItemCount > 0 ? (
+      {needsStartDate ? (
         <>
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.template.application.startDate')}
@@ -746,26 +839,90 @@ export function AutomationTemplateApplicationEditor({
               onChange={(event) => setStartDate(event.target.value)}
             />
           </label>
-          <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
-            {t('automation.template.application.workItemsNotice').replace('{count}', String(workItemCount))}
-          </p>
+          {workItemCount > 0 ? (
+            <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+              {t('automation.template.application.workItemsNotice').replace('{count}', String(workItemCount))}
+            </p>
+          ) : null}
         </>
+      ) : null}
+      {planningEntityCount > 0 ? (
+        <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('automation.template.application.planningParent')}
+          <select
+            className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+            data-testid="automation-template-application-planning-parent"
+            disabled={isApplying}
+            required
+            value={selectedParentId}
+            onChange={(event) => setPlanningParentId(event.target.value)}
+          >
+            <option value="">{t('automation.template.application.planningParentNone')}</option>
+            {usableParents.map((parent) => (
+              <option key={parent.id} value={parent.id}>{`${parent.title} (${t(`planning.type.${parent.type}`)})`}</option>
+            ))}
+          </select>
+          <span className={planningParentsFailed
+            ? 'text-xs font-semibold text-fg-red-700'
+            : 'text-xs font-medium leading-5 text-[var(--workbench-muted)]'}
+          >
+            {t(planningParentsFailed
+              ? 'automation.template.application.planningParentUnavailable'
+              : planningParents?.isLoading
+                ? 'automation.template.application.planningParentLoading'
+                : planningParents?.parents !== undefined && usableParents.length === 0
+                  ? 'automation.template.application.planningParentEmpty'
+                  : 'automation.template.application.planningParentHint')}
+          </span>
+          {planningParentsFailed ? (
+            <button
+              className="workbench-button-secondary min-h-9 justify-self-start px-3"
+              data-testid="automation-template-application-planning-parent-retry"
+              type="button"
+              onClick={planningParents?.onRetry}
+            >
+              {t('automation.template.application.planningParentRetry')}
+            </button>
+          ) : null}
+        </label>
       ) : null}
       {!targetsAvailable ? (
         <p className="text-xs font-semibold text-fg-red-700" role="alert">
           {t('automation.template.application.noTargets')}
         </p>
       ) : null}
-      <div className="flex justify-end">
+      {requiresPreview && !previewAllowsApply ? (
+        <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+          {t('automation.template.application.previewRequired')}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap justify-end gap-2">
+        {requiresPreview ? (
+          <button
+            className="workbench-button-secondary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-55"
+            data-testid="automation-template-application-preview"
+            disabled={!targetsAvailable || !startDateIsValid || isPreviewing || isApplying}
+            type="button"
+            onClick={() => void handlePreview()}
+          >
+            {t(isPreviewing ? 'automation.template.application.previewing' : 'automation.template.application.preview')}
+          </button>
+        ) : null}
         <button
           className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
           data-testid="automation-template-application-submit"
-          disabled={!targetsAvailable || !startDateIsValid || isApplying}
+          disabled={!targetsAvailable || !startDateIsValid || !planningParentIsValid || !previewAllowsApply || isApplying}
           type="submit"
         >
           {t(isApplying ? 'automation.template.application.applying' : 'automation.template.apply')}
         </button>
       </div>
+      {previewErrorMessage ? (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+          {previewErrorMessage}
+        </p>
+      ) : null}
+      {preview && previewIsCurrent ? <TemplateApplicationPreview locale={locale} preview={preview} /> : null}
       {application ? (
         <TemplateApplicationResult
           application={application}
@@ -840,6 +997,12 @@ function TemplateApplicationResult({
           {result.workItemCount
             ? ` ${t('automation.template.application.workItemsResult').replace('{count}', String(result.workItemCount))}`
             : null}
+          {result.planningEntityCount
+            ? ` ${t('automation.template.application.planningResult').replace('{count}', String(result.planningEntityCount))}`
+            : null}
+          {result.dependencyCount
+            ? ` ${t('automation.template.application.dependencyResult').replace('{count}', String(result.dependencyCount))}`
+            : null}
         </p>
       ) : result?.kind === 'workflow' ? (
         <p className="mt-3 text-sm font-semibold text-[var(--workbench-text)]">
@@ -857,13 +1020,160 @@ function TemplateApplicationResult({
   )
 }
 
+/** Props of the Project template application preview. */
+type TemplateApplicationPreviewProps = {
+  /** Display locale. */
+  locale: Locale
+  /** Dry-run result to show. */
+  preview: AutomationProjectTemplateApplicationPreview
+}
+
+/**
+ * Shows what a Project template application would create and the problems that would stop it.
+ *
+ * @param props - Preview and locale.
+ * @returns The preview section.
+ */
+function TemplateApplicationPreview({ locale, preview }: TemplateApplicationPreviewProps) {
+  const t = useMemo(() => createTranslator(locale), [locale])
+  return (
+    <section
+      className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-4"
+      data-testid="automation-template-application-preview-result"
+    >
+      <h4 className="text-sm font-semibold text-[var(--workbench-text)]">
+        {t('automation.template.application.previewTitle')}
+      </h4>
+      <p className="text-sm font-medium text-[var(--workbench-text)]">
+        {t('automation.template.application.previewSummary')
+          .replace('{name}', preview.name)
+          .replace('{workItems}', String(preview.workItems.length))
+          .replace('{planning}', String(preview.planningEntities.length))
+          .replace('{dependencies}', String(preview.dependencyCount))}
+      </p>
+      {preview.startDate && preview.endDate ? (
+        <p className="text-xs font-medium text-[var(--workbench-muted)]">
+          {t('automation.template.application.previewPeriod')
+            .replace('{start}', preview.startDate)
+            .replace('{end}', preview.endDate)}
+        </p>
+      ) : null}
+      {preview.errors.length > 0 ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2" role="alert">
+          <p className="text-sm font-semibold text-fg-red-700">{t('automation.template.application.previewErrors')}</p>
+          <ul className="mt-1 grid gap-1 text-xs font-medium text-fg-red-700">
+            {preview.errors.map((error, index) => (
+              <li key={`${error.code}-${index}`}>
+                {error.wbsNumber
+                  ? t('automation.template.application.previewErrorWbs')
+                    .replace('{wbs}', error.wbsNumber)
+                    .replace('{message}', error.message)
+                  : error.dependencyNumber
+                    ? t('automation.template.application.previewErrorDependency')
+                      .replace('{number}', String(error.dependencyNumber))
+                      .replace('{message}', error.message)
+                    : error.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {preview.workItems.length > 0 ? (
+        <PreviewTable
+          caption={t('automation.template.application.previewWorkItems')}
+          rows={preview.workItems.map((workItem) => ({
+            key: workItem.wbsNumber,
+            label: `${workItem.wbsNumber} ${workItem.title}`,
+            startDate: workItem.startDate,
+            endDate: workItem.endDate,
+          }))}
+        />
+      ) : null}
+      {preview.planningEntities.length > 0 ? (
+        <PreviewTable
+          caption={t('automation.template.application.previewPlanning')}
+          rows={preview.planningEntities.map((entity, index) => ({
+            key: String(index),
+            label: `${t(entity.type === 'phase'
+              ? 'automation.template.application.previewPhase'
+              : 'automation.template.application.previewMilestone')}: ${entity.phaseTitle ? `${entity.phaseTitle} / ` : ''}${entity.title}`,
+            startDate: entity.startDate,
+            endDate: entity.endDate,
+          }))}
+        />
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * Lists previewed rows with their dates.
+ *
+ * @param props - Caption and rows.
+ * @returns A compact date table.
+ */
+function PreviewTable({ caption, rows }: {
+  /** Table caption. */
+  caption: string
+  /** Rows with a stable key, label, and inclusive dates. */
+  rows: Array<{ key: string, label: string, startDate: string, endDate: string }>
+}) {
+  return (
+    <div className="max-h-64 overflow-auto">
+      <table className="w-full min-w-0 text-left text-xs">
+        <caption className="pb-1 text-left text-xs font-semibold text-[var(--workbench-muted)]">{caption}</caption>
+        <tbody>
+          {rows.map((row) => (
+            <tr className="border-t border-[var(--workbench-border)]" key={row.key}>
+              <td className="break-all py-1 pr-2 font-medium text-[var(--workbench-text)]">{row.label}</td>
+              <td className="w-48 whitespace-nowrap py-1 text-[var(--workbench-muted)]">
+                {row.startDate === row.endDate ? row.startDate : `${row.startDate} – ${row.endDate}`}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
+ * Identifies the template version and form values a preview was computed for.
+ *
+ * @param templateVersion - Template version being applied.
+ * @param teamId - Selected Team ID.
+ * @param startDate - Project start date, when the template needs one.
+ * @param planningParentId - Planning parent, when the template has Phases or Milestones.
+ * @returns A key that changes whenever one of the values does.
+ */
+function createPreviewKey(
+  templateVersion: number,
+  teamId: string,
+  startDate: string | undefined,
+  planningParentId: string | undefined,
+) {
+  return JSON.stringify([templateVersion, teamId, startDate ?? null, planningParentId ?? null])
+}
+
+/**
+ * Counts the Phases and Milestones a Project template creates.
+ *
+ * @param payload - Project template payload.
+ * @returns Number of Planning entities.
+ */
+function countProjectTemplatePlanningEntities(payload: Extract<AutomationTemplate, { kind: 'project' }>['payload']) {
+  return (payload.phases ?? []).reduce((total, phase) => total + 1 + (phase.milestones?.length ?? 0), 0) +
+    (payload.milestones?.length ?? 0)
+}
+
 /**
  * Builds the application request for the selected target.
  *
  * @param template - Project or Workflow template being applied.
  * @param targetValue - Selected Team ID or encoded Workflow scope.
  * @param workflowTargets - Workflow scopes the viewer can choose from.
- * @param startDate - Project start date, sent only for a template with a WBS.
+ * @param startDate - Project start date, sent only for a template with dated content.
+ * @param planningParentId - Planning parent, sent only for a template with Phases or Milestones.
  * @returns The request body, or undefined when no target is selected.
  */
 function createTemplateApplicationInput(
@@ -871,10 +1181,18 @@ function createTemplateApplicationInput(
   targetValue: string,
   workflowTargets: AutomationWorkflowTargetOption[],
   startDate?: string,
+  planningParentId?: string,
 ): ApplyAutomationTemplateInput | undefined {
   if (template.kind === 'project') {
     return targetValue
-      ? { target: { kind: 'project', teamId: targetValue, ...(startDate ? { startDate } : {}) } }
+      ? {
+          target: {
+            kind: 'project',
+            teamId: targetValue,
+            ...(startDate ? { startDate } : {}),
+            ...(planningParentId ? { planningParentId } : {}),
+          },
+        }
       : undefined
   }
   const target = workflowTargets.find((candidate) =>

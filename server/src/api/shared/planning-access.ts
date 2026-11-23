@@ -7,6 +7,7 @@ import {
   type WorkItemDependencyEndpoint,
   type EnterprisePermissionId,
 } from '@mukuroji/contracts'
+import { readWorkspaceWorkloadCalendarPolicy } from './workspace-calendar'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -243,16 +244,18 @@ export async function requirePlanningEndpointScopePermission(
  * @param principal - Authenticated Workspace principal.
  * @param endpoint - Qualified Work Item endpoint.
  * @param minimumRole - Required role at both Team and assigned Project scopes.
+ * @param readContext - Directory and ACL reads to reuse, such as a consistent read right after a write.
  * @returns Strongly read authorized Work Item detail.
  */
 export async function requirePlanningWorkItemEndpointPermission(
   principal: WorkspacePrincipal,
   endpoint: WorkItemDependencyEndpoint,
   minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+  readContext?: TeamPermissionReadContext,
 ) {
   const evaluation = principal.enterpriseAuthorizationEvaluation
   if (evaluation && !principal.isSystemAdmin) {
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(
       principal.directoryId,
       'ja',
     )
@@ -301,6 +304,8 @@ export async function requirePlanningWorkItemEndpointPermission(
     endpoint.teamId,
     endpoint.workItemId,
     minimumRole,
+    undefined,
+    readContext,
   )
 }
 
@@ -552,8 +557,18 @@ export async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
   scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
-  const response = await readAccessibleWorkItems(principal, false, scope)
+  const [response, workspacePolicy] = await Promise.all([
+    readAccessibleWorkItems(principal, false, scope),
+    readWorkspaceWorkloadCalendarPolicy(principal.directoryId),
+  ])
+  // Planning entities belong to the Workspace, so their critical path counts the Workspace
+  // calendar's working days (ADR 0058). The policy stays in memory, so it keeps every day off
+  // rather than the capped set a stored Work Item schedule holds.
   return {
+    workingCalendar: {
+      workingWeekdays: workspacePolicy.workingWeekdays,
+      holidays: workspacePolicy.holidays,
+    },
     workItems: response.workItems.map((workItem) => ({
       id: workItem.id,
       revision: workItem.revision,

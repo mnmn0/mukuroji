@@ -8,9 +8,25 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_TEAM_TIME_ENTRY_POLICY,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ZONE,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  readTeamTimeEntryPolicy,
+  type TeamTimeEntryPolicy,
+  type TeamTimeEntryPolicyRecord,
+  type TimeEntryPolicyWarning,
   NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
-  TIME_ENTRY_CATEGORIES,
+  TIME_RATE_CARD_JOB_ROLE_LIMIT,
+  TIME_RATE_CARD_MAX_HOURLY_RATE_MINOR,
+  TIME_RATE_CARD_MEMBER_LIMIT,
+  isKnownCurrencyCode,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
+  isActiveTimeEntryCategory,
+  readTimeEntryCategoryKey,
+  type WorkspaceTimeEntryCategorySettings,
+  type WorkspaceWeekStartDay,
+  workspaceWeekContaining,
   type RunningTimer,
   type TimeBudget,
   type TimeEntry,
@@ -19,6 +35,9 @@ import {
   type TimeEntrySource,
   type TimeEntryStatus,
   type TimePeriodClose,
+  type TimeRateCard,
+  type TimeRateCardJobRoleRate,
+  type TimeRateCardMemberRate,
   type TimeSheet,
   type TimeSummaryGroup,
   type TimeTrackingGroupBy,
@@ -89,6 +108,8 @@ const HISTORY_PREFIX = 'TIME_HISTORY#'
 const TIMER_PREFIX = 'TIME_TIMER#'
 const BUDGET_PREFIX = 'TIME_BUDGET#'
 const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
+const ENTRY_POLICY_PREFIX = 'TIME_POLICY#'
+const RATE_CARD_PREFIX = 'TIME_RATE_CARD#'
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/u
 const MIN_CLOSE_YEAR = 1970
 const MAX_CLOSE_YEAR = 9998
@@ -147,6 +168,8 @@ export type CreateTimeEntryInput = {
   billable: boolean
   /** Currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Optional confidential hourly rate. */
   hourlyRateMinor?: number
   /** Origin of the entry. */
@@ -321,6 +344,8 @@ export type StopTimerInput = {
   hourlyRateMinor?: number
   /** Currency for the generated entry. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Whether the caller may set confidential fields. */
   canManageRates: boolean
   /** Optional client key used to make audit writes idempotent across retries. */
@@ -356,6 +381,96 @@ export type TimeTrackingEstimateSource = {
   listPlannedEffort(workspaceId: string, teamId: string): Promise<ReadonlyMap<string, number>>
 }
 
+/**
+ * Read port for the work categories a Workspace offers.
+ *
+ * The categories are owned by the tenant profile; time tracking only checks new entries against
+ * them and names report groups with them.
+ */
+export type TimeTrackingCategorySource = {
+  /**
+   * Reads the Workspace work categories.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns The stored categories, or the defaults when the Workspace has not saved any.
+   */
+  readCategories(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings>
+  /**
+   * Reads the Workspace time zone, which decides the local dates the daily total is counted on.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns IANA time zone, or the Workspace default when the Workspace has not chosen one.
+   */
+  readTimeZone?(workspaceId: string): Promise<string>
+  /**
+   * Reads the day the Workspace week starts on, which decides the weekly report and timesheet buckets.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Week start day from 0 (Sunday) to 6, or Monday when the Workspace has not chosen one.
+   */
+  readWeekStartDay?(workspaceId: string): Promise<WorkspaceWeekStartDay>
+}
+
+/** A stored Team time entry policy. */
+export type StoredTeamTimeEntryPolicy = TeamTimeEntryPolicy & {
+  /** Record schema version. */
+  schemaVersion: 1
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Optimistic concurrency revision, starting at 1. */
+  revision: number
+  /** Member who saved the policy. */
+  updatedBy: string
+  /** Save timestamp. */
+  updatedAt: string
+}
+
+/** A Team time entry policy update request. */
+export type SaveTeamTimeEntryPolicyInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Requested policy. */
+  policy: TeamTimeEntryPolicy
+  /** Revision the caller read; 0 while the Team uses the defaults. */
+  expectedRevision: number
+  /** Manager saving the policy. */
+  actorUserId: string
+  /** Optional mutation replay key. */
+  idempotencyKey?: string
+}
+
+/** A saved entry with the checks it broke in a Team that only warns about them. */
+export type TimeEntryWithWarnings = {
+  /** Saved entry. */
+  entry: TimeEntry
+  /** Broken checks; empty when none, and on an idempotent replay. */
+  warnings: TimeEntryPolicyWarning[]
+}
+
+/** A request replacing a Team's whole rate card. */
+export type SaveTimeRateCardInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team whose rate card is replaced. */
+  teamId: string
+  /** ISO 4217 currency of every rate. */
+  currency: string
+  /** Complete list of member rates, validated by the service. */
+  memberRates: readonly unknown[]
+  /** Complete list of job role rates, validated by the service. */
+  jobRoleRates: readonly unknown[]
+  /** Revision read before editing, or zero for the first save. */
+  expectedRevision: number
+  /** Actor changing the rate card. */
+  updatedBy: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
+}
+
 /** A budget update request. */
 export type SaveTimeBudgetInput = {
   /** Workspace identifier. */
@@ -370,6 +485,8 @@ export type SaveTimeBudgetInput = {
   amountMinor: number
   /** ISO 4217 currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Inclusive local period start. */
   periodFrom?: string
   /** Inclusive local period end. */
@@ -603,12 +720,30 @@ export interface TimeTrackingRepository {
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
   saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  /** Reads a Team's rate card. */
+  getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined>
+  /** Saves a Team's rate card with optimistic concurrency and optional audit. */
+  saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void>
   /** Lists the closed months of a Team in month order. */
   listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]>
   /** Stores a month close and rejects a month that is already closed. */
   createPeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Removes a month close only while it is the same close that was read. */
   deletePeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  /** Reads a Team's time entry policy, or undefined while the Team uses the defaults. */
+  getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined>
+  /** Saves a Team's time entry policy with optimistic concurrency and optional audit. */
+  saveEntryPolicy(
+    policy: StoredTeamTimeEntryPolicy,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void>
 }
 
 /** Stable error raised by time tracking validation, authorization, or persistence. */
@@ -641,6 +776,8 @@ export class TimeTrackingService {
   private readonly idempotency?: TimeTrackingIdempotencyPort
   /** Read port for canonical Work Item estimates. */
   private readonly estimates?: TimeTrackingEstimateSource
+  /** Read port for Workspace work categories and time zone; the built-in ones when absent. */
+  private readonly categories?: TimeTrackingCategorySource
 
   /** Creates a time tracking service. */
   constructor(
@@ -651,6 +788,7 @@ export class TimeTrackingService {
       audit?: TimeTrackingAuditOptions
       idempotency?: TimeTrackingIdempotencyPort
       estimates?: TimeTrackingEstimateSource
+      categories?: TimeTrackingCategorySource
     } = {},
   ) {
     this.repository = repository
@@ -659,19 +797,70 @@ export class TimeTrackingService {
     this.audit = options.audit
     this.idempotency = options.idempotency
     this.estimates = options.estimates
+    this.categories = options.categories
+  }
+
+  /**
+   * Reads the Workspace work categories, or the built-in ones when no source is configured.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Work category settings in effect.
+   */
+  private async readCategorySettings(workspaceId: string): Promise<WorkspaceTimeEntryCategorySettings> {
+    return this.categories
+      ? await this.categories.readCategories(workspaceId)
+      : DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  }
+
+  /**
+   * Reads the day the Workspace week starts on, or Monday when no source is configured.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @returns Week start day weekly buckets begin on.
+   */
+  private async readWeekStartDay(workspaceId: string): Promise<WorkspaceWeekStartDay> {
+    return await this.categories?.readWeekStartDay?.(workspaceId) ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay
+  }
+
+  /**
+   * Requires that new work may be recorded under a category.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param category - Requested category key.
+   * @throws TimeTrackingError When the Workspace does not offer the category or has retired it.
+   */
+  private async requireActiveCategory(workspaceId: string, category: TimeEntryCategory): Promise<void> {
+    const settings = await this.readCategorySettings(workspaceId)
+    if (!isActiveTimeEntryCategory(settings, category)) {
+      throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'The Workspace does not offer this work category.')
+    }
   }
 
   /** Creates a manual time entry in draft state. */
   async createEntry(input: CreateTimeEntryInput, canManageRates: boolean): Promise<TimeEntry> {
-    return await this.withIdempotency(
+    return (await this.createEntryWithWarnings(input, canManageRates)).entry
+  }
+
+  /**
+   * Creates a manual time entry in draft state and reports the Team checks it broke.
+   *
+   * @param input - Entry request.
+   * @param canManageRates - Whether the caller may set an hourly rate.
+   * @returns The entry and the warnings of checks the Team only warns about.
+   * @throws TimeTrackingError When the entry breaks a check the Team rejects.
+   */
+  async createEntryWithWarnings(input: CreateTimeEntryInput, canManageRates: boolean): Promise<TimeEntryWithWarnings> {
+    let warnings: TimeEntryPolicyWarning[] = []
+    const entry = await this.withIdempotency(
       input.workspaceId,
       input.userId,
       input.idempotencyKey,
       'time-entry.create',
       input,
-      (completion) => this.createEntryInternal(input, canManageRates, completion),
+      (completion) => this.createEntryInternal(input, canManageRates, completion, (found) => { warnings = found }),
       readStoredEntry,
     )
+    return { entry, warnings }
   }
 
   /** Persists a manual time entry without the public idempotency wrapper. */
@@ -679,9 +868,12 @@ export class TimeTrackingService {
     input: CreateTimeEntryInput,
     canManageRates: boolean,
     completion?: TimeTrackingIdempotencyCompletion,
+    onWarnings?: (warnings: TimeEntryPolicyWarning[]) => void,
   ): Promise<TimeEntry> {
-    const normalized = normalizeCreateInput(input, canManageRates)
-    const periodGuard = await this.requireOpenPeriod(normalized.workspaceId, normalized.teamId, [normalized])
+    const requested = normalizeCreateInput(input, canManageRates)
+    if (requested.category !== undefined) await this.requireActiveCategory(requested.workspaceId, requested.category)
+    const periodGuard = await this.requireOpenPeriod(requested.workspaceId, requested.teamId, [requested])
+    const normalized = { ...requested, ...await this.resolveEntryRate(requested) }
     const now = readNow(this.now)
     const entry: TimeEntry = {
       schemaVersion: 1,
@@ -709,6 +901,7 @@ export class TimeTrackingService {
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     }
+    onWarnings?.(await this.checkEntryPolicy(entry))
     const history = createHistory(this.createId, entry, 'created', normalized.userId, now)
     const auditPut = this.createAuditPut(entry, history, undefined, input.idempotencyKey)
     const idempotencyPut = completion ? await completion(entry) : undefined
@@ -725,21 +918,37 @@ export class TimeTrackingService {
 
   /** Updates a draft or rejected time entry with optimistic concurrency. */
   async updateEntry(input: UpdateTimeEntryInput): Promise<TimeEntry> {
-    return await this.withIdempotency(
+    return (await this.updateEntryWithWarnings(input)).entry
+  }
+
+  /**
+   * Updates a draft or rejected time entry and reports the Team checks its new time broke.
+   * Only a change of the start or end is checked, so an entry that already broke a check can
+   * still have its description or category corrected.
+   *
+   * @param input - Update request.
+   * @returns The entry and the warnings of checks the Team only warns about.
+   * @throws TimeTrackingError When the new time breaks a check the Team rejects.
+   */
+  async updateEntryWithWarnings(input: UpdateTimeEntryInput): Promise<TimeEntryWithWarnings> {
+    let warnings: TimeEntryPolicyWarning[] = []
+    const entry = await this.withIdempotency(
       input.workspaceId,
       input.actorUserId,
       input.idempotencyKey,
       'time-entry.update',
       input,
-      (completion) => this.updateEntryInternal(input, completion),
+      (completion) => this.updateEntryInternal(input, completion, (found) => { warnings = found }),
       readStoredEntry,
     )
+    return { entry, warnings }
   }
 
   /** Persists an entry update without the public idempotency wrapper. */
   private async updateEntryInternal(
     input: UpdateTimeEntryInput,
     completion?: TimeTrackingIdempotencyCompletion,
+    onWarnings?: (warnings: TimeEntryPolicyWarning[]) => void,
   ): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
     if (current.userId !== input.actorUserId && !input.canManageRates) {
@@ -764,6 +973,10 @@ export class TimeTrackingService {
         ? undefined
         : readCategory(input.category)
     requireWorkItemOrCategory(workItemId, category)
+    // An entry may keep a category the Workspace retired after it was recorded; only a change is checked.
+    if (category !== undefined && category !== current.category) {
+      await this.requireActiveCategory(current.workspaceId, category)
+    }
     const currency = input.currency ?? current.currency
     validateCurrency(currency)
     const hourlyRateMinor = input.hourlyRateMinor === undefined
@@ -773,6 +986,11 @@ export class TimeTrackingService {
         : requireMoney(input.hourlyRateMinor, 'Hourly rate')
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may change hourly rates.')
+    }
+    // A rate, such as one taken from the rate card, is in the entry's currency, so only a manager
+    // who may change the rate may change that currency.
+    if (hourlyRateMinor !== undefined && currency !== current.currency && !input.canManageRates) {
+      throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may change the currency of an entry with an hourly rate.')
     }
     const periodGuard = await this.requireOpenPeriod(current.workspaceId, current.teamId, [current, { startAt, endAt }])
     const now = readNow(this.now).toISOString()
@@ -794,6 +1012,9 @@ export class TimeTrackingService {
       ...(hourlyRateMinor === undefined ? {} : { hourlyRateMinor }),
       ...calculateCostFields(input.billable ?? current.billable, hourlyRateMinor, startAt, endAt),
       updatedAt: now,
+    }
+    if (next.startAt !== current.startAt || next.endAt !== current.endAt) {
+      onWarnings?.(await this.checkEntryPolicy(next))
     }
     const history = createHistory(this.createId, next, 'updated', input.actorUserId, new Date(now), current.status, current.status)
     const auditPut = this.createAuditPut(next, history, current, input.idempotencyKey)
@@ -1061,9 +1282,14 @@ export class TimeTrackingService {
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may set an hourly rate.')
     }
-    const hourlyRateMinor = input.hourlyRateMinor === undefined
-      ? undefined
-      : requireMoney(input.hourlyRateMinor, 'Hourly rate')
+    const rate = await this.resolveEntryRate({
+      workspaceId: timer.workspaceId,
+      teamId: timer.teamId,
+      userId: timer.userId,
+      currency: normalizedCurrency,
+      ...(input.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: requireMoney(input.hourlyRateMinor, 'Hourly rate') }),
+    })
+    const hourlyRateMinor = rate.hourlyRateMinor
     const now = readNow(this.now).toISOString()
     const entry: TimeEntry = {
       schemaVersion: 1,
@@ -1078,7 +1304,7 @@ export class TimeTrackingService {
       durationMinutes: calculateDurationMinutes(timer.startedAt, endedAt),
       ...(timer.description ? { description: timer.description } : {}),
       billable: timer.billable,
-      currency: normalizedCurrency,
+      currency: rate.currency,
       status: 'draft',
       source: 'timer',
       revision: 1,
@@ -1290,6 +1516,138 @@ export class TimeTrackingService {
   }
 
   /**
+   * Reads a Team's rate card, or an empty card at revision `0` when none is saved.
+   *
+   * Callers must already have checked that the reader may see confidential rates.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param defaultCurrency - Currency of the empty card returned for an unsaved Team.
+   * @returns The stored or empty rate card.
+   */
+  async getRateCard(workspaceId: string, teamId: string, defaultCurrency: string): Promise<TimeRateCard> {
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const normalizedTeamId = readIdentifier(teamId, 'Team ID')
+    return await this.repository.getRateCard(normalizedWorkspaceId, normalizedTeamId) ?? {
+      schemaVersion: 1,
+      workspaceId: normalizedWorkspaceId,
+      teamId: normalizedTeamId,
+      currency: validateCurrency(defaultCurrency),
+      memberRates: [],
+      jobRoleRates: [],
+      revision: 0,
+    }
+  }
+
+  /**
+   * Replaces a Team's rate card.
+   *
+   * @param input - Whole card, expected revision, and actor.
+   * @returns The stored card.
+   * @throws TimeTrackingError with `InvalidTimeRateCard` for an invalid card and
+   *   `TimeRateCardRevisionConflict` when the card changed after it was read.
+   */
+  async saveRateCard(input: SaveTimeRateCardInput): Promise<TimeRateCard> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.updatedBy,
+      input.idempotencyKey,
+      'time-rate-card.save',
+      input,
+      (completion) => this.saveRateCardInternal(input, completion),
+      readStoredRateCard,
+    )
+  }
+
+  /**
+   * Saves a rate card without the public idempotency wrapper.
+   *
+   * @param input - Whole card, expected revision, and actor.
+   * @param completion - Idempotency receipt completion committed with the card.
+   * @returns The stored card.
+   */
+  private async saveRateCardInternal(
+    input: SaveTimeRateCardInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeRateCard> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const updatedBy = readIdentifier(input.updatedBy, 'Actor user ID')
+    const currency = validateCurrency(input.currency)
+    if (!isKnownCurrencyCode(currency)) {
+      throw new TimeTrackingError(400, 'InvalidCurrency', 'Currency must be a known ISO 4217 code.')
+    }
+    const memberRates = normalizeMemberRates(input.memberRates)
+    const jobRoleRates = normalizeJobRoleRates(input.jobRoleRates)
+    const expectedRevision = requireInteger(input.expectedRevision, 'Rate card revision', 0, Number.MAX_SAFE_INTEGER)
+    const current = await this.repository.getRateCard(workspaceId, teamId)
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
+    }
+    const rateCard: TimeRateCard = {
+      schemaVersion: 1,
+      workspaceId,
+      teamId,
+      currency,
+      memberRates,
+      jobRoleRates,
+      revision: expectedRevision + 1,
+      updatedAt: readNow(this.now).toISOString(),
+      updatedBy,
+    }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId: updatedBy,
+      eventType: 'time-rate-card.updated',
+      entityType: 'time-rate-card',
+      entityId: teamId,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'rate-card.updated', teamId, revision: rateCard.revision },
+      before: current ? toAuditRateCardSnapshot(current) : undefined,
+      after: toAuditRateCardSnapshot(rateCard),
+      includeFields: ['currency', 'memberRates', 'jobRoleRates', 'revision'],
+      // The rows hold confidential rates, so the audit diff only says that they changed.
+      redactFields: ['memberRates', 'jobRoleRates'],
+      metadata: { teamId, memberRateCount: memberRates.length, jobRoleRateCount: jobRoleRates.length },
+      path: `/api/teams/${teamId}/time-rate-card`,
+      occurredAt: rateCard.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(rateCard) : undefined
+    await this.repository.saveRateCard(rateCard, expectedRevision, auditPut, idempotencyPut)
+    return rateCard
+  }
+
+  /**
+   * Fills the rate of a new entry from the Team rate card when the request names none.
+   *
+   * The member's own rate wins over the rate of the member's job role. An applied rate brings the
+   * card's currency, so the stored cost and its currency always agree.
+   *
+   * @param request - Team, member, requested currency, and requested rate of the new entry.
+   * @returns The rate and currency to store; the request's own when the card does not apply.
+   */
+  private async resolveEntryRate(request: {
+    workspaceId: string
+    teamId: string
+    userId: string
+    currency: string
+    hourlyRateMinor?: number
+  }): Promise<{ currency: string; hourlyRateMinor?: number }> {
+    const requested = {
+      currency: request.currency,
+      ...(request.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: request.hourlyRateMinor }),
+    }
+    if (request.hourlyRateMinor !== undefined) return requested
+    const rateCard = await this.repository.getRateCard(request.workspaceId, request.teamId)
+    const hourlyRateMinor = rateCard ? findDefaultHourlyRate(rateCard, request.userId) : undefined
+    return rateCard && hourlyRateMinor !== undefined
+      ? { currency: rateCard.currency, hourlyRateMinor }
+      : requested
+  }
+
+  /**
    * Lists the closed months of a Team.
    *
    * @param workspaceId - Workspace identifier.
@@ -1452,12 +1810,152 @@ export class TimeTrackingService {
     })
   }
 
+  /**
+   * Reads a Team's time entry policy.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns The saved policy, or the defaults at revision 0.
+   */
+  async getEntryPolicy(workspaceId: string, teamId: string): Promise<TeamTimeEntryPolicyRecord> {
+    const stored = await this.repository.getEntryPolicy(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+    )
+    return stored ? toEntryPolicyRecord(stored) : { ...DEFAULT_TEAM_TIME_ENTRY_POLICY, teamId, revision: 0 }
+  }
+
+  /**
+   * Saves a Team's time entry policy and records it in the audit log.
+   *
+   * @param input - Policy, expected revision, and the saving manager.
+   * @returns The saved policy.
+   * @throws TimeTrackingError When the policy is invalid or the revision changed.
+   */
+  async saveEntryPolicy(input: SaveTeamTimeEntryPolicyInput): Promise<TeamTimeEntryPolicyRecord> {
+    return toEntryPolicyRecord(await this.withIdempotency(
+      input.workspaceId,
+      input.actorUserId,
+      input.idempotencyKey,
+      'time-entry-policy.save',
+      input,
+      (completion) => this.saveEntryPolicyInternal(input, completion),
+      readStoredEntryPolicy,
+    ))
+  }
+
+  /** Saves a Team time entry policy without the public idempotency wrapper. */
+  private async saveEntryPolicyInternal(
+    input: SaveTeamTimeEntryPolicyInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<StoredTeamTimeEntryPolicy> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const actorUserId = readIdentifier(input.actorUserId, 'Actor user ID')
+    const policy = readTeamTimeEntryPolicy(input.policy)
+    if (!policy) {
+      throw new TimeTrackingError(400, 'InvalidTimeEntryPolicy', 'Check modes must be off, warn, or reject, and the daily limit 1 to 1440 minutes.')
+    }
+    const expectedRevision = requireInteger(input.expectedRevision, 'Policy revision', 0, Number.MAX_SAFE_INTEGER)
+    const current = await this.repository.getEntryPolicy(workspaceId, teamId)
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeEntryPolicyRevisionConflict', 'The time entry policy was changed by another request.')
+    }
+    const saved: StoredTeamTimeEntryPolicy = {
+      schemaVersion: 1,
+      workspaceId,
+      teamId,
+      ...policy,
+      revision: expectedRevision + 1,
+      updatedBy: actorUserId,
+      updatedAt: readNow(this.now).toISOString(),
+    }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId,
+      eventType: 'time-entry-policy.updated',
+      entityType: 'time-entry-policy',
+      entityId: teamId,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'time-entry-policy.updated', teamId, ...policy, revision: saved.revision },
+      before: current ? toAuditEntryPolicySnapshot(current) : toAuditEntryPolicySnapshot({ ...DEFAULT_TEAM_TIME_ENTRY_POLICY, revision: 0 }),
+      after: toAuditEntryPolicySnapshot(saved),
+      includeFields: ['overlap', 'dailyLimit', 'dailyLimitMinutes', 'revision'],
+      metadata: { teamId },
+      path: `/api/teams/${teamId}/time-entry-policy`,
+      occurredAt: saved.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(saved) : undefined
+    await this.repository.saveEntryPolicy(saved, expectedRevision, auditPut, idempotencyPut)
+    return saved
+  }
+
+  /**
+   * Applies the Team's overlap and daily total checks to an entry about to be saved.
+   *
+   * Entries are compared with the same member's other entries in the Team. Days are local days
+   * in the Workspace time zone. An entry recorded as a date and minutes has no meaningful time of
+   * day, so it counts toward daily totals but never overlaps. The check reads the date index,
+   * which is eventually consistent, so two entries saved at the same moment may both pass.
+   *
+   * @param entry - Entry as it will be saved.
+   * @returns Warnings for the checks the Team only warns about.
+   * @throws TimeTrackingError When the entry breaks a check the Team rejects.
+   */
+  private async checkEntryPolicy(entry: TimeEntry): Promise<TimeEntryPolicyWarning[]> {
+    const policy = (await this.repository.getEntryPolicy(entry.workspaceId, entry.teamId)) ?? DEFAULT_TEAM_TIME_ENTRY_POLICY
+    if (policy.overlap === 'off' && policy.dailyLimit === 'off') return []
+    const timeZone = await this.categories?.readTimeZone?.(entry.workspaceId) ?? DEFAULT_WORKSPACE_TIME_ZONE
+    const start = Date.parse(entry.startAt)
+    const end = Date.parse(entry.endAt)
+    const firstDate = localDateAt(start, timeZone)
+    const lastDate = localDateAt(Math.max(start, end - 1), timeZone)
+    const rangeStart = resolveLocalDateStart(firstDate, timeZone)
+    const rangeEnd = resolveLocalDateStart(addCalendarDays(lastDate, 1), timeZone)
+    const others = (await this.repository.listEntries({
+      workspaceId: entry.workspaceId,
+      teamId: entry.teamId,
+      userId: entry.userId,
+      from: new Date(rangeStart).toISOString(),
+      to: new Date(rangeEnd).toISOString(),
+    })).filter((other) => other.id !== entry.id && other.userId === entry.userId)
+    const warnings: TimeEntryPolicyWarning[] = []
+    if (policy.overlap !== 'off' && entry.durationOnly !== true) {
+      const overlapping = others
+        .filter((other) => other.durationOnly !== true && Date.parse(other.startAt) < end && Date.parse(other.endAt) > start)
+        .map((other) => other.id)
+      if (overlapping.length > 0) {
+        if (policy.overlap === 'reject') {
+          throw new TimeTrackingError(409, 'TimeEntryOverlap', 'This time overlaps another entry of yours.')
+        }
+        warnings.push({ code: 'TimeEntryOverlap', entryIds: overlapping })
+      }
+    }
+    if (policy.dailyLimit !== 'off') {
+      for (let date = firstDate; date <= lastDate; date = addCalendarDays(date, 1)) {
+        const minutes = [...others, entry].reduce((total, candidate) => total + entryMinutesOnDate(candidate, date, timeZone), 0)
+        if (minutes <= policy.dailyLimitMinutes) continue
+        if (policy.dailyLimit === 'reject') {
+          throw new TimeTrackingError(409, 'TimeEntryDailyLimitExceeded', `Time on ${date} would exceed the Team's daily limit of ${policy.dailyLimitMinutes} minutes.`)
+        }
+        warnings.push({ code: 'TimeEntryDailyLimitExceeded', date, minutes, limitMinutes: policy.dailyLimitMinutes })
+      }
+    }
+    return warnings
+  }
+
   /** Builds an ACL-filtered aggregate report. */
   async createSummary(input: TimeTrackingReportInput): Promise<TimeTrackingSummary> {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const categoryLabels = input.groupBy === 'category'
+      ? readCategoryLabels(await this.readCategorySettings(input.workspaceId))
+      : undefined
+    const weekStartDay = input.groupBy === 'week' ? await this.readWeekStartDay(input.workspaceId) : undefined
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, categoryLabels, weekStartDay)
     const includeBudget = input.includeCosts && (
       input.budgetScope !== 'project' ||
       input.managedProjectIds === undefined ||
@@ -1498,7 +1996,8 @@ export class TimeTrackingService {
     const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
-    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const weekStartDay = await this.readWeekStartDay(input.workspaceId)
+    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds, weekStartDay)
     return {
       from: period.from,
       to: period.to,
@@ -1715,6 +2214,51 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   private readonly budgets = new Map<string, TimeBudget>()
   /** Closed months keyed by Workspace, Team, and month. */
   private readonly periodCloses = new Map<string, TimePeriodClose>()
+  /** Team time entry policies keyed by Workspace and Team. */
+  private readonly entryPolicies = new Map<string, StoredTeamTimeEntryPolicy>()
+
+  /** Reads a Team time entry policy. */
+  async getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined> {
+    const policy = this.entryPolicies.get(`${workspaceId}\0${teamId}`)
+    return policy ? clone(policy) : undefined
+  }
+
+  /** Saves a Team time entry policy at the expected revision. */
+  async saveEntryPolicy(
+    policy: StoredTeamTimeEntryPolicy,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const key = `${policy.workspaceId}\0${policy.teamId}`
+    if ((this.entryPolicies.get(key)?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeEntryPolicyRevisionConflict', 'The time entry policy was changed by another request.')
+    }
+    this.entryPolicies.set(key, clone(policy))
+  }
+
+  /** Rate cards keyed by Workspace and Team. */
+  private readonly rateCards = new Map<string, TimeRateCard>()
+
+  /** Reads a Team's rate card. */
+  async getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined> {
+    const rateCard = this.rateCards.get(`${workspaceId}#${teamId}`)
+    return rateCard ? clone(rateCard) : undefined
+  }
+
+  /** Saves a rate card when it is still at the expected revision. */
+  async saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const key = `${rateCard.workspaceId}#${rateCard.teamId}`
+    if ((this.rateCards.get(key)?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
+    }
+    this.rateCards.set(key, clone(rateCard))
+  }
 
   /** Lists a Team's closed months. */
   async listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]> {
@@ -2301,6 +2845,100 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     }
   }
 
+  /** Reads a Team time entry policy with a consistent read. */
+  async getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: `${ENTRY_POLICY_PREFIX}${teamId}` },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const policy = readStoredEntryPolicy(response.Item)
+    if (policy.workspaceId !== workspaceId || policy.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry policy scope does not match the requested key.')
+    }
+    return policy
+  }
+
+  /** Saves a Team time entry policy with optimistic concurrency, its audit event, and receipt. */
+  async saveEntryPolicy(
+    policy: StoredTeamTimeEntryPolicy,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    const put = {
+      Put: {
+        TableName: this.tableName,
+        Item: { ...policy, recordKey: `${ENTRY_POLICY_PREFIX}${policy.teamId}` },
+        ...(expectedRevision === 0
+          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+          : {
+              ConditionExpression: 'revision = :expectedRevision',
+              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            }),
+      },
+    }
+    try {
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeEntryPolicyRevisionConflict', 'The time entry policy was changed by another request.')
+    }
+  }
+
+  /** Reads a Team's rate card with a consistent read. */
+  async getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: `${RATE_CARD_PREFIX}${teamId}` },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const rateCard = readStoredRateCard(response.Item)
+    if (rateCard.workspaceId !== workspaceId || rateCard.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card scope does not match the requested key.')
+    }
+    return rateCard
+  }
+
+  /** Saves a rate card with optimistic concurrency, its audit event, and its receipt. */
+  async saveRateCard(
+    rateCard: TimeRateCard,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void> {
+    try {
+      const put = {
+        Put: {
+          TableName: this.tableName,
+          Item: { ...rateCard, recordKey: `${RATE_CARD_PREFIX}${rateCard.teamId}` },
+          ...(expectedRevision === 0
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {
+                ConditionExpression: 'revision = :expectedRevision',
+                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+              }),
+        },
+      }
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeRateCardRevisionConflict', 'The rate card was changed by another request.')
+    }
+  }
+
   /** Lists a Team's closed months with a consistent prefix query. */
   async listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]> {
     const closes: TimePeriodClose[] = []
@@ -2454,15 +3092,15 @@ function resolveDurationInterval(duration: TimeEntryDurationInput): { startAt: s
 }
 
 /**
- * Validates a work category.
+ * Validates the shape of a work category key; whether the Workspace offers it is checked separately.
  *
- * @param value - Category value from a request or a stored entry.
- * @returns The category when it is one of the supported values.
+ * @param value - Category value from a request.
+ * @returns The category key.
  */
 function readCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) {
-    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `Category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'Category must be a work category key.')
   }
   return category
 }
@@ -2623,9 +3261,11 @@ function aggregateEntries(
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
   managedProjectIds?: ReadonlySet<string>,
+  categoryLabels?: ReadonlyMap<string, string>,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
-    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds)
+    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds, weekStartDay)
   }
   const grouped = new Map<string, MutableSummaryGroup>()
   for (const entry of entries) {
@@ -2638,7 +3278,7 @@ function aggregateEntries(
         : groupBy === 'category'
           ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
           : entry.projectId ?? 'unassigned'
-    const group = grouped.get(key) ?? createMutableSummaryGroup(key, readFallbackGroupLabel(groupBy, entry))
+    const group = grouped.get(key) ?? createMutableSummaryGroup(key, categoryLabels?.get(key) ?? readFallbackGroupLabel(groupBy, entry))
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
     group.entryIds.add(entry.id)
@@ -2656,6 +3296,18 @@ function aggregateEntries(
 }
 
 /**
+ * Collects the names the Workspace gave its work categories, for report group labels.
+ *
+ * @param settings - Workspace work category settings.
+ * @returns Names keyed by category; built-in categories without a name are left out and keep
+ *   their key as the label.
+ */
+function readCategoryLabels(settings: WorkspaceTimeEntryCategorySettings): ReadonlyMap<string, string> {
+  return new Map(settings.categories.flatMap((category) =>
+    category.label === undefined ? [] : [[category.key, category.label] as const]))
+}
+
+/**
  * Returns the label of a report group whose key is a placeholder rather than an identifier.
  *
  * @param groupBy - Report grouping.
@@ -2668,7 +3320,7 @@ function readFallbackGroupLabel(groupBy: TimeTrackingGroupBy, entry: TimeEntry):
   return undefined
 }
 
-/** Aggregates entries into local day or Monday-based week buckets. */
+/** Aggregates entries into local day buckets, or week buckets that begin on the Workspace week start day. */
 function aggregateCalendarEntries(
   entries: readonly TimeEntry[],
   groupBy: 'day' | 'week',
@@ -2678,6 +3330,7 @@ function aggregateCalendarEntries(
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
   managedProjectIds?: ReadonlySet<string>,
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
 ): TimeSummaryGroup[] {
   const grouped = new Map<string, MutableSummaryGroup>()
   const segments = entries.flatMap((entry) => splitEntryByLocalDate(entry, timeZone, from, to)
@@ -2693,7 +3346,7 @@ function aggregateCalendarEntries(
     )
   }
   for (const { entry, segment } of segments) {
-    const key = groupBy === 'day' ? segment.date : mondayOfWeek(segment.date)
+    const key = groupBy === 'day' ? segment.date : workspaceWeekContaining(segment.date, weekStartDay).from
     const group = grouped.get(key) ?? createMutableSummaryGroup(key)
     group.minutes += segment.minutes
     group.billableMinutes += entry.billable ? segment.minutes : 0
@@ -2936,6 +3589,161 @@ function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
   }
 }
 
+/**
+ * Creates a rate card snapshot whose rate rows are available for field-level redaction.
+ *
+ * @param rateCard - Card to describe.
+ * @returns Audit snapshot.
+ */
+function toAuditRateCardSnapshot(rateCard: TimeRateCard): Record<string, unknown> {
+  return {
+    currency: rateCard.currency,
+    memberRates: rateCard.memberRates,
+    jobRoleRates: rateCard.jobRoleRates,
+    revision: rateCard.revision,
+  }
+}
+
+/**
+ * Finds the default hourly rate of a member in a rate card.
+ *
+ * @param rateCard - Team rate card.
+ * @param userId - Member recording the time.
+ * @returns The member's own rate, else the rate of the member's job role, else `undefined`.
+ */
+function findDefaultHourlyRate(rateCard: TimeRateCard, userId: string): number | undefined {
+  const memberRate = rateCard.memberRates.find((rate) => rate.userId === userId)
+  if (!memberRate) return undefined
+  if (memberRate.hourlyRateMinor !== undefined) return memberRate.hourlyRateMinor
+  if (memberRate.jobRoleId === undefined) return undefined
+  return rateCard.jobRoleRates.find((rate) => rate.jobRoleId === memberRate.jobRoleId)?.hourlyRateMinor
+}
+
+/**
+ * Throws the stable error for an invalid rate card request.
+ *
+ * @param message - Client-facing reason.
+ * @returns Never returns.
+ * @throws TimeTrackingError with `InvalidTimeRateCard`.
+ */
+function invalidRateCard(message: string): never {
+  throw new TimeTrackingError(400, 'InvalidTimeRateCard', message)
+}
+
+/**
+ * Validates an hourly rate of a rate card.
+ *
+ * @param value - Untrusted rate.
+ * @param label - Field name used in the error.
+ * @returns The rate in minor units.
+ */
+function readRateCardHourlyRate(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > TIME_RATE_CARD_MAX_HOURLY_RATE_MINOR) {
+    invalidRateCard(`${label} must be a non-negative integer in minor currency units.`)
+  }
+  return value
+}
+
+/**
+ * Validates a member or job role identifier of a rate card.
+ *
+ * @param value - Untrusted identifier.
+ * @param label - Field name used in the error.
+ * @returns The trimmed identifier.
+ */
+function readRateCardIdentifier(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.trim().length > 256) invalidRateCard(`${label} is invalid.`)
+  return value.trim()
+}
+
+/**
+ * Validates the member rows of a rate card.
+ *
+ * @param value - Untrusted rows.
+ * @returns Rows sorted by member key, each naming a rate, a job role, or both.
+ */
+function normalizeMemberRates(value: unknown): TimeRateCardMemberRate[] {
+  if (!Array.isArray(value) || value.length > TIME_RATE_CARD_MEMBER_LIMIT) {
+    invalidRateCard(`Member rates must be an array with at most ${TIME_RATE_CARD_MEMBER_LIMIT} entries.`)
+  }
+  const seen = new Set<string>()
+  return value.map((candidate: unknown): TimeRateCardMemberRate => {
+    if (!isRecord(candidate)) invalidRateCard('Member rate must be an object.')
+    const userId = readRateCardIdentifier(candidate.userId, 'Member rate user ID')
+    if (seen.has(userId)) invalidRateCard(`Member "${userId}" is listed more than once.`)
+    seen.add(userId)
+    const hourlyRateMinor = candidate.hourlyRateMinor === undefined || candidate.hourlyRateMinor === null
+      ? undefined
+      : readRateCardHourlyRate(candidate.hourlyRateMinor, 'Member hourly rate')
+    const jobRoleId = candidate.jobRoleId === undefined || candidate.jobRoleId === null
+      ? undefined
+      : readRateCardIdentifier(candidate.jobRoleId, 'Member job role ID')
+    if (hourlyRateMinor === undefined && jobRoleId === undefined) {
+      invalidRateCard(`Member "${userId}" needs an hourly rate or a job role.`)
+    }
+    return {
+      userId,
+      ...(hourlyRateMinor === undefined ? {} : { hourlyRateMinor }),
+      ...(jobRoleId === undefined ? {} : { jobRoleId }),
+    }
+  }).sort((left, right) => left.userId.localeCompare(right.userId))
+}
+
+/**
+ * Validates the job role rows of a rate card.
+ *
+ * @param value - Untrusted rows.
+ * @returns Rows sorted by job role ID.
+ */
+function normalizeJobRoleRates(value: unknown): TimeRateCardJobRoleRate[] {
+  if (!Array.isArray(value) || value.length > TIME_RATE_CARD_JOB_ROLE_LIMIT) {
+    invalidRateCard(`Job role rates must be an array with at most ${TIME_RATE_CARD_JOB_ROLE_LIMIT} entries.`)
+  }
+  const seen = new Set<string>()
+  return value.map((candidate: unknown): TimeRateCardJobRoleRate => {
+    if (!isRecord(candidate)) invalidRateCard('Job role rate must be an object.')
+    const jobRoleId = readRateCardIdentifier(candidate.jobRoleId, 'Job role ID')
+    if (seen.has(jobRoleId)) invalidRateCard(`Job role "${jobRoleId}" is listed more than once.`)
+    seen.add(jobRoleId)
+    return { jobRoleId, hourlyRateMinor: readRateCardHourlyRate(candidate.hourlyRateMinor, 'Job role hourly rate') }
+  }).sort((left, right) => left.jobRoleId.localeCompare(right.jobRoleId))
+}
+
+/**
+ * Reads a stored rate card, or an idempotent replay of one.
+ *
+ * @param value - Stored value.
+ * @returns The validated rate card.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for a malformed value.
+ */
+function readStoredRateCard(value: unknown): TimeRateCard {
+  const record = readRecord(value)
+  readSchemaVersion(record, 'Stored rate card')
+  const currency = readString(record.currency, 'Stored rate card currency')
+  if (!CURRENCY_PATTERN.test(currency)) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card currency is invalid.')
+  let memberRates: TimeRateCardMemberRate[]
+  let jobRoleRates: TimeRateCardJobRoleRate[]
+  try {
+    memberRates = normalizeMemberRates(record.memberRates)
+    jobRoleRates = normalizeJobRoleRates(record.jobRoleRates)
+  } catch {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card rates are invalid.')
+  }
+  const updatedAt = readOptionalString(record.updatedAt)
+  const updatedBy = readOptionalString(record.updatedBy)
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored rate card Workspace ID'),
+    teamId: readString(record.teamId, 'Stored rate card Team ID'),
+    currency,
+    memberRates,
+    jobRoleRates,
+    revision: readNumber(record.revision, 'Stored rate card revision'),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(updatedBy ? { updatedBy } : {}),
+  }
+}
+
 /** Computes chargeable cost fields. */
 function calculateCostFields(
   billable: boolean,
@@ -3078,14 +3886,6 @@ function addCalendarDays(date: string, days: number): string {
   const next = new Date(`${date}T00:00:00.000Z`)
   next.setUTCDate(next.getUTCDate() + days)
   return next.toISOString().slice(0, 10)
-}
-
-/** Returns the Monday date for a local date. */
-function mondayOfWeek(date: string): string {
-  const value = new Date(`${date}T00:00:00.000Z`)
-  const weekday = value.getUTCDay()
-  value.setUTCDate(value.getUTCDate() - (weekday === 0 ? 6 : weekday - 1))
-  return value.toISOString().slice(0, 10)
 }
 
 /** Validates an interval and returns normalized instants. */
@@ -3249,13 +4049,15 @@ function readDurationOnlyFlag(value: unknown): true {
 }
 
 /**
- * Reads a stored work category, failing closed on values this version does not know.
+ * Reads a stored work category key, failing closed on values that are not a key.
+ *
+ * The key is not checked against the Workspace categories, which may have retired it since.
  *
  * @param value - Stored `category` attribute.
  * @returns The stored category.
  */
 function readStoredCategory(value: unknown): TimeEntryCategory {
-  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  const category = readTimeEntryCategoryKey(value)
   if (category === undefined) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry category is invalid.')
   return category
 }
@@ -3296,6 +4098,74 @@ function readStoredHistory(value: unknown): TimeEntryHistory {
 }
 
 /** Reads a stored budget. */
+/**
+ * Reads a stored Team time entry policy, failing closed on an invalid mode or limit.
+ *
+ * @param value - Stored item.
+ * @returns The stored policy.
+ */
+function readStoredEntryPolicy(value: unknown): StoredTeamTimeEntryPolicy {
+  const record = readRecord(value)
+  readSchemaVersion(record, 'Stored time entry policy')
+  const policy = readTeamTimeEntryPolicy(record)
+  if (!policy) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry policy is invalid.')
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored policy Workspace ID'),
+    teamId: readString(record.teamId, 'Stored policy Team ID'),
+    ...policy,
+    revision: readNumber(record.revision, 'Stored policy revision'),
+    updatedBy: readString(record.updatedBy, 'Stored policy author'),
+    updatedAt: readString(record.updatedAt, 'Stored policy update time'),
+  }
+}
+
+/**
+ * Converts a stored policy to the API record.
+ *
+ * @param policy - Stored policy.
+ * @returns The policy with its Team, revision, and save time.
+ */
+function toEntryPolicyRecord(policy: StoredTeamTimeEntryPolicy): TeamTimeEntryPolicyRecord {
+  return {
+    teamId: policy.teamId,
+    overlap: policy.overlap,
+    dailyLimit: policy.dailyLimit,
+    dailyLimitMinutes: policy.dailyLimitMinutes,
+    revision: policy.revision,
+    updatedAt: policy.updatedAt,
+  }
+}
+
+/**
+ * Builds the audit snapshot of a policy.
+ *
+ * @param policy - Policy and its revision.
+ * @returns Audited fields.
+ */
+function toAuditEntryPolicySnapshot(policy: TeamTimeEntryPolicy & { revision: number }): Record<string, unknown> {
+  return {
+    overlap: policy.overlap,
+    dailyLimit: policy.dailyLimit,
+    dailyLimitMinutes: policy.dailyLimitMinutes,
+    revision: policy.revision,
+  }
+}
+
+/**
+ * Counts the minutes an entry adds to one local date, split the way reports split it, so a daily
+ * total matches the time the report shows for that day, also for an entry that crosses midnight.
+ *
+ * @param entry - Entry to count.
+ * @param date - Local date (`YYYY-MM-DD`).
+ * @param timeZone - Time zone that defines the date.
+ * @returns Whole minutes on that date, with a started minute of the entry counted as a whole one.
+ */
+function entryMinutesOnDate(entry: TimeEntry, date: string, timeZone: string): number {
+  return splitEntryByLocalDate(entry, timeZone, entry.startAt, entry.endAt)
+    .find((segment) => segment.date === date)?.minutes ?? 0
+}
+
 function readStoredBudget(value: unknown): TimeBudget {
   const record = readRecord(value)
   readSchemaVersion(record, 'Stored budget')
@@ -3647,9 +4517,13 @@ const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
 
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
+  // A currency the route filled from the Workspace default is not what the client sent, so a retry
+  // after the default changes still replays the stored result.
+  const defaultedCurrency = 'currencyFromWorkspaceDefault' in input && input.currencyFromWorkspaceDefault === true
   const body = Object.fromEntries(
     Object.entries(input)
       .filter(([key]) => !IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS.has(key))
+      .filter(([key]) => !(defaultedCurrency && key === 'currency'))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )

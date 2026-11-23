@@ -11,7 +11,7 @@ import type {
   SubmitRequestInput,
   TriageEntry,
 } from '@mukuroji/contracts'
-import { WORK_ITEM_TITLE_MAX_LENGTH } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY, WORK_ITEM_TITLE_MAX_LENGTH } from '@mukuroji/contracts'
 import type { FileObjectClient } from '../files/file-proofing'
 import {
   DynamoDbRequestIntakeClient,
@@ -869,6 +869,15 @@ test('shortens a mapped request title to the Work Item title limit', () => {
     { action: 'convert', expectedRevision: 1, title: longTitle },
   )
   expect(mapped.input.title).toBe(`${'a'.repeat(WORK_ITEM_TITLE_MAX_LENGTH - 1)}…`)
+})
+
+test('keeps the shared calendar marker so the target calendar can replace it', () => {
+  const mapped = createRequestWorkItemInput(
+    createStoredSubmission() as RequestSubmission,
+    { action: 'convert', expectedRevision: 1 },
+    { ...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY, calendarSource: 'shared' },
+  )
+  expect(mapped.input.schedule?.calendarPolicy.calendarSource).toBe('shared')
 })
 
 test('uses the first matching routing rule and maps a submission into a canonical Work Item input', () => {

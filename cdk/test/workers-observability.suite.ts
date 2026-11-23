@@ -53,10 +53,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
     },
     {
       Effect: 'Allow', Action: 'dynamodb:Query',
-      Resource: [
-        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
-        { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
-      ],
+      Resource: { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
     },
     {
       Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
@@ -64,6 +61,8 @@ test('Slack notifications use the sparse due queue with bounded execution and re
         { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
         { 'Fn::GetAtt': ['EnterpriseIdentityTable7491FB7A', 'Arn'] },
         { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
+        // Directory memberships are queried; GetItem reads the recipient's language preference.
+        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
         { 'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
         { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
@@ -118,6 +117,11 @@ test('Email notifications drain their own sparse queue and send only as the conf
     }),
     expect.objectContaining({
       Effect: 'Allow', Action: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminListGroupsForUser'],
+    }),
+    // The recipient's language preference is a single directory row.
+    expect.objectContaining({
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: expect.arrayContaining([{ 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] }]),
     }),
   ]));
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -2980,6 +2984,21 @@ test('automation workers consume the audit outbox and run recurring schedules wi
   const scheduleConditionCheckPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationScheduleTransactWritePolicy')
   )?.[1];
+  // Only the event worker reflects Work Item completion into Documents: it
+  // reads backlinks, writes the Document rows, and checks ancestor folders
+  // inside the transaction. The schedule job gets none of it.
+  const eventStatements = (eventPolicy as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+  expect(eventStatements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('DocumentsTable7E808EE5'))).toEqual([{
+    Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
+  }]);
+  expect(JSON.stringify(eventConditionCheckPolicy)).toContain('DocumentsTable7E808EE5');
+  expect(JSON.stringify([schedulePolicy, scheduleConditionCheckPolicy]))
+    .not.toContain('DocumentsTable7E808EE5');
   for (const [policy, conditionCheckPolicy] of [
     [eventPolicy, eventConditionCheckPolicy],
     [schedulePolicy, scheduleConditionCheckPolicy],
@@ -3106,9 +3125,10 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         JSON.stringify(statement.Resource)
           .includes('TenantAdministrationTable621D59EB');
     });
+    // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
     expect(tenantEntitlementStatement).toEqual(expect.objectContaining({
       Effect: 'Allow',
-      Action: 'dynamodb:GetItem',
+      Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     }));
   }
   for (const policyPrefix of [

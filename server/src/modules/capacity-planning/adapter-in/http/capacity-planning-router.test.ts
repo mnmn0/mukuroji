@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   CapacityPlanningError,
   CapacityPlanningService,
+  createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../capacity-planning'
@@ -54,6 +55,8 @@ function createFixture(options: { allowManager?: boolean; canViewConfidential?: 
     },
     verifyWorkItem: async () => undefined,
     getCapacityPlanning: () => service,
+    readWorkspaceCalendar: async () => ({ timeZone: 'Asia/Tokyo', workingWeekdays: ['monday', 'tuesday'], holidays: ['2026-08-04'] }),
+    readWeekStartDay: async () => 0,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => context.json({
       code: error instanceof CapacityPlanningError ? error.code : 'mapped',
@@ -125,6 +128,70 @@ describe('createCapacityPlanningRouter', () => {
 
     expect(response.status).toBe(503)
     expect(calls).toEqual(['authenticate:workload-token', 'permission:team-1:manager'])
+  })
+
+  test('saves an inheriting profile and reads it with the Workspace calendar', async () => {
+    const { router } = createFixture()
+    const save = (calendarSource: unknown) => router.request('/api/teams/team-1/workload/profiles/member-1', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        skills: [],
+        calendarSource,
+        timeZone: 'UTC',
+        schedule: createDefaultWorkingSchedule(),
+        holidays: [],
+        expectedRevision: 0,
+        expectedTeamRevision: 0,
+      }),
+    })
+
+    expect((await save('team')).status).toBe(503)
+    const saved = await save('workspace')
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ profile: { calendarSource: 'workspace' } })
+
+    const read = await router.request('/api/teams/team-1/workload?from=2026-08-03&to=2026-08-05&granularity=day', {
+      headers: { Authorization: 'Bearer token-1' },
+    })
+    const snapshot: unknown = await read.json()
+    expect(snapshot).toMatchObject({
+      members: [{
+        calendarSource: 'workspace',
+        // Monday works, the Workspace holiday on Tuesday, Wednesday is not a Workspace working day.
+        cells: [{ capacityMinutes: 480 }, { capacityMinutes: 0 }, { capacityMinutes: 0 }],
+      }],
+    })
+  })
+
+  test('buckets weekly workload by the Workspace week start day', async () => {
+    const { router } = createFixture()
+    const saved = await router.request('/api/teams/team-1/workload/profiles/member-1', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        skills: [],
+        calendarSource: 'workspace',
+        timeZone: 'UTC',
+        schedule: createDefaultWorkingSchedule(),
+        holidays: [],
+        expectedRevision: 0,
+        expectedTeamRevision: 0,
+      }),
+    })
+    expect(saved.status).toBe(200)
+
+    const read = await router.request('/api/teams/team-1/workload?from=2026-08-02&to=2026-08-15&granularity=week', {
+      headers: { Authorization: 'Bearer token-1' },
+    })
+    expect(await read.json()).toMatchObject({
+      members: [{
+        cells: [
+          { fromDate: '2026-08-02', toDate: '2026-08-08' },
+          { fromDate: '2026-08-09', toDate: '2026-08-15' },
+        ],
+      }],
+    })
   })
 
   test('does not let a member approve their own time off', async () => {

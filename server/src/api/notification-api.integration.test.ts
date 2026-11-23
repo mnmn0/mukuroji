@@ -1352,6 +1352,115 @@ test('shows Planning update publish and comment notifications only for readable 
   })
 })
 
+test('shows a Milestone notification only to a current watcher who can read the current Milestone', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  let revision = 0
+  for (const [id, type, parentId, projectId] of [
+    ['milestone-portfolio', 'portfolio', undefined, undefined],
+    ['milestone-roadmap', 'roadmap', 'milestone-portfolio', undefined],
+    ['refero-phase', 'phase', 'milestone-roadmap', 'refero'],
+    ['private-phase', 'phase', 'milestone-roadmap', 'private-project'],
+  ] as const) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(id, revision),
+      type,
+      ...(parentId ? { parentId } : {}),
+      ...(projectId ? { projectId } : { teamId: undefined, projectId: undefined }),
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, { workItems: [] })
+    revision += 1
+  }
+  for (const [id, projectId, archived] of [
+    ['refero-milestone', 'refero', false],
+    // Visible and current, so only the missing watch hides its notification.
+    ['other-milestone', 'refero', false],
+    ['private-milestone', 'private-project', false],
+    ['archived-milestone', 'refero', true],
+  ] as const) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(id, revision),
+      type: 'milestone',
+      parentId: projectId === 'refero' ? 'refero-phase' : 'private-phase',
+      projectId,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+      baseline: { startDate: '2026-08-14', endDate: '2026-08-14' },
+      forecast: { startDate: '2026-08-14', endDate: '2026-08-14' },
+    }, { workItems: [] })
+    revision += 1
+    if (archived) {
+      await planning.archive(workspaceId, id, { expectedRevision: revision }, { workItems: [] })
+      revision += 1
+    }
+  }
+  const completed = createNotificationItem({
+    id: 'milestone-completed',
+    eventType: 'planning-entity.milestone-completed',
+    reasons: ['watcher'],
+    issueId: undefined,
+    entityId: 'refero-milestone',
+    teamId: 'core-team',
+    projectId: 'refero',
+  })
+  const notWatching = createNotificationItem({
+    ...completed,
+    id: 'milestone-not-watching',
+    eventType: 'planning-entity.milestone-rescheduled',
+    entityId: 'other-milestone',
+  })
+  const inaccessible = createNotificationItem({
+    ...completed,
+    id: 'milestone-inaccessible',
+    entityId: 'private-milestone',
+    projectId: 'private-project',
+  })
+  const moved = createNotificationItem({
+    ...completed,
+    id: 'milestone-moved',
+    projectId: 'private-project',
+  })
+  const archived = createNotificationItem({
+    ...completed,
+    id: 'milestone-archived',
+    entityId: 'archived-milestone',
+  })
+  const probe = createNotificationVisibilityProbe([completed, notWatching, inaccessible, moved, archived])
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getWatcherState(input) {
+        const subscribed = input.entityKey !== `${workspaceId}#planning-entity#other-milestone`
+        return { subscribed, explicit: subscribed, automatic: false, reasons: subscribed ? ['manual'] : [], watcherCount: 1 }
+      },
+    }),
+    notifications: probe.client,
+  })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [completed.id, true],
+    [notWatching.id, false],
+    [inaccessible.id, false],
+    [moved.id, false],
+    [archived.id, false],
+  ]))
+})
+
 test('requires both the captured and current Initiative scope for Planning update comments', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',

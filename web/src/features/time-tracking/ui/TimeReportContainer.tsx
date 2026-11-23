@@ -1,4 +1,4 @@
-import type { TimeTrackingGroupBy } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_CURRENCY, type TimeTrackingGroupBy } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
@@ -6,9 +6,15 @@ import { downloadTimeTrackingCsv, type TimeReportBudgetScope } from '../api/time
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRange } from '../model/timeReport'
 import { resolveBrowserTimeZone } from '../model/timePeriod'
+import { useSaveTeamTimeEntryPolicy } from '../mutations/useSaveTeamTimeEntryPolicy'
 import { useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
+import { useSaveTimeRateCard } from '../mutations/useSaveTimeRateCard'
+import { useTeamTimeEntryPolicy } from '../queries/useTeamTimeEntryPolicy'
+import { useTimeRateCard, useTimeTrackingTeamSettings } from '../queries/useTimeRateCard'
 import { useTimeTrackingSummary } from '../queries/useTimeTrackingSummary'
 import { TimeBudgetPanel, type TimeBudgetProjectOption } from './TimeBudgetPanel'
+import { TimeEntryPolicyPanel } from './TimeEntryPolicyPanel'
+import { TimeRateCardPanel, type TimeRateCardJobRoleOption } from './TimeRateCardPanel'
 import { TimeReport, type TimeReportLabels } from './TimeReport'
 import { createTimeTrackingFormatters } from './timeTrackingText'
 
@@ -28,8 +34,20 @@ export type TimeReportContainerProps = {
   labels: TimeReportLabels
   /** Projects of the Team, offered as budget scopes. */
   projects: readonly TimeBudgetProjectOption[]
+  /** Job roles of the Team's Work Item configuration, offered in the rate card; absent until read. */
+  jobRoles?: readonly TimeRateCardJobRoleOption[]
+  /** Whether reading the job roles failed. */
+  hasJobRoleError?: boolean
+  /** Reads the job roles again. */
+  onRetryJobRoles?: () => void
   /** Opens another period or grouping. */
   onChange: (range: TimeReportRange, groupBy: TimeTrackingGroupBy) => void
+  /** First month of the Workspace fiscal year, offered as budget periods once known. */
+  fiscalYearStartMonth?: number
+  /** Whether reading the Workspace fiscal year failed. */
+  hasFiscalYearError?: boolean
+  /** Reads the Workspace fiscal year again. */
+  onRetryFiscalYear?: () => void
 }
 
 /**
@@ -48,7 +66,7 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
 }
 
 /**
- * Connects the Team report, its CSV export, and the budget panel to the API.
+ * Connects the Team report, its CSV export, the budget panel, and the Team's time entry checks to the API.
  *
  * The budget panel appears only when the server returns costs (`costsRedacted` is false), so
  * members who may not see confidential money never see budgets either.
@@ -58,10 +76,16 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
  */
 export function TimeReportContainer({
   accessToken,
+  fiscalYearStartMonth,
   groupBy,
+  hasFiscalYearError = false,
+  hasJobRoleError = false,
+  jobRoles,
   labels,
   locale,
   onChange,
+  onRetryFiscalYear,
+  onRetryJobRoles,
   projects,
   range,
   teamId,
@@ -80,6 +104,18 @@ export function TimeReportContainer({
   )
   const budgetReport = useTimeTrackingSummary(accessToken, teamId, budgetInput, ordered && canSeeCosts)
   const saveBudget = useSaveTimeBudget(accessToken, teamId)
+  const entryPolicy = useTeamTimeEntryPolicy(accessToken, teamId)
+  const saveEntryPolicy = useSaveTeamTimeEntryPolicy(accessToken, teamId)
+  const settings = useTimeTrackingTeamSettings(accessToken, teamId)
+  const canManageRateCard = settings.data?.canManageRateCard === true
+  const rateCard = useTimeRateCard(accessToken, teamId, canManageRateCard)
+  const saveRateCard = useSaveTimeRateCard(accessToken, teamId)
+  const members = useMemo(
+    () => Object.entries(labels.members)
+      .map(([id, name]) => ({ id, name }))
+      .sort((left, right) => left.name.localeCompare(right.name, locale)),
+    [labels.members, locale],
+  )
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -104,20 +140,50 @@ export function TimeReportContainer({
       />
       {canSeeCosts ? (
         <TimeBudgetPanel
-          defaultCurrency={locale === 'ja' ? 'JPY' : 'USD'}
-          hasLoadError={Boolean(budgetReport.error)}
-          isLoading={budgetReport.isLoading}
+          defaultCurrency={settings.data?.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
+          fiscalYearStartMonth={fiscalYearStartMonth}
+          hasFiscalYearError={hasFiscalYearError}
+          {...(onRetryFiscalYear ? { onRetryFiscalYear } : {})}
+          // The Workspace currency seeds a new budget, so the editor waits for the settings too.
+          hasLoadError={Boolean(budgetReport.error ?? settings.error)}
+          isLoading={budgetReport.isLoading || (!settings.data && !settings.error)}
           locale={locale}
           onChangeScope={setBudgetScope}
-          onRetry={() => { void budgetReport.mutate().catch(() => undefined) }}
+          onRetry={() => {
+            void Promise.all([budgetReport.mutate(), settings.mutate()]).catch(() => undefined)
+          }}
           onSave={(input) => saveBudget(budgetScope, input)}
           onUseBudgetPeriod={(next) => onChange(next, groupBy)}
           projects={projects}
           scope={budgetScope}
           t={t}
-          {...(budgetReport.data ? { summary: budgetReport.data } : {})}
+          {...(budgetReport.data && settings.data ? { summary: budgetReport.data } : {})}
         />
       ) : null}
+      {canManageRateCard ? (
+        <TimeRateCardPanel
+          // A failed job role read is shown, not taken as a Team without job roles.
+          hasLoadError={Boolean(rateCard.error) || hasJobRoleError}
+          isLoading={rateCard.isLoading || (!jobRoles && !hasJobRoleError)}
+          jobRoles={jobRoles ?? []}
+          members={members}
+          onRetry={() => {
+            void rateCard.mutate().catch(() => undefined)
+            onRetryJobRoles?.()
+          }}
+          onSave={saveRateCard}
+          t={t}
+          {...(rateCard.data ? { rateCard: rateCard.data } : {})}
+        />
+      ) : null}
+      <TimeEntryPolicyPanel
+        hasLoadError={Boolean(entryPolicy.error)}
+        isLoading={entryPolicy.isLoading}
+        onRetry={() => { void entryPolicy.mutate().catch(() => undefined) }}
+        onSave={saveEntryPolicy}
+        t={t}
+        {...(entryPolicy.data ? { view: entryPolicy.data } : {})}
+      />
     </div>
   )
 }

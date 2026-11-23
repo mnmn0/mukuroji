@@ -155,6 +155,8 @@ export type WorkspaceRouteContextValue = {
   canManageWorkspaceConfiguration: boolean
   /** Whether the current user may manage Workspace AI assistance policy. */
   canManageAiAssistance: boolean
+  /** Whether the current user may edit Team settings across the Workspace. */
+  canManageTeams: boolean
   /** Whether the current user may use Customer sensitive search and business-value filters. */
   canViewCustomerSensitiveData: boolean
   /** Whether the current user may read Customer records and relationship identifiers. */
@@ -382,6 +384,8 @@ export function WorkspaceRouteProvider() {
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
   const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
+  // An Enterprise role with Workspace `teams.manage` edits Team settings without being an admin.
+  const canManageTeams = user?.canManageTeams ?? canManageWorkspaceConfiguration
   const canViewCustomerSensitiveData = user?.canViewCustomerSensitiveData ?? false
   const canReadCustomers = user?.canReadCustomers ?? false
   // A server that predates these fields still lets owners and admins read, and only owners export.
@@ -889,6 +893,7 @@ export function WorkspaceRouteProvider() {
     canExportAuditLog,
     canManageCustomerRequests,
     canManageAiAssistance,
+    canManageTeams,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
     softwareFactoryEnabled,
@@ -958,6 +963,7 @@ export function WorkspaceRouteProvider() {
     canExportAuditLog,
     canManageCustomerRequests,
     canManageAiAssistance,
+    canManageTeams,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
     softwareFactoryEnabled,

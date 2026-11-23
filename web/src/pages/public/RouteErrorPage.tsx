@@ -10,6 +10,8 @@ type RouteErrorPageProps = {
   initialLocale?: Locale
   /** Reloads the application; a full page load by default. */
   onReload?: () => void
+  /** ID of the error report sent to operators, when one was sent. */
+  reportId?: string
 }
 
 /**
@@ -18,12 +20,15 @@ type RouteErrorPageProps = {
  * Reloading fetches the current application, which also recovers a tab that still references
  * chunks replaced by a deploy.
  *
- * @param props - Initial locale and the reload action.
+ * When the failure was reported, the page shows the report ID so the user can quote it.
+ *
+ * @param props - Initial locale, the reload action, and the report ID.
  * @returns The error page with reload and login actions.
  */
 export function RouteErrorPage({
   initialLocale,
   onReload = () => window.location.reload(),
+  reportId,
 }: RouteErrorPageProps = {}) {
   return (
     <PublicPageShell initialLocale={initialLocale} titleKey="public.routeError.title">
@@ -37,6 +42,11 @@ export function RouteErrorPage({
             <p className="mb-0 mt-6 text-base font-medium leading-8 text-[var(--workbench-muted)] sm:text-lg">
               {t('public.routeError.description')}
             </p>
+            {reportId === undefined ? null : (
+              <p className="mb-0 mt-4 text-sm leading-6 text-[var(--workbench-muted)]" data-testid="route-error-report-id">
+                {t('public.routeError.reportId')} <code className="select-all break-all">{reportId}</code>
+              </p>
+            )}
             <div className="mt-7 flex flex-wrap gap-3">
               <button className="workbench-button-primary inline-flex min-h-12 items-center justify-center px-5" onClick={onReload} type="button">
                 {t('public.routeError.reloadAction')}

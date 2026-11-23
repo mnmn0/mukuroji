@@ -42,8 +42,10 @@ export function createWeeklyReportReader(sources: WeeklyReportReaderSources): Sc
     async readWorkspaceSettings(workspaceId) {
       const profile = await sources.readProfile(workspaceId)
       const reminders = profile?.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
+      const calendar = profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
       return {
-        weekStartDay: (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).weekStartDay,
+        weekStartDay: calendar.weekStartDay,
+        timeZone: calendar.timeZone,
         // A Workspace being closed keeps its settings but is no longer reminded.
         reminders: profile && profile.status !== 'active' ? { ...reminders, enabled: false } : reminders,
       }

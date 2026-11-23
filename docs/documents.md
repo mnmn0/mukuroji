@@ -158,7 +158,7 @@ SVG と埋め込み URL は server で検証・escape し、response は `no-sto
 Document 画面は global navigation の内側に Document tree、中央の editor / canvas、右側の
 context panel を置きます。Tree は active / archive を最初の page だけ読み、明示的な「さらに
 読み込む」で継続します。Recent は newest-first index から別に取得します。右 panel では
-comment thread、強調表示した mention、backlink、activity / version を同じ文脈のまま確認でき、
+comment thread、強調表示した mention（composer で `@` に続けて名前を入力し候補から選ぶ。`@member-key` と打っても認識する）、backlink、activity / version を同じ文脈のまま確認でき、
 各長大リストは opaque cursor で追加取得します。Work Item relation と Whiteboard card は
 Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するため、逆リンクと画面遷移が
 同じ canonical ID を使います。Whiteboard は canvas を広く保つため toolbar を floating control
@@ -205,4 +205,11 @@ Whiteboard の付箋（note object）も同じダイアログで Work Item に�
 namespace）。作成済みの付箋には「Work Item を開く」が出て、Work Item 側の関連ドキュメントから元の
 Whiteboard へ戻れます。付箋を削除すると server が relation も一緒に消します。付箋は配置したまま残し、
 Work Item card への置き換えはしません。
+
+こうして作った Work Item を完了にすると、元のチェック項目は `checked: true`、付箋は `done: true` に
+なります。Work Item の更新で audit outbox に入る `work-item.updated`（`completionTransition`）を
+automation event worker が受け、上の 2 種類の relation を持つ要素だけを system actor
+（`system:work-item-completion`）で書き換えます（ADR 0053）。完了させた人の Document 権限は問わず、
+archive 済みの Document と、手で張った link・Work Item card は対象外です。Work Item を再オープンしても
+チェックは外しません。付箋の完了は inspector の「完了」でも切り替えられます。
 

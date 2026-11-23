@@ -1006,7 +1006,11 @@ async function acceptTriageEntryAsNewWorkItem(
         entry.source.submissionId,
       )
     : undefined
-  const workspaceCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(request.workspaceId)
+  const calendarProjectId = request.action.projectId ?? entry.projectId
+  const workspaceCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(request.workspaceId, {
+    teamId: request.teamId,
+    ...(calendarProjectId ? { projectId: calendarProjectId } : {}),
+  })
   const formConversion = submission && entry.retention.redactedAt === undefined
     ? createRequestWorkItemInput(submission, {
         action: 'convert',

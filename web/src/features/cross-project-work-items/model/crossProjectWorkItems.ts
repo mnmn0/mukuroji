@@ -30,6 +30,11 @@ export const crossProjectWorkItemLayouts: readonly CrossProjectWorkItemLayout[] 
 export type CrossProjectWorkItemListState = {
   /** Team-qualified Projects to show. Empty means every readable Project. */
   projects: CrossProjectWorkItemProjectRef[]
+  /**
+   * Whether a saved view chose only Projects this viewer cannot read. No Work Item matches then,
+   * rather than every readable Project, until the viewer picks Projects again.
+   */
+  projectsUnavailable?: boolean
   /** Whether completed and canceled Work Items are hidden. */
   openOnly: boolean
   /** Whether only Work Items the viewer owns or contributes to are shown. */
@@ -310,6 +315,7 @@ export function filterCrossProjectWorkItems(
   state: CrossProjectWorkItemListState,
   userIdentityAliases: readonly string[],
 ) {
+  if (state.projectsUnavailable && state.projects.length === 0) return []
   const projectKeys = new Set(state.projects.map(createCrossProjectWorkItemProjectKey))
   return workItems.filter((workItem) => {
     if (projectKeys.size > 0) {

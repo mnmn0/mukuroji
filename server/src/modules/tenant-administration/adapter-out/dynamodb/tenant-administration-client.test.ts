@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 import type {
   TenantOperation,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
 import {
   createDefaultTenantAdministrationSnapshot,
 } from '../../domain/tenant-administration'
@@ -171,6 +172,7 @@ describe('DynamoDbTenantAdministrationClient', () => {
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: [],
       publicHolidays: 'japan',
+      timeZone: 'Asia/Tokyo',
     })
     const reminders = {
       enabled: true,
@@ -182,6 +184,10 @@ describe('DynamoDbTenantAdministrationClient', () => {
     expect((await client.getProfile('workspace-1'))?.weeklyReportReminders).toEqual(reminders)
     // Stored settings that no longer validate fail the read instead of falling back to defaults.
     items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: { ...reminders, reminder: { weekday: 9, hour: 9 } } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
+    items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: reminders, defaultCurrency: 'USD' })
+    expect((await client.getProfile('workspace-1'))?.defaultCurrency).toBe('USD')
+    items.set('PROFILE', { ...items.get('PROFILE'), defaultCurrency: 'usd' })
     await expect(client.getProfile('workspace-1')).rejects.toThrow()
     items.delete('PROFILE')
     expect(await client.getProfile('workspace-1')).toBeUndefined()
@@ -442,6 +448,59 @@ describe('DynamoDbTenantAdministrationClient', () => {
       code: 'TenantAdministrationUnavailable',
       status: 503,
     })
+  })
+
+  test('retires work categories but refuses to drop one already offered', async () => {
+    const items = createAggregateItems()
+    let transactionWrites = 0
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactionWrites += 1
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:00:00.000Z',
+    )
+    const input = {
+      region: 'ap-northeast-1',
+      locale: 'ja',
+      defaultPolicy: { defaultMemberRole: 'member' },
+      expectedRevision: 0,
+    } satisfies import('@mukuroji/contracts').UpdateTenantProfileInput
+    const builtIns = DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS.categories
+
+    // Without stored settings the built-in categories are in effect, so they cannot be dropped.
+    await expect(client.updateProfile('workspace-1', 'system-admin-1', {
+      ...input,
+      timeEntryCategories: { categories: builtIns.filter((category) => category.key !== 'leave') },
+    })).rejects.toMatchObject({ code: 'TimeEntryCategoryRemoved', status: 400 })
+    expect(transactionWrites).toBe(0)
+
+    const retired = {
+      categories: [
+        ...builtIns.map((category) => category.key === 'leave' ? { ...category, active: false } : category),
+        { key: 'custom-sales', label: '営業支援', active: true },
+      ],
+    }
+    const saved = await client.updateProfile('workspace-1', 'system-admin-1', { ...input, timeEntryCategories: retired })
+    expect(saved.timeEntryCategories).toEqual(retired)
+    expect(transactionWrites).toBe(1)
+
+    items.set('PROFILE', { ...items.get('PROFILE'), timeEntryCategories: retired })
+    expect((await client.getProfile('workspace-1'))?.timeEntryCategories).toEqual(retired)
+    await expect(client.updateProfile('workspace-1', 'system-admin-1', {
+      ...input,
+      timeEntryCategories: { categories: retired.categories.filter((category) => category.key !== 'custom-sales') },
+    })).rejects.toMatchObject({ code: 'TimeEntryCategoryRemoved', status: 400 })
+    // Stored settings that no longer validate fail the read instead of falling back to defaults.
+    items.set('PROFILE', { ...items.get('PROFILE'), timeEntryCategories: { categories: [] } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
   })
 
   test('replays an export request from its digest-derived operation identifier', async () => {

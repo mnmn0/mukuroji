@@ -8,6 +8,8 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import type { WorkspaceMember } from '../../workspace/api'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   canMutateWorkspaceContent,
@@ -59,7 +61,7 @@ import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
   derivePlanningUpdateAcknowledgement,
-  extractPlanningUpdateCommentMentions,
+  resolvePlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
   type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
@@ -99,6 +101,8 @@ import {
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
 import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
+import { PlanningMilestoneWatchContainer } from '../../planning/ui/PlanningMilestoneWatch'
+import { CycleScheduleBaselineContainer } from '../../planning/ui/CycleScheduleBaselinePanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -123,6 +127,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
+/** Stable empty list while Workspace members load. */
+const emptyMentionMembers: readonly WorkspaceMember[] = []
 
 /**
  * 認証済み Workspace の Planning workbench です。
@@ -148,6 +154,23 @@ export function PlanningPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
+  // Offered by display name in update comments; without it typed `@email` mentions still work.
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+    mutate: reloadWorkspaceAccess,
+  } = useWorkspaceAccess(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
+  const mentionMembers = workspaceAccess?.members ?? emptyMentionMembers
+  const mentionSuggestionsFailure = workspaceAccessError && !workspaceAccess
+    ? {
+        message: t('planning.field.mentionSuggestionsError'),
+        retryLabel: t('planning.field.mentionSuggestionsRetry'),
+        onRetry: () => void reloadWorkspaceAccess(),
+      }
+    : undefined
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -473,10 +496,15 @@ export function PlanningPage() {
   const submitPlanningUpdateComment = async (
     updateId: string,
     bodyMarkdown: string,
+    selectedMentionMemberKeys: readonly string[],
   ) => {
     const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
     if (!accessToken || !selectedUpdateTarget || !update) return
-    const mentionMemberKeys = extractPlanningUpdateCommentMentions(bodyMarkdown)
+    const mentionMemberKeys = resolvePlanningUpdateCommentMentions(
+      bodyMarkdown,
+      selectedMentionMemberKeys,
+      mentionMembers,
+    )
     const input = {
       body: bodyMarkdown,
       id: createPlanningClientId('planning-update-comment'),
@@ -596,6 +624,8 @@ export function PlanningPage() {
             updateAnnotations.key && updateAnnotations.isLoading,
           ),
           isPending: isUpdateCollaborationPending,
+          mentionMembers,
+          mentionSuggestionsFailure,
           onAddComment: canAnnotateSelectedUpdate
             ? submitPlanningUpdateComment
             : undefined,
@@ -665,6 +695,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBaseline={accessToken && snapshot
+            ? (cycle, canManageCycle) => (
+                <CycleScheduleBaselineContainer
+                  accessToken={accessToken}
+                  canCapture={canManagePlanning && canManageCycle}
+                  cycle={cycle}
+                  key={cycle.id}
+                  labels={labels.cycleBaseline}
+                  snapshot={snapshot}
+                  onCaptured={() => void mutatePlanning()}
+                />
+              )
+            : undefined}
           renderCycleBurndown={accessToken && snapshot
             ? (cycle) => (
                 <CycleBurndown
@@ -688,6 +731,18 @@ export function PlanningPage() {
                   labels={labels.entityActivity}
                   ownerOptions={ownerOptions}
                   revision={snapshot.revision}
+                />
+              )
+            : undefined}
+          renderMilestoneWatch={accessToken
+            ? (milestone) => (
+                <PlanningMilestoneWatchContainer
+                  accessToken={accessToken}
+                  // Everyone who can see the Milestone may watch it, including read-only members.
+                  canWatch={Boolean(user)}
+                  entityId={milestone.id}
+                  key={milestone.id}
+                  labels={labels.milestoneWatch}
                 />
               )
             : undefined}

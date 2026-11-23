@@ -56,6 +56,7 @@ import type { TeamReminderSettingsStore } from '../../modules/notifications/appl
 import type { AgentRunStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CycleScheduleBaselineStore } from '../../modules/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
 import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
@@ -75,6 +76,7 @@ import type { WorkspaceAccessClient } from '../../modules/workspace-access/works
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type {
   JapanesePublicHolidayDates,
+  WorkCalendarStore,
   TenantAdministrationClient,
   TenantLifecycleEnforcement,
   TenantExportDownloadPort,
@@ -83,6 +85,7 @@ import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
   ApiAccessObservation,
   ApiErrorObservation,
+  ClientErrorObservation,
 } from '../../infrastructure/observability/api-observability'
 import type { ReadinessProbe } from '../../infrastructure/observability/readiness'
 import type {
@@ -151,6 +154,8 @@ export interface WorkspaceDependencies {
   tenantAdministration: TenantAdministrationClient
   /** Lists the Japanese national holiday dates new Work Items use. */
   nationalHolidays: JapanesePublicHolidayDates
+  /** Keeps Team and Project calendars (ADR 0058). */
+  workCalendars: WorkCalendarStore
   /** Provides authorized access to completed tenant export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
   /** Enforces tenant lifecycle state at authenticated route boundaries. */
@@ -213,6 +218,8 @@ export interface WorkItemDependencies {
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
+  /** Provides the named schedule baselines of each Cycle. */
+  cycleScheduleBaselines: CycleScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */
@@ -323,6 +330,12 @@ export interface OperationalDependencies {
    * @param observation - Redacted unexpected-error metadata.
    */
   recordError(observation: ApiErrorObservation): void
+  /**
+   * Emits one validated browser error report.
+   *
+   * @param observation - Validated report without client-identifying data.
+   */
+  recordClientError(observation: ClientErrorObservation): void
 }
 
 /** Domain dependency bundles bound to one HTTP application instance. */
