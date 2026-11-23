@@ -1,13 +1,20 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
   type ApplyAutomationTemplateInput,
+  type AutomationProjectTemplateApplicationPreview,
   type AutomationTemplate,
   type AutomationTemplateApplication,
   type AutomationTemplateKind,
   type CreateAutomationTemplateInput,
   type UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
-import { isNonnegativeSafeInteger, isRecord, readRecord } from '../../shared/api/jsonValidation'
+import {
+  isNonnegativeSafeInteger,
+  isOptionalString,
+  isPositiveSafeInteger,
+  isRecord,
+  readRecord,
+} from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
 
@@ -123,6 +130,78 @@ export function applyAutomationTemplate(
     input,
     mutationContext,
   )
+}
+
+/**
+ * Dry-runs a Project template application: returns what would be created, on which dates, and
+ * every problem that would stop it, without writing anything.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param templateId - Project template to preview.
+ * @param input - Application target, as it would be sent to apply.
+ * @returns The preview.
+ */
+export async function previewAutomationTemplateApplication(
+  accessToken: string,
+  templateId: string,
+  input: ApplyAutomationTemplateInput,
+): Promise<AutomationProjectTemplateApplicationPreview> {
+  const response = await requestJson<unknown>(
+    `${automationApiBaseUrl}/automation/templates/${encodeURIComponent(templateId)}/application-previews`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
+  )
+  if (!isAutomationProjectTemplateApplicationPreview(response)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
+  return response
+}
+
+/**
+ * Returns whether a value has every field of a Project template preview the Web client reads.
+ *
+ * @param value - Unknown preview response.
+ * @returns Whether the value is a Project template application preview.
+ */
+function isAutomationProjectTemplateApplicationPreview(
+  value: unknown,
+): value is AutomationProjectTemplateApplicationPreview {
+  return isRecord(value) &&
+    value.kind === 'project' &&
+    typeof value.teamId === 'string' &&
+    typeof value.name === 'string' &&
+    isPositiveSafeInteger(value.templateVersion) &&
+    typeof value.calendarFingerprint === 'string' &&
+    isOptionalString(value.startDate) &&
+    isOptionalString(value.endDate) &&
+    Array.isArray(value.workItems) &&
+    value.workItems.every((workItem) => isRecord(workItem) &&
+      typeof workItem.wbsNumber === 'string' &&
+      typeof workItem.title === 'string' &&
+      typeof workItem.startDate === 'string' &&
+      typeof workItem.endDate === 'string') &&
+    Array.isArray(value.planningEntities) &&
+    value.planningEntities.every((entity) => isRecord(entity) &&
+      (entity.type === 'phase' || entity.type === 'milestone') &&
+      typeof entity.title === 'string' &&
+      isOptionalString(entity.phaseTitle) &&
+      typeof entity.startDate === 'string' &&
+      typeof entity.endDate === 'string') &&
+    isNonnegativeSafeInteger(value.dependencyCount) &&
+    Array.isArray(value.errors) &&
+    value.errors.every((error) => isRecord(error) &&
+      typeof error.code === 'string' &&
+      typeof error.message === 'string' &&
+      isOptionalString(error.wbsNumber) &&
+      (error.dependencyNumber === undefined || isPositiveSafeInteger(error.dependencyNumber)))
 }
 
 /**
