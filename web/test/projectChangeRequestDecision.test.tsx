@@ -273,6 +273,23 @@ describe('approving a change request', () => {
     expect(calls.decisions[2]?.key).toBe(calls.decisions[0]?.key)
   })
 
+  test('sends an unknown rejection again instead of approving the same request', async () => {
+    const calls = installFakeApi({
+      a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
+    }, [503, 200])
+    const entry = changeRequest([{ workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } }])
+    const decide = captureDecide()
+
+    await expect(decide(entry, 'rejected', { replaceBaseline: false, baselineName: '' })).rejects.toThrow()
+    await decide(entry, 'approved', { replaceBaseline: true, baselineName: '変更要求' })
+
+    expect(calls.confirms).toEqual([])
+    expect(calls.captures).toBe(0)
+    expect(calls.decisions).toHaveLength(2)
+    expect(calls.decisions[1]).toEqual(calls.decisions[0])
+    expect(calls.decisions[1]?.body).toMatchObject({ outcome: 'rejected' })
+  })
+
   test('shows the closed request even when the log cannot be reloaded', async () => {
     installFakeApi({}, [])
     const entry = changeRequest([])

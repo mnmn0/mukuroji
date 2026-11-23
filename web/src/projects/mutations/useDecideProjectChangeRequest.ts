@@ -142,7 +142,7 @@ async function applyScheduleChanges(
 
 /** A decision request whose outcome is not known yet, kept to send again unchanged. */
 type PendingDecision = {
-  /** Team, Project, entry, revision, and outcome the request decides. */
+  /** Team, Project, entry, and revision the request decides. */
   entryKey: string
   /** The decision request, including the baseline captured for it. */
   request: DecideProjectRaidChangeRequest
@@ -201,9 +201,11 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
         (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId)
       )),
     ])
-    const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision, outcome])
-    // A decision whose outcome is unknown is sent again as it was, before any date change or
-    // baseline capture runs again, so a lost response neither repeats them nor changes the key.
+    const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision])
+    // A decision whose outcome is unknown is sent again as it was, with its own outcome, before
+    // any date change or baseline capture runs, so a lost response neither repeats them nor
+    // changes the plan of a request that may already be rejected. A different outcome can be
+    // chosen only once the server has answered the retained one.
     let attempt = pendingDecisions.current.get(entryKey)
     if (attempt === undefined) {
       let baselineId: string | undefined
