@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
   createDefaultUnscheduledWorkItemSchedule,
@@ -9,6 +11,7 @@ import {
   type AutomationProjectTemplateWorkItem,
 } from '@mukuroji/contracts'
 import {
+  listProjectTemplateWbsNumbers,
   validateApplyAutomationTemplateInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
@@ -234,5 +237,108 @@ describe('Automation management validation domain', () => {
         target: { kind: 'project', teamId: 'core-team', startDate },
       })).toThrow('start date')
     }
+  })
+
+  test('normalizes Project template Phases, Milestones, dependencies, and the Planning parent', () => {
+    const workItems: AutomationProjectTemplateWorkItem[] = [
+      {
+        title: '要件定義',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+      },
+      { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+    ]
+    expect(validateCreateAutomationTemplateInput({
+      kind: 'project',
+      name: 'Planned',
+      enabled: true,
+      payload: {
+        nameJa: '計画',
+        workItems,
+        dependencies: [{ predecessor: '1.1', successor: '2', type: 'start-to-start', lagDays: -1 }],
+        phases: [{
+          title: ' 準備 ',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+        }],
+        milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+      },
+    }).payload).toEqual({
+      nameJa: '計画',
+      tone: 'blue',
+      workItems,
+      dependencies: [{ predecessor: '1.1', successor: '2', type: 'start-to-start', lagDays: -1 }],
+      phases: [{
+        title: '準備',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+      }],
+      milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+    })
+    expect(listProjectTemplateWbsNumbers(workItems)).toEqual(['1', '1.1', '2'])
+    expect(validateApplyAutomationTemplateInput({
+      target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-07', planningParentId: 'roadmap-1' },
+    })).toEqual({
+      target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-07', planningParentId: 'roadmap-1' },
+    })
+  })
+
+  test('rejects invalid Project template dependencies and Planning entities', () => {
+    const workItems: AutomationProjectTemplateWorkItem[] = [
+      {
+        title: '要件定義',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+      },
+      { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+      { title: '実装', startOffsetWorkingDays: 8, durationWorkingDays: 3 },
+    ]
+    const create = (payload: Record<string, unknown>) => validateCreateAutomationTemplateInput({
+      kind: 'project',
+      name: 'Planned',
+      enabled: true,
+      payload: { nameJa: '計画', workItems, ...payload },
+    })
+    const dependency = (predecessor: string, successor: string, extra: Record<string, unknown> = {}) => ({
+      predecessor,
+      successor,
+      type: 'finish-to-start',
+      lagDays: 0,
+      ...extra,
+    })
+    expect(() => create({ dependencies: [dependency('1', '9')] })).toThrow('WBS number 9')
+    expect(() => create({ dependencies: [dependency('2', '2')] })).toThrow('to itself')
+    expect(() => create({ dependencies: [dependency('1', '1.1')] })).toThrow('parent or child')
+    expect(() => create({ dependencies: [dependency('1', '2'), dependency('2', '1')] })).toThrow('same Work Items')
+    expect(() => create({
+      dependencies: [dependency('1', '2'), dependency('2', '3'), dependency('3', '1')],
+    })).toThrow('cycle')
+    expect(() => create({ dependencies: [dependency('1', '2', { type: 'blocks' })] })).toThrow('type is invalid')
+    expect(() => create({ dependencies: [dependency('1', '2', { lagDays: 366 })] })).toThrow('lag days')
+    expect(() => create({
+      dependencies: Array.from({ length: AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT + 1 }, () => dependency('1', '2')),
+    })).toThrow(`at most ${AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT} dependencies`)
+    expect(() => create({ phases: [{ title: '準備', startOffsetWorkingDays: 0, durationWorkingDays: 0 }] }))
+      .toThrow('Phase duration')
+    expect(() => create({ milestones: [{ title: '改行\nあり', offsetWorkingDays: 0 }] })).toThrow('line breaks')
+    expect(() => create({ phases: [{ title: '◆ 準備', startOffsetWorkingDays: 0, durationWorkingDays: 1 }] }))
+      .toThrow('must not start with')
+    // 251 supplementary characters fit the character limit but not Planning's UTF-16 limit.
+    expect(() => create({ milestones: [{ title: '𠮷'.repeat(251), offsetWorkingDays: 0 }] }))
+      .toThrow('500 characters or fewer')
+    expect(() => create({ milestones: [{ title: 'a\uD800b', offsetWorkingDays: 0 }] })).toThrow('well-formed')
+    expect(() => create({
+      milestones: Array.from(
+        { length: AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT + 1 },
+        (_, index) => ({ title: `M${index}`, offsetWorkingDays: 0 }),
+      ),
+    })).toThrow(`at most ${AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT} Phases and Milestones`)
+    expect(() => validateApplyAutomationTemplateInput({
+      target: { kind: 'project', teamId: 'core-team', planningParentId: '' },
+    })).toThrow('Planning parent ID')
   })
 })

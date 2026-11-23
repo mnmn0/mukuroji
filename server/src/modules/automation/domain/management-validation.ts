@@ -1,14 +1,24 @@
 import {
+  AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
+  AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER,
+  AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH,
+  AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
   type ApplyAutomationTemplateInput,
   type AutomationInboundWebhookLifecycleInput,
+  type AutomationProjectTemplateDependency,
+  type AutomationProjectTemplateMilestone,
+  type AutomationProjectTemplatePhase,
+  type AutomationProjectTemplatePreviewExpectation,
   type AutomationProjectTemplateWorkItem,
   type AutomationValue,
   type CreateAutomationInboundWebhookEndpointInput,
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
+  type ScheduleDependencyType,
   type UpdateAutomationInboundWebhookEndpointInput,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
   WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
@@ -134,7 +144,7 @@ export function validateCreateAutomationTemplateInput(
     case 'project': {
       assertOnlyKeys(
         payload,
-        ['name', 'nameEn', 'nameJa', 'tone', 'workItems'],
+        ['dependencies', 'milestones', 'name', 'nameEn', 'nameJa', 'phases', 'tone', 'workItems'],
         'Project template payload',
       )
       const rawName = typeof payload.name === 'string' ? payload.name.trim() : ''
@@ -158,6 +168,16 @@ export function validateCreateAutomationTemplateInput(
       const workItems = payload.workItems === undefined
         ? undefined
         : validateProjectTemplateWorkItems(payload.workItems)
+      const dependencies = payload.dependencies === undefined
+        ? []
+        : validateProjectTemplateDependencies(payload.dependencies, workItems ?? [])
+      const planningCounter = { count: 0 }
+      const phases = payload.phases === undefined
+        ? []
+        : validateProjectTemplatePhases(payload.phases, planningCounter)
+      const milestones = payload.milestones === undefined
+        ? []
+        : validateProjectTemplateMilestones(payload.milestones, planningCounter)
       return {
         kind: input.kind,
         name,
@@ -168,6 +188,9 @@ export function validateCreateAutomationTemplateInput(
           ...(rawNameEn ? { nameEn: rawNameEn } : {}),
           tone,
           ...(workItems && workItems.length > 0 ? { workItems } : {}),
+          ...(dependencies.length > 0 ? { dependencies } : {}),
+          ...(phases.length > 0 ? { phases } : {}),
+          ...(milestones.length > 0 ? { milestones } : {}),
         },
       }
     }
@@ -311,6 +334,259 @@ function readProjectTemplateWorkItemLevel(
   })
 }
 
+/**
+ * Lists the WBS numbers of a template outline in display order.
+ *
+ * @param workItems - Top-level template Work Items with their children.
+ * @returns WBS numbers such as `1`, `1.1`, and `2`, in depth-first order.
+ */
+export function listProjectTemplateWbsNumbers(
+  workItems: readonly AutomationProjectTemplateWorkItem[],
+): string[] {
+  const numbers: string[] = []
+  const visit = (items: readonly AutomationProjectTemplateWorkItem[], prefix: string) => {
+    items.forEach((item, index) => {
+      const wbsNumber = `${prefix}${index + 1}`
+      numbers.push(wbsNumber)
+      if (item.children) visit(item.children, `${wbsNumber}.`)
+    })
+  }
+  visit(workItems, '')
+  return numbers
+}
+
+/**
+ * Validates the schedule dependencies of a Project template against its WBS.
+ *
+ * Both ends must name Work Items of the outline by WBS number. A Work Item cannot depend on
+ * itself, two dependencies cannot join the same pair, a parent and its descendant cannot depend on
+ * each other, and the dependencies cannot form a cycle. Whether the dates satisfy them depends on
+ * the start date and calendar, so that is checked when the template is previewed or applied.
+ *
+ * @param value - Untrusted dependency list.
+ * @param workItems - Validated template WBS.
+ * @returns Normalized dependencies in input order.
+ */
+function validateProjectTemplateDependencies(
+  value: unknown,
+  workItems: readonly AutomationProjectTemplateWorkItem[],
+): AutomationProjectTemplateDependency[] {
+  if (!Array.isArray(value)) throw invalidInput('Project template dependencies must be an array.')
+  if (value.length > AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT) {
+    throw invalidInput(
+      `Project template can hold at most ${AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT} dependencies.`,
+    )
+  }
+  const wbsNumbers = new Set(listProjectTemplateWbsNumbers(workItems))
+  const edges = new Set<string>()
+  const adjacency = new Map<string, string[]>()
+  const dependencies = value.map((candidate, index) => {
+    const label = `Project template dependency ${index + 1}`
+    const dependency = requireRecord(candidate, label)
+    assertOnlyKeys(dependency, ['lagDays', 'predecessor', 'successor', 'type'], label)
+    const predecessor = requireBoundedText(dependency.predecessor, `${label} predecessor`, 32)
+    const successor = requireBoundedText(dependency.successor, `${label} successor`, 32)
+    for (const wbsNumber of [predecessor, successor]) {
+      if (!wbsNumbers.has(wbsNumber)) {
+        throw invalidInput(`${label} refers to WBS number ${wbsNumber}, which the template does not have.`)
+      }
+    }
+    if (predecessor === successor) throw invalidInput(`${label} cannot connect a Work Item to itself.`)
+    if (predecessor.startsWith(`${successor}.`) || successor.startsWith(`${predecessor}.`)) {
+      throw invalidInput(`${label} cannot connect a Work Item to its own parent or child.`)
+    }
+    const edge = `${predecessor}\u0000${successor}`
+    const reverse = `${successor}\u0000${predecessor}`
+    if (edges.has(edge) || edges.has(reverse)) {
+      throw invalidInput(`${label} joins the same Work Items as another dependency.`)
+    }
+    edges.add(edge)
+    adjacency.set(predecessor, [...(adjacency.get(predecessor) ?? []), successor])
+    return {
+      predecessor,
+      successor,
+      type: readScheduleDependencyType(dependency.type, label),
+      lagDays: requireInteger(
+        dependency.lagDays,
+        `${label} lag days`,
+        -AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
+        AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
+      ),
+    }
+  })
+  assertProjectTemplateDependenciesAcyclic(adjacency)
+  return dependencies
+}
+
+/**
+ * Rejects template dependencies that lead back to where they start.
+ *
+ * @param adjacency - Successor WBS numbers keyed by predecessor WBS number.
+ */
+function assertProjectTemplateDependenciesAcyclic(adjacency: ReadonlyMap<string, readonly string[]>) {
+  const state = new Map<string, 'visiting' | 'done'>()
+  const visit = (node: string) => {
+    const current = state.get(node)
+    if (current === 'done') return
+    if (current === 'visiting') throw invalidInput('Project template dependencies must not form a cycle.')
+    state.set(node, 'visiting')
+    for (const next of adjacency.get(node) ?? []) visit(next)
+    state.set(node, 'done')
+  }
+  for (const node of adjacency.keys()) visit(node)
+}
+
+/**
+ * Reads a schedule dependency type.
+ *
+ * @param value - Untrusted type.
+ * @param label - Field owner used in the error message.
+ * @returns The dependency type.
+ */
+function readScheduleDependencyType(value: unknown, label: string): ScheduleDependencyType {
+  if (
+    value === 'finish-to-start' ||
+    value === 'start-to-start' ||
+    value === 'finish-to-finish' ||
+    value === 'start-to-finish'
+  ) {
+    return value
+  }
+  throw invalidInput(`${label} type is invalid.`)
+}
+
+/**
+ * Validates the Planning Phases of a Project template.
+ *
+ * @param value - Untrusted Phase list.
+ * @param counter - Running Phase and Milestone count across the whole template.
+ * @returns Normalized Phases with their Milestones.
+ */
+function validateProjectTemplatePhases(
+  value: unknown,
+  counter: { count: number },
+): AutomationProjectTemplatePhase[] {
+  if (!Array.isArray(value)) throw invalidInput('Project template Phases must be an array.')
+  return value.map((candidate) => {
+    countProjectTemplatePlanningEntity(counter)
+    const phase = requireRecord(candidate, 'Project template Phase')
+    assertOnlyKeys(
+      phase,
+      ['durationWorkingDays', 'milestones', 'startOffsetWorkingDays', 'title'],
+      'Project template Phase',
+    )
+    const milestones = phase.milestones === undefined
+      ? []
+      : validateProjectTemplateMilestones(phase.milestones, counter)
+    const title = readProjectTemplateLineTitle(phase.title, 'Project template Phase title')
+    if (title.startsWith(AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER)) {
+      throw invalidInput(`Project template Phase title must not start with ${AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER}.`)
+    }
+    return {
+      title,
+      startOffsetWorkingDays: requireInteger(
+        phase.startOffsetWorkingDays,
+        'Project template Phase start offset',
+        0,
+        AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
+      ),
+      durationWorkingDays: requireInteger(
+        phase.durationWorkingDays,
+        'Project template Phase duration',
+        1,
+        AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
+      ),
+      ...(milestones.length > 0 ? { milestones } : {}),
+    }
+  })
+}
+
+/**
+ * Validates a list of Project template Milestones.
+ *
+ * @param value - Untrusted Milestone list.
+ * @param counter - Running Phase and Milestone count across the whole template.
+ * @returns Normalized Milestones in input order.
+ */
+function validateProjectTemplateMilestones(
+  value: unknown,
+  counter: { count: number },
+): AutomationProjectTemplateMilestone[] {
+  if (!Array.isArray(value)) throw invalidInput('Project template Milestones must be an array.')
+  return value.map((candidate) => {
+    countProjectTemplatePlanningEntity(counter)
+    const milestone = requireRecord(candidate, 'Project template Milestone')
+    assertOnlyKeys(milestone, ['offsetWorkingDays', 'title'], 'Project template Milestone')
+    return {
+      title: readProjectTemplateLineTitle(milestone.title, 'Project template Milestone title'),
+      offsetWorkingDays: requireInteger(
+        milestone.offsetWorkingDays,
+        'Project template Milestone offset',
+        0,
+        AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
+      ),
+    }
+  })
+}
+
+/**
+ * Counts one Phase or Milestone against the template limit.
+ *
+ * @param counter - Running count, incremented in place.
+ */
+function countProjectTemplatePlanningEntity(counter: { count: number }) {
+  counter.count += 1
+  if (counter.count > AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT) {
+    throw invalidInput(
+      `Project template can hold at most ${AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT} Phases and Milestones.`,
+    )
+  }
+}
+
+/**
+ * Reads a title that the template editor shows on one line.
+ *
+ * @param value - Untrusted title.
+ * @param label - Field name used in error messages.
+ * @returns The trimmed title.
+ */
+/**
+ * Reads the preview a caller accepted before applying a Project template.
+ *
+ * @param value - Untrusted `expectedPreview` value.
+ * @returns The template version and calendar fingerprint to check when applying.
+ */
+function readProjectTemplatePreviewExpectation(value: unknown): AutomationProjectTemplatePreviewExpectation {
+  const expectation = requireRecord(value, 'Expected template preview')
+  assertOnlyKeys(expectation, ['calendarFingerprint', 'templateVersion'], 'Expected template preview')
+  if (
+    typeof expectation.templateVersion !== 'number' ||
+    !Number.isSafeInteger(expectation.templateVersion) ||
+    expectation.templateVersion < 1
+  ) {
+    throw invalidInput('Expected template preview version must be a positive integer.')
+  }
+  return {
+    templateVersion: expectation.templateVersion,
+    calendarFingerprint: requireBoundedText(
+      expectation.calendarFingerprint,
+      'Expected template preview calendar fingerprint',
+      128,
+    ),
+  }
+}
+
+function readProjectTemplateLineTitle(value: unknown, label: string) {
+  // Planning stores the title, so its UTF-16 limit applies as well as the editor's character limit.
+  const title = requireBoundedText(value, label, AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH)
+  if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+    throw invalidInput(`${label} must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
+  }
+  if (/\p{Cs}/u.test(title)) throw invalidInput(`${label} must be well-formed text.`)
+  if (/[\r\n\u2028\u2029]/u.test(title)) throw invalidInput(`${label} must not contain line breaks.`)
+  return title
+}
+
 /** Maps pure workflow validation failures to the stable Automation error contract. */
 function validateAutomationWorkflowTemplate(value: unknown) {
   try {
@@ -337,19 +613,34 @@ export function validateApplyAutomationTemplateInput(
   value: unknown,
 ): ApplyAutomationTemplateInput {
   const input = requireRecord(value, 'Template application')
-  assertOnlyKeys(input, ['target'], 'Template application')
+  assertOnlyKeys(input, ['expectedPreview', 'target'], 'Template application')
   const target = requireRecord(input.target, 'Template application target')
+  if (input.expectedPreview !== undefined && target.kind !== 'project') {
+    throw invalidInput('Only a Project template application accepts an expected preview.')
+  }
   if (target.kind === 'project') {
-    assertOnlyKeys(target, ['kind', 'startDate', 'teamId'], 'Project template application target')
+    assertOnlyKeys(
+      target,
+      ['kind', 'planningParentId', 'startDate', 'teamId'],
+      'Project template application target',
+    )
     const startDate = target.startDate === undefined
       ? undefined
       : requireCalendarDate(target.startDate, 'Project template start date')
+    const planningParentId = target.planningParentId === undefined
+      ? undefined
+      : requireBoundedText(target.planningParentId, 'Project template Planning parent ID', 256)
+    const expectedPreview = input.expectedPreview === undefined
+      ? undefined
+      : readProjectTemplatePreviewExpectation(input.expectedPreview)
     return {
       target: {
         kind: 'project',
         teamId: requireBoundedText(target.teamId, 'Project template Team ID', 256),
         ...(startDate === undefined ? {} : { startDate }),
+        ...(planningParentId === undefined ? {} : { planningParentId }),
       },
+      ...(expectedPreview === undefined ? {} : { expectedPreview }),
     }
   }
   if (target.kind === 'workflow') {

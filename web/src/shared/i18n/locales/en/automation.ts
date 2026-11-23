@@ -177,6 +177,40 @@ export const automationMessages = {
     'Line {line}: a template can hold at most 50 Work Items.',
   'automation.template.project.workItemsError.depth':
     'Line {line}: the WBS can be at most 4 levels deep.',
+  'automation.template.project.planning':
+    'Phases / Milestones',
+  'automation.template.project.planningPlaceholder':
+    'Preparation | 0 | 5\n  ◆ Requirements fixed | 4\n◆ Design done | 7',
+  'automation.template.project.planningHint':
+    'A phase is "title | start | duration" and a milestone starts with ◆ as "◆ title | date", both in working days from the project start. A milestone indented two spaces under a phase belongs to it, and a phase title cannot start with ◆. Up to 30 in total.',
+  'automation.template.project.planningError.format':
+    'Line {line}: write a phase as "title | start | duration" and a milestone as "◆ title | date".',
+  'automation.template.project.planningError.indent':
+    'Line {line}: only a milestone under a phase can be indented, by two spaces.',
+  'automation.template.project.planningError.title':
+    'Line {line}: enter a title of up to 256 characters and 500 UTF-16 code units (some characters, such as emoji, count as 2), without line breaks.',
+  'automation.template.project.planningError.days':
+    'Line {line}: start and date must be 0 or more and duration 1 or more, up to 3650 working days.',
+  'automation.template.project.planningError.limit':
+    'Line {line}: a template can hold at most 30 phases and milestones.',
+  'automation.template.project.dependencies':
+    'Dependencies in the WBS',
+  'automation.template.project.dependenciesPlaceholder':
+    '1 -> 2\n1.1 -> 2 SS +1',
+  'automation.template.project.dependenciesHint':
+    'One per line: predecessor WBS number -> successor WBS number, optionally followed by a type (FS, SS, FF, SF; FS by default) and a lag in calendar days such as +2 or -1. Up to 100.',
+  'automation.template.project.dependenciesError.format':
+    'Line {line}: write it as "1.1 -> 2 FS +2", with a lag of at most ±365 days.',
+  'automation.template.project.dependenciesError.reference':
+    'Line {line}: the WBS has no such number.',
+  'automation.template.project.dependenciesError.self':
+    'Line {line}: a Work Item cannot depend on itself.',
+  'automation.template.project.dependenciesError.hierarchy':
+    'Line {line}: a parent and its child cannot depend on each other.',
+  'automation.template.project.dependenciesError.duplicate':
+    'Line {line}: another dependency already joins these two Work Items.',
+  'automation.template.project.dependenciesError.limit':
+    'Line {line}: a template can hold at most 100 dependencies.',
   'automation.template.apply': 'Apply',
   'automation.template.application.title': 'Apply template',
   'automation.template.application.projectDescription':
@@ -206,6 +240,52 @@ export const automationMessages = {
   'automation.template.application.status.running': 'Running',
   'automation.template.application.status.succeeded': 'Succeeded',
   'automation.template.application.status.failed': 'Failed',
+  'automation.template.application.planningParent':
+    'Planning parent for phases and milestones',
+  'automation.template.application.planningParentNone':
+    'Choose one',
+  'automation.template.application.planningParentHint':
+    'Phases are created under a roadmap, initiative, or goal that is outside any project and in no other team.',
+  'automation.template.application.planningParentEmpty':
+    'No roadmap, initiative, or goal can hold this team\'s phases. Choose another team, or create one in Planning for the workspace or this team.',
+  'automation.template.application.planningParentLoading': 'Loading Planning parents.',
+  'automation.template.application.planningParentRetry': 'Load again',
+  'automation.template.application.planningParentUnavailable':
+    'Could not load the Planning parents.',
+  'automation.template.application.preview':
+    'Preview',
+  'automation.template.application.previewing':
+    'Checking...',
+  'automation.template.application.previewRequired':
+    'Preview the application and make sure it has no problems before applying.',
+  'automation.template.application.previewStale':
+    'The template or the working calendar changed after the preview. Nothing was created; preview again before applying.',
+  'automation.template.application.previewError':
+    'Could not load the preview. Try again.',
+  'automation.template.application.previewTitle':
+    'Preview (nothing has been created yet)',
+  'automation.template.application.previewSummary':
+    'Creates project “{name}” with {workItems} Work Items, {planning} phases and milestones, and {dependencies} dependencies.',
+  'automation.template.application.previewPeriod':
+    'Period: {start} to {end}',
+  'automation.template.application.previewErrors':
+    'Fix these problems before applying.',
+  'automation.template.application.previewErrorWbs':
+    'WBS {wbs}: {message}',
+  'automation.template.application.previewErrorDependency':
+    'Dependency {number}: {message}',
+  'automation.template.application.previewWorkItems':
+    'Work Items',
+  'automation.template.application.previewPlanning':
+    'Phases / Milestones',
+  'automation.template.application.previewPhase':
+    'Phase',
+  'automation.template.application.previewMilestone':
+    'Milestone',
+  'automation.template.application.planningResult':
+    'Created {count} phases and milestones.',
+  'automation.template.application.dependencyResult':
+    'Created {count} dependencies.',
   'automation.recurring.createTitle': 'New recurring work',
   'automation.recurring.createDescription':
     'Choose a template, team, local time, and catch-up policy. New schedules start paused.',
