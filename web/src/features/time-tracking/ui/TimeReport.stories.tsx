@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { timeTrackingFixtureMemberNames } from '../fixtures'
@@ -45,6 +46,39 @@ function TimeReportView(props: TimeReportProps & {
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Budget panel whose first save fails because another manager changed the budget period.
+ *
+ * @param props - Translator and locale of the panel.
+ * @returns Budget panel that swaps in the newer budget on a conflict.
+ */
+function BudgetRevisionConflictView(props: Pick<TimeReportProps, 'locale' | 't'>) {
+  const [summary, setSummary] = useState(timeReportFixtureBudgetSummary)
+  /** Fails the first save and replaces the summary with the newer revision. */
+  const save = async () => {
+    const budget = summary.budget
+    if (budget && budget.revision === timeReportFixtureBudgetSummary.budget?.revision) {
+      setSummary({ ...summary, budget: { ...budget, periodFrom: '2026-10-01', periodTo: '2027-03-31', revision: budget.revision + 1 } })
+      throw new Error('conflict')
+    }
+  }
+  return (
+    <TimeBudgetPanel
+      defaultCurrency="JPY"
+      fiscalYearStartMonth={4}
+      locale={props.locale}
+      onChangeScope={fn()}
+      onRetry={fn()}
+      onSave={save}
+      onUseBudgetPeriod={fn()}
+      projects={timeReportFixtureProjects}
+      scope={{ scopeType: 'team' }}
+      summary={summary}
+      t={props.t}
+    />
   )
 }
 
@@ -111,6 +145,19 @@ export const FiscalYearBudgetPeriod: Story = {
     await expect(fiscalYear).toBeDefined()
     await userEvent.selectOptions(select, '2026')
     await expect(canvas.getByLabelText('期間の開始日（任意）')).toHaveValue('2026-04-01')
+    await expect(canvas.getByLabelText('期間の終了日（任意）')).toHaveValue('2027-03-31')
+  },
+}
+
+/** A revision conflict while editing loads the other manager's period into the form. */
+export const BudgetPeriodAfterRevisionConflict: Story = {
+  render: (args) => <BudgetRevisionConflictView locale={args.locale} t={args.t} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '予算を編集' }))
+    await userEvent.selectOptions(canvas.getByTestId('time-budget-fiscal-year-select'), '2026')
+    await userEvent.click(canvas.getByRole('button', { name: '予算を保存' }))
+    await expect(await canvas.findByLabelText('期間の開始日（任意）')).toHaveValue('2026-10-01')
     await expect(canvas.getByLabelText('期間の終了日（任意）')).toHaveValue('2027-03-31')
   },
 }

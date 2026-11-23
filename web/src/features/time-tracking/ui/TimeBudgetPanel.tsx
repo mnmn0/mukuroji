@@ -96,6 +96,14 @@ export function TimeBudgetPanel({
   const currency = budget?.currency ?? defaultCurrency
   const [periodFrom, setPeriodFrom] = useState('')
   const [periodTo, setPeriodTo] = useState('')
+  const formKey = `${projectId ?? 'team'}:${budget?.revision ?? 0}`
+  const [periodFormKey, setPeriodFormKey] = useState(formKey)
+  if (periodFormKey !== formKey) {
+    // The keyed form resets amount and currency when the saved budget changes; reset the period with them.
+    setPeriodFormKey(formKey)
+    setPeriodFrom(budget?.periodFrom ?? '')
+    setPeriodTo(budget?.periodTo ?? '')
+  }
   const fiscalYearOptions = useMemo(
     () => fiscalYearStartMonth === undefined
       ? []
@@ -268,7 +276,7 @@ export function TimeBudgetPanel({
 
       {summary && !isLoading ? (
         isEditing ? (
-          <form className="grid min-w-0 gap-3" key={`${projectId ?? 'team'}:${budget?.revision ?? 0}`} onSubmit={(event) => { void submit(event) }}>
+          <form className="grid min-w-0 gap-3" key={formKey} onSubmit={(event) => { void submit(event) }}>
             <div className="flex min-w-0 flex-wrap items-end gap-3">
               <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('timeTracking.budget.amount')}
