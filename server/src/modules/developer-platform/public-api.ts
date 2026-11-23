@@ -5229,12 +5229,6 @@ function requireDocumentService(dependencies: PublicApiDependencies): PublicDocu
 }
 
 /**
- * Returns the configured Agent Run service or reports that runs are unavailable.
- *
- * @param dependencies - Router dependencies.
- * @returns Agent Run service.
- */
-/**
  * Returns the agent telemetry receiver or reports that it is unavailable.
  *
  * @param dependencies - Public API dependencies.
@@ -5247,6 +5241,12 @@ function requireAgentTelemetryService(dependencies: PublicApiDependencies): Publ
   return dependencies.agentTelemetry
 }
 
+/**
+ * Returns the configured Agent Run service or reports that runs are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Agent Run service.
+ */
 function requireAgentRunService(dependencies: PublicApiDependencies): PublicAgentRunService {
   if (!dependencies.agentRuns) {
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent Runs are not configured.', true)
