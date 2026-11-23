@@ -164,6 +164,7 @@ export const projectsMessages = {
   'projects.raidLog.overdue': 'Overdue. Review the entry and set a new date, or close it.',
   'projects.raidLog.reviewDue': 'Review by {date}',
   'projects.raidLog.error.loading': 'The log could not be loaded.',
+  'projects.raidLog.error.workItems': 'The Work Items to relate could not be loaded.',
   'projects.raidLog.error.save': 'The entry could not be saved.',
   'projects.raidLog.error.conflict': 'Someone else updated it first. Reload and try again.',
   'projects.raidLog.error.invalid': 'Check the values: {reason}',

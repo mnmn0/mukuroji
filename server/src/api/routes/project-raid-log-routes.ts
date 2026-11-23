@@ -237,31 +237,32 @@ async function verifyEntryReferences(
     'InvalidProjectRaidEntry',
     'The owner must be an active member of the Project.',
   )
+  const isCaller = principal.principalKind !== 'service-account' &&
+    normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(ownerMemberId)
+  // The owner's fence is read before the membership check: removing the owner from the Project
+  // advances the member version, so a removal after this read fails the write at commit. The
+  // caller's own membership fence already covers a caller who owns the entry, and DynamoDB refuses
+  // a transaction that checks the same item twice.
+  let fence: ProjectRaidLogCallerAuthorizationCheck | undefined
+  if (!isCaller) {
+    const { workspaceAccess } = workspaceDependencies
+    if (!workspaceAccess.createActiveMemberConditionCheck) {
+      throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'The owner cannot be verified.')
+    }
+    fence = await workspaceAccess.createActiveMemberConditionCheck.call(
+      workspaceAccess,
+      principal.directoryId,
+      ownerMemberId,
+    )
+    if (!fence) throw notMember()
+  }
   const { members } = await workspaceDependencies.projectDirectory.getProjectMembers(
     principal.directoryId,
     projectId,
     teamId,
   )
   if (!members.some((member) => member.id === ownerMemberId)) throw notMember()
-  if (
-    principal.principalKind !== 'service-account' &&
-    normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(ownerMemberId)
-  ) {
-    // The caller's own membership fence already proves the owner active, and DynamoDB refuses a
-    // transaction that checks the same item twice.
-    return workItemFences
-  }
-  const { workspaceAccess } = workspaceDependencies
-  if (!workspaceAccess.createActiveMemberConditionCheck) {
-    throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'The owner cannot be verified.')
-  }
-  const fence = await workspaceAccess.createActiveMemberConditionCheck.call(
-    workspaceAccess,
-    principal.directoryId,
-    ownerMemberId,
-  )
-  if (!fence) throw notMember()
-  return [...workItemFences, fence]
+  return fence ? [...workItemFences, fence] : workItemFences
 }
 
 /**
