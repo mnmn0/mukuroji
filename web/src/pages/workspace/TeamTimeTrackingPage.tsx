@@ -1,8 +1,9 @@
-import { isWeeklyReportDate, isWorkspaceWeekStartDay, type WorkspaceWeekStartDay } from '@mukuroji/contracts'
+import { isSummaryMonth, isWeeklyReportDate, isWorkspaceWeekStartDay, shiftSummaryMonth, type WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
+import { TeamMonthlySummaryContainer } from '../../features/time-tracking/ui/TeamMonthlySummaryContainer'
 import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
 import { TeamWeeklySummaryContainer } from '../../features/time-tracking/ui/TeamWeeklySummaryContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
@@ -11,7 +12,7 @@ import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportC
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveBrowserTimeZone, resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
-import { useTeamWeeklySummary } from '../../features/time-tracking/queries/useWeeklyReports'
+import { useTeamMonthlySummary, useTeamWeeklySummary } from '../../features/time-tracking/queries/useWeeklyReports'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { resolveTimeReportGroupBy, resolveTimeReportRange } from '../../features/time-tracking/model/timeReport'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
@@ -39,6 +40,16 @@ function readDateWeekday(date: string | undefined): WorkspaceWeekStartDay | unde
 }
 
 /**
+ * Returns the current calendar month in the browser's time zone.
+ *
+ * @returns Month as `YYYY-MM`.
+ */
+function currentMonth(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+/**
  * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the managers'
  * weekly report status and approval queue, and the Team report with its CSV export and budgets.
  *
@@ -58,7 +69,8 @@ export function TeamTimeTrackingPage() {
     viewParam === 'periods' ||
     viewParam === 'weekly-report' ||
     viewParam === 'team-weekly-reports' ||
-    viewParam === 'weekly-summary'
+    viewParam === 'weekly-summary' ||
+    viewParam === 'monthly-summary'
     ? viewParam
     : 'timesheet'
   const reportFrom = searchParams.get('from')
@@ -84,8 +96,13 @@ export function TeamTimeTrackingPage() {
   const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
-  // The weekly summary is counted on the server, so it does not read the Team's Work Items here.
-  const workItems = useWorkspaceWorkItems(accessToken, enabled && view !== 'weekly-summary' && view !== 'periods', false, teamWorkItemFilter)
+  // The weekly and monthly summaries are counted on the server, so they do not read the Team's Work Items here.
+  const workItems = useWorkspaceWorkItems(
+    accessToken,
+    enabled && view !== 'weekly-summary' && view !== 'monthly-summary' && view !== 'periods',
+    false,
+    teamWorkItemFilter,
+  )
   // The weekly report lists only the member's own Work Items, filtered by the server.
   const myWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '', involvement: 'mine' as const }), [teamId])
   const myWorkItems = useWorkspaceWorkItems(accessToken, enabled && view === 'weekly-report', false, myWorkItemFilter)
@@ -124,6 +141,9 @@ export function TeamTimeTrackingPage() {
     teamId ?? '',
     weekStart,
   )
+  const requestedMonth = searchParams.get('month')
+  const month = isSummaryMonth(requestedMonth) ? requestedMonth : currentMonth()
+  const monthlySummary = useTeamMonthlySummary(view === 'monthly-summary' ? accessToken : undefined, teamId ?? '', month)
   const lookupError = workItems.error ?? writeAccess.error ?? projectMembers.error ?? projectMembers.data?.errors[0]
   const memberNames = useMemo(() => {
     const names: Record<string, string> = {}
@@ -175,6 +195,15 @@ export function TeamTimeTrackingPage() {
     open(view, weeks === 0 ? resolveWeekStart(null, undefined, weekStartDay) : shiftWeek(weekStart, weeks, weekStartDay))
   }
 
+  /**
+   * Moves the month shown by the monthly summary; 0 returns to the current month.
+   *
+   * @param months - Months to move.
+   */
+  const moveMonth = (months: number) => {
+    open('monthly-summary', months === 0 ? undefined : shiftSummaryMonth(month, months))
+  }
+
   if (!teamId) return null
 
   /**
@@ -189,6 +218,7 @@ export function TeamTimeTrackingPage() {
       return createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
     }
     if (candidate === 'periods') return createTeamTimeTrackingPath(teamId, 'periods')
+    if (candidate === 'monthly-summary') return createTeamTimeTrackingPath(teamId, 'monthly-summary', requestedMonth === null ? undefined : month)
     if (candidate === 'weekly-report' && exactReportWeekDay !== undefined) {
       return createTeamTimeTrackingPath(teamId, 'weekly-report', reportWeekStart, undefined, true)
     }
@@ -196,7 +226,7 @@ export function TeamTimeTrackingPage() {
   }
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, workItemConfiguration.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, monthlySummary.error, workItemConfiguration.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={tabHref}
@@ -219,6 +249,11 @@ export function TeamTimeTrackingPage() {
         {view === 'report' ? (
           <TimeReportContainer
             accessToken={accessToken}
+            fiscalYearStartMonth={calendarSettings.settings?.fiscalYearStartMonth}
+            // Budgets can still take dates when the fiscal year cannot be read; only a failure
+            // before any successful read hides the fiscal years.
+            hasFiscalYearError={Boolean(calendarSettings.error) && !calendarSettings.settings}
+            onRetryFiscalYear={calendarSettings.retry}
             groupBy={reportGroupBy}
             hasJobRoleError={Boolean(workItemConfiguration.error)}
             {...(jobRoles ? { jobRoles } : {})}
@@ -241,6 +276,19 @@ export function TeamTimeTrackingPage() {
             teamId={teamId}
             teamNames={teamNames}
             timeZone={workspace.timeZone ?? resolveBrowserTimeZone()}
+          />
+        ) : view === 'monthly-summary' ? (
+          <TeamMonthlySummaryContainer
+            error={monthlySummary.error}
+            key={`${teamId}:monthly-summary:${month}`}
+            locale={workspace.locale}
+            month={month}
+            onMoveMonth={moveMonth}
+            onRetry={() => { void monthlySummary.mutate().catch(() => undefined) }}
+            projectNames={projectNames}
+            summary={monthlySummary.data}
+            teamId={teamId}
+            teamName={activeTeam?.name ?? teamId}
           />
         ) : !calendarSettings.settings ? (
           calendarSettings.error ? (
@@ -299,6 +347,7 @@ export function TeamTimeTrackingPage() {
             projectNames={projectNames}
             summary={weeklySummary.data}
             teamId={teamId}
+            teamName={activeTeam?.name ?? teamId}
             weekStart={weekStart}
             weekStartDay={calendarSettings.settings.weekStartDay}
           />

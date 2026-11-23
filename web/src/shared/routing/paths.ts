@@ -389,8 +389,10 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  * @param teamId - Team identifier.
  * @param view - `timesheet` for the member's week, `weekly-report` for the member's weekly report,
  *   `team-weekly-reports` for the managers' submission status, `weekly-summary` for the Team and
- *   Project weekly summary, `approvals` for the manager queue, or `report` for totals.
- * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
+ *   Project weekly summary, `monthly-summary` for the monthly one, `approvals` for the manager
+ *   queue, or `report` for totals.
+ * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by
+ *   `report`. For `monthly-summary` it is the month as `YYYY-MM` instead.
  * @param report - Period and grouping of the `report` view; omitted for the current week by day.
  * @param exactWeek - Opens the week starting exactly on `weekStart`, even when the Workspace now
  *   starts weeks on another day; used to reopen a weekly report saved under an earlier setting.
@@ -398,7 +400,7 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  */
 export function createTeamTimeTrackingPath(
   teamId: string,
-  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'approvals' | 'report' | 'periods' = 'timesheet',
+  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'monthly-summary' | 'approvals' | 'report' | 'periods' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
   exactWeek = false,
@@ -413,6 +415,8 @@ export function createTeamTimeTrackingPath(
       query.set('to', report.to)
       query.set('groupBy', report.groupBy)
     }
+  } else if (view === 'monthly-summary') {
+    if (weekStart) query.set('month', weekStart)
   } else if (weekStart) {
     query.set('week', weekStart)
     if (exactWeek) query.set('exactWeek', '1')

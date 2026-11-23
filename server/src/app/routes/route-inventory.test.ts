@@ -9,9 +9,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(553)
-  expect(new Set(inventory).size).toBe(549)
+  expect(inventory).toHaveLength(555)
+  expect(new Set(inventory).size).toBe(551)
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
+  expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
@@ -31,6 +32,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
   expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-summary')
+  expect(inventory).toContain('GET /api/teams/:teamId/monthly-summary')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
@@ -144,6 +146,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '7ad92cce8741adc23a75a79d33db9b4dfd78d689fd7f383c81243152bf3d4cf2',
+    'd61233015864dee0fd7b5da39948bb5df74b7e1de75ec41d37b4634c1b01730c',
   )
 })
