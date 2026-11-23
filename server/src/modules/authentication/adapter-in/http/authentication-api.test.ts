@@ -8,6 +8,7 @@ const {
   createFakeAuthTokenSet,
   createWorkspaceAccessFake,
   expectStableWorkspaceMutationAuditContexts,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
   withTestEnvironment,
@@ -22,6 +23,7 @@ import {
 import {
   InMemoryEnterpriseIdentityClient,
 } from '../../../enterprise-identity/enterprise-identity'
+import type { AuditEventV1 } from '../../../audit'
 import {
   afterEach,
   expect,
@@ -755,4 +757,74 @@ test('retries membership reconcile on normal login after password completion suc
       workspaceId: 'user#demo@example.com',
     },
   )
+})
+
+/**
+ * Replaces the audit event store with one that keeps written events in memory.
+ *
+ * @returns Events written during the test.
+ */
+function captureAuditEvents(): AuditEventV1[] {
+  const written: AuditEventV1[] = []
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async putEvent(event) {
+        written.push(event)
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  return written
+}
+
+test('records a completed sign-in in the Workspace audit log', async () => {
+  configureFakeProjectClients(true, { mfaChallengeTokens: true })
+  const written = captureAuditEvents()
+
+  const response = await app.request('/api/auth/challenge/mfa', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'demo@example.com', challenge: 'SOFTWARE_TOKEN_MFA', code: '123456', session: 'mfa-session' }),
+  })
+
+  expect(response.status).toBe(200)
+  const signIns = written.filter((event) => event.eventType === 'auth.signed-in')
+  expect(signIns).toHaveLength(1)
+  expect(signIns[0]).toMatchObject({ entity: { type: 'sign-in' }, metadata: { authenticationMethods: ['SOFTWARE_TOKEN_MFA'] } })
+  expect(JSON.stringify(signIns[0])).not.toContain('123456')
+})
+
+test('records repeated rejected sign-ins once per window without the address or password', async () => {
+  configureFakeProjectClients(true)
+  const written = captureAuditEvents()
+  getTestAppDependencies().authentication.cognito.initiatePasswordAuth = async () => {
+    throw new CognitoServiceError(400, 'NotAuthorizedException', 'Incorrect username or password.')
+  }
+
+  await withTestEnvironment({ MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production' }, async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await app.request('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'Guess@Example.com', password: `Wrong-${attempt}` }),
+      })
+      expect(response.status).toBe(401)
+    }
+  })
+
+  const failures = written.filter((event) => event.eventType === 'auth.sign-in-failed')
+  expect(failures).toHaveLength(1)
+  expect(failures[0]).toMatchObject({
+    workspaceId: 'workspace#production',
+    actor: { kind: 'system' },
+    metadata: { reason: 'invalid-credentials', emailDomain: 'example.com' },
+  })
+  const serialized = JSON.stringify(failures[0])
+  expect(serialized).not.toContain('guess@example.com')
+  expect(serialized).not.toContain('Wrong-')
 })
