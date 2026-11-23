@@ -192,4 +192,31 @@ describe('saving Project log entries', () => {
     expect(keys[1]).not.toBe(keys[0])
     expect(keys[2]).toBe(keys[0])
   })
+
+  test('gives distinct operations with the same input their own Idempotency-Key', async () => {
+    const keys: string[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+      return new Response('{}', { status: 503 })
+    }
+    let save: ReturnType<typeof useSaveProjectRaidEntry> | undefined
+
+    /**
+     * Captures the save function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      save = useSaveProjectRaidEntry({ accessToken: 'token', teamId: 'core-team', projectId: 'refero' })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    const input: ProjectRaidEntryInput = { kind: 'risk', title: '同じ文面', probability: 3, impact: 3, status: 'open' }
+    await expect(save?.(undefined, input, 'promote-risk:a')).rejects.toThrow()
+    await expect(save?.(undefined, input, 'promote-risk:b')).rejects.toThrow()
+    await expect(save?.(undefined, input, 'promote-risk:a')).rejects.toThrow()
+    expect(keys[1]).not.toBe(keys[0])
+    expect(keys[2]).toBe(keys[0])
+  })
 })

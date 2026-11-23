@@ -1872,7 +1872,7 @@ function createFocusPlanningWorkItemState(
  */
 function canReadFocusScopedSource(
   principal: WorkspacePrincipal,
-  permission: 'planning.read' | 'files.read',
+  permission: 'planning.read' | 'files.read' | 'projects.read',
   teamId?: string,
   projectId?: string,
 ): boolean {
@@ -2207,6 +2207,9 @@ async function readFocusProjectLogSources(
       access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
     ))
     .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+    // Focus itself only needs `work-items.read`, while the Project log needs `projects.read`, as
+    // its own GET does, so Enterprise access is checked again for each Project.
+    .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
   let incomplete = false
   const sources = await mapInOrderWithConcurrency(projects, FOCUS_PROJECT_LOG_READ_CONCURRENCY, async (project) => {
     try {
