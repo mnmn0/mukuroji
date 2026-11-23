@@ -106,6 +106,7 @@ import {
   getEffectiveProjectAccessList,
   readLegacyProjectScopeAccesses,
   requireTeamPermission,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -2199,6 +2200,8 @@ type FocusProjectLogRead = {
 async function readFocusProjectLogSources(
   principal: WorkspacePrincipal,
 ): Promise<FocusProjectLogRead> {
+  // The Project log GET refuses guests, so Focus does not show them log entries either.
+  if (!canReadWorkspaceBusinessData(principal)) return { sources: [], incomplete: false }
   const fullDirectory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projects = principal.enterpriseAuthorizationEvaluation !== undefined && !principal.isSystemAdmin
     ? fullDirectory.teams.flatMap((team) => team.projects
@@ -2224,6 +2227,23 @@ async function readFocusProjectLogSources(
     }
   })
   return { sources: sources.flat(), incomplete }
+}
+
+/**
+ * Tells whether the principal passes the Workspace business-read restriction, which keeps guests
+ * away from Project data such as the Project log.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Whether {@link requireWorkspaceBusinessRead} accepts the principal.
+ */
+function canReadWorkspaceBusinessData(principal: WorkspacePrincipal): boolean {
+  try {
+    requireWorkspaceBusinessRead(principal)
+    return true
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) return false
+    throw error
+  }
 }
 
 /**
