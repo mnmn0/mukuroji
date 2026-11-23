@@ -14,6 +14,7 @@ const sampleCalendar: WorkspaceCalendarSettings = {
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
   holidays: ['2027-01-01', '2027-01-02', '2027-05-03'],
   publicHolidays: 'japan',
+  timeZone: 'Asia/Tokyo',
 }
 
 /** Calendar with a single working weekday, whose checkbox cannot be cleared. */
@@ -23,6 +24,7 @@ const singleWeekdayCalendar: WorkspaceCalendarSettings = {
   workingWeekdays: ['monday'],
   holidays: [],
   publicHolidays: 'none',
+  timeZone: 'UTC',
 }
 
 /** Props of {@link EditableWorkingCalendar}. */

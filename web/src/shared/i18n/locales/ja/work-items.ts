@@ -284,6 +284,7 @@ export const workItemsMessages = {
   'tasks.calendar.day.sun': '日',
   'tasks.calendar.week': '{from} 〜 {to} の週',
   'tasks.calendar.empty': '予定なし',
+  'tasks.calendar.nonWorking': '休み',
   'tasks.calendar.previousMonth': '前の月',
   'tasks.calendar.currentMonth': '今月',
   'tasks.calendar.nextMonth': '次の月',
