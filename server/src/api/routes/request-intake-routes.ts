@@ -60,6 +60,7 @@ import {
 import {
   authenticateWorkspacePrincipal,
   requireRequestAdministration,
+  requireRequestFormManagement,
 } from '../shared/request-authorization'
 import {
   createDeterministicTriageWorkItemId,
@@ -1242,6 +1243,7 @@ export function registerRequestIntakeRoutes(routeApp: Hono): void {
   routeApp.route('/', createAdminRequestIntakeRouter({
     getRequestIntake: () => workItemDependencies.requestIntake,
     requireAdministration: requireRequestAdministration,
+    requireFormManagement: requireRequestFormManagement,
     readJson,
     validateFormRoutingReferences: validateRequestFormRoutingReferences,
     readSubmissionStatus: readRequestSubmissionStatus,

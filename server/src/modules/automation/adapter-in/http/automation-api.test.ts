@@ -5277,3 +5277,202 @@ test('predicts a Bulk undo completion date in the calendar of the restored sched
   expect(calls.issueUpdates).toHaveLength(1)
   expect(corrections).toEqual([undefined])
 })
+
+/** A Team rule body that reacts to status changes and assigns the Work Item. */
+const teamRuleBody = {
+  ownerTeamId: 'core-team',
+  name: 'Assign on review',
+  enabled: true,
+  trigger: { type: 'status', toStatusId: 'review' },
+  actions: [{ type: 'assign', assigneeMemberKey: 'user#reviewer@example.com' }],
+}
+
+/**
+ * Creates the stored form of a Team rule.
+ *
+ * @param ownerTeamId - Owner Team of the stored rule, or undefined for a Workspace rule.
+ * @returns A stored Automation rule.
+ */
+function createStoredTeamRule(ownerTeamId: string | undefined) {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'rule-team',
+    workspaceId: 'user#demo@example.com',
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+    name: 'Assign on review',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    trigger: { type: 'status', toStatusId: 'review' },
+    conditions: [],
+    actions: [{ type: 'assign', assigneeMemberKey: 'user#reviewer@example.com' }],
+    retryPolicy: { maxAttempts: 3, initialDelayMs: 1000, backoffMultiplier: 2, maxDelayMs: 60000 },
+    rateLimit: { maxExecutions: 100, windowSeconds: 60 },
+    allowReentry: false,
+    maxChainDepth: 8,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  } satisfies Awaited<ReturnType<TestAutomationRuleTemplatePort['createRule']>>
+}
+
+test('lets a Team manager create and change rules of their own Team only', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'manager' })
+  const created: unknown[] = []
+  const updated: unknown[] = []
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async createRule(_workspaceId, input) {
+        created.push(input)
+        return createStoredTeamRule(input.ownerTeamId)
+      },
+      async getRule(_workspaceId, ruleId) {
+        return createStoredTeamRule(ruleId === 'rule-workspace' ? undefined : 'core-team')
+      },
+      async updateRule(_workspaceId, _ruleId, input) {
+        updated.push(input)
+        return createStoredTeamRule('core-team')
+      },
+    }),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const post = (body: unknown) => app.request('/api/automation/rules', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  })
+
+  const ownTeam = await post(teamRuleBody)
+  const workspaceRule = await post({ ...teamRuleBody, ownerTeamId: undefined })
+  const webhookAction = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'webhook', url: 'https://hooks.example.com/review' }],
+  })
+  const otherTeamCreate = await post({
+    ...teamRuleBody,
+    actions: [{
+      type: 'create',
+      values: { teamId: 'ops-team', title: 'Follow up', schedule: createDefaultDueDateWorkItemSchedule('2026-07-20') },
+    }],
+  })
+  const otherTeamProject = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'move', targetProjectId: 'other-team-project' }],
+  })
+  const formTrigger = await post({ ...teamRuleBody, trigger: { type: 'form', formId: 'form-1' } })
+  const stopOwn = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const stopWorkspace = await app.request('/api/automation/rules/rule-workspace', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(ownTeam.status).toBe(201)
+  expect(workspaceRule.status).toBe(403)
+  expect(await workspaceRule.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
+  for (const response of [webhookAction, otherTeamCreate, otherTeamProject, formTrigger]) {
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  }
+  expect(stopOwn.status).toBe(200)
+  expect(stopWorkspace.status).toBe(403)
+  expect(created).toEqual([expect.objectContaining({ ownerTeamId: 'core-team' })])
+  expect(updated).toEqual([{ expectedRevision: 1, enabled: false }])
+  expect(await scopes.json()).toEqual({ workspace: false, teamIds: ['core-team'] })
+})
+
+test('keeps Team rules with Workspace administrators for members who do not manage the Team', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'member' })
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({}),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  const response = await app.request('/api/automation/rules', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(teamRuleBody),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(response.status).toBe(403)
+  expect(await scopes.json()).toEqual({ workspace: false, teamIds: [] })
+})
+
+test('lets a Workspace administrator stop a Team rule and see every Team as manageable', async () => {
+  configureFakeProjectClients(true)
+  const updated: unknown[] = []
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getRule() {
+        return createStoredTeamRule('core-team')
+      },
+      async updateRule(_workspaceId, _ruleId, input) {
+        updated.push(input)
+        return { ...createStoredTeamRule('core-team'), enabled: false }
+      },
+    }),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  const stop = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(stop.status).toBe(200)
+  expect(updated).toHaveLength(1)
+  expect(await scopes.json()).toEqual({ workspace: true, teamIds: ['core-team'] })
+})
+
+test('rejects Team execution actions that reach another Team at run time', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-team-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-team',
+      ruleVersion: 1,
+      ownerTeamId: 'ops-team',
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-team-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const executor = createAutomationActionExecutor()
+
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({ type: 'assign', assigneeMemberKey: 'user#demo@example.com' }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({
+      type: 'create',
+      values: { teamId: 'core-team', title: 'Elsewhere', schedule: createDefaultDueDateWorkItemSchedule('2026-07-20') },
+    }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({ type: 'webhook', url: 'https://hooks.example.com/x' }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  expect(calls.issueUpdates).toHaveLength(0)
+  expect(calls.issueCreates).toHaveLength(0)
+})

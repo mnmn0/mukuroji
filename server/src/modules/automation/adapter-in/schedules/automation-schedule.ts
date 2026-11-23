@@ -398,6 +398,7 @@ async function executeRecurringOccurrence(
     workspaceId: definition.workspaceId,
     ruleId: `recurring:${definition.id}`,
     ruleVersion: definition.version,
+    ...(definition.ownerTeamId === undefined ? {} : { ownerTeamId: definition.ownerTeamId }),
     triggerEventId: event.eventId,
     status: 'pending',
     attempts: 0,

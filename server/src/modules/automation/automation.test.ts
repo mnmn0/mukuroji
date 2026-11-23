@@ -591,6 +591,92 @@ describe('automation management create idempotency', () => {
     expect(disabledRule.actions[0]).toMatchObject({ templateVersion: 2 })
   })
 
+  test('keeps Team definitions on their own Team templates and their owner Team fixed', async () => {
+    const { documentClient } = createIdempotencyDocumentClient()
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const template = (ownerTeamId: string | undefined, teamId?: string) => client.createTemplate('workspace-1', {
+      ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+      kind: 'work-item',
+      name: `Template ${ownerTeamId ?? 'workspace'} ${teamId ?? ''}`,
+      enabled: true,
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Weekly report',
+        ...(teamId === undefined ? {} : { teamId }),
+      },
+    })
+    const coreTemplate = await template('core')
+    const opsTemplate = await template('ops')
+    const workspaceTemplate = await template(undefined)
+    const workspaceOpsTemplate = await template(undefined, 'ops')
+    const rule = (ownerTeamId: string | undefined, templateId: string) => client.createRule('workspace-1', {
+      ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+      name: 'Create a follow-up',
+      enabled: true,
+      trigger: { type: 'status', toStatusId: 'done' },
+      actions: [{ type: 'create', templateId }],
+    })
+    const schedule = {
+      frequency: 'weekly' as const,
+      interval: 1,
+      timeZone: 'Asia/Tokyo',
+      localTime: '17:00',
+      startDate: '2020-01-03',
+      daysOfWeek: [5],
+      catchUpPolicy: 'skip' as const,
+    }
+
+    expect(coreTemplate.ownerTeamId).toBe('core')
+    expect((await rule('core', coreTemplate.id)).ownerTeamId).toBe('core')
+    expect((await rule('core', workspaceTemplate.id)).ownerTeamId).toBe('core')
+    await expect(rule('core', opsTemplate.id)).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    await expect(rule('core', workspaceOpsTemplate.id)).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    await expect(rule(undefined, coreTemplate.id)).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    await expect(template('core', 'ops')).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+
+    const recurring = await client.createRecurringWork('workspace-1', {
+      name: 'Weekly report',
+      teamId: 'core',
+      ownerTeamId: 'core',
+      enabled: true,
+      templateId: coreTemplate.id,
+      schedule,
+    })
+    expect(recurring.ownerTeamId).toBe('core')
+    await expect(client.createRecurringWork('workspace-1', {
+      name: 'Weekly report',
+      teamId: 'ops',
+      ownerTeamId: 'core',
+      enabled: true,
+      templateId: workspaceTemplate.id,
+      schedule,
+    })).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    await expect(client.updateRecurringWork('workspace-1', recurring.id, {
+      expectedRevision: recurring.revision,
+      teamId: 'ops',
+    })).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    await expect(client.updateRecurringWork('workspace-1', recurring.id, {
+      expectedRevision: recurring.revision,
+      templateId: opsTemplate.id,
+    })).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+    const owned = await rule('core', coreTemplate.id)
+    // The update type has no owner field; an HTTP body can still carry one.
+    await expect(client.updateRule('workspace-1', owned.id, Object.assign(
+      { expectedRevision: owned.revision },
+      { ownerTeamId: 'ops' },
+    ))).rejects.toMatchObject({ code: 'InvalidAutomationInput' })
+    const renamed = await client.updateRule('workspace-1', owned.id, {
+      expectedRevision: owned.revision,
+      name: 'Renamed',
+    })
+    expect(renamed.ownerTeamId).toBe('core')
+    const renamedTemplate = await client.updateTemplate('workspace-1', coreTemplate.id, {
+      expectedRevision: coreTemplate.revision,
+      name: 'Renamed template',
+    })
+    expect(renamedTemplate.ownerTeamId).toBe('core')
+  })
+
   test('replays a pinned template application receipt after the current template is paused', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
     const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)

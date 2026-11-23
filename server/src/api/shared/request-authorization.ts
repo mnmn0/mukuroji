@@ -1,3 +1,4 @@
+import { listDelegatedManagementScopes } from './team-delegated-management'
 import {
   type EnterprisePermissionId,
   type EnterpriseRoutePermissionRule,
@@ -2025,6 +2026,36 @@ export async function requireRequestAdministration(c: Context) {
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
   requireWorkspaceAdministration(principal)
   return principal
+}
+
+/**
+ * Authenticates a Request form manager: a Workspace administrator, or a Team manager who
+ * manages the forms scoped to their own Teams (ADR 0087).
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The principal and the form scopes it manages.
+ * @throws RequestIntakeError when the caller manages no form scope.
+ */
+export async function requireRequestFormManagement(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  const scopes = await listDelegatedManagementScopes(principal)
+  if (!scopes.workspace && scopes.teamIds.length === 0) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Workspace owner or admin access, or Team manager access, is required.',
+    )
+  }
+  return {
+    directoryId: principal.directoryId,
+    userKey: principal.userKey,
+    workspace: scopes.workspace,
+    teamIds: scopes.teamIds,
+  }
 }
 
 /**

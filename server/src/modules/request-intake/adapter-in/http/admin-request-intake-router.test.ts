@@ -137,6 +137,10 @@ function createDependencies(
       calls.push({ operation: 'requireAdministration', value: context })
       return principal
     },
+    async requireFormManagement(context) {
+      calls.push({ operation: 'requireFormManagement', value: context })
+      return { ...principal, workspace: true, teamIds: [] }
+    },
     readJson: async (request) => await request.json(),
     async validateFormRoutingReferences(workspaceId: string, draft: RequestFormDraft) {
       calls.push({ operation: 'validateFormRoutingReferences', value: { workspaceId, draft } })
@@ -181,7 +185,7 @@ describe('admin request intake router', () => {
     expect(createResponse.status).toBe(201)
     expect(detailResponse.status).toBe(200)
     expect(updateResponse.status).toBe(200)
-    expect(calls.filter(({ operation }) => operation === 'requireAdministration')).toHaveLength(4)
+    expect(calls.filter(({ operation }) => operation === 'requireFormManagement')).toHaveLength(4)
     expect(calls.find(({ operation }) => operation === 'createForm')?.value).toMatchObject({
       workspaceId: principal.directoryId,
       actor: { id: principal.userKey },
@@ -204,7 +208,7 @@ describe('admin request intake router', () => {
 
     expect(response.status).toBe(200)
     expect(calls.map(({ operation }) => operation)).toEqual([
-      'requireAdministration',
+      'requireFormManagement',
       'getForm',
       'validateFormRoutingReferences',
       'publishForm',
@@ -277,7 +281,7 @@ describe('admin request intake router', () => {
   test('maps authentication failures without calling downstream operations', async () => {
     const failure = new Error('not authorized')
     const { calls, router } = createDependencies({
-      async requireAdministration() {
+      async requireFormManagement() {
         throw failure
       },
       mapError: (context, error) => {
@@ -320,7 +324,7 @@ describe('admin request intake router', () => {
 
     expect(response.status).toBe(409)
     expect(calls.map(({ operation }) => operation)).toEqual([
-      'requireAdministration',
+      'requireFormManagement',
       'getForm',
       'validateFormRoutingReferences',
     ])
@@ -355,9 +359,63 @@ describe('admin request intake router', () => {
     expect(updateResponse.status).toBe(400)
     expect(publishResponse.status).toBe(400)
     expect(calls.map(({ operation }) => operation)).toEqual([
-      'requireAdministration',
-      'requireAdministration',
-      'requireAdministration',
+      'requireFormManagement',
+      'requireFormManagement',
+      'requireFormManagement',
     ])
+  })
+
+  test('limits a Team manager to the forms of their own Teams', async () => {
+    const teamForm: RequestForm = { ...form, id: 'form-team', scope: { type: 'team', teamId: 'core' } }
+    const otherTeamForm: RequestForm = { ...form, id: 'form-other', scope: { type: 'team', teamId: 'ops' } }
+    const forms = new Map([form, teamForm, otherTeamForm].map((entry) => [entry.id, entry]))
+    const { calls, router } = createDependencies({
+      async requireFormManagement() {
+        return { ...principal, workspace: false, teamIds: ['core'] }
+      },
+      mapError: (context, error) => {
+        expect(error).toMatchObject({ code: 'RequestFormScopeDenied', status: 403 })
+        return context.json({ code: 'RequestFormScopeDenied' }, 403)
+      },
+    }, {
+      listForms: async () => ({ forms: [...forms.values()] }),
+      getForm: async (_workspaceId, formId) => forms.get(formId) ?? form,
+    })
+
+    const listResponse = await router.request('/api/request-forms')
+    const ownDetail = await router.request('/api/request-forms/form-team')
+    const otherDetail = await router.request('/api/request-forms/form-other')
+    const workspaceDetail = await router.request('/api/request-forms/form-1')
+    const createWorkspace = await router.request('/api/request-forms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Feedback', scope: { type: 'workspace' }, accessMode: 'public', draft }),
+    })
+    const createOwn = await router.request('/api/request-forms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Feedback', scope: { type: 'team', teamId: 'core' }, accessMode: 'public', draft }),
+    })
+    const moveToOther = await router.request('/api/request-forms/form-team', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 7, scope: { type: 'team', teamId: 'ops' } }),
+    })
+    const publishOther = await router.request('/api/request-forms/form-other/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 7 }),
+    })
+
+    expect(await listResponse.json()).toEqual({ forms: [teamForm] })
+    expect(ownDetail.status).toBe(200)
+    expect(otherDetail.status).toBe(403)
+    expect(workspaceDetail.status).toBe(403)
+    expect(createWorkspace.status).toBe(403)
+    expect(createOwn.status).toBe(201)
+    expect(moveToOther.status).toBe(403)
+    expect(publishOther.status).toBe(403)
+    expect(calls.filter(({ operation }) => operation === 'createForm')).toHaveLength(1)
+    expect(calls.some(({ operation }) => operation === 'updateForm' || operation === 'publishForm')).toBe(false)
   })
 })
