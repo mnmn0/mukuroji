@@ -94,7 +94,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
       }}
       onRetry={() => { void report.mutate().catch(() => undefined) }}
       range={range}
-      renderLink={(path, children) => <Link className="workbench-button" to={path}>{children}</Link>}
+      renderLink={(path, children) => <Link className="workbench-button-secondary inline-flex min-h-9 items-center px-3" to={path}>{children}</Link>}
       t={t}
       {...(report.data ? { report: report.data } : {})}
     />

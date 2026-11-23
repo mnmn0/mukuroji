@@ -390,6 +390,34 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('audit-table')
   })
 
+  test('keys a Project budget by its Team and Project', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}, {}], commands)),
+      { now: () => new Date('2026-08-02T12:00:00.000Z') },
+    )
+
+    await service.saveBudget({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'project',
+      scopeId: 'project-1',
+      amountMinor: 50_000,
+      currency: 'JPY',
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+    await service.getBudget('workspace-1', 'team-2', 'project', 'project-1')
+
+    expect(commands[0]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_BUDGET#project#team-1#project-1' })
+    expect(commands[1]?.input.Item).toMatchObject({
+      recordKey: 'TIME_BUDGET#project#team-1#project-1',
+      teamId: 'team-1',
+      scopeId: 'project-1',
+    })
+    expect(commands[2]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_BUDGET#project#team-2#project-1' })
+  })
+
   test('writes timer start and its audit event in one transaction', async () => {
     const commands: CommandWithInput[] = []
     const service = new TimeTrackingService(

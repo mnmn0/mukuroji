@@ -15,7 +15,7 @@ const meta = {
     range: { from: projectBudgetReportFixture.from, to: projectBudgetReportFixture.to },
     report: projectBudgetReportFixture,
     budgetEditPath: '/teams/core-team/timesheet?view=report',
-    renderLink: (path, children) => <a className="workbench-button" href={path}>{children}</a>,
+    renderLink: (path, children) => <a className="workbench-button-secondary inline-flex min-h-9 items-center px-3" href={path}>{children}</a>,
     onChangeRange: fn(),
     onExport: fn(),
     onRetry: fn(),

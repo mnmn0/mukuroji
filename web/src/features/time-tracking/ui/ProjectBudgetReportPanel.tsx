@@ -67,7 +67,7 @@ export function ProjectBudgetReportPanel({
         <div className="flex flex-wrap items-center gap-2">
           {renderLink(budgetEditPath, t('timeTracking.projectBudget.editBudget'))}
           <button
-            className="workbench-button"
+            className="workbench-button-secondary inline-flex min-h-9 items-center px-3"
             disabled={isExporting || !rangeIsValid}
             type="button"
             onClick={onExport}
@@ -80,7 +80,7 @@ export function ProjectBudgetReportPanel({
         <label className="grid gap-1" htmlFor={`${id}-from`}>
           <span className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.projectBudget.from')}</span>
           <input
-            className="workbench-input"
+            className="workbench-input min-h-9 px-2"
             id={`${id}-from`}
             type="date"
             value={range.from}
@@ -90,7 +90,7 @@ export function ProjectBudgetReportPanel({
         <label className="grid gap-1" htmlFor={`${id}-to`}>
           <span className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.projectBudget.to')}</span>
           <input
-            className="workbench-input"
+            className="workbench-input min-h-9 px-2"
             id={`${id}-to`}
             type="date"
             value={range.to}
@@ -103,7 +103,7 @@ export function ProjectBudgetReportPanel({
       ) : hasLoadError ? (
         <div className="flex flex-wrap items-center gap-3 text-sm" role="alert">
           <span className="font-semibold text-fg-red-700">{t('timeTracking.projectBudget.loadError')}</span>
-          <button className="workbench-button" type="button" onClick={onRetry}>{t('timeTracking.projectBudget.retry')}</button>
+          <button className="workbench-button-secondary inline-flex min-h-9 items-center px-3" type="button" onClick={onRetry}>{t('timeTracking.projectBudget.retry')}</button>
         </div>
       ) : isLoading || !report ? (
         <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.projectBudget.loading')}</p>
@@ -234,7 +234,7 @@ function Figure({ children, label, note, testId }: { children: ReactNode; label:
 }
 
 const WIDTH = 640
-const HEIGHT = 220
+const HEIGHT = 200
 const PADDING_LEFT = 84
 const PADDING = 20
 
@@ -290,7 +290,7 @@ function CumulativeChart({ locale, report, t }: { locale: Locale; report: Projec
         ))}
       </ul>
       <div aria-label={label} className="mt-2" role="img">
-        <svg className="h-auto w-full overflow-visible" viewBox={`0 0 ${WIDTH} ${HEIGHT}`}>
+        <svg className="h-auto max-h-72 w-full overflow-visible" viewBox={`0 0 ${WIDTH} ${HEIGHT}`}>
           <title>{label}</title>
           {[maximum, maximum / 2, 0].map((tick) => (
             <g key={tick}>
