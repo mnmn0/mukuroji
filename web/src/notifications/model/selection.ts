@@ -1,7 +1,23 @@
 import type { InboxNotification } from '../api'
 
-/** Number of per-notification requests a bulk Inbox action keeps in flight at once. */
-export const notificationBulkActionConcurrency = 4
+/** Number of bulk requests, each of up to `NOTIFICATION_BULK_MAXIMUM` notifications, kept in flight at once. */
+export const notificationBulkActionConcurrency = 2
+
+/**
+ * Splits notification IDs into consecutive chunks of at most `size` IDs.
+ *
+ * @param ids - IDs in the order they should be sent.
+ * @param size - Largest chunk; values below 1 are treated as 1.
+ * @returns Chunks that together hold every ID once, in order.
+ */
+export function chunkNotificationIds(ids: readonly string[], size: number) {
+  const chunkSize = Math.max(1, Math.floor(size))
+  const chunks: string[][] = []
+  for (let start = 0; start < ids.length; start += chunkSize) {
+    chunks.push(ids.slice(start, start + chunkSize))
+  }
+  return chunks
+}
 
 /**
  * Resolves the selection against the loaded Inbox list, dropping rows that left it.
