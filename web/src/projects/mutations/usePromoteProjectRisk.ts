@@ -3,7 +3,7 @@ import {
   PROJECT_RAID_TITLE_MAX_LENGTH,
   type CuratedContextItem,
 } from '@mukuroji/contracts'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { useSaveProjectRaidEntry } from './useSaveProjectRaidEntry'
 
@@ -96,11 +96,7 @@ export function usePromoteProjectRisk({
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId: projectId ?? '' })
   const [promotedKeys, setPromotedKeys] = useState<ReadonlySet<string>>(() => new Set())
   const log = useProjectRaidLog(accessToken, teamId, projectId ?? '', projectId !== undefined)
-  const promote = useCallback(async (item: CuratedContextItem) => {
-    if (!teamId || !projectId) return
-    // The destination is fixed when the promotion starts, so one finishing after the Work Item
-    // moved to another Project is remembered for the Project that received it.
-    const key = promotionKey(teamId, projectId, item.id)
+  const runPromotion = useCallback(async (key: string, item: CuratedContextItem) => {
     const description = item.body.trim()
     await save(undefined, {
       kind: 'risk',
@@ -112,7 +108,24 @@ export function usePromoteProjectRisk({
       status: 'open',
     }, `promote-risk:${item.id}`)
     setPromotedKeys((current) => new Set(current).add(key))
-  }, [projectId, save, teamId, workItemId])
+  }, [save, workItemId])
+  // Promotions still running, by promotion key. The decisions tab loses its own pending state when
+  // it remounts, so a second click on the same risk joins the running promotion instead of sending
+  // a new request while the first one waits for the log to reload.
+  const inFlight = useRef(new Map<string, Promise<void>>())
+  const promote = useCallback((item: CuratedContextItem): Promise<void> => {
+    if (!teamId || !projectId) return Promise.resolve()
+    // The destination is fixed when the promotion starts, so one finishing after the Work Item
+    // moved to another Project is remembered for the Project that received it.
+    const key = promotionKey(teamId, projectId, item.id)
+    const running = inFlight.current.get(key)
+    if (running !== undefined) return running
+    const started = runPromotion(key, item).finally(() => {
+      inFlight.current.delete(key)
+    })
+    inFlight.current.set(key, started)
+    return started
+  }, [projectId, teamId, runPromotion])
   const promotedItemIds = useMemo(() => {
     const ids = new Set<string>()
     if (!teamId || !projectId) return ids
