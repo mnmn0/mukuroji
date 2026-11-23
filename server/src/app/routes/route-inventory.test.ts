@@ -9,8 +9,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(554)
-  expect(new Set(inventory).size).toBe(550)
+  expect(inventory).toHaveLength(555)
+  expect(new Set(inventory).size).toBe(551)
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId/decision')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/raid-log')
+  expect(inventory).toContain('POST /api/client-errors')
+  expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
@@ -28,7 +32,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
-  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId/decision')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
   expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
@@ -98,7 +101,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/me')
   expect(inventory).toContain('GET /api/v1/teams')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/members')
-  expect(inventory).toContain('GET /api/v1/projects/:projectId/raid-log')
   expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
@@ -148,6 +150,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '6f54f89067dde5a90658598f7aec79e3a42819481b79110ff2ee25bf2b620994',
+    'a56622d8a09d8e0297c93e3cefcc0b12f6bf8e40c712c72b426bc57aa03cd3f4',
   )
 })
