@@ -964,6 +964,8 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.profileMeta': '正規 owner、リージョン、locale、新規招待の既定 role',
   'workspace.tenantAdministration.owner': 'Workspace owner',
   'workspace.tenantAdministration.region': '管理リージョン',
+  'workspace.tenantAdministration.defaultCurrency': '通貨',
+  'workspace.tenantAdministration.defaultCurrencyHint': '新しい工数の原価・単価表・予算で通貨を指定しないときに使います。保存済みの金額は元の通貨のままです。',
   'workspace.tenantAdministration.locale': 'テナント locale',
   'workspace.tenantAdministration.defaultRole': '既定 member role',
   'workspace.tenantAdministration.fiscalYearStartMonth': '会計年度の開始月',

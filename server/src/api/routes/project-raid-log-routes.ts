@@ -10,7 +10,7 @@ import {
   type ProjectRaidLogCallerAuthorizationCheck,
 } from '../../modules/project-raid-log'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
-import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
@@ -193,7 +193,8 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
  *
  * The owner must be a member of the Project and an active Workspace member; the returned fence
  * fails the write when the owner is deactivated before it commits. Each added Work Item must be
- * one the caller can read and must belong to this Project. Every refusal answers the same 400
+ * one the caller can read and must belong to this Project, and its fence fails the write when the
+ * Work Item is deleted or moved to another Project before it commits. Every refusal answers the same 400
  * whether the Work Item is missing, hidden, or in another Project, so the response does not
  * reveal which Work Items exist.
  *
@@ -201,7 +202,8 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
  * @param teamId - Team that owns the Project.
  * @param projectId - Project whose log is changed.
  * @param references - Owner and added Work Items.
- * @returns The owner's active-member fence, or none when the owner did not change or is the caller.
+ * @returns Fences for the added Work Items and the owner. The owner has none when it did not
+ * change or is the caller.
  * @throws ProjectDataError 400 for a reference that is not allowed, 503 when membership cannot be fenced.
  */
 async function verifyEntryReferences(
@@ -210,6 +212,7 @@ async function verifyEntryReferences(
   projectId: string,
   references: ProjectRaidEntryReferences,
 ): Promise<ProjectRaidLogCallerAuthorizationCheck[]> {
+  const workItemFences: ProjectRaidLogCallerAuthorizationCheck[] = []
   for (const workItemId of references.addedWorkItemIds) {
     let assignedProjectId: string | undefined
     try {
@@ -225,9 +228,10 @@ async function verifyEntryReferences(
         `Related Work Item "${workItemId}" is not a Work Item of this Project.`,
       )
     }
+    workItemFences.push(createRelatedWorkItemConditionCheck(principal.directoryId, teamId, projectId, workItemId))
   }
   const { ownerMemberId } = references
-  if (ownerMemberId === undefined) return []
+  if (ownerMemberId === undefined) return workItemFences
   const notMember = () => new ProjectDataError(
     400,
     'InvalidProjectRaidEntry',
@@ -245,7 +249,7 @@ async function verifyEntryReferences(
   ) {
     // The caller's own membership fence already proves the owner active, and DynamoDB refuses a
     // transaction that checks the same item twice.
-    return []
+    return workItemFences
   }
   const { workspaceAccess } = workspaceDependencies
   if (!workspaceAccess.createActiveMemberConditionCheck) {
@@ -257,7 +261,33 @@ async function verifyEntryReferences(
     ownerMemberId,
   )
   if (!fence) throw notMember()
-  return [fence]
+  return [...workItemFences, fence]
+}
+
+/**
+ * Builds the commit-time check that a related Work Item still exists in this Project.
+ *
+ * @param directoryId - Workspace that owns the Work Item.
+ * @param teamId - Team that owns the Work Item.
+ * @param projectId - Project the Work Item must belong to.
+ * @param workItemId - Related Work Item.
+ * @returns A condition check on the Work Item row.
+ */
+function createRelatedWorkItemConditionCheck(
+  directoryId: string,
+  teamId: string,
+  projectId: string,
+  workItemId: string,
+): ProjectRaidLogCallerAuthorizationCheck {
+  return {
+    ConditionCheck: {
+      TableName: getTeamIssuesTableName(),
+      Key: { directoryTeamId: `${directoryId}#team#${teamId}`, issueId: workItemId },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+      ExpressionAttributeValues: { ':projectId': projectId },
+    },
+  }
 }
 
 /**

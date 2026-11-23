@@ -183,6 +183,10 @@ describe('DynamoDbTenantAdministrationClient', () => {
     // Stored settings that no longer validate fail the read instead of falling back to defaults.
     items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: { ...reminders, reminder: { weekday: 9, hour: 9 } } })
     await expect(client.getProfile('workspace-1')).rejects.toThrow()
+    items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: reminders, defaultCurrency: 'USD' })
+    expect((await client.getProfile('workspace-1'))?.defaultCurrency).toBe('USD')
+    items.set('PROFILE', { ...items.get('PROFILE'), defaultCurrency: 'usd' })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
     items.delete('PROFILE')
     expect(await client.getProfile('workspace-1')).toBeUndefined()
   })

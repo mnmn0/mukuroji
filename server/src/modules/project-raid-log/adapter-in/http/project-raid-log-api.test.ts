@@ -393,7 +393,21 @@ test('fences another owner once and adds no second fence when the caller owns th
   }, 'own-2')
   expect(theirs.status).toBe(201)
   expect(fences).toEqual([other.id])
-  expect(recorded).toHaveLength(2)
+  const { issues } = await dependencies.workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
+  const related = issues.find((issue) => issue.assignedProjectId === projectId)
+  if (!related) throw new Error('The fake Project has no Work Item.')
+  const linked = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Linked', impact: 2, relatedWorkItemIds: [related.id], status: 'open' },
+  }, 'own-3')
+  expect(linked.status).toBe(201)
+  expect(recorded.at(-1)).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      Key: { directoryTeamId: 'user#demo@example.com#team#core-team', issueId: related.id },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeValues: { ':projectId': projectId },
+    }),
+  })
+  expect(recorded).toHaveLength(3)
   for (const checks of recorded) {
     const keys = checks.map((check) => JSON.stringify(check))
     expect(new Set(keys).size).toBe(keys.length)
