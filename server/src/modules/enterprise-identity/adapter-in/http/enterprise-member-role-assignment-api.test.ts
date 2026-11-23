@@ -373,7 +373,7 @@ test('lets an auditor read the audit log but not export it or read Projects', as
   })
 })
 
-test('tells the Web that a Workspace-wide teams.manage role may edit Team settings', async () => {
+test('tells the Web that a Workspace-wide role with teams.manage and members.read may edit Team settings', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(false, { workspaceRole: 'member' })
     const identity = new InMemoryEnterpriseIdentityClient()
@@ -391,6 +391,20 @@ test('tells the Web that a Workspace-wide teams.manage role may edit Team settin
       expect(response.status).toBe(200)
       return response.json()
     }
+    expect(await readMe()).toMatchObject({ canManageTeams: false })
+
+    // The panel lists the Workspace members, so teams.manage alone does not offer it.
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:team-desk',
+      name: 'Team desk',
+      permissions: ['workspace.read', 'teams.manage', 'projects.manage'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    })
+    await assignToFixtureMember(identity, 'custom:team-desk')
     expect(await readMe()).toMatchObject({ canManageTeams: false })
 
     await assignToFixtureMember(identity, 'workspace:admin')
