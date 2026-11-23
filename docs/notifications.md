@@ -222,7 +222,7 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 - 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
 - SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
 
-Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `WebDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
+Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `cdk/cdk.json` の `mukuroji:webDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
 
 ### 宛先と抑止
 
