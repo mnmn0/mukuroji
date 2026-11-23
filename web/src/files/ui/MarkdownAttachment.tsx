@@ -49,6 +49,8 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
   const version = file ? findInlineImageVersion(file) : undefined
   const versionKey = file && version ? `${file.id}:${version.id}` : undefined
   const [access, setAccess] = useState<{ key: string; url?: string; failed: boolean }>()
+  // Bumped once when a loaded URL stops working, for example a lazy image shown after the URL expired.
+  const [reloadCount, setReloadCount] = useState(0)
   const getVersionAccess = attachments?.controller.getVersionAccess
 
   useEffect(() => {
@@ -64,7 +66,7 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
     }
     // The file object changes on every list refresh; the version key is what decides a new URL.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [versionKey, getVersionAccess])
+  }, [versionKey, getVersionAccess, reloadCount])
 
   const t = attachments?.t
   const currentAccess = access?.key === versionKey ? access : undefined
@@ -88,6 +90,14 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
       data-testid={`markdown-attachment-image-${file.id}`}
       decoding="async"
       loading="lazy"
+      onError={() => {
+        if (reloadCount > 0) {
+          setAccess({ failed: true, key: currentAccess.key })
+          return
+        }
+        setAccess(undefined)
+        setReloadCount(1)
+      }}
       referrerPolicy="no-referrer"
       src={currentAccess.url}
     />
