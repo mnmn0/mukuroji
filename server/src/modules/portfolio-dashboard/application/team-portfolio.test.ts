@@ -113,7 +113,7 @@ describe('redactTeamPortfolioSnapshot', () => {
     })
     if (!alpha || !beta) throw new Error('Rows are missing.')
     const snapshot = redactTeamPortfolioSnapshot(
-      { workspaceId: 'w', teamId: 't', month: '2026-11', capturedAt: '2026-11-23T00:00:00.000Z', projects: [alpha, beta] },
+      { workspaceId: 'w', teamId: 't', month: '2026-11', capturedAt: '2026-11-23T00:00:00.000Z', revision: 1, projects: [alpha, beta] },
       (projectId) => projectId === 'alpha',
       () => false,
     )
@@ -176,6 +176,30 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     expect(budgets.get('alpha')).toMatchObject({ actualCostMinor: 12_000, hasOtherCurrencyCost: true })
 
     await expect(service.summarizeProjectBudgets({ ...input, entryLimit: 1 })).rejects.toMatchObject({ status: 413, code: 'PortfolioTooLarge' })
+  })
+
+  test('counts only entries inside each Project budget period toward the limit', async () => {
+    const repository = new InMemoryTimeTrackingRepository()
+    const service = new TimeTrackingService(repository)
+    await repository.saveBudget({
+      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      periodFrom: '2026-01-01', periodTo: '2026-01-31', revision: 1, updatedAt: '2026-01-01T00:00:00.000Z',
+    }, 0)
+    await repository.saveBudget({
+      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'beta', amountMinor: 100_000, currency: 'JPY',
+      periodFrom: '2026-11-01', periodTo: '2026-11-30', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
+    }, 0)
+    await repository.saveEntry(timeEntry('alpha-jan', 'alpha', '2026-01-10T10:00:00.000Z', '2026-01-10T11:00:00.000Z'))
+    for (const day of ['03', '04', '05']) {
+      await repository.saveEntry(timeEntry(`alpha-nov-${day}`, 'alpha', `2026-11-${day}T10:00:00.000Z`, `2026-11-${day}T11:00:00.000Z`))
+    }
+    await repository.saveEntry(timeEntry('beta-nov', 'beta', '2026-11-10T10:00:00.000Z', '2026-11-10T11:00:00.000Z'))
+
+    const budgets = await service.summarizeProjectBudgets({
+      workspaceId: 'w', teamId: 't', projectIds: ['alpha', 'beta'], timeZone: 'UTC', now: new Date('2026-11-23T00:00:00.000Z'), entryLimit: 2,
+    })
+    expect(budgets.get('alpha')).toMatchObject({ actualCostMinor: 6_000 })
+    expect(budgets.get('beta')).toMatchObject({ actualCostMinor: 6_000 })
   })
 })
 

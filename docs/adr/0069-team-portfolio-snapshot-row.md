@@ -25,6 +25,7 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
   6 件ずつ並行に読み、失敗した Team だけを画面で名指しし、ほかの Team は表示を続ける。
 - 上限を超えたら黙って切らずに断る（fail-closed）。Team あたり Project 200 件、Work Item は
   既存の要約 scan の上限、予算期間内の工数は 20,000 件、Workspace あたり Team 100 件まで。
+  工数は予算期間が同じ Project ごとにその期間だけを読み、期間外の工数は上限に数えない。
   超えた場合は API が 413 `PortfolioTooLarge` を返し、Web は Team 数超過を通知して読まない。
 - 返すのは読める Project の指標だけで、読めない Project は `hiddenProjectCount`、費用を見せない
   Project は `costHiddenProjectCount` と各行の `costHidden` で件数だけを返す。
@@ -32,6 +33,9 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
   `TEAM_PORTFOLIO_SNAPSHOT#<encodeURIComponent(teamId)>#<YYYY-MM>`（`entryType:
   team-portfolio-snapshot`、`schemaVersion: 1`）で持つ。行には Project ごとの指標（費用を含む）を
   そのまま入れ、350,000 byte を超える場合は 413 で保存を断る。
+  行は保存のたびに 1 から増える `revision` を持ち、保存は計算の前に読んだ revision の次としてだけ
+  書ける（条件付き Put）。後から始めた保存が先に終わった場合、遅れた方は 409 で断り、新しい snapshot を
+  古い計算で上書きしない。
 - 保存は `PUT /api/teams/:teamId/portfolio/snapshots/:month` で、`teams.manage` の操作として扱い、
   Team 全体を管理している人だけができる。システム管理者か、Team の全 Project を読めて費用も見られる
   工数管理者で、Team への直接の権限があっても読めない Project や費用の見えない Project が1つでもあれば

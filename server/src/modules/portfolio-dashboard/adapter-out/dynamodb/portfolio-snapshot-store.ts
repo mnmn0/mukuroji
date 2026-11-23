@@ -48,12 +48,15 @@ function recordKey(teamId: string, month: string) {
 }
 
 /**
- * Rejects a snapshot larger than one row may store.
+ * Rejects a snapshot with an invalid revision or larger than one row may store.
  *
  * @param snapshot - Snapshot to store.
- * @throws ProjectDataError 413 when it is too large.
+ * @throws ProjectDataError 400 for an invalid revision, and 413 when it is too large.
  */
 function assertSnapshotSize(snapshot: StoredTeamPortfolioSnapshot) {
+  if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1) {
+    throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'The snapshot revision is invalid.')
+  }
   if (
     snapshot.projects.length > PORTFOLIO_TEAM_PROJECT_LIMIT ||
     new TextEncoder().encode(JSON.stringify(snapshot.projects)).length > SNAPSHOT_MAX_BYTES
@@ -148,8 +151,18 @@ export class DynamoDbTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
             teamId: snapshot.teamId,
             month: snapshot.month,
             capturedAt: snapshot.capturedAt,
+            revision: snapshot.revision,
             projects: structuredClone(snapshot.projects),
           },
+          // A capture replaces only the revision it read, so a slower earlier capture cannot
+          // overwrite a newer one.
+          ...(snapshot.revision === 1
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {
+                ConditionExpression: '#revision = :expectedRevision',
+                ExpressionAttributeNames: { '#revision': 'revision' },
+                ExpressionAttributeValues: { ':expectedRevision': snapshot.revision - 1 },
+              }),
         },
       },
       ...input.callerAuthorization,
@@ -190,7 +203,11 @@ export class InMemoryTeamPortfolioSnapshotStore implements TeamPortfolioSnapshot
   async put(input: WriteTeamPortfolioSnapshotInput): Promise<void> {
     assertSnapshotSize(input.snapshot)
     const { snapshot } = input
-    this.snapshots.set(JSON.stringify([snapshot.workspaceId, snapshot.teamId, snapshot.month]), structuredClone(snapshot))
+    const key = JSON.stringify([snapshot.workspaceId, snapshot.teamId, snapshot.month])
+    if ((this.snapshots.get(key)?.revision ?? 0) !== snapshot.revision - 1) {
+      throw snapshotConflict()
+    }
+    this.snapshots.set(key, structuredClone(snapshot))
     this.auditEvents.push({
       eventType: 'team.portfolio_snapshot_saved',
       teamId: snapshot.teamId,
@@ -218,7 +235,7 @@ function parseStoredSnapshot(
   month: string,
   key: string,
 ): StoredTeamPortfolioSnapshot {
-  const { capturedAt, projects } = row
+  const { capturedAt, projects, revision } = row
   if (
     row.workspaceId !== workspaceId ||
     row.recordKey !== key ||
@@ -229,6 +246,9 @@ function parseStoredSnapshot(
     !isPortfolioMonth(row.month) ||
     typeof capturedAt !== 'string' ||
     Number.isNaN(Date.parse(capturedAt)) ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
     !Array.isArray(projects) ||
     projects.length > PORTFOLIO_TEAM_PROJECT_LIMIT
   ) {
@@ -240,7 +260,7 @@ function parseStoredSnapshot(
     if (!project) throw corruptSnapshot()
     parsed.push(project)
   }
-  return { workspaceId, teamId, month, capturedAt, projects: parsed }
+  return { workspaceId, teamId, month, capturedAt, revision, projects: parsed }
 }
 
 /**
@@ -268,7 +288,8 @@ const TRANSIENT_ERROR_NAMES = [
 /**
  * Maps a DynamoDB failure to a Project data error.
  *
- * A transaction cancelled only by failed conditions means the caller's access changed. One
+ * A transaction cancelled only by failed conditions means another save of the month came first
+ * or the caller's access changed. One
  * cancelled by throttling or a competing transaction is retryable, and any other failure is a
  * storage failure.
  *
@@ -289,7 +310,7 @@ function storageFailure(error: unknown, transactionSize = 0): never {
       typeof reason === 'object' && reason !== null && 'Code' in reason ? String(reason.Code) : undefined)
     if (transactionSize > 0 && codes.length === transactionSize) {
       if (codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) {
-        throw new ProjectDataError(409, 'PortfolioSnapshotConflict', 'Your permissions changed. Reload and try again.')
+        throw snapshotConflict()
       }
       if (
         codes.some((code) => code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code)) &&
@@ -302,6 +323,15 @@ function storageFailure(error: unknown, transactionSize = 0): never {
   }
   if (typeof name === 'string' && TRANSIENT_ERROR_NAMES.includes(name)) throw retryableFailure()
   throw new ProjectDataError(502, 'PortfolioSnapshotStorageFailure', 'Portfolio snapshot storage request failed.')
+}
+
+/**
+ * Creates the error for a save that lost to another save of the month or to a permission change.
+ *
+ * @returns The error.
+ */
+function snapshotConflict() {
+  return new ProjectDataError(409, 'PortfolioSnapshotConflict', 'The snapshot or your permissions changed. Reload and try again.')
 }
 
 /**

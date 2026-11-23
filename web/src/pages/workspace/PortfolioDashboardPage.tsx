@@ -2,7 +2,10 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { PORTFOLIO_WORKSPACE_TEAM_LIMIT, previousPortfolioMonth } from '@mukuroji/contracts'
 import { saveTeamPortfolioSnapshot } from '../../features/portfolio-dashboard/api/portfolio'
-import { createPortfolioDashboardModel } from '../../features/portfolio-dashboard/model/portfolioDashboard'
+import {
+  createPortfolioDashboardModel,
+  listPortfolioDashboardErrors,
+} from '../../features/portfolio-dashboard/model/portfolioDashboard'
 import {
   usePortfolioDashboard,
   usePortfolioSnapshots,
@@ -71,6 +74,7 @@ export function PortfolioDashboardPage() {
   const [compareMonth, setCompareMonth] = useState<string | undefined>(() => previousPortfolioMonth(calendar.month))
   const [isSavingSnapshot, setIsSavingSnapshot] = useState(false)
   const [snapshotMessage, setSnapshotMessage] = useState<string>()
+  const [snapshotSaveErrors, setSnapshotSaveErrors] = useState<readonly unknown[]>([])
   const teamIds = useMemo(() => workspace.teams.map((team) => team.id), [workspace.teams])
   const accessToken = workspace.canLoadWorkspaceData ? workspace.accessToken : undefined
   const reads = usePortfolioDashboard(accessToken, teamIds, timeZone, workspace.softwareFactoryEnabled)
@@ -96,15 +100,19 @@ export function PortfolioDashboardPage() {
     if (!token || capturableTeamIds.length === 0) return
     setIsSavingSnapshot(true)
     setSnapshotMessage(undefined)
+    setSnapshotSaveErrors([])
     const failed: string[] = []
+    const errors: unknown[] = []
     for (const teamId of capturableTeamIds) {
       try {
         await saveTeamPortfolioSnapshot(token, teamId, calendar.month, timeZone, createMutationRequestContext())
-      } catch {
+      } catch (error) {
+        errors.push(error)
         failed.push(workspace.teams.find((team) => team.id === teamId)?.name ?? teamId)
       }
     }
     setIsSavingSnapshot(false)
+    setSnapshotSaveErrors(errors)
     const savedCount = capturableTeamIds.length - failed.length
     setSnapshotMessage(failed.length > 0
       ? t('portfolioDashboard.snapshot.failed').replace('{teams}', failed.join(', '))
@@ -112,9 +120,16 @@ export function PortfolioDashboardPage() {
     if (compareMonth === calendar.month) void snapshots.mutate()
   }
 
+  const sessionErrors = [
+    reads.error,
+    planning.error,
+    snapshots.error,
+    ...listPortfolioDashboardErrors(reads.data?.teams ?? [], snapshots.data ?? []),
+    ...snapshotSaveErrors,
+  ]
   const isLoading = workspace.isLoading || (Boolean(accessToken) && reads.data === undefined && !reads.error)
   return (
-    <WorkspaceRouteContent isLoading={isLoading} sessionErrors={[reads.error, planning.error]}>
+    <WorkspaceRouteContent isLoading={isLoading} sessionErrors={sessionErrors}>
       <div className="grid gap-5 px-[clamp(16px,3vw,34px)] py-5">
         {reads.error ? (
           <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">

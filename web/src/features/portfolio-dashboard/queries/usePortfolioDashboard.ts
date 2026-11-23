@@ -56,7 +56,10 @@ export function usePortfolioDashboard(
             (error: unknown) => ({ error }),
           ),
           includeAgentRuns
-            ? getTeamAgentRunBoard(token, teamId).then((value) => ({ value }), () => ({ failed: true }))
+            ? getTeamAgentRunBoard(token, teamId).then(
+                (value) => ({ value }),
+                (error: unknown) => ({ failed: true, error }),
+              )
             : Promise.resolve(undefined),
         ])
         return {
@@ -64,6 +67,7 @@ export function usePortfolioDashboard(
           ...('value' in portfolio ? { portfolio: portfolio.value } : { error: portfolio.error }),
           ...(agentBoard && 'value' in agentBoard ? { agentBoard: agentBoard.value } : {}),
           agentBoardFailed: agentBoard !== undefined && 'failed' in agentBoard,
+          ...(agentBoard && 'error' in agentBoard ? { agentBoardError: agentBoard.error } : {}),
         }
       })
       return { tooManyTeams: false, teams }
@@ -94,8 +98,8 @@ export function usePortfolioSnapshots(
         try {
           const { snapshot } = await getTeamPortfolioSnapshot(token, teamId, currentMonth)
           return { teamId, snapshot, failed: false }
-        } catch {
-          return { teamId, failed: true }
+        } catch (error) {
+          return { teamId, failed: true, error }
         }
       }),
     { revalidateOnFocus: false, shouldRetryOnError: false },

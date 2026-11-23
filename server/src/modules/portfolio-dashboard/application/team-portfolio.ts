@@ -267,6 +267,8 @@ export type StoredTeamPortfolioSnapshot = {
   month: string
   /** Instant of the capture. */
   capturedAt: string
+  /** Number of saves of this month, starting at 1; a save must name the revision it replaces. */
+  revision: number
   /** Rows of every Project the capturing manager could read, with costs they could see. */
   projects: PortfolioProjectMetrics[]
 }
@@ -312,7 +314,11 @@ export function redactTeamPortfolioSnapshot(
 
 /** Snapshot write with the caller's authorization fences and audit context. */
 export type WriteTeamPortfolioSnapshotInput<TCallerCheck, TAudit> = {
-  /** Snapshot to store; it replaces an earlier snapshot of the same month. */
+  /**
+   * Snapshot to store; it replaces the snapshot of the same month whose revision is one less,
+   * or is the first save of the month at revision 1. A capture that read before another save
+   * finished is rejected instead of replacing the newer snapshot.
+   */
   snapshot: StoredTeamPortfolioSnapshot
   /** Checks committed with the write so a caller who lost access cannot save. */
   callerAuthorization: readonly TCallerCheck[]
@@ -332,9 +338,10 @@ export interface TeamPortfolioSnapshotStore<TCallerCheck, TAudit> {
    */
   get(workspaceId: string, teamId: string, month: string): Promise<StoredTeamPortfolioSnapshot | null>
   /**
-   * Stores the snapshot of one month, replacing an earlier one.
+   * Stores the snapshot of one month, replacing the revision before it.
    *
    * @param input - Snapshot, fences, and audit context.
+   * @throws ProjectDataError 409 when another save of the month came first.
    */
   put(input: WriteTeamPortfolioSnapshotInput<TCallerCheck, TAudit>): Promise<void>
 }

@@ -6,6 +6,7 @@ import {
   createPortfolioDashboardCsv,
   createPortfolioDashboardModel,
   evaluatePortfolioDashboardAttention,
+  listPortfolioDashboardErrors,
 } from '../src/features/portfolio-dashboard/model/portfolioDashboard'
 import { PortfolioDashboardView } from '../src/features/portfolio-dashboard/ui/PortfolioDashboardView'
 import type { ProjectDirectoryTeam } from '../src/projects/api'
@@ -154,5 +155,21 @@ describe('PortfolioDashboardView', () => {
     expect(html).toContain('No access')
     expect(html).toContain('data-testid="portfolio-save-snapshot"')
     expect(html).toContain('+30pt since then')
+  })
+})
+
+describe('listPortfolioDashboardErrors', () => {
+  test('keeps every Team read failure so an expired session reaches the Workspace shell', () => {
+    const expired = { status: 401, code: 'EnterpriseSessionExpired' }
+    const boardDenied = { status: 403, code: 'EnterpriseSessionIpDenied' }
+    const snapshotFailure = { status: 502 }
+    expect(listPortfolioDashboardErrors(
+      [
+        { teamId: 'a', error: expired, agentBoardFailed: false },
+        { teamId: 'b', agentBoardFailed: true, agentBoardError: boardDenied },
+        { teamId: 'c', agentBoardFailed: false },
+      ],
+      [{ teamId: 'a', failed: true, error: snapshotFailure }, { teamId: 'b', snapshot: null, failed: false }],
+    )).toEqual([expired, boardDenied, snapshotFailure])
   })
 })

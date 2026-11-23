@@ -123,8 +123,18 @@ export function registerPortfolioRoutes(routeApp: Hono): void {
       if (month !== currentMonth(now, timeZone)) {
         throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'Only the current month can be saved.')
       }
+      // Read the month's revision before the metrics, so a capture that finishes after a newer
+      // save is rejected rather than replacing it.
+      const previous = await workItemDependencies.portfolioSnapshots.get(principal.directoryId, teamId, month)
       const projects = await computeTeamPortfolio(principal, access, timeZone, now)
-      const stored = { workspaceId: principal.directoryId, teamId, month, capturedAt: now.toISOString(), projects }
+      const stored = {
+        workspaceId: principal.directoryId,
+        teamId,
+        month,
+        capturedAt: now.toISOString(),
+        revision: (previous?.revision ?? 0) + 1,
+        projects,
+      }
       await workItemDependencies.portfolioSnapshots.put({
         snapshot: stored,
         callerAuthorization: createPlanningCallerAuthorizationConditionChecks(

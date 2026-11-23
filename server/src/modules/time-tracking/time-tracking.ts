@@ -1737,28 +1737,35 @@ export class TimeTrackingService {
       const to = periodEnd < nowInstant ? periodEnd : nowInstant
       periods.set(projectId, { ...(from === undefined ? {} : { from }), to })
     }
-    const starts = [...periods.values()].map((period) => period.from)
-    // A budget without a start reads every entry; otherwise the read starts at the earliest start.
-    const earliest = starts.includes(undefined)
-      ? undefined
-      : starts.flatMap((start) => start === undefined ? [] : [start]).sort()[0]
-    const readable = [...periods.values()].some((period) => period.from === undefined || period.from < period.to)
-    const entries = !readable
-      ? []
-      : await this.listAllEntries({
-          workspaceId: input.workspaceId,
-          teamId: input.teamId,
-          ...(earliest === undefined ? {} : { from: earliest }),
-          to: nowInstant,
-          projectIds: new Set(budgets.keys()),
-          limit: input.entryLimit + 1,
-        })
-    if (entries.length > input.entryLimit) {
-      throw new TimeTrackingError(
-        413,
-        'PortfolioTooLarge',
-        `This Team has more than ${input.entryLimit} time entries in its Project budget periods.`,
-      )
+    // Projects that share a budget period are read together, and each read covers only its own
+    // period, so entries outside a Project's period neither cost reads nor count toward the limit.
+    const groups = new Map<string, { from?: string; to: string; projectIds: Set<string> }>()
+    for (const [projectId, period] of periods) {
+      if (period.from !== undefined && !(period.from < period.to)) continue
+      const key = `${period.from ?? ''}|${period.to}`
+      const group = groups.get(key) ?? { ...period, projectIds: new Set<string>() }
+      group.projectIds.add(projectId)
+      groups.set(key, group)
+    }
+    const entries: TimeEntry[] = []
+    for (const group of groups.values()) {
+      const remaining = input.entryLimit - entries.length
+      const read = await this.listAllEntries({
+        workspaceId: input.workspaceId,
+        teamId: input.teamId,
+        ...(group.from === undefined ? {} : { from: group.from }),
+        to: group.to,
+        projectIds: group.projectIds,
+        limit: remaining + 1,
+      })
+      if (read.length > remaining) {
+        throw new TimeTrackingError(
+          413,
+          'PortfolioTooLarge',
+          `This Team has more than ${input.entryLimit} time entries in its Project budget periods.`,
+        )
+      }
+      entries.push(...read)
     }
     for (const [projectId, budget] of budgets) {
       const period = periods.get(projectId)

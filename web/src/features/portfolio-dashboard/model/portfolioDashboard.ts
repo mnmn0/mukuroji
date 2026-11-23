@@ -29,6 +29,8 @@ export type TeamPortfolioRead = {
   agentBoard?: TeamAgentRunBoardResponse
   /** Whether the Factory board read failed. */
   agentBoardFailed: boolean
+  /** Failure of the Factory board read, kept so session failures reach the Workspace shell. */
+  agentBoardError?: unknown
 }
 
 /** Result of reading one Team's snapshot of the compared month. */
@@ -39,6 +41,26 @@ export type TeamPortfolioSnapshotRead = {
   snapshot?: TeamPortfolioSnapshot | null
   /** Whether the read failed. */
   failed: boolean
+  /** Failure of the read, kept so session failures reach the Workspace shell. */
+  error?: unknown
+}
+
+/**
+ * Lists every failure the portfolio reads kept, so the Workspace shell can react to an expired
+ * or denied session while each Team's ordinary failure stays a notice on the dashboard.
+ *
+ * @param reads - Team portfolio reads.
+ * @param snapshots - Snapshot reads of the compared month.
+ * @returns The failures, in Team order.
+ */
+export function listPortfolioDashboardErrors(
+  reads: readonly TeamPortfolioRead[],
+  snapshots: readonly TeamPortfolioSnapshotRead[],
+): unknown[] {
+  return [
+    ...reads.flatMap((read) => [read.error, read.agentBoardError].filter((error) => error !== undefined)),
+    ...snapshots.flatMap((read) => read.error === undefined ? [] : [read.error]),
+  ]
 }
 
 /** State of the Workspace portfolio reads. */
