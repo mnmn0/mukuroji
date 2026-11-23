@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
+import { expect, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TaskCalendarView } from './TaskCalendarView'
 import { taskViewStoryTasks } from './TaskView.stories.fixtures'
@@ -54,5 +55,22 @@ export const WorkspaceDaysOff: Story = {
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: ['2026-06-03'],
     },
+  },
+}
+
+/**
+ * Month in a Workspace whose week starts on Sunday: the dates are grouped under Sunday-to-Saturday
+ * week headings, and the first and last weeks show only the dates inside the month.
+ */
+export const SundayWeekStart: Story = {
+  args: {
+    calendarPeriods: { fiscalYearStartMonth: 4, weekStartDay: 0 },
+    month: '2026-06',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('task-calendar-week-2026-05-31')).toBeVisible()
+    await expect(canvas.getByText('2026-06-28 〜 2026-07-04 の週')).toBeVisible()
+    await expect(canvas.queryByTestId('task-calendar-week-2026-06-01')).toBeNull()
   },
 }

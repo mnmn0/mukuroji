@@ -119,5 +119,8 @@ TypeScript のコンパイル生成物は `cdk/dist/` に出力し、ソース�
 - Contracts の変更: `bun run typecheck:contracts`, `bun run dependencies:check`
 - ファイル配置・公開境界・エントリポイントの変更: `bun run dependencies:check`, `bun run knip:check`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
+- 保存済み row の schema version を上げる変更、または既存 row から派生 row を作る変更:
+  `docs/data-migration.md`「新しい schema 変更の PR の確認項目」をそろえ、Floci で
+  `bun run data:migrate` の dry run・`--apply`・`verify` と `bun run data:migrate:rehearsal` を確認する
 
 push 前レビューで指摘が出た場合は、対応してから再度必要な検証と最終 commit に対するレビューを行ってください。

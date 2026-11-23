@@ -146,3 +146,20 @@ export const LinkOnlyRetry: Story = {
     await expect(canvas.getByDisplayValue('見積もりを金曜までに送る')).toBeDisabled()
   },
 }
+
+/**
+ * The owner and deadline saved on the checklist item are selected first.
+ */
+export const SavedOwnerAndDeadline: Story = {
+  args: {
+    defaultAssigneeKey: 'sato@example.com',
+    defaultDueDate: '2026-12-04',
+  },
+  beforeEach: () => installMemberStoryFetch('members'),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement.ownerDocument.body)
+    await expect(await canvas.findByRole('option', { name: '佐藤 一郎' })).toBeInTheDocument()
+    await expect(canvas.getByDisplayValue('佐藤 一郎')).toBeVisible()
+    await expect(canvas.getByDisplayValue('2026-12-04')).toBeVisible()
+  },
+}

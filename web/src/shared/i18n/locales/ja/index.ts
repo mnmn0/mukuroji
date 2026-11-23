@@ -23,6 +23,7 @@ import { codingAgentGuideMessages } from './coding-agent-guide'
 import { agentConnectionMessages } from './agent-connection'
 import { connectorOAuthMessages } from './connector-oauth'
 import { connectorCatalogMessages } from './connector-catalog'
+import { developerPlatformMessages } from './developer-platform'
 import { collectionsMessages } from './collections'
 import { agentSettingsMessages } from './agent-settings'
 import { factoryBoardMessages } from './factory-board'
@@ -60,6 +61,7 @@ export const jaMessages = {
   ...agentConnectionMessages,
   ...connectorOAuthMessages,
   ...connectorCatalogMessages,
+  ...developerPlatformMessages,
   ...collectionsMessages,
   ...agentSettingsMessages,
   ...factoryBoardMessages,

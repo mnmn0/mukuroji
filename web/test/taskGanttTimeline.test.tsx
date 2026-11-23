@@ -5,6 +5,7 @@ import { createDefaultDateRangeTaskSchedule } from '../src/tasks/model/taskSched
 import {
   createTaskGanttScaledColumns,
   isTaskGanttScale,
+  isTaskGanttWeekStartColumn,
   listTaskGanttNonWorkingSpans,
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
@@ -43,6 +44,54 @@ describe('task Gantt timeline scales', () => {
         { endDate: '2027-03-31', label: '2027 Q1', startDate: '2027-01-01' },
       ])
     expect(createTaskGanttScaledColumns(range, 'day').columns).toHaveLength(15)
+  })
+
+  test('starts weeks on the Workspace week start and quarters on the fiscal year start', () => {
+    const periods = { fiscalYearStartMonth: 4, weekStartDay: 0 } as const
+
+    expect(createTaskGanttScaledColumns({ endDate: '2026-12-02', startDate: '2026-11-18' }, 'week', periods)
+      .columns.map((column) => [column.startDate, column.endDate]))
+      .toEqual([
+        ['2026-11-15', '2026-11-21'],
+        ['2026-11-22', '2026-11-28'],
+        ['2026-11-29', '2026-12-05'],
+      ])
+    expect(createTaskGanttScaledColumns({ endDate: '2027-04-10', startDate: '2026-12-15' }, 'quarter', periods).columns)
+      .toEqual([
+        { endDate: '2026-12-31', label: 'FY2026 Q3', startDate: '2026-10-01' },
+        { endDate: '2027-03-31', label: 'FY2026 Q4', startDate: '2027-01-01' },
+        { endDate: '2027-06-30', label: 'FY2027 Q1', startDate: '2027-04-01' },
+      ])
+    expect(createTaskGanttScaledColumns({ endDate: '2026-06-01', startDate: '2026-05-20' }, 'quarter', {
+      fiscalYearStartMonth: 2,
+      weekStartDay: 1,
+    }).columns).toEqual([{ endDate: '2026-07-31', label: 'FY2026 Q2', startDate: '2026-05-01' }])
+    expect(isTaskGanttWeekStartColumn({ endDate: '2026-11-22', startDate: '2026-11-22' }, 0)).toBe(true)
+    expect(isTaskGanttWeekStartColumn({ endDate: '2026-11-22', startDate: '2026-11-22' }, 1)).toBe(false)
+    expect(isTaskGanttWeekStartColumn({ endDate: '2026-11-28', startDate: '2026-11-22' }, 0)).toBe(false)
+  })
+
+  test('marks Workspace week starts in the day header', () => {
+    setSystemTime(new Date('2026-11-20T03:00:00.000Z'))
+    const tasks = [{
+      ...taskViewStoryTasks[0],
+      schedule: createDefaultDateRangeTaskSchedule('2026-11-16', '2026-11-30'),
+    }]
+    const html = renderToStaticMarkup(
+      <TaskGanttView
+        calendarPeriods={{ fiscalYearStartMonth: 4, weekStartDay: 0 }}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        display={{ isCompact: false, scale: 'day', showsProgressLine: false }}
+        t={t}
+        tasks={tasks}
+      />,
+    )
+
+    const weekStarts = [...html.matchAll(/aria-label="(\d{4}-\d{2}-\d{2})"[^>]*data-week-start=""/g)]
+      .map((match) => match[1])
+    expect(weekStarts).toContain('2026-11-22')
+    expect(weekStarts).toContain('2026-11-29')
+    expect(weekStarts).not.toContain('2026-11-23')
   })
 
   test('falls back to a coarser scale when a range needs too many columns', () => {

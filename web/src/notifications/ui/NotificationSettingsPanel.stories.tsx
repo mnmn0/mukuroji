@@ -28,3 +28,31 @@ export const SlackEnabled: Story = {
     },
   },
 }
+/**
+ * Saved category channels and mutes: status changes stay out of Slack, one Project is muted with
+ * approvals still delivered, and a mute for a Project no longer listed can be removed.
+ */
+export const RoutingAndMutes: Story = {
+  args: {
+    controller: {
+      ...notificationPreferencesControllerFixture,
+      preferences: {
+        ...notificationPreferencesControllerFixture.preferences!,
+        channels: { inApp: true, email: false, push: false, slack: true },
+        categoryChannels: { status: { slack: false }, comment: { inApp: false } },
+        mutes: { projectKeys: ['core-team#brand-guideline', 'core-team#archived-project'], teamIds: [], keepMentions: true, keepApprovals: false },
+      },
+    },
+    muteTargets: [
+      {
+        id: 'core-team',
+        name: 'Core',
+        projects: [
+          { id: 'product-roadmap', name: 'Product roadmap' },
+          { id: 'brand-guideline', name: 'Brand guideline' },
+        ],
+      },
+      { id: 'design-team', name: 'Design', projects: [] },
+    ],
+  },
+}

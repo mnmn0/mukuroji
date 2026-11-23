@@ -67,7 +67,42 @@ export const ReviewAndApply: Story = {
     await expect(applyFilters).toHaveBeenCalledWith({
       filters: expect.objectContaining({ statuses: ['todo', 'in-progress'] }),
       report: { groupBy: 'team', metric: 'count' },
-    })
+    }, expect.any(String))
+  },
+}
+
+/** File is not indexed, so it is not offered as a type filter for a new draft. */
+export const HidesUnindexedFileType: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: 'Work Item' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(canvas.queryByRole('button', { name: 'File' })).toBeNull()
+  },
+}
+
+/** A draft that already selected File keeps the chip until the operator clears it. */
+export const ClearsExistingFileSelection: Story = {
+  args: {
+    generation: {
+      ...aiSearchGenerationFixture,
+      content: {
+        ...aiSearchGenerationFixture.content,
+        draft: {
+          ...aiSearchGenerationFixture.content.draft,
+          filters: {
+            ...aiSearchGenerationFixture.content.draft.filters,
+            entityTypes: ['work-item', 'file'],
+          },
+        },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const file = canvas.getByRole('button', { name: 'File' })
+    await expect(file).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(file)
+    await expect(canvas.queryByRole('button', { name: 'File' })).toBeNull()
   },
 }
 

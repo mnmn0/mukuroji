@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type {
   DocumentChecklistBlock,
+  DocumentNode,
   WhiteboardNoteObject,
 } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
@@ -11,6 +12,11 @@ import {
   parseTemplateParticipants,
 } from '../src/documents/model/builtInTemplates'
 import {
+  isChecklistItemOverdue,
+  resolveChecklistAssigneeLabel,
+  updateChecklistItemOwnership,
+} from '../src/documents/model/checklistItems'
+import {
   createChecklistItemWorkItemRelation,
   createDocumentWorkItemRelation,
   createDocumentWorkItemSourceKey,
@@ -18,7 +24,12 @@ import {
   findDocumentWorkItemId,
   findWhiteboardNoteWorkItemId,
 } from '../src/documents/model/checklistWorkItems'
+import {
+  collectOpenActionItems,
+  selectActionItemDocuments,
+} from '../src/documents/model/projectActionItems'
 import { DocumentEditor } from '../src/documents/ui/DocumentEditor'
+import { summarizeProjectOverviewActionItems } from '../src/projects/model/projectOverview'
 import { DocumentHome } from '../src/documents/ui/DocumentHome'
 import { NoteWorkItemAction } from '../src/documents/ui/WhiteboardCanvas'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -270,5 +281,230 @@ describe('Whiteboard notes as Work Items', () => {
     )
 
     expect(html).toBe('')
+  })
+})
+
+describe('checklist item owners and deadlines', () => {
+  const block: DocumentChecklistBlock = {
+    id: 'block-actions',
+    items: [
+      {
+        assigneeMemberKey: 'sato@example.com',
+        checked: false,
+        dueDate: '2026-11-20',
+        id: 'item-owned',
+        text: 'Send the estimate',
+      },
+      { checked: false, id: 'item-open', text: 'Book the review' },
+    ],
+    type: 'checklist',
+  }
+  const assignees = [{ id: 'sato@example.com', label: 'Ichiro Sato' }]
+
+  test('sets and clears the owner and deadline without empty values', () => {
+    const assigned = updateChecklistItemOwnership(block, 'item-open', {
+      assigneeMemberKey: 'yamada@example.com',
+      dueDate: '2026-12-01',
+    })
+    expect(assigned.items[1]).toEqual({
+      assigneeMemberKey: 'yamada@example.com',
+      checked: false,
+      dueDate: '2026-12-01',
+      id: 'item-open',
+      text: 'Book the review',
+    })
+    expect(assigned.items[0]).toBe(block.items[0])
+
+    const cleared = updateChecklistItemOwnership(block, 'item-owned', { dueDate: '' })
+    expect(cleared.items[0]).toEqual({
+      assigneeMemberKey: 'sato@example.com',
+      checked: false,
+      id: 'item-owned',
+      text: 'Send the estimate',
+    })
+    expect(updateChecklistItemOwnership(block, 'item-owned', { assigneeMemberKey: '' }).items[0])
+      .not.toHaveProperty('assigneeMemberKey')
+  })
+
+  test('marks only open items whose deadline has passed as overdue', () => {
+    expect(isChecklistItemOverdue({ checked: false, dueDate: '2026-11-20' }, '2026-11-21')).toBe(true)
+    expect(isChecklistItemOverdue({ checked: false, dueDate: '2026-11-21' }, '2026-11-21')).toBe(false)
+    expect(isChecklistItemOverdue({ checked: true, dueDate: '2026-11-20' }, '2026-11-21')).toBe(false)
+    expect(isChecklistItemOverdue({ checked: false }, '2026-11-21')).toBe(false)
+  })
+
+  test('shows an owner who is no longer offered by the saved member key', () => {
+    expect(resolveChecklistAssigneeLabel(assignees, 'sato@example.com')).toBe('Ichiro Sato')
+    expect(resolveChecklistAssigneeLabel(assignees, 'left@example.com')).toBe('left@example.com')
+    expect(resolveChecklistAssigneeLabel(assignees, undefined)).toBeUndefined()
+  })
+
+  test('offers owner and deadline fields to editors', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('aria-label="Owner of checklist item 1"')
+    expect(html).toContain('aria-label="Due date of checklist item 2"')
+    expect(html).toContain('value="2026-11-20"')
+  })
+
+  test('reports a failed owner read with a reload action', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, onRetryAssignees: () => undefined, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('Reload')
+  })
+
+  test('shows the owner and deadline to read-only viewers', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable={false}
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Owner: Ichiro Sato')
+    expect(html).toContain('Due 2026-11-20')
+    expect(html).not.toContain('Owner of checklist item')
+  })
+})
+
+describe('open action items of a Project', () => {
+  /**
+   * Builds a Project Document node for the selection tests.
+   *
+   * @param id - Document ID.
+   * @param kind - Document kind.
+   * @param updatedAt - Last update time.
+   * @param archivedAt - Archive time, when archived.
+   * @returns Document node.
+   */
+  function node(
+    id: string,
+    kind: DocumentNode['kind'],
+    updatedAt: string,
+    archivedAt?: string,
+  ): DocumentNode {
+    return {
+      capabilities: documentRecordFixture.capabilities,
+      childCount: 0,
+      createdAt: updatedAt,
+      createdByUserId: 'owner',
+      favorite: false,
+      id,
+      kind,
+      position: 'a0',
+      revision: 1,
+      schemaVersion: 1,
+      scope: { projectId: 'refero', type: 'project' },
+      title: id,
+      updatedAt,
+      updatedByUserId: 'owner',
+      ...(archivedAt ? { archivedAt } : {}),
+    }
+  }
+
+  test('reads only active pages, most recently updated first, up to the limit', () => {
+    const selection = selectActionItemDocuments([
+      node('old-page', 'page', '2026-11-01T00:00:00.000Z'),
+      node('template', 'template', '2026-11-20T00:00:00.000Z'),
+      node('new-page', 'page', '2026-11-21T00:00:00.000Z'),
+      node('archived', 'page', '2026-11-22T00:00:00.000Z', '2026-11-22T00:00:00.000Z'),
+      node('folder', 'folder', '2026-11-22T00:00:00.000Z'),
+    ], 1)
+
+    expect(selection.documents.map((document) => document.id)).toEqual(['new-page'])
+    expect(selection.skippedCount).toBe(1)
+  })
+
+  test('collects unchecked items with a deadline first and keeps their Work Item', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const relation = createChecklistItemWorkItemRelation(
+      'actions',
+      'no-deadline',
+      'team/core/issue/ISSUE-2',
+      new Date('2026-11-19T00:00:00Z'),
+    )
+    const items = collectOpenActionItems([{
+      ...documentRecordFixture,
+      blocks: [{
+        id: 'actions',
+        items: [
+          { checked: false, id: 'no-deadline', text: 'Write the summary' },
+          { checked: true, dueDate: '2026-11-01', id: 'done', text: 'Done already' },
+          { checked: false, id: 'blank', text: '  ' },
+          { assigneeMemberKey: 'sato', checked: false, dueDate: '2026-11-30', id: 'late', text: 'Book the room' },
+          { checked: false, dueDate: '2026-11-25', id: 'early', text: 'Send the estimate' },
+        ],
+        type: 'checklist',
+      }],
+      id: 'minutes',
+      relations: [relation],
+      title: 'Minutes',
+    }])
+
+    expect(items.map((item) => item.itemId)).toEqual(['early', 'late', 'no-deadline'])
+    expect(items[1]).toMatchObject({ assigneeMemberKey: 'sato', documentTitle: 'Minutes' })
+    expect(items[2]?.workItemId).toBe('team/core/issue/ISSUE-2')
+  })
+
+  test('shows owner names, overdue deadlines, and what the overview left out', () => {
+    const summary = summarizeProjectOverviewActionItems(
+      [
+        { assigneeMemberKey: 'sato', blockId: 'b', documentId: 'd', documentTitle: 'Minutes', dueDate: '2026-11-20', itemId: '1', text: 'A' },
+        { assigneeMemberKey: 'left', blockId: 'b', documentId: 'd', documentTitle: 'Minutes', itemId: '2', text: 'B' },
+        { blockId: 'b', documentId: 'd', documentTitle: 'Minutes', itemId: '3', text: 'C' },
+      ],
+      { failedDocumentCount: 2, hasMoreDocuments: true, skippedDocumentCount: 0 },
+      [{ email: 'sato@example.com', id: 'sato', name: 'Ichiro Sato', role: 'member', updatedAt: '2026-11-01T00:00:00.000Z', workspaceStatus: 'active' }],
+      '2026-11-21',
+      2,
+    )
+
+    expect(summary.items.map((item) => [item.ownerLabel, item.overdue])).toEqual([
+      ['Ichiro Sato', true],
+      ['left', false],
+    ])
+    expect(summary.hiddenCount).toBe(1)
+    expect(summary.failedDocumentCount).toBe(2)
+    expect(summary.hasUnscannedDocuments).toBe(true)
   })
 })

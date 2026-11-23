@@ -10,7 +10,9 @@ import {
   WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
   WEEKLY_REPORT_REMINDER_EVENT_TYPE,
   createDynamoDbWeeklyReportRosterReader,
+  type ChannelDelivery,
 } from '../../modules/notifications'
+import { toDeliveryProjectionEvent } from './notification-delivery-authorization'
 import { createWeeklyReportReader, createWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
@@ -219,5 +221,49 @@ describe('weekly report reminder adapters', () => {
     })
     expect([...await reader.readSubmittedMembers('workspace-1', 'core', ['a@example.com', 'b@example.com', 'c@example.com'], '2026-11-16')])
       .toEqual(['b@example.com', 'c@example.com'])
+  })
+
+  test('rechecks a queued Slack or Email reminder against the week right before it is sent', async () => {
+    let week: ReturnType<typeof createWeek> | null = createWeek(0)
+    const revalidator = createWeeklyReportReminderRevalidator({ getWeek: async () => week }, 'PlanningTable')
+    const delivery: ChannelDelivery = {
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      recipientKey: 'workspace-1#member@example.com',
+      notificationKey: '2026-11-20T08:00:00.000Z#event-1',
+      attempts: 0,
+      version: 1,
+      nextAttemptAt: '2026-11-20T08:00:00.000Z',
+      expiresAt: 2_000_000_000,
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      weeklyReportWeekStart: '2026-11-16',
+      notification: {
+        id: 'notification-1',
+        eventId: 'event-1',
+        eventType: WEEKLY_REPORT_REMINDER_EVENT_TYPE,
+        reasons: ['weekly-report'],
+        teamId: 'core',
+        projectId: 'platform',
+        occurredAt: '2026-11-20T08:00:00.000Z',
+        state: 'unread',
+      },
+    }
+    const event = toDeliveryProjectionEvent(delivery)
+    expect(event).toMatchObject({
+      teamId: 'core',
+      projectId: 'platform',
+      weeklyReportWeekStart: '2026-11-16',
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      notificationCandidates: [{ memberKey: 'member@example.com', reason: 'weekly-report' }],
+    })
+    expect((await readWeeklyReportReminderFence(event, revalidator)).current).toBe(true)
+    // Submitted while quiet hours or a digest held the message: it is not sent.
+    week = createWeek(1)
+    expect((await readWeeklyReportReminderFence(event, revalidator)).current).toBe(false)
+    week = null
+    // A row saved before the week was kept on it, or a job that cannot reread it, never sends.
+    const { weeklyReportWeekStart: _week, ...legacy } = delivery
+    expect((await readWeeklyReportReminderFence(toDeliveryProjectionEvent(legacy), revalidator)).current).toBe(false)
+    expect((await readWeeklyReportReminderFence(event, undefined)).current).toBe(false)
   })
 })
