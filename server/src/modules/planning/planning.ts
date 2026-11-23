@@ -4458,6 +4458,8 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
       ],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
@@ -4468,6 +4470,14 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
         KeySchema: [
           { AttributeName: 'updateScheduleShard', KeyType: 'HASH' },
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }, {
+        // Matches the CDK Planning table; the Inbox digest worker finds due members here.
+        IndexName: 'InboxDigestDueIndex',
+        KeySchema: [
+          { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+          { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }],

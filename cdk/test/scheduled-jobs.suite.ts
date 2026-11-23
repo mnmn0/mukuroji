@@ -141,3 +141,33 @@ test('lets the national holiday sync write only its shared tenant administration
     },
   });
 });
+
+test('lets the Inbox digest job find due members through its sparse index only', () => {
+  const template = synthesizedTemplate;
+  const functionLogicalId = findScheduledJobsFunctionLogicalId(template);
+  const roleLogicalId: unknown =
+    template.toJSON().Resources[functionLogicalId].Properties.Role['Fn::GetAtt'][0];
+  // The role already holds ten managed policies, so the job's statements are inline.
+  const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+    .filter((policy) => JSON.stringify(policy.Properties.Roles) === JSON.stringify([{ Ref: roleLogicalId }]))
+    .flatMap((policy): unknown[] => policy.Properties.PolicyDocument.Statement);
+
+  expect(JSON.stringify(statements)).toContain('/index/InboxDigestDueIndex');
+  expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
+    .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
+  expect(statements).toContainEqual(expect.objectContaining({
+    Action: ['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem'],
+    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationsTable/u), 'Arn'] },
+  }));
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: {
+      Variables: Match.objectLike({
+        INBOX_DIGEST_WORKER_ENABLED: { Ref: 'InboxDigestDeliveryEnabled' },
+      }),
+    },
+  });
+  expect(template.toJSON().Parameters.InboxDigestDeliveryEnabled).toMatchObject({
+    Default: 'true',
+    AllowedValues: ['true', 'false'],
+  });
+});

@@ -502,6 +502,8 @@ test('planning data uses retained storage with a sparse update schedule due inde
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
       DeletionProtectionEnabled: true,
@@ -510,6 +512,13 @@ test('planning data uses retained storage with a sparse update schedule due inde
         KeySchema: [
           { AttributeName: 'updateScheduleShard', KeyType: 'HASH' },
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }, {
+        IndexName: 'InboxDigestDueIndex',
+        KeySchema: [
+          { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+          { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }],

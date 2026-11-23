@@ -35,6 +35,7 @@
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `InboxDigestDeliveryEnabled` | no | `true`（既定）なら、メンバーが「受信トレイのダイジェスト設定」で同意した Update の日次・週次ダイジェストを scheduled-jobs Lambda が15分おきに受信トレイへ配ります。`false` にすると同意は保存されたまま何も配りません。[ADR 0066](../docs/adr/0066-inbox-digest-scheduled-job.md) を参照してください。 |
 | `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
 | `CognitoEmailSesIdentity` | no | `CognitoEmailSender` を認可する SES の検証済み identity（アドレスかドメイン）。既定値は空で、空なら `CognitoEmailSender` のアドレス自体を使います。ドメインを検証した場合はそのドメインを指定します。 |
 | `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |

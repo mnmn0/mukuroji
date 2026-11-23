@@ -93,6 +93,7 @@ import { DeveloperPlatformError } from '../../modules/developer-platform'
 import {
   authenticationDependencies,
   developerPlatformDependencies,
+  initializeLegacyTenantAdministration,
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
@@ -3035,6 +3036,19 @@ function filterPlanningUpdateTargetSummaryForPrincipal(
   return redacted
 }
 
+/**
+ * Creates the tenant profile of a Workspace that never had one, before a member opts into Inbox
+ * digests. Delivery commits only against an existing active profile, and a Workspace whose
+ * administrators never opened tenant settings or invited anyone has none yet.
+ *
+ * @param workspaceId - Server-resolved Workspace identifier.
+ * @returns Resolves once the profile exists.
+ */
+async function ensureTenantProfileForInboxDigest(workspaceId: string): Promise<void> {
+  if (await workspaceDependencies.tenantAdministration.getProfile(workspaceId)) return
+  await initializeLegacyTenantAdministration(workspaceId)
+}
+
 /** Reuses current background-member and Feed authorization without constructing HTTP requests.
  * @param bindStore - Composition-owned durable store with current caller/tenant fences.
  * @param tenantIsActive - Current tenant lifecycle check; errors propagate.
@@ -3170,13 +3184,14 @@ export function registerPlanningRoutes(routeApp: Hono): void {
     } catch (error) { return toPlanningErrorResponse(c, error) }
   })
 
-  /** Saves delivery consent only; no worker is activated and no notification is sent. */
+  /** Saves delivery consent; the scheduled digest job delivers to members who opted in. */
   routeApp.put('/api/planning/update-feed/digest/inbox', async (c) => {
     const accessToken = readBearerAccessToken(c)
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+      await ensureTenantProfileForInboxDigest(principal.directoryId)
       const store = workItemDependencies.inboxDigestSettings.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
       return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req), workItemDependencies.savedUpdateFeeds))
     } catch (error) { return toPlanningErrorResponse(c, error) }
