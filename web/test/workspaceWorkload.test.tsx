@@ -134,7 +134,7 @@ describe('workload across Teams', () => {
     const html = renderToStaticMarkup(
       <TeamWorkloadView granularity="day" isLoading={false} onGranularityChange={() => {}} onRetry={() => {}} snapshot={snapshot} t={t} />,
     )
-    expect(html).toContain('他 Team を含めて超過')
+    expect(html).toContain('Workspace 全体では超過')
     expect(html).toContain('全 Team の割り当て 10h / キャパシティ 8h')
   })
 })

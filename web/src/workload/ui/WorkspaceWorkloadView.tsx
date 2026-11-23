@@ -121,11 +121,12 @@ export function WorkspaceWorkloadView({
                   </th>
                   {member.cells.map((cell) => (
                     <td className="border-l border-slate-100 px-2 py-2" key={`${member.memberId}-${cell.fromDate}`}>
-                      <div className={`min-h-[58px] rounded-md px-2 py-2 ${cellClass(cell)}`} title={formatCellTitle(cell, teamNames, t)}>
+                      <div className={`min-h-[58px] rounded-md px-2 py-2 ${cellClass(cell)}`}>
                         <span className="block text-sm font-bold text-fg-0d1833">{formatMinutes(cell.allocatedMinutes)}</span>
                         <span className="mt-1 block text-[11px] font-semibold text-fg-526381">
                           {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                         </span>
+                        <CellBreakdown cell={cell} teamNames={teamNames} t={t} />
                       </div>
                     </td>
                   ))}
@@ -164,25 +165,38 @@ function formatMinutes(minutes: number): string {
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`
 }
 
+/** Props of the per-Team breakdown shown inside a heatmap cell. */
+interface CellBreakdownProps {
+  /** Workspace workload cell. */
+  cell: WorkspaceWorkloadCell
+  /** Team names by ID. */
+  teamNames: ReadonlyMap<string, string>
+  /** Translator. */
+  t: (key: MessageKey) => string
+}
+
 /**
- * Lists a cell's allocation per visible Team and the hidden remainder for its title.
+ * Lists a cell's allocation per visible Team and the hidden remainder as visible text, so the
+ * breakdown is readable without hovering.
  *
- * @param cell - Workspace workload cell.
- * @param teamNames - Team names by ID.
- * @param t - Translator.
- * @returns Title text.
+ * @param props - Cell, Team names, and translator.
+ * @returns The breakdown list, or nothing when the cell has no allocation.
  */
-function formatCellTitle(
-  cell: WorkspaceWorkloadCell,
-  teamNames: ReadonlyMap<string, string>,
-  t: (key: MessageKey) => string,
-): string {
-  const parts = [
-    `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')}`,
-    ...cell.teams.map((team) => `${teamNames.get(team.teamId) ?? team.teamId}: ${formatMinutes(team.allocatedMinutes)}`),
-  ]
-  if (cell.hiddenAllocatedMinutes > 0) {
-    parts.push(t('workspaceWorkload.hidden').replace('{hidden}', formatMinutes(cell.hiddenAllocatedMinutes)))
-  }
-  return parts.join(' · ')
+function CellBreakdown({ cell, teamNames, t }: CellBreakdownProps) {
+  const teams = cell.teams.filter((team) => team.allocatedMinutes > 0)
+  if (teams.length === 0 && cell.hiddenAllocatedMinutes <= 0) return null
+  return (
+    <ul className="mt-1 space-y-0.5 text-[11px] font-medium leading-4 text-fg-526381">
+      {teams.map((team) => (
+        <li className="truncate" key={team.teamId}>
+          {teamNames.get(team.teamId) ?? team.teamId}: {formatMinutes(team.allocatedMinutes)}
+        </li>
+      ))}
+      {cell.hiddenAllocatedMinutes > 0 ? (
+        <li className="truncate">
+          {t('workspaceWorkload.hidden').replace('{hidden}', formatMinutes(cell.hiddenAllocatedMinutes))}
+        </li>
+      ) : null}
+    </ul>
+  )
 }

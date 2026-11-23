@@ -477,17 +477,16 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         input.projectIds = await dependencies.getAccessibleProjectIds(principal, team.teamId)
         // Only the caller's own time, whatever the caller manages in the Team.
         input.viewer = { userId: principal.userKey, canManage: false }
-        const [timesheet, entries] = await Promise.all([
-          dependencies.getTimeTracking().createTimesheet(input),
-          dependencies.getTimeTracking().listAllEntries({
-            workspaceId: principal.directoryId,
-            teamId: team.teamId,
-            from: input.from,
-            to: input.to,
-            userId: principal.userKey,
-            ...(input.projectIds ? { projectIds: input.projectIds, includeUnassigned: true } : {}),
-          }),
-        ])
+        // Entries are listed over the normalized period, so date-only bounds follow the time zone.
+        const timesheet = await dependencies.getTimeTracking().createTimesheet(input)
+        const entries = await dependencies.getTimeTracking().listAllEntries({
+          workspaceId: principal.directoryId,
+          teamId: team.teamId,
+          from: timesheet.from,
+          to: timesheet.to,
+          userId: principal.userKey,
+          ...(input.projectIds ? { projectIds: input.projectIds, includeUnassigned: true } : {}),
+        })
         return {
           teamId: team.teamId,
           name: team.name,
@@ -746,6 +745,8 @@ async function runTimesheetAction<Principal extends TimeTrackingPrincipal>(
         actorUserId: principal.userKey,
         canApprove: canManage,
         expectedRevision: requestedRevisions?.get(entry.id) ?? entry.revision,
+        // Binds the transition to the revision whose Project was verified above.
+        authorizedRevision: entry.revision,
         action,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
         ...(input.idempotencyKey === undefined

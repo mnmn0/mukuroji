@@ -71,9 +71,8 @@ function WorkspaceWorkloadSession() {
             failed={Boolean(timesheet.error)}
             isLoading={timesheet.isLoading}
             isSubmitting={submission.isSubmitting}
-            notice={submission.notice}
+            notice={submission.noticeFor(week)}
             onMoveWeek={(weeks) => {
-              submission.clearNotice()
               setParams({ week: shiftWeek(weekStart, weeks, weekStartDay) })
             }}
             onRetry={() => { void timesheet.mutate() }}

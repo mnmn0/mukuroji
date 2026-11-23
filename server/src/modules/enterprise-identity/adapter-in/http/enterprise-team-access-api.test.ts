@@ -256,17 +256,42 @@ test('lets a Team-scoped grant read workload and submit time across its Teams on
     expect(timesheet.status).toBe(200)
     expect((await timesheet.json()).teams.map((team: { teamId: string }) => team.teamId)).toEqual(['core-team'])
 
+    const created = await app.request('/api/teams/core-team/time-entries', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workItemId: 'onboarding-friction',
+        startAt: '2026-08-10T09:00:00.000Z',
+        endAt: '2026-08-10T10:00:00.000Z',
+        billable: false,
+        currency: 'USD',
+      }),
+    })
+    expect(created.status).toBe(201)
+    const draft = (await created.json()).entry
+
     const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
       method: 'POST',
       headers: { Authorization: authorization, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         from: '2026-08-10T00:00:00.000Z',
         to: '2026-08-11T00:00:00.000Z',
-        entries: [{ teamId: 'core-team', entryId: 'entry-1', expectedRevision: 1 }],
+        entries: [{ teamId: 'core-team', entryId: draft.id, expectedRevision: draft.revision }],
       }),
     })
     expect(submitted.status).toBe(200)
-    expect(await submitted.json()).toMatchObject({ teams: [{ teamId: 'core-team' }] })
+    expect(await submitted.json()).toMatchObject({
+      count: 1,
+      failedEntryIds: [],
+      partialFailure: false,
+      teams: [{ teamId: 'core-team', count: 1, failedEntryIds: [] }],
+    })
+
+    const after = await app.request(`/api/time-tracking/my-timesheet?${period}`, {
+      headers: { Authorization: authorization },
+    })
+    const afterTeams: { entries: { id: string; status: string }[] }[] = (await after.json()).teams
+    expect(afterTeams[0]?.entries.find((entry) => entry.id === draft.id)?.status).toBe('submitted')
   })
 })
 

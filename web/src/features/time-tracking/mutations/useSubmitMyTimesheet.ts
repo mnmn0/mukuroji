@@ -13,21 +13,24 @@ import { useRefreshTimeTrackingQueries } from './refreshTimeTrackingQueries'
  * submission succeeded or not.
  *
  * @param accessToken - Bearer token, or undefined while signed out.
- * @returns Submission state, outcome, and the submit and clear actions.
+ * The outcome is kept with the period it was for, so a week reached by any route (buttons,
+ * browser history, or an edited URL) never shows another week's result.
+ *
+ * @returns Submission state, the outcome lookup by period, and the submit action.
  */
 export function useSubmitMyTimesheet(accessToken: string | undefined) {
   const refresh = useRefreshTimeTrackingQueries()
   const [runner] = useState(createMutationRequestRunner)
   const [isSubmitting, setSubmitting] = useState(false)
-  const [notice, setNotice] = useState<MyTimesheetSubmitNotice>()
+  const [outcome, setOutcome] = useState<SubmitOutcome>()
   const submit = useCallback(async (request: MyTimesheetSubmitRequest) => {
     if (!accessToken || isSubmitting) return
     if (request.entries.length === 0) {
-      setNotice({ kind: 'nothing' })
+      setOutcome({ from: request.from, to: request.to, notice: { kind: 'nothing' } })
       return
     }
     setSubmitting(true)
-    setNotice(undefined)
+    setOutcome(undefined)
     try {
       // The server takes at most 500 entries per request, so larger weeks go in batches. Each
       // batch keeps its own retry identity, and a failed batch counts its entries as failed.
@@ -54,13 +57,17 @@ export function useSubmitMyTimesheet(accessToken: string | undefined) {
           partialFailure = true
         }
       }
-      setNotice(failedBatches === batches.length
-        ? { kind: 'error' }
-        : partialFailure
-          ? { kind: 'partial', count, failed }
-          : count === 0 ? { kind: 'nothing' } : { kind: 'submitted', count })
+      setOutcome({
+        from: request.from,
+        to: request.to,
+        notice: failedBatches === batches.length
+          ? { kind: 'error' }
+          : partialFailure
+            ? { kind: 'partial', count, failed }
+            : count === 0 ? { kind: 'nothing' } : { kind: 'submitted', count },
+      })
     } catch {
-      setNotice({ kind: 'error' })
+      setOutcome({ from: request.from, to: request.to, notice: { kind: 'error' } })
     } finally {
       // Stay busy until the timesheet is read again, so a second click cannot send the entries
       // just submitted at their old revisions.
@@ -71,8 +78,22 @@ export function useSubmitMyTimesheet(accessToken: string | undefined) {
       }
     }
   }, [accessToken, isSubmitting, refresh, runner])
-  const clearNotice = useCallback(() => setNotice(undefined), [])
-  return { isSubmitting, notice, submit, clearNotice }
+  const noticeFor = useCallback(
+    (period: { from: string; to: string }): MyTimesheetSubmitNotice | undefined =>
+      outcome && outcome.from === period.from && outcome.to === period.to ? outcome.notice : undefined,
+    [outcome],
+  )
+  return { isSubmitting, noticeFor, submit }
+}
+
+/** Outcome of the last submission together with the period it submitted. */
+interface SubmitOutcome {
+  /** Inclusive start of the submitted period. */
+  from: string
+  /** Exclusive end of the submitted period. */
+  to: string
+  /** Outcome shown for that period. */
+  notice: MyTimesheetSubmitNotice
 }
 
 /** Most entries one cross-Team submit request may name, matching the server limit. */

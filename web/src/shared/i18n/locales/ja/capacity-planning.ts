@@ -90,7 +90,7 @@ export const capacityPlanningMessages = {
   'workload.controls.assignment.preview': 'what-if をプレビュー',
   'workload.controls.assignment.setupFirst': 'アサインを作成・プレビューする前に稼働設定を保存してください。',
   'workload.controls.assignment.previewResult': 'プレビューでは {member} は {capacity} のキャパシティに対して {allocated} 割り当てです。',
-  'workload.crossTeam.over': '他 Team を含めて超過',
+  'workload.crossTeam.over': 'Workspace 全体では超過',
   'workload.crossTeam.title': '全 Team の割り当て {allocated} / キャパシティ {capacity}',
   'workload.crossTeam.link': '全 Team の稼働を見る',
   'workspaceWorkload.eyebrow': '要員',

@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
   type ResourceAssignment,
   type WorkloadMemberProfile,
 } from '@mukuroji/contracts'
+import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import {
   buildWorkloadSnapshot,
   CapacityPlanningService,
+  DynamoDbCapacityPlanningRepository,
   createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningState,
@@ -1063,3 +1066,76 @@ describe('Workspace-wide workload', () => {
     expect(snapshot.members).toEqual([])
   })
 })
+
+describe('DynamoDbCapacityPlanningRepository', () => {
+  test('lists Team states across every Query page', async () => {
+    const requests: Record<string, unknown>[] = []
+    const lastEvaluatedKey = { workspaceId: { S: 'workspace-1' }, recordKey: { S: 'CAPACITY#TEAM#team-a' } }
+    const pages = [
+      { Items: [storedStateItem('team-a')], LastEvaluatedKey: lastEvaluatedKey },
+      { Items: [storedStateItem('team-b')] },
+    ]
+    const lowLevelClient = new DynamoDBClient({
+      credentials: { accessKeyId: 'test-access-key', secretAccessKey: 'test-secret-key' },
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push(readJsonRequestBody(request))
+          const page = pages[requests.length - 1] ?? { Items: [] }
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(page)),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = createDynamoDbDocumentClient(lowLevelClient)
+    try {
+      const repository = new DynamoDbCapacityPlanningRepository('capacity-table', documentClient)
+
+      const states = await repository.listStates('workspace-1')
+
+      expect(states.map((state) => state.teamId)).toEqual(['team-a', 'team-b'])
+      expect(requests).toHaveLength(2)
+      expect(requests[0]?.ExclusiveStartKey).toBeUndefined()
+      expect(requests[1]?.ExclusiveStartKey).toEqual(lastEvaluatedKey)
+    } finally {
+      documentClient.destroy()
+    }
+  })
+})
+
+/** Encodes an empty stored Team state as a low-level DynamoDB item. */
+function storedStateItem(teamId: string): Record<string, unknown> {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `CAPACITY#TEAM#${teamId}` },
+    revision: { N: '1' },
+    profiles: { L: [] },
+    requests: { L: [] },
+    assignments: { L: [] },
+  }
+}
+
+/** Parses the JSON body of an AWS SDK request. */
+function readJsonRequestBody(request: unknown): Record<string, unknown> {
+  if (!isRecord(request)) throw new TypeError('Expected an AWS SDK request object.')
+  const body = Reflect.get(request, 'body')
+  const text = typeof body === 'string'
+    ? body
+    : body instanceof Uint8Array
+      ? new TextDecoder().decode(body)
+      : undefined
+  if (text === undefined) throw new TypeError('Expected an AWS SDK request body.')
+  const parsed: unknown = JSON.parse(text)
+  if (!isRecord(parsed)) throw new TypeError('Expected an AWS SDK JSON request body.')
+  return parsed
+}
+
+/** Returns whether an unknown value is a non-array object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

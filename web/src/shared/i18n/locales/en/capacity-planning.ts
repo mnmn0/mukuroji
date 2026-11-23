@@ -90,7 +90,7 @@ export const capacityPlanningMessages = {
   'workload.controls.assignment.preview': 'Preview what-if',
   'workload.controls.assignment.setupFirst': 'Save an availability profile before creating or previewing an assignment.',
   'workload.controls.assignment.previewResult': '{member}: {allocated} allocated against {capacity} capacity in the preview.',
-  'workload.crossTeam.over': 'Over with other Teams',
+  'workload.crossTeam.over': 'Over across the Workspace',
   'workload.crossTeam.title': 'All Teams: {allocated} allocated of {capacity} capacity',
   'workload.crossTeam.link': 'See workload across Teams',
   'workspaceWorkload.eyebrow': 'People',
