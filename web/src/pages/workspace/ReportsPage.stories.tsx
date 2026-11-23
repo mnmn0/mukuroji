@@ -385,6 +385,26 @@ export const Empty: Story = {
 }
 
 /**
+ * report がまだなく、自分への配信も読み込めなかった状態です。空の案内の下で再試行できます。
+ */
+export const EmptyDeliveriesFailed: Story = {
+  args: {
+    deliveriesFailed: true,
+    filter: analyticsFilterFixture,
+    onRetryDeliveries: fn(),
+    reports: [],
+    selectedReportId: undefined,
+    snapshot: undefined,
+    widgets: [],
+  },
+  play: async ({ args, canvasElement }) => {
+    const error = within(canvasElement).getByTestId('analytics-deliveries-error')
+    await userEvent.click(within(error).getByRole('button'))
+    await expect(args.onRetryDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
  * Report と analytics query の初回 loading state です。
  */
 export const Loading: Story = {

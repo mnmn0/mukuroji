@@ -569,8 +569,10 @@ export function AnalyticsWorkbench({
   if (showEmptyState) {
     return (
       <AnalyticsEmptyState
+        deliveriesFailed={deliveriesFailed}
         t={t}
         onCreateBlank={onCreateBlank}
+        onRetryDeliveries={onRetryDeliveries}
         onStartExample={onStartExample}
       />
     )
@@ -915,12 +917,27 @@ export function AnalyticsWorkbench({
   )
 }
 
+/**
+ * Shows the first-run screen of a Workspace without reports, with any delivery-list failure.
+ *
+ * @param props - Empty state props.
+ * @param props.deliveriesFailed - Whether the delivery list failed to load.
+ * @param props.onCreateBlank - Starts a blank report.
+ * @param props.onRetryDeliveries - Loads the delivery list again.
+ * @param props.onStartExample - Starts the example report.
+ * @param props.t - Translator.
+ * @returns The empty state.
+ */
 function AnalyticsEmptyState({
+  deliveriesFailed,
   onCreateBlank,
+  onRetryDeliveries,
   onStartExample,
   t,
 }: {
+  deliveriesFailed?: boolean
   onCreateBlank?: () => void
+  onRetryDeliveries?: () => void
   onStartExample?: () => void
   t: ReturnType<typeof createTranslator>
 }) {
@@ -944,6 +961,16 @@ function AnalyticsEmptyState({
               {t('analytics.empty.create')}
             </button>
           </div>
+          {deliveriesFailed ? (
+            <p className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs font-medium text-fg-red-800" data-testid="analytics-deliveries-error" role="alert">
+              {t('analytics.deliveries.error')}
+              {onRetryDeliveries ? (
+                <button className="underline underline-offset-2" type="button" onClick={onRetryDeliveries}>
+                  {t('analytics.action.retry')}
+                </button>
+              ) : null}
+            </p>
+          ) : null}
         </div>
         <div className="grid grid-cols-3 gap-px bg-[var(--workbench-border)] text-left max-[680px]:grid-cols-1">
           {[

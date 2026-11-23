@@ -4582,7 +4582,8 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
           ? [{ recordKey, delivery }]
           : []
       })
-      .sort((left, right) => right.recordKey.localeCompare(left.recordKey))
+      // Sort by code unit, like DynamoDB and the cursor boundary below, not by locale.
+      .sort((left, right) => compareRecordKeysDescending(left.recordKey, right.recordKey))
       .filter((row) => query.after === undefined || row.recordKey < query.after)
     const page = rows.slice(0, query.limit)
     const last = page.at(-1)
@@ -5265,11 +5266,12 @@ function readStoredRecipientDelivery(value: Record<string, unknown>): AnalyticsR
     typeof value.reportId !== 'string' ||
     typeof value.snapshotId !== 'string' ||
     (value.format !== 'csv' && value.format !== 'pdf') ||
-    typeof value.deliveredAt !== 'string'
+    typeof value.deliveredAt !== 'string' ||
+    typeof value.recordKey !== 'string'
   ) {
     throw persistenceInvalid('Stored Analytics recipient delivery row is invalid.')
   }
-  return normalizeRecipientDelivery({
+  const delivery = normalizeRecipientDelivery({
     workspaceId: value.workspaceId,
     recipientMemberKey: value.recipientMemberKey,
     reportId: value.reportId,
@@ -5277,6 +5279,24 @@ function readStoredRecipientDelivery(value: Record<string, unknown>): AnalyticsR
     format: value.format,
     deliveredAt: value.deliveredAt,
   })
+  // A row whose fields name another recipient than its key would leak into the wrong list.
+  if (createRecipientDeliveryRecordKey(delivery) !== value.recordKey) {
+    throw persistenceInvalid('Stored Analytics recipient delivery row does not match its key.')
+  }
+  return delivery
+}
+
+/**
+ * Orders record keys newest first by UTF-16 code unit, the order DynamoDB sorts keys in and the
+ * order the cursor boundary uses.
+ *
+ * @param left - First record key.
+ * @param right - Second record key.
+ * @returns A negative number when `left` sorts first.
+ */
+function compareRecordKeysDescending(left: string, right: string) {
+  if (left === right) return 0
+  return left > right ? -1 : 1
 }
 
 /**

@@ -858,6 +858,8 @@ export function ReportsPage() {
           onOpenDelivery={(delivery) => {
             const report = reports.find((item) => item.id === delivery.reportId)
             if (!report) return
+            // Evidence belongs to the report on screen; drop it and its request before switching.
+            closeEvidence()
             setHasStartedAdHoc(false)
             commitRouteState({
               asOf: undefined,

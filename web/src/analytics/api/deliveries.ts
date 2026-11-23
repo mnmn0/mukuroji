@@ -14,6 +14,7 @@ const defaultAnalyticsApiErrorMessage = 'Unable to complete the analytics reques
  * @param cursor - Cursor of the previous page.
  * @param signal - Signal that aborts the request.
  * @returns The deliveries of reports the user can read now, and the next cursor.
+ * @throws AnalyticsApiError when the request fails or the response is malformed.
  */
 export async function getAnalyticsDeliveries(
   accessToken: string,
@@ -41,12 +42,13 @@ export async function getAnalyticsDeliveries(
       typeof record.code === 'string' ? record.code : undefined,
     )
   }
-  const deliveries = Array.isArray(record.deliveries)
-    ? record.deliveries.flatMap((value) => {
-        const delivery = readAnalyticsDelivery(value)
-        return delivery === undefined ? [] : [delivery]
-      })
-    : []
+  // A malformed success response is a failure, so the page shows its retry instead of an empty list.
+  if (!Array.isArray(record.deliveries)) throw invalidDeliveriesResponse()
+  const deliveries = record.deliveries.map((value) => {
+    const delivery = readAnalyticsDelivery(value)
+    if (delivery === undefined) throw invalidDeliveriesResponse()
+    return delivery
+  })
   return {
     deliveries,
     ...(typeof record.nextCursor === 'string' && record.nextCursor
@@ -56,7 +58,20 @@ export async function getAnalyticsDeliveries(
 }
 
 /**
- * Reads one delivery from the response, leaving out malformed entries.
+ * Creates the error for a success response that does not hold a valid delivery list.
+ *
+ * @returns The error to throw.
+ */
+function invalidDeliveriesResponse() {
+  return new AnalyticsApiError(
+    502,
+    'Analytics API returned an invalid response.',
+    'InvalidAnalyticsResponse',
+  )
+}
+
+/**
+ * Reads one delivery from the response.
  *
  * @param value - Response entry.
  * @returns The delivery, or undefined when the entry is malformed.

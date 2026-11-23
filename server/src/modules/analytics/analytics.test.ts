@@ -2663,6 +2663,52 @@ describe('Analytics repository', () => {
     expect([...fake.rows.values()].every((row) => !String(row.recordKey).includes('@'))).toBeTrue()
   })
 
+  test('pages recipient deliveries in key order when report IDs differ only in case', async () => {
+    const fake = createDynamoDocumentClient()
+    for (const repository of [
+      new InMemoryAnalyticsRepository(),
+      new DynamoDbAnalyticsRepository('analytics-table', fake.client),
+    ]) {
+      for (const reportId of ['a', 'B']) {
+        await repository.putRecipientDelivery({
+          workspaceId: 'workspace-1',
+          recipientMemberKey: 'sato@example.com',
+          reportId,
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-01-12T00:00:00.000Z',
+        })
+      }
+      const first = await repository.listRecipientDeliveries('workspace-1', 'sato@example.com', 1)
+      const second = await repository.listRecipientDeliveries(
+        'workspace-1',
+        'sato@example.com',
+        1,
+        first.nextCursor,
+      )
+      expect([...first.deliveries, ...second.deliveries].map((item) => item.reportId).sort())
+        .toEqual(['B', 'a'])
+    }
+  })
+
+  test('rejects a stored delivery row whose recipient does not match its key', async () => {
+    const fake = createDynamoDocumentClient()
+    const repository = new DynamoDbAnalyticsRepository('analytics-table', fake.client)
+    await repository.putRecipientDelivery({
+      workspaceId: 'workspace-1',
+      recipientMemberKey: 'sato@example.com',
+      reportId: 'weekly',
+      snapshotId: 'snapshot-1',
+      format: 'pdf',
+      deliveredAt: '2026-01-12T00:00:00.000Z',
+    })
+    for (const row of fake.rows.values()) {
+      if (row.entryType === 'analytics-delivery-recipient') row.recipientMemberKey = 'kato@example.com'
+    }
+    await expect(repository.listRecipientDeliveries('workspace-1', 'sato@example.com', 10))
+      .rejects.toMatchObject({ code: 'AnalyticsPersistenceInvalid' })
+  })
+
   test('continues due pages by key when processed reports leave the due set', async () => {
     const repository = new InMemoryAnalyticsRepository(
       () => new Date('2026-01-08T00:00:00.000Z'),

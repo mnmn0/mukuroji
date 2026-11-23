@@ -330,7 +330,7 @@ describe('Analytics API', () => {
 })
 
 describe('Analytics deliveries API', () => {
-  test('reads the caller\'s deliveries and leaves out malformed entries', async () => {
+  test('reads the caller\'s deliveries', async () => {
     const requests = installFetchRecorder(() => ({
       deliveries: [
         {
@@ -340,7 +340,6 @@ describe('Analytics deliveries API', () => {
           format: 'pdf',
           deliveredAt: '2026-07-13T00:00:00.000Z',
         },
-        { reportId: 'broken' },
       ],
       nextCursor: 'next-page',
     }))
@@ -355,6 +354,21 @@ describe('Analytics deliveries API', () => {
       nextCursor: 'next-page',
     })
     expect(requests[0]?.url).toContain('/analytics/deliveries?limit=20&cursor=cursor-1')
+  })
+
+  test('accepts an empty list', async () => {
+    installFetchRecorder(() => ({ deliveries: [] }))
+    expect(await getAnalyticsDeliveries('token-1')).toEqual({ deliveries: [] })
+  })
+
+  test('fails instead of showing an empty list when the response is malformed', async () => {
+    for (const body of [{}, { deliveries: [{ reportId: 'broken' }] }, 'not json']) {
+      installFetchRecorder(() => body)
+      await expect(getAnalyticsDeliveries('token-1')).rejects.toMatchObject({
+        status: 502,
+        code: 'InvalidAnalyticsResponse',
+      })
+    }
   })
 })
 
