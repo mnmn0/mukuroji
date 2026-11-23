@@ -39,6 +39,8 @@ export type TaskViewOption = {
   isPersonalDefault: boolean
   /** Whether the view is the default for its Team scope. */
   isTeamDefault: boolean
+  /** Whether the view is the default for its Project scope. */
+  isProjectDefault: boolean
   /** Human-readable saved-view name. */
   name: string
   /** Whether the current user has pinned the view. */
@@ -69,6 +71,8 @@ export type TaskViewPreferencePatch = {
   isDefault?: boolean
   /** Next Team-default preference. */
   isTeamDefault?: boolean
+  /** Next Project-default preference. */
+  isProjectDefault?: boolean
   /** Next pin preference. */
   pinned?: boolean
 }
@@ -87,6 +91,8 @@ export type TaskViewToolbarProps = {
   builtInName: string
   /** Whether the current viewer may assign a Team default in this resource scope. */
   canSetTeamDefault?: boolean
+  /** Whether the current viewer may assign a Project default in this Project scope. */
+  canSetProjectDefault?: boolean
   /** Whether the current user may create saved views. */
   canWrite: boolean
   /** Whether the current user may create Workspace-shared views. */
@@ -105,6 +111,11 @@ export type TaskViewToolbarProps = {
   supportsSubtasks?: boolean
   /** Whether the active layout renders grouping, columns, density, and wrapping. */
   supportsLayoutPresentation?: boolean
+  /**
+   * Whether the toolbar offers its display settings panel. A surface that has its own filter and
+   * layout controls turns it off and keeps only the saved-view lifecycle.
+   */
+  supportsSettings?: boolean
   /** Whether the current surface implements J/K and range-selection shortcuts. */
   supportsKeyboardSelection?: boolean
   /** Whether the active table can render persisted column width and pin metadata. */
@@ -162,6 +173,7 @@ export function TaskViewToolbar({
   builtInName,
   canManageShared,
   canSetTeamDefault = false,
+  canSetProjectDefault = false,
   canWrite,
   columnOptions,
   errorMessage,
@@ -170,6 +182,7 @@ export function TaskViewToolbar({
   requiredColumnIds = ['title'],
   supportsSubtasks = false,
   supportsLayoutPresentation = true,
+  supportsSettings = true,
   supportsKeyboardSelection = false,
   supportsColumnLayoutMetadata = false,
   supportsEmptyGroups = false,
@@ -218,6 +231,7 @@ export function TaskViewToolbar({
     <section
       className="workbench-panel mb-3 overflow-visible"
       data-can-set-team-default={canSetTeamDefault ? 'true' : 'false'}
+      data-can-set-project-default={canSetProjectDefault ? 'true' : 'false'}
       data-testid="task-view-toolbar"
     >
       <div className="grid gap-2 px-3 py-2.5 sm:flex sm:flex-wrap sm:items-center sm:justify-between">
@@ -326,7 +340,7 @@ export function TaskViewToolbar({
             {copied ? <CheckIcon className="h-4 w-4 text-[var(--workbench-primary-text)]" />
               : <CopyIcon className="h-4 w-4" />}
           </button>
-          <button
+          {supportsSettings ? <button
             aria-expanded={isSettingsOpen}
             className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-semibold transition ${
               isSettingsOpen
@@ -338,7 +352,7 @@ export function TaskViewToolbar({
           >
             <SlidersIcon className="h-4 w-4" />
             {t('taskViews.settings')}
-          </button>
+          </button> : null}
           {canWrite && selectedView ? (
             <Popover
               align="right"
@@ -394,6 +408,16 @@ export function TaskViewToolbar({
                     }))}
                   />
                 ) : null}
+                {selectedView.visibility === 'team' && canSetProjectDefault ? (
+                  <TaskViewPreferenceButton
+                    active={selectedView.isProjectDefault}
+                    disabled={isSaving}
+                    label={t('taskViews.projectDefault')}
+                    onClick={() => runToolbarAction(() => onPatchPreference(selectedView.id, {
+                      isProjectDefault: !selectedView.isProjectDefault,
+                    }))}
+                  />
+                ) : null}
                 <TaskViewPreferenceButton
                   disabled={isSaving}
                   label={t('search.saved.clone')}
@@ -445,7 +469,7 @@ export function TaskViewToolbar({
           </ul>
         </div>
       ) : null}
-      {isSettingsOpen ? (
+      {supportsSettings && isSettingsOpen ? (
         <TaskViewSettingsPanel
           columnOptions={columnOptions}
           groupOptions={groupOptions}
@@ -1359,6 +1383,7 @@ function formatViewMeta(view: TaskViewOption, t: (key: MessageKey) => string): s
   const parts = [t(`search.saved.${view.visibility}`)]
   if (view.isPersonalDefault) parts.push(t('search.saved.default'))
   if (view.isTeamDefault) parts.push(t('taskViews.teamDefault'))
+  if (view.isProjectDefault) parts.push(t('taskViews.projectDefault'))
   return parts.join(' · ')
 }
 
