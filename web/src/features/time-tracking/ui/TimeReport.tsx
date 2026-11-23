@@ -1,7 +1,6 @@
 import {
   NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
-  isBuiltInTimeEntryCategory,
   type TimeSummaryGroup,
   type TimeTrackingGroupBy,
   type TimeTrackingSummary,
@@ -11,12 +10,13 @@ import type { Locale } from '../../../shared/i18n/i18n'
 import { formatCostsByCurrency, isTimeReportRangeOrdered, timeReportGroupings, type TimeReportRange } from '../model/timeReport'
 import { formatMinutes } from '../model/timePeriod'
 import {
+  describeTimeEntryCategory,
   describeTimeTrackingFailure,
   interpolate,
-  timeEntryCategoryKeys,
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Display names used to label report rows keyed by an identifier. */
 export type TimeReportLabels = {
@@ -96,6 +96,7 @@ export function TimeReport({
   const id = useId()
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string>()
+  const categories = useTimeEntryCategories()
   const ordered = isTimeReportRangeOrdered(range)
   const showCosts = summary !== undefined && !summary.costsRedacted
   // Members get only their own time, except Work Item totals that every viewer of the Work Item reads.
@@ -122,12 +123,14 @@ export function TimeReport({
       case 'work-item':
         if (group.key === NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.noWorkItem')
         return labels.workItems[group.key] ?? group.label
-      case 'category':
+      case 'category': {
         if (group.key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.category.uncategorized')
-        // The server labels a category with the name the Workspace gave it, or with its key.
-        return group.label === group.key && isBuiltInTimeEntryCategory(group.key)
-          ? t(timeEntryCategoryKeys[group.key])
-          : group.label
+        // The Workspace settings say whether a category was named; a built-in one without a name
+        // is translated, even when its key happens to equal a name. A key the loaded settings do
+        // not know keeps the name the server gave it.
+        const name = describeTimeEntryCategory(t, group.key, categories)
+        return name === group.key ? group.label : name
+      }
     }
   }
 

@@ -1908,9 +1908,7 @@ export class TimeTrackingService {
     }
     if (policy.dailyLimit !== 'off') {
       for (let date = firstDate; date <= lastDate; date = addCalendarDays(date, 1)) {
-        const dayStart = resolveLocalDateStart(date, timeZone)
-        const dayEnd = resolveLocalDateStart(addCalendarDays(date, 1), timeZone)
-        const minutes = [...others, entry].reduce((total, candidate) => total + overlapMinutes(candidate, dayStart, dayEnd), 0)
+        const minutes = [...others, entry].reduce((total, candidate) => total + entryMinutesOnDate(candidate, date, timeZone), 0)
         if (minutes <= policy.dailyLimitMinutes) continue
         if (policy.dailyLimit === 'reject') {
           throw new TimeTrackingError(409, 'TimeEntryDailyLimitExceeded', `Time on ${date} would exceed the Team's daily limit of ${policy.dailyLimitMinutes} minutes.`)
@@ -2825,7 +2823,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       Key: { workspaceId, recordKey: `${ENTRY_POLICY_PREFIX}${teamId}` },
       ConsistentRead: true,
     }))
-    return response.Item ? readStoredEntryPolicy(response.Item) : undefined
+    if (!response.Item) return undefined
+    const policy = readStoredEntryPolicy(response.Item)
+    if (policy.workspaceId !== workspaceId || policy.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry policy scope does not match the requested key.')
+    }
+    return policy
   }
 
   /** Saves a Team time entry policy with optimistic concurrency, its audit event, and receipt. */
@@ -4127,16 +4130,17 @@ function toAuditEntryPolicySnapshot(policy: TeamTimeEntryPolicy & { revision: nu
 }
 
 /**
- * Counts the minutes of an entry inside a time window, rounded the way reports count them, so a
- * daily total matches the time the report shows for that day.
+ * Counts the minutes an entry adds to one local date, split the way reports split it, so a daily
+ * total matches the time the report shows for that day, also for an entry that crosses midnight.
  *
  * @param entry - Entry to count.
- * @param windowStart - Window start in epoch milliseconds.
- * @param windowEnd - Window end in epoch milliseconds.
- * @returns Whole minutes of overlap, with a started minute counted as a whole one.
+ * @param date - Local date (`YYYY-MM-DD`).
+ * @param timeZone - Time zone that defines the date.
+ * @returns Whole minutes on that date, with a started minute of the entry counted as a whole one.
  */
-function overlapMinutes(entry: TimeEntry, windowStart: number, windowEnd: number): number {
-  return clippedEntryMinutes(entry, new Date(windowStart).toISOString(), new Date(windowEnd).toISOString())
+function entryMinutesOnDate(entry: TimeEntry, date: string, timeZone: string): number {
+  return splitEntryByLocalDate(entry, timeZone, entry.startAt, entry.endAt)
+    .find((segment) => segment.date === date)?.minutes ?? 0
 }
 
 function readStoredBudget(value: unknown): TimeBudget {

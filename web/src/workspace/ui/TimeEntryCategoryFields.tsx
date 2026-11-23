@@ -142,7 +142,8 @@ export function TimeEntryCategoryFields({ settings, disabled, onChange, t }: Tim
           maxLength={MAX_TIME_ENTRY_CATEGORY_LABEL_LENGTH}
           onChange={(event) => setNewLabel(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') {
+            // Enter that confirms an IME conversion does not add the category.
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
               event.preventDefault()
               add()
             }

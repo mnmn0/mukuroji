@@ -577,6 +577,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       {},
       { Item: { ...stored, recordKey: 'TIME_POLICY#team-1' } },
       { Item: { ...stored, overlap: 'block', recordKey: 'TIME_POLICY#team-1' } },
+      { Item: { ...stored, teamId: 'team-2', recordKey: 'TIME_POLICY#team-1' } },
     ], commands))
 
     await repository.saveEntryPolicy({ ...stored }, 0)
@@ -584,6 +585,9 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(commands[0]?.input.ConditionExpression).toBe('attribute_not_exists(recordKey)')
     expect(await repository.getEntryPolicy('workspace-1', 'team-1')).toEqual(stored)
     expect(commands[1]?.input).toMatchObject({ Key: { workspaceId: 'workspace-1', recordKey: 'TIME_POLICY#team-1' }, ConsistentRead: true })
+    await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+    // A row whose payload names another Team is never used for this Team.
     await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
       .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
   })

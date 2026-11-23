@@ -131,11 +131,12 @@ describe('time entry policy routes', () => {
     const rejected = await record(router, '2026-08-03T04:30:00.000Z', '2026-08-03T04:45:00.000Z')
     expect(rejected.status).toBe(409)
     expect(await rejected.json()).toMatchObject({ code: 'TimeEntryOverlap' })
-    // An entry recorded as a date and minutes has no time of day, so it never overlaps.
+    // An entry recorded as a date and minutes has no time of day, so it never overlaps, even when
+    // the span it is stored with covers the timed entries of the same day.
     const durationOnly = await router.request('/api/teams/team-1/time-entries', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ workItemId: 'work-item-1', date: '2026-08-04', minutes: 60, timeZone: 'Asia/Tokyo', billable: false }),
+      body: JSON.stringify({ workItemId: 'work-item-1', date: '2026-08-03', minutes: 720, timeZone: 'Asia/Tokyo', billable: false }),
     })
     expect(durationOnly.status).toBe(201)
   })
@@ -191,6 +192,20 @@ describe('time entry policy routes', () => {
     const rejected = await record(router, '2026-08-03T02:00:00.000Z', '2026-08-03T03:00:00.000Z')
     expect(rejected.status).toBe(409)
     expect(await rejected.json()).toMatchObject({ code: 'TimeEntryDailyLimitExceeded' })
+  })
+
+  test('splits an entry that crosses midnight between the days as the report does', async () => {
+    const { router } = createFixture({ canManage: true, wholeTeam: true })
+    expect((await record(router, '2026-08-03T01:00:00.000Z', '2026-08-03T01:59:00.000Z')).status).toBe(201)
+    expect((await record(router, '2026-08-04T01:00:00.000Z', '2026-08-04T01:59:00.000Z')).status).toBe(201)
+    await savePolicy(router, { overlap: 'off', dailyLimit: 'warn', dailyLimitMinutes: 59, expectedRevision: 0 })
+    // 23:59:30-00:00:30 JST is 30 seconds on each day. The report counts its 1 minute once, on
+    // 08-03, so only that day goes over; counting a started minute on each day would flag both.
+    const crossing = await record(router, '2026-08-03T14:59:30.000Z', '2026-08-03T15:00:30.000Z')
+    expect(crossing.status).toBe(201)
+    expect((await crossing.json()).warnings).toEqual([
+      { code: 'TimeEntryDailyLimitExceeded', date: '2026-08-03', minutes: 60, limitMinutes: 59 },
+    ])
   })
 
   test("gives no warnings to a manager editing another member's time", async () => {

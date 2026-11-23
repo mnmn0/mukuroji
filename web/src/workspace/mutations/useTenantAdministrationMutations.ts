@@ -85,25 +85,31 @@ export function useTenantAdministrationMutations({
     const saved = await runMutation(
       'tenant-profile',
       JSON.stringify(profile),
-      (context) => updateTenantProfile(accessToken, {
-        region: profile.region,
-        locale: profile.locale,
-        defaultPolicy: profile.defaultPolicy,
-        ...(profile.calendar ? { calendar: profile.calendar } : {}),
-        ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
-        ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
-        ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
-        expectedRevision: profile.revision,
-      }, context),
+      async (context) => {
+        const updated = await updateTenantProfile(accessToken, {
+          region: profile.region,
+          locale: profile.locale,
+          defaultPolicy: profile.defaultPolicy,
+          ...(profile.calendar ? { calendar: profile.calendar } : {}),
+          ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
+          ...(profile.timeEntryCategories ? { timeEntryCategories: profile.timeEntryCategories } : {}),
+          ...(profile.defaultCurrency ? { defaultCurrency: profile.defaultCurrency } : {}),
+          expectedRevision: profile.revision,
+        }, context)
+        // The saved categories reach the timesheets as soon as the server accepts them, even if
+        // reloading the profile afterwards fails.
+        const savedCategories = updated.timeEntryCategories ?? profile.timeEntryCategories
+        if (savedCategories) {
+          await mutateGlobal(isWorkspaceTimeEntryCategoriesKey, savedCategories, { revalidate: false })
+            .catch(() => undefined)
+        }
+        return updated
+      },
     )
     // Timesheets read the week start through their own query, which may not be mounted now, so
     // the saved value is written into every cached entry instead of only revalidating mounted ones.
     if (saved && profile.calendar) {
       await mutateGlobal(isWorkspaceCalendarSettingsKey, profile.calendar, { revalidate: false })
-        .catch(() => undefined)
-    }
-    if (saved && profile.timeEntryCategories) {
-      await mutateGlobal(isWorkspaceTimeEntryCategoriesKey, profile.timeEntryCategories, { revalidate: false })
         .catch(() => undefined)
     }
     return saved
