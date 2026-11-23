@@ -201,6 +201,9 @@ function createDefaultWorkItemService(
       return createImportJob('import-commit', false)
     },
     async authorizeImportJob() {},
+    async getImportProgress(_principal, job) {
+      return { jobId: job.id, status: job.status, totalRows: 2, processedRows: 1, totalLinks: 0, processedLinks: 0 }
+    },
     async cancelImport(_principal, job) {
       return { ...job, status: 'cancelled' }
     },
@@ -2548,6 +2551,46 @@ describe('public API router', () => {
       expect(detail.status).toBe(404)
       expect(await detail.json()).toMatchObject({ code: 'not_found' })
     }
+  })
+
+  test('returns the progress of the caller\'s own import job only', async () => {
+    const { platform, router } = createTestRouter()
+    const own = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+    const foreign = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-2',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+
+    const progress = await router.request(`http://localhost/developer/imports/${own.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(progress.status).toBe(200)
+    expect(await progress.json()).toEqual({
+      jobId: own.id,
+      status: own.status,
+      totalRows: 2,
+      processedRows: 1,
+      totalLinks: 0,
+      processedLinks: 0,
+    })
+
+    const hidden = await router.request(`http://localhost/developer/imports/${foreign.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(hidden.status).toBe(404)
   })
 
   test('retains the local connector credential when provider disconnect fails', async () => {

@@ -1482,6 +1482,37 @@ export type ImportJob = {
 }
 
 /**
+ * Progress of a Work Item import job. The worker creates every row first and then applies the
+ * links between them (parents, dependencies, relations, and acceptance criteria).
+ */
+export type ImportJobProgress = {
+  /**
+   * Import job ID.
+   */
+  jobId: string
+  /**
+   * Current status of the job.
+   */
+  status: ImportJobStatus
+  /**
+   * Rows the import creates. Absent until the worker has validated the source.
+   */
+  totalRows?: number
+  /**
+   * Rows already created.
+   */
+  processedRows: number
+  /**
+   * Links the import applies after every row. Absent until the worker has validated the source.
+   */
+  totalLinks?: number
+  /**
+   * Links already applied.
+   */
+  processedLinks: number
+}
+
+/**
  * Work Item export の file format です。
  */
 export type ExportFormat = 'csv' | 'json'

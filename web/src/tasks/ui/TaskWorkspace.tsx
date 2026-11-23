@@ -751,6 +751,7 @@ export function TaskWorkspace({
       {activeTab === 'table' ? (
         <TaskTableView
           assigneeOptions={assigneeOptions}
+          exportFileBaseName={projectName}
           bulkProjectOptions={bulkProjectOptions}
           bulkTaskActionEpoch={bulkTaskActionEpoch}
           bulkTaskActionRequest={bulkTaskActionRequest}

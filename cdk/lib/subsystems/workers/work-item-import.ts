@@ -138,6 +138,8 @@ export function buildWorkItemImportWorker(
     }),
   );
   workItemImportQueue.grants.consumeMessages(workItemImportFunction);
+  // A job that outlasts one invocation's slice queues its next slice itself.
+  workItemImportQueue.grants.sendMessages(workItemImportFunction);
   enterpriseIdentityTokenHashKeySecret.grantRead(workItemImportFunction);
   developerPlatformTable.grants.readWriteData(workItemImportFunction);
   workItemsTable.grants.readWriteData(workItemImportFunction);

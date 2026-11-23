@@ -461,6 +461,8 @@ export const developerPlatformLabelsFixture = {
   closeDialog: 'Close',
   importReportSummary:
     '{valid} of {total} rows are valid. {invalid} rows need attention.',
+  importProgressSummary:
+    'Created {rows} of {totalRows} rows and set {links} of {totalLinks} parents, dependencies, and relations.',
 } satisfies DeveloperPlatformLabels
 
 /**

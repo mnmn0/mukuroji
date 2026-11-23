@@ -4,6 +4,7 @@ import type {
   DeveloperPlatformOverview,
   PersonalCredentialAdministration,
   ImportDryRunReport,
+  ImportJobProgress,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
@@ -68,6 +69,8 @@ import { WebhooksSection } from './WebhooksSection'
 export type DeveloperPlatformPanelProps = {
   /** Developer Platform aggregate resources. */
   resources?: DeveloperPlatformOverview
+  /** Rows and links the latest import has processed, read while it runs. */
+  latestImportProgress?: ImportJobProgress
   /** Connector providers configured in this environment; omitted while unknown, which offers none. */
   availableConnectorProviders?: readonly string[]
   /** Safe message shown when the configured connector providers cannot be loaded. */
@@ -190,6 +193,7 @@ export function DeveloperPlatformPanel({
   labels,
   loadErrorMessage,
   resources,
+  latestImportProgress,
   availableConnectorProviders,
   connectorAvailabilityErrorMessage,
   isConnectorAvailabilityLoading,
@@ -993,6 +997,7 @@ export function DeveloperPlatformPanel({
               importTeamOptions={importTeamOptions}
               labels={labels}
               latestImport={latestImport}
+              latestImportProgress={latestImportProgress}
               previewReport={previewImportReport}
               onCommit={
                 onCommitImport &&

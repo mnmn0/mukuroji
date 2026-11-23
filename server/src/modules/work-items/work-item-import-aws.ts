@@ -23,6 +23,7 @@ import {
   type WorkItemImportExecution,
   type WorkItemImportExecutionStatus,
   type WorkItemImportExecutionStore,
+  type WorkItemImportPlannedSteps,
   type WorkItemImportQueue,
   type WorkItemImportQueueMessage,
   type WorkItemImportRowReceipt,
@@ -33,6 +34,7 @@ import {
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
 import { isWorkItemSchedule } from './domain/work-item-schedule'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 const executionRecordPrefix = 'IMPORT_EXECUTION#'
 const receiptRecordPrefix = 'IMPORT_RECEIPT#'
@@ -263,6 +265,39 @@ export class DynamoDbWorkItemImportExecutionStore implements WorkItemImportExecu
         ExpressionAttributeValues: { ':leaseOwner': leaseOwner },
       }))
     } catch (error) {
+      if (!isConditionalFailure(error)) throw error
+    }
+  }
+
+  /**
+   * Saves the rows and links the current lease owner's validation found.
+   *
+   * @param workspaceId - Workspace of the import.
+   * @param jobId - Import job.
+   * @param leaseOwner - Worker that must still hold the lease.
+   * @param plannedSteps - Rows and links the validation found.
+   */
+  async recordPlannedSteps(
+    workspaceId: string,
+    jobId: string,
+    leaseOwner: string,
+    plannedSteps: WorkItemImportPlannedSteps,
+  ) {
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: createExecutionRecordKey(jobId) },
+        UpdateExpression: 'SET plannedSteps = :plannedSteps',
+        ConditionExpression: '#status = :running AND leaseOwner = :leaseOwner',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':running': 'running',
+          ':leaseOwner': leaseOwner,
+          ':plannedSteps': { rows: plannedSteps.rows, links: plannedSteps.links },
+        },
+      }))
+    } catch (error) {
+      // A lost lease or a finished job keeps its stored counts; the next step stops the worker.
       if (!isConditionalFailure(error)) throw error
     }
   }
@@ -657,6 +692,7 @@ function readExecutionItem(value: Record<string, unknown>): WorkItemImportExecut
     !isExecutionStatus(value.status) ||
     !Number.isSafeInteger(value.checkpointRow) ||
     (value.checkpointRow as number) < 0 ||
+    !(value.plannedSteps === undefined || isPlannedSteps(value.plannedSteps)) ||
     typeof value.cancelRequested !== 'boolean' ||
     !isText(value.createdAt) ||
     !isText(value.updatedAt) ||
@@ -672,6 +708,18 @@ function readExecutionItem(value: Record<string, unknown>): WorkItemImportExecut
     throw new WorkItemImportError('ImportExecutionInvalid', 'Stored import execution is invalid.')
   }
   return structuredClone(value) as WorkItemImportExecution
+}
+
+/**
+ * Reports whether a stored value is a row and link count.
+ *
+ * @param value - Stored value.
+ * @returns Whether both counts are non-negative integers.
+ */
+function isPlannedSteps(value: unknown): value is WorkItemImportPlannedSteps {
+  return isRecord(value) &&
+    typeof value.rows === 'number' && Number.isSafeInteger(value.rows) && value.rows >= 0 &&
+    typeof value.links === 'number' && Number.isSafeInteger(value.links) && value.links >= 0
 }
 
 function readReceiptItem(value: Record<string, unknown>): WorkItemImportRowReceipt {

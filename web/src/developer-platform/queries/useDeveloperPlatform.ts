@@ -1,10 +1,11 @@
-import type { CursorPage, WorkItemSyncConflict } from '@mukuroji/contracts'
+import type { CursorPage, ImportJob, WorkItemSyncConflict } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import { getPersonalCredentialAdministration } from '../api/apiKeys'
 import { listAvailableDeveloperConnectorProviders } from '../api/connectors'
 import { getDeveloperPlatformResources } from '../api/overview'
 import { listDeveloperSyncConflicts } from '../api/syncConflicts'
+import { getDeveloperImportProgress } from '../api/transfers'
 
 const developerPlatformQueryConfig = {
   dedupingInterval: 10_000,
@@ -107,4 +108,46 @@ export function useDeveloperSyncConflicts(
     }),
     developerPlatformQueryConfig,
   )
+}
+
+/** How often the progress of a running import is read again. */
+const importProgressRefreshMilliseconds = 3_000
+
+/**
+ * Reads the progress of an import job while it is queued or running.
+ *
+ * @param accessToken - Access token for the Developer Platform API.
+ * @param job - Latest import job, if any.
+ * @returns SWR state holding the job's progress.
+ */
+export function useDeveloperImportProgress(
+  accessToken: string | undefined,
+  job: ImportJob | undefined,
+) {
+  const running = job !== undefined && !job.dryRun && isRunningImportStatus(job.status)
+  const key = accessToken && job && !job.dryRun
+    ? ['developer-import-progress', accessToken, job.id] as const
+    : null
+  return useSWR(
+    key,
+    ([, token, jobId]) => getDeveloperImportProgress(token, jobId),
+    {
+      shouldRetryOnError: false,
+      // Polls until the job ends; a finished job is read once for its final counts.
+      refreshInterval: (latest) =>
+        running && (latest === undefined || isRunningImportStatus(latest.status))
+          ? importProgressRefreshMilliseconds
+          : 0,
+    },
+  )
+}
+
+/**
+ * Reports whether an import job still has rows or links to process.
+ *
+ * @param status - Import job status.
+ * @returns Whether the job is queued, validating, or running.
+ */
+export function isRunningImportStatus(status: ImportJob['status']) {
+  return status === 'queued' || status === 'validating' || status === 'running'
 }

@@ -1187,6 +1187,53 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
   expect(calls.issueReads).toEqual([])
 })
 
+test('narrows the developer export to one Team, Project, and status', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'other-project', name: 'Other Project', tone: 'blue' as const }],
+    }],
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      { projectId: 'other-project', role: 'manager' },
+    ],
+  })
+  setTestAppDependencies({
+    rateLimits: {
+      async consumeRateLimit() {
+        return { allowed: true, limit: 120, remaining: 119, resetAt: '2026-07-18T00:01:00.000Z' }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/developer/work-item-exports?format=csv&teamId=other-team&assignedProjectId=other-project&workflowStatusId=todo',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(calls.publicIssuePageReads.map(({ teamId, assignedProjectId, workflowStatusId }) => ({
+    teamId,
+    assignedProjectId,
+    workflowStatusId,
+  }))).toEqual([{ teamId: 'other-team', assignedProjectId: 'other-project', workflowStatusId: 'todo' }])
+
+  // A Team the caller cannot view gives an empty export instead of revealing whether it exists.
+  calls.publicIssuePageReads.length = 0
+  const hidden = await app.request('/api/developer/exports?teamId=unknown-team', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hidden.status).toBe(200)
+  expect(await hidden.json()).toEqual({ items: [], hasMore: false })
+  expect(calls.publicIssuePageReads).toEqual([])
+
+  const invalid = await app.request('/api/developer/exports?teamId=bad%24team', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(invalid.status).toBe(400)
+})
+
 test('keeps contributors and acceptance criteria only in the structured developer export', async () => {
   configureFakeProjectClients(true, {
     issueContributorAssignments: [{

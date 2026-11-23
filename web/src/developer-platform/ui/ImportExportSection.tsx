@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import type { ImportDryRunReport, ImportJob } from '@mukuroji/contracts'
+import type { ImportDryRunReport, ImportJob, ImportJobProgress } from '@mukuroji/contracts'
 import { interpolate } from '../model/displayFormatting'
 import {
   DEVELOPER_IMPORT_FILE_ACCEPT,
@@ -38,6 +38,7 @@ export function ImportExportSection({
   importTeamOptions,
   labels,
   latestImport,
+  latestImportProgress,
   previewReport,
   onCommit,
   onExport,
@@ -61,6 +62,7 @@ export function ImportExportSection({
   importTeamOptions: DeveloperPlatformOption[]
   labels: DeveloperPlatformLabels
   latestImport?: ImportJob
+  latestImportProgress?: ImportJobProgress
   previewReport?: ImportDryRunReport
   onCommit?: () => void
   onExport?: (format: DeveloperExportFormat) => Promise<void>
@@ -331,6 +333,20 @@ export function ImportExportSection({
                 />
               ) : null}
             </div>
+            {!previewReport && latestImportProgress?.totalRows !== undefined ? (
+              <p
+                className="mt-2 text-xs font-medium text-[var(--workbench-muted)]"
+                data-testid="developer-import-progress"
+                role="status"
+              >
+                {interpolate(labels.importProgressSummary, {
+                  links: latestImportProgress.processedLinks,
+                  rows: latestImportProgress.processedRows,
+                  totalLinks: latestImportProgress.totalLinks ?? 0,
+                  totalRows: latestImportProgress.totalRows,
+                })}
+              </p>
+            ) : null}
             {report?.errors.length ? (
               <ul className="mt-4 grid gap-2">
                 {report.errors.map((error, index) => (

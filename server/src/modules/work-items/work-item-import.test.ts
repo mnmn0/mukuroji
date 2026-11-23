@@ -14,6 +14,7 @@ import {
   createDefaultWorkItemImportSourceStore,
 } from './work-item-import-aws'
 import {
+  WORK_ITEM_IMPORT_SLICE_SECONDS,
   WorkItemImportError,
   createWorkItemImportJobId,
   processWorkItemImportBatch,
@@ -155,6 +156,76 @@ describe('durable Work Item import', () => {
     expect(fixture.execution?.checkpointRow).toBe(4)
     expect(fixture.execution?.status).toBe('completed')
     expect(fixture.execution?.terminalReport?.validRows).toBe(2)
+  })
+
+  test('hands the rest of a long import to a new message and resumes from its checkpoint', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-slice')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    fixture.queued.length = 0
+    const created: number[] = []
+    let clock = new Date('2026-07-18T00:00:00.000Z').getTime()
+    let slowRows = true
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Advances one second per read, and past the slice time once the first row is made. */
+      now() {
+        clock += 1_000
+        return new Date(clock)
+      },
+      async createWorkItem(request) {
+        created.push(request.row)
+        if (slowRows) {
+          slowRows = false
+          clock += WORK_ITEM_IMPORT_SLICE_SECONDS * 1_000
+        }
+      },
+    })
+
+    const first = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(first).toEqual({ batchItemFailures: [] })
+    expect(created).toEqual([1])
+    expect(fixture.execution?.status).toBe('running')
+    expect(fixture.execution?.checkpointRow).toBe(1)
+    expect(fixture.execution?.leaseOwner).toBeUndefined()
+    expect(fixture.execution?.plannedSteps).toEqual({ rows: 2, links: 0 })
+    expect(fixture.queued).toEqual([{ workspaceId: 'workspace-1', jobId }])
+
+    const second = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(second).toEqual({ batchItemFailures: [] })
+    expect(created).toEqual([1, 2])
+    expect(fixture.execution?.status).toBe('completed')
+    expect(fixture.queued).toHaveLength(1)
+  })
+
+  test('retries the message when the next slice cannot be queued', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-slice-queue')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    let clock = new Date('2026-07-18T00:00:00.000Z').getTime()
+    const dependencies = createWorkerDependencies(fixture, {
+      /** Jumps past the slice time after the first row. */
+      now() {
+        clock += 1_000
+        return new Date(clock)
+      },
+      async createWorkItem() {
+        clock += WORK_ITEM_IMPORT_SLICE_SECONDS * 1_000
+      },
+      queue: {
+        async enqueue() {
+          throw new Error('queue unavailable')
+        },
+      },
+    })
+
+    const result = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(fixture.execution?.status).toBe('running')
+    expect(fixture.execution?.checkpointRow).toBe(1)
+    expect(fixture.execution?.leaseOwner).toBeUndefined()
   })
 
   test('finishes a retry near the Team link limit when a link was applied before its receipt', async () => {
@@ -851,6 +922,16 @@ function createFixture() {
           delete execution.leaseExpiresAt
         }
       },
+      async recordPlannedSteps(
+        _workspaceId: string,
+        _jobId: string,
+        leaseOwner: string,
+        plannedSteps: NonNullable<WorkItemImportExecution['plannedSteps']>,
+      ) {
+        if (execution?.leaseOwner === leaseOwner && execution.status === 'running') {
+          execution.plannedSteps = structuredClone(plannedSteps)
+        }
+      },
       async recordRowReceipt(
         _workspaceId: string,
         _jobId: string,
@@ -1002,6 +1083,7 @@ function createWorkerDependencies(
       lease += 1
       return `lease-${lease}`
     },
+    queue: fixture.queue,
     ...overrides,
   }
 }

@@ -49,6 +49,7 @@ import {
   type ImportFieldMapping,
   type ImportDryRunReport,
   type ImportJob,
+  type ImportJobProgress,
   type ImportSource,
   type PublicWorkItemTypeCatalog,
   type PublicWorkItemTypeChangePreview,
@@ -433,6 +434,17 @@ export interface PublicWorkItemService {
     job: ImportJob,
     write: boolean,
   ): Promise<void>
+  /**
+   * Reads how many rows and links an authorized import job has processed.
+   *
+   * @param principal - Caller that already passed the job's authorization.
+   * @param job - Import job.
+   * @returns The job's progress.
+   */
+  getImportProgress(
+    principal: DeveloperManagementPrincipal,
+    job: ImportJob,
+  ): Promise<ImportJobProgress>
   /** Worker と協調して未完了 import を cancel し、cancelled retry は成功扱いにします。 */
   cancelImport(
     principal: DeveloperManagementPrincipal,
@@ -446,6 +458,7 @@ export interface PublicWorkItemService {
     continuation: string | undefined,
     limit: number,
     includeStructure?: boolean,
+    filters?: PublicWorkItemExportFilters,
   ): Promise<{
     /** Export page に含まれる Work Items です。 */
     items: CanonicalWorkItem[]
@@ -454,6 +467,22 @@ export interface PublicWorkItemService {
     /** 次 page の store-bound opaque continuation です。 */
     nextContinuation?: string
   }>
+}
+
+/** Optional filters that narrow a Work Item export to one Team, Project, or field value. */
+export type PublicWorkItemExportFilters = {
+  /** Only Work Items owned by this Team. */
+  teamId?: string
+  /** Only Work Items assigned to this Project. */
+  assignedProjectId?: string
+  /** Only Work Items with this assignee. */
+  assigneeUserId?: string
+  /** Only Work Items in this workflow status. */
+  workflowStatusId?: string
+  /** Only Work Items of this Work Item Type. */
+  workItemTypeId?: string
+  /** Only Work Items updated after this timestamp. */
+  updatedAfter?: string
 }
 
 /** Filters for listing a Team's Agent Runs. */
@@ -2760,6 +2789,18 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
   })
 
+  router.get('/developer/imports/:jobId/progress', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canImport')
+    const job = await requireAuthorizedImportJob(
+      dependencies.imports,
+      dependencies.workItems,
+      principal,
+      readRouteId(c.req.param('jobId'), 'Import job ID'),
+      false,
+    )
+    return c.json(await dependencies.workItems.getImportProgress(principal, job))
+  })
+
   router.get('/developer/imports/:jobId/report', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     const job = await requireAuthorizedImportJob(
@@ -2788,12 +2829,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/exports', { format }),
+      managementCursorScope(principal, '/developer/exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit),
+        dependencies.workItems.export(principal, format, continuation, limit, false, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -2803,12 +2845,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/work-item-exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/work-item-exports', { format }),
+      managementCursorScope(principal, '/developer/work-item-exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit, true),
+        dependencies.workItems.export(principal, format, continuation, limit, true, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -4752,14 +4795,25 @@ function readPageLimit(value: string | undefined) {
 }
 
 function readWorkItemFilters(c: Context) {
-  const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+  return {
+    teamId: readRequiredQuery(c.req.query('teamId'), 'teamId'),
+    ...readWorkItemFieldFilters(c),
+  }
+}
+
+/**
+ * Reads the Project, assignee, status, type, and update-time filters of a Work Item list.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemFieldFilters(c: Context) {
   const assignedProjectId = c.req.query('assignedProjectId')
   const assigneeUserId = c.req.query('assigneeUserId')
   const workflowStatusId = c.req.query('workflowStatusId')
   const workItemTypeId = c.req.query('workItemTypeId')
   const updatedAfter = c.req.query('updatedAfter')
   return {
-    teamId,
     ...(assignedProjectId
       ? { assignedProjectId: readIdentifier(assignedProjectId, 'assignedProjectId') }
       : {}),
@@ -4775,6 +4829,20 @@ function readWorkItemFilters(c: Context) {
     ...(updatedAfter
       ? { updatedAfter: readIsoTimestamp(updatedAfter, 'updatedAfter') }
       : {}),
+  }
+}
+
+/**
+ * Reads the optional Team, Project, and field filters of a Work Item export.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemExportFilters(c: Context): PublicWorkItemExportFilters {
+  const teamId = c.req.query('teamId')
+  return {
+    ...(teamId !== undefined ? { teamId: readIdentifier(teamId, 'teamId') } : {}),
+    ...readWorkItemFieldFilters(c),
   }
 }
 

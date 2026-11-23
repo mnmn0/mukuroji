@@ -106,4 +106,6 @@ export type DeveloperPlatformLabels = {
   closeDialog: string
   /** Placeholder-based summary shown for import reports. */
   importReportSummary: string
+  /** Placeholder-based progress of a running or finished import. */
+  importProgressSummary: string
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import {
   createMutationFingerprint,
@@ -41,12 +41,14 @@ import {
   applySavedPersonalCredentialPolicy,
   type SavedPersonalCredentialPolicy,
 } from '../model/credentials'
-import type { DeveloperExportFormat } from '../model/transfers'
+import { selectLatestImport, type DeveloperExportFormat } from '../model/transfers'
 import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
 import { exportDeveloperWorkItems } from '../queries/developerExport'
 import {
+  isRunningImportStatus,
   useAvailableDeveloperConnectorProviders,
+  useDeveloperImportProgress,
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
   usePersonalCredentialAdministration,
@@ -113,6 +115,19 @@ export function DeveloperPlatformPanelContainer({
     isValidating: isResourcesValidating,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
+  const latestImport = resources ? selectLatestImport(resources.imports) : undefined
+  const { data: latestImportProgress } = useDeveloperImportProgress(
+    mutationSession.accessToken,
+    latestImport,
+  )
+  // A job that ended while its progress was read refreshes the job list, which holds its report.
+  const latestImportEnded = latestImport !== undefined &&
+    isRunningImportStatus(latestImport.status) &&
+    latestImportProgress?.jobId === latestImport.id &&
+    !isRunningImportStatus(latestImportProgress.status)
+  useEffect(() => {
+    if (latestImportEnded && resourceKey) void mutateCache(resourceKey)
+  }, [latestImportEnded, mutateCache, resourceKey])
   const {
     data: availableConnectorProviders,
     error: availableConnectorProvidersError,
@@ -256,6 +271,9 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
+      latestImportProgress={latestImportProgress?.jobId === latestImport?.id
+        ? latestImportProgress
+        : undefined}
       availableConnectorProviders={availableConnectorProviders}
       connectorAvailabilityErrorMessage={
         availableConnectorProvidersError && !availableConnectorProviders

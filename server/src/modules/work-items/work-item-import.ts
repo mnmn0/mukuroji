@@ -23,6 +23,12 @@ export const WORK_ITEM_IMPORT_MAX_RECEIVE_COUNT = 5
 /** Import worker lease の既定秒数です。 */
 export const WORK_ITEM_IMPORT_LEASE_SECONDS = 20 * 60
 
+/**
+ * Seconds one worker invocation spends on rows and links before it hands the rest of the job to
+ * a new queue message. It leaves the 15-minute Lambda timeout room for the step that is running.
+ */
+export const WORK_ITEM_IMPORT_SLICE_SECONDS = 10 * 60
+
 const storedImportErrorLimit = 100
 const storedImportErrorCodeLength = 128
 const storedImportErrorMessageLength = 512
@@ -82,6 +88,11 @@ export type WorkItemImportExecution = {
   status: WorkItemImportExecutionStatus
   /** 最後に durable receipt を記録した1始まりの row 番号です。 */
   checkpointRow: number
+  /**
+   * Rows and links the worker found when it last validated the source, kept so the progress of a
+   * running import can be shown. Absent until a worker validates the source.
+   */
+  plannedSteps?: WorkItemImportPlannedSteps
   /** Cancel API が cooperative worker に設定する marker です。 */
   cancelRequested: boolean
   /** 現在 lease を所有する invocation ID です。 */
@@ -98,6 +109,14 @@ export type WorkItemImportExecution = {
   terminalReport?: ImportReport
   /** Failed execution を public ImportJob へ再同期する safe problem です。 */
   terminalProblem?: ApiProblem
+}
+
+/** Rows and links one import creates, rows first and then links. */
+export type WorkItemImportPlannedSteps = {
+  /** Source rows, each creating one Work Item. */
+  rows: number
+  /** Parent, dependency, relation, and acceptance-criteria links applied after every row. */
+  links: number
 }
 
 /** 完了した1 row の deterministic receipt です。 */
@@ -235,6 +254,13 @@ export interface WorkItemImportExecutionStore {
   ): Promise<WorkItemImportExecution | undefined>
   /** Retry を早く再開できるよう現在 worker の lease を解放します。 */
   releaseClaim(workspaceId: string, jobId: string, leaseOwner: string): Promise<void>
+  /** Current lease owner だけが、validation で数えた row と link の数を保存できます。 */
+  recordPlannedSteps(
+    workspaceId: string,
+    jobId: string,
+    leaseOwner: string,
+    plannedSteps: WorkItemImportPlannedSteps,
+  ): Promise<void>
   /** Row receipt と monotonically increasing checkpoint を原子的に保存します。 */
   recordRowReceipt(
     workspaceId: string,
@@ -361,6 +387,8 @@ export type WorkItemImportWorkerDependencies = {
   now(): Date
   /** Invocation ごとに一意な lease owner を作ります。 */
   createLeaseOwner(): string
+  /** Queue that receives the next slice of a job that ran out of its slice time. */
+  queue: WorkItemImportQueue
 }
 
 /** Durable import API staging の dependencies です。 */
@@ -649,6 +677,37 @@ async function processQueueRecord(
       return
     }
     assertValidationRows(validation)
+    const plannedSteps = {
+      rows: validation.report.totalRows,
+      links: validation.links?.length ?? 0,
+    }
+    if (
+      execution.plannedSteps?.rows !== plannedSteps.rows ||
+      execution.plannedSteps.links !== plannedSteps.links
+    ) {
+      await dependencies.executions.recordPlannedSteps(
+        execution.workspaceId,
+        execution.jobId,
+        leaseOwner,
+        plannedSteps,
+      )
+    }
+    const sliceDeadline = addSeconds(claimedAt, WORK_ITEM_IMPORT_SLICE_SECONDS).getTime()
+    /**
+     * Hands the rest of the job to a new queue message once this invocation's slice time is used.
+     * The lease is released first, so the next invocation can claim the job at once.
+     *
+     * @returns Whether this invocation stops here.
+     */
+    const yieldWhenSliceEnds = async () => {
+      if (dependencies.now().getTime() < sliceDeadline) return false
+      await dependencies.executions.releaseClaim(execution.workspaceId, execution.jobId, leaseOwner)
+      await dependencies.queue.enqueue({
+        workspaceId: execution.workspaceId,
+        jobId: execution.jobId,
+      })
+      return true
+    }
 
     /** Records one finished step and renews the lease. */
     const recordStep = async (
@@ -681,6 +740,7 @@ async function processQueueRecord(
 
     for (const item of validation.rows) {
       if (item.row <= checkpointRow) continue
+      if (await yieldWhenSliceEnds()) return
       processingRow = item.row
       processingReportRow = item.row
       const current = await readRunnableExecution(execution, dependencies)
@@ -702,6 +762,7 @@ async function processQueueRecord(
     for (const [index, link] of links.entries()) {
       const step = validation.report.totalRows + index + 1
       if (step <= checkpointRow) continue
+      if (await yieldWhenSliceEnds()) return
       processingRow = step
       processingReportRow = readLinkRow(link)
       const current = await readRunnableExecution(execution, dependencies)

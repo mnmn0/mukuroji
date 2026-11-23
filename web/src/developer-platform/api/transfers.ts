@@ -5,6 +5,7 @@ import type {
   CursorPage,
   ImportDryRunReport,
   ImportJob,
+  ImportJobProgress,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
@@ -52,6 +53,20 @@ export function createDeveloperImport(
     '/developer/imports',
     accessToken,
     createJsonMutation('POST', input, mutationContext),
+  )
+}
+
+/**
+ * Reads how many rows and links an import job has processed.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param jobId - Import job.
+ * @returns The job's progress.
+ */
+export function getDeveloperImportProgress(accessToken: string, jobId: string) {
+  return requestJson<ImportJobProgress>(
+    `/developer/imports/${encodeURIComponent(jobId)}/progress`,
+    accessToken,
   )
 }
 
