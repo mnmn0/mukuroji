@@ -147,7 +147,7 @@ describe('settings panel links', () => {
 
 describe('quiet hours time zone', () => {
   test('uses the member time zone only before notification settings are saved', async () => {
-    const { resolveQuietHoursTimeZone } = await import('../src/notifications/ui/NotificationSettingsPanel')
+    const { resolveQuietHoursTimeZone } = await import('../src/notifications/model/quietHoursTimeZone')
     expect(resolveQuietHoursTimeZone('UTC', true, 'Asia/Tokyo', true)).toBe('Asia/Tokyo')
     expect(resolveQuietHoursTimeZone('Europe/Paris', true, 'Asia/Tokyo', true)).toBe('Europe/Paris')
     expect(resolveQuietHoursTimeZone('UTC', false, 'Asia/Tokyo', true)).toBe('UTC')
