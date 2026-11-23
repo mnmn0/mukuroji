@@ -529,12 +529,18 @@ export type PlanningClient = {
   ): Promise<PlanningWorkItemLink | undefined>
   /** Directory 破壊操作用に未フィルタ参照と同一 read の revision を返します。 */
   getAuthorizationState(workspaceId: string): Promise<PlanningAuthorizationState>
-  /** Planning entity を作成します。 */
+  /**
+   * Planning entity を作成します。
+   *
+   * `authorizationConditionChecks` re-check the caller's authorization sources in the same
+   * transaction as the write.
+   */
   create(
     workspaceId: string,
     input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
     transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<PlanningMutationResponse>
   /** Planning entity の editable fields を更新します。 */
   update(
@@ -1207,12 +1213,22 @@ abstract class BasePlanningClient implements PlanningClient {
     }
   }
 
-  /** Planning entity を作成します。 */
+  /**
+   * Planning entity を作成します。
+   *
+   * @param workspaceId - Workspace directory identifier.
+   * @param input - Entity to create, with the expected Planning revision.
+   * @param workItemState - Canonical Work Item state for roll-ups.
+   * @param transaction - Optional receipt or audit contribution.
+   * @param authorizationConditionChecks - Caller authorization checks committed with the write.
+   * @returns The Planning snapshot after the write.
+   */
   async create(
     workspaceId: string,
     input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
     transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     await this.requireIdNotArchived(workspaceId, input.id)
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
@@ -1227,7 +1243,7 @@ abstract class BasePlanningClient implements PlanningClient {
         state: next,
         entityTransactionSource: { action: 'created', entity: structuredClone(entity) },
       }
-    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
+    }, authorizationConditionChecks, transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の editable fields を更新します。 */

@@ -1,4 +1,5 @@
 import type {
+  AutomationTemplate,
   AutomationTemplateApplication,
   UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
@@ -9,6 +10,7 @@ import type { ProjectDirectoryTeam } from '../../projects/api'
 import { AutomationManagementPanel } from './AutomationManagementPanel'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
+  AutomationApiError,
   applyAutomationTemplate,
   createAutomationInboundWebhookEndpoint,
   createAutomationRule,
@@ -17,6 +19,7 @@ import {
   duplicateAutomationTemplate,
   getAutomationTemplateApplication,
   pauseAutomationInboundWebhookEndpoint,
+  previewAutomationTemplateApplication,
   resumeAutomationInboundWebhookEndpoint,
   revokeAutomationInboundWebhookEndpoint,
   retryAutomationExecution,
@@ -27,6 +30,7 @@ import {
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
 import { useAutomationManagement } from '../queries/useAutomationManagement'
+import { useAutomationPlanningParents } from '../queries/useAutomationPlanningParents'
 
 /** Automation management panel container の props です。 */
 export type AutomationManagementPanelContainerProps = {
@@ -73,7 +77,11 @@ export function AutomationManagementPanelContainer({
         request,
         () => mutate(),
         (mutationError) => {
-          setMutationErrorMessage(readErrorMessage(mutationError, t('automation.error.mutation')))
+          setMutationErrorMessage(
+            mutationError instanceof AutomationApiError && mutationError.code === 'AutomationTemplatePreviewStale'
+              ? t('automation.template.application.previewStale')
+              : readErrorMessage(mutationError, t('automation.error.mutation')),
+          )
         },
       )
     } finally {
@@ -82,6 +90,10 @@ export function AutomationManagementPanelContainer({
   }
 
   const initialTab = readInitialTab()
+  const planningParentsQuery = useAutomationPlanningParents(
+    accessToken,
+    canManage && (data?.templates ?? []).some(hasPlanningEntities),
+  )
 
   return (
     <AutomationManagementPanel
@@ -213,6 +225,19 @@ export function AutomationManagementPanelContainer({
       onRefreshTemplateApplication={canManage
         ? (applicationId) => getAutomationTemplateApplication(accessToken, applicationId)
         : undefined}
+      onPreviewTemplateApplication={canManage
+        ? (template, input) => previewAutomationTemplateApplication(accessToken, template.id, input)
+        : undefined}
+      planningParents={canManage
+        ? {
+            parents: planningParentsQuery.data,
+            isLoading: planningParentsQuery.isLoading,
+            failed: planningParentsQuery.error !== undefined,
+            onRetry: () => {
+              void planningParentsQuery.mutate()
+            },
+          }
+        : undefined}
       onCreateRecurringWork={canManage ? (input) => runMutation(
         'recurring:create',
         input,
@@ -237,6 +262,17 @@ export function AutomationManagementPanelContainer({
       ) : undefined}
     />
   )
+}
+
+/**
+ * Tells whether a template creates Phases or Milestones and so needs a Planning parent.
+ *
+ * @param template - Automation template.
+ * @returns True for a Project template with Phases or Milestones.
+ */
+function hasPlanningEntities(template: AutomationTemplate) {
+  return template.kind === 'project' &&
+    ((template.payload.phases?.length ?? 0) > 0 || (template.payload.milestones?.length ?? 0) > 0)
 }
 
 function readInitialTab() {
