@@ -26,9 +26,8 @@ type SoftwareFactoryRoute = Readonly<{
 /**
  * Routes that exist only for Software factory: the Web Factory board, Agent Run history,
  * reports, and analytics, Team agent settings, the Public API Agent Run and agent context
- * endpoints that coding agents call through MCP, and the issuance of personal agent
- * credentials. Revoking a personal credential stays available so that keys issued while the
- * module was on can still be removed.
+ * endpoints that coding agents call through MCP. Personal credentials stay available, because
+ * the Workspace MCP profile reads the Workspace with them whether or not the module is on.
  */
 const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
   {
@@ -49,22 +48,13 @@ const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
       '/api/v1/agent-settings/*',
       '/api/v1/agent-context',
       '/api/v1/agent-context/*',
-      '/api/developer/me/agent-connection',
-      '/api/developer/me/agent-connection/*',
     ],
-  },
-  {
-    paths: [
-      '/api/developer/me/api-keys',
-      '/api/developer/me/api-keys/:apiKeyId/rotate',
-    ],
-    methods: ['POST'],
   },
 ]
 
 /**
  * Registers the gate that refuses Software factory routes when the deployment omits the
- * module. It runs before authentication so that no Agent Run, agent setting, or credential
+ * module. It runs before authentication so that no Agent Run or agent setting
  * work starts.
  *
  * Register it after the common and runtime-control middleware and before the domain routes.

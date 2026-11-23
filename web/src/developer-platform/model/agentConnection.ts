@@ -6,6 +6,12 @@ export const AGENT_CONNECTION_CLIENTS = ['claude-code', 'codex', 'kiro'] as cons
 /** Coding agent client selected on the connection page. */
 export type AgentConnectionClient = (typeof AGENT_CONNECTION_CLIENTS)[number]
 
+/**
+ * MCP tool set the configuration selects: `tasks` hands one Team's tasks to the agent
+ * (Software factory), `workspace` reads Teams, Projects, members, and Work Items.
+ */
+export type AgentConnectionProfile = 'tasks' | 'workspace'
+
 /** Shell family whose quoting, paths, and commands the snippets use. */
 export type AgentConnectionShell = 'posix' | 'powershell'
 
@@ -23,6 +29,8 @@ export type AgentConnectionSettings = {
   mcpPath: string
   /** Shell family of the member's machine. */
   shell: AgentConnectionShell
+  /** Tool set to configure; `tasks` when omitted. */
+  profile?: AgentConnectionProfile
 }
 
 /** One copyable configuration snippet. */
@@ -33,8 +41,11 @@ export type AgentConnectionSnippet = {
   content: string
 }
 
-/** MCP server name registered in every client. */
-const MCP_SERVER_NAME = 'mukuroji-tasks'
+/** MCP server name registered in every client, by profile. */
+const MCP_SERVER_NAMES: Record<AgentConnectionProfile, string> = {
+  tasks: 'mukuroji-tasks',
+  workspace: 'mukuroji',
+}
 
 /**
  * Resolves the origin that the MCP server calls, from the Web app's API base URL.
@@ -69,6 +80,12 @@ export function resolveMcpScriptPath(mcpPath: string, shell: AgentConnectionShel
  * @returns Environment entries in display order.
  */
 function buildEnvironment(settings: AgentConnectionSettings): Array<[string, string]> {
+  if (settings.profile === 'workspace') {
+    return [
+      ['MUKUROJI_MCP_URL', settings.origin],
+      ['MUKUROJI_MCP_PROFILE', 'workspace'],
+    ]
+  }
   return [
     ['MUKUROJI_MCP_URL', settings.origin],
     ['MUKUROJI_MCP_TEAM_ID', settings.teamId],
@@ -103,13 +120,14 @@ function quoteShellWord(value: string, shell: AgentConnectionShell) {
  */
 export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): AgentConnectionSnippet {
   const environment = buildEnvironment(settings)
+  const serverName = MCP_SERVER_NAMES[settings.profile ?? 'tasks']
   const scriptPath = resolveMcpScriptPath(settings.mcpPath, settings.shell)
   const windows = settings.shell === 'powershell'
   if (settings.client === 'claude-code') {
     const continuation = windows ? ' `\n  ' : ' \\\n  '
     const words = [
       // The name comes before `--env`: the option takes several values and would read the name as one of them.
-      `claude mcp add --scope user --transport stdio ${MCP_SERVER_NAME}`,
+      `claude mcp add --scope user --transport stdio ${serverName}`,
       ...environment.map(([name, value]) => `--env ${quoteShellWord(`${name}=${value}`, settings.shell)}`),
       // Single quotes keep the shell from expanding the variable; Claude Code expands it at start-up.
       "--env 'MUKUROJI_MCP_TOKEN=${MUKUROJI_MCP_TOKEN}'",
@@ -124,12 +142,12 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
     return {
       location: windows ? '%USERPROFILE%\\.codex\\config.toml' : '~/.codex/config.toml',
       content: [
-        `[mcp_servers.${MCP_SERVER_NAME}]`,
+        `[mcp_servers.${serverName}]`,
         'command = "node"',
         `args = [${JSON.stringify(scriptPath)}]`,
         'env_vars = ["MUKUROJI_MCP_TOKEN"]',
         '',
-        `[mcp_servers.${MCP_SERVER_NAME}.env]`,
+        `[mcp_servers.${serverName}.env]`,
         ...environment.map(([name, value]) => `${name} = ${JSON.stringify(value)}`),
       ].join('\n'),
     }
@@ -138,7 +156,7 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
     location: windows ? '%USERPROFILE%\\.kiro\\settings\\mcp.json' : '~/.kiro/settings/mcp.json',
     content: JSON.stringify({
       mcpServers: {
-        [MCP_SERVER_NAME]: {
+        [serverName]: {
           command: 'node',
           args: [scriptPath],
           env: {
