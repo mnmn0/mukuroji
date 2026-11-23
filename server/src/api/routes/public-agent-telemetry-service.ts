@@ -11,7 +11,7 @@ import {
 } from '../../modules/developer-platform/public-api'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from '../shared/developer-platform-access'
-import { requireWorkspaceBusinessWrite } from '../shared/project-access'
+import { requireWorkspaceBusinessRead } from '../shared/project-access'
 
 /**
  * Creates the receiver of coding agent OpenTelemetry logs. Usage is kept per credential owner,
@@ -26,8 +26,10 @@ export function createCanonicalPublicAgentTelemetryService(now: () => Date = () 
     /** Adds one export's usage to the credential owner's totals. */
     async ingestLogs(credential: AuthenticatedDeveloperCredential, body: unknown) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, { permission: 'workspace.read' })
-      // Read-only maintenance refuses the write; exporters retry, then drop the export.
-      requireWorkspaceBusinessWrite(principal)
+      // The usage is the owner's own, so a non-guest member is enough: write grants scoped to a Team or
+      // Project do not show on this Workspace-level principal. The credential still needs
+      // `work-items:write`, and the read-only maintenance middleware refuses this POST.
+      requireWorkspaceBusinessRead(principal)
       const receivedAt = now()
       let parsed
       try {

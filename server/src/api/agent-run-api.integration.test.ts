@@ -2887,6 +2887,41 @@ describe('Agent telemetry usage', () => {
     expect([...usage.buckets.values()].reduce((sum, bucket) => sum + bucket.inputTokens, 0)).toBe(200)
   })
 
+  test('accepts usage from a member whose Enterprise write role is scoped to one Team', async () => {
+    configureUnstartedAssignedWorkItem()
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    const at = '2026-11-23T00:00:00.000Z'
+    identity.getSnapshot = async (requestedWorkspaceId) => ({
+      ...await readSnapshot(requestedWorkspaceId),
+      customRoles: [{
+        workspaceId,
+        roleId: 'custom:team-writer',
+        name: 'Team writer',
+        permissions: ['work-items.read', 'work-items.write'],
+        guestAssignable: false,
+        revision: 1,
+        createdAt: at,
+        updatedAt: at,
+      }],
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'team-writer',
+        principalKind: 'member',
+        principalId: 'demo@example.com',
+        roleId: 'custom:team-writer',
+        scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+        source: 'direct',
+      }],
+    })
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ enterpriseIdentity: identity, agentRunUsage: usage })
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    expect(usage.buckets.size).toBe(1)
+  })
+
   test('refuses an export that is not an OTLP logs request', async () => {
     configureUnstartedAssignedWorkItem()
     const telemetry = createCanonicalPublicAgentTelemetryService()

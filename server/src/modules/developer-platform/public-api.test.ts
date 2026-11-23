@@ -3780,6 +3780,7 @@ describe('public Agent Run routes', () => {
     const { platform, router } = createTestRouter({ agentTelemetry: {
       async ingestLogs(_credential, body) {
         received.push(body)
+        if (received.length === 3) throw new AgentRunError('temporarily_unavailable', 'Throttled.')
         return { rejectedRecords: received.length === 1 ? 0 : 2, duplicate: false }
       },
     } })
@@ -3791,6 +3792,9 @@ describe('public Agent Run routes', () => {
     expect(await accepted.json()).toEqual({})
     const partial = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
     expect(await partial.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } })
+    // OTLP exporters retry only 429, 502, 503, and 504, so a transient storage failure is a 503.
+    const throttled = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(throttled.status).toBe(503)
     const protobuf = await router.request('/v1/agent-telemetry/v1/logs', {
       method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-protobuf' }, body: 'binary',
     })
@@ -3800,7 +3804,7 @@ describe('public Agent Run routes', () => {
       method: 'POST', headers: { ...headers, Authorization: `Bearer ${readOnlyKey.secret}` }, body,
     })
     expect(unscoped.status).toBe(403)
-    expect(received).toHaveLength(2)
+    expect(received).toHaveLength(3)
     const unconfigured = createTestRouter({ platform })
     expect((await unconfigured.router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })).status).toBe(503)
   })

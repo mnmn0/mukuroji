@@ -273,6 +273,29 @@ describe('agent usage stores', () => {
     expect(await store.recordBatch('ws', 'member', 'batch', buckets, now)).toBe('duplicate')
   })
 
+  test('the DynamoDB store reports throttling and competing transactions as retryable, and passes other failures on', async () => {
+    let failure: unknown
+    const client: AgentRunUsageDocumentClient = {
+      async send() {
+        throw failure
+      },
+    }
+    const store = new DynamoDbAgentRunUsageStore(client, 'runs')
+    const unavailable = { category: 'temporarily_unavailable', status: 503 }
+    failure = Object.assign(new Error('throttled'), { name: 'ThrottlingException' })
+    await expect(store.recordBatch('ws', 'member', 'batch', buckets, now)).rejects.toMatchObject(unavailable)
+    failure = Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'TransactionConflict' }],
+    })
+    await expect(store.recordBatch('ws', 'member', 'batch', buckets, now)).rejects.toMatchObject(unavailable)
+    failure = Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ValidationError' }],
+    })
+    await expect(store.recordBatch('ws', 'member', 'batch', buckets, now)).rejects.toBe(failure)
+  })
+
   test('the DynamoDB store reads a member range and stops at the limit', async () => {
     const instanceIdHash = hashAgentInstanceId('laptop')
     const item = (bucketStart: string, instance = instanceIdHash) => ({

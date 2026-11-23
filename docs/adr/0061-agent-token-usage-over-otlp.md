@@ -29,7 +29,9 @@ Shinji の方針は「なるべく安く」。
   専用の scope（`agent-telemetry:write`）は採らない。Public API の互換性検査は response の enum の拡大を破壊的変更として
   扱い、scope を足すと API key・OAuth app・webhook・本人用 token の response にある `scopes` がすべて該当するため。
   そのため `work-items:write` を持つ Workspace の API key や OAuth app からも、その credential の持ち主の usage を
-  送れる。usage は credential の持ち主の member に記録し、他の member の usage は書けない。read-only maintenance 中は書き込みとして断る。
+  送れる。usage は credential の持ち主の member に記録し、他の member の usage は書けない。自分の usage なので、
+  member 側は guest でないことだけを求め、Team・Project 単位の書き込み権限しか持たない member も送れる。
+  read-only maintenance 中は書き込みとして断る。
 - **読む値**：`claude_code.api_request`（`event.name` が `api_request`）の record だけを読み、読む attribute は
   トークン数 4 種、推定費用、model、時刻、`mukuroji.agent_instance` に限る。prompt、tool の入力、そのほかの
   attribute は読まずに捨てる。1 回の export は 2,000 record まで、7 日より古い event と 5 分より先の event は断る。
@@ -47,7 +49,9 @@ Shinji の方針は「なるべく安く」。
   受信時刻で受け付けの窓から外れた event も含めた export の全 event から作り、再送までに event が 7 日を過ぎても
   同じ受領行に当たるようにする。table に TTL
   attribute `usageExpiresAt` を追加し、usage の行は 400 日、受領行は 2 日で消す。どの行も `workspaceId` を
-  持つので、Workspace の削除・export の既存の対象に入る。
+  持つので、Workspace の削除・export の既存の対象に入る。throttling や競合する transaction による一時的な
+  保存失敗は `503` で返す。OTLP の exporter が再送するのは 429・502・503・504 だけのため。Agent Run の
+  整合性チェックは、Team を探す scan でこの 2 種類の partition を Team ではないものとして読み飛ばす。
 - **見せ方**：Web の Work Item の Run 一覧 API が、Run ごとの `usage` と、返した Run の合計 `usageTotal` を返す。
   トークン数は Work Item を見られる人に、推定費用は Team manager にだけ返す。1 Run あたり、その instance の
   2,000 bucket まで読む。同じ member の別 instance の行も同じ partition にあるため、読む行は 10,000 行までとし、

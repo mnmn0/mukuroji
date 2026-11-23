@@ -1,6 +1,6 @@
 import { QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import { type AgentUsageBucket } from '../../domain/agent-run-usage'
-import { createAgentRunIntegrityError } from '../../domain/agent-run-error'
+import { createAgentRunIntegrityError, createAgentUsageUnavailableError } from '../../domain/agent-run-error'
 
 /** Days a usage bucket is kept before DynamoDB TTL removes it. */
 export const AGENT_USAGE_RETENTION_DAYS = 400
@@ -88,6 +88,23 @@ function agentUsageBatchPartition(directoryId: string, memberKey: string): strin
   return `${directoryId}#agent-usage-batch#member#${memberKey}`
 }
 
+/** Partition markers of the usage rows and export receipts, between the Workspace ID and the member key. */
+const agentUsagePartitionMarkers = ['#agent-usage#member#', '#agent-usage-batch#member#'] as const
+
+/**
+ * Checks whether a partition key holds usage rows or export receipts, so a scan of the Agent Runs
+ * table can tell them from Team partitions.
+ *
+ * @param partition - Partition key.
+ * @returns True for a usage or receipt partition with a Workspace ID and a member key.
+ */
+export function isAgentUsagePartition(partition: string): boolean {
+  return agentUsagePartitionMarkers.some((marker) => {
+    const at = partition.indexOf(marker)
+    return at > 0 && partition.length > at + marker.length
+  })
+}
+
 /**
  * Builds a bucket row key. Bucket starts have a fixed width, so keys sort by time.
  *
@@ -129,6 +146,37 @@ function isReceiptConflict(error: unknown): boolean {
   if (!isRecord(error) || error.name !== 'TransactionCanceledException') return false
   const reasons = error.CancellationReasons
   return Array.isArray(reasons) && isRecord(reasons[0]) && reasons[0].Code === 'ConditionalCheckFailed'
+}
+
+/** Transaction cancellation codes that may pass when the same transaction is retried. */
+const transientCancellationCodes: ReadonlySet<string> = new Set(['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError'])
+
+/** SDK error names that may pass when the same request is retried. */
+const transientErrorNames: ReadonlySet<string> = new Set([
+  'ProvisionedThroughputExceededException',
+  'ThrottlingException',
+  'RequestLimitExceeded',
+  'InternalServerError',
+  'TransactionInProgressException',
+  'TimeoutError',
+])
+
+/**
+ * Checks whether a failed usage write may succeed when the exporter retries it.
+ *
+ * A cancelled transaction counts when a competing transaction or throttling cancelled at least one
+ * item and the other items had no failure of their own.
+ *
+ * @param error - Thrown value.
+ * @returns True for a transient failure.
+ */
+function isTransientUsageWriteFailure(error: unknown): boolean {
+  if (!isRecord(error) || typeof error.name !== 'string') return false
+  if (transientErrorNames.has(error.name)) return true
+  if (error.name !== 'TransactionCanceledException' || !Array.isArray(error.CancellationReasons)) return false
+  const codes = error.CancellationReasons.map((reason) => isRecord(reason) && typeof reason.Code === 'string' ? reason.Code : undefined)
+  return codes.some((code) => code !== undefined && transientCancellationCodes.has(code)) &&
+    codes.every((code) => code === 'None' || (code !== undefined && transientCancellationCodes.has(code)))
 }
 
 /**
@@ -259,6 +307,7 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
         await this.#client.send(new TransactWriteCommand({ TransactItems: items }))
         recorded = true
       } catch (error) {
+        if (isTransientUsageWriteFailure(error)) throw createAgentUsageUnavailableError()
         if (!isReceiptConflict(error)) throw error
       }
     }
