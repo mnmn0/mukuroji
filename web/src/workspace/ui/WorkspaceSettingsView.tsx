@@ -41,7 +41,7 @@ export type WorkspaceSettingsViewProps = {
   onThemePreferenceChange: (preference: ThemePreference) => void
   /** Callback that saves a time zone; undefined follows the browser. */
   onTimeZoneChange?: (timeZone: string | undefined) => void
-  /** Whether to link the agent connection page, which only Software factory deployments serve. */
+  /** Whether to link the agent connection page; every deployment serves it. */
   showAgentConnection?: boolean
   /** Localized message resolver. */
   t: (key: MessageKey) => string

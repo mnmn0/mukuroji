@@ -9,10 +9,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(548)
-  expect(new Set(inventory).size).toBe(544)
-  expect(inventory).toContain('POST /api/notifications/bulk')
+  expect(inventory).toHaveLength(554)
+  expect(new Set(inventory).size).toBe(550)
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
+  expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
@@ -32,6 +32,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
   expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-summary')
+  expect(inventory).toContain('GET /api/teams/:teamId/monthly-summary')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
@@ -95,6 +96,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/actual-dates')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents/:documentId')
+  expect(inventory).toContain('GET /api/v1/me')
+  expect(inventory).toContain('GET /api/v1/teams')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/members')
+  expect(inventory).toContain('GET /api/v1/work-item-keys/:key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
@@ -109,10 +114,14 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/me/preferences')
   expect(inventory).toContain('PUT /api/me/preferences')
   expect(inventory).toContain('GET /api/developer/credential-policy')
+  expect(inventory).toContain('GET /api/developer/work-item-exports')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
   expect(inventory).toContain('GET /api/teams/:teamId/time-periods')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/close')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/reopen')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-tracking/settings')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-rate-card')
+  expect(inventory).toContain('PUT /api/teams/:teamId/time-rate-card')
   expect(inventory).toContain('POST /api/teams/:teamId/time-entries/:entryId/return')
   expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
@@ -133,12 +142,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
-  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
-  // credential routes (#632).
+  // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
+  // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
-  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
+  expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '795b6728c73bc168bbd609d8f9d38341ac1f8d38d164b2b01f290d056ed7fb37',
+    'e9f67d0058168df09f45b63ffa4dfe62e34c3973cde56605121038234bbfed09',
   )
 })

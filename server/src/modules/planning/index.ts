@@ -3,6 +3,7 @@ export type { PlanningUpdateActivity } from './planning-update-activity'
 export {
   PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,
+  findWorkItemDependencyScheduleConflicts,
   createPlanningUpdateProjectTargetRecordKey,
   createPlanningUpdateTargetRecordKey,
   isPlanningHealthDegraded,
