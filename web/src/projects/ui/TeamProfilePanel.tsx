@@ -338,7 +338,9 @@ function TeamProfileForm({
   const [description, setDescription] = useState(stored.description)
   const [leaderMemberKey, setLeaderMemberKey] = useState(stored.leaderMemberKey)
   const [dirty, setDirty] = useState(false)
-  const changedElsewhere = !isSameStoredTeamProfile(loaded, stored)
+  // Only a newer revision was saved elsewhere. An older one is a cache that has not caught up
+  // with this form's own save yet (for example, its reload failed), so it must not undo the save.
+  const changedElsewhere = stored.revision > loaded.revision
   if (changedElsewhere && !dirty) {
     // A background reload without unsaved edits shows the newer values right away.
     setLoaded(stored)
@@ -370,12 +372,13 @@ function TeamProfileForm({
     setDirty(false)
   }
 
-  /** Drops the unsaved edits and shows the stored values. */
+  /** Drops the unsaved edits and shows the latest saved values. */
   const discard = () => {
+    const latest = changedElsewhere ? stored : loaded
     setDirty(false)
-    setLoaded(stored)
-    setDescription(stored.description)
-    setLeaderMemberKey(stored.leaderMemberKey)
+    setLoaded(latest)
+    setDescription(latest.description)
+    setLeaderMemberKey(latest.leaderMemberKey)
   }
 
   return (
@@ -465,19 +468,6 @@ function readStoredTeamProfile(team: DirectoryAdministrationTeam): StoredTeamPro
     description: team.description ?? '',
     leaderMemberKey: team.leaderMemberKey ?? '',
   }
-}
-
-/**
- * Tells whether two stored profiles are the same.
- *
- * @param left - One stored profile.
- * @param right - Another stored profile.
- * @returns Whether the revision and both values match.
- */
-function isSameStoredTeamProfile(left: StoredTeamProfile, right: StoredTeamProfile) {
-  return left.revision === right.revision &&
-    left.description === right.description &&
-    left.leaderMemberKey === right.leaderMemberKey
 }
 
 /** Props of {@link TeamProfileMembers}. */

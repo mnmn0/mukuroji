@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import type { DirectoryAdministrationTeam, UpdateDirectoryTeamProfileInput } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { ProjectMember } from '../api/members'
@@ -189,6 +189,32 @@ export const ChangedLeaderAfterReload: Story = {
     await userEvent.click(canvas.getByRole('button', { name: '保存' }))
     await expect(await canvas.findByText('保存しました。')).toBeVisible()
     await expect(canvas.getByLabelText('リーダー')).toHaveValue('suzuki@example.com')
+  },
+}
+
+/**
+ * A save whose reload failed keeps the saved values, and the next save expects the revision the
+ * first one wrote instead of the one the stale Team still shows.
+ */
+export const SavedWhileReloadFails: Story = {
+  // The Team prop never changes, as when the directory could not be read again after the save.
+  args: { onSaveProfile: fn(async (): Promise<true> => true) },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const description = canvas.getByLabelText('説明')
+    await userEvent.clear(description)
+    await userEvent.type(description, '保存した説明')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(await canvas.findByText('保存しました。')).toBeVisible()
+    await expect(canvas.getByLabelText('説明')).toHaveValue('保存した説明')
+    await expect(canvas.queryByTestId('team-profile-changed-elsewhere')).toBeNull()
+    await userEvent.type(canvas.getByLabelText('説明'), '追記')
+    await userEvent.click(canvas.getByRole('button', { name: '保存' }))
+    await expect(args.onSaveProfile).toHaveBeenLastCalledWith('core-team', {
+      description: '保存した説明追記',
+      leaderMemberKey: 'sato@example.com',
+      expectedProfileRevision: 1,
+    })
   },
 }
 
