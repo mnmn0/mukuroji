@@ -10,6 +10,7 @@ import { createTranslator } from '../../shared/i18n/i18n'
 import { getWorkspaceWorkload } from '../../workload/api'
 import { createWorkloadDateRange } from '../../workload/model/dateRange'
 import { WorkspaceWorkloadView } from '../../workload/ui/WorkspaceWorkloadView'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -36,8 +37,10 @@ function WorkspaceWorkloadSession() {
       getWorkspaceWorkload(token, { fromDate, toDate, granularity: currentGranularity }),
     { shouldRetryOnError: false },
   )
-  const weekStart = resolveWeekStart(params.get('week'))
-  const week = createWeekPeriod(weekStart)
+  const calendarSettings = useWorkspaceCalendarSettings(workspace.accessToken, workspace.canLoadWorkspaceData)
+  const weekStartDay = calendarSettings.settings?.weekStartDay
+  const weekStart = resolveWeekStart(params.get('week'), undefined, weekStartDay)
+  const week = createWeekPeriod(weekStart, weekStartDay)
   const timeZone = resolveBrowserTimeZone()
   const timesheet = useSWR(
     workspace.canLoadWorkspaceData && workspace.accessToken ? ['my-timesheet', workspace.accessToken, week.from, week.to, timeZone] as const : null,
@@ -54,7 +57,11 @@ function WorkspaceWorkloadSession() {
     try {
       const result = await submitMyTimesheet(accessToken, { from: week.from, to: week.to }, createMutationRequestContext())
       setNotice(result.partialFailure
-        ? { kind: 'partial', count: result.count, failed: result.failedEntryIds.length }
+        ? {
+            kind: 'partial',
+            count: result.count,
+            failed: result.failedEntryIds.length + result.teams.filter((team) => team.failed === true).length,
+          }
         : result.count === 0 ? { kind: 'nothing' } : { kind: 'submitted', count: result.count })
     } catch {
       setNotice({ kind: 'error' })
@@ -83,7 +90,7 @@ function WorkspaceWorkloadSession() {
           notice={notice}
           onMoveWeek={(weeks) => {
             setNotice(undefined)
-            setParams({ week: shiftWeek(weekStart, weeks) })
+            setParams({ week: shiftWeek(weekStart, weeks, weekStartDay) })
           }}
           onRetry={() => { void timesheet.mutate() }}
           onSubmit={() => { void submit() }}

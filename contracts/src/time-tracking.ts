@@ -307,6 +307,8 @@ export type MyTimesheetSubmitTeamResult = {
   count: number
   /** Entries that could not be submitted and need a retry. */
   failedEntryIds: string[]
+  /** Whether the Team could not be processed at all, for example after losing access; retry later. */
+  failed?: boolean
 }
 
 /** Result of submitting the caller's draft and rejected time in every Team at once. */

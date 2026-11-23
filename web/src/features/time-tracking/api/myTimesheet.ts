@@ -60,10 +60,18 @@ export async function submitMyTimesheet(
   }
   const teams: MyTimesheetSubmitResult['teams'] = []
   for (const value of data.teams) {
-    if (!isRecord(value) || typeof value.teamId !== 'string' || typeof value.count !== 'number' || !isStringArray(value.failedEntryIds)) {
+    if (
+      !isRecord(value) || typeof value.teamId !== 'string' || typeof value.count !== 'number' ||
+      !isStringArray(value.failedEntryIds) || (value.failed !== undefined && typeof value.failed !== 'boolean')
+    ) {
       throw createInvalidTimeTrackingResponseError('Personal timesheet submission')
     }
-    teams.push({ teamId: value.teamId, count: value.count, failedEntryIds: value.failedEntryIds })
+    teams.push({
+      teamId: value.teamId,
+      count: value.count,
+      failedEntryIds: value.failedEntryIds,
+      ...(value.failed === true ? { failed: true } : {}),
+    })
   }
   return { count: data.count, failedEntryIds: data.failedEntryIds, partialFailure: data.partialFailure, teams }
 }

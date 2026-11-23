@@ -467,20 +467,25 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const teams = await dependencies.listTimeTrackingTeams(principal, 'member')
       const results = []
       for (const team of teams) {
-        const { updated, failedEntryIds } = await runTimesheetAction(
-          dependencies,
-          principal,
-          team.teamId,
-          false,
-          { action: 'submit', from, to },
-        )
-        results.push({ teamId: team.teamId, count: updated.length, failedEntryIds })
+        try {
+          const { updated, failedEntryIds } = await runTimesheetAction(
+            dependencies,
+            principal,
+            team.teamId,
+            false,
+            { action: 'submit', from, to },
+          )
+          results.push({ teamId: team.teamId, count: updated.length, failedEntryIds })
+        } catch {
+          // One Team the caller can no longer submit to must not stop the other Teams.
+          results.push({ teamId: team.teamId, count: 0, failedEntryIds: [], failed: true })
+        }
       }
       const failedEntryIds = results.flatMap((result) => result.failedEntryIds)
       return context.json({
         count: results.reduce((total, result) => total + result.count, 0),
         failedEntryIds,
-        partialFailure: failedEntryIds.length > 0,
+        partialFailure: failedEntryIds.length > 0 || results.some((result) => result.failed === true),
         teams: results,
       })
     })
