@@ -48,10 +48,10 @@ const CLOSED_ROW_RETENTION_DAYS = 30
  */
 const MAX_AUDIT_EVENTS_PER_WRITE = 99
 /**
- * Most assignments a request cancellation audits one by one; with the request's own event they
- * stay within `MAX_AUDIT_EVENTS_PER_WRITE`. Larger cascades are recorded as one event.
+ * Most assignments one request cancellation can cancel with it. Each gets its own audit event,
+ * so with the request's event they stay within `MAX_AUDIT_EVENTS_PER_WRITE`.
  */
-const MAX_ITEMIZED_CASCADE_EVENTS = MAX_AUDIT_EVENTS_PER_WRITE - 1
+const MAX_CASCADE_ASSIGNMENTS = MAX_AUDIT_EVENTS_PER_WRITE - 1
 /** Days after their end date that any row is kept; longer than the widest snapshot range. */
 const PAST_ROW_RETENTION_DAYS = 400
 /** Audit entity type for Team workload changes. */
@@ -614,21 +614,25 @@ export class CapacityPlanningService {
             'The assignments that fill this resource request changed. Reload and try again.',
           )
         }
+        if (activeAssignments.length > MAX_CASCADE_ASSIGNMENTS) {
+          throw new CapacityPlanningError(
+            413,
+            'ResourceRequestCascadeTooLarge',
+            `Cancel some assignments of this resource request first; at most ${MAX_CASCADE_ASSIGNMENTS} can be canceled with it.`,
+          )
+        }
         const canceledAssignments = activeAssignments.map((assignment): ResourceAssignment => ({
           ...assignment,
           status: 'canceled',
           revision: assignment.revision + 1,
           updatedAt: timestamp,
         }))
-        for (const canceled of canceledAssignments) replaceById(state.assignments, canceled, 'id')
-        if (canceledAssignments.length <= MAX_ITEMIZED_CASCADE_EVENTS) {
-          activeAssignments.forEach((assignment, index) => {
-            const canceled = canceledAssignments[index]
-            if (canceled) events.push(createAssignmentAuditEvent(input, assignment, canceled))
-          })
-        } else {
-          events.push(createCascadeCancelAuditEvent(input, current.id, canceledAssignments))
-        }
+        activeAssignments.forEach((assignment, index) => {
+          const canceled = canceledAssignments[index]
+          if (!canceled) return
+          replaceById(state.assignments, canceled, 'id')
+          events.push(createAssignmentAuditEvent(input, assignment, canceled))
+        })
       } else if (input.status === 'canceled' && activeAssignments.length > 0) {
         throw new CapacityPlanningError(
           409,
@@ -1733,36 +1737,6 @@ function createAssignmentAuditEvent(
       status: next.status,
       ...(next.projectId ? { projectId: next.projectId } : {}),
       ...(next.workItemId ? { workItemId: next.workItemId } : {}),
-    },
-  })
-}
-
-/**
- * Records a request cancellation that canceled more assignments than one write can audit one by
- * one, as a single event that lists every canceled assignment and notifies each assigned member.
- *
- * @param scope - Workspace, Team, and actor.
- * @param requestId - Canceled request.
- * @param canceled - Assignments canceled with the request.
- * @returns The audit event input.
- */
-function createCascadeCancelAuditEvent(
-  scope: WorkloadAuditScope,
-  requestId: string,
-  canceled: readonly ResourceAssignment[],
-): MutationAuditEventInput {
-  const memberIds = [...new Set(canceled.map((assignment) => assignment.memberId))]
-  return createWorkloadAuditEvent(scope, {
-    eventType: 'workload.assignment.canceled',
-    action: 'resource_assignment_canceled',
-    target: { type: 'resource-request', id: requestId },
-    changes: undefined,
-    summary: `${canceled.length} assignments canceled with their request`,
-    recipients: memberIds.map((memberKey) => ({ memberKey, reason: 'workload-assignment' })),
-    metadata: {
-      requestId,
-      assignmentIds: canceled.map((assignment) => assignment.id),
-      status: 'canceled',
     },
   })
 }

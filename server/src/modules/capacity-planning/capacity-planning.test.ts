@@ -781,7 +781,7 @@ describe('capacity planning reviews and retention', () => {
     ])
   })
 
-  test('records a cascade too large to audit one by one as one event that notifies every member', async () => {
+  test('refuses a cascade larger than one write can audit assignment by assignment', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     const service = createReviewService(repository)
     await seedMember(service, 'member-2')
@@ -804,22 +804,31 @@ describe('capacity planning reviews and retention', () => {
     }
     const current = await service.getRequest('workspace-1', 'team-1', request.id)
 
-    await service.updateRequest({
+    const cancel: UpdateResourceRequestInput = {
       workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
       expectedRevision: current.revision, expectedTeamRevision: 102, actorMemberId: 'manager-1',
-    }, { canViewConfidential: true, authorizedAssignmentIds: ids }, { auditContext })
+    }
+
+    // 99 assignment events, the request event, and the state Put would exceed DynamoDB's 100 items.
+    await expect(service.updateRequest(cancel, { canViewConfidential: true, authorizedAssignmentIds: ids }, { auditContext }))
+      .rejects.toMatchObject({ code: 'ResourceRequestCascadeTooLarge', status: 413 })
+    const [first] = ids
+    if (!first) throw new Error('The fixture must have assignments.')
+    const single = await service.getAssignment('workspace-1', 'team-1', first)
+    await service.updateAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', assignmentId: first, status: 'canceled',
+      expectedRevision: single.revision, expectedTeamRevision: 102, actorMemberId: 'manager-1',
+    })
+    const after = await service.getRequest('workspace-1', 'team-1', request.id)
+    await service.updateRequest({ ...cancel, expectedRevision: after.revision, expectedTeamRevision: 103 }, {
+      canViewConfidential: true, authorizedAssignmentIds: ids,
+    }, { auditContext })
     const events = repository.auditLog.at(-1)?.events ?? []
 
-    // State Put plus two events stays far below the 100-item transaction limit.
-    expect(events.map((event) => event.eventType)).toEqual(['workload.assignment.canceled', 'workload.request.canceled'])
-    expect(events[0]?.metadata).toMatchObject({
-      requestId: request.id,
-      assignmentIds: [...ids],
-      notificationCandidates: [
-        { memberKey: 'member-2', reason: 'workload-assignment' },
-        { memberKey: 'member-3', reason: 'workload-assignment' },
-      ],
-    })
+    // Each of the remaining 98 assignments keeps its own audit event and target.
+    expect(events).toHaveLength(99)
+    expect(events.filter((event) => event.eventType === 'workload.assignment.canceled')).toHaveLength(98)
+    expect(events.at(-1)?.eventType).toBe('workload.request.canceled')
   })
 
   test('reports a replayed audit event as a duplicate and keeps other transaction failures as errors', async () => {

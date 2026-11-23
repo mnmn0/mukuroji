@@ -49,7 +49,8 @@ manager が「空いていない」と判断した後に休暇が取り消され
   Team（割当に Project があれば Project）で確かめる。Project のない Team の workload event は、要員 API と同じく
   Team の Project のどれか 1 つを読めれば外部チャネル（メール・push・Slack）にも配信する（Analytics の Team レポートと同じ扱い）。
 - DynamoDB の transaction は 100 item までなので、1 回の書き込みの audit event は 99 件までにする。
-  依頼の取消で 99 件を超える割当を巻き込むときは、取り消した割当の ID と通知先をまとめた 1 件の event にする。
+  依頼の取消で巻き込める割当は 98 件までとし、超えるときは `413 ResourceRequestCascadeTooLarge` で断る（先に割当をいくつか個別に取り消す）。
+  まとめた 1 件の event にすると、割当ごとの target で audit を検索・export できなくなるため。
 - transaction の取消は、audit event の条件だけが失敗したとき（同じ idempotency key の再送）に `409 CapacityPlanningDuplicateRequest`、
   Team の revision が失敗したときに `409 CapacityPlanningRevisionConflict` を返す。throttling や transaction conflict は
   基盤のエラーのまま返し、記録して再試行できるようにする。
