@@ -17,7 +17,7 @@ import {
 import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProjectDirectoryApiError } from '../api/errors'
-import { ProjectChangeRequestScheduleConflictError } from '../model/projectChangeRequestDecision'
+import { describeScheduleChanges, ProjectChangeRequestScheduleConflictError } from '../model/projectChangeRequestDecision'
 import {
   createProjectRaidLogCsv,
   labelProjectRaidReference,
@@ -25,7 +25,6 @@ import {
 } from '../model/projectRaidLogExport'
 import {
   ChangeRequestDecision,
-  describeScheduleChanges,
   ScheduleChangesField,
   type ProjectChangeRequestDecisionChoice,
 } from './ProjectChangeRequestControls'

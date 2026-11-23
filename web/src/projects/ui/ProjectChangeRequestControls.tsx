@@ -6,6 +6,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import { operationDate } from '../model/projectChangeRequestDecision'
 import { labelProjectRaidReference, type ProjectRaidReferenceOption } from '../model/projectRaidLogExport'
 
 /** Options of one decision, as the panel passes them to its owner. */
@@ -34,16 +35,6 @@ type ScheduleChangesFieldProps = {
 
 /** Kind of change selected for one Work Item in the form, or none. */
 type ScheduleChangeKind = 'none' | ProjectRaidScheduleChangeOperation['type']
-
-/**
- * Reads the date of a requested change.
- *
- * @param operation - Requested change.
- * @returns The target date or the new end date.
- */
-function operationDate(operation: ProjectRaidScheduleChangeOperation) {
-  return operation.type === 'move' ? operation.targetDate : operation.endDate
-}
 
 /**
  * Builds a requested change from the form inputs.
@@ -130,29 +121,6 @@ export function ScheduleChangesField({ relatedWorkItemIds, workItemOptions, valu
       })}
     </fieldset>
   )
-}
-
-/**
- * Describes the requested date changes of an entry in one line.
- *
- * @param changes - Requested changes.
- * @param workItemOptions - Work Items with their display text.
- * @param t - Translator.
- * @returns The text.
- */
-export function describeScheduleChanges(
-  changes: readonly ProjectRaidScheduleChange[],
-  workItemOptions: readonly ProjectRaidReferenceOption[],
-  t: (key: MessageKey) => string,
-) {
-  return changes.map((change) => {
-    const key: MessageKey = change.operation.type === 'move'
-      ? 'projects.raidLog.schedule.moveTo'
-      : 'projects.raidLog.schedule.endOn'
-    return t(key)
-      .replace('{item}', labelProjectRaidReference(workItemOptions, change.workItemId))
-      .replace('{date}', operationDate(change.operation))
-  }).join(' / ')
 }
 
 /** Props of the decision part of one change request. */
