@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import type { TimeBudget, TimeTrackingSummary } from '@mukuroji/contracts'
+import type { TimeBudget, TimeRateCard, TimeTrackingSummary } from '@mukuroji/contracts'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
 /** Mutable state of the mocked report API. */
@@ -14,6 +14,12 @@ type TimeReportMockState = {
   exportQueries: URLSearchParams[]
   /** Bodies of budget saves. */
   budgetBodies: unknown[]
+  /** Whether the member manages the whole Team and so sees the rate card. */
+  canManageRateCard: boolean
+  /** Saved Team rate card. */
+  rateCard: TimeRateCard
+  /** Bodies of rate card saves. */
+  rateCardBodies: unknown[]
 }
 
 /**
@@ -51,8 +57,16 @@ function createSummary(state: TimeReportMockState, query: URLSearchParams): Time
  * @param isManager - Whether the member receives costs and budgets.
  * @returns Mutable mock state.
  */
-async function mockTimeReport(page: Page, isManager: boolean): Promise<TimeReportMockState> {
-  const state: TimeReportMockState = { isManager, summaryQueries: [], exportQueries: [], budgetBodies: [] }
+async function mockTimeReport(page: Page, isManager: boolean, canManageRateCard = false): Promise<TimeReportMockState> {
+  const state: TimeReportMockState = {
+    isManager,
+    summaryQueries: [],
+    exportQueries: [],
+    budgetBodies: [],
+    canManageRateCard,
+    rateCard: { schemaVersion: 1, workspaceId: 'workspace-demo', teamId: 'core-team', currency: 'JPY', memberRates: [], jobRoleRates: [], revision: 0 },
+    rateCardBodies: [],
+  }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
@@ -81,6 +95,26 @@ async function mockTimeReport(page: Page, isManager: boolean): Promise<TimeRepor
   await page.route((url) => url.pathname === '/api/teams/core-team/time-tracking/export', (route) => {
     state.exportQueries.push(new URL(route.request().url()).searchParams)
     return route.fulfill({ body: 'Group,Minutes\ndemo@example.com,750\n', headers: { 'Content-Type': 'text/csv; charset=utf-8' } })
+  })
+  await page.route((url) => url.pathname === '/api/teams/core-team/time-tracking/settings', (route) =>
+    route.fulfill({ json: { defaultCurrency: 'JPY', canManageRateCard: state.canManageRateCard } }))
+  await page.route((url) => url.pathname === '/api/teams/core-team/work-item-configuration', (route) =>
+    route.fulfill({ json: { configuration: { jobRoles: [{ id: 'role-engineer', name: 'Engineer' }] } } }))
+  await page.route((url) => url.pathname === '/api/teams/core-team/time-rate-card', (route) => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON()
+      state.rateCardBodies.push(body)
+      state.rateCard = {
+        ...state.rateCard,
+        currency: body.currency,
+        memberRates: body.memberRates,
+        jobRoleRates: body.jobRoleRates,
+        revision: state.rateCard.revision + 1,
+        updatedAt: '2026-11-10T01:00:00.000Z',
+        updatedBy: 'demo@example.com',
+      }
+    }
+    return route.fulfill({ json: { rateCard: state.rateCard } })
   })
   await page.route((url) => url.pathname === '/api/teams/core-team/time-budget', (route) => {
     const body = route.request().postDataJSON()
@@ -141,6 +175,24 @@ test.describe('time tracking report', () => {
     await expect(page).toHaveURL(/from=2026-11-01&to=2026-11-30&groupBy=user/u)
   })
 
+  test('a manager of the whole Team sets rates by job role and by member', async ({ page }) => {
+    const state = await mockTimeReport(page, true, true)
+    await page.goto('/teams/core-team/timesheet?view=report&from=2026-11-09&to=2026-11-15&groupBy=user')
+    const panel = page.getByTestId('time-rate-card-panel')
+    await expect(panel).toContainText('Engineer')
+    await panel.getByLabel('Engineer Hourly rate').fill('6000')
+    await panel.getByLabel('Demo Member Job role').selectOption('role-engineer')
+    await panel.getByRole('button', { name: 'Save rate card' }).click()
+    await expect(panel.getByText('Rate card saved.', { exact: false })).toBeVisible()
+    expect(state.rateCardBodies.at(-1)).toEqual({
+      currency: 'JPY',
+      memberRates: [{ userId: 'demo@example.com', jobRoleId: 'role-engineer' }],
+      jobRoleRates: [{ jobRoleId: 'role-engineer', hourlyRateMinor: 6_000 }],
+      expectedRevision: 0,
+    })
+    await expect(panel.getByLabel('Engineer Hourly rate')).toHaveValue('6000')
+  })
+
   test('a member sees hours without costs or budgets', async ({ page }) => {
     await mockTimeReport(page, false)
     await page.goto('/teams/core-team/timesheet?view=report&from=2026-11-09&to=2026-11-15&groupBy=user')
@@ -148,5 +200,6 @@ test.describe('time tracking report', () => {
     await expect(table).toContainText('12:30')
     await expect(table.getByRole('columnheader', { name: 'Actual cost' })).toHaveCount(0)
     await expect(page.getByTestId('time-budget-panel')).toHaveCount(0)
+    await expect(page.getByTestId('time-rate-card-panel')).toHaveCount(0)
   })
 })
