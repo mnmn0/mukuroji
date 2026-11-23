@@ -12,6 +12,7 @@ import { confirmTeamIssueSchedule, getTeamIssueDetail, previewTeamIssueSchedule 
 import { createMutationRequestContext, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { captureProjectScheduleBaseline } from '../../work-items/api/scheduleBaseline'
 import { PROJECT_SCHEDULE_BASELINE_KEY } from '../../work-items/queries/useProjectScheduleBaseline'
+import { WORK_ITEM_SCHEDULE_BASELINES_KEY } from '../../work-items/queries/useWorkItemScheduleBaselines'
 import { decideProjectRaidChangeRequest } from '../api/raidLog'
 import { ProjectDirectoryApiError } from '../api/errors'
 import {
@@ -198,7 +199,9 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       mutate(projectRaidLogKey(accessToken, teamId, projectId)),
       mutate((key: unknown) => Array.isArray(key) && (
         (key[0] === 'project-issues' && key[2] === projectId) ||
-        (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId)
+        (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId) ||
+        // Baseline comparisons across Projects, such as the table's baseline delay column.
+        key[0] === WORK_ITEM_SCHEDULE_BASELINES_KEY
       )),
     ])
     const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision])
