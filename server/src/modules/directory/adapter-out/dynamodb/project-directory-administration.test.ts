@@ -275,6 +275,23 @@ test('rejects renaming an archived Team, an empty name, and a name over 500 char
   expect(transactions()).toEqual([])
 })
 
+test('applies the rename name limits when a Team or Project is created', async () => {
+  const { client, transactions } = createClient([createTeamRow('beta', 20)])
+  const creator = { userKey: 'owner@example.com', workspaceMemberVersion: 1 }
+
+  await expect(client.createTeam(directoryId, { name: 'x'.repeat(501) }))
+    .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  await expect(client.createTeam(directoryId, { nameJa: 'ok', nameEn: 'y'.repeat(501) }))
+    .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  await expect(client.createProject(directoryId, 'beta', { name: 'x'.repeat(501) }, creator))
+    .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  await expect(client.createProject(directoryId, 'beta', { name: 'line\nbreak' }, creator))
+    .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  await expect(client.renameTeam(directoryId, 'beta', { nameJa: 'tab\there' }))
+    .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  expect(transactions()).toEqual([])
+})
+
 test('renames a Project and keeps its color unless a new one is given', async () => {
   const { client, transactions } = createClient([
     createTeamRow('alpha', 10),

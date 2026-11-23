@@ -165,6 +165,31 @@ export const WhiteboardNoteWorkItem: Story = {
 }
 
 /**
+ * Work Item の完了で付箋が完了になった Whiteboard です。付箋に「✓ 完了」と取り消し線が付きます。
+ */
+export const WhiteboardNoteDone: Story = {
+  args: {
+    data: {
+      ...screenData,
+      selectedDocument: whiteboardRecordFixture.kind === 'whiteboard'
+        ? {
+            ...whiteboardRecordFixture,
+            whiteboard: {
+              ...whiteboardRecordFixture.whiteboard,
+              objects: whiteboardRecordFixture.whiteboard.objects.map((object) =>
+                object.type === 'note' ? { ...object, done: true } : object),
+            },
+          }
+        : whiteboardRecordFixture,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findByText(/✓ 完了/u)).toBeInTheDocument()
+  },
+}
+
+/**
  * Comment と version history を右 drawer で確認する状態です。
  */
 export const VersionHistory: Story = {

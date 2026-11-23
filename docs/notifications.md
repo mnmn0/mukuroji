@@ -48,6 +48,7 @@ GET  /api/notifications?filter=all|unread|read|archived|snoozed&type=...&limit=.
 GET  /api/notifications/unread-count
 PATCH /api/notifications/{notificationId}
 POST /api/notifications/mark-all-read
+POST /api/notifications/bulk
 GET  /api/notification-preferences
 PUT  /api/notification-preferences
 GET  /api/teams/{teamId}/notification-reminders
@@ -90,7 +91,32 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - quiet hours: enabled、start、end、IANA time zone
 - reminder days（`reminderDays`）: 自分あての期限前通知・超過の再通知・未更新の督促・工数の督促の日数（下の [リマインドの日数](#リマインドの日数)）。PUT で `reminderDays` を省略すると保存済みの値を残し、空 object を送ると消します。項目を知らない古い client が保存しても消えないようにするためです
 
+- category channels（`categoryChannels`）: 通知の種類ごとに切ったチャネル（下の [種類ごとの配信先とミュート](#種類ごとの配信先とミュート)）。保存するのは `false` だけです
+- mutes（`mutes`）: ミュートした Project（`projectKeys`、Project ID は Team の中でだけ一意なので `<teamId>#<projectId>` で持つ）・Team（`teamIds`）を各 100 件までと、ミュート中も届ける mention・承認の切り替え（既定はどちらも届ける）
+
+`categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします。`categoryChannels` か `mutes` を持つ row は、ほかの項目が壊れている場合も同じです（読み替えると、ミュートした通知が届いてしまうため）。
+
 in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+
+### 種類ごとの配信先とミュート
+
+通知は受信者ごとに 1 つの種類（category）に入ります。分類は `server/src/modules/notifications/domain/notification-routing.ts` の `classifyNotificationCategory` が持ち、受信者の reasons を `mention`、`approval`、`assignment`、`due`、`status`、`comment`、`reminder` の順に見て、どれにも当たらなければ event type で決めます（`approval.*` は reasons より先に承認とします）。種類は `mention`・`approval`・`assignment`・`status`・`due`・`comment`・`planning`・`reminder`・`other` です。
+
+あるチャネルに届くのは、チャネル全体の switch が on、その種類でチャネルが切られていない、ミュートされていない、のすべてを満たすときです。ミュートは notification の `teamId` と `projectId` の組が `projectKeys` に、または `teamId` が `teamIds` に含まれるときで、種類が mention か approval で対応する切り替えが on なら除きます。
+
+- 投影（`createNotificationProjectionDeliveryState`）: 種類やミュートで in-app に届かない通知は archived row として保存し、unread には入れません（アーカイブの一覧には出ます）。全体の in-app switch が off のときは従来どおり `inAppVisible: false` で一覧にも出しません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
+- 外部 channel の送信（`deliverDueChannelNotifications`）: 送る直前に強整合で読んだ preference で同じ判定をやり直し、投影後に種類を切ったりミュートしたりした通知は `suppressed` にします
+- 更新ダイジェスト（`update-feed.digest`、種類は other）: Inbox に書く時点で同じ判定を使い、in-app に届かなければ archived row にします
+- 判定は受信者本人の設定で配信を減らすだけで、受信者の選び方と閲覧権限の確認は変えません
+
+### Inbox の一括操作
+
+```http
+POST /api/notifications/bulk
+{ "action": "mark-read" | "mark-unread" | "archive" | "restore", "notificationIds": ["..."] }
+```
+
+1 回に 50 件まで受け付け、同じ ID は 1 回だけ処理します。各通知は `PATCH /api/notifications/{notificationId}` と同じ所有者・現在権限・version の確認を通り、4 件ずつ並行して更新します。更新できなかった通知は request 全体を失敗にせず、`failures` に `{ id, status, code }` で返します。処理は `application/bulk-notification-update.ts` が持ち、route は入力の検証と response の変換だけを行います。response は `{ notifications, failures, unreadCount }` です。storage の障害など NotificationError でない失敗は request 全体を失敗にします。Web は選択を 50 件ずつに分けて送り、失敗した通知を選択に残します。
 
 ## Web Push の購読
 
@@ -269,6 +295,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - 本人への督促は Team ごとに 1 通で、本人が書いている最初の Project（ID 順）の通知として認可します。manager への通知は作成者 × manager ごとに 1 通で、作成者本人には送りません。重複排除 key は Workspace・Team・週・種類・作成者・宛先です
 - 通知は Inbox の「週報の提出」として届き、本人は `/teams/{teamId}/timesheet?view=weekly-report&week=<週の開始日>`、manager は `view=team-weekly-reports` の同じ週を開きます。概要は週の開始日と、manager 向けには作成者の表示名です
 - projection は配信時に週の行を強整合で読み直し、提出済みなら捨てます。未提出なら「週の行がないか `submissionCount = 0`」の ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で捨てます。読み直す手段がない projection では届けません
-- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます。Slack・Email の送信時は提出状況を読み直しません
+- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます
+- Slack と Email への配信も、送信の直前に同じ週の行を強整合で読み直します。通知行は作成者（`weeklyReportAuthorMemberKey`）と週の開始日（`weeklyReportWeekStart`）を持ち、提出済みなら送らずに `suppressed` で終えます。quiet hours や digest で送信が遅れる間に提出した場合も、古い督促は届きません。manager への通知も、作成者が提出していれば届きません。週の開始日を持たない行と、読み直す手段（`PLANNING_TABLE_NAME`）のない送信 job では督促を送りません。読み直しから送信までの間に提出した場合は、まれに届くことがあります
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

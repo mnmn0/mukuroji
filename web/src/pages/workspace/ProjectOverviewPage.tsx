@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { DocumentsApiError } from '../../documents/api/errors'
 import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
+import { useProjectActionItems } from '../../documents/queries/useProjectActionItems'
 import { useProjectDocuments } from '../../documents/queries/useProjectDocuments'
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
 import { TeamIssuesApiError } from '../../issues/api'
@@ -12,6 +13,7 @@ import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewDocuments,
   selectProjectOverviewSchedule,
+  summarizeProjectOverviewActionItems,
   summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
   summarizeProjectOverviewRaid,
@@ -61,6 +63,27 @@ export function ProjectOverviewPage() {
     projectId,
   )
   const projectDocuments = useProjectDocuments(canRead ? workspace.accessToken : undefined, projectId)
+  // Action items are read once the first page of Project Documents is in, so
+  // a slow later page never holds the list back.
+  const actionItemsQuery = useProjectActionItems(
+    canRead ? workspace.accessToken : undefined,
+    projectDocuments.isLoading || projectDocuments.error ? undefined : projectDocuments.documents,
+  )
+  const actionItems = useMemo(
+    () => actionItemsQuery.data
+      ? summarizeProjectOverviewActionItems(
+          actionItemsQuery.data.items,
+          {
+            failedDocumentCount: actionItemsQuery.data.failedCount,
+            hasMoreDocuments: projectDocuments.hasMore,
+            skippedDocumentCount: actionItemsQuery.data.skippedCount,
+          },
+          (members.data ?? []).filter(isActiveProjectAssignmentCandidate),
+          toLocalDate(new Date()),
+        )
+      : undefined,
+    [actionItemsQuery.data, members.data, projectDocuments.hasMore],
+  )
   const agentRunBoard = useTeamAgentRunBoard(
     canRead && workspace.softwareFactoryEnabled ? workspace.accessToken : undefined,
     team?.id,
@@ -141,14 +164,18 @@ export function ProjectOverviewPage() {
         raidLog.error,
         documentBacklinks.error,
         projectDocuments.error,
+        actionItemsQuery.error,
       ]}
     >
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <ProjectOverviewView
+          actionItems={actionItems}
+          actionItemsError={resolveDocumentsError(actionItemsQuery.error, projectDocuments.error)}
           agentRuns={agentRuns}
           agentRunsError={agentRunsError}
           documents={documents}
           documentsError={documentsError}
+          isActionItemsLoading={projectDocuments.isLoading || actionItemsQuery.isLoading}
           isAgentRunsLoading={agentRunBoard.isLoading}
           isDocumentsLoading={isBacklinksLoading || projectDocuments.isLoading}
           isMembersLoading={Boolean(members.key) && members.data === undefined && !members.error}
@@ -159,6 +186,10 @@ export function ProjectOverviewPage() {
           locale={workspace.locale}
           members={memberSummary}
           membersError={membersError}
+          onRetryActionItems={() => {
+            if (projectDocuments.error) void projectDocuments.refresh()
+            else void actionItemsQuery.mutate()
+          }}
           onRetryAgentRuns={() => void agentRunBoard.mutate()}
           onRetryDocuments={() => {
             if (documentBacklinks.error) void documentBacklinks.mutate()

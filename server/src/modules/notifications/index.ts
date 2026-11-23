@@ -8,6 +8,7 @@ export {
   requiresCurrentWorkItemAssignee,
   isSlackNotificationEligible,
   isEmailNotificationEligible,
+  isNotificationRoutedToChannel,
   toNotificationItem,
   type CountUnreadNotificationsInput,
   type ListNotificationsInput,
@@ -29,6 +30,12 @@ export {
   type UpdateNotificationInput,
   type UpdateNotificationPreferencesInput,
 } from './notifications'
+/** Exposes how one notification is routed to channels for one member. */
+export {
+  classifyNotificationCategory,
+  resolveNotificationRouting,
+  type NotificationRoutingSubject,
+} from './domain/notification-routing'
 /** Exposes the deterministic shard key used when queuing Slack notifications. */
 export { slackDeliveryShard } from './domain/slack-delivery'
 /** Exposes the application workflow that delivers due Slack notifications. */

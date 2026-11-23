@@ -150,6 +150,10 @@ function createRealtimeEnterpriseSnapshot(
   }
 }
 
+
+/** Routing subject that no category or mute setting in these tests affects. */
+const unscopedRoutingSubject = { eventType: 'comment.created', reasons: ['mention'] }
+
 describe('collaboration projection pure helpers', () => {
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
     const keys = [
@@ -631,7 +635,7 @@ describe('collaboration projection pure helpers', () => {
     expect(candidate).toEqual({ memberKey, reasons: ['report-recipient'] })
     if (!candidate) throw new Error('Analytics delivery must have one candidate.')
     expect(createNotificationProjectionItem(shared, candidate, createNotificationProjectionDeliveryState(
-      `${shared.workspaceId}#${memberKey}`, shared.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES,
+      `${shared.workspaceId}#${memberKey}`, shared.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES, unscopedRoutingSubject,
     ))).toMatchObject({
       eventType: 'analytics.report.delivered',
       entityId: 'weekly-report',
@@ -738,14 +742,29 @@ describe('collaboration projection pure helpers', () => {
       channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: '2026-07-12T12:00:00.000Z' }
     for (const occurredAt of ['2026-07-12T11:59:59.999Z', '2026-07-12T12:00:00.000Z']) {
       const event = createProjectionEvent({ occurredAt })
-      const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences)
+      const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, unscopedRoutingSubject)
       const row = createNotificationProjectionItem(event, candidate, state)
       expect(row.slackQueueShard !== undefined).toBe(occurredAt === preferences.slackEnabledAt)
       expect(row.inAppVisible).toBe(true)
     }
     const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', '2026-07-12T12:00:00.000Z',
-      { ...preferences, slackEnabledAt: undefined })
+      { ...preferences, slackEnabledAt: undefined }, unscopedRoutingSubject)
     expect(state.deliveryChannels).toEqual(['inApp'])
+  })
+  test('keeps a weekly report reminder\'s author and week on the row for the Slack and Email recheck', () => {
+    const candidate = { memberKey: 'member@example.com', reasons: ['weekly-report'] }
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: '2026-07-12T12:00:00.000Z' }
+    const event = createProjectionEvent({
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      weeklyReportWeekStart: '2026-07-06',
+    })
+    const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, preferences, unscopedRoutingSubject)
+    expect(createNotificationProjectionItem(event, candidate, state)).toMatchObject({
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      weeklyReportWeekStart: '2026-07-06',
+    })
   })
   test('queues Email only when the deployment configured a sender and the event is inside the opt-in period', () => {
     const previous = process.env.NOTIFICATION_EMAIL_SENDER
@@ -756,7 +775,7 @@ describe('collaboration projection pure helpers', () => {
       for (const sender of ['', 'notify@example.com']) {
         process.env.NOTIFICATION_EMAIL_SENDER = sender
         for (const occurredAt of ['2026-07-12T11:59:59.999Z', '2026-07-12T12:00:00.000Z']) {
-          const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences)
+          const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, unscopedRoutingSubject)
           const row = createNotificationProjectionItem(createProjectionEvent({ occurredAt }), candidate, state)
           const queued = Boolean(sender) && occurredAt === preferences.emailEnabledAt
           expect(row.deliveryChannels).toContain('email')
@@ -780,7 +799,7 @@ describe('collaboration projection pure helpers', () => {
       targetId: 'approval-1', fileId: 'file-1', notificationCandidates: [{ memberKey, reason: 'approval-requested' }] })
     const candidate = { memberKey, reasons: ['approval-requested'] }
     const row = createNotificationProjectionItem(event, candidate, createNotificationProjectionDeliveryState(
-      `${event.workspaceId}#${memberKey}`, event.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES,
+      `${event.workspaceId}#${memberKey}`, event.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES, unscopedRoutingSubject,
     ))
     expect(row).toMatchObject({ targetId: 'approval-1', fileId: 'file-1' })
     const cache = createNotificationDeliveryAuthorizationCache()
@@ -1280,7 +1299,7 @@ describe('collaboration projection pure helpers', () => {
       const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, {
         version: 0, channels: { inApp: false, email: false, push: false, slack }, slackEnabledAt: event.occurredAt,
         frequency: 'hourly', quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
-      })
+      }, unscopedRoutingSubject)
       const item = createNotificationProjectionItem(event, { memberKey: 'member@example.com', reasons: ['mention'] }, state)
       expect(item.slackNextAttemptAt).toBe(slack ? state.deliveryAfter : undefined)
       expect(item.slackDeliveryStatus).toBe(slack ? 'pending' : undefined)
@@ -2035,7 +2054,7 @@ describe('collaboration projection pure helpers', () => {
           end: '07:00',
           timeZone: 'UTC',
         },
-      },
+      }, unscopedRoutingSubject,
     )
 
     expect(state).toEqual({
@@ -2047,6 +2066,28 @@ describe('collaboration projection pure helpers', () => {
       deliveryAfter: '2026-07-13T07:00:00.000Z',
       deliveryFrequency: 'instant',
     })
+  })
+
+  test('keeps a category turned off or a muted Project out of that channel and out of the unread Inbox', () => {
+    const preferences = {
+      ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: true },
+      categoryChannels: { status: { push: false as const } },
+      mutes: { projectKeys: ['dev#noisy'], teamIds: [], keepMentions: true, keepApprovals: true },
+    }
+    const occurredAt = '2026-07-12T12:00:00.000Z'
+    const status = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
+      eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'quiet',
+    })
+    expect(status).toMatchObject({ inAppVisible: true, inboxState: 'unread', deliveryChannels: ['inApp'] })
+    const muted = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
+      eventType: 'work-item.updated', reasons: ['assignment'], projectId: 'noisy', teamId: 'dev',
+    })
+    expect(muted).toMatchObject({ inAppVisible: true, inboxState: 'archived', archivedAt: occurredAt, deliveryChannels: [] })
+    const mention = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
+      eventType: 'comment.created', reasons: ['mention'], projectId: 'noisy', teamId: 'dev',
+    })
+    expect(mention).toMatchObject({ inAppVisible: true, inboxState: 'unread', deliveryChannels: ['inApp', 'push'] })
   })
 
   test('persists the Work Item identity required by current-permission reads', () => {
@@ -2068,7 +2109,7 @@ describe('collaboration projection pure helpers', () => {
           end: '07:00',
           timeZone: 'UTC',
         },
-      },
+      }, unscopedRoutingSubject,
     )
 
     expect(createNotificationProjectionItem(
@@ -2122,7 +2163,7 @@ describe('collaboration projection pure helpers', () => {
           end: '07:00',
           timeZone: 'UTC',
         },
-      },
+      }, unscopedRoutingSubject,
     )
 
     expect(createNotificationProjectionItem(
@@ -2222,7 +2263,7 @@ describe('collaboration projection pure helpers', () => {
           end: '07:00',
           timeZone: 'UTC',
         },
-      },
+      }, unscopedRoutingSubject,
     )
     expect(createNotificationProjectionItem(
       parsed,

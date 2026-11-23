@@ -63,6 +63,7 @@ import {
 } from '../../analytics/model/defaults'
 import {
   AnalyticsWorkbench,
+  type AnalyticsCustomFieldOption,
   type AnalyticsWorkItemTypeOption,
 } from '../../analytics/ui/AnalyticsWorkbench'
 import { createAnalyticsLiveQueryRunner } from '../../analytics/liveQuery'
@@ -79,11 +80,15 @@ import {
   type ProjectDirectoryTeam,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
+import { useActiveDirectoryMembers } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
-import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
+import {
+  resolveConfigurationCustomFields,
+  resolveWorkItemTypes,
+} from '../../work-items/model/workItemDisplay'
 import { useTeamWorkItemConfigurations } from '../../work-items/queries/useWorkItemConfigurations'
 
 const emptyReports: AnalyticsReport[] = []
@@ -171,6 +176,17 @@ export function ReportsPage() {
       })))
       .sort((left, right) => left.label.localeCompare(right.label)),
   [teams, workItemConfigurationLoadResult?.configurationsByTeam])
+  const customFields = useMemo<AnalyticsCustomFieldOption[]>(() => {
+    const fields = new Map<string, AnalyticsCustomFieldOption>()
+    for (const team of teams) {
+      for (const field of resolveConfigurationCustomFields(
+        workItemConfigurationLoadResult?.configurationsByTeam[team.id],
+      )) {
+        if (!fields.has(field.id)) fields.set(field.id, { id: field.id, label: field.name })
+      }
+    }
+    return [...fields.values()].sort((left, right) => left.label.localeCompare(right.label))
+  }, [teams, workItemConfigurationLoadResult?.configurationsByTeam])
   const {
     data: reportResponse,
     error: reportsError,
@@ -288,6 +304,12 @@ export function ReportsPage() {
   const displayedTimeZone = selectedSnapshotRecord?.query.timeZone ??
     routeState.timezone
   const displayedWidgets = selectedSnapshotRecord?.query.widgets ?? widgets
+  // Members name the assignee groups and fill the assignee and recipient pickers.
+  const { data: directoryMembers } = useActiveDirectoryMembers(
+    accessToken,
+    teams,
+    Boolean(user && !currentUserError),
+  )
   const queryInput = useMemo(() => createAnalyticsQueryInput(
     routeState,
     queryAsOf,
@@ -778,6 +800,7 @@ export function ReportsPage() {
           locale,
           queryInput,
           routeState.snapshotId,
+          selectedReport?.id,
         ),
       })
       downloadArtifact(artifact.blob, artifact.filename)
@@ -826,6 +849,8 @@ export function ReportsPage() {
           teams={teams}
           timeZone={displayedTimeZone}
           workItemTypes={workItemTypes}
+          {...(directoryMembers ? { members: directoryMembers.members } : {})}
+          customFields={customFields}
           widgets={displayedWidgets}
           onBuilderChange={(builder) => {
             if (selectedSnapshotRecord) {

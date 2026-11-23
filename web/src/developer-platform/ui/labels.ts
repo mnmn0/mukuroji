@@ -158,73 +158,53 @@ export function createDeveloperPlatformLabels(
       },
       {
         value: 'work-item.parent-changed',
-        label: ja ? '親の変更' : 'Parent changed',
-        description: ja
-          ? 'Work Item の親が設定・変更・解除されたとき（子の側）。'
-          : 'The parent of a Work Item was set, changed, or removed (sent for the child).',
+        label: t('developerPlatform.webhookEvents.parentChanged.label'),
+        description: t('developerPlatform.webhookEvents.parentChanged.description'),
       },
       {
         value: 'work-item.child-added',
-        label: ja ? '子の追加' : 'Child added',
-        description: ja
-          ? 'Work Item に子が加わったとき（親の側）。'
-          : 'A child was added to a Work Item (sent for the parent).',
+        label: t('developerPlatform.webhookEvents.childAdded.label'),
+        description: t('developerPlatform.webhookEvents.childAdded.description'),
       },
       {
         value: 'work-item.child-removed',
-        label: ja ? '子の削除' : 'Child removed',
-        description: ja
-          ? 'Work Item から子が外れたとき（親の側）。'
-          : 'A child left a Work Item (sent for the parent).',
+        label: t('developerPlatform.webhookEvents.childRemoved.label'),
+        description: t('developerPlatform.webhookEvents.childRemoved.description'),
       },
       {
         value: 'work-item.blocker-added',
-        label: ja ? 'blocker の追加' : 'Blocker added',
-        description: ja
-          ? 'Work Item を block する Work Item が加わったとき。'
-          : 'A Work Item that blocks this one was added.',
+        label: t('developerPlatform.webhookEvents.blockerAdded.label'),
+        description: t('developerPlatform.webhookEvents.blockerAdded.description'),
       },
       {
         value: 'work-item.blocker-removed',
-        label: ja ? 'blocker の解除' : 'Blocker removed',
-        description: ja
-          ? 'Work Item を block していた Work Item が外れたとき。'
-          : 'A Work Item that blocked this one was removed.',
+        label: t('developerPlatform.webhookEvents.blockerRemoved.label'),
+        description: t('developerPlatform.webhookEvents.blockerRemoved.description'),
       },
       {
         value: 'work-item.blocking-added',
-        label: ja ? 'block 先の追加' : 'Now blocking',
-        description: ja
-          ? 'Work Item が別の Work Item を block し始めたとき。'
-          : 'This Work Item started blocking another Work Item.',
+        label: t('developerPlatform.webhookEvents.blockingAdded.label'),
+        description: t('developerPlatform.webhookEvents.blockingAdded.description'),
       },
       {
         value: 'work-item.blocking-removed',
-        label: ja ? 'block 先の解除' : 'No longer blocking',
-        description: ja
-          ? 'Work Item が別の Work Item を block しなくなったとき。'
-          : 'This Work Item stopped blocking another Work Item.',
+        label: t('developerPlatform.webhookEvents.blockingRemoved.label'),
+        description: t('developerPlatform.webhookEvents.blockingRemoved.description'),
       },
       {
         value: 'work-item.relation-added',
-        label: ja ? '関連の追加' : 'Related item linked',
-        description: ja
-          ? '関連または重複の link が加わったとき。'
-          : 'A related or duplicate link was added.',
+        label: t('developerPlatform.webhookEvents.relationAdded.label'),
+        description: t('developerPlatform.webhookEvents.relationAdded.description'),
       },
       {
         value: 'work-item.relation-removed',
-        label: ja ? '関連の削除' : 'Related item unlinked',
-        description: ja
-          ? '関連または重複の link が外れたとき。'
-          : 'A related or duplicate link was removed.',
+        label: t('developerPlatform.webhookEvents.relationRemoved.label'),
+        description: t('developerPlatform.webhookEvents.relationRemoved.description'),
       },
       {
         value: 'work-item.sibling-order-changed',
-        label: ja ? '並び順の変更' : 'Sibling order changed',
-        description: ja
-          ? '同じ親の中で Work Item の並び順が変わったとき。'
-          : 'A Work Item moved among its siblings.',
+        label: t('developerPlatform.webhookEvents.siblingOrderChanged.label'),
+        description: t('developerPlatform.webhookEvents.siblingOrderChanged.description'),
       },
       {
         value: 'external-link.created',
@@ -330,6 +310,20 @@ export function createDeveloperPlatformLabels(
           : 'Required Work Item title.',
       },
       {
+        value: 'assigneeUserId',
+        label: ja ? '責任者' : 'Owner',
+        description: ja
+          ? '必須。Workspace member の user ID です。'
+          : 'Required Workspace member user ID.',
+      },
+      {
+        value: 'schedule',
+        label: ja ? 'スケジュール' : 'Schedule',
+        description: ja
+          ? '必須。canonical schedule の JSON です。'
+          : 'Required canonical schedule JSON.',
+      },
+      {
         value: 'description',
         label: ja ? '説明' : 'Description',
         description: ja
@@ -337,25 +331,88 @@ export function createDeveloperPlatformLabels(
           : 'Markdown Work Item description.',
       },
       {
-        value: 'status',
+        value: 'workItemTypeId',
+        label: 'Work Item Type',
+        description: ja
+          ? 'Work Item Type の ID です。'
+          : 'Work Item Type ID.',
+      },
+      {
+        value: 'workflowStatusId',
         label: ja ? 'ステータス' : 'Status',
         description: ja
-          ? '設定済み workflow の状態です。'
-          : 'Configured workflow state.',
+          ? '設定済み workflow の status ID です。'
+          : 'Configured workflow status ID.',
       },
       {
         value: 'priority',
         label: ja ? '優先度' : 'Priority',
         description: ja
-          ? '設定済みの優先度です。'
-          : 'Configured priority value.',
+          ? 'high、medium、low のいずれかです。'
+          : 'high, medium, or low.',
       },
       {
-        value: 'assignee',
-        label: ja ? '担当者' : 'Assignee',
+        value: 'assignedProjectId',
+        label: 'Project',
         description: ja
-          ? 'Workspace member の識別子です。'
-          : 'Workspace member identifier.',
+          ? '割り当てる Project の ID です。'
+          : 'ID of the Project to assign.',
+      },
+      {
+        value: 'importKey',
+        label: 'Import key',
+        description: ja
+          ? '他の行が親や依存の参照に使うこの行の key です。'
+          : 'Key other rows use to name this row as a parent or predecessor.',
+      },
+      {
+        value: 'parentKey',
+        label: ja ? '親' : 'Parent',
+        description: ja
+          ? '親の行の import key か WBS 番号です。'
+          : 'Import key or WBS number of the parent row.',
+      },
+      {
+        value: 'wbsNumber',
+        label: ja ? 'WBS 番号' : 'WBS number',
+        description: ja
+          ? '1.2.3 のような番号です。親の列がなければ親を決めます。'
+          : 'Number such as 1.2.3; it decides the parent when no parent column is mapped.',
+      },
+      {
+        value: 'outlineLevel',
+        label: ja ? '階層レベル' : 'Outline level',
+        description: ja
+          ? '1 から始まる階層の深さです。'
+          : 'Outline depth starting at 1.',
+      },
+      {
+        value: 'dependencies',
+        label: ja ? '先行タスク' : 'Predecessors',
+        description: ja
+          ? '「key FS +2」のように種類と lag を付けた先行行です。'
+          : 'Predecessor rows with a type and lag, such as "key FS +2".',
+      },
+      {
+        value: 'relations',
+        label: ja ? '関連' : 'Relations',
+        description: ja
+          ? '「blocks:key」のように種類を付けた関連する行です。'
+          : 'Related rows with a type, such as "blocks:key".',
+      },
+      {
+        value: 'contributors',
+        label: ja ? 'Contributor' : 'Contributors',
+        description: ja
+          ? '「member:ID effort:2h」のように書いた Contributor です。'
+          : 'Contributors written like "member:ID effort:2h".',
+      },
+      {
+        value: 'acceptanceCriteria',
+        label: ja ? '受け入れ条件' : 'Acceptance criteria',
+        description: ja
+          ? '1 行に 1 条件。「[x]」で始まる行は達成済みです。'
+          : 'One condition per line; a line starting with "[x]" is met.',
       },
     ],
     tableHeaders: {
@@ -395,6 +452,8 @@ export function createDeveloperPlatformLabels(
       dryRun: ja ? '検証を実行' : 'Run validation',
       'export-csv': ja ? 'CSV を export' : 'Export CSV',
       'export-json': ja ? 'JSON を export' : 'Export JSON',
+      'export-msproject': ja ? 'MS Project XML を export' : 'Export MS Project XML',
+      'export-xlsx': ja ? 'Excel を export' : 'Export Excel',
       'use-local': ja ? 'mukuroji を採用' : 'Keep mukuroji',
       'use-external': ja ? 'Provider を採用' : 'Keep provider',
       ignore: ja ? 'この競合を無視' : 'Ignore this conflict',
@@ -480,6 +539,8 @@ export function createDeveloperPlatformLabels(
       oauthAppsEmpty: ja ? 'OAuth app はまだありません' : 'No OAuth apps yet',
       'source-csv': 'CSV file',
       'source-json': 'JSON file',
+      'source-msproject': 'MS Project XML',
+      'source-xlsx': ja ? 'Excel (.xlsx)' : 'Excel (.xlsx)',
       syncConflicts: ja ? '同期競合' : 'Sync conflicts',
       syncConflictsEmpty: ja ? '未解決の同期競合はありません' : 'No sync conflicts',
       webhooks: ja ? 'Webhook 購読' : 'Webhook subscriptions',
@@ -592,6 +653,12 @@ export function createDeveloperPlatformLabels(
       'source-json': ja
         ? '入れ子の data や構造化 custom field に適しています。'
         : 'Best for nested source data and structured custom fields.',
+      'source-msproject': ja
+        ? 'MS Project で XML として保存した計画の階層・先行タスク・割り当てを取り込みます。'
+        : 'Brings in the outline, predecessors, and assignments of a plan saved as XML from MS Project.',
+      'source-xlsx': ja
+        ? '最初の sheet の表を読みます。mukuroji の export はそのまま取り込めます。'
+        : 'Reads the table on the first sheet; a mukuroji export imports as it is.',
       syncConflicts: ja
         ? 'mukuroji と Provider の値を比較し、競合 ID ごとに安全な復旧方法を選びます。'
         : 'Compare mukuroji and provider values, then choose a recovery for each conflict ID.',

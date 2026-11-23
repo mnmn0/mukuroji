@@ -668,6 +668,32 @@ export type WorkItemRelationAuditInput = {
   notificationEndpoints?: ReadonlyMap<string, WorkItemRelationNotificationEndpoint>
 }
 
+/**
+ * Audit input for the relations removed by a Work Item delete.
+ *
+ * The other endpoints are only read while the clean-up is prepared, so their notification
+ * details are built from that read instead of being supplied by the caller.
+ */
+export type WorkItemDeletionRelationAuditInput = {
+  /** Request audit context of the delete, shared by every endpoint event. */
+  context: MutationAuditContext
+  /** Workspace member key that the Work Item activity shows as the actor. */
+  actorMemberKey: string
+  /**
+   * Builds the app-relative path that opens an endpoint Work Item in a notification.
+   *
+   * @param workItemId - Endpoint Work Item ID.
+   * @returns The deep link.
+   */
+  createDeepLink: (workItemId: string) => string
+  /**
+   * First audit sequence slot of the endpoint events. Event IDs derive from the idempotency key
+   * and the slot only, so the slots must not overlap the delete event and any other event the
+   * caller commits with the delete.
+   */
+  firstSequence: number
+}
+
 /** Endpoint details that let a relation audit event notify the endpoint's assignee. */
 export type WorkItemRelationNotificationEndpoint = {
   /** Current assignee member key; empty when the Work Item has no assignee. */
@@ -859,6 +885,14 @@ export type WorkItemConfigurationClient = {
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
   /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  countRelationLinks?(workspaceId: string, teamId: string): Promise<number>
+  /**
    * Reads how many times a child of the parent Work Item has been restored.
    *
    * @param workspaceId - Workspace that owns the parent Work Item.
@@ -873,12 +907,14 @@ export type WorkItemConfigurationClient = {
    * @param workspaceId - Workspace that owns the relation graph.
    * @param teamId - Team that owns the Work Item.
    * @param workItemId - Work Item about to be deleted.
+   * @param audit - Request audit input for the events recorded on the other endpoints.
    * @returns The Work Item's children and the clean-up writes.
    */
   prepareWorkItemDeletionRelationCleanup?(
     workspaceId: string,
     teamId: string,
     workItemId: string,
+    audit?: WorkItemDeletionRelationAuditInput,
   ): Promise<WorkItemDeletionRelationCleanup>
   /**
    * Reciprocal relation を単一 transaction で作成します。
@@ -2038,8 +2074,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     workspaceId: string,
     teamId: string,
     workItemId: string,
+    audit?: WorkItemDeletionRelationAuditInput,
   ): Promise<WorkItemDeletionRelationCleanup> {
     await this.ensureTable()
+    this.assertRelationAuditInput(workspaceId, audit)
     const graph = await this.readRelationGraphState(workspaceId, teamId)
     const relations = await this.readWorkItemRelations(workspaceId, teamId, workItemId)
     const childWorkItemIds = relations
@@ -2086,19 +2124,21 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       )
     }
     // One endpoint can hold several relations to the Work Item, and a transaction may write each
-    // item only once, so the projection of each other endpoint is computed once.
-    const projectedByEndpoint = new Map<string, WorkItemRelation[]>()
+    // item only once, so each other endpoint is guarded once with all of its removed rows.
+    const removedByEndpoint = new Map<string, WorkItemRelation[]>()
     for (const reciprocal of reciprocals) {
-      if (!isProjectedRelationType(reciprocal.type)) continue
-      projectedByEndpoint.set(reciprocal.sourceWorkItemId, [
-        ...projectedByEndpoint.get(reciprocal.sourceWorkItemId) ?? [],
+      removedByEndpoint.set(reciprocal.sourceWorkItemId, [
+        ...removedByEndpoint.get(reciprocal.sourceWorkItemId) ?? [],
         reciprocal,
       ])
     }
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
-    const endpointItems = await Promise.all([...projectedByEndpoint].map(async ([endpointId, removed]) => {
+    const endpoints = await Promise.all([...removedByEndpoint].map(async ([endpointId, removed]) => {
+      const projected = removed.filter((relation) => isProjectedRelationType(relation.type))
       const [relationIds, response] = await Promise.all([
-        this.readRelationIdsAfter(workspaceId, teamId, endpointId, { remove: removed }),
+        projected.length > 0
+          ? this.readRelationIdsAfter(workspaceId, teamId, endpointId, { remove: projected })
+          : Promise.resolve(undefined),
         this.documentClient.send(new GetCommand({
           TableName: this.workItemsTableName,
           Key: { directoryTeamId: workItemPartitionKey, issueId: endpointId },
@@ -2113,15 +2153,37 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       ) {
         throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'A relation endpoint is missing.')
       }
-      return createRelationEndpointTransactionItem(this.workItemsTableName, workItemPartitionKey, {
+      const assignedProjectId = typeof endpoint.assignedProjectId === 'string'
+        ? endpoint.assignedProjectId
+        : undefined
+      const snapshot: RelationTransactionEndpoint = {
         workItemId: endpointId,
         expectedRevision: endpoint.revision,
-        ...(typeof endpoint.assignedProjectId === 'string'
-          ? { assignedProjectId: endpoint.assignedProjectId }
-          : {}),
-        relationIds,
-      })
+        ...(assignedProjectId ? { assignedProjectId } : {}),
+        // An endpoint holding only the parent's `child` row keeps its projection; its guard still
+        // pins the Project assignment recorded on its audit event.
+        ...(relationIds ? { relationIds } : {}),
+      }
+      const notification: WorkItemRelationNotificationEndpoint | undefined = audit
+        ? {
+            assigneeMemberKey: typeof endpoint.assigneeUserId === 'string' ? endpoint.assigneeUserId : '',
+            title: typeof endpoint.title === 'string' ? endpoint.title : endpointId,
+            deepLink: audit.createDeepLink(endpointId),
+            ...(assignedProjectId ? { assignedProjectId } : {}),
+          }
+        : undefined
+      return { snapshot, notification }
     }))
+    const snapshots = endpoints.map((endpoint) => endpoint.snapshot)
+    const relationAudit: WorkItemRelationAuditInput | undefined = audit
+      ? {
+          context: audit.context,
+          actorMemberKey: audit.actorMemberKey,
+          notificationEndpoints: new Map(endpoints.flatMap((endpoint) =>
+            endpoint.notification ? [[endpoint.snapshot.workItemId, endpoint.notification] as const] : []
+          )),
+        }
+      : undefined
     return {
       childWorkItemIds,
       transactItems: [
@@ -2134,8 +2196,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ...[...relations, ...reciprocals].map((relation) =>
           createRelationDelete(this.tableName, workspaceId, teamId, relation)
         ),
-        ...endpointItems,
+        ...snapshots.map((snapshot) =>
+          createRelationEndpointTransactionItem(this.workItemsTableName, workItemPartitionKey, snapshot)
+        ),
         guardDelete,
+        // The deleted Work Item keeps only its own delete event; each other endpoint records the
+        // removal from its point of view, so a cleared blocker notifies the blocked Work Item.
+        ...this.createRelationAuditPuts(
+          workspaceId,
+          teamId,
+          relationAudit,
+          audit?.context.occurredAt ?? new Date().toISOString(),
+          graph.revision + 1,
+          reciprocals.map((reciprocal) => describeRelationAuditChange(reciprocal, 'removed')),
+          snapshots,
+          audit?.firstSequence,
+        ),
       ],
     }
   }
@@ -3018,6 +3094,19 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /**
+   * Reads how many relation links, parent links included, a Team stores.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Stored links, each counted once although it is kept as two directed rows.
+   */
+  async countRelationLinks(workspaceId: string, teamId: string): Promise<number> {
+    await this.ensureTable()
+    const { edgeCount } = await this.readRelationGraphState(workspaceId, teamId)
+    return Math.floor(edgeCount / 2)
+  }
+
+  /**
    * Reads the current canonical relation graph revision with a strongly consistent read.
    *
    * @param workspaceId - Workspace that owns the relation graph.
@@ -3076,6 +3165,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param changes - Endpoint changes in a deterministic order.
    * @param endpoints - Endpoint snapshots guarded by the same transaction; each change's endpoint
    * must be among them so its event records the Project assignment the commit checked.
+   * @param firstSequence - Audit sequence slot of the first change; later changes take the next
+   * slots.
    * @returns Audit event Puts, or none when auditing is not configured.
    */
   private createRelationAuditPuts(
@@ -3086,8 +3177,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     graphRevision: number,
     changes: readonly RelationAuditChange[],
     endpoints: readonly WorkItemRelationEndpointSnapshot[],
+    firstSequence = 0,
   ): NonNullable<TransactWriteCommandInput['TransactItems']> {
-    return changes.flatMap((change, sequence) => {
+    return changes.flatMap((change, index) => {
+      const sequence = firstSequence + index
       const endpoint = endpoints.find((candidate) => candidate.workItemId === change.workItemId)
       if (!endpoint) {
         throw new WorkItemConfigurationError(

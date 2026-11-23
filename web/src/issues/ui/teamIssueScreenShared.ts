@@ -1,4 +1,7 @@
 import type {
+  BulkOperation,
+  BulkOperationPreview,
+  BulkOperationRequest,
   PlanningSnapshot,
   WorkItemScheduleCalendarPolicy,
   ResolvedWorkItemConfiguration,
@@ -9,6 +12,8 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemTypeChangePreview,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { type ReactNode } from 'react'
 import { type FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -19,6 +24,7 @@ import { type IssueCollaborationRoute } from '../model/collaborationTabs'
 import { type CancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
+import type { TaskCalendarPeriods } from '../../tasks/model/taskGanttTimeline'
 import { type WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { type WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import { type TeamIssueViewState } from '../../task-views/model/taskViewSurfaceState'
@@ -190,6 +196,8 @@ export type TeamIssueScreenProps = {
    * default calendar is used and nothing is shaded when it is omitted.
    */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  calendarPeriods?: TaskCalendarPeriods
   /** Shown when the Workspace working calendar could not be read, so the default is in use. */
   workingCalendarErrorMessage?: string
   /** Reads the Workspace working calendar again after a failure. */
@@ -318,4 +326,32 @@ export type TeamIssueScreenProps = {
    * Archives (true) or restores (false) one Work Item from the detail pane.
    */
   onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
+  /**
+   * Previews one schedule change from the Calendar or Gantt chart against the current revision.
+   * With `onConfirmScheduleChange`, cards and bars of writable Work Items can be moved.
+   */
+  onPreviewScheduleChange?: (
+    issue: TeamIssue,
+    operation: WorkItemScheduleOperation,
+  ) => Promise<WorkItemScheduleChangePreview>
+  /** Workspace ID that bulk operations are requested in; the table offers them only with it. */
+  bulkWorkspaceId?: string
+  /** Validates a bulk edit, move, or archive of the selected rows before it is applied. */
+  onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
+  /** Applies a previewed bulk operation. */
+  onBulkApply?: (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
+  ) => Promise<BulkOperation>
+  /** Retries the failed items of a bulk operation. */
+  onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Undoes the succeeded items of a bulk operation. */
+  onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Persists a previewed schedule change and every dependency ripple it showed. */
+  onConfirmScheduleChange?: (
+    issue: TeamIssue,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ) => Promise<TeamIssue>
 }

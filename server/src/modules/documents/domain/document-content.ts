@@ -851,6 +851,9 @@ function validateBlock(block: DocumentBlock): void {
         if (item.assigneeMemberKey !== undefined) {
           assertIdentifier(item.assigneeMemberKey, 'block.items[].assigneeMemberKey')
         }
+        if (item.dueDate !== undefined) {
+          assertCalendarDate(item.dueDate, 'block.items[].dueDate')
+        }
       }
       return
     }
@@ -933,6 +936,9 @@ function validateWhiteboardObject(object: WhiteboardObject): void {
   }
   if (object.type === 'note' || object.type === 'text') {
     assertText(object.text, 'whiteboard.object.text', DOCUMENT_MAX_TEXT_LENGTH, true)
+    if (object.type === 'note' && object.done !== undefined && typeof object.done !== 'boolean') {
+      throw new DocumentError(400, 'InvalidWhiteboardObject', 'Whiteboard note done must be a boolean.')
+    }
   } else if (object.type === 'shape') {
     if (
       object.shape !== 'rectangle' &&
@@ -1409,6 +1415,23 @@ function assertIsoTimestamp(value: string, field: string): void {
     new Date(value).toISOString() !== value
   ) {
     throw new DocumentError(400, 'InvalidDocumentTimestamp', `${field} must be an ISO-8601 timestamp.`)
+  }
+}
+
+/**
+ * Asserts that a value is a real calendar date in `YYYY-MM-DD` form.
+ *
+ * @param value - Date candidate.
+ * @param field - Field name used in validation errors.
+ */
+function assertCalendarDate(value: unknown, field: string): void {
+  const isCalendarDate =
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(`${value}T00:00:00.000Z`)) &&
+    new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value
+  if (!isCalendarDate) {
+    throw new DocumentError(400, 'InvalidDocumentBlock', `${field} must be a YYYY-MM-DD date.`)
   }
 }
 

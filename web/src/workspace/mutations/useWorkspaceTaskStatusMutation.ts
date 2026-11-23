@@ -1,10 +1,11 @@
 import type {
   CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
+  WorkItemPriority,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyedMutator } from 'swr'
-import { TeamIssuesApiError } from '../../issues/api'
+import { TeamIssuesApiError, updateTeamIssue } from '../../issues/api'
 import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
@@ -69,6 +70,14 @@ export type WorkspaceTaskStatusMutationController = {
     workflowStatusId: string,
     options?: WorkspaceTaskStatusMoveOptions,
   ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | undefined>
+  /**
+   * Saves a new priority for a Work Item and returns its persisted snapshot. Rejects when the
+   * save fails; a revision conflict reloads the list.
+   */
+  updateTaskPriority?: (
+    task: CanonicalWorkItem,
+    priority: WorkItemPriority,
+  ) => Promise<CanonicalWorkItem | undefined>
 }
 
 /**
@@ -227,8 +236,55 @@ export function useWorkspaceTaskStatusMutation({
     tasks,
   ])
 
+  const updateTaskPriority = useCallback(async (
+    task: CanonicalWorkItem,
+    priority: WorkItemPriority,
+  ) => {
+    const canonicalTask = tasks.find(
+      (candidate) => createWorkspaceTaskKey(candidate) === createWorkspaceTaskKey(task),
+    )
+    if (!enabled || !accessToken || !canonicalTask || canonicalTask.priority === priority) return
+    const taskKey = createWorkspaceTaskKey(canonicalTask)
+    try {
+      const updatedTask = await guardAuthenticatedRequest(mutationRequestRunner.run(
+        `task:priority:${taskKey}`,
+        JSON.stringify([canonicalTask.revision, priority]),
+        (context) => updateTeamIssue(
+          canonicalTask.teamId,
+          canonicalTask.id,
+          accessToken,
+          { expectedRevision: canonicalTask.revision, priority },
+          context,
+        ),
+      ))
+      await mutateWorkItems(
+        // A row read or confirmed meanwhile at a newer revision already includes this change.
+        (currentTasks = [...tasks]) => currentTasks.some((candidate) =>
+          createWorkspaceTaskKey(candidate) === taskKey && candidate.revision > updatedTask.revision
+        )
+          ? currentTasks
+          : replaceWorkspaceTask(currentTasks, updatedTask),
+        { revalidate: false },
+      )
+      return updatedTask
+    } catch (error) {
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        await mutateWorkItems()
+      }
+      throw error
+    }
+  }, [
+    accessToken,
+    enabled,
+    guardAuthenticatedRequest,
+    mutateWorkItems,
+    mutationRequestRunner,
+    tasks,
+  ])
+
   return {
     errorMessage,
     moveTaskStatus: enabled ? moveTaskStatus : undefined,
+    updateTaskPriority: enabled ? updateTaskPriority : undefined,
   }
 }

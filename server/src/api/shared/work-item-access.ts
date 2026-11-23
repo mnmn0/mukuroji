@@ -34,6 +34,7 @@ import {
   projectAccessAllows,
   projectAccessAppliesToTeam,
   type TeamPermissionContext,
+  type TeamPermissionReadContext,
 } from './workspace-access'
 
 /**
@@ -65,8 +66,9 @@ export async function loadAuthorizedTeamIssue(
     consistentIssueRead: true,
     includeEvents: false,
   },
+  readContext?: TeamPermissionReadContext,
 ) {
-  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  const context = await requireTeamPermission(principal, teamId, minimumRole, readContext)
   const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
     principal.directoryId,
     teamId,

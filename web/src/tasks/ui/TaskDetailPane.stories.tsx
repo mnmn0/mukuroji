@@ -1,6 +1,7 @@
 import { DEFAULT_WORK_ITEM_TYPE, type AiPlanningDraft } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
+import { SWRConfig } from 'swr'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
 import {
@@ -9,6 +10,7 @@ import {
 } from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { externalWorkItemLinkFixtures } from '../../work-items/externalLinksFixtures'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import {
   TaskDetailPane,
@@ -423,6 +425,54 @@ export const Default: Story = {
         workflowStatusId: 'review',
       }),
     )
+  },
+}
+
+/**
+ * Replaces `fetch` for one story so the external link panel reads fixture links and every other
+ * request fails without leaving the browser.
+ *
+ * @returns Cleanup that restores the original `fetch`.
+ */
+function installExternalLinksStoryFetch() {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (new URL(url, globalThis.location.href).pathname.endsWith('/external-links')) {
+      return Response.json({ hasMore: false, items: externalWorkItemLinkFixtures })
+    }
+    return Response.json({ code: 'StoryRequestNotMocked' }, { status: 404 })
+  }
+  return () => {
+    globalThis.fetch = originalFetch
+  }
+}
+
+/** Project detail pane with the key actions and read-only external links shared with the Team pane. */
+export const KeyActionsAndExternalLinks: Story = {
+  args: {
+    accessToken: 'story-access-token',
+    canManageExternalLinks: false,
+    detail: {
+      ...taskViewStorySelectedIssueDetail,
+      issue: { ...taskViewStorySelectedIssueDetail.issue, key: 'CORE-12' },
+    },
+    task: { ...taskViewStorySelectedTask, key: 'CORE-12' },
+  },
+  beforeEach: installExternalLinksStoryFetch,
+  decorators: [
+    (Story) => (
+      <SWRConfig value={{ dedupingInterval: 0, provider: () => new Map() }}>
+        <Story />
+      </SWRConfig>
+    ),
+  ],
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByText('CORE-12')).toBeVisible()
+    await expect(await canvas.findByText('GH-29')).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: '外部 resource を追加' })).toBeNull()
   },
 }
 

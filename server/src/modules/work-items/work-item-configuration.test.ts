@@ -28,7 +28,7 @@ import {
   validateWorkItemConfiguration,
   type WorkItemRelationNotificationEndpoint,
 } from './work-item-configuration'
-import { createMutationAuditContext, toAuditEventView } from '../audit'
+import { createAuditEventId, createMutationAuditContext, toAuditEventView } from '../audit'
 
 test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
@@ -2804,6 +2804,8 @@ function createInMemoryRelationStore(
     onWorkItemRead?: (key: Record<string, string>) => void
     /** Audit table the client writes relation events to; omitted disables auditing. */
     auditTableName?: string
+    /** Extra attributes returned with a Work Item row, keyed by Work Item ID. */
+    workItemAttributes?: Readonly<Record<string, Record<string, unknown>>>
   } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
@@ -2876,7 +2878,13 @@ function createInMemoryRelationStore(
                 throw Object.assign(new Error('Work Item read failed.'), { name: options.workItemReadFailure })
               }
               const rank = workItemRanks.get(key.issueId ?? '')
-              return { Item: { revision: 1, ...(rank === undefined ? {} : { hierarchyRank: rank }) } }
+              return {
+                Item: {
+                  revision: 1,
+                  ...options.workItemAttributes?.[key.issueId ?? ''],
+                  ...(rank === undefined ? {} : { hierarchyRank: rank }),
+                },
+              }
             }
             return key.recordKey ? { Item: rows.get(key.recordKey) } : {}
           }
@@ -3156,6 +3164,9 @@ test('prepares the relation clean-up of a deleted Work Item and refuses one with
     Key: { issueId: 'peer' },
     ExpressionAttributeValues: { ':revision': 1, ':relationIds': ['related:other'] },
   })
+  // The parent is still guarded so its audit event records the Project assignment checked here.
+  expect(rest.flatMap((item) => item.ConditionCheck ? [item.ConditionCheck.Key] : []))
+    .toEqual([expect.objectContaining({ issueId: 'parent' })])
 
   await expect(client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'owner'))
     .resolves.toEqual({ childWorkItemIds: ['child'], transactItems: [] })
@@ -3165,4 +3176,65 @@ test('prepares the relation clean-up of a deleted Work Item and refuses one with
   expect(unrelated.transactItems[0]?.ConditionCheck?.Key).toMatchObject({ recordKey: 'RELATION_GRAPH' })
   expect(unrelated.transactItems[1]?.Delete?.Key).toMatchObject({ recordKey: 'CHILD_RESTORE#lonely' })
   expect(store.transactions).toEqual([])
+})
+
+test('records the removed relations on the other endpoints when a Work Item is deleted', async () => {
+  const store = createInMemoryRelationStore({
+    auditTableName: 'audit-table',
+    workItemAttributes: {
+      build: { title: 'Build the release', assigneeUserId: 'build-owner', assignedProjectId: 'project-1' },
+      parent: { title: 'Release', assigneeUserId: 'release-owner' },
+    },
+  })
+  store.seedRelation('design', 'build', 'blocks')
+  store.seedRelation('design', 'parent', 'parent')
+  store.seedGraph(2, 4)
+  const client = store.createClient()
+
+  const audit = createRelationAudit('work-item-delete-1')
+  const cleanup = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'design', {
+    ...audit,
+    createDeepLink: (workItemId) => `/teams/core-team/issues?issueId=${workItemId}`,
+    firstSequence: 2,
+  })
+
+  const events = readRelationAuditEvents({ TransactItems: cleanup.transactItems })
+  // Event IDs derive from the idempotency key and the slot only, so the endpoint events start
+  // after the slots the delete event (0) and a released Agent Run (1) take in the same transaction.
+  const entity = { type: 'work-item', id: 'team/core-team/issue/design' }
+  expect(events.map((event) => event.eventId)).toEqual([
+    createAuditEventId(audit.context, 'work-item.blocker-removed', entity, 2),
+    createAuditEventId(audit.context, 'work-item.child-removed', entity, 3),
+  ])
+  // The deleted Work Item records only its own delete; each other endpoint records its side.
+  expect(events.map((event) => [event.entityId, event.eventType])).toEqual([
+    ['team/core-team/issue/build', 'work-item.blocker-removed'],
+    ['team/core-team/issue/parent', 'work-item.child-removed'],
+  ])
+  expect(events[0]?.metadata).toMatchObject({
+    issueId: 'build',
+    relationType: 'blockedBy',
+    relatedWorkItemId: 'design',
+    projectId: 'project-1',
+    projectScopeRecorded: true,
+    graphRevision: 3,
+    actorMemberKey: 'member-1',
+    deepLink: '/teams/core-team/issues?issueId=build',
+    notificationTitle: 'Build the release',
+    notificationCandidates: [{ memberKey: 'build-owner', reason: 'assignee' }],
+  })
+  // Only a cleared blocker notifies, and a Team-only endpoint records no Project.
+  expect(events[1]?.metadata).not.toHaveProperty('notificationCandidates')
+  expect(events[1]?.metadata).not.toHaveProperty('projectId')
+  expect(events[0]?.publicView).not.toContain('design')
+})
+
+test('requires the audit input of a deleted Work Item relation clean-up when auditing is configured', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  store.seedRelation('design', 'build', 'blocks')
+  store.seedGraph(1, 2)
+  const client = store.createClient()
+
+  await expect(client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'design'))
+    .rejects.toMatchObject({ code: 'WorkItemRelationAuditContextMissing' })
 })

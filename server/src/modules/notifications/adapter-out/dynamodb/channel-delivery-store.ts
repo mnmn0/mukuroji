@@ -243,6 +243,10 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     (typeof row.weeklyReportAuthorMemberKey !== 'string' || !row.weeklyReportAuthorMemberKey.trim())
   ) throw invalidRow()
   if (
+    row.weeklyReportWeekStart !== undefined &&
+    (typeof row.weeklyReportWeekStart !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.weeklyReportWeekStart))
+  ) throw invalidRow()
+  if (
     row.timeEntryIds !== undefined &&
     (!Array.isArray(row.timeEntryIds) ||
       row.timeEntryIds.length === 0 ||
@@ -267,6 +271,7 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     ...(typeof row.weeklyReportAuthorMemberKey === 'string'
       ? { weeklyReportAuthorMemberKey: row.weeklyReportAuthorMemberKey }
       : {}),
+    ...(typeof row.weeklyReportWeekStart === 'string' ? { weeklyReportWeekStart: row.weeklyReportWeekStart } : {}),
     ...(timeEntryIds ? { timeEntryIds } : {}),
     ...(typeof row.timesheetDueBefore === 'string' ? { timesheetDueBefore: row.timesheetDueBefore } : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),

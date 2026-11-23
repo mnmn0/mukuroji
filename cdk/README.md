@@ -62,7 +62,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 | `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
-| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）、Team の agent 設定、本人用 agent token（`/developer/me/agent-connection` と発行・rotate）を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、agent 接続、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token の失効は使えます。 |
+| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）と Team の agent 設定を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token（発行・rotate・失効）は使えます。Web の agent 接続は MCP の Workspace profile の設定例を出します。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -195,6 +195,19 @@ aws ce update-cost-allocation-tags-status \
 | `LambdaTracingMode=Active`（X-Ray） | 利用量に比例 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。sampling は 1 秒あたり 1 request と残りの 5% で、毎分の job だけで月約 4.3 万 trace、50 人で月約 70 万 trace（約 $3）です。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
+
+### 任意化しない構成要素と毎分 job の費用
+
+次の構成要素は、無効にしても下がる固定費がほとんどないため、任意 module にしていません（2026 年 11 月に確認）。費用を下げたいときは、上の任意 module と AI の設定から見直してください。
+
+| 構成要素 | 無効にして下がる固定費 | 任意化しない理由 |
+| --- | --- | --- |
+| SCIM group job と enterprise identity maintenance の worker | 約 $0.20 / 月（DLQ の alarm 2 個） | DynamoDB stream で起動する Lambda なので、待機中は stream の読み取りも含めて課金されません。event filter で SCIM の group job と identity maintenance の記録だけを受けるため、SCIM を使わない Workspace では起動しません。 |
+| AI assistance の observability worker | $0 | DynamoDB stream で起動し、alarm 5 個は AI を設定したときだけ作ります（上の増分の表の「AI」）。 |
+| X-Ray | $0 | 既定の `LambdaTracingMode=PassThrough` で記録しません。 |
+| GuardDuty Malware Protection for S3 | $0 | 料金は scan した容量と object 数だけです。無効にすると upload した file を scan できず、download を許す条件（scan 済みの tag）が成り立たないため、必須にしています。 |
+
+`ScheduledJobsFunction` は毎分 1 回起動し、その分に実行する job だけを動かします（毎分: Automation、Triage、Agent Run triage、Slack 通知、Email 通知。5 分: Analytics。60 分: 通知の予定、Cycle。6 時間: 祝日の取り込み）。毎分の job は、対象を期限の sparse index（Automation の `ScheduleDueIndex`、Triage の `triage-wake-index` の 8 partition、通知の配信待ち index）から query して読むため、対象がない分は空の query だけで終わります。Software factory を deploy しない環境では Agent Run triage を動かしません。月 43,200 回の起動は Lambda の無料枠に収まる見込みで、DynamoDB の読み取りは月数十セントです。間隔を延ばすと期限の通知や Automation の実行が最大でその分遅れるため、毎分のままにしています。
 
 ### 利用規模ごとの試算
 
