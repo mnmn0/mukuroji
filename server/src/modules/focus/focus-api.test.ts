@@ -208,6 +208,7 @@ function createOversizedFocusNotificationClient(): NotificationClient {
  * @param teamIssueCount - Number of visible canonical Work Items returned by the fixture.
  * @param workspaceRole - Workspace membership role used by the authorization fixture.
  * @param additionalTeams - Extra Teams returned by the directory fixture.
+ * @param projectOptions - Extra Project directory fixture options, such as Team Projects and accesses.
  * @returns Captured source calls and the isolated idempotency adapters.
  */
 function configureFocusSources(
@@ -216,8 +217,10 @@ function configureFocusSources(
   teamIssueCount = 1,
   workspaceRole: 'owner' | 'member' | 'guest' = 'member',
   additionalTeams?: Array<{ id: string; name: string; projects: Array<{ id: string; name: string; tone: 'purple' }> }>,
+  projectOptions: Pick<NonNullable<Parameters<typeof configureFakeProjectClients>[1]>, 'teamProjects' | 'projectAccesses'> = {},
 ) {
   const projectCalls = configureFakeProjectClients(true, {
+    ...projectOptions,
     role,
     workspaceRole,
     teamIssueCount,
@@ -2694,6 +2697,35 @@ test('lists Project log entries from a Project granted only Enterprise Project r
     expect(response.status).toBe(200)
     expect(readProjects).toEqual(['side-team/side-project'])
   })
+})
+
+test('reads at most 100 Project logs and reports the rest as incomplete', async () => {
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = Array.from({ length: 101 }, (_, index) => ({
+    id: `project-${String(index).padStart(3, '0')}`,
+    name: `Project ${index}`,
+    tone: 'blue',
+  }))
+  configureFocusSources('member', undefined, 0, 'member', undefined, {
+    teamProjects,
+    projectAccesses: teamProjects.map((project): { projectId: string; role: 'member' } => ({ projectId: project.id, role: 'member' })),
+  })
+  const readProjects: string[] = []
+  const store = new InMemoryProjectRaidLogStore()
+  const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+  store.listOpenOwnedBy = async (scope, memberKey) => {
+    readProjects.push(scope.projectId)
+    return await listOpenOwnedBy(scope, memberKey)
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(readProjects).toHaveLength(100)
+  expect(readProjects).not.toContain('project-100')
+  expect(body.projectLogIncomplete).toBe(true)
 })
 
 test('reports an incomplete Project log list instead of an empty one when a log cannot be read', async () => {

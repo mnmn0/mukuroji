@@ -4106,6 +4106,16 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('project-raid-log')).toBeVisible()
     // The tab request is consumed once the screen switches, so the URL keeps only the Project.
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+
+    // A link opened before the current user loads still opens the log: the screen is keyed by the
+    // user's scope, so the request is kept until that scope is known.
+    await page.route('**/api/auth/me', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      await route.fallback()
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&tab=permissions')
+    await expect(page.getByTestId('project-raid-log')).toBeVisible()
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
   })
 
   test('Issue #194: Done の Focus 行は状態 selector から再オープンできる', async ({ page }) => {
@@ -12455,6 +12465,10 @@ test.describe('authenticated task page', () => {
     await Promise.all([panel.getByRole('link', { name: '登録簿を開く' }).click(), declined])
     await expect(page).not.toHaveURL(/tab=permissions/)
     await expect(panel).toBeVisible()
+    // Declining keeps the unsent comment.
+    await panel.getByRole('tab', { name: /会話/ }).click()
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('登録簿へ移る前のコメント下書き')
+    await panel.getByRole('tab', { name: /判断/ }).click()
     const accepted = new Promise<void>((resolve) => {
       page.once('dialog', async (dialog) => {
         await dialog.accept()

@@ -494,9 +494,10 @@ test('fences another owner once and adds no second fence when the caller owns th
     }),
   })
   expect(recorded).toHaveLength(3)
+  // DynamoDB refuses two operations on one item in a transaction, whatever their conditions.
   for (const checks of recorded) {
-    const keys = checks.map((check) => JSON.stringify(check))
-    expect(new Set(keys).size).toBe(keys.length)
+    const targets = checks.map(transactionItemTarget)
+    expect(new Set(targets).size).toBe(targets.length)
   }
 })
 
@@ -587,3 +588,33 @@ test('approves a change request with the captured baseline and rejects one witho
   }, 'decide-5')
   expect(notRequest.status).toBe(400)
 })
+
+/**
+ * Names the item a recorded transaction operation touches: its table and its key, with the key's
+ * attributes in a fixed order so that two operations on the same item always compare equal.
+ *
+ * @param item - One recorded transaction item, such as `{ ConditionCheck: { TableName, Key } }`.
+ * @returns The table name and the normalized key, serialized.
+ */
+function transactionItemTarget(item: unknown): string {
+  if (!isPlainRecord(item)) throw new Error('Expected a transaction item.')
+  const operations = Object.values(item).filter(isPlainRecord)
+  const operation = operations[0]
+  if (operations.length !== 1 || operation === undefined) throw new Error('Expected one operation per item.')
+  const key = operation.Key
+  if (typeof operation.TableName !== 'string' || !isPlainRecord(key)) {
+    throw new Error('Expected a table name and a key.')
+  }
+  const normalizedKey = Object.keys(key).sort().map((name) => [name, key[name]])
+  return JSON.stringify([operation.TableName, normalizedKey])
+}
+
+/**
+ * Tells whether a value is a non-array object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a plain record.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

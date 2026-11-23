@@ -1,5 +1,5 @@
 import { deriveProjectRaidSeverity, type ProjectRaidEntry, type ProjectRaidSeverity } from '@mukuroji/contracts'
-import { escapeSpreadsheetCell } from '../../workspace/model/spreadsheetCell'
+import { escapeSpreadsheetCell } from '../../shared/lib/spreadsheetCell'
 
 /** A member or Work Item the log can name, with the text shown for it. */
 export type ProjectRaidReferenceOption = {

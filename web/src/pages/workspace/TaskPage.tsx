@@ -1094,13 +1094,16 @@ export function TaskPage() {
   }, [isCreateTaskRequested, searchParams, setSearchParams])
 
   // A requested tab is consumed once the screen has switched to it, so a later link asking for
-  // the same tab switches again after the user has moved to another tab.
+  // the same tab switches again after the user has moved to another tab. It waits for the current
+  // user: the screen is keyed by the user's scope, and a screen mounted again after the user loads
+  // must still receive the requested tab.
+  const isTaskScopeSettled = user !== undefined || currentUserError !== undefined
   useEffect(() => {
-    if (requestedTaskTab === undefined) return
+    if (requestedTaskTab === undefined || !isTaskScopeSettled) return
     const nextSearchParams = new URLSearchParams(searchParams)
     nextSearchParams.delete('tab')
     setSearchParams(nextSearchParams, { replace: true })
-  }, [requestedTaskTab, searchParams, setSearchParams])
+  }, [isTaskScopeSettled, requestedTaskTab, searchParams, setSearchParams])
 
   useEffect(() => {
     if (!hasAmbiguousIssueSelection) {

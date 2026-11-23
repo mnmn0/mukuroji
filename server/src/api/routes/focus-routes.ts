@@ -2175,11 +2175,14 @@ async function readFocusLegacyUpdateTargetScope(
 /** Most Project logs one Focus read queries at the same time. */
 const FOCUS_PROJECT_LOG_READ_CONCURRENCY = 8
 
+/** Most Project logs one Focus read queries in all; Projects beyond it make the result incomplete. */
+const FOCUS_PROJECT_LOG_MAX_PROJECTS = 100
+
 /** Owned open Project log entries, and whether any Project log could not be read. */
 type FocusProjectLogRead = {
   /** Entries with their Team, Project, and Project name. */
   sources: FocusProjectLogSource[]
-  /** True when at least one Project log failed, so `sources` may be missing entries. */
+  /** True when a Project log failed or was left out by the limit, so `sources` may miss entries. */
   incomplete: boolean
 }
 
@@ -2190,12 +2193,13 @@ type FocusProjectLogRead = {
  * a Project granted only `projects.read`. Other viewers keep their Project roles, as an owner
  * must be a member of the Project.
  *
- * Every such Project is read, a few at a time. A log that cannot be read is reported as an
+ * Up to {@link FOCUS_PROJECT_LOG_MAX_PROJECTS} such Projects are read, a few at a time, in
+ * directory order. A log that cannot be read, or a Project beyond that limit, is reported as an
  * incomplete result instead of an empty one, so the rest of the Focus queue still loads and the
  * viewer is told that some entries may be missing.
  *
  * @param principal - Current authenticated Workspace principal.
- * @returns Owned open entries, and whether any Project log failed.
+ * @returns Owned open entries, and whether any Project log failed or was left out.
  */
 async function readFocusProjectLogSources(
   principal: WorkspacePrincipal,
@@ -2203,12 +2207,13 @@ async function readFocusProjectLogSources(
   // The Project log GET refuses guests, so Focus does not show them log entries either.
   if (!canReadWorkspaceBusinessData(principal)) return { sources: [], incomplete: false }
   const fullDirectory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  const projects = principal.enterpriseAuthorizationEvaluation !== undefined && !principal.isSystemAdmin
+  const readableProjects = principal.enterpriseAuthorizationEvaluation !== undefined && !principal.isSystemAdmin
     ? fullDirectory.teams.flatMap((team) => team.projects
       .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
       .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
     : await readLegacyFocusProjectLogProjects(principal, fullDirectory)
-  let incomplete = false
+  const projects = readableProjects.slice(0, FOCUS_PROJECT_LOG_MAX_PROJECTS)
+  let incomplete = readableProjects.length > projects.length
   const sources = await mapInOrderWithConcurrency(projects, FOCUS_PROJECT_LOG_READ_CONCURRENCY, async (project) => {
     try {
       const entries = await workItemDependencies.projectRaidLogs.listOpenOwnedBy(
