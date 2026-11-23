@@ -3453,6 +3453,17 @@ test('previews a Project template application with dates, counts, and validation
       dependencyNumber: 1,
     }),
   ])
+
+  // A Planning graph without room for the template's rows is reported before anything is created.
+  const get = planning.get.bind(planning)
+  planning.get = async (...args) => {
+    const snapshot = await get(...args)
+    return { ...snapshot, capacity: { ...snapshot.capacity, liveRowCount: snapshot.capacity.liveRowCapacity - 1 } }
+  }
+  const full = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect((await full.json()).errors).toContainEqual(expect.objectContaining({ code: 'PlanningCapacityExceeded' }))
+  planning.get = get
+
   expect(createdIssues.size).toBe(0)
   expect(projectCalls.projectCreates).toEqual([])
   expect((await planning.get('user#demo@example.com', { workItems: [] })).entities).toHaveLength(2)

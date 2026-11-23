@@ -1197,6 +1197,11 @@ export async function previewProjectTemplateApplication(
     report(error)
   }
   await preflightProjectTemplatePlanning(principal, target, payload, workItems, planningEntities, report)
+  await previewProjectTemplatePlanningCapacity(
+    principal,
+    planningEntities.length + (payload.dependencies?.length ?? 0),
+    report,
+  )
   const dates = [
     ...workItems.map((workItem) => workItem.schedule.endDate),
     ...planningEntities.map((entity) => entity.range.endDate),
@@ -1228,6 +1233,35 @@ export async function previewProjectTemplateApplication(
     }),
     dependencyCount: payload.dependencies?.length ?? 0,
     errors,
+  }
+}
+
+/**
+ * Reports a preview whose Planning entities and dependencies cannot fit in the live Planning graph.
+ *
+ * Each new Phase, Milestone, and dependency takes at least one live row, so this finds a graph
+ * that is full or has fewer rows left than the template needs. Byte usage cannot be told in
+ * advance and is still enforced when each write commits. Only a preview runs this: on a retried
+ * application some of these rows already exist.
+ *
+ * @param principal - Workspace administrator previewing the application.
+ * @param rowCount - Planning entities and dependencies the application would create.
+ * @param report - Receives the problem.
+ */
+async function previewProjectTemplatePlanningCapacity(
+  principal: WorkspacePrincipal,
+  rowCount: number,
+  report: ProjectTemplateIssueReporter,
+) {
+  if (rowCount === 0) return
+  const { capacity } = await workItemDependencies.planning.get(principal.directoryId, { workItems: [] })
+  if (capacity.level === 'full' || capacity.liveRowCount + rowCount > capacity.liveRowCapacity) {
+    report(new AutomationError(
+      'payload-too-large',
+      'PlanningCapacityExceeded',
+      'Planning does not have room for the template\'s Phases, Milestones, and dependencies. ' +
+        'Archive Planning items no longer needed, then preview again.',
+    ))
   }
 }
 
