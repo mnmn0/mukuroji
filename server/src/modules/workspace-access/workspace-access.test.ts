@@ -3541,6 +3541,24 @@ test('refuses renaming a directory member and a stale version', async () => {
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
 })
 
+/**
+ * Builds the audit context of a rename request whose fingerprint covers the requested change.
+ *
+ * @param idempotencyKey - Idempotency key of the request.
+ * @param name - Requested name.
+ * @returns Audit context of the request.
+ */
+function createRenameAuditContext(idempotencyKey: string, name: string) {
+  return createMutationAuditContext({
+    workspaceId,
+    actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+    idempotencyKey,
+    occurredAt: now.toISOString(),
+    request: { method: 'PUT', path: '/api/me/profile', body: { expectedVersion: 1, name } },
+    source: { kind: 'api' },
+  })
+}
+
 test('returns the saved member when a committed rename is retried with the same idempotency key', async () => {
   const member = createWorkspaceMember('sato@example.com', 'member')
   const first = createMemberNameClient([member])
@@ -3549,7 +3567,7 @@ test('returns the saved member when a committed rename is retried with the same 
     member.memberKey,
     member.memberKey,
     { name: '佐藤 花子', expectedVersion: 1 },
-    createAuditContext('rename-retry'),
+    createRenameAuditContext('rename-retry', '佐藤 花子'),
   )
   const transactItems = first.inputs[0]?.TransactItems
   const auditPut = Array.isArray(transactItems) ? transactItems[1] : undefined
@@ -3565,7 +3583,7 @@ test('returns the saved member when a committed rename is retried with the same 
     member.memberKey,
     member.memberKey,
     { name: '佐藤 花子', expectedVersion: 1 },
-    createAuditContext('rename-retry'),
+    createRenameAuditContext('rename-retry', '佐藤 花子'),
   )).resolves.toEqual(saved)
   expect(retry.inputs).toEqual([])
 
@@ -3574,13 +3592,23 @@ test('returns the saved member when a committed rename is retried with the same 
     member.memberKey,
     member.memberKey,
     { name: '佐藤 花子', expectedVersion: 1 },
-    createAuditContext('rename-other'),
+    createRenameAuditContext('rename-other', '佐藤 花子'),
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
   await expect(retry.client.updateMemberName(
     workspaceId,
     member.memberKey,
     member.memberKey,
     { name: '別の名前', expectedVersion: 1 },
-    createAuditContext('rename-retry'),
+    createRenameAuditContext('rename-retry', '別の名前'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+
+  // After a later change, the same key with another name is still refused, not taken as saved.
+  const later = createMemberNameClient([{ ...saved, name: '後の名前', version: 3 }], auditItem ? [auditItem] : [])
+  await expect(later.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '別の名前', expectedVersion: 1 },
+    createRenameAuditContext('rename-retry', '別の名前'),
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
 })

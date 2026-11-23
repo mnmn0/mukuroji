@@ -2572,7 +2572,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
     const name = normalizeOptional(input.name)
     if (target.version !== input.expectedVersion) {
-      const replayed = await this.findReplayedMemberRename(normalizedWorkspaceId, target, name, input, auditContext)
+      const replayed = await this.findReplayedMemberRename(normalizedWorkspaceId, target, input, auditContext)
       if (replayed) return replayed
       throw new WorkspaceAccessError(
         409,
@@ -2649,7 +2649,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       if (isConditionalTransactionCancellation(error)) {
         const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
         const replayed = current
-          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, name, input, auditContext)
+          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext)
           : undefined
         if (replayed) return replayed
         await this.classifyMemberUpdateConflict(
@@ -2672,16 +2672,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    *
    * @param workspaceId - Normalized Workspace ID.
    * @param current - Member row as it is now.
-   * @param name - Requested name after normalization; undefined removes it.
    * @param input - Requested change, with the version it was based on.
    * @param auditContext - Audit context of the request, carrying its idempotency key.
    * @returns The current member when the request already committed, otherwise undefined.
-   * @throws WorkspaceAccessError 409 when the same idempotency key was used for another name.
+   * @throws WorkspaceAccessError 409 when the same idempotency key was used for another change.
    */
   private async findReplayedMemberRename(
     workspaceId: string,
     current: WorkspaceMember,
-    name: string | undefined,
     input: UpdateWorkspaceMemberNameInput,
     auditContext: MutationAuditContext | undefined,
   ): Promise<WorkspaceMember | undefined> {
@@ -2695,16 +2693,14 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }))
     if (!response.Item) return undefined
     const event = normalizeAuditEvent(response.Item)
+    if (event.eventType !== 'member.renamed' || event.entity.id !== entityId) return undefined
+    // The request fingerprint covers the requested name and version, so the same key sent with
+    // another change is refused whatever happened to the member since.
     if (
-      event.eventType !== 'member.renamed' ||
-      event.entity.id !== entityId ||
+      event.requestFingerprint !== auditContext.requestFingerprint ||
+      event.actor.id !== auditContext.actor.id ||
       event.metadata?.expectedVersion !== input.expectedVersion
     ) {
-      return undefined
-    }
-    // With no later change, the saved name must be the one this request asked for; a different
-    // name means the key was reused for another change.
-    if (current.version === input.expectedVersion + 1 && current.name !== name) {
       throw new WorkspaceAccessError(
         409,
         'WorkspaceIdempotencyConflict',

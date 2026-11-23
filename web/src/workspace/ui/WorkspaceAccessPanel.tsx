@@ -342,7 +342,7 @@ export function WorkspaceAccessPanelContainer({
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
-  const refresh = async () => {
+  const refresh = async ({ keepRetainedContexts = false }: { keepRetainedContexts?: boolean } = {}) => {
     if (!accessKey) {
       return
     }
@@ -354,12 +354,12 @@ export function WorkspaceAccessPanelContainer({
       () => getWorkspaceAccess(mutationSession.accessToken),
       { revalidate: false },
     )
-    mutationRequestRunner.discardRetainedContexts()
+    if (!keepRetainedContexts) mutationRequestRunner.discardRetainedContexts()
   }
 
-  const retryLoad = async () => {
+  const retryLoad = async (options?: { keepRetainedContexts?: boolean }) => {
     try {
-      await refresh()
+      await refresh(options)
     } catch {
       // SWR が保持する既存の load error を表示したまま、click handler の
       // unhandled rejection だけを抑止します。

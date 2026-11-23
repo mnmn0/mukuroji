@@ -8,8 +8,12 @@ export type UseWorkspaceMemberRenameOptions = {
   accessToken: string
   /** Runner that reuses the idempotency key when a request is retried after a transport failure. */
   requestRunner: MutationRequestRunner
-  /** Reloads the member list once the rename settles. */
-  reload: () => Promise<unknown>
+  /**
+   * Reloads the member list once the rename settles. After a failure it keeps the runner's
+   * retained contexts, so that saving again reuses the idempotency key of a rename whose
+   * response was lost and the server recognizes it.
+   */
+  reload: (options: { keepRetainedContexts: boolean }) => Promise<unknown>
 }
 
 /**
@@ -40,8 +44,10 @@ export function useWorkspaceMemberRename({ accessToken, requestRunner, reload }:
         (context) => updateWorkspaceMemberName(accessToken, memberKey, input, context),
         shouldRetainRenameContext,
       )
-    } finally {
-      await reload()
+    } catch (error) {
+      await reload({ keepRetainedContexts: true })
+      throw error
     }
+    await reload({ keepRetainedContexts: false })
   }, [accessToken, requestRunner, reload])
 }

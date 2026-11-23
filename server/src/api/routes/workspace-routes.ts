@@ -544,8 +544,11 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const input = readMemberNameChange(await readJson<unknown>(c.req))
+      // The name is part of the request fingerprint, so a retry with the same key and another
+      // name is refused instead of being taken for the saved rename.
       const auditContext = createWorkspaceMutationContext(c, principal, {
         expectedVersion: input.expectedVersion,
+        name: input.name ?? null,
       })
       const member = await workspaceDependencies.workspaceAccess.updateMemberName(
         principal.directoryId,
@@ -580,6 +583,7 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
       const auditContext = createWorkspaceMutationContext(c, principal, {
         expectedVersion: input.expectedVersion,
         memberKey,
+        name: input.name ?? null,
       })
       const member = await workspaceDependencies.workspaceAccess.updateMemberName(
         principal.directoryId,

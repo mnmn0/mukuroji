@@ -29,7 +29,7 @@ directory（SCIM）連携の member は、reconcile のたびに directory の�
   directory 管理の member（`provisioningSource = directory`）は 409
   `WorkspaceMemberNameDirectoryManaged` で断り、条件式でも読み取り後に directory 管理へ変わった row を守る。
 - 応答が届かず同じ `Idempotency-Key` で再送された変更は、同じ transaction で書いた audit event
-  （ID は idempotency key から決まり、metadata に `expectedVersion` を持つ）で検出し、409 にせず保存後の member を返す。
+  （ID は idempotency key から決まり、request fingerprint は名前と `expectedVersion` を含む）で検出し、409 にせず保存後の member を返す。
   同じ key で別の名前を送った場合は 409 `WorkspaceIdempotencyConflict` にする。
 - 名前は前後の空白を除いて 128 文字まで、制御文字を含めない。空は名前を消し、メールで表示する。
 - Cognito の `name` 属性は変えない。ログインで上書きされず、Cognito への書き込みと IAM 権限を増やさずに済む。
