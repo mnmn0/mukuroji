@@ -24,6 +24,9 @@ export type WorkspaceMemberNameEditorProps = {
 export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: WorkspaceMemberNameEditorProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(member.name ?? '')
+  // The version the draft started from, so a rename that another administrator saved while the
+  // form was open is refused as a conflict instead of being overwritten.
+  const [draftVersion, setDraftVersion] = useState(member.version)
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
   const parsed = readMemberDisplayName(draft)
@@ -45,6 +48,7 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
         type="button"
         onClick={() => {
           setDraft(member.name ?? '')
+          setDraftVersion(member.version)
           setFailed(false)
           setEditing(true)
         }}
@@ -60,7 +64,7 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
     setSaving(true)
     setFailed(false)
     try {
-      await onSave(parsed.name, member.version)
+      await onSave(parsed.name, draftVersion)
       close()
     } catch {
       setFailed(true)

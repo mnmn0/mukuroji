@@ -20,7 +20,6 @@ import {
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
   updateWorkspaceMember,
-  updateWorkspaceMemberName,
   WorkspaceAccessApiError,
   type CreateWorkspaceInvitationInput,
   type UpdateWorkspaceMemberInput,
@@ -39,6 +38,7 @@ import {
   shouldCloseCredentialResetDialog,
   useWorkspaceMemberCredentialReset,
 } from '../mutations/useWorkspaceMemberCredentialReset'
+import { useWorkspaceMemberRename } from '../mutations/useWorkspaceMemberRename'
 import {
   createWorkspaceAccessMutationSession,
   getBulkInvitationRunner,
@@ -366,6 +366,12 @@ export function WorkspaceAccessPanelContainer({
     }
   }
 
+  const renameMember = useWorkspaceMemberRename({
+    accessToken: mutationSession.accessToken,
+    requestRunner: mutationRequestRunner,
+    reload: retryLoad,
+  })
+
   const createInvitationMutationFingerprint = (invitationId: string) => {
     const invitation = access?.invitations.find((item) => item.id === invitationId)
 
@@ -454,15 +460,7 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
-      onRenameMember={async (memberKey, name, expectedVersion) => {
-        const input = { name: name ?? null, expectedVersion }
-        await mutationRequestRunner.run(
-          `workspace-member:rename:${memberKey}`,
-          JSON.stringify(input),
-          (context) => updateWorkspaceMemberName(accessToken, memberKey, input, context),
-          shouldRetainWorkspaceMutationContext,
-        ).finally(() => retryLoad())
-      }}
+      onRenameMember={renameMember}
       onUpdateMember={async (memberKey, input) => {
         await mutationRequestRunner.run(
           `workspace-member:update:${memberKey}`,
