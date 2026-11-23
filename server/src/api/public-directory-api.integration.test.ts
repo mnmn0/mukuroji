@@ -136,6 +136,17 @@ describe('Public API directory', () => {
       .listProjectRaidLog(credential, 'core-team', 'hidden'))).rejects.toMatchObject({ status: 403 })
   })
 
+  test('refuses the Project log to a Workspace guest, as the Web log GET does', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'guest',
+    })
+    await expect(runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .listProjectRaidLog(credential, 'core-team', 'refero'))).rejects.toMatchObject({ status: 403 })
+  })
+
   test('resolves a readable key and answers 404 alike for unused, stale, and unreadable keys', async () => {
     const locations = {
       'CT-11': { key: 'CT-11', teamId: 'core-team', workItemId: 'onboarding-friction' },

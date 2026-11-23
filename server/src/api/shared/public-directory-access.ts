@@ -15,6 +15,7 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import { requirePlanningUpdateProjectPermission } from './planning-access'
+import { requireWorkspaceBusinessRead } from './project-access'
 import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from './project-directory-visibility'
 
 /**
@@ -143,6 +144,8 @@ async function listCredentialProjectRaidLog(
     projectId,
     evaluateProjectScopes: true,
   })
+  // The same restriction as the Web log GET: guests cannot read Project logs.
+  requireWorkspaceBusinessRead(principal)
   await requirePlanningUpdateProjectPermission(principal, teamId, projectId, 'viewer')
   const log = await readProjectRaidLogUseCase(
     workItemDependencies.projectRaidLogs,

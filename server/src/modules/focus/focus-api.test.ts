@@ -2567,6 +2567,26 @@ test('lists overdue Project log entries the viewer owns only in Projects the vie
   expect(body.projectLogIncomplete).toBeUndefined()
 })
 
+test('shows no Project log entries to a Workspace guest, as the log GET refuses them', async () => {
+  configureFocusSources('member', undefined, 0, 'guest')
+  const readProjects: string[] = []
+  const store = new InMemoryProjectRaidLogStore()
+  const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+  store.listOpenOwnedBy = async (scope, memberKey) => {
+    readProjects.push(`${scope.teamId}/${scope.projectId}`)
+    return await listOpenOwnedBy(scope, memberKey)
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(body.projectLogEntries).toEqual([])
+  expect(readProjects).toEqual([])
+})
+
 test('lists Project log entries in Focus only with Enterprise Project read permission', async () => {
   await withTestEnvironment({
     COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
