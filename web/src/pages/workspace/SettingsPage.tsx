@@ -51,7 +51,6 @@ export function SettingsPage() {
         <SettingsSectionNav current={section} t={t} />
         {section === 'personal' ? (
           <WorkspaceSettingsView
-            showAgentConnection={workspace.softwareFactoryEnabled}
             accountSections={workspace.accessToken ? (
               <>
                 <AccountSecurityPanelContainer

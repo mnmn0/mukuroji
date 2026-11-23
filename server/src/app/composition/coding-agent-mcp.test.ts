@@ -55,7 +55,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -249,7 +249,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(20)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 3, serverCompatibility: { status: 'compatible', server: { apiRevision: 3, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 4, serverCompatibility: { status: 'compatible', server: { apiRevision: 4, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -390,7 +390,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
@@ -418,4 +418,106 @@ test('configuration failures never echo supplied secrets', () => {
     MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_ID: 'team',
     MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_RUNTIME: 'cursor',
   })).toThrow('RUNTIME')
+})
+
+/**
+ * Starts a fake public API for the Workspace profile, which fixes no Team.
+ *
+ * @returns The server and the requests it received.
+ */
+function startFakeWorkspaceApi() {
+  const requests: string[] = []
+  const issue = { id: 'task', teamId: 'team', revision: 2, title: 'Import GitHub issue', assigneeUserId: 'owner',
+    workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
+    schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
+  const api = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+    const url = new URL(request.url)
+    if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
+    if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
+    requests.push(`${url.pathname}${url.search}`)
+    const teamId = url.searchParams.get('teamId')
+    switch (url.pathname) {
+      case '/api/v1/me':
+        return Response.json({ schemaVersion: 1, workspaceId: 'workspace', memberId: 'owner', email: 'owner@example.com' })
+      case '/api/v1/teams':
+        return Response.json({ schemaVersion: 1, items: [
+          { id: 'team', name: 'Platform', projects: [{ id: 'project', name: 'WBS', lifecycleState: 'active', code: 'WBS' }] },
+          { id: 'other', name: 'Other', projects: [] },
+        ] })
+      case '/api/v1/work-item-keys/ABC-7':
+        return Response.json({ schemaVersion: 1, key: 'ABC-7', teamId: 'team', workItemId: 'task' })
+      case '/api/v1/work-items/task':
+        return teamId === 'team' ? Response.json(issue) : Response.json({}, { status: 404 })
+      case '/api/v1/work-items/task/key':
+        return Response.json({ schemaVersion: 1, teamId: 'team', workItemId: 'task', createdAt: issue.createdAt, key: 'ABC-7' })
+      case '/api/v1/work-items/task/comments':
+        return Response.json({ items: [{ id: 'comment', actorUserId: 'owner', body: 'Imported', createdAt: issue.createdAt }], hasMore: false })
+      case '/api/v1/work-items':
+        return Response.json({ items: teamId === 'team' ? [issue] : [], hasMore: false })
+      case '/api/v1/projects/project/members':
+        return Response.json({ schemaVersion: 1, teamId: 'team', projectId: 'project', items: [{ id: 'owner', email: 'owner@example.com', role: 'manager' }] })
+      case '/api/v1/work-item-types':
+        return Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [{ id: 'task-type', name: 'Task', customFields: [],
+          workflow: { initialStatusId: 'todo', statuses: [
+            { id: 'done', name: 'Done', category: 'completed', sortOrder: 2 },
+            { id: 'todo', name: 'To do', category: 'unstarted', sortOrder: 1 },
+          ] } }] })
+      default:
+        return Response.json({}, { status: 404 })
+    }
+  } })
+  return { api, requests }
+}
+
+test('the workspace profile reads Teams, members, statuses, and Work Items by key without a fixed Team', async () => {
+  const fake = startFakeWorkspaceApi()
+  const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [handlerPath],
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token', MUKUROJI_MCP_PROFILE: 'workspace' },
+      stderr: 'pipe',
+    }))
+    const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
+    expect(tools).toEqual(['get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_teams', 'list_users', 'whoami'])
+
+    expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
+      data: [{ id: 'project', name: 'WBS', lifecycleState: 'active', code: 'WBS', teamId: 'team', teamName: 'Platform' }],
+    })
+    expect((await call(client, 'get_issue', { id: 'abc-7' })).content).toMatchObject({ data: { id: 'task', teamId: 'team', key: 'ABC-7' } })
+    expect((await call(client, 'list_comments', { issueId: 'ABC-7' })).content).toMatchObject({
+      data: { teamId: 'team', workItemId: 'task', items: [{ id: 'comment', body: 'Imported' }], hasMore: false },
+    })
+    expect((await call(client, 'list_issues', { teamId: 'team', assigneeId: 'me' })).content).toMatchObject({ data: { items: [{ id: 'task' }] } })
+    expect((await call(client, 'list_users', { teamId: 'team', projectId: 'project' })).content).toMatchObject({ data: { items: [{ id: 'owner' }] } })
+    expect((await call(client, 'list_issue_statuses', { teamId: 'team' })).content).toEqual({ data: { teamId: 'team', workItemTypes: [{
+      id: 'task-type', name: 'Task', statuses: [
+        { id: 'todo', name: 'To do', category: 'unstarted', initial: true },
+        { id: 'done', name: 'Done', category: 'completed', initial: false },
+      ],
+    }] } })
+    // With a Team the value is an ID even when it looks like a key.
+    expect((await call(client, 'get_issue', { id: 'task', teamId: 'team' })).content).toMatchObject({ data: { id: 'task', key: 'ABC-7' } })
+    const keyLikeId = await call(client, 'get_issue', { id: 'ABC-7', teamId: 'team' })
+    expect(keyLikeId.content).toMatchObject({ error: { code: 'not_found' } })
+    const withoutTeam = await call(client, 'get_issue', { id: 'task' })
+    expect(withoutTeam.isError).toBe(true)
+    expect(withoutTeam.content).toMatchObject({ error: { code: 'invalid_request' } })
+
+    expect(fake.requests).toContain('/api/v1/work-items?teamId=team&assigneeUserId=owner&limit=50')
+    expect(fake.requests.some((path) => path.startsWith('/api/v1/agent-'))).toBe(false)
+  } finally {
+    await client.close()
+    await fake.api.stop(true)
+  }
+})
+
+test('the workspace profile needs only the origin and token, and rejects an unknown profile', () => {
+  expect(() => composeCodingAgentMcp({ MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_TOKEN: 'never-print-this' })).toThrow('workspace profile')
+  expect(() => composeCodingAgentMcp({ MUKUROJI_MCP_PROFILE: 'linear' })).toThrow('MUKUROJI_MCP_PROFILE')
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token',
+  })).not.toThrow()
 })
