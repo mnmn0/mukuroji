@@ -13,6 +13,7 @@ import {
   TIME_RATE_CARD_JOB_ROLE_LIMIT,
   TIME_RATE_CARD_MAX_HOURLY_RATE_MINOR,
   TIME_RATE_CARD_MEMBER_LIMIT,
+  isKnownCurrencyCode,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
   type RunningTimer,
   type TimeBudget,
@@ -154,6 +155,8 @@ export type CreateTimeEntryInput = {
   billable: boolean
   /** Currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Optional confidential hourly rate. */
   hourlyRateMinor?: number
   /** Origin of the entry. */
@@ -328,6 +331,8 @@ export type StopTimerInput = {
   hourlyRateMinor?: number
   /** Currency for the generated entry. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Whether the caller may set confidential fields. */
   canManageRates: boolean
   /** Optional client key used to make audit writes idempotent across retries. */
@@ -397,6 +402,8 @@ export type SaveTimeBudgetInput = {
   amountMinor: number
   /** ISO 4217 currency code. */
   currency: string
+  /** Whether the route filled `currency` from the Workspace default; the default stays out of the request fingerprint. */
+  currencyFromWorkspaceDefault?: boolean
   /** Inclusive local period start. */
   periodFrom?: string
   /** Inclusive local period end. */
@@ -1395,6 +1402,9 @@ export class TimeTrackingService {
     const teamId = readIdentifier(input.teamId, 'Team ID')
     const updatedBy = readIdentifier(input.updatedBy, 'Actor user ID')
     const currency = validateCurrency(input.currency)
+    if (!isKnownCurrencyCode(currency)) {
+      throw new TimeTrackingError(400, 'InvalidCurrency', 'Currency must be a known ISO 4217 code.')
+    }
     const memberRates = normalizeMemberRates(input.memberRates)
     const jobRoleRates = normalizeJobRoleRates(input.jobRoleRates)
     const expectedRevision = requireInteger(input.expectedRevision, 'Rate card revision', 0, Number.MAX_SAFE_INTEGER)
@@ -2506,7 +2516,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       Key: { workspaceId, recordKey: `${RATE_CARD_PREFIX}${teamId}` },
       ConsistentRead: true,
     }))
-    return response.Item ? readStoredRateCard(response.Item) : undefined
+    if (!response.Item) return undefined
+    const rateCard = readStoredRateCard(response.Item)
+    if (rateCard.workspaceId !== workspaceId || rateCard.teamId !== teamId) {
+      throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored rate card scope does not match the requested key.')
+    }
+    return rateCard
   }
 
   /** Saves a rate card with optimistic concurrency, its audit event, and its receipt. */
@@ -4042,9 +4057,13 @@ const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
 
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
+  // A currency the route filled from the Workspace default is not what the client sent, so a retry
+  // after the default changes still replays the stored result.
+  const defaultedCurrency = 'currencyFromWorkspaceDefault' in input && input.currencyFromWorkspaceDefault === true
   const body = Object.fromEntries(
     Object.entries(input)
       .filter(([key]) => !IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS.has(key))
+      .filter(([key]) => !(defaultedCurrency && key === 'currency'))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )

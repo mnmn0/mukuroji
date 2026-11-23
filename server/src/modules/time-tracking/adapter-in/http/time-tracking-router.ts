@@ -107,7 +107,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
         billable: readRequiredBoolean(body.billable, 'Billable'),
-        currency: readOptionalString(body.currency) ?? await readDefaultCurrency(dependencies, principal),
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         source: 'manual',
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -429,7 +429,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         timerId: timer.id,
         userId: principal.userKey,
         ...(body.endedAt === undefined ? {} : { endedAt: readRequiredString(body.endedAt, 'End time') }),
-        currency: readOptionalString(body.currency) ?? await readDefaultCurrency(dependencies, principal),
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         canManageRates: canManage,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -546,7 +546,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         scopeType: 'team',
         scopeId: teamId,
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
-        currency: readOptionalString(body.currency) ?? await readDefaultCurrency(dependencies, principal),
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
@@ -572,7 +572,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         scopeType: 'project',
         scopeId: readRequiredString(context.req.param('projectId'), 'Project ID'),
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
-        currency: readOptionalString(body.currency) ?? await readDefaultCurrency(dependencies, principal),
+        ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
@@ -657,6 +657,26 @@ async function requireRateCardManager<Principal extends TimeTrackingPrincipal>(
   if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
     throw new TimeTrackingError(403, 'TimeRateCardDenied', 'Only a manager of the whole Team may read or change its rate card.')
   }
+}
+
+/**
+ * Reads the currency a request names, or the Workspace default with a flag that keeps the default
+ * out of the request fingerprint.
+ *
+ * @param dependencies - Router dependencies.
+ * @param principal - Caller.
+ * @param value - Currency from the request body.
+ * @returns Input fields for the currency.
+ */
+async function readRequestCurrency<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  value: unknown,
+): Promise<{ currency: string, currencyFromWorkspaceDefault?: true }> {
+  const requested = readOptionalString(value)
+  return requested === undefined
+    ? { currency: await readDefaultCurrency(dependencies, principal), currencyFromWorkspaceDefault: true }
+    : { currency: requested }
 }
 
 /**

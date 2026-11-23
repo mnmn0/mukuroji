@@ -751,7 +751,7 @@ test('accepts an ISO 4217 Workspace currency from an administrator only', async 
 
   const updates: unknown[] = []
   const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
-  for (const defaultCurrency of [null, 'jpy', 'YEN!', 'JP', 392]) {
+  for (const defaultCurrency of [null, 'jpy', 'YEN!', 'JP', 'ZZZ', 392]) {
     const rejected = await admin.request('/api/tenant/profile', {
       body: JSON.stringify({ ...body, defaultCurrency }),
       headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },

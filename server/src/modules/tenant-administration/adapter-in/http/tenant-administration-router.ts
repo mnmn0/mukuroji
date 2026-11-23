@@ -14,7 +14,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
-  isCurrencyCode,
+  isKnownCurrencyCode,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
@@ -406,10 +406,10 @@ function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportRemind
  *
  * @param value - Untrusted `defaultCurrency` field of the request body.
  * @returns The ISO 4217 code.
- * @throws TenantAdministrationError When the value is not an upper-case three-letter code.
+ * @throws TenantAdministrationError When the value is not a known upper-case ISO 4217 code.
  */
 function readTenantDefaultCurrencyInput(value: unknown): string {
-  if (!isCurrencyCode(value)) {
+  if (!isKnownCurrencyCode(value)) {
     throw new TenantAdministrationError(400, 'InvalidTenantDefaultCurrency', 'Default currency must be an ISO 4217 code such as JPY.')
   }
   return value

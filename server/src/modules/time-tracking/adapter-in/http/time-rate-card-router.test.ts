@@ -251,6 +251,8 @@ describe('time rate card routes', () => {
     expect(negative.status).toBe(400)
     const badCurrency = await putRateCard(router, { currency: 'Y1N', memberRates: [], jobRoleRates: [], expectedRevision: 0 })
     expect(await badCurrency.json()).toMatchObject({ code: 'InvalidCurrency' })
+    const unknownCurrency = await putRateCard(router, { currency: 'ZZZ', memberRates: [], jobRoleRates: [], expectedRevision: 0 })
+    expect(await unknownCurrency.json()).toMatchObject({ code: 'InvalidCurrency' })
 
     expect((await putRateCard(router, { currency: 'JPY', memberRates: [], jobRoleRates: [], expectedRevision: 0 })).status).toBe(200)
     const stale = await putRateCard(router, { currency: 'JPY', memberRates: [], jobRoleRates: [], expectedRevision: 0 })
@@ -271,4 +273,5 @@ describe('time rate card routes', () => {
     const settings = await router.request('/api/teams/team-1/time-tracking/settings', { headers })
     expect(await settings.json()).toMatchObject({ defaultCurrency: 'EUR' })
   })
+
 })

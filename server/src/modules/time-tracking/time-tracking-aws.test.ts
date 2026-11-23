@@ -611,4 +611,22 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(audit).not.toContain('8000')
     expect(audit).not.toContain('6000')
   })
+
+  test('rejects a stored rate card whose Team does not match its key', async () => {
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{
+      Item: {
+        schemaVersion: 1,
+        workspaceId: 'workspace-1',
+        teamId: 'team-2',
+        currency: 'JPY',
+        memberRates: [],
+        jobRoleRates: [{ jobRoleId: 'role-1', hourlyRateMinor: 6_000 }],
+        revision: 1,
+        recordKey: 'TIME_RATE_CARD#team-1',
+      },
+    }], []))
+
+    await expect(repository.getRateCard('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+  })
 })

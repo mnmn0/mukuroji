@@ -97,3 +97,21 @@ export type TimeTrackingTeamSettingsResponse = {
 export function isCurrencyCode(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Z]{3}$/u.test(value)
 }
+
+/** ISO 4217 codes the runtime knows, read once. */
+let supportedCurrencyCodes: ReadonlySet<string> | undefined
+
+/**
+ * Returns whether a value is an ISO 4217 code that the runtime's `Intl` knows, such as `JPY`.
+ *
+ * Use it where a person types a currency; stored values keep the shape check of {@link isCurrencyCode}
+ * so that a runtime with a shorter list still reads them.
+ *
+ * @param value - Untrusted value.
+ * @returns `true` for a known code; `false` for an unknown one such as `ZZZ`.
+ */
+export function isKnownCurrencyCode(value: unknown): value is string {
+  if (!isCurrencyCode(value)) return false
+  supportedCurrencyCodes ??= new Set(Intl.supportedValuesOf('currency'))
+  return supportedCurrencyCodes.has(value)
+}

@@ -372,7 +372,7 @@ export function TenantAdministrationPanel({
               <select
                 className="workbench-input"
                 data-testid="tenant-default-currency"
-                disabled={tenantLifecycleLocked}
+                disabled={isSaving || tenantLifecycleLocked}
                 onChange={(event) => onChangeProfile({ ...profile, defaultCurrency: event.target.value })}
                 value={profile.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
               >
