@@ -271,7 +271,7 @@ function listSettingsPanels(
     ? [
         'profile',
         'display',
-        'install',
+        // The install card hides itself where the browser cannot install the app, so it is not linked.
         signedIn && 'notifications',
         signedIn && 'account-security',
         signedIn && available.aiAssistance && 'ai-assistance',

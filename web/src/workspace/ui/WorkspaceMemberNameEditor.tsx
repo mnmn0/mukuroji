@@ -1,5 +1,5 @@
 import { MEMBER_DISPLAY_NAME_MAX_LENGTH, readMemberDisplayName } from '@mukuroji/contracts'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../api/access'
 
@@ -27,12 +27,28 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
   const parsed = readMemberDisplayName(draft)
+  const renameButtonRef = useRef<HTMLButtonElement>(null)
+  const returnFocusRef = useRef(false)
+
+  useEffect(() => {
+    // Closing the form removes the focused field, so focus goes back to the button that opened it.
+    if (!editing && returnFocusRef.current) {
+      returnFocusRef.current = false
+      renameButtonRef.current?.focus()
+    }
+  }, [editing])
+
+  const close = () => {
+    returnFocusRef.current = true
+    setEditing(false)
+  }
 
   if (!editing) {
     return (
       <button
         className="mt-1 text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
         data-testid={`workspace-member-rename-${testId}`}
+        ref={renameButtonRef}
         type="button"
         onClick={() => {
           setDraft(member.name ?? '')
@@ -52,7 +68,7 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
     setFailed(false)
     try {
       await onSave(parsed.name, member.version)
-      setEditing(false)
+      close()
     } catch {
       setFailed(true)
     } finally {
@@ -94,7 +110,7 @@ export function WorkspaceMemberNameEditor({ member, onSave, t, testId }: Workspa
           className="workbench-button-secondary min-h-9 px-3"
           disabled={saving}
           type="button"
-          onClick={() => setEditing(false)}
+          onClick={close}
         >
           {t('workspace.access.members.renameCancel')}
         </button>

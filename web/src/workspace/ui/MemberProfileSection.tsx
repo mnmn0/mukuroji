@@ -1,5 +1,6 @@
 import { MEMBER_DISPLAY_NAME_MAX_LENGTH, readMemberDisplayName } from '@mukuroji/contracts'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useSWRConfig } from 'swr'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createMutationRequestRunner,
@@ -192,6 +193,7 @@ export function MemberProfileSectionContainer({
   userLabel,
 }: MemberProfileSectionContainerProps) {
   const { data, error, mutate } = useMemberProfile(accessToken)
+  const { mutate: mutateCache } = useSWRConfig()
   const runner = useMemo(() => createMutationRequestRunner(), [])
 
   return (
@@ -211,6 +213,12 @@ export function MemberProfileSectionContainer({
             (failure) => !(failure instanceof WorkspaceAccessApiError),
           )
           await mutate(profile, { revalidate: false })
+          // The member list on the Workspace settings shows this name too.
+          void mutateCache(
+            (key) => Array.isArray(key) && key[0] === 'workspace-access',
+            undefined,
+            { revalidate: true },
+          )
         } catch (failure) {
           // A conflict means the member changed elsewhere; show the latest name.
           if (failure instanceof WorkspaceAccessApiError && failure.status === 409) void mutate()
