@@ -3383,11 +3383,19 @@ test('pins a member record to the version read, or to its absence', () => {
  * @param members - Stored member rows, by member key.
  * @returns The adapter and the recorded write inputs.
  */
-function createMemberNameClient(members: readonly WorkspaceMember[]) {
+function createMemberNameClient(
+  members: readonly WorkspaceMember[],
+  auditItems: ReadonlyArray<Record<string, unknown>> = [],
+) {
   const inputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand' && command.input.TableName === 'AuditTable') {
+        const key = command.input.Key
+        const eventId = typeof key === 'object' && key !== null && 'eventId' in key ? String(key.eventId) : ''
+        return { Item: auditItems.find((item) => item.eventId === eventId) }
+      }
       if (command.constructor.name === 'GetCommand') {
         const key = command.input.Key
         const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key
@@ -3531,4 +3539,48 @@ test('refuses renaming a directory member and a stale version', async () => {
     owner.memberKey,
     { name: 'New', expectedVersion: 3 },
   )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+})
+
+test('returns the saved member when a committed rename is retried with the same idempotency key', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const first = createMemberNameClient([member])
+  await first.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createAuditContext('rename-retry'),
+  )
+  const transactItems = first.inputs[0]?.TransactItems
+  const auditPut = Array.isArray(transactItems) ? transactItems[1] : undefined
+  const auditItem = typeof auditPut === 'object' && auditPut !== null && 'Put' in auditPut
+    ? auditPut.Put.Item
+    : undefined
+  expect(auditItem).toMatchObject({ metadata: { expectedVersion: 1 } })
+  const saved = { ...member, name: '佐藤 花子', version: 2 }
+  const retry = createMemberNameClient([saved], auditItem ? [auditItem] : [])
+
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createAuditContext('rename-retry'),
+  )).resolves.toEqual(saved)
+  expect(retry.inputs).toEqual([])
+
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createAuditContext('rename-other'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '別の名前', expectedVersion: 1 },
+    createAuditContext('rename-retry'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
 })

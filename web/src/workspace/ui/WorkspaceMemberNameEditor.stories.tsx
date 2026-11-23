@@ -53,14 +53,17 @@ export const Editing: Story = {
   },
 }
 
-/** A name with a line break is refused before saving. */
+/**
+ * A name with a control character is refused before saving. The draft starts from a stored name
+ * that has a tab, because typing cannot go past the field's length limit.
+ */
 export const InvalidName: Story = {
+  args: { member: { ...member, name: 'Sato\tHanako' } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: t('workspace.access.members.rename') }))
-    const input = canvas.getByTestId('workspace-member-rename-input-sato-example-com')
-    await userEvent.clear(input)
-    await userEvent.type(input, 'x'.repeat(129))
+    await expect(canvas.getByTestId('workspace-member-rename-input-sato-example-com')).toHaveAttribute('aria-invalid', 'true')
+    await expect(canvas.getByRole('alert')).toHaveTextContent(t('workspace.settings.profile.invalid'))
     await expect(canvas.getByTestId('workspace-member-rename-save-sato-example-com')).toBeDisabled()
   },
 }
