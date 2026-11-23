@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
-import type { CapacityPlanningGranularity } from '@mukuroji/contracts'
+import type { CapacityPlanningGranularity, MyTimesheet, MyTimesheetSubmitRequest } from '@mukuroji/contracts'
 import { useSubmitMyTimesheet } from '../../features/time-tracking/mutations/useSubmitMyTimesheet'
 import { createWeekPeriod, resolveBrowserTimeZone, resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
 import { useMyTimesheet } from '../../features/time-tracking/queries/useMyTimesheet'
@@ -77,7 +77,9 @@ function WorkspaceWorkloadSession() {
               setParams({ week: shiftWeek(weekStart, weeks, weekStartDay) })
             }}
             onRetry={() => { void timesheet.mutate() }}
-            onSubmit={() => { void submission.submit({ from: week.from, to: week.to }) }}
+            onSubmit={() => {
+              void submission.submit({ from: week.from, to: week.to, entries: listSubmittableEntries(timesheet.data) })
+            }}
             t={t}
             timesheet={timesheet.data}
           />
@@ -85,4 +87,16 @@ function WorkspaceWorkloadSession() {
       </div>
     </WorkspaceRouteContent>
   )
+}
+
+/**
+ * Lists the draft and rejected entries of every Team the member sees, with the revision shown.
+ *
+ * @param timesheet - Loaded personal timesheet, or undefined while loading.
+ * @returns Entries to submit.
+ */
+function listSubmittableEntries(timesheet: MyTimesheet | undefined): MyTimesheetSubmitRequest['entries'] {
+  return (timesheet?.teams ?? []).flatMap((team) => team.entries
+    .filter((entry) => entry.status === 'draft' || entry.status === 'rejected')
+    .map((entry) => ({ teamId: team.teamId, entryId: entry.id, expectedRevision: entry.revision })))
 }

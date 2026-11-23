@@ -233,7 +233,11 @@ test('lets a Team-scoped grant read workload and submit time across its Teams on
     const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
       method: 'POST',
       headers: { Authorization: authorization, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: '2026-08-10T00:00:00.000Z', to: '2026-08-11T00:00:00.000Z' }),
+      body: JSON.stringify({
+        from: '2026-08-10T00:00:00.000Z',
+        to: '2026-08-11T00:00:00.000Z',
+        entries: [{ teamId: 'core-team', entryId: 'entry-1', expectedRevision: 1 }],
+      }),
     })
     expect(submitted.status).toBe(200)
     expect(await submitted.json()).toMatchObject({ teams: [{ teamId: 'core-team' }] })
@@ -247,7 +251,11 @@ test('rejects submitting time across Teams without Team teams.write access', asy
     const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
       method: 'POST',
       headers: { Authorization: authorization, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: '2026-08-10T00:00:00.000Z', to: '2026-08-11T00:00:00.000Z' }),
+      body: JSON.stringify({
+        from: '2026-08-10T00:00:00.000Z',
+        to: '2026-08-11T00:00:00.000Z',
+        entries: [{ teamId: 'core-team', entryId: 'entry-1', expectedRevision: 1 }],
+      }),
     })
     expect(submitted.status).toBe(403)
   })

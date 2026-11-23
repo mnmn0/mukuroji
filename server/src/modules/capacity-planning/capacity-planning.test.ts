@@ -966,6 +966,29 @@ describe('Workspace-wide workload', () => {
     expect(snapshot.members[0]?.cells[0]).toMatchObject({ capacityMinutes: 480, workspaceCapacityMinutes: 0 })
   })
 
+  test('hides the allocation of a Team whose member allowlist leaves the member out', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [
+        { teamId: 'team-1', name: 'Team 1', canViewConfidential: false },
+        { teamId: 'team-2', name: 'Team 2', visibleMemberIds: new Set(['viewer-1']), canViewConfidential: true },
+      ],
+    })
+
+    expect(snapshot.members[0]).toMatchObject({ memberId: 'member-1', teamIds: ['team-1'] })
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 600,
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
   test('leaves out members the viewer cannot see in any viewable Team', async () => {
     const service = await createWorkspaceService(twoTeams())
 

@@ -164,10 +164,11 @@ describe('personal timesheet across Teams', () => {
     expect(read.teams[0]?.name).toBe('開発')
 
     const requests = answerWith({ count: 2, failedEntryIds: [], partialFailure: false, teams: [{ teamId: 'team-1', count: 2, failedEntryIds: [] }] })
-    const result = await submitMyTimesheet('token', { from: 'a', to: 'b' }, { idempotencyKey: 'key', correlationId: 'id' })
+    const entries = [{ teamId: 'team-1', entryId: 'entry-1', expectedRevision: 2 }]
+    const result = await submitMyTimesheet('token', { from: 'a', to: 'b', entries }, { idempotencyKey: 'key', correlationId: 'id' })
     expect(result.count).toBe(2)
     expect(requests[0]?.url).toEndWith('/time-tracking/my-timesheet/submit')
-    expect(requests[0]?.body).toBe(JSON.stringify({ from: 'a', to: 'b' }))
+    expect(requests[0]?.body).toBe(JSON.stringify({ from: 'a', to: 'b', entries }))
   })
 
   test('renders one row per Team with the week totals', () => {

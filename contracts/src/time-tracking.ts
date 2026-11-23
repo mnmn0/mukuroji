@@ -307,8 +307,31 @@ export type MyTimesheetSubmitTeamResult = {
   count: number
   /** Entries that could not be submitted and need a retry. */
   failedEntryIds: string[]
-  /** Whether the Team could not be processed at all, for example after losing access; retry later. */
+  /**
+   * Whether the Team could not be processed at all, for example after losing access; every entry
+   * sent for it is then in `failedEntryIds`.
+   */
   failed?: boolean
+}
+
+/** One time entry a cross-Team submission names. */
+export type MyTimesheetSubmitEntry = {
+  /** Team the entry is stored in. */
+  teamId: string
+  /** Time entry identifier. */
+  entryId: string
+  /** Revision of the entry the member saw; a newer entry is not submitted. */
+  expectedRevision: number
+}
+
+/** Request body of `POST /api/time-tracking/my-timesheet/submit`. */
+export type MyTimesheetSubmitRequest = {
+  /** Inclusive period start as an ISO 8601 instant. */
+  from: string
+  /** Exclusive period end as an ISO 8601 instant. */
+  to: string
+  /** Entries to submit, 1 to 500; only these are submitted. */
+  entries: MyTimesheetSubmitEntry[]
 }
 
 /** Result of submitting the caller's draft and rejected time in every Team at once. */
@@ -319,6 +342,6 @@ export type MyTimesheetSubmitResult = {
   failedEntryIds: string[]
   /** Whether any entry failed. */
   partialFailure: boolean
-  /** Per-Team results, in directory order. */
+  /** Per-Team results, in the order the Teams first appear in the request. */
   teams: MyTimesheetSubmitTeamResult[]
 }

@@ -342,9 +342,19 @@ describe('createTimeTrackingRouter', () => {
     })
     expect(sheet.teams[0].entries).toHaveLength(1)
 
-    const submitted = await requestAs(fixture.router, 'bob', 'POST', '/api/time-tracking/my-timesheet/submit', period)
+    const submitBody = {
+      ...period,
+      entries: sheet.teams.flatMap((team: { teamId: string; entries: Array<{ id: string; revision: number }> }) =>
+        team.entries.map((entry) => ({ teamId: team.teamId, entryId: entry.id, expectedRevision: entry.revision }))),
+    }
+    const submitOnce = async () => await fixture.router.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer bob', 'Content-Type': 'application/json', 'Idempotency-Key': 'my-week-1' },
+      body: JSON.stringify(submitBody),
+    })
+    const submitted = await submitOnce()
     expect(submitted.status).toBe(200)
-    expect(await submitted.json()).toEqual({
+    const expectedResult = {
       count: 2,
       failedEntryIds: [],
       partialFailure: false,
@@ -352,13 +362,21 @@ describe('createTimeTrackingRouter', () => {
         { teamId: 'team-1', count: 1, failedEntryIds: [] },
         { teamId: 'team-2', count: 1, failedEntryIds: [] },
       ],
-    })
+    }
+    expect(await submitted.json()).toEqual(expectedResult)
+
+    // A retry after a lost response replays each entry and leaves drafts created since alone.
+    const later = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    const retried = await submitOnce()
+    expect(await retried.json()).toEqual(expectedResult)
+    const laterRead = await requestAs(fixture.router, 'bob', 'GET', '/api/teams/team-1/time-entries?userId=bob')
+    expect((await laterRead.json()).entries).toContainEqual(expect.objectContaining({ id: later.id, status: 'draft' }))
 
     // Each Team's manager approves the submitted time in that Team's own flow.
     const approved = await requestAs(fixture.router, 'alice', 'POST', '/api/teams/team-2/timesheet/approve', period)
     expect(await approved.json()).toMatchObject({ count: 1, entries: [{ id: ownInOtherTeam.id, status: 'approved' }] })
 
-    const guest = await requestAs(fixture.router, 'guest', 'POST', '/api/time-tracking/my-timesheet/submit', period)
+    const guest = await requestAs(fixture.router, 'guest', 'POST', '/api/time-tracking/my-timesheet/submit', submitBody)
     expect(guest.status).toBe(403)
   })
 
@@ -649,6 +667,7 @@ type FixtureProjectRoles = Record<string, 'viewer' | 'member' | 'manager'>
  */
 function createProjectFixture() {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+    idempotency: createIdempotencyStore(),
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
       let id = 0

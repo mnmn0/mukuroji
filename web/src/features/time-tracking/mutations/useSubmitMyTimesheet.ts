@@ -1,3 +1,4 @@
+import type { MyTimesheetSubmitRequest } from '@mukuroji/contracts'
 import { useCallback, useState } from 'react'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import { submitMyTimesheet } from '../api/myTimesheet'
@@ -7,7 +8,8 @@ import { useRefreshTimeTrackingQueries } from './refreshTimeTrackingQueries'
 /**
  * Submits the caller's drafts of every Team in a period, once at a time, and reports the outcome.
  *
- * A retry after a lost connection reuses the same idempotency key. Every time tracking query is
+ * A retry after a lost connection reuses the same idempotency key. With nothing to submit, no
+ * request is sent. Every time tracking query is
  * refreshed afterwards, whether the submission succeeded or not.
  *
  * @param accessToken - Bearer token, or undefined while signed out.
@@ -18,19 +20,23 @@ export function useSubmitMyTimesheet(accessToken: string | undefined) {
   const [runner] = useState(createMutationRequestRunner)
   const [isSubmitting, setSubmitting] = useState(false)
   const [notice, setNotice] = useState<MyTimesheetSubmitNotice>()
-  const submit = useCallback(async (period: { from: string; to: string }) => {
+  const submit = useCallback(async (request: MyTimesheetSubmitRequest) => {
     if (!accessToken || isSubmitting) return
+    if (request.entries.length === 0) {
+      setNotice({ kind: 'nothing' })
+      return
+    }
     setSubmitting(true)
     setNotice(undefined)
     try {
       const result = await runner.run(
         'my-timesheet:submit',
-        JSON.stringify(period),
-        (context) => submitMyTimesheet(accessToken, period, context),
+        JSON.stringify(request),
+        (context) => submitMyTimesheet(accessToken, request, context),
       )
-      const failedTeams = result.teams.filter((team) => team.failed === true).length
+      // A Team that could not be processed lists every entry it was sent as failed.
       setNotice(result.partialFailure
-        ? { kind: 'partial', count: result.count, failed: result.failedEntryIds.length + failedTeams }
+        ? { kind: 'partial', count: result.count, failed: result.failedEntryIds.length }
         : result.count === 0 ? { kind: 'nothing' } : { kind: 'submitted', count: result.count })
     } catch {
       setNotice({ kind: 'error' })

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { Hono, type Context } from 'hono'
 import {
   DEFAULT_WORKSPACE_CURRENCY,
@@ -464,21 +465,35 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const body = asRecord(await dependencies.readJson(context.req))
       const from = readRequiredString(body.from, 'Period start')
       const to = readRequiredString(body.to, 'Period end')
+      const requested = readMyTimesheetSubmitEntries(body.entries)
+      const idempotencyKey = readOptionalIdempotencyKey(context)
       const teams = await dependencies.listTimeTrackingTeams(principal, 'member')
-      const results = []
-      for (const team of teams) {
+      const permittedTeamIds = new Set(teams.map((team) => team.teamId))
+      const results: Array<{ teamId: string; count: number; failedEntryIds: string[]; failed?: true }> = []
+      for (const teamId of new Set(requested.map((entry) => entry.teamId))) {
+        const entries = requested.filter((entry) => entry.teamId === teamId)
+        if (!permittedTeamIds.has(teamId)) {
+          results.push({ teamId, count: 0, failedEntryIds: entries.map((entry) => entry.entryId), failed: true })
+          continue
+        }
         try {
           const { updated, failedEntryIds } = await runTimesheetAction(
             dependencies,
             principal,
-            team.teamId,
+            teamId,
             false,
-            { action: 'submit', from, to },
+            {
+              action: 'submit',
+              from,
+              to,
+              entries,
+              ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+            },
           )
-          results.push({ teamId: team.teamId, count: updated.length, failedEntryIds })
+          results.push({ teamId, count: updated.length, failedEntryIds })
         } catch {
           // One Team the caller can no longer submit to must not stop the other Teams.
-          results.push({ teamId: team.teamId, count: 0, failedEntryIds: [], failed: true })
+          results.push({ teamId, count: 0, failedEntryIds: entries.map((entry) => entry.entryId), failed: true })
         }
       }
       const failedEntryIds = results.flatMap((result) => result.failedEntryIds)
@@ -631,6 +646,27 @@ type TimesheetActionInput = {
   to: string
   /** Rejection reason, when given. */
   reason?: string
+  /**
+   * Entries the caller saw and asked to change, with the revision they saw. When given, only
+   * these entries are changed, each at that revision, instead of every eligible entry of the period.
+   */
+  entries?: readonly TimesheetActionEntry[]
+  /** Request key; each listed entry derives its own key from it so a retry replays the first result. */
+  idempotencyKey?: string
+}
+
+/** One entry a bulk timesheet request names. */
+type TimesheetActionEntry = {
+  /** Entry identifier. */
+  entryId: string
+  /** Revision of the entry the caller saw. */
+  expectedRevision: number
+}
+
+/** One entry the cross-Team submit names. */
+type MyTimesheetSubmitEntry = TimesheetActionEntry & {
+  /** Team the entry is stored in. */
+  teamId: string
 }
 
 /**
@@ -669,15 +705,25 @@ async function runTimesheetAction<Principal extends TimeTrackingPrincipal>(
     userId: action === 'submit' ? principal.userKey : undefined,
     ...(projectIds ? { projectIds, includeUnassigned: true } : {}),
   })
-  const eligible = entries.filter((entry) => action === 'submit'
-    ? entry.status === 'draft' || entry.status === 'rejected'
-    : action === 'lock'
-      ? entry.status === 'approved'
-      : entry.status === 'submitted')
+  const requestedRevisions = input.entries
+    ? new Map(input.entries.map((entry) => [entry.entryId, entry.expectedRevision]))
+    : undefined
+  // Named entries are matched by ID whatever their status now, so a retry after a committed
+  // request replays each entry's first result instead of picking up drafts created since.
+  const eligible = requestedRevisions
+    ? entries.filter((entry) => requestedRevisions.has(entry.id))
+    : entries.filter((entry) => action === 'submit'
+      ? entry.status === 'draft' || entry.status === 'rejected'
+      : action === 'lock'
+        ? entry.status === 'approved'
+        : entry.status === 'submitted')
+  const missingEntryIds = requestedRevisions
+    ? [...requestedRevisions.keys()].filter((entryId) => !eligible.some((entry) => entry.id === entryId))
+    : []
   const projectIdsToVerify = [...new Set(eligible.flatMap((entry) => entry.projectId ? [entry.projectId] : []))]
   for (const projectId of projectIdsToVerify) await dependencies.verifyProject(principal, teamId, projectId, minimum)
   const updated: TimeEntry[] = []
-  const failedEntryIds: string[] = []
+  const failedEntryIds: string[] = [...missingEntryIds]
   for (const entry of eligible) {
     try {
       updated.push(await dependencies.getTimeTracking().transitionEntry({
@@ -686,9 +732,12 @@ async function runTimesheetAction<Principal extends TimeTrackingPrincipal>(
         entryId: entry.id,
         actorUserId: principal.userKey,
         canApprove: canManage,
-        expectedRevision: entry.revision,
+        expectedRevision: requestedRevisions?.get(entry.id) ?? entry.revision,
         action,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
+        ...(input.idempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: deriveEntryIdempotencyKey(input.idempotencyKey, teamId, entry.id) }),
       }))
     } catch {
       failedEntryIds.push(entry.id)
@@ -956,6 +1005,49 @@ function readRequiredString(value: unknown, label: string): string {
 /** Reads an optional string. */
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+/** Most entries one cross-Team submit may name. */
+const MAX_MY_TIMESHEET_SUBMIT_ENTRIES = 500
+
+/**
+ * Reads the entries a cross-Team submit names.
+ *
+ * @param value - Request `entries` field.
+ * @returns The named entries, each once.
+ */
+function readMyTimesheetSubmitEntries(value: unknown): MyTimesheetSubmitEntry[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_MY_TIMESHEET_SUBMIT_ENTRIES) {
+    throw new TimeTrackingError(400, 'InvalidRequest', `Entries must list 1 to ${MAX_MY_TIMESHEET_SUBMIT_ENTRIES} time entries.`)
+  }
+  const seen = new Set<string>()
+  const entries: MyTimesheetSubmitEntry[] = []
+  for (const item of value) {
+    const record = asRecord(item)
+    const teamId = readRequiredString(record.teamId, 'Team ID')
+    const entryId = readRequiredString(record.entryId, 'Time entry ID')
+    const expectedRevision = record.expectedRevision
+    if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new TimeTrackingError(400, 'InvalidRequest', 'Expected revision must be a positive integer.')
+    }
+    const key = `${teamId}\0${entryId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    entries.push({ teamId, entryId, expectedRevision })
+  }
+  return entries
+}
+
+/**
+ * Derives the key of one entry's transition from the key of a bulk request.
+ *
+ * @param idempotencyKey - Key of the bulk request.
+ * @param teamId - Team of the entry.
+ * @param entryId - Entry identifier.
+ * @returns A fixed-length key bound to the request, Team, and entry.
+ */
+function deriveEntryIdempotencyKey(idempotencyKey: string, teamId: string, entryId: string): string {
+  return createHash('sha256').update(`${idempotencyKey}\0${teamId}\0${entryId}`).digest('hex')
 }
 
 /** Reads an optional bounded idempotency key from a mutation request. */

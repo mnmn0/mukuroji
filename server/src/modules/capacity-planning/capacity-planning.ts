@@ -1272,8 +1272,9 @@ type WorkspaceBucketTotals = {
  *
  * A member appears when a viewable Team has a profile for them and the Team's member allowlist
  * includes them. Totals count every active assignment of every Team; the Team and Project
- * breakdowns count only assignments of viewable Teams that the Team's Project and confidential
- * rules let the caller see, and the rest is reported as hidden allocation.
+ * breakdowns count only assignments of viewable Teams whose member allowlist includes the member
+ * and that the Team's Project and confidential rules let the caller see, and the rest is reported
+ * as hidden allocation.
  *
  * @param teamStates - Every Team state of the Workspace.
  * @param input - Range, granularity, viewer, and viewable Teams with their visibility.
@@ -1306,6 +1307,8 @@ export function buildWorkspaceWorkloadSnapshot(
       const team = visibilityByTeamId.get(load.teamId)
       if (!team) return false
       const { assignment } = load
+      // The owning Team's member allowlist applies too, as it does in that Team's own view.
+      if (team.visibleMemberIds !== undefined && !team.visibleMemberIds.has(memberId)) return false
       return (team.visibleProjectIds === undefined ||
         assignment.projectId === undefined ||
         team.visibleProjectIds.has(assignment.projectId)) &&
