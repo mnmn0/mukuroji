@@ -167,6 +167,7 @@ export const publicMessages = {
   'public.routeError.title': 'This page could not be loaded',
   'public.routeError.description':
     'Check your connection and reload. If the app was just updated, reloading loads the new version.',
+  'public.routeError.reportId': 'The app tried to report the error to the operators, but the report may not arrive. Quote this ID if you contact them:',
   'public.routeError.reloadAction': 'Reload',
   'public.routeError.loginAction': 'Back to login',
   'public.notFound.eyebrow': 'Page not found',

@@ -65,8 +65,6 @@ export type CrossProjectWorkItemListProps = {
   onOpenWorkItem: (workItem: CanonicalWorkItem) => void
   /** Reads the Work Items again after a failed load. */
   onRetry: () => void
-  /** Copies the URL of the current view, resolving whether it succeeded. */
-  onCopyLink: () => Promise<boolean>
 }
 
 /** Gantt settings the list starts with; they stay while filters change and the chart reloads. */
@@ -75,9 +73,6 @@ const initialGanttDisplay: TaskGanttDisplaySettings = {
   scale: 'auto',
   showsProgressLine: false,
 }
-
-/** Result of the latest copy-link attempt shown next to the button. */
-type CopyLinkStatus = 'idle' | 'copied' | 'failed'
 
 /**
  * Renders the Workspace-wide Work Item table with Project, involvement, and contributor filters.
@@ -103,15 +98,12 @@ export function CrossProjectWorkItemList({
   onChangeState,
   onOpenWorkItem,
   onRetry,
-  onCopyLink,
 }: CrossProjectWorkItemListProps) {
-  const [copyLinkStatus, setCopyLinkStatus] = useState<CopyLinkStatus>('idle')
   // The chart unmounts while a changed filter reloads, so the list keeps its display settings.
   const [ganttDisplay, setGanttDisplay] = useState(initialGanttDisplay)
   const selectedProjectKeys = new Set(state.projects.map(createCrossProjectWorkItemProjectKey))
   const roleNames = new Map(jobRoleOptions.map((option) => [option.key, option.name]))
   const update = (patch: Partial<CrossProjectWorkItemListState>) => {
-    setCopyLinkStatus('idle')
     onChangeState({ ...state, ...patch })
   }
   const toggleProject = (option: CrossProjectWorkItemProjectOption) => {
@@ -119,6 +111,7 @@ export function CrossProjectWorkItemList({
       projects: selectedProjectKeys.has(option.key)
         ? state.projects.filter((ref) => createCrossProjectWorkItemProjectKey(ref) !== option.key)
         : [...state.projects, { teamId: option.teamId, projectId: option.projectId }],
+      projectsUnavailable: false,
     })
   }
   const ganttGroup = useMemo(
@@ -129,7 +122,10 @@ export function CrossProjectWorkItemList({
     [state.grouping, t, teams],
   )
   const ganttWorkItems = useMemo(() => groups.flatMap((group) => group.workItems), [groups])
-  const projectSummary = state.projects.length === 0
+  const projectsUnavailable = Boolean(state.projectsUnavailable) && state.projects.length === 0
+  const projectSummary = projectsUnavailable
+    ? t('workItems.crossProject.projects.unavailable')
+    : state.projects.length === 0
     ? t('workItems.crossProject.projects.all')
     : t('workItems.crossProject.projects.selected').replace('{count}', String(state.projects.length))
 
@@ -158,10 +154,10 @@ export function CrossProjectWorkItemList({
                 <span className="text-xs text-[var(--workbench-muted)]">{option.teamName}</span>
               </label>
             ))}
-            {state.projects.length > 0 ? (
+            {state.projects.length > 0 || projectsUnavailable ? (
               <button
                 className="workbench-button-secondary mt-1 min-h-8 px-2 text-xs"
-                onClick={() => update({ projects: [] })}
+                onClick={() => update({ projects: [], projectsUnavailable: false })}
                 type="button"
               >
                 {t('workItems.crossProject.projects.clear')}
@@ -250,24 +246,6 @@ export function CrossProjectWorkItemList({
               {t(`issues.view.${layout}`)}
             </button>
           ))}
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <span aria-live="polite" className="text-xs text-[var(--workbench-muted)]">
-            {copyLinkStatus === 'copied'
-              ? t('workItems.crossProject.copyLink.copied')
-              : copyLinkStatus === 'failed'
-                ? t('workItems.crossProject.copyLink.failed')
-                : ''}
-          </span>
-          <button
-            className="workbench-button-secondary min-h-9 px-3 text-sm"
-            onClick={() => {
-              void onCopyLink().then((copied) => setCopyLinkStatus(copied ? 'copied' : 'failed'))
-            }}
-            type="button"
-          >
-            {t('workItems.crossProject.copyLink')}
-          </button>
         </div>
       </section>
       {loadFailed ? (

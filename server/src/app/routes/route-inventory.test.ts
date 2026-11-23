@@ -9,8 +9,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(555)
-  expect(new Set(inventory).size).toBe(551)
+  expect(inventory).toHaveLength(556)
+  expect(new Set(inventory).size).toBe(552)
+  expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
@@ -149,6 +150,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'b8e86bf46e0faad16560688063afb381977b74d90adc17279633620934aaa6a9',
+    '6afa41ee0ca39bf4158c7ba6015d8509edcef624c912164998730aafce9ddbd1',
   )
 })
