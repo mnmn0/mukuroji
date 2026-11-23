@@ -139,7 +139,7 @@ export function TeamWorkloadView({
                   <tr className="border-b border-slate-100 last:border-b-0" key={member.memberId}>
                     <th className="sticky left-0 z-10 bg-surface px-4 py-3" scope="row">
                       <span className="block truncate text-sm font-bold text-fg-0d1833">{member.displayName ?? member.memberId}</span>
-                      <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.timeZone}</span>
+                      <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.effectiveTimeZone ?? member.timeZone}</span>
                     </th>
                     {member.cells.map((cell) => (
                       <td

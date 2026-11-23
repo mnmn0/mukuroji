@@ -11,7 +11,7 @@ import {
   normalizeWorkItemSchedule,
   rebaseWorkItemScheduleCalendar,
 } from '../../modules/work-items'
-import { ambientWorkCalendarSources, type WorkCalendarSources } from './app-dependencies'
+import { ambientWorkCalendarSources, type WorkCalendarSources, workspaceDependencies } from './app-dependencies'
 
 /** Workspace calendar inputs every shared calendar resolution starts from. */
 export type WorkspaceCalendarInputs = {
@@ -185,6 +185,32 @@ function requestsSharedCalendar(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
   const policy: unknown = Reflect.get(value, 'calendarPolicy')
   return typeof policy === 'object' && policy !== null && Reflect.get(policy, 'calendarSource') === 'shared'
+}
+
+/**
+ * Reads the full Workspace calendar that workload profiles inheriting it are counted against.
+ *
+ * Unlike {@link readWorkspaceWorkItemCalendarPolicy}, which keeps at most the number of holidays a
+ * persisted Work Item schedule can hold (chosen around today), this keeps every company holiday and
+ * every national holiday, because a workload range may lie anywhere and must not change as today
+ * moves. The policy is only used in memory and never stored.
+ *
+ * @param directoryId - Workspace directory whose calendar is read.
+ * @returns The Workspace time zone, working weekdays, and every day off.
+ */
+export async function readWorkspaceWorkloadCalendarPolicy(
+  directoryId: string,
+): Promise<WorkItemScheduleCalendarPolicy> {
+  const profile = await workspaceDependencies.tenantAdministration.getProfile(directoryId)
+  const settings = profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+  const nationalHolidays = settings.publicHolidays === 'japan'
+    ? await workspaceDependencies.nationalHolidays.listDates()
+    : []
+  return {
+    timeZone: settings.timeZone,
+    workingWeekdays: [...settings.workingWeekdays],
+    holidays: [...new Set([...settings.holidays, ...nationalHolidays])].sort(),
+  }
 }
 
 /**
