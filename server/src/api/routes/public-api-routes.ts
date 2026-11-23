@@ -1951,7 +1951,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       })
       requireWorkspaceBusinessWrite(principal)
       await requirePublicImportPermission(principal, input)
-      return (await validatePublicImport(principal, input)).report
+      return (await validatePublicImport(principal, input, undefined, { checkTeamLinkCapacity: true })).report
     },
 
     async commitImport(managementPrincipal, dryRunJobId, input, mutationContext) {
@@ -2739,12 +2739,17 @@ async function requirePublicImportPermission(
  * @param calendarPolicy - Calendar policy for rows without one. A queued execution passes the
  *   policy it pinned, so a retry keeps each row's request digest; otherwise the current Workspace
  *   working calendar is read.
+ * @param options - Checks only a dry run makes.
+ * @param options.checkTeamLinkCapacity - Whether to count the links the Team already stores
+ *   against its limit. Only a dry run does: once the worker has applied some of the import's
+ *   links, the stored count already includes them, so a retry would count them twice.
  * @returns The dry-run report and the valid row inputs.
  */
 async function validatePublicImport(
   principal: WorkspacePrincipal,
   input: PublicImportSourceInput,
   calendarPolicy?: WorkItemScheduleCalendarPolicy,
+  options: { checkTeamLinkCapacity?: boolean } = {},
 ) {
   const permission = await requirePublicImportPermission(principal, input)
   const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -2834,6 +2839,7 @@ async function validatePublicImport(
     configuration,
     preview.links,
     linkRows,
+    options.checkTeamLinkCapacity === true,
   )) {
     errorsByRow.get(error.row)?.push(error)
   }

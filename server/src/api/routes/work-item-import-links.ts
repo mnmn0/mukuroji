@@ -90,6 +90,8 @@ export type ApplyWorkItemImportLinkRequest = {
  * @param configuration - Team Work Item configuration.
  * @param links - Links resolved from the source.
  * @param rows - Valid rows by row number.
+ * @param checkTeamLinkCapacity - Whether to count the links the Team already stores against its
+ *   limit, which only a dry run does.
  * @returns Errors to report on the rows.
  */
 export async function validateWorkItemImportLinks(
@@ -98,6 +100,7 @@ export async function validateWorkItemImportLinks(
   configuration: ResolvedWorkItemConfiguration,
   links: readonly WorkItemImportLink[],
   rows: ReadonlyMap<number, WorkItemImportLinkRow>,
+  checkTeamLinkCapacity: boolean,
 ): Promise<WorkItemImportLinkError[]> {
   const errors = validateWorkItemImportParentLinks(configuration, links, rows)
   // The worker checks each endpoint as creating a dependency does, so the dry run applies the same
@@ -119,7 +122,10 @@ export async function validateWorkItemImportLinks(
     }
     return access
   }
-  errors.push(...await validateWorkItemImportTeamLinkCapacity(principal.directoryId, teamId, links))
+  // The worker skips this check: after some links are applied, the stored count includes them.
+  if (checkTeamLinkCapacity) {
+    errors.push(...await validateWorkItemImportTeamLinkCapacity(principal.directoryId, teamId, links))
+  }
   for (const link of links) {
     if (link.kind !== 'dependency') continue
     const predecessor = rows.get(link.predecessorRow)
