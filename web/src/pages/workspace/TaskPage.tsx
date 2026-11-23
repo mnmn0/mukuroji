@@ -1999,7 +1999,7 @@ export function TaskPage() {
     <TaskViewToolbar
       builtInName={t('tasks.tab.table')}
       canManageShared={taskViewController.canManageShared}
-      canSetTeamDefault={taskViewController.canSetTeamDefault}
+      canSetProjectDefault={taskViewController.canSetProjectDefault}
       canWrite={taskViewController.canWrite}
       columnOptions={taskViewFieldOptions}
       errorMessage={taskViewController.errorMessage}
