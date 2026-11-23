@@ -1,7 +1,7 @@
-import type { FocusUpdateDeadline, FocusUpdateDeadlineTarget } from '@mukuroji/contracts'
+import type { FocusUpdateDeadline } from '@mukuroji/contracts'
 import { Link } from 'react-router'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
-import { formatFocusTimestamp } from '../model/focusQueue'
+import { focusUpdateTargetLabelKey, formatFocusTimestamp } from '../model/focusQueue'
 
 /** Props for the health update deadlines owned by the current viewer. */
 export type FocusUpdateDeadlinesProps = {
@@ -11,19 +11,6 @@ export type FocusUpdateDeadlinesProps = {
   locale: Locale
   /** Localized message resolver. */
   t: (key: MessageKey) => string
-}
-
-/**
- * Resolves the fallback label of a health update target without a server title.
- *
- * @param target - Project, Team, or Initiative target.
- * @returns Localized message key.
- */
-export function focusUpdateTargetLabelKey(target: FocusUpdateDeadlineTarget): MessageKey {
-  if (target.type === 'project') return 'workspace.focus.updateDeadlines.project'
-  return target.type === 'team'
-    ? 'workspace.focus.updateDeadlines.team'
-    : 'workspace.focus.updateDeadlines.initiative'
 }
 
 /**

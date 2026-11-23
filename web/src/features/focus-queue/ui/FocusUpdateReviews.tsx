@@ -1,8 +1,7 @@
 import type { FocusUpdateReview } from '@mukuroji/contracts'
 import { Link } from 'react-router'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
-import { formatFocusTimestamp } from '../model/focusQueue'
-import { focusUpdateTargetLabelKey } from './FocusUpdateDeadlines'
+import { focusUpdateTargetLabelKey, formatFocusTimestamp } from '../model/focusQueue'
 
 /** Props for the published health updates that wait for the viewer's acknowledgement. */
 export type FocusUpdateReviewsProps = {
