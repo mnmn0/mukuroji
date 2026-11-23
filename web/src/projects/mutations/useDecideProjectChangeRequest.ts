@@ -3,6 +3,7 @@ import {
   type DecideProjectRaidChangeRequest,
   type ProjectRaidChangeDecisionOutcome,
   type ProjectRaidEntry,
+  type ProjectRaidLogResponse,
   type ProjectRaidScheduleChange,
 } from '@mukuroji/contracts'
 import { useCallback, useRef } from 'react'
@@ -150,6 +151,17 @@ type PendingDecision = {
 }
 
 /**
+ * Replaces one entry of a loaded log with its stored version.
+ *
+ * @param log - The loaded log.
+ * @param stored - The entry the server returned.
+ * @returns The log with that entry replaced.
+ */
+function replaceLogEntry(log: ProjectRaidLogResponse, stored: ProjectRaidEntry): ProjectRaidLogResponse {
+  return { ...log, entries: log.entries.map((current) => current.id === stored.id ? stored : current) }
+}
+
+/**
  * Returns a function that approves or rejects a change request (ADR 0078).
  *
  * Approval first applies the requested date changes through the Work Item schedule cascade and
@@ -211,8 +223,11 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       }
       pendingDecision.current = attempt
     }
+    let decided: ProjectRaidEntry
     try {
-      await decideProjectRaidChangeRequest(accessToken, teamId, projectId, entry.id, attempt.request, attempt.context)
+      decided = (await decideProjectRaidChangeRequest(
+        accessToken, teamId, projectId, entry.id, attempt.request, attempt.context,
+      )).entry
     } catch (error) {
       if (error instanceof ProjectDirectoryApiError && error.status < 500 && pendingDecision.current === attempt) {
         pendingDecision.current = undefined
@@ -221,6 +236,13 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       throw error
     }
     if (pendingDecision.current === attempt) pendingDecision.current = undefined
+    // The closed entry is shown before the log reloads, so a failed reload cannot leave the
+    // request open with its approval controls enabled.
+    await mutate<ProjectRaidLogResponse>(
+      projectRaidLogKey(accessToken, teamId, projectId),
+      (current) => current === undefined ? current : replaceLogEntry(current, decided),
+      { revalidate: false },
+    )
     await refresh()
   }, [accessToken, mutate, projectId, teamId])
 }

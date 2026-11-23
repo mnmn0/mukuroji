@@ -7,11 +7,13 @@ import {
   type WorkItemScheduleChangePreview,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { SWRConfig, unstable_serialize, type Cache } from 'swr'
 import {
   isScheduleChangeInPlace,
   ProjectChangeRequestWorkItemMovedError,
 } from '../src/projects/model/projectChangeRequestDecision'
 import { useDecideProjectChangeRequest } from '../src/projects/mutations/useDecideProjectChangeRequest'
+import { projectRaidLogKey } from '../src/projects/queries/useProjectRaidLog'
 
 /** One Work Item of the fake server. */
 type FakeWorkItem = {
@@ -175,9 +177,10 @@ function installFakeApi(items: Record<string, FakeWorkItem>, decisionStatuses: n
 /**
  * Renders the hook once and returns its decision function.
  *
+ * @param cache - SWR cache the hook writes to, or a fresh one.
  * @returns The decision function.
  */
-function captureDecide() {
+function captureDecide(cache: Cache = new Map()) {
   let decide: ReturnType<typeof useDecideProjectChangeRequest> | undefined
   /**
    * Captures the decision function.
@@ -188,7 +191,7 @@ function captureDecide() {
     decide = useDecideProjectChangeRequest({ accessToken: 'token', teamId: 'core-team', projectId: 'refero' })
     return null
   }
-  renderToStaticMarkup(<Probe />)
+  renderToStaticMarkup(<SWRConfig value={{ provider: () => cache }}><Probe /></SWRConfig>)
   if (!decide) throw new Error('Expected the decision function.')
   return decide
 }
@@ -253,6 +256,20 @@ describe('approving a change request', () => {
     expect(calls.decisions).toHaveLength(2)
     expect(calls.decisions[1]).toEqual(calls.decisions[0])
     expect(calls.decisions[0]?.body).toMatchObject({ baselineId: 'baseline-1' })
+  })
+
+  test('shows the closed request even when the log cannot be reloaded', async () => {
+    installFakeApi({}, [])
+    const entry = changeRequest([])
+    const cache: Cache = new Map()
+    const logKey = unstable_serialize(projectRaidLogKey('token', 'core-team', 'refero'))
+    cache.set(logKey, { data: { teamId: 'core-team', projectId: 'refero', entries: [entry], viewer: { canEdit: true } } })
+
+    await captureDecide(cache)(entry, 'rejected', { replaceBaseline: false, baselineName: '' })
+
+    const cached: unknown = cache.get(logKey)?.data
+    const entries = isRecord(cached) && Array.isArray(cached.entries) ? cached.entries : []
+    expect(entries).toMatchObject([{ id: 'cr-1', status: 'closed', revision: 2 }])
   })
 })
 
