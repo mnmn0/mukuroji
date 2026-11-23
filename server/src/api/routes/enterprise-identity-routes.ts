@@ -120,6 +120,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { getAwsRegion, getEnv } from '../shared/runtime-config'
 import { decodeJwtPayload, readNumericClaim } from '../shared/token-claims'
 import { isRecord } from '../shared/value-guards'
+import { decodeEnterpriseXml } from '../shared/enterprise-xml'
 import {
   enforceActiveTenantForWorkspace,
   readWorkspaceEmail,
@@ -779,23 +780,6 @@ function readXmlAttribute(tag: string, name: string) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
   const match = tag.match(new RegExp(`${escapedName}\\s*=\\s*(["'])(.*?)\\1`, 'iu'))
   return match?.[2]
-}
-
-/**
- * Decodes the predefined XML entities in a SAML metadata attribute value.
- *
- * `&amp;` is decoded last so that an escaped entity such as `&amp;lt;` becomes `&lt;`, not `<`.
- *
- * @param value - Raw attribute value read from the metadata document.
- * @returns The attribute value with the predefined entities decoded once.
- */
-function decodeEnterpriseXml(value: string) {
-  return value
-    .replaceAll('&quot;', '"')
-    .replaceAll('&apos;', '\'')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&amp;', '&')
 }
 
 function readEnterpriseText(value: unknown, label: string) {
