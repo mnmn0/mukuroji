@@ -1,14 +1,12 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
-import useSWR from 'swr'
 import type { CapacityPlanningGranularity } from '@mukuroji/contracts'
-import { getMyTimesheet, submitMyTimesheet } from '../../features/time-tracking/api/myTimesheet'
+import { useSubmitMyTimesheet } from '../../features/time-tracking/mutations/useSubmitMyTimesheet'
 import { createWeekPeriod, resolveBrowserTimeZone, resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
-import { MyTimesheetPanel, type MyTimesheetSubmitNotice } from '../../features/time-tracking/ui/MyTimesheetPanel'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
+import { useMyTimesheet } from '../../features/time-tracking/queries/useMyTimesheet'
+import { MyTimesheetPanel } from '../../features/time-tracking/ui/MyTimesheetPanel'
 import { createTranslator } from '../../shared/i18n/i18n'
-import { getWorkspaceWorkload } from '../../workload/api'
-import { createWorkloadDateRange } from '../../workload/model/dateRange'
+import { useWorkspaceWorkload } from '../../workload/queries/useWorkspaceWorkload'
 import { WorkspaceWorkloadView } from '../../workload/ui/WorkspaceWorkloadView'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -30,48 +28,20 @@ function WorkspaceWorkloadSession() {
   const t = createTranslator(workspace.locale)
   const [params, setParams] = useSearchParams()
   const [granularity, setGranularity] = useState<CapacityPlanningGranularity>('week')
-  const range = createWorkloadDateRange(new Date(), granularity === 'month' ? 62 : granularity === 'week' ? 28 : 14)
-  const workload = useSWR(
-    workspace.canLoadWorkspaceData && workspace.accessToken ? ['workspace-workload', workspace.accessToken, range.fromDate, range.toDate, granularity] as const : null,
-    ([, token, fromDate, toDate, currentGranularity]) =>
-      getWorkspaceWorkload(token, { fromDate, toDate, granularity: currentGranularity }),
-    { shouldRetryOnError: false },
-  )
+  const workload = useWorkspaceWorkload(workspace.accessToken, granularity, workspace.canLoadWorkspaceData)
+  // The week must follow the Workspace week start, so the timesheet waits for the calendar.
   const calendarSettings = useWorkspaceCalendarSettings(workspace.accessToken, workspace.canLoadWorkspaceData)
   const weekStartDay = calendarSettings.settings?.weekStartDay
   const weekStart = resolveWeekStart(params.get('week'), undefined, weekStartDay)
   const week = createWeekPeriod(weekStart, weekStartDay)
-  const timeZone = resolveBrowserTimeZone()
-  const timesheet = useSWR(
-    workspace.canLoadWorkspaceData && workspace.accessToken ? ['my-timesheet', workspace.accessToken, week.from, week.to, timeZone] as const : null,
-    ([, token, from, to, zone]) => getMyTimesheet(token, { from, to, timeZone: zone }),
-    { shouldRetryOnError: false },
+  const timesheet = useMyTimesheet(
+    workspace.accessToken,
+    { from: week.from, to: week.to, timeZone: resolveBrowserTimeZone() },
+    workspace.canLoadWorkspaceData && weekStartDay !== undefined,
   )
-  const [isSubmitting, setSubmitting] = useState(false)
-  const [notice, setNotice] = useState<MyTimesheetSubmitNotice>()
-  const submit = async () => {
-    const accessToken = workspace.accessToken
-    if (!accessToken) return
-    setSubmitting(true)
-    setNotice(undefined)
-    try {
-      const result = await submitMyTimesheet(accessToken, { from: week.from, to: week.to }, createMutationRequestContext())
-      setNotice(result.partialFailure
-        ? {
-            kind: 'partial',
-            count: result.count,
-            failed: result.failedEntryIds.length + result.teams.filter((team) => team.failed === true).length,
-          }
-        : result.count === 0 ? { kind: 'nothing' } : { kind: 'submitted', count: result.count })
-    } catch {
-      setNotice({ kind: 'error' })
-    } finally {
-      setSubmitting(false)
-      void timesheet.mutate()
-    }
-  }
+  const submission = useSubmitMyTimesheet(workspace.accessToken)
   return (
-    <WorkspaceRouteContent sessionErrors={[workload.error, timesheet.error]}>
+    <WorkspaceRouteContent sessionErrors={[workload.error, timesheet.error, calendarSettings.error]}>
       <div className="grid gap-8 px-[clamp(16px,3vw,34px)] py-5">
         <WorkspaceWorkloadView
           failed={Boolean(workload.error)}
@@ -82,21 +52,36 @@ function WorkspaceWorkloadSession() {
           snapshot={workload.data}
           t={t}
         />
-        <MyTimesheetPanel
-          days={week.days}
-          failed={Boolean(timesheet.error)}
-          isLoading={timesheet.isLoading}
-          isSubmitting={isSubmitting}
-          notice={notice}
-          onMoveWeek={(weeks) => {
-            setNotice(undefined)
-            setParams({ week: shiftWeek(weekStart, weeks, weekStartDay) })
-          }}
-          onRetry={() => { void timesheet.mutate() }}
-          onSubmit={() => { void submit() }}
-          t={t}
-          timesheet={timesheet.data}
-        />
+        {weekStartDay === undefined ? (
+          calendarSettings.error ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border border-tone-f2c7c7 bg-tone-fff7f7 px-4 py-3 text-sm font-semibold text-fg-9f3f3f" role="alert">
+              <span>{t('timeTracking.page.calendarSettingsError')}</span>
+              <button className="rounded-md border border-tone-d99696 px-3 py-2 text-xs font-bold" type="button" onClick={calendarSettings.retry}>
+                {t('timeTracking.page.calendarSettingsRetry')}
+              </button>
+            </div>
+          ) : (
+            <p className="text-sm font-semibold text-[var(--workbench-muted)]" aria-live="polite">
+              {t('timeTracking.page.calendarSettingsLoading')}
+            </p>
+          )
+        ) : (
+          <MyTimesheetPanel
+            days={week.days}
+            failed={Boolean(timesheet.error)}
+            isLoading={timesheet.isLoading}
+            isSubmitting={submission.isSubmitting}
+            notice={submission.notice}
+            onMoveWeek={(weeks) => {
+              submission.clearNotice()
+              setParams({ week: shiftWeek(weekStart, weeks, weekStartDay) })
+            }}
+            onRetry={() => { void timesheet.mutate() }}
+            onSubmit={() => { void submission.submit({ from: week.from, to: week.to }) }}
+            t={t}
+            timesheet={timesheet.data}
+          />
+        )}
       </div>
     </WorkspaceRouteContent>
   )

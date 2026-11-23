@@ -213,6 +213,46 @@ test('uses Team teams.write access for time-entry creation', async () => {
   })
 })
 
+test('lets a Team-scoped grant read workload and submit time across its Teams only', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.write'])
+
+    const workload = await app.request('/api/workload?from=2026-08-10&to=2026-08-10&granularity=day', {
+      headers: { Authorization: authorization },
+    })
+    expect(workload.status).toBe(200)
+    expect((await workload.json()).teams.map((team: { teamId: string }) => team.teamId)).toEqual(['core-team'])
+
+    const period = 'from=2026-08-10T00:00:00.000Z&to=2026-08-11T00:00:00.000Z'
+    const timesheet = await app.request(`/api/time-tracking/my-timesheet?${period}`, {
+      headers: { Authorization: authorization },
+    })
+    expect(timesheet.status).toBe(200)
+    expect((await timesheet.json()).teams.map((team: { teamId: string }) => team.teamId)).toEqual(['core-team'])
+
+    const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-08-10T00:00:00.000Z', to: '2026-08-11T00:00:00.000Z' }),
+    })
+    expect(submitted.status).toBe(200)
+    expect(await submitted.json()).toMatchObject({ teams: [{ teamId: 'core-team' }] })
+  })
+})
+
+test('rejects submitting time across Teams without Team teams.write access', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+
+    const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: '2026-08-10T00:00:00.000Z', to: '2026-08-11T00:00:00.000Z' }),
+    })
+    expect(submitted.status).toBe(403)
+  })
+})
+
 test('treats Team teams.manage access as managing every Project for time entry costs', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     const authorization = await configureEnterpriseTeamAccess([
