@@ -74,6 +74,24 @@ describe('DynamoDbPushSubscriptionStore devices for delivery', () => {
     }
   })
 
+  test('rejects a device list that still has pages after the page budget', async () => {
+    const queries: QueryCommand[] = []
+    const client = {
+      send: async (command: SentCommand) => {
+        if (command instanceof QueryCommand) {
+          queries.push(command)
+          return { Items: [row(`expired-${queries.length}`, nowSeconds)], LastEvaluatedKey: { pk: 'member#ws-1#ada', sk: `k${queries.length}` } }
+        }
+        if (command instanceof GetCommand) return { Item: owner }
+        return {}
+      },
+    }
+    await expect(new DynamoDbPushSubscriptionStore(client, 'push').listDevices('ws-1', 'ada', now, AbortSignal.timeout(5_000)))
+      .rejects.toThrow('could not be read completely')
+    expect(queries).toHaveLength(5)
+    expect(queries[1]?.input.ExclusiveStartKey).toEqual({ pk: 'member#ws-1#ada', sk: 'k1' })
+  })
+
   test('rechecks the endpoint owner right before a send', async () => {
     const live = row('live')
     const device = { subscriptionId: live.subscriptionId, endpoint: live.endpoint, keys: { p256dh: 'p', auth: 'a' }, updatedAt: live.updatedAt }
