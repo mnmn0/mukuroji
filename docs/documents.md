@@ -116,9 +116,10 @@ Mention は active Workspace member を検証し、comment と同じ transaction
 します。Reply の通知は mention された member に加え、thread の root の作成者とそれまでの返信者
 （reply 作成者自身を除く）にも届きます。参加者は thread ごとの index row
 （`COMMENT_PARTICIPANT#<documentId>#<rootCommentId>#<memberKey>`）に comment と同じ transaction で
-書き、返信時はその thread の row だけを全 page 読みます。index ができる前の thread（root 作成者の
-row がない）は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
-transaction で index に書き足します。どちらも page を途中で打ち切りません。Comment の作成者は自分の
+書き、返信時はその thread の row だけを全 page 読みます。新しい root comment は index の完了 marker
+（`COMMENT_PARTICIPANT_INDEX#<documentId>#<rootCommentId>`）も書きます。marker のない、index が
+できる前の thread は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
+transaction で参加者 row と marker を書き足します。どちらも page を途中で打ち切りません（ADR 0092）。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
 し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
 thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の

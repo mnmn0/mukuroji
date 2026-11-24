@@ -1569,14 +1569,30 @@ function escapeRawHtmlOutsideCodeSpans(line: string): string {
     const close = findClosingBacktickRun(line, runEnd, run.length)
     if (close === -1) {
       // An unclosed backtick run is literal text; keep scanning after it.
-      result += line.slice(index, runEnd).replace(RAW_HTML_START, '\\<')
+      result += escapeRawHtmlStarts(line.slice(index, runEnd))
       index = runEnd
       continue
     }
-    result += line.slice(index, open).replace(RAW_HTML_START, '\\<') + line.slice(open, close + run.length)
+    result += escapeRawHtmlStarts(line.slice(index, open)) + line.slice(open, close + run.length)
     index = close + run.length
   }
-  return result + line.slice(index).replace(RAW_HTML_START, '\\<')
+  return result + escapeRawHtmlStarts(line.slice(index))
+}
+
+/**
+ * Escapes each `<` that starts raw HTML in text outside code. A `<` already escaped by an odd
+ * number of backslashes is left as it is, so exporting an imported page does not add another
+ * backslash on each round trip.
+ *
+ * @param text - Markdown text outside code spans and fenced code.
+ * @returns The text with unescaped raw HTML starts escaped.
+ */
+function escapeRawHtmlStarts(text: string): string {
+  return text.replace(RAW_HTML_START, (match, offset: number) => {
+    let backslashes = 0
+    while (text[offset - 1 - backslashes] === '\\') backslashes += 1
+    return backslashes % 2 === 1 ? match : '\\<'
+  })
 }
 
 /**

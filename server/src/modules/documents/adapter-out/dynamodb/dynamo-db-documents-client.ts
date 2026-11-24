@@ -592,8 +592,24 @@ type StoredDocumentCommentParticipantItem = {
   rootCommentId: string
   /** Normalized member key of the participant. */
   memberKey: string
-  /** Whether the member wrote the root; this row marks a thread whose index is complete. */
-  rootAuthor: boolean
+}
+
+/**
+ * Marks a thread whose participant index is complete: written with a new root, or after an
+ * older thread's participants were all backfilled. Kept apart from the participant rows, so
+ * a reply by the root author never marks an incomplete older thread as complete.
+ */
+type StoredDocumentCommentParticipantIndexItem = {
+  /** Canonical Workspace partition key. */
+  workspaceId: string
+  /** Sort key from the Document and the root comment. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-comment-participant-index'
+  /** Document that owns the thread. */
+  documentId: string
+  /** Root comment of the thread. */
+  rootCommentId: string
 }
 
 /**
@@ -3094,12 +3110,12 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       : await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
     const threadParticipants = (threadRead?.participants ?? [])
       .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
-    // The participant index of the thread: the root author marks a new root, and a reply adds its
-    // author and backfills an older thread.
+    // The participant index of the thread: every comment adds its author, a new root marks its
+    // index complete, and a reply to an older thread backfills it and marks it complete only
+    // when every participant was written.
     const rootCommentId = storedParent?.id ?? id
-    const rootAuthor = normalizeCommentMemberKey(storedParent?.authorUserId ?? input.access.memberKey)
-    const participantPuts = [...new Set([...(threadRead?.backfill ?? []), actorMemberKey])]
-      .map((memberKey) => ({
+    const participantPuts = [
+      ...[...new Set([...(threadRead?.backfill ?? []), actorMemberKey])].map((memberKey) => ({
         Put: {
           TableName: this.tableName,
           Item: {
@@ -3109,10 +3125,24 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             documentId: input.documentId,
             rootCommentId,
             memberKey,
-            rootAuthor: memberKey === rootAuthor,
           } satisfies StoredDocumentCommentParticipantItem,
         },
-      }))
+      })),
+      ...(storedParent === undefined || threadRead?.completesIndex === true
+        ? [{
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: input.workspaceId,
+                recordKey: commentParticipantIndexKey(input.documentId, rootCommentId),
+                entryType: 'document-comment-participant-index',
+                documentId: input.documentId,
+                rootCommentId,
+              } satisfies StoredDocumentCommentParticipantIndexItem,
+            },
+          }]
+        : []),
+    ]
     const notificationCandidates = [
       ...[...mentionedMemberKeys].map((memberKey) => ({
         memberKey,
@@ -3776,33 +3806,39 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   /**
    * Reads the members who wrote in one comment thread: the root author and every replier.
    *
-   * A thread whose root was written with the participant index reads only its index rows. An
-   * older thread has no root marker in the index, so every page of the Document's comments is
-   * read; its participants are then returned for backfill, so the next reply reads the index.
-   * No page is skipped either way.
+   * A thread whose index is marked complete reads only its participant rows. An older thread
+   * has no completion marker, so every page of the Document's comments is read; its participants
+   * are then returned for backfill, and the index is marked complete when all of them fit in the
+   * reply transaction. No page is skipped either way.
    *
    * @param workspaceId - Workspace that owns the Document.
    * @param documentId - Document that owns the thread.
    * @param root - Root comment of the thread.
-   * @returns Normalized participant member keys, and those to write to the index.
+   * @returns Normalized participant member keys, those to write to the index, and whether
+   *   writing them completes the index.
    */
   private async readThreadParticipants(
     workspaceId: string,
     documentId: string,
     root: StoredDocumentCommentItem,
-  ): Promise<{ participants: string[]; backfill: string[] }> {
-    const rootAuthor = normalizeCommentMemberKey(root.authorUserId)
-    const participants = new Set([rootAuthor])
-    let indexed = false
+  ): Promise<{ participants: string[]; backfill: string[]; completesIndex: boolean }> {
+    const participants = new Set([normalizeCommentMemberKey(root.authorUserId)])
+    const marker = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: commentParticipantIndexKey(documentId, root.id) },
+      ConsistentRead: true,
+    }))
+    const indexed = marker.Item !== undefined
+    if (marker.Item !== undefined) {
+      readStoredCommentParticipantIndex(marker.Item, workspaceId, documentId, root.id)
+    }
     for (const item of await this.queryAllPages(
       workspaceId,
       commentParticipantPrefix(documentId, root.id),
     )) {
-      const row = readStoredCommentParticipant(item, workspaceId, documentId, root.id)
-      participants.add(row.memberKey)
-      if (row.rootAuthor) indexed = true
+      participants.add(readStoredCommentParticipant(item, workspaceId, documentId, root.id).memberKey)
     }
-    if (indexed) return { participants: [...participants], backfill: [] }
+    if (indexed) return { participants: [...participants], backfill: [], completesIndex: false }
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const result = await this.client.send(new QueryCommand({
@@ -3826,11 +3862,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       exclusiveStartKey = result.LastEvaluatedKey
     } while (exclusiveStartKey !== undefined)
     const all = [...participants]
-    return {
-      participants: all,
-      // A thread with more participants than one transaction can index keeps the full read.
-      backfill: all.length <= DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT ? all : [],
-    }
+    // A thread with more participants than one transaction can index keeps the full read.
+    const completesIndex = all.length <= DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT
+    return { participants: all, backfill: completesIndex ? all : [], completesIndex }
   }
 
   /**
@@ -6932,8 +6966,7 @@ function readStoredCommentParticipant(
     value.rootCommentId !== rootCommentId ||
     typeof value.memberKey !== 'string' ||
     !value.memberKey ||
-    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey) ||
-    typeof value.rootAuthor !== 'boolean'
+    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey)
   ) {
     throw invalidStoredDocumentData()
   }
@@ -6944,7 +6977,52 @@ function readStoredCommentParticipant(
     documentId,
     rootCommentId,
     memberKey: value.memberKey,
-    rootAuthor: value.rootAuthor,
+  }
+}
+
+/**
+ * Builds the sort key of the marker of a thread whose participant index is complete.
+ *
+ * @param documentId - Document that owns the thread.
+ * @param rootCommentId - Root comment of the thread.
+ * @returns The marker sort key.
+ */
+function commentParticipantIndexKey(documentId: string, rootCommentId: string): string {
+  return `COMMENT_PARTICIPANT_INDEX#${encodeKeyPart(documentId)}#${encodeKeyPart(rootCommentId)}`
+}
+
+/**
+ * Validates the completion marker of one thread's participant index.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document.
+ * @param rootCommentId - Expected root comment.
+ * @returns The validated marker.
+ * @throws DocumentError when the row is malformed or crosses a boundary.
+ */
+function readStoredCommentParticipantIndex(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  rootCommentId: string,
+): StoredDocumentCommentParticipantIndexItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !== commentParticipantIndexKey(documentId, rootCommentId) ||
+    value.entryType !== 'document-comment-participant-index' ||
+    value.documentId !== documentId ||
+    value.rootCommentId !== rootCommentId
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'document-comment-participant-index',
+    documentId,
+    rootCommentId,
   }
 }
 

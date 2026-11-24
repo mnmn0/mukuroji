@@ -64,6 +64,66 @@ export function resolveDocumentMentions(
   return [...named, ...typed].sort((left, right) => left.offset - right.offset)
 }
 
+/**
+ * Resolves the mention ranges of an edited comment. A stored mention whose exact token is still
+ * in the body keeps its member, so a member renamed since the comment was written stays
+ * mentioned and an unrelated edit is not rejected. The n-th remaining occurrence of a token takes
+ * the n-th stored mention with that token; the rest of the body is resolved like a new comment.
+ *
+ * @param original - Stored body and mentions of the comment.
+ * @param body - Edited plain text body.
+ * @param selectedMemberKeys - Member keys picked from the composer's suggestions.
+ * @param members - Mention candidates used to validate the picked tokens.
+ * @returns Mention ranges ordered by offset.
+ */
+export function resolveEditedDocumentMentions(
+  original: { body: string; mentions: readonly DocumentMention[] },
+  body: string,
+  selectedMemberKeys: readonly string[],
+  members: readonly MentionableMember[],
+): DocumentMention[] {
+  const storedByToken = new Map<string, DocumentMention[]>()
+  for (const mention of [...original.mentions].sort((left, right) => left.offset - right.offset)) {
+    const token = original.body.slice(mention.offset, mention.offset + mention.length)
+    storedByToken.set(token, [...(storedByToken.get(token) ?? []), mention])
+  }
+  const kept: DocumentMention[] = []
+  for (const [token, stored] of storedByToken) {
+    const occurrences = findTokenOccurrences(body, token)
+      .filter((offset) => !overlapsMentionRanges({ offset, length: token.length }, kept))
+    occurrences.slice(0, stored.length).forEach((offset, index) => {
+      const mention = stored[index]
+      if (mention) kept.push({ userId: mention.userId, offset, length: token.length })
+    })
+  }
+  const resolved = resolveDocumentMentions(body, selectedMemberKeys, members)
+    .filter((mention) => !overlapsMentionRanges(mention, kept))
+  return [...kept, ...resolved].sort((left, right) => left.offset - right.offset)
+}
+
+/**
+ * Finds whole-token occurrences of a mention token in a body.
+ *
+ * @param body - Comment body.
+ * @param token - Mention token such as `@Mina Sato`.
+ * @returns Offsets where the token starts and is not part of a longer word.
+ */
+function findTokenOccurrences(body: string, token: string): number[] {
+  const offsets: number[] = []
+  if (!token) return offsets
+  let index = body.indexOf(token)
+  while (index !== -1) {
+    const before = index === 0 ? '' : body[index - 1] ?? ''
+    const after = body[index + token.length] ?? ''
+    if (!mentionWordCharacter.test(before) && !mentionWordCharacter.test(after)) offsets.push(index)
+    index = body.indexOf(token, index + token.length)
+  }
+  return offsets
+}
+
+/** A character that continues a mention token. */
+const mentionWordCharacter = /^[\p{L}\p{N}_@]$/u
+
 const documentMentionPattern =
   /(^|[\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】])@([^\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】]+)/gu
 

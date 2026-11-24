@@ -97,3 +97,4 @@
 | [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
 | [0076](0076-workspace-wide-time-period-close.md) | Workspace 単位の月の締めは Team ごとの締め row をまとめて作る | 提案 |
 | [0091](0091-document-version-pin-and-approval.md) | 名前付き version を TTL なしの snapshot で残し、承認は成果物の Work Item に既存の approval として作る | 提案 |
+| [0092](0092-document-comment-participant-index-and-mutation-receipts.md) | Document comment の thread 参加者を index row で持ち、編集・削除の冪等性を TTL 付き receipt で持つ | 提案 |

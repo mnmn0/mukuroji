@@ -26,7 +26,7 @@ import type {
   DocumentRecord,
   DocumentVersion,
 } from '../api'
-import { resolveDocumentMentions } from '../model/comments'
+import { resolveDocumentMentions, resolveEditedDocumentMentions } from '../model/comments'
 import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
 import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import {
@@ -927,7 +927,7 @@ function CommentCard({
     const body = editDraft?.body.trim() ?? ''
     if (!editDraft || !onEdit || !body || isSaving) return
     const saved = await runChange(() =>
-      onEdit(comment.id, body, resolveDocumentMentions(body, editDraft.mentionMemberKeys, mentionMembers)),
+      onEdit(comment.id, body, resolveEditedDocumentMentions(comment, body, editDraft.mentionMemberKeys, mentionMembers)),
     )
     if (saved) setEditDraft(undefined)
   }

@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { SWRConfig, unstable_serialize } from 'swr'
 import type { DocumentComment } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
-import { replaceLoadedDocumentComment } from '../src/documents/model/comments'
+import { replaceLoadedDocumentComment, resolveEditedDocumentMentions } from '../src/documents/model/comments'
 import { useDocumentCommentChanges } from '../src/documents/mutations/useDocumentCommentChanges'
 import { convertMarkdownToDocument } from '../src/documents/model/markdownImport'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
@@ -106,6 +106,29 @@ describe('Document editing and comments (#422)', () => {
     // A thread without the comment, or one not read yet, is left as it is.
     expect(replaceLoadedDocumentComment([root], edited)).toEqual([root])
     expect(replaceLoadedDocumentComment(undefined, edited)).toBeUndefined()
+  })
+
+  test('keeps the stored mention of a renamed member when an unrelated part is edited', () => {
+    // Mina was mentioned as "Mina Sato" and has since been renamed to "Mina Ito".
+    const renamed = [
+      ...members.filter(({ memberKey }) => memberKey !== 'mina@example.com'),
+      { memberKey: 'mina@example.com', name: 'Mina Ito', email: 'mina@example.com', status: 'active' },
+    ]
+    const original = {
+      body: 'Ask @Mina Sato about it',
+      mentions: [{ userId: 'mina@example.com', offset: 4, length: 10 }],
+    }
+
+    expect(resolveEditedDocumentMentions(original, 'Please ask @Mina Sato about it today', ['mina@example.com'], renamed))
+      .toEqual([{ userId: 'mina@example.com', offset: 11, length: 10 }])
+    // A newly picked mention in the edited span is resolved with the current name.
+    expect(resolveEditedDocumentMentions(original, 'Ask @Mina Sato and @Owner Name', ['mina@example.com', 'owner@example.com'], renamed))
+      .toEqual([
+        { userId: 'mina@example.com', offset: 4, length: 10 },
+        { userId: 'owner@example.com', offset: 19, length: 11 },
+      ])
+    // Editing the token itself drops the stored mention.
+    expect(resolveEditedDocumentMentions(original, 'Ask Mina about it', [], renamed)).toEqual([])
   })
 
   test('puts an edited comment into the cached thread opened by a deep link', async () => {

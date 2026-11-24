@@ -4620,7 +4620,10 @@ test('notifies every thread participant through the participant index, backfilli
   await reply('mina@example.com', 'reply-1')
   // Simulates a thread written before the participant index existed.
   for (const item of memory.items()) {
-    if (item.entryType === 'document-comment-participant') {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
       memory.remove(String(item.workspaceId), String(item.recordKey))
     }
   }
@@ -4645,15 +4648,13 @@ test('notifies every thread participant through the participant index, backfilli
     { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
     { memberKey: 'mina@example.com', reason: 'reply' },
   ])
-  // The older thread was backfilled, so the next reply reads only its index.
+  // The older thread was backfilled and marked complete, so the next reply reads only its index.
   expect(memory.items()
     .filter((item) => item.entryType === 'document-comment-participant')
-    .map(({ memberKey, rootAuthor }) => [memberKey, rootAuthor])
-    .sort()).toEqual([
-    ['kai@example.com', false],
-    ['mina@example.com', false],
-    [ownerAccess.memberKey.toLowerCase(), true],
-  ])
+    .map(({ memberKey }) => memberKey)
+    .sort()).toEqual(['kai@example.com', 'mina@example.com', ownerAccess.memberKey.toLowerCase()])
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toHaveLength(1)
   memory.remove('workspace-1', String(memory.items().find(({ id }) => id === 'reply-1')?.recordKey))
   await reply('ren@example.com', 'reply-3')
   expect(replyCandidates('reply-3')).toEqual([
@@ -4661,6 +4662,72 @@ test('notifies every thread participant through the participant index, backfilli
     { memberKey: 'kai@example.com', reason: 'reply' },
     { memberKey: 'mina@example.com', reason: 'reply' },
   ])
+})
+
+test('keeps reading an older thread too large to backfill, even after the root author replies', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Large thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // More repliers than one reply transaction backfills, written before the index existed.
+  for (let index = 0; index < 26; index += 1) {
+    await reply(`member-${index}@example.com`, `legacy-${index}`)
+  }
+  for (const item of memory.items()) {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+
+  // The root author's reply adds its own row but must not mark the older index complete.
+  await reply(ownerAccess.memberKey, 'owner-reply')
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toEqual([])
+  await reply('late@example.com', 'late-reply')
+  const lateEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'late-reply')
+  const candidates = lateEvent && typeof lateEvent.metadata === 'object' && lateEvent.metadata !== null &&
+    'notificationCandidates' in lateEvent.metadata && Array.isArray(lateEvent.metadata.notificationCandidates)
+    ? lateEvent.metadata.notificationCandidates
+    : []
+  // Every historical replier is still found by reading all comment pages.
+  expect(candidates).toHaveLength(27)
 })
 
 test('replays an idempotent comment edit or delete without rewriting a newer change', async () => {
@@ -5454,6 +5521,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       { id: 'block-m', type: 'paragraph', text: '**bold** and \\*literal\\*' },
       { id: 'block-q', type: 'paragraph', text: '> quoted <b>tag</b> and `a<b>c` and <https://example.com>' },
       { id: 'block-f', type: 'paragraph', text: '```html\n<div>kept</div>\n```' },
+      { id: 'block-e', type: 'paragraph', text: 'already \\<div> and \\\\<span>' },
       {
         id: 'block-b',
         type: 'table',
@@ -5469,6 +5537,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   // Only raw HTML is escaped: the blockquote marker, an autolink, and code keep their text.
   expect(markdown.content).toContain('\n> quoted \\<b>tag\\</b> and `a<b>c` and <https://example.com>\n')
   expect(markdown.content).toContain('\n```html\n<div>kept</div>\n```\n')
+  // An escaped `<` stays as written; after an escaped backslash, `<` still starts HTML.
+  expect(markdown.content).toContain('\nalready \\<div> and \\\\\\<span>\n')
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
   expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')
