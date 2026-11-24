@@ -4,6 +4,7 @@ import {
   loadAutomationManagementData,
   type AutomationManagementData,
 } from '../managementData'
+import { loadOwnedAutomationExecutions } from './loadOwnedAutomationExecutions'
 
 /**
  * Automation management panelに必要なrules・templates・executionsを取得します。
@@ -22,6 +23,29 @@ export function useAutomationManagement(
 ) {
   return useSWR<AutomationManagementData>(
     ['automation-management', accessToken, canManage, teams.map((team) => team.id).join('\0'), ownerTeamId ?? ''],
-    () => loadAutomationManagementData(accessToken, teams, canManage, ownerTeamId),
+    () => ownerTeamId === undefined
+      ? loadAutomationManagementData(accessToken, teams, canManage)
+      : loadTeamAutomationManagementData(accessToken, teams, ownerTeamId),
   )
+}
+
+/**
+ * Loads the management data for the Team settings view, replacing the first Workspace execution
+ * page with the runs collected for the owner Team.
+ *
+ * @param accessToken - Automation API access token.
+ * @param teams - Teams used to resolve Workflow targets.
+ * @param ownerTeamId - Team whose definitions are shown.
+ * @returns Management data whose executions belong to the owner Team.
+ */
+async function loadTeamAutomationManagementData(
+  accessToken: string,
+  teams: ProjectDirectoryTeam[],
+  ownerTeamId: string,
+): Promise<AutomationManagementData> {
+  const [data, executions] = await Promise.all([
+    loadAutomationManagementData(accessToken, teams, false),
+    loadOwnedAutomationExecutions(accessToken, ownerTeamId),
+  ])
+  return { ...data, executions }
 }

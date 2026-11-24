@@ -68,6 +68,8 @@ export const requestsMessages = {
   'requests.action.error': 'The action could not be completed. Review the latest state.',
   'requests.routing.teamBacklog': 'Team backlog',
   'requests.routing.initialStatus': 'Initial status',
+  'requests.forms.scopeLoadError': 'Could not load which Team request forms you can manage.',
+  'requests.forms.scopeRetry': 'Retry',
   'requests.forms.title': 'Forms',
   'requests.forms.description': 'Manage presentation, access links, and routing without code changes.',
   'requests.forms.new': 'New form',

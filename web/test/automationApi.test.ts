@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { loadOwnedAutomationExecutions } from '../src/automation/managementData'
+import { loadOwnedAutomationExecutions } from '../src/automation/queries/loadOwnedAutomationExecutions'
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AutomationInboundWebhookEndpoint,

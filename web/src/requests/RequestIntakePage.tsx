@@ -116,7 +116,11 @@ export function RequestIntakePage() {
   )
   const isWorkspaceStructureManager = canManageWorkspaceStructure(user)
   // A Team manager manages the forms scoped to their own Teams (ADR 0087).
-  const { data: managementScopes } = useRequestFormManagementScopes(
+  const {
+    data: managementScopes,
+    error: managementScopesError,
+    mutate: mutateManagementScopes,
+  } = useRequestFormManagementScopes(
     accessToken,
     Boolean(user) && !currentUserError && !isWorkspaceStructureManager,
   )
@@ -225,6 +229,7 @@ export function RequestIntakePage() {
       projectDirectoryError,
       queueError,
       formsError,
+      managementScopesError,
       workspaceAccessError,
       requestWorkItemConfigurationError,
       detailError,
@@ -363,6 +368,17 @@ export function RequestIntakePage() {
               <TabButton active={activeView === 'queue'} label={t('requests.tab.queue')} onClick={() => selectView('queue')} />
               {canManageForms ? <TabButton active={activeView === 'forms'} label={t('requests.tab.forms')} onClick={() => selectView('forms')} /> : null}
             </div>
+            {managementScopesError ? (
+              <div
+                className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
+                role="alert"
+              >
+                <span>{t('requests.forms.scopeLoadError')}</span>
+                <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => void mutateManagementScopes()}>
+                  {t('requests.forms.scopeRetry')}
+                </button>
+              </div>
+            ) : null}
 
             {activeView === 'queue' ? (
               <RequestQueue
