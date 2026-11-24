@@ -172,6 +172,10 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import {
+  DynamoDbTeamPortfolioSnapshotStore,
+  InMemoryTeamPortfolioSnapshotStore,
+} from '../../modules/portfolio-dashboard'
+import {
   DynamoDbCycleScheduleBaselineStore,
   InMemoryCycleScheduleBaselineStore,
 } from '../../modules/planning'
@@ -680,6 +684,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    portfolioSnapshots: new DynamoDbTeamPortfolioSnapshotStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -1967,6 +1976,7 @@ export function createTestAppDependencies(): AppDependencies {
       projectStatusShares: new InMemoryProjectStatusShareStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
+      portfolioSnapshots: new InMemoryTeamPortfolioSnapshotStore(),
       cycleScheduleBaselines: new InMemoryCycleScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
@@ -2102,6 +2112,7 @@ export function overrideAppDependencies(
       ...(overrides.projectStatusShares ? { projectStatusShares: overrides.projectStatusShares } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
+      ...(overrides.portfolioSnapshots ? { portfolioSnapshots: overrides.portfolioSnapshots } : {}),
       ...(overrides.cycleScheduleBaselines ? { cycleScheduleBaselines: overrides.cycleScheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),

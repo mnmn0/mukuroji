@@ -644,6 +644,13 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
     permission: 'projects.write',
   },
+  // Saving a Team's portfolio snapshot captures every Project of the Team, so it needs the Team
+  // manage permission; reading the portfolio falls through to `teams.read` below.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/portfolio/snapshots/:month',
+    permission: 'teams.manage',
+  },
   {
     // Rendering a PDF reads the Project; the POST only carries the report to render.
     method: 'POST',

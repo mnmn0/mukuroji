@@ -646,6 +646,32 @@ export type TimeTrackingReportInput = {
   budgetScopeId?: string
 }
 
+/** Input of {@link TimeTrackingService.summarizeProjectBudgets}. */
+export type ProjectBudgetConsumptionInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team that owns the Projects. */
+  teamId: string
+  /** Projects whose budgets and costs are read; the caller already checked cost visibility. */
+  projectIds: readonly string[]
+  /** IANA timezone that bounds the local budget periods. */
+  timeZone: string
+  /** Instant the cost is totalled up to. */
+  now: Date
+  /** Most entries the read may total before it fails closed. */
+  entryLimit: number
+}
+
+/** Budget of one Project and the billable cost recorded against it. */
+export type ProjectBudgetConsumption = {
+  /** Stored budget. */
+  budget: TimeBudget
+  /** Billable cost in the budget currency within the period up to now, in minor units. */
+  actualCostMinor: number
+  /** Whether billable cost was recorded in another currency. */
+  hasOtherCurrencyCost: boolean
+}
+
 /**
  * Caller of a report, used to decide whose entries the report may total.
  *
@@ -1988,6 +2014,102 @@ export class TimeTrackingService {
       costsRedacted: !input.includeCosts,
       canManageTeam: input.viewer?.canManage ?? true,
     }
+  }
+
+  /**
+   * Reads the budget of each Project and totals the billable cost recorded against it within its
+   * period up to now, with one bounded read of the Team's time entries.
+   *
+   * The caller decides which Projects' costs the reader may see; this method totals every
+   * member's billable entries in the given Projects, as a Project budget report does for a
+   * manager of those Projects.
+   *
+   * @param input - Team, Projects, calendar, clock, and entry read limit.
+   * @returns Budget and cost of each Project that has a budget, keyed by Project ID.
+   * @throws TimeTrackingError 413 when the budget periods hold more entries than the limit.
+   */
+  async summarizeProjectBudgets(input: ProjectBudgetConsumptionInput): Promise<Map<string, ProjectBudgetConsumption>> {
+    validateTimeZone(input.timeZone)
+    const budgets = new Map<string, TimeBudget>()
+    for (const projectId of input.projectIds) {
+      const budget = await this.repository.getBudget(input.workspaceId, 'project', projectId)
+      if (budget) budgets.set(projectId, budget)
+    }
+    const result = new Map<string, ProjectBudgetConsumption>()
+    if (budgets.size === 0) return result
+    const nowInstant = input.now.toISOString()
+    const today = localDateAt(input.now.getTime(), input.timeZone)
+    const periods = new Map<string, { from?: string; to: string }>()
+    for (const [projectId, budget] of budgets) {
+      const from = budget.periodFrom === undefined
+        ? undefined
+        : new Date(resolveLocalDateStart(budget.periodFrom, input.timeZone)).toISOString()
+      // A period still running ends now; only an ended period needs the day after its end, which
+      // also keeps far-future end dates such as 9999-12-31 out of the date arithmetic.
+      const periodEnd = budget.periodTo === undefined || budget.periodTo >= today
+        ? nowInstant
+        : new Date(resolveLocalDateStart(addCalendarDays(budget.periodTo, 1), input.timeZone)).toISOString()
+      const to = periodEnd < nowInstant ? periodEnd : nowInstant
+      periods.set(projectId, { ...(from === undefined ? {} : { from }), to })
+    }
+    // Projects that share a budget period are read together, and each read covers only its own
+    // period, so entries outside a Project's period neither cost reads nor count toward the limit.
+    const groups = new Map<string, { from?: string; to: string; projectIds: Set<string> }>()
+    for (const [projectId, period] of periods) {
+      if (period.from !== undefined && !(period.from < period.to)) continue
+      const key = `${period.from ?? ''}|${period.to}`
+      const group = groups.get(key) ?? { ...period, projectIds: new Set<string>() }
+      group.projectIds.add(projectId)
+      groups.set(key, group)
+    }
+    const entries: TimeEntry[] = []
+    for (const group of groups.values()) {
+      const remaining = input.entryLimit - entries.length
+      const read = await this.listAllEntries({
+        workspaceId: input.workspaceId,
+        teamId: input.teamId,
+        ...(group.from === undefined ? {} : { from: group.from }),
+        to: group.to,
+        projectIds: group.projectIds,
+        limit: remaining + 1,
+      })
+      if (read.length > remaining) {
+        throw new TimeTrackingError(
+          413,
+          'PortfolioTooLarge',
+          `This Team has more than ${input.entryLimit} time entries in its Project budget periods.`,
+        )
+      }
+      entries.push(...read)
+    }
+    const totals = new Map<string, { actualCostMinor: number; hasOtherCurrencyCost: boolean }>()
+    for (const projectId of budgets.keys()) totals.set(projectId, { actualCostMinor: 0, hasOtherCurrencyCost: false })
+    for (const entry of entries) {
+      if (entry.projectId === undefined) continue
+      const budget = budgets.get(entry.projectId)
+      const period = periods.get(entry.projectId)
+      const total = totals.get(entry.projectId)
+      if (!budget || !period || !total || (period.from !== undefined && !(period.from < period.to))) continue
+      const cost = costForEntry(entry, clippedEntryMinutes(entry, period.from ?? new Date(0).toISOString(), period.to), true)
+      if (cost === undefined) continue
+      if (entry.currency !== budget.currency) {
+        total.hasOtherCurrencyCost = true
+        continue
+      }
+      total.actualCostMinor += cost
+      if (!Number.isSafeInteger(total.actualCostMinor)) {
+        throw new TimeTrackingError(
+          422,
+          'PortfolioCostOverflow',
+          `The billable cost of Project "${entry.projectId}" is too large to total exactly.`,
+        )
+      }
+    }
+    for (const [projectId, budget] of budgets) {
+      const total = totals.get(projectId) ?? { actualCostMinor: 0, hasOtherCurrencyCost: false }
+      result.set(projectId, { budget, ...total })
+    }
+    return result
   }
 
   /** Builds daily and weekly timesheet rows with DST-aware local boundaries. */
