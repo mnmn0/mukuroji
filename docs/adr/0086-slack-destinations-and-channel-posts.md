@@ -57,6 +57,10 @@ Slack 配信は個人あての通知だけで、送信先の Incoming Webhook �
 
 - メンバーとマネージャーが管理者を待たずに Slack の送信先を登録でき、テスト送信で確かめられる。
 - channel の参加者は投稿を読めるので、channel の選び方はマネージャーの責任になる（設定画面と利用者ガイドに書く）。
+- Team の送信先は、その Team の Project のうち自分の送信先を持たないものの投稿も受ける。
+- 保存は Webhook を先に書き、設定 row を revision 条件付きで書く。2 人のマネージャーが同時に URL を差し替えると、
+  revision で負けた側の URL が secret に残ることがある。どちらもその送信先を変えられる人で、画面の再読み込み後に
+  保存し直せば揃うので、secret の version 管理は入れない。
 - Notifications table に送信先 row と投稿 row（TTL 30 日）が増える。GSI・Lambda は増えない。
 - Agent Run の判断待ちは監査 event がまだないため channel には投稿しない。
 - 更新した文書: `docs/notifications.md`、`docs/guide/member.md`、`docs/guide/pm.md`。

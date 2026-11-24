@@ -113,7 +113,12 @@ export {
   testNotificationDestination,
   toPublicChannelDestination,
 } from './application/notification-destinations'
-export type { ChannelDestinationTarget } from './domain/channel-destination'
+export type { ChannelDestinationRecord, ChannelDestinationTarget } from './domain/channel-destination'
+export type {
+  ChannelDestinationStore,
+  DeleteChannelDestinationInput,
+  SaveChannelDestinationInput,
+} from './application/ports/channel-posts'
 export {
   SecretsManagerSlackDestinationSecretStore,
   slackChannelDestinationSecretId,

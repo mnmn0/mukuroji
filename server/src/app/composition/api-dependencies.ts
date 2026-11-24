@@ -2076,6 +2076,10 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.channelDestinations ? { channelDestinations: overrides.channelDestinations } : {}),
+      ...(overrides.notificationDestinationSecrets
+        ? { notificationDestinationSecrets: overrides.notificationDestinationSecrets }
+        : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
