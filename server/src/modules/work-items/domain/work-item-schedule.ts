@@ -222,6 +222,8 @@ function isCanonicalCalendarPolicy(
   normalized: WorkItemScheduleCalendarPolicy,
 ): boolean {
   return isRecord(value) &&
+    value.calendarSource === normalized.calendarSource &&
+    Object.hasOwn(value, 'calendarSource') === (normalized.calendarSource !== undefined) &&
     value.timeZone === normalized.timeZone &&
     hasExactStringEntries(value.workingWeekdays, normalized.workingWeekdays) &&
     hasExactStringEntries(value.holidays, normalized.holidays)
@@ -645,8 +647,11 @@ function normalizeCalendarPolicy(value: unknown): WorkItemScheduleCalendarPolicy
   if (!isRecord(value)) {
     return invalidCalendarPolicy('Calendar policy must be an object.')
   }
-  if (!hasOnlyKeys(value, ['timeZone', 'workingWeekdays', 'holidays'])) {
+  if (!hasOnlyKeys(value, ['timeZone', 'workingWeekdays', 'holidays', 'calendarSource'])) {
     return invalidCalendarPolicy('Calendar policy contains unsupported fields.')
+  }
+  if (value.calendarSource !== undefined && value.calendarSource !== 'shared') {
+    return invalidCalendarPolicy('Calendar source must be "shared" when present.')
   }
   const timeZone = normalizeTimeZone(value.timeZone)
   if (!Array.isArray(value.workingWeekdays)) {
@@ -681,6 +686,7 @@ function normalizeCalendarPolicy(value: unknown): WorkItemScheduleCalendarPolicy
     timeZone,
     workingWeekdays: WEEKDAY_ORDER.filter((weekday) => weekdaySet.has(weekday)),
     holidays: [...holidaySet].sort(),
+    ...(value.calendarSource === 'shared' ? { calendarSource: 'shared' as const } : {}),
   }
 }
 
@@ -1071,4 +1077,60 @@ function invalidOperation(message: string): never {
  */
 function invalidInstant(message: string): never {
   throw new WorkItemScheduleError(400, 'InvalidWorkItemScheduleInstant', message)
+}
+
+/** Result of moving a schedule onto another calendar. */
+export type WorkItemScheduleCalendarRebase = {
+  /** Schedule under the new calendar policy. */
+  schedule: WorkItemSchedule
+  /** Whether keeping the end date left no working day, so the duration was kept instead. */
+  fellBackToKeepDuration: boolean
+}
+
+/**
+ * Moves a schedule onto another calendar policy, as a shared calendar change does (ADR 0058).
+ *
+ * Only a date-range schedule can change its dates: `keep-duration` keeps the start date and the
+ * working-day count, so the end date moves; `keep-end-date` keeps both dates and recounts the
+ * working days, falling back to `keep-duration` when no working day would be left. Deadlines,
+ * milestones, and unscheduled items keep their dates and only take the new policy.
+ *
+ * @param schedule - Canonical schedule to move.
+ * @param policy - New calendar policy.
+ * @param adjustment - How a date range keeps its dates.
+ * @returns The moved schedule and whether the adjustment fell back.
+ */
+export function rebaseWorkItemScheduleCalendar(
+  schedule: WorkItemSchedule,
+  policy: WorkItemScheduleCalendarPolicy,
+  adjustment: 'keep-duration' | 'keep-end-date',
+): WorkItemScheduleCalendarRebase {
+  const current = normalizeWorkItemSchedule(schedule)
+  const calendarPolicy = normalizeCalendarPolicy(policy)
+  if (current.mode !== 'date-range') {
+    return { schedule: { ...current, calendarPolicy }, fellBackToKeepDuration: false }
+  }
+  if (adjustment === 'keep-end-date') {
+    const durationDays = calculateWorkItemScheduleDurationDays(
+      current.startDate,
+      current.endDate,
+      calendarPolicy,
+    )
+    if (durationDays > 0) {
+      return {
+        schedule: { ...current, calendarPolicy, durationDays },
+        fellBackToKeepDuration: false,
+      }
+    }
+  }
+  const endDate = calculateWorkItemScheduleEndDate(
+    current.startDate,
+    current.durationDays,
+    calendarPolicy,
+  )
+  // Keep the start date the member chose; only the end date moves.
+  return {
+    schedule: { ...current, calendarPolicy, endDate },
+    fellBackToKeepDuration: adjustment === 'keep-end-date',
+  }
 }

@@ -64,6 +64,20 @@ export const TruncatedHistory: Story = {
   },
 }
 
+/** Telemetry usage of the runs, as a Team manager sees it with the estimated cost. */
+export const WithUsage: Story = {
+  args: {
+    runs: agentRunFixtures.map((run, index) => index === 0
+      ? { ...run, usage: { inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7, estimatedCostMicroUsd: 412_000, models: ['claude-sonnet-5-5'], hasMore: false } }
+      : run),
+    usageTotal: { inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7, estimatedCostMicroUsd: 412_000, models: ['claude-sonnet-5-5'], hasMore: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(labels.usageTotal)).toBeVisible()
+  },
+}
+
 /** No agent has claimed the task. */
 export const Empty: Story = {
   args: { runs: [] },

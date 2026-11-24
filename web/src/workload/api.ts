@@ -1,6 +1,8 @@
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
+  isWorkloadCalendarSource,
   type CapacityPlanningGranularity,
+  type WorkloadCalendarSource,
   type ResourceAssignmentStatus,
   type WorkloadMemberSummary,
   type WorkloadHoliday,
@@ -33,7 +35,9 @@ export type SaveWorkloadProfileRequest = {
   role?: string
   /** Skill identifiers used by resource matching. */
   skills: string[]
-  /** IANA timezone used for local capacity dates. */
+  /** Whether the profile inherits the Workspace calendar or keeps its own. */
+  calendarSource: WorkloadCalendarSource
+  /** IANA timezone used for local capacity dates when the profile keeps its own calendar. */
   timeZone: string
   /** Recurring weekday schedule. */
   schedule: WorkingSchedule
@@ -193,7 +197,8 @@ export type WorkloadWhatIfRequest = {
   plannedEffortMinutes: number
 }
 
-const workloadApiBaseUrl = resolveApiBaseUrl()
+/** Base URL of the workload API routes. */
+export const workloadApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Fetches a Team workload snapshot for a local date range.
@@ -453,6 +458,8 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
   return value.members.every((member): member is WorkloadMemberSummary => isRecord(member) &&
     typeof member.memberId === 'string' &&
     typeof member.timeZone === 'string' &&
+    (member.effectiveTimeZone === undefined || typeof member.effectiveTimeZone === 'string') &&
+    (member.calendarSource === undefined || isWorkloadCalendarSource(member.calendarSource)) &&
     Array.isArray(member.skills) && member.skills.every((skill) => typeof skill === 'string') &&
     isWorkingSchedule(member.schedule) &&
     Array.isArray(member.holidays) && member.holidays.every(isWorkloadHoliday) &&
@@ -499,7 +506,22 @@ function isWorkloadCell(value: unknown): boolean {
     isNonNegativeSafeInteger(value.remainingEffortMinutes) &&
     isNonNegativeSafeInteger(value.utilizationPercent) &&
     typeof value.varianceMinutes === 'number' && Number.isSafeInteger(value.varianceMinutes) &&
-    (value.status === 'under' || value.status === 'balanced' || value.status === 'over' || value.status === 'unavailable')
+    isCellStatus(value.status) &&
+    (value.workspaceCapacityMinutes === undefined || isNonNegativeSafeInteger(value.workspaceCapacityMinutes)) &&
+    (value.workspaceAllocatedMinutes === undefined || isNonNegativeSafeInteger(value.workspaceAllocatedMinutes)) &&
+    isCellStatus(value.workspaceStatus, true)
+}
+
+/**
+ * Checks a cell status, allowing it to be absent when `optional` is set.
+ *
+ * @param value - Value from a response.
+ * @param optional - Whether an absent status is accepted.
+ * @returns Whether the value is a known status, or absent and allowed to be.
+ */
+export function isCellStatus(value: unknown, optional = false): boolean {
+  if (value === undefined) return optional
+  return value === 'under' || value === 'balanced' || value === 'over' || value === 'unavailable'
 }
 
 /** Checks one resource request returned by a workload snapshot. */
@@ -549,8 +571,13 @@ function isWorkloadHoliday(value: unknown): value is WorkloadHoliday {
     (value.label === undefined || typeof value.label === 'string')
 }
 
-/** Checks a non-negative safe integer at the workload API boundary. */
-function isNonNegativeSafeInteger(value: unknown): value is number {
+/**
+ * Checks a non-negative safe integer at the workload API boundary.
+ *
+ * @param value - Value from a response.
+ * @returns Whether the value is a non-negative safe integer.
+ */
+export function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
@@ -559,23 +586,38 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
-/** Checks a Gregorian calendar date at the workload API boundary. */
-function isIsoDate(value: unknown): value is string {
+/**
+ * Checks a Gregorian calendar date at the workload API boundary.
+ *
+ * @param value - Value from a response.
+ * @returns Whether the value is a `YYYY-MM-DD` date that exists.
+ */
+export function isIsoDate(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
   const parsed = Date.parse(`${value}T00:00:00Z`)
   return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value
 }
 
-/** Reads a safe API error message. */
-function readErrorMessage(value: unknown): string {
+/**
+ * Reads a safe API error message.
+ *
+ * @param value - Error response body.
+ * @returns The server message, or a generic one.
+ */
+export function readErrorMessage(value: unknown): string {
   return typeof value === 'object' && value !== null &&
     'message' in value && typeof value.message === 'string'
     ? value.message
     : 'Workload data could not be loaded.'
 }
 
-/** Reads a JSON response body without assuming its runtime shape. */
-async function readJson(response: Response): Promise<unknown> {
+/**
+ * Reads a JSON response body without assuming its runtime shape.
+ *
+ * @param response - Fetch response.
+ * @returns The parsed body.
+ */
+export async function readJson(response: Response): Promise<unknown> {
   const text = await response.text()
   if (!text) return {}
   try {

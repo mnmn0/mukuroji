@@ -5,7 +5,7 @@ import {
   normalizeWorkspaceInvitationEmail,
 } from '@mukuroji/contracts'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../api/access'
-import { escapeSpreadsheetCell, unescapeSpreadsheetCell } from './spreadsheetCell'
+import { escapeSpreadsheetCell, unescapeSpreadsheetCell } from '../../shared/lib/spreadsheetCell'
 
 /**
  * Why a row of a bulk invitation cannot be sent.

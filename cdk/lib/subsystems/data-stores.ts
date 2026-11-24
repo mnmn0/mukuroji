@@ -551,6 +551,8 @@ export function buildDataStores(
     encryption: dynamodb.TableEncryption.AWS_MANAGED,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    // Only agent telemetry usage rows and their export receipts carry this attribute (ADR 0061).
+    timeToLiveAttribute: 'usageExpiresAt',
   });
 
   agentRunsTable.addGlobalSecondaryIndex({

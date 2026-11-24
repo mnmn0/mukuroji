@@ -314,6 +314,26 @@ function projectIdRawItem(
 }
 
 /**
+ * Creates a valid low-level Team-wide grant receipt row.
+ *
+ * @param overrides - Exact attributes that should replace valid defaults.
+ * @returns One raw DynamoDB item suitable for the normalization boundary.
+ */
+function teamGrantRequestRawItem(
+  overrides: Readonly<Record<string, AttributeValue>> = {},
+): Record<string, AttributeValue> {
+  return {
+    directoryId: { S: 'TEAM_GRANT_REQUEST#workspace%231' },
+    entryKey: { S: 'KEY#key-hash' },
+    entryType: { S: 'team-grant-request' },
+    workspaceId: { S: 'workspace#1' },
+    requestFingerprint: { S: 'request-fingerprint' },
+    createdAt: { S: CHECKED_AT },
+    ...overrides,
+  }
+}
+
+/**
  * Wraps one raw row in a complete single-page DynamoDB response.
  *
  * @param item - Raw DynamoDB item returned by Scan.
@@ -631,6 +651,36 @@ describe('cross-domain normalized page reader boundary', () => {
           )
       } finally {
         reader.close()
+      }
+    }
+  })
+
+  test('accepts a canonical Team-wide grant receipt and fails closed on a malformed one', async () => {
+    const accepted = new FixtureRawReader({ pages: [rawItemPage(teamGrantRequestRawItem())] })
+    const reader = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+    installFixtureRawReader(reader, accepted)
+    try {
+      await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+        .resolves.toMatchObject({ items: [], retainedUnitCount: 0 })
+    } finally {
+      reader.close()
+    }
+
+    const malformedRows = [
+      teamGrantRequestRawItem({ directoryId: { S: 'TEAM_GRANT_REQUEST#workspace#1' } }),
+      teamGrantRequestRawItem({ entryKey: { S: 'key-hash' } }),
+      teamGrantRequestRawItem({ requestFingerprint: { S: '' } }),
+      teamGrantRequestRawItem({ createdAt: { S: 'yesterday' } }),
+    ]
+    for (const row of malformedRows) {
+      const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
+      const malformed = createCrossDomainIntegrityNormalizedPageReader(readerConfiguration())
+      installFixtureRawReader(malformed, fixture)
+      try {
+        await expect(malformed.readPage(pageRequest(undefined, 'project-directory')))
+          .rejects.toEqual(new CrossDomainIntegrityNormalizedPageReaderFailure('AWS_RESPONSE_INVALID'))
+      } finally {
+        malformed.close()
       }
     }
   })

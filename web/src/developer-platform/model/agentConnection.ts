@@ -31,6 +31,11 @@ export type AgentConnectionSettings = {
   shell: AgentConnectionShell
   /** Tool set to configure; `tasks` when omitted. */
   profile?: AgentConnectionProfile
+  /**
+   * Instance ID that both the MCP server and the agent's OpenTelemetry export carry, so token usage
+   * is attributed to the instance's runs (ADR 0061). Empty or omitted leaves usage out.
+   */
+  usageInstanceId?: string
 }
 
 /** One copyable configuration snippet. */
@@ -73,6 +78,45 @@ export function resolveMcpScriptPath(mcpPath: string, shell: AgentConnectionShel
     : '/Users/you/mukuroji/mcp.mjs'
 }
 
+/** Clients whose OpenTelemetry token usage Mukuroji reads. */
+const USAGE_CLIENTS: ReadonlySet<AgentConnectionClient> = new Set(['claude-code'])
+
+/** Instance IDs the page writes: safe in shell words and in an `OTEL_RESOURCE_ATTRIBUTES` list. */
+const USAGE_INSTANCE_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u
+
+/**
+ * Tells whether the connection page offers token usage for the client and profile.
+ *
+ * @param client - Selected client.
+ * @param profile - Selected tool set; `tasks` when omitted.
+ * @returns Whether usage can be sent.
+ */
+export function supportsAgentUsage(client: AgentConnectionClient, profile: AgentConnectionProfile = 'tasks') {
+  return profile === 'tasks' && USAGE_CLIENTS.has(client)
+}
+
+/**
+ * Tells whether a typed instance ID can be written into the snippets.
+ *
+ * @param value - Typed instance ID.
+ * @returns Whether it is 1 to 64 letters, digits, `.`, `_`, or `-`.
+ */
+export function isValidUsageInstanceId(value: string) {
+  return USAGE_INSTANCE_ID_PATTERN.test(value)
+}
+
+/**
+ * Returns the usage instance ID the snippets use, when usage applies and the ID is valid.
+ *
+ * @param settings - Connection values.
+ * @returns The instance ID, or undefined.
+ */
+function resolveUsageInstanceId(settings: AgentConnectionSettings): string | undefined {
+  const value = settings.usageInstanceId?.trim() ?? ''
+  if (!supportsAgentUsage(settings.client, settings.profile) || !isValidUsageInstanceId(value)) return undefined
+  return value
+}
+
 /**
  * Builds the non-secret environment the MCP server needs.
  *
@@ -92,7 +136,19 @@ function buildEnvironment(settings: AgentConnectionSettings): Array<[string, str
     ['MUKUROJI_MCP_ASSIGNEE_ID', settings.memberId],
     ['MUKUROJI_MCP_AGENT_NAME', settings.client],
     ['MUKUROJI_MCP_RUNTIME', settings.client],
+    ...usageEnvironment(settings),
   ]
+}
+
+/**
+ * Builds the instance ID entry that ties the MCP server's runs to the usage export.
+ *
+ * @param settings - Connection values.
+ * @returns The entry, or none when usage is not configured.
+ */
+function usageEnvironment(settings: AgentConnectionSettings): Array<[string, string]> {
+  const instanceId = resolveUsageInstanceId(settings)
+  return instanceId === undefined ? [] : [['MUKUROJI_MCP_INSTANCE_ID', instanceId]]
 }
 
 /**
@@ -165,6 +221,34 @@ export function buildAgentConnectionSnippet(settings: AgentConnectionSettings): 
           },
         },
       },
+    }, null, 2),
+  }
+}
+
+/**
+ * Builds the Claude Code settings that send token usage over OpenTelemetry to Mukuroji (ADR 0061).
+ *
+ * The token is never written into the snippet; `otelHeadersHelper` reads it from
+ * `MUKUROJI_MCP_TOKEN` when the exporter starts. The helper is a POSIX shell command.
+ *
+ * @param settings - Connection values.
+ * @returns Where to save the settings and their text, or undefined when usage is not configured.
+ */
+export function buildAgentUsageSnippet(settings: AgentConnectionSettings): AgentConnectionSnippet | undefined {
+  const instanceId = resolveUsageInstanceId(settings)
+  if (instanceId === undefined) return undefined
+  return {
+    location: settings.shell === 'powershell' ? '%USERPROFILE%\\.claude\\settings.json' : '~/.claude/settings.json',
+    content: JSON.stringify({
+      env: {
+        CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+        OTEL_LOGS_EXPORTER: 'otlp',
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${settings.origin}/api/v1/agent-telemetry/v1/logs`,
+        OTEL_LOGS_EXPORT_INTERVAL: '60000',
+        OTEL_RESOURCE_ATTRIBUTES: `mukuroji.agent_instance=${instanceId}`,
+      },
+      otelHeadersHelper: `printf '{"Authorization":"Bearer %s"}' "$MUKUROJI_MCP_TOKEN"`,
     }, null, 2),
   }
 }

@@ -6,7 +6,7 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 
 /**
  * Renders the page where a member issues their own agent token and copies a client configuration.
- * Without Software factory the configuration uses the Workspace MCP profile, which only reads.
+ * Without Software factory the configuration uses the Workspace MCP profile, which fixes no Team.
  *
  * @returns Agent connection content rendered inside the shared Workspace shell.
  */

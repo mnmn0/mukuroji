@@ -131,6 +131,7 @@ export function TeamMembersPage() {
           teamId={activeTeam?.id}
         />
         <TeamWorkloadView
+          crossTeamPath="/workload"
           error={workload.error ?? assignmentMutation.error}
           granularity={granularity}
           isLoading={Boolean(workload.key && workload.isLoading)}
