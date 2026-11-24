@@ -79,7 +79,18 @@ function parseSuppression(row: Record<string, unknown>, recipientKey: string): E
     row.recipientKey !== recipientKey || row.notificationKey !== EMAIL_SUPPRESSION_KEY || row.itemType !== EMAIL_SUPPRESSION_ITEM_TYPE ||
     typeof row.addressHash !== 'string' || !/^[0-9a-f]{64}$/.test(row.addressHash) ||
     (row.reason !== 'bounce' && row.reason !== 'complaint') ||
-    typeof row.suppressedAt !== 'string' || !Number.isFinite(Date.parse(row.suppressedAt))
+    // Only the canonical UTC form compares correctly as text with the opt-in time.
+    typeof row.suppressedAt !== 'string' || !isCanonicalTimestamp(row.suppressedAt)
   ) throw new Error('Invalid Email suppression row.')
   return { addressHash: row.addressHash, reason: row.reason, suppressedAt: row.suppressedAt }
+}
+
+/**
+ * Returns whether a timestamp is in the canonical UTC form `toISOString` writes.
+ * @param value - Stored timestamp.
+ * @returns Whether it round-trips unchanged.
+ */
+function isCanonicalTimestamp(value: string): boolean {
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString() === value
 }

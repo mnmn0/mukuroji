@@ -435,28 +435,62 @@ async function deliverOne(run: DeliveryRun, delivery: ChannelDelivery): Promise<
 }
 
 /**
- * Sends a recipient's due non-instant notifications as one digest. Every row is claimed and
- * checked on its own exactly as a single send is; only the rows that pass and still hold their
- * lease right before sending are included, and all of them share the one transport outcome.
+ * Sends a recipient's due non-instant notifications as digests of at most
+ * {@link MAX_DIGEST_NOTIFICATIONS}. When more untried rows are waiting than fit in one, the next
+ * digest follows right away, opened by the first row left out, until none are left or the run's
+ * time runs out.
  * @param run - Invocation state.
  * @param digest - Digest listing and transport ports.
  * @param delivery - Due delivery that started the digest.
- * @returns Identities of every row this digest looked at, so the shard loop skips them.
+ * @returns Identities of every row these digests looked at, so the shard loop skips them.
  */
 async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies, delivery: ChannelDelivery): Promise<string[]> {
+  const handled: string[] = []
+  let opener: ChannelDelivery | undefined = delivery
+  // The bound keeps a recipient with a corrupt overflow from holding the run; the deadline still applies.
+  for (let batch = 0; opener && batch < MAX_DIGEST_BATCHES_PER_RUN; batch += 1) {
+    if (batch > 0 && run.dependencies.now().getTime() >= run.deadline) break
+    const sent = await deliverDigestBatch(run, digest, opener)
+    handled.push(...sent.identities)
+    opener = sent.overflow && !handled.includes(deliveryIdentity(sent.overflow)) ? sent.overflow : undefined
+  }
+  return handled
+}
+
+/** Most digests one run sends to one recipient before leaving the rest to the next run. */
+const MAX_DIGEST_BATCHES_PER_RUN = 4
+
+/**
+ * Sends one digest. Every row is claimed and checked on its own exactly as a single send is; only
+ * the rows that pass, still hold their lease, and are still within retention right before sending
+ * are included, and all of them share the one transport outcome.
+ * @param run - Invocation state.
+ * @param digest - Digest listing and transport ports.
+ * @param opener - Row that opens this digest.
+ * @returns Identities of the rows this digest looked at, and the first waiting row it left out.
+ */
+async function deliverDigestBatch(run: DeliveryRun, digest: ChannelDigestDependencies, opener: ChannelDelivery): Promise<{
+  /** Rows this digest looked at. */
+  identities: string[]
+  /** First untried row that did not fit, when more were waiting. */
+  overflow?: ChannelDelivery
+}> {
   let companions: ChannelDelivery[] = []
   try {
-    const found = await digest.listCompanions(delivery, run.dependencies.now(), MAX_DIGEST_NOTIFICATIONS - 1)
+    // One more than fits tells whether rows are left over for the next digest.
+    const found = await digest.listCompanions(opener, run.dependencies.now(), MAX_DIGEST_NOTIFICATIONS)
     // A scan that ran out of pages still sends what it found; the rest come in a later digest,
     // and the run reports it so a crowded shard does not pass as healthy.
     if (!found.complete) run.failed = true
-    companions = found.deliveries.filter((companion) => companion.recipientKey === delivery.recipientKey && isDigestDelivery(companion) &&
-        deliveryIdentity(companion) !== deliveryIdentity(delivery))
+    companions = found.deliveries.filter((companion) => companion.recipientKey === opener.recipientKey && isDigestDelivery(companion) &&
+        deliveryIdentity(companion) !== deliveryIdentity(opener))
   } catch {
     // Without the companions the row is still sent, as a digest of one.
     run.failed = true
   }
-  const candidates = [delivery, ...companions].slice(0, MAX_DIGEST_NOTIFICATIONS)
+  const candidates = [opener, ...companions].slice(0, MAX_DIGEST_NOTIFICATIONS)
+  const identities = candidates.map(deliveryIdentity)
+  const overflow = companions[MAX_DIGEST_NOTIFICATIONS - 1]
   const checked: ClaimedDelivery[] = []
   for (const candidate of candidates) {
     if (run.dependencies.now().getTime() >= run.deadline) break
@@ -464,16 +498,23 @@ async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies
     const claimed = await claimDelivery(run, candidate, 120_000)
     if (claimed && await checkClaimed(run, claimed)) checked.push(claimed)
   }
-  const ready: ClaimedDelivery[] = []
+  const renewed: ClaimedDelivery[] = []
   // The first renewal's lease expires first, so the renewals and the send must both fit inside it.
   const renewalStartedAt = run.dependencies.now().getTime()
   for (const claimed of checked) {
-    if (await renewClaimed(run, claimed, DIGEST_SEND_LEASE_MS)) ready.push(claimed)
+    if (await renewClaimed(run, claimed, DIGEST_SEND_LEASE_MS)) renewed.push(claimed)
   }
-  if (ready.length > 0 && run.dependencies.now().getTime() - renewalStartedAt > DIGEST_RENEWAL_BUDGET_MS) {
+  if (renewed.length > 0 && run.dependencies.now().getTime() - renewalStartedAt > DIGEST_RENEWAL_BUDGET_MS) {
     // Too slow to keep every lease through the send: hand the rows back untouched for the next run.
-    for (const claimed of ready) await releaseClaimed(run, claimed)
-    return candidates.map(deliveryIdentity)
+    for (const claimed of renewed) await releaseClaimed(run, claimed)
+    return { identities }
+  }
+  // Checking up to 50 rows takes time, so a row checked early may have passed its retention since.
+  const nowSeconds = run.dependencies.now().getTime() / 1_000
+  const ready: ClaimedDelivery[] = []
+  for (const claimed of renewed) {
+    if (claimed.delivery.expiresAt > nowSeconds) ready.push(claimed)
+    else await suppressExpired(run, claimed)
   }
   if (ready.length > 0) {
     let result: ChannelSendResult | undefined
@@ -486,7 +527,20 @@ async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies
     const outcome = result
     if (outcome) await Promise.all(ready.map((claimed) => completeClaimed(run, claimed, outcome)))
   }
-  return candidates.map(deliveryIdentity)
+  return overflow ? { identities, overflow } : { identities }
+}
+
+/**
+ * Finishes a claimed row whose retention ended before the send, as a single send's checks do.
+ * @param run - Invocation state.
+ * @param claimed - Renewed claim past its retention.
+ */
+async function suppressExpired(run: DeliveryRun, claimed: ClaimedDelivery): Promise<void> {
+  try {
+    await run.dependencies.store.finish(claimed.delivery, claimed.token, 'suppressed')
+  } catch {
+    await finishUnavailable(run, claimed)
+  }
 }
 
 /**

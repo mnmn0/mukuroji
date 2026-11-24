@@ -160,11 +160,17 @@ test('lets the Inbox digest job find due members through its sparse index only',
   }));
   expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
     .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
-  expect(statements).toContainEqual(expect.objectContaining({
-    // The shared role merges this with the Email feedback job's UpdateItem on the same table.
-    Action: expect.arrayContaining(['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem']),
-    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationsTable/u), 'Arn'] },
-  }));
+  // The shared role merges the Inbox digest job's grant with the Email feedback job's UpdateItem;
+  // the whole set is pinned so no other action on the table slips in.
+  const notificationsTableActions = statements
+    .filter((statement) => JSON.stringify(statement).includes('"Fn::GetAtt":["NotificationsTable'))
+    .flatMap((statement): unknown[] => {
+      const action = typeof statement === 'object' && statement !== null && 'Action' in statement ? statement.Action : undefined;
+      return Array.isArray(action) ? action : [action];
+    });
+  expect([...new Set(notificationsTableActions)].sort()).toEqual([
+    'dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
+  ]);
   template.hasResourceProperties('AWS::Lambda::Function', {
     Environment: {
       Variables: Match.objectLike({

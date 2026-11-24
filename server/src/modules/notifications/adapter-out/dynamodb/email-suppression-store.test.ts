@@ -49,6 +49,9 @@ describe('DynamoDB Email suppression store', () => {
   })
   test('fails closed on a corrupt row and keeps the row out of the Inbox', async () => {
     await expect(fixture({ suppression: { ...suppressionRow, addressHash: 'member@example.test' } }).store.readActive(recipientKey)).rejects.toThrow()
+    for (const suppressedAt of ['2026-09-26T11:00:00-01:00', '2026-09-26T12:00:00Z', 'not-a-date']) {
+      await expect(fixture({ suppression: { ...suppressionRow, suppressedAt } }).store.readActive(recipientKey)).rejects.toThrow()
+    }
     expect(toNotificationItem(suppressionRow, recipientKey, new Date())).toBeUndefined()
     expect(() => toNotificationItem({ ...suppressionRow, notificationKey: 'other' }, recipientKey, new Date())).toThrow()
   })

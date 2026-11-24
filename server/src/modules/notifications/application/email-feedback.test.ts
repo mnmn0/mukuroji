@@ -33,6 +33,7 @@ describe('Email feedback parsing', () => {
   test('ignores transient bounces, not-spam feedback, other event types, and mail without the recipient tag', () => {
     for (const body of [
       sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Transient', bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }),
+      sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Undetermined', bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }),
       sesEvent({ eventType: 'Complaint', complaint: { complaintFeedbackType: 'not-spam', complainedRecipients: [] } }),
       sesEvent({ eventType: 'Delivery', delivery: {} }),
       sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Permanent', bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }, {}),
@@ -41,6 +42,8 @@ describe('Email feedback parsing', () => {
   test('flags malformed events for the dead-letter queue', () => {
     for (const body of [
       'not json', '[]', JSON.stringify({ source: 'aws.ses', detail: {} }),
+      sesEvent({ eventType: 'Bounce', bounce: { bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }),
+      sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Soft', bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }),
       sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Permanent', bouncedRecipients: [] } }),
       sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Permanent', bouncedRecipients: [{ emailAddress: 'a@x' }, { emailAddress: 'b@x' }] } }),
       sesEvent({ eventType: 'Bounce', bounce: { bounceType: 'Permanent', bouncedRecipients: [{ emailAddress: 'member@example.test' }] } }, { 'mukuroji-recipient': ['%%'] }),

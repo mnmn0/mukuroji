@@ -128,8 +128,11 @@ export function parseEmailFeedback(body: string): EmailFeedback {
   let recipients: unknown
   if (type === 'Bounce') {
     if (!isRecord(detail.bounce)) return { kind: 'invalid' }
+    const { bounceType } = detail.bounce
+    // A missing or unknown type is kept for investigation instead of being dropped as harmless.
+    if (bounceType !== 'Permanent' && bounceType !== 'Transient' && bounceType !== 'Undetermined') return { kind: 'invalid' }
     // Transient and undetermined bounces may succeed later, so only a permanent one suppresses.
-    if (detail.bounce.bounceType !== 'Permanent') return { kind: 'ignore' }
+    if (bounceType !== 'Permanent') return { kind: 'ignore' }
     reason = 'bounce'
     feedback = detail.bounce
     recipients = detail.bounce.bouncedRecipients
