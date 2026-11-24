@@ -70,5 +70,5 @@ list に任せていたが、アプリからは止まったことが見えず、
 - permanent bounce と complaint の宛先には送らなくなり、row の状態とログで確かめられる。
 - SES の configuration set・EventBridge rule・SQS queue と DLQ、DLQ の alarm が 1 つずつ増える。GSI と table は
   増えない。
-- 定期レポート（#348）や Update Feed digest（#241）を Email に流す outbox の境界は、この変更に含めない。
+- 他の機能から Email に送る境界は、新しい outbox を作らず、既存の audit outbox event → collaboration projection → 配信 queue とする（Analytics の定期配信 `analytics.report.delivered` が既にこの形で、#348 の定期配信もこれで代替済み）。Update Feed の Inbox digest（#241）は in-app 専用の設計のまま Email に載せない。
 - 更新した文書: `docs/notifications.md`、`docs/operational-readiness.md`、`docs/guide/member.md`、`cdk/README.md`。
