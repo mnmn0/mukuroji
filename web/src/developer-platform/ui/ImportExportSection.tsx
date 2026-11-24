@@ -1,5 +1,10 @@
 import type { FormEvent } from 'react'
-import type { ImportDryRunReport, ImportJob, ImportJobProgress } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  type ImportDryRunReport,
+  type ImportJob,
+  type ImportJobProgress,
+} from '@mukuroji/contracts'
 import { interpolate } from '../model/displayFormatting'
 import {
   DEVELOPER_IMPORT_FILE_ACCEPT,
@@ -210,6 +215,7 @@ export function ImportExportSection({
                     {labels.fields.sourceField}
                     <input
                       className="workbench-input min-h-9 bg-surface px-3"
+                      maxLength={WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH}
                       placeholder={labels.placeholders.sourceField}
                       required
                       value={mapping.sourceField}

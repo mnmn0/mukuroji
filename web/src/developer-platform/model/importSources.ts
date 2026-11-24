@@ -1,4 +1,8 @@
-import { measureWorkItemImportContentBytes, WORK_ITEM_IMPORT_MAX_BYTES } from '@mukuroji/contracts'
+import {
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAX_BYTES,
+} from '@mukuroji/contracts'
 import type { DeveloperImportFieldMapping, DeveloperImportFormat } from './transfers'
 import { MS_PROJECT_IMPORT_COLUMNS, readMsProjectXml } from './msProjectXml'
 import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from '../../shared/lib/files/spreadsheet'
@@ -142,6 +146,8 @@ export function suggestDeveloperImportMapping(headers: readonly string[]): Devel
   const mapping: DeveloperImportFieldMapping[] = []
   const targets = new Set<string>()
   for (const header of headers) {
+    // A column name longer than a mapping field accepts is left for the person to rename.
+    if (header.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH) continue
     const target = header.startsWith('customFieldValues.')
       ? header
       : suggestedTargets.get(header.trim().toLowerCase())

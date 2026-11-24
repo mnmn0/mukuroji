@@ -8,7 +8,11 @@ import {
   type TeamWorkItemHierarchyNode,
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
-import { measureWorkItemImportContentBytes, WORK_ITEM_IMPORT_MAX_BYTES } from '@mukuroji/contracts'
+import {
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAX_BYTES,
+} from '@mukuroji/contracts'
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
 import { createMsProjectXml, readMsProjectXml } from '../src/developer-platform/model/msProjectXml'
 import { createSpreadsheetWorkbook, findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/shared/lib/files/spreadsheet'
@@ -383,6 +387,12 @@ describe('Developer Platform Work Item export', () => {
     expect(measureWorkItemImportContentBytes('\n')).toBe(3)
     expect(measureWorkItemImportContentBytes('\\')).toBe(4)
     expect(measureWorkItemImportContentBytes('あ')).toBe(3)
+  })
+
+  test('does not suggest a column whose name is longer than a mapping field accepts', () => {
+    const long = `customFieldValues.${'x'.repeat(WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH)}`
+
+    expect(suggestDeveloperImportMapping(['title', long]).map((entry) => entry.sourceField)).toEqual(['title'])
   })
 
   test('refuses a source whose escaped text exceeds the import limit', async () => {

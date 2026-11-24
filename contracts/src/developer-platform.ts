@@ -1504,6 +1504,12 @@ export function measureWorkItemImportContentBytes(content: string): number {
   return new TextEncoder().encode(JSON.stringify(inRequest)).byteLength - 2
 }
 
+/**
+ * Longest `sourceField` or `targetField`, in UTF-16 code units, that one import mapping entry
+ * accepts. It bounds the mapping, which travels beside the source in the same Lambda payload.
+ */
+export const WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH = 256
+
 /** Most source rows that one Work Item import accepts. */
 export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000
 
