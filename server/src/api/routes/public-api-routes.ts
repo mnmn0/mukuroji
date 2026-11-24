@@ -3113,8 +3113,19 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
       .resolveConflict(principal, conflictId, input)
   },
   async createLinkedResource(input) {
-    const record = await (await requireConfiguredConnectorSyncEngine()).createLinkedResource(input)
-    return { externalId: record.externalId, externalUrl: record.externalUrl }
+    const resource = await (await requireConfiguredConnectorSyncEngine()).createLinkedResource(input)
+    return {
+      externalId: resource.record.externalId,
+      externalUrl: resource.record.externalUrl,
+      baseline: resource,
+    }
+  },
+  async initializeLinkedResourceSync(input) {
+    await (await requireConfiguredConnectorSyncEngine()).initializeLinkedResourceSync({
+      workspaceId: input.workspaceId,
+      link: input.link,
+      resource: input.baseline,
+    })
   },
 }
 

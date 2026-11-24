@@ -42,6 +42,8 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
 - 予定の version は provider の ETag（Google の `etag`、Graph の `@odata.etag`）とし、更新は `If-Match` で条件付きにする。
   最後に読んだ後で予定が動いていれば `412` になり、outbound は書かずに skip する。次の poll がその変更を読み、
   Work Item も変わっていれば競合として記録する。
+- 予定を作って link を保存したら、作成に使った Work Item の revision と作成した予定を link の最初の同期状態として
+  保存する。最初の poll より前に Work Item の日付が変わっても、作成時の日付へ戻さない。
 - ETag は順序を持たないので、カレンダーの予定は保存済みの version と同じときだけ「変更なし」とみなす
   （他の connector の数値・文字列の大小比較は使わない）。
 - 競合の解決中に予定が動いた場合（`412`）は、予定を 1 件読み直して競合の外部側の値と version を新しくし、

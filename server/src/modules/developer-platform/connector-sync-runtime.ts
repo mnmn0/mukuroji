@@ -374,6 +374,24 @@ export type ConnectorSyncResult =
     conflict: WorkItemSyncConflict
   }
 
+/** Provider resource created for a new link, with the Work Item revision it was created from. */
+export type ConnectorLinkedResource = {
+  /** Created provider resource. */
+  record: ConnectorExternalRecord
+  /** Work Item revision whose contents the resource holds. */
+  workItemRevision: number
+}
+
+/** Input of {@link ConnectorSyncEngine.initializeLinkedResourceSync}. */
+export type InitializeConnectorLinkedResourceSyncInput = {
+  /** Workspace of the link. */
+  workspaceId: string
+  /** Link just created for the resource. */
+  link: ExternalWorkItemLink
+  /** Resource and Work Item revision returned by `createLinkedResource`. */
+  resource: ConnectorLinkedResource
+}
+
 /** Input of {@link ConnectorSyncEngine.createLinkedResource}. */
 export type CreateConnectorLinkedResourceInput = {
   /** Workspace of the installation. */
@@ -728,7 +746,7 @@ export class ConnectorSyncEngine {
    * @param input - Workspace, installation, Work Item, resource type, and stable operation ID.
    * @returns The created resource.
    */
-  async createLinkedResource(input: CreateConnectorLinkedResourceInput): Promise<ConnectorExternalRecord> {
+  async createLinkedResource(input: CreateConnectorLinkedResourceInput): Promise<ConnectorLinkedResource> {
     requireStableValue(input.operationId, 'Connector create operation ID')
     if (input.resourceType !== 'calendar-event') {
       throw new ConnectorRuntimeError(
@@ -789,7 +807,29 @@ export class ConnectorSyncEngine {
         'Connector created a resource of another type.',
       )
     }
-    return record
+    return { record, workItemRevision: workItem.revision }
+  }
+
+  /**
+   * Records the created resource and the Work Item revision it came from as the link's first
+   * synchronized state. Without it, the first poll would take the Work Item's current revision as
+   * the baseline and move the Work Item back to the dates the event was created with.
+   *
+   * @param input - New link and the resource created for it.
+   * @returns Nothing; a link that already has a state, for example from a poll, keeps it.
+   */
+  async initializeLinkedResourceSync(input: InitializeConnectorLinkedResourceSyncInput): Promise<void> {
+    validateLinkRecordBinding(input.link, input.resource.record)
+    const persisted = await this.persistence.getLinkState(input.workspaceId, input.link.id)
+    if (persisted) return
+    await this.persistence.commitLinkState({
+      workspaceId: input.workspaceId,
+      link: input.link,
+      workItemRevision: input.resource.workItemRevision,
+      externalRecord: createPersistedConnectorExternalRecord(input.resource.record),
+      syncedAt: this.clock().toISOString(),
+      deferLinkStatus: true,
+    })
   }
 
   /** Provider pages を bounded に poll し、既存 links だけを inbound sync します。 */

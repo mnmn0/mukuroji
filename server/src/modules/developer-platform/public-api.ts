@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
+  type ExternalWorkItemLink,
   isWorkItemProgressPercent,
   measureWorkItemImportContentBytes,
   WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
@@ -112,6 +113,7 @@ import type {
   WebhookDeliveryPort,
   WebhookSubscriptionPort,
 } from './application/ports'
+import type { ConnectorLinkedResource } from './connector-sync-runtime'
 import { readCredentialPrincipalKey } from './credential-principal'
 import { DeveloperPlatformError } from './errors'
 import {
@@ -945,7 +947,21 @@ export interface ConnectorAuthorizationService {
     externalId: string
     /** Provider URL of the resource. */
     externalUrl: string
+    /** First synchronized state, passed back to `initializeLinkedResourceSync`. */
+    baseline?: ConnectorLinkedResource
   }>
+  /**
+   * Records the first synchronized state of a link whose resource `createLinkedResource` just
+   * created, so the first poll compares against the Work Item the resource was created from.
+   */
+  initializeLinkedResourceSync?(input: {
+    /** Workspace of the link. */
+    workspaceId: string
+    /** Created link. */
+    link: ExternalWorkItemLink
+    /** `baseline` returned by `createLinkedResource`. */
+    baseline: ConnectorLinkedResource
+  }): Promise<void>
 }
 
 /** External ports and request-bound services required by the management and public API router. */
@@ -1749,14 +1765,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     await dependencies.workItems.authorizeExternalLink(credential, teamId, workItemId, true)
     return executeIdempotentJson(c, dependencies, credential, body, async (_context, idempotency) => ({
       status: 201,
-      body: await dependencies.externalLinks.createExternalWorkItemLink({
-        workspaceId: credential.workspaceId,
-        input: {
-          ...await resolveExternalLinkTarget(dependencies, credential.workspaceId, teamId, workItemId, body, idempotency),
-          teamId,
-          workItemId,
-        },
-      }),
+      body: await createExternalLinkWithTarget(
+        dependencies,
+        credential.workspaceId,
+        teamId,
+        workItemId,
+        body,
+        idempotency,
+      ),
     }))
   })
 
@@ -2628,21 +2644,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     return executeManagementIdempotentJson(c, dependencies, principal, body, async (_context, idempotency) => ({
       status: 201,
-      body: await dependencies.externalLinks.createExternalWorkItemLink({
-        workspaceId: principal.workspaceId,
-        input: {
-          ...await resolveExternalLinkTarget(
-            dependencies,
-            principal.workspaceId,
-            body.teamId,
-            workItemId,
-            body,
-            idempotency,
-          ),
-          teamId: body.teamId,
-          workItemId,
-        },
-      }),
+      body: await createExternalLinkWithTarget(
+        dependencies,
+        principal.workspaceId,
+        body.teamId,
+        workItemId,
+        body,
+        idempotency,
+      ),
     }))
   })
 
@@ -4243,6 +4252,44 @@ function readExternalLinkResourceType(
 }
 
 /**
+ * Creates an external link, first creating its provider resource when the request names none,
+ * and records that resource as the link's first synchronized state.
+ *
+ * @param dependencies - Router dependencies.
+ * @param workspaceId - Workspace of the request.
+ * @param teamId - Team of the Work Item.
+ * @param workItemId - Work Item.
+ * @param body - Validated link fields.
+ * @param idempotency - Request idempotency token.
+ * @returns The created link.
+ */
+async function createExternalLinkWithTarget<
+  TBody extends ReturnType<typeof readExternalLinkFields>,
+>(
+  dependencies: PublicApiDependencies,
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  body: TBody,
+  idempotency: IdempotencyMutationToken,
+) {
+  const target = await resolveExternalLinkTarget(dependencies, workspaceId, teamId, workItemId, body, idempotency)
+  const link = await dependencies.externalLinks.createExternalWorkItemLink({
+    workspaceId,
+    input: { ...target.fields, teamId, workItemId },
+  })
+  const initialize = dependencies.connectorAuthorization?.initializeLinkedResourceSync
+  if (target.baseline && initialize) {
+    await initialize.call(dependencies.connectorAuthorization, {
+      workspaceId,
+      link,
+      baseline: target.baseline,
+    })
+  }
+  return link
+}
+
+/**
  * Returns the provider resource a new link points to, creating the calendar event first when the
  * request leaves it out.
  *
@@ -4252,7 +4299,8 @@ function readExternalLinkResourceType(
  * @param workItemId - Work Item.
  * @param body - Validated link fields.
  * @param idempotency - Request idempotency token; it makes the provider create idempotent.
- * @returns The link fields with the resource ID and URL.
+ * @returns The link fields with the resource ID and URL, and the first synchronized state of a
+ * resource created here.
  */
 async function resolveExternalLinkTarget<
   TBody extends ReturnType<typeof readExternalLinkFields>,
@@ -4266,7 +4314,7 @@ async function resolveExternalLinkTarget<
 ) {
   const { externalId, externalUrl, ...rest } = body
   if (externalId !== undefined && externalUrl !== undefined) {
-    return { ...rest, externalId, externalUrl }
+    return { fields: { ...rest, externalId, externalUrl }, baseline: undefined }
   }
   if (body.resourceType !== 'calendar-event') {
     throw new PublicApiServiceError(400, 'validation_failed', 'externalId and externalUrl are required.')
@@ -4294,11 +4342,14 @@ async function resolveExternalLinkTarget<
       .digest('hex'),
   })
   return {
-    ...rest,
-    // Provider IDs, such as Microsoft Graph's, use characters a client-sent ID may not; the link
-    // store still bounds their length and characters.
-    externalId: resource.externalId,
-    externalUrl: readHttpsUrl(resource.externalUrl, 'externalUrl'),
+    fields: {
+      ...rest,
+      // Provider IDs, such as Microsoft Graph's, use characters a client-sent ID may not; the link
+      // store still bounds their length and characters.
+      externalId: resource.externalId,
+      externalUrl: readHttpsUrl(resource.externalUrl, 'externalUrl'),
+    },
+    baseline: resource.baseline,
   }
 }
 

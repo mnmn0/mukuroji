@@ -215,7 +215,7 @@ async function linkNewEvent(
   fixture: Awaited<ReturnType<typeof createCalendarFixture>>,
   syncDirection: 'outbound' | 'bidirectional' = 'bidirectional',
 ) {
-  const record = await fixture.engine.createLinkedResource({
+  const { record } = await fixture.engine.createLinkedResource({
     workspaceId: 'workspace-1',
     installationId: fixture.installation.id,
     teamId: 'team-1',
@@ -288,9 +288,10 @@ describe('calendar connectors (ADR 0089)', () => {
       resourceType: 'calendar-event',
       operationId: 'create-operation-1',
     })
-    expect(retried.externalId).toBe(first.externalId)
+    expect(retried.record.externalId).toBe(first.record.externalId)
+    expect(retried.workItemRevision).toBe(3)
     expect(fixture.google.events.size).toBe(1)
-    expect(first).toMatchObject({
+    expect(first.record).toMatchObject({
       resourceType: 'calendar-event',
       schedule: { startDate: '2026-11-30', endDate: '2026-11-30' },
       title: 'Ship the release',
@@ -302,6 +303,48 @@ describe('calendar connectors (ADR 0089)', () => {
       start: { date: '2026-11-30' },
       end: { date: '2026-12-01' },
       extendedProperties: { private: { mukurojiManaged: '1' } },
+    })
+  })
+
+  test('keeps dates changed between creating the event and the first poll', async () => {
+    const fixture = await createCalendarFixture()
+    const resource = await fixture.engine.createLinkedResource({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      resourceType: 'calendar-event',
+      operationId: 'create-operation-1',
+    })
+    const link = await fixture.platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: fixture.installation.id,
+        resourceType: 'calendar-event',
+        externalId: resource.record.externalId,
+        externalUrl: resource.record.externalUrl,
+        syncDirection: 'inbound',
+      },
+    })
+    await fixture.engine.initializeLinkedResourceSync({ workspaceId: 'workspace-1', link, resource })
+    // The Work Item moves before the first poll; the unchanged event must not move it back.
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: 4,
+      schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
+    })
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(fixture.patches).toEqual([])
+    expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-05' })
+    expect(await fixture.persistence.getLinkState('workspace-1', link.id)).toMatchObject({
+      workItemRevision: 3,
+      lastExternalVersion: resource.record.externalVersion,
     })
   })
 
