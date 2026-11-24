@@ -137,6 +137,7 @@ export async function resolveDeveloperCredentialPrincipal(
     ? await readEnterpriseScopeDirectory(
         workspaceDependencies.projectDirectory,
         credential.workspaceId,
+        [...compatibleRoleAssignments, ...compatibleGroupMappings],
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory

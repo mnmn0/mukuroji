@@ -1044,6 +1044,7 @@ export async function authenticateWorkspacePrincipal(
     ? await readEnterpriseScopeDirectory(
         workspaceDependencies.projectDirectory,
         principal.directoryId,
+        [...compatibleRoleAssignments, ...compatibleGroupMappings],
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
@@ -1334,6 +1335,7 @@ async function authenticateEnterpriseServiceAccount(
         ? await readEnterpriseScopeDirectory(
             workspaceDependencies.projectDirectory,
             workspaceId,
+            [...serviceAccountAssignments, ...snapshot.groupMappings],
           )
         : undefined
       const qualifiedServiceAccountAssignments = enterpriseDirectory

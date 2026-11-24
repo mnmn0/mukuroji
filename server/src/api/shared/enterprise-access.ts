@@ -582,22 +582,25 @@ export function hasDirectoryDependentEnterpriseScope(
 }
 
 /**
- * Reads the active Project Directory and the OrgUnit structure strongly consistently, for
- * resolving Enterprise scopes.
+ * Reads the active Project Directory strongly consistently for resolving Enterprise scopes, with
+ * the OrgUnit structure only when an OrgUnit scope needs it.
  *
  * @param projectDirectory - Project Directory port.
  * @param workspaceId - Workspace whose directory is read.
- * @returns The directory with its OrgUnit structure.
+ * @param entries - Assignment or group-mapping records whose scopes are resolved.
+ * @returns The directory, with its OrgUnit structure when any entry has an OrgUnit scope.
  */
 export async function readEnterpriseScopeDirectory(
   projectDirectory: Pick<ProjectDirectoryClient, 'getProjectDirectory' | 'getOrgStructure'>,
   workspaceId: string,
+  entries: readonly { scope: EnterpriseRoleScope }[],
 ): Promise<EnterpriseScopeDirectory> {
+  const needsOrgStructure = entries.some((entry) => entry.scope.kind === 'org-unit')
   const [directory, orgStructure] = await Promise.all([
     projectDirectory.getProjectDirectory(workspaceId, 'ja', true),
-    projectDirectory.getOrgStructure(workspaceId, true),
+    needsOrgStructure ? projectDirectory.getOrgStructure(workspaceId, true) : undefined,
   ])
-  return { ...directory, orgStructure }
+  return orgStructure ? { ...directory, orgStructure } : directory
 }
 
 /**
@@ -606,8 +609,9 @@ export async function readEnterpriseScopeDirectory(
  * Project scopes are qualified by their unique owner Team, as in
  * {@link qualifyEnterpriseProjectScopes}. Each OrgUnit scope is replaced by one Team scope for
  * every active Team that belongs to the OrgUnit or to an OrgUnit below it (ADR 0097). An OrgUnit
- * scope without a structure, for an unknown OrgUnit, or with no active Team is dropped, so it
- * grants nothing.
+ * scope without a structure, for an unknown OrgUnit, or with no active Team is kept unexpanded:
+ * it matches no resource, yet still counts as an assignment, so the member does not fall back to
+ * the permissions of their legacy Workspace role.
  *
  * @param entries - Assignment or group-mapping records carrying an Enterprise scope.
  * @param directory - Current active directory with its OrgUnit structure.
@@ -621,13 +625,14 @@ export function resolveEnterpriseDirectoryScopes<T extends { scope: EnterpriseRo
   return qualifyEnterpriseProjectScopes(entries, directory).flatMap((entry) => {
     if (entry.scope.kind !== 'org-unit') return [entry]
     const orgUnitId = entry.scope.targetId
-    if (!directory.orgStructure || orgUnitId === undefined) return []
-    return listOrgUnitTeamIds(directory.orgStructure, orgUnitId)
+    if (!directory.orgStructure || orgUnitId === undefined) return [entry]
+    const expanded = listOrgUnitTeamIds(directory.orgStructure, orgUnitId)
       .filter((teamId) => activeTeamIds.has(teamId))
       .map((teamId) => ({
         ...entry,
         scope: { workspaceId: entry.scope.workspaceId, kind: 'team' as const, targetId: teamId },
       }))
+    return expanded.length > 0 ? expanded : [entry]
   })
 }
 

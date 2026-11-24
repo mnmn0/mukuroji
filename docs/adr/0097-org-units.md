@@ -29,7 +29,9 @@ Team ごとに割り当てるか、Workspace 全体に広げるしかなかっ�
 - 認可の評価では、OrgUnit の scope を、その OrgUnit と配下の OrgUnit に所属する**有効な** Team の Team scope に展開してから
   既存の評価器へ渡す。展開は Project scope の Team 解決と同じ箇所（directory の一貫性のある読み取り）で行う。
   評価器（`scopeMatches`）は展開されていない `org-unit` scope に一致しない。構造を読めない経路や展開しない経路では
-  OrgUnit のロールは何も許可しない（deny by default）。
+  OrgUnit のロールは何も許可しない（deny by default）。構造がない、OrgUnit が消えた、有効な Team がないなどで
+  展開できない scope は、展開せずに残す。何にも一致しないが割り当てとしては数えるので、そのメンバーが
+  元の Workspace ロールの権限に戻ることはない。
 - 部門別の集計は、既存の Team ごとの portfolio 読み取りを Web で OrgUnit の配下ごとに合計する。新しい集計 API は作らない。
 - テナント削除では、既存の sidecar と同じく Workspace ごとの partition を削除対象の末尾に加える。データ整合性検査では
   `org-structure` 行を既知の補助行として検証する。

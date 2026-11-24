@@ -105,16 +105,22 @@ test('lets an OrgUnit manager act on its Teams and their Projects and denies eve
 test('denies by default when an OrgUnit scope cannot be resolved', () => {
   // Unexpanded, the evaluator never matches an OrgUnit scope.
   expect(allows([salesManager], { workspaceId, kind: 'team', targetId: 'east-team' })).toBe(false)
-  // Without a structure, for an unknown OrgUnit, or for an OrgUnit without Teams, nothing remains.
-  expect(resolveEnterpriseDirectoryScopes([salesManager], { teams: directory.teams })).toEqual([])
-  expect(resolveEnterpriseDirectoryScopes([{
+  // Without a structure, for an unknown OrgUnit, or for an OrgUnit without Teams, the scope stays
+  // unexpanded: it still counts as the member's assignment, so no legacy Workspace role applies,
+  // and it matches nothing.
+  const deletedUnit: EnterpriseRoleAssignment = {
     ...salesManager,
     scope: { workspaceId, kind: 'org-unit', targetId: 'deleted-unit' },
-  }], directory)).toEqual([])
-  expect(resolveEnterpriseDirectoryScopes([{
-    ...salesManager,
-    scope: { workspaceId, kind: 'org-unit' },
-  }], directory)).toEqual([])
+  }
+  const missingTarget: EnterpriseRoleAssignment = { ...salesManager, scope: { workspaceId, kind: 'org-unit' } }
+  expect(resolveEnterpriseDirectoryScopes([salesManager], { teams: directory.teams })).toEqual([salesManager])
+  expect(resolveEnterpriseDirectoryScopes([deletedUnit], directory)).toEqual([deletedUnit])
+  expect(resolveEnterpriseDirectoryScopes([missingTarget], directory)).toEqual([missingTarget])
+  for (const unresolved of [salesManager, deletedUnit, missingTarget]) {
+    const kept = resolveEnterpriseDirectoryScopes([unresolved], { teams: directory.teams })
+    expect(allows(kept, { workspaceId, kind: 'team', targetId: 'east-team' })).toBe(false)
+    expect(allows(kept, { workspaceId, kind: 'workspace' }, 'workspace.manage')).toBe(false)
+  }
 })
 
 test('leaves Workspace and Team scopes untouched and needs no directory for them', () => {

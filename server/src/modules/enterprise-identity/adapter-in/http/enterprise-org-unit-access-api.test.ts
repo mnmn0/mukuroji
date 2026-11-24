@@ -163,6 +163,21 @@ test('grants nothing through an OrgUnit role when the Workspace has no OrgUnit s
 
     expect((await send('/api/teams/east-team/issues')).status).toBe(403)
     expect((await send('/api/teams/core-team/issues')).status).toBe(403)
+    // The unresolved assignment still replaces the legacy member role, so the member listing that
+    // a plain member may read (`members.read`) stays denied instead of falling back to it.
+    expect((await send('/api/workspace/access')).status).toBe(403)
+  })
+})
+
+test('does not fall back to the legacy Workspace role when an OrgUnit has no active Team', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    await configureOrgUnitRole('org-unit:manager', {
+      ...orgStructure,
+      teamAssignments: orgStructure.teamAssignments.filter((assignment) => assignment.orgUnitId === 'engineering'),
+    })
+
+    expect((await send('/api/teams/east-team/issues')).status).toBe(403)
+    expect((await send('/api/workspace/access')).status).toBe(403)
   })
 })
 

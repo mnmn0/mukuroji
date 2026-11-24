@@ -586,6 +586,7 @@ async function requirePlanningCadenceRecipientTargetPermission(
     ? await readEnterpriseScopeDirectory(
         workspaceDependencies.projectDirectory,
         principal.directoryId,
+        [...directoryPrincipal.compatibleRoleAssignments, ...directoryPrincipal.compatibleGroupMappings],
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
