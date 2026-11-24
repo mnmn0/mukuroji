@@ -103,6 +103,7 @@ export function createWebPushNotificationSender(options: WebPushNotificationSend
     const plaintext = Buffer.from(JSON.stringify(renderPushNotification(delivery, options.appOrigin, locale)))
     const outcomes: DeviceOutcome[] = []
     let retryAfterMs = 0
+    let cleanupFailed = false
     const pending = [...devices]
     // A few workers share the deadline, so a stalled device never keeps the others from being tried.
     const worker = async () => {
@@ -113,15 +114,24 @@ export function createWebPushNotificationSender(options: WebPushNotificationSend
         if (result.outcome === 'gone') {
           try {
             await options.devices.removeGoneDevice(delivery.workspaceId, delivery.memberKey, device, signal)
-          } catch { /* The next delivery reports the same status and removes it again. */ }
+          } catch {
+            // The gone device is still registered, so the delivery is retried and the removal with it.
+            cleanupFailed = true
+            outcomes.push('retryable')
+            continue
+          }
         }
         outcomes.push(result.outcome)
       }
     }
     await Promise.all(Array.from({ length: Math.min(DEVICE_CONCURRENCY, devices.length) }, worker))
+    // An accepting device ends the delivery; a gone device left behind is removed on the next one.
     if (outcomes.includes('accepted')) return { succeeded: true, retryable: false }
     if (outcomes.includes('retryable')) {
-      return { succeeded: false, retryable: true, code: 'PushDeliveryUnavailable', ...(retryAfterMs ? { retryAfterMs } : {}) }
+      return {
+        succeeded: false, retryable: true, code: cleanupFailed ? 'PushCleanupUnavailable' : 'PushDeliveryUnavailable',
+        ...(retryAfterMs ? { retryAfterMs } : {}),
+      }
     }
     // A corrupt registration is kept for an operator and fails loudly instead of being deleted.
     if (outcomes.includes('invalid')) return { succeeded: false, retryable: false, code: 'PushSubscriptionInvalid' }
