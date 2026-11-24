@@ -132,6 +132,10 @@ export type CalendarFeedReadResult =
       kind: 'not-found'
     }
   | {
+      /** The owner's open Work Items do not fit in the read budget, so the feed would be incomplete. */
+      kind: 'too-large'
+    }
+  | {
       /** Too many requests for the feed. */
       kind: 'rate-limited'
       /** Seconds until the window resets. */
@@ -175,6 +179,7 @@ export async function readCalendarFeedUseCase<AuditContext, Completion>(
     return body === undefined ? { kind: 'not-found' } : { kind: 'feed', body }
   } catch (error) {
     if (error instanceof CalendarFeedError && error.category === 'not-found') return { kind: 'not-found' }
+    if (error instanceof CalendarFeedError && error.category === 'limit-exceeded') return { kind: 'too-large' }
     throw error
   }
 }
@@ -244,11 +249,12 @@ function feedProject(record: CalendarFeedRecord) {
  * Reads the feed's Work Items. Every page read counts toward the Planning scope, scheduled or
  * not; only scheduled Work Items become events, at most {@link CALENDAR_FEED_WORK_ITEM_LIMIT}.
  * Reading stops after {@link CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT} pages so one feed cannot read the
- * whole Workspace.
+ * whole Workspace; a feed that still has pages left fails instead of serving a partial calendar.
  *
  * @param view - Owner view.
  * @param filter - Feed filter.
  * @returns Scheduled Work Items and the Projects and Teams of all read Work Items.
+ * @throws CalendarFeedError `limit-exceeded` when pages remain after the page limit.
  */
 async function readFeedWorkItems(view: CalendarFeedOwnerView, filter: CalendarFeedWorkItemFilter) {
   const scheduled: CalendarFeedWorkItemRow[] = []
@@ -265,9 +271,13 @@ async function readFeedWorkItems(view: CalendarFeedOwnerView, filter: CalendarFe
       }
     }
     cursor = result.nextCursor
-    if (!cursor) break
+    if (!cursor) return { scheduled, projectKeys, teamIds }
   }
-  return { scheduled, projectKeys, teamIds }
+  throw new CalendarFeedError(
+    'limit-exceeded',
+    'CalendarFeedTooLarge',
+    'Calendar feed has more Work Items than one read can evaluate.',
+  )
 }
 
 /**

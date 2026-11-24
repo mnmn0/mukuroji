@@ -109,3 +109,13 @@ test('sends the feed requests and validates their responses', async () => {
   })
   expect(listCalendarFeeds('token')).rejects.toMatchObject({ status: 502 })
 })
+
+test('keeps an interrupted response body retryable', async () => {
+  const interrupted = new Response(new ReadableStream({
+    start(controller) {
+      controller.error(new Error('connection reset'))
+    },
+  }), { status: 201 })
+  globalThis.fetch = Object.assign(async () => interrupted, { preconnect: originalFetch.preconnect })
+  await expect(listCalendarFeeds('token')).rejects.toMatchObject({ status: 0 })
+})

@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { CALENDAR_FEED_PROJECT_LIMIT } from '@mukuroji/contracts'
 import { InMemoryCalendarFeedStore } from './adapter-out/dynamodb/calendar-feed-store'
 import {
+  CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT,
   readCalendarFeedUseCase,
   type CalendarFeedOwnerView,
   type CalendarFeedPlanningRow,
@@ -186,6 +187,30 @@ test('keeps the Milestones of a Project whose member tasks have no dates', async
   // Only the dated task becomes an event.
   expect(result.body).toContain('A-2')
   expect(result.body).not.toContain('A-1 ')
+})
+
+test('fails instead of serving a partial feed when Work Item pages remain', async () => {
+  const store = new InMemoryCalendarFeedStore()
+  const issued = await issueCalendarFeedUseCase(store, owner, { kind: 'member' }, {
+    now: '2026-11-24T00:00:00.000Z',
+    canReadProject,
+  })
+  let pages = 0
+  const reader: CalendarFeedReader = {
+    openOwnerView: async () => ({
+      memberKeys: [owner.memberKey],
+      async readWorkItemPage() {
+        pages += 1
+        return { workItems: [], nextCursor: `cursor-${pages}` }
+      },
+      readPlanningEntities: async () => [],
+    }),
+    readTimeZone: async () => 'Asia/Tokyo',
+    consumeRateLimit: async () => ({ allowed: true }),
+  }
+  const token = issued.feedPath.split('/').at(-1)
+  expect(await readCalendarFeedUseCase(store, reader, token, new Date())).toEqual({ kind: 'too-large' })
+  expect(pages).toBe(CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT)
 })
 
 test('answers not found when the owner loses access during a read, and reports a rate limit', async () => {

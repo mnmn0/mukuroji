@@ -35,6 +35,7 @@
 - 応答は終日の `VALUE=DATE` event だけにする（Work Item・マイルストーン・Cycle はすべて日付だけで持つ）。
   Workspace の time zone は `X-WR-TIMEZONE` に書く。未完了で日付のある Work Item を最大 1,000 件、
   マイルストーンと Cycle を最大 300 件、Work Item の読み取りは最大 10 page までにする。
+  10 page で読み切れないときは、予定の欠けたカレンダーを返さずに `413` を返す。
 - 1 つのフィードは 5 分に 30 回までとし、既存の Developer Platform の rate limit 表を使う。
   `Cache-Control: private, max-age=300`、`Referrer-Policy: no-referrer`、`X-Robots-Tag: noindex` を付ける。
 - Google / Outlook の API に書き込む provider 固有の同期（#352 の第 2 段階）はこの判断に含めない。
