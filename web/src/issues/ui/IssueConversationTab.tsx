@@ -196,6 +196,7 @@ export function IssueConversationTab({
   const [editDraft, setEditDraft] = useState<TargetedCommentComposerDraft>()
   const replyingToId = replyDraft?.commentId
   const editingId = editDraft?.commentId
+  const pendingAttachmentUploadsRef = useRef(0)
   const draftStateRef = useRef<{
     /** Current root composer slot used by asynchronous ownership checks. */
     root: CommentComposerDraft
@@ -267,6 +268,17 @@ export function IssueConversationTab({
     return true
   }
 
+  /**
+   * Counts attachment uploads in progress in any composer, so the conversation reports itself
+   * dirty and stays mounted until each reference has been inserted.
+   *
+   * @param isUploading - Whether one composer's uploads started or finished.
+   */
+  function trackAttachmentUpload(isUploading: boolean) {
+    pendingAttachmentUploadsRef.current = Math.max(0, pendingAttachmentUploadsRef.current + (isUploading ? 1 : -1))
+    reportDraftDirty(draftStateRef.current.root, draftStateRef.current.reply, draftStateRef.current.edit)
+  }
+
   /** Releases a slot only when the completion belongs to its active request. */
   function finishSlotSubmission(slot: CommentComposerSlot, lifetimeId: number) {
     if (pendingSlotLifetimesRef.current[slot] !== lifetimeId) return
@@ -279,7 +291,8 @@ export function IssueConversationTab({
       onDraftDirtyChange?.(
         current.root.isDirty ||
         Boolean(current.reply?.isDirty || current.edit?.isDirty) ||
-        Object.keys(pendingSlotLifetimesRef.current).length > 0,
+        Object.keys(pendingSlotLifetimesRef.current).length > 0 ||
+        pendingAttachmentUploadsRef.current > 0,
       )
     }
   }
@@ -304,7 +317,8 @@ export function IssueConversationTab({
       onDraftDirtyChange?.(
         nextRoot.isDirty ||
         Boolean(nextReply?.isDirty || nextEdit?.isDirty) ||
-        Object.keys(pendingSlotLifetimesRef.current).length > 0,
+        Object.keys(pendingSlotLifetimesRef.current).length > 0 ||
+        pendingAttachmentUploadsRef.current > 0,
       )
     }
   }
@@ -682,6 +696,7 @@ export function IssueConversationTab({
           <CommentComposer
             artifacts={artifacts}
             key="root-comment-composer"
+            onAttachmentUploadingChange={trackAttachmentUpload}
             onInsertAttachment={(lifetimeId, insertion) => insertDraftAttachment('root', lifetimeId, insertion)}
             labelKey="collaboration.composer.label"
             members={members}
@@ -1005,6 +1020,7 @@ export function IssueConversationTab({
                 readOnlyMessage={readOnlyMessage}
                 onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
                 onInsertDraftAttachment={insertDraftAttachment}
+                onAttachmentUploadingChange={trackAttachmentUpload}
                 onEditConflictRetry={handleEditConflictRetry}
                 onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                 replyDraft={replyDraft?.commentId === thread.root.id ? replyDraft : undefined}
@@ -1038,6 +1054,7 @@ export function IssueConversationTab({
                       readOnlyMessage={readOnlyMessage}
                       onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
                       onInsertDraftAttachment={insertDraftAttachment}
+                onAttachmentUploadingChange={trackAttachmentUpload}
                       onEditConflictRetry={handleEditConflictRetry}
                       onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                       replyDraft={replyDraft?.commentId === reply.id ? replyDraft : undefined}
@@ -1153,6 +1170,8 @@ type CommentCardProps = {
   finishSlotSubmission: (slot: CommentComposerSlot, lifetimeId: number) => void
   /** Retains raw edit text after a comment refresh or tab switch. */
   onEditDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
+  /** Tells the draft owner when a reply or edit composer's uploads start and finish. */
+  onAttachmentUploadingChange: (isUploading: boolean) => void
   /** Inserts an uploaded attachment reference into the reply or edit slot it started in. */
   onInsertDraftAttachment: (slot: 'edit' | 'reply', lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /** Explicitly adopts the displayed canonical revision for a conflict retry. */
@@ -1269,6 +1288,7 @@ function CommentCard({
   onDeleteConfirmationChange,
   onAcceptResolution,
   onEditDraftChange,
+  onAttachmentUploadingChange,
   onInsertDraftAttachment,
   onEditConflictRetry,
   onEditingChange,
@@ -1372,6 +1392,7 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={editDraft}
+                onAttachmentUploadingChange={onAttachmentUploadingChange}
                 onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('edit', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.edit !== undefined}
                 key={`edit-${comment.id}`}
@@ -1562,6 +1583,7 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={replyDraft}
+                onAttachmentUploadingChange={onAttachmentUploadingChange}
                 onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('reply', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.reply !== undefined}
                 key={`reply-${comment.id}`}
@@ -2039,6 +2061,10 @@ type CommentComposerProps = {
    */
   onInsertAttachment?: (lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /**
+   * Tells the draft owner when this composer's uploads start and finish.
+   */
+  onAttachmentUploadingChange?: (isUploading: boolean) => void
+  /**
    * textarea に表示する label key です。
    */
   labelKey: MessageKey
@@ -2083,6 +2109,7 @@ type CommentComposerProps = {
 function CommentComposer({
   artifacts,
   draft,
+  onAttachmentUploadingChange,
   onInsertAttachment,
   externallySubmitting = false,
   labelKey,
@@ -2118,6 +2145,7 @@ function CommentComposer({
     controller: onInsertAttachment ? artifacts : undefined,
     disabled: isSubmitting || externallySubmitting,
     onInsert: insertAttachment,
+    onUploadingChange: onAttachmentUploadingChange,
   })
 
   /** Applies one atomic body-and-mention update to the persistent composer slot. */

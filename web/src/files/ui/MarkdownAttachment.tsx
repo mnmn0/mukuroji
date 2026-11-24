@@ -50,6 +50,8 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
   const version = file ? findInlineImageVersion(file) : undefined
   // Bumped once when a loaded URL stops working, for example a lazy image shown after it expired.
   const [attempt, setAttempt] = useState(0)
+  // Set when the image still fails to load after one fresh URL; the viewer can retry by hand.
+  const [imageFailedAttempt, setImageFailedAttempt] = useState<number>()
   const access = useFileVersionInlineUrl(attachments?.controller, file, version, attempt)
 
   const t = attachments?.t
@@ -60,14 +62,18 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
   if (!version) {
     return <AttachmentPlaceholder>{describeHiddenVersion(file, t)}</AttachmentPlaceholder>
   }
-  if (access.failed) {
+  const retry = () => {
+    setImageFailedAttempt(undefined)
+    setAttempt((current) => current + 1)
+  }
+  if (access.failed || imageFailedAttempt === attempt) {
     return (
       <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
         <AttachmentPlaceholder>{t('files.markdown.unavailable')}</AttachmentPlaceholder>
         <button
           className="min-h-7 rounded px-2 text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 hover:bg-[var(--workbench-surface-muted)]"
           data-testid={`markdown-attachment-retry-${file.id}`}
-          onClick={access.retry}
+          onClick={retry}
           type="button"
         >
           {t('files.markdown.retry')}
@@ -87,6 +93,7 @@ export function MarkdownAttachmentImage({ alt, attachments, fileId }: MarkdownAt
       loading="lazy"
       onError={() => {
         if (attempt === 0) setAttempt(1)
+        else setImageFailedAttempt(attempt)
       }}
       referrerPolicy="no-referrer"
       src={access.url}
