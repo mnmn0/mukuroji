@@ -132,6 +132,40 @@ describe('Document drafts', () => {
     })
   })
 
+  /** Verifies Whiteboard operations naming connectors, frames, or relations that are gone are fitted. */
+  test('drops changes to connectors, frames, and relations that no longer exist', () => {
+    const relation = {
+      createdAt: '2026-11-24T00:00:00.000Z',
+      createdByUserId: 'member-a',
+      id: 'relation-1',
+      source: { kind: 'whiteboard-object', objectId: 'board-note' },
+      target: { kind: 'work-item', workItemId: 'launch-review' },
+    }
+    const kept = [
+      // Gone before the member came back.
+      { connectorId: 'connector-gone', operationId: 'operation-1', type: 'delete-connector' },
+      { frameId: 'frame-gone', operationId: 'operation-2', type: 'delete-frame' },
+      { operationId: 'operation-3', relationId: 'relation-gone', type: 'delete-relation' },
+      { connector: { from: { objectId: 'object-gone' }, id: 'connector-new', to: { objectId: 'board-note' } }, operationId: 'operation-4', type: 'upsert-connector' },
+      { frame: { bounds: { height: 1, width: 1, x: 0, y: 0 }, id: 'board-frame', objectIds: ['board-note', 'object-gone'], title: 'Launch' }, operationId: 'operation-5', type: 'upsert-frame' },
+      { operationId: 'operation-6', relation, type: 'upsert-relation' },
+      // Deleting the note also removes the connector and the relation that point at it.
+      { objectId: 'board-note', operationId: 'operation-7', type: 'delete-object' },
+      { connectorId: 'board-connector', operationId: 'operation-8', type: 'delete-connector' },
+      { operationId: 'operation-9', relationId: 'relation-1', type: 'delete-relation' },
+      { frameId: 'board-frame', operationId: 'operation-10', type: 'delete-frame' },
+    ]
+    const draft = parseDocumentSessionDraft({ baseRevision: 7, operations: kept })
+    if (!draft) throw new Error('The draft should parse.')
+
+    expect(recoverDocumentSessionDraftOperations(whiteboardRecordFixture, draft.operations).operations).toEqual([
+      { ...kept[4], frame: { ...kept[4]!.frame, objectIds: ['board-note'] } },
+      kept[5],
+      kept[6],
+      kept[9],
+    ])
+  })
+
   /** Verifies kept positions past the blocks that remain are sent as positions the API accepts. */
   test('moves inserts and moves past the remaining blocks to the end', () => {
     const blockCount = documentRecordFixture.kind === 'page' ? documentRecordFixture.blocks.length : 0
@@ -164,6 +198,14 @@ describe('Document drafts', () => {
     expect(parseDocumentSessionDraft({ baseRevision: 7, operations: [{ ...blockUpdate, operationId: '' }] }))
       .toBeUndefined()
     expect(parseDocumentSessionDraft({ baseRevision: -1, operations: [blockUpdate] })).toBeUndefined()
+    expect(parseDocumentSessionDraft({
+      baseRevision: 7,
+      operations: [{ connector: { from: { objectId: 'a' }, id: 'c' }, operationId: 'operation-1', type: 'upsert-connector' }],
+    })).toBeUndefined()
+    expect(parseDocumentSessionDraft({
+      baseRevision: 7,
+      operations: [{ frame: { id: 'f', objectIds: 'a' }, operationId: 'operation-1', type: 'upsert-frame' }],
+    })).toBeUndefined()
     expect(parseDocumentSessionDraft({ baseRevision: 7, operations: [] })).toBeUndefined()
   })
 })

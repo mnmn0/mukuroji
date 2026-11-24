@@ -1,4 +1,4 @@
-import type { DocumentOperation } from '@mukuroji/contracts'
+import type { DocumentOperation, DocumentRelationSource, WhiteboardConnector } from '@mukuroji/contracts'
 import type { DocumentRecord } from '../api'
 
 /**
@@ -88,8 +88,10 @@ export type RecoveredDocumentSessionDraftOperations = {
  * Someone else may have deleted a block or Whiteboard object while the session was over. An
  * update to it would be ignored on screen and refused by the Document API, so the edited block
  * or object is added back instead: a block at the end of the page, an object on the board.
- * Moving or deleting an element that is already gone is dropped, and a kept position past the
- * blocks that remain is moved to the end.
+ * The Document API refuses a whole batch when one operation names an element that is gone, so
+ * moving or deleting an element that is already gone is dropped, a connector or relation whose
+ * element is gone is dropped, a frame keeps only the objects that remain, and a kept position
+ * past the blocks that remain is moved to the end.
  *
  * @param document - Current Document the operations are restored onto.
  * @param operations - Kept operations, in the order they were made.
@@ -99,59 +101,132 @@ export function recoverDocumentSessionDraftOperations(
   document: DocumentRecord,
   operations: readonly DocumentOperation[],
 ): RecoveredDocumentSessionDraftOperations {
-  const blockIds = document.kind === 'page' || document.kind === 'template'
-    ? document.blocks.map((block) => block.id)
-    : []
-  const objectIds = new Set(document.kind === 'whiteboard' ? document.whiteboard.objects.map((object) => object.id) : [])
+  const elements = createDocumentElementTracker(document)
   const recovered: DocumentOperation[] = []
   let readdedDeletedElements = false
 
   for (const operation of operations) {
     if (operation.type === 'insert-block') {
       // Blocks deleted meanwhile can leave a kept position past the end, which the API refuses.
-      const index = clampIndex(operation.index, blockIds.length)
-      blockIds.splice(index, 0, operation.block.id)
+      const index = clampIndex(operation.index, elements.blockIds.length)
+      elements.blockIds.splice(index, 0, operation.block.id)
       recovered.push(index === operation.index ? operation : { ...operation, index })
     } else if (operation.type === 'update-block') {
-      if (blockIds.includes(operation.blockId)) {
+      if (elements.blockIds.includes(operation.blockId)) {
         recovered.push(operation)
         continue
       }
-      recovered.push({ block: operation.block, index: blockIds.length, operationId: operation.operationId, type: 'insert-block' })
-      blockIds.push(operation.block.id)
+      recovered.push({ block: operation.block, index: elements.blockIds.length, operationId: operation.operationId, type: 'insert-block' })
+      elements.blockIds.push(operation.block.id)
       readdedDeletedElements = true
     } else if (operation.type === 'move-block') {
-      const currentIndex = blockIds.indexOf(operation.blockId)
+      const currentIndex = elements.blockIds.indexOf(operation.blockId)
       if (currentIndex < 0) continue
-      blockIds.splice(currentIndex, 1)
+      elements.blockIds.splice(currentIndex, 1)
       // A move names a position among the blocks that exist, so it ends at the last one at most.
-      const index = clampIndex(operation.index, blockIds.length)
-      blockIds.splice(index, 0, operation.blockId)
+      const index = clampIndex(operation.index, elements.blockIds.length)
+      elements.blockIds.splice(index, 0, operation.blockId)
       recovered.push(index === operation.index ? operation : { ...operation, index })
     } else if (operation.type === 'delete-block') {
-      const currentIndex = blockIds.indexOf(operation.blockId)
+      const currentIndex = elements.blockIds.indexOf(operation.blockId)
       if (currentIndex < 0) continue
-      blockIds.splice(currentIndex, 1)
+      elements.blockIds.splice(currentIndex, 1)
+      elements.removeRelationsFrom((source) => source.kind === 'block' && source.blockId === operation.blockId)
       recovered.push(operation)
     } else if (operation.type === 'insert-object') {
-      objectIds.add(operation.object.id)
+      elements.objectIds.add(operation.object.id)
       recovered.push(operation)
     } else if (operation.type === 'update-object') {
-      if (objectIds.has(operation.objectId)) {
+      if (elements.objectIds.has(operation.objectId)) {
         recovered.push(operation)
         continue
       }
       recovered.push({ object: operation.object, operationId: operation.operationId, type: 'insert-object' })
-      objectIds.add(operation.object.id)
+      elements.objectIds.add(operation.object.id)
       readdedDeletedElements = true
     } else if (operation.type === 'delete-object') {
-      if (!objectIds.delete(operation.objectId)) continue
+      if (!elements.objectIds.delete(operation.objectId)) continue
+      // Deleting an object also removes the connectors and relations that point at it.
+      for (const [connectorId, connector] of elements.connectors) {
+        if (connector.from.objectId === operation.objectId || connector.to.objectId === operation.objectId) {
+          elements.connectors.delete(connectorId)
+        }
+      }
+      elements.removeRelationsFrom((source) => source.kind === 'whiteboard-object' && source.objectId === operation.objectId)
+      recovered.push(operation)
+    } else if (operation.type === 'upsert-connector') {
+      const { connector } = operation
+      if (!elements.objectIds.has(connector.from.objectId) || !elements.objectIds.has(connector.to.objectId)) continue
+      elements.connectors.set(connector.id, connector)
+      recovered.push(operation)
+    } else if (operation.type === 'delete-connector') {
+      if (!elements.connectors.delete(operation.connectorId)) continue
+      recovered.push(operation)
+    } else if (operation.type === 'upsert-frame') {
+      const objectIds = operation.frame.objectIds.filter((objectId) => elements.objectIds.has(objectId))
+      elements.frameIds.add(operation.frame.id)
+      recovered.push(objectIds.length === operation.frame.objectIds.length
+        ? operation
+        : { ...operation, frame: { ...operation.frame, objectIds } })
+    } else if (operation.type === 'delete-frame') {
+      if (!elements.frameIds.delete(operation.frameId)) continue
+      recovered.push(operation)
+    } else if (operation.type === 'upsert-relation') {
+      if (!elements.hasRelationSource(operation.relation.source)) continue
+      elements.relations.set(operation.relation.id, operation.relation.source)
       recovered.push(operation)
     } else {
+      if (!elements.relations.delete(operation.relationId)) continue
       recovered.push(operation)
     }
   }
   return { operations: recovered, readdedDeletedElements }
+}
+
+/** Elements of a Document that kept operations may name, as they stand while operations are fitted. */
+type DocumentElementTracker = {
+  /** Block IDs in page order. */
+  blockIds: string[]
+  /** Whiteboard object IDs. */
+  objectIds: Set<string>
+  /** Whiteboard connectors by ID. */
+  connectors: Map<string, WhiteboardConnector>
+  /** Whiteboard frame IDs. */
+  frameIds: Set<string>
+  /** Relation sources by relation ID. */
+  relations: Map<string, DocumentRelationSource>
+  /** Removes the relations whose source matches. */
+  removeRelationsFrom: (matches: (source: DocumentRelationSource) => boolean) => void
+  /** Tells whether a relation's source element exists. */
+  hasRelationSource: (source: DocumentRelationSource) => boolean
+}
+
+/**
+ * Collects the elements of a Document that kept operations may name.
+ *
+ * @param document - Current Document.
+ * @returns Mutable element sets.
+ */
+function createDocumentElementTracker(document: DocumentRecord): DocumentElementTracker {
+  const whiteboard = document.kind === 'whiteboard' ? document.whiteboard : undefined
+  const tracker: DocumentElementTracker = {
+    blockIds: document.kind === 'page' || document.kind === 'template' ? document.blocks.map((block) => block.id) : [],
+    objectIds: new Set(whiteboard?.objects.map((object) => object.id) ?? []),
+    connectors: new Map((whiteboard?.connectors ?? []).map((connector) => [connector.id, connector])),
+    frameIds: new Set(whiteboard?.frames.map((frame) => frame.id) ?? []),
+    relations: new Map(document.relations.map((relation) => [relation.id, relation.source])),
+    removeRelationsFrom: (matches) => {
+      for (const [relationId, source] of tracker.relations) {
+        if (matches(source)) tracker.relations.delete(relationId)
+      }
+    },
+    hasRelationSource: (source) => {
+      if (source.kind === 'block') return tracker.blockIds.includes(source.blockId)
+      if (source.kind === 'whiteboard-object') return tracker.objectIds.has(source.objectId)
+      return true
+    },
+  }
+  return tracker
 }
 
 /**
@@ -182,8 +257,34 @@ function isKeptDocumentOperation(value: unknown): value is DocumentOperation {
     if (field === 'index') return typeof fieldValue === 'number' && Number.isInteger(fieldValue)
     if (field.endsWith('Id')) return typeof fieldValue === 'string' && fieldValue !== ''
     return typeof fieldValue === 'object' && fieldValue !== null &&
-      typeof Reflect.get(fieldValue, 'id') === 'string'
+      typeof Reflect.get(fieldValue, 'id') === 'string' && hasKeptElementReferences(field, fieldValue)
   })
+}
+
+/**
+ * Checks the references to other elements that fitting a draft to the current Document reads.
+ *
+ * @param field - Operation field holding the element.
+ * @param element - Kept element.
+ * @returns Whether a connector names both ends, a frame lists its objects, and a relation has a
+ * source; other elements need nothing more.
+ */
+function hasKeptElementReferences(field: string, element: object): boolean {
+  if (field === 'connector') {
+    return ['from', 'to'].every((end) => {
+      const endpoint: unknown = Reflect.get(element, end)
+      return typeof endpoint === 'object' && endpoint !== null && typeof Reflect.get(endpoint, 'objectId') === 'string'
+    })
+  }
+  if (field === 'frame') {
+    const objectIds: unknown = Reflect.get(element, 'objectIds')
+    return Array.isArray(objectIds) && objectIds.every((objectId) => typeof objectId === 'string')
+  }
+  if (field === 'relation') {
+    const source: unknown = Reflect.get(element, 'source')
+    return typeof source === 'object' && source !== null && typeof Reflect.get(source, 'kind') === 'string'
+  }
+  return true
 }
 
 /**
