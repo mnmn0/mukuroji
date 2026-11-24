@@ -13329,6 +13329,54 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
   })
 
+  test('Issue #431: 自分の表示名を変更でき、各設定へ URL の fragment で直接移動できる', async ({ page }) => {
+    const savedBodies: unknown[] = []
+    let profile = {
+      memberKey: 'demo@example.com',
+      email: 'demo@example.com',
+      name: 'Demo User',
+      nameEditable: true,
+      version: 1,
+    }
+    await page.route('**/api/me/profile', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const body: unknown = route.request().postDataJSON()
+        savedBodies.push(body)
+        const name = typeof body === 'object' && body !== null && 'name' in body && typeof body.name === 'string'
+          ? body.name
+          : undefined
+        profile = { ...profile, ...(name ? { name } : {}), version: profile.version + 1 }
+      }
+      await route.fulfill({ json: { profile } })
+    })
+
+    await page.goto('/settings/personal')
+    const nameInput = page.getByTestId('settings-profile-name')
+    await expect(nameInput).toHaveValue('Demo User')
+    await nameInput.fill('デモ 太郎')
+    await page.getByTestId('settings-profile-save').click()
+    await expect(page.getByTestId('settings-profile')).toContainText('表示名を保存しました。')
+    expect(savedBodies).toEqual([{ name: 'デモ 太郎', expectedVersion: 1 }])
+
+    const panelLinks = page.getByTestId('settings-panel-links')
+    await expect(panelLinks.getByTestId('settings-panel-link-notifications')).toHaveAttribute(
+      'href',
+      '/settings/personal#settings-notifications',
+    )
+
+    await page.goto('/settings/workspace#settings-audit-log')
+    await expect(page.locator('#settings-members')).toBeVisible()
+    await page.getByTestId('settings-panel-link-members').click()
+    await expect(page).toHaveURL('/settings/workspace#settings-members')
+    await expect(page.locator('#settings-members')).toBeInViewport()
+
+    // Following the same link again scrolls back to the panel.
+    await page.locator('#settings-audit-log, #settings-automation').last().scrollIntoViewIfNeeded()
+    await expect(page.locator('#settings-members')).not.toBeInViewport()
+    await page.getByTestId('settings-panel-link-members').click()
+    await expect(page.locator('#settings-members')).toBeInViewport()
+  })
+
   test('設定画面で通知 channel・種類ごとの配信先・ミュート・frequency・quiet hours を保存できる', async ({ page }) => {
     const requestCounts = getMockRequestCounts(page)
 
@@ -13361,6 +13409,26 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('notification-mute-project-core-team-product-roadmap')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepMentions')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepApprovals')).not.toBeChecked()
+  })
+
+  test('Issue #431: 管理者がメンバーの表示名を修正できる', async ({ page }) => {
+    const renameBodies: unknown[] = []
+    await page.route('**/api/workspace/members/sato%40example.com/name', async (route) => {
+      expect(route.request().method()).toBe('PUT')
+      renameBodies.push(route.request().postDataJSON())
+      await route.fulfill({ json: { member: {} } })
+    })
+
+    await page.goto('/settings/workspace')
+    const row = page.getByTestId('workspace-member-sato-example-com')
+    await expect(row).toBeVisible()
+    await expect(page.getByTestId('workspace-member-demo-example-com')
+      .getByRole('button', { name: '表示名を修正' })).toHaveCount(0)
+    await row.getByRole('button', { name: '表示名を修正' }).click()
+    await row.getByRole('textbox', { name: '表示名' }).fill('佐藤 花子')
+    await row.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(row.getByRole('button', { name: '表示名を修正' })).toBeVisible()
+    expect(renameBodies).toEqual([{ name: '佐藤 花子', expectedVersion: 2 }])
   })
 
   test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {

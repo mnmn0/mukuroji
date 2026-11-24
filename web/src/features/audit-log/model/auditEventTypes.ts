@@ -167,6 +167,7 @@ export const suggestedAuditEventTypes: readonly string[] = [
   'comment.deleted',
   'member.created',
   'member.role-changed',
+  'member.renamed',
   'member.removed',
   'invitation.created',
   'invitation.revoked',

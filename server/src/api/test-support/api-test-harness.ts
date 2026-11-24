@@ -705,6 +705,7 @@ function createWorkspaceAccessFake(
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
     listActiveMembers: unsupported,
+    listMembers: unsupported,
     createInvitation: unsupported,
     getInvitation: unsupported,
     acquireInvitationAcceptanceLock: unsupported,
@@ -721,6 +722,7 @@ function createWorkspaceAccessFake(
     prepareReinvite: unsupported,
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
+    updateMemberName: unsupported,
     recordMemberCredentialAction: unsupported,
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
@@ -1451,6 +1453,10 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Display names on Workspace member rows that differ from Cognito; null clears the name. */
+    workspaceMemberNames?: Record<string, string | null>
+    /** Makes listing every Workspace member row fail, as a throttled Query would. */
+    workspaceMemberListFails?: boolean
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
     /** Custom fields returned by the resolved Work Item configuration. */
@@ -1880,6 +1886,12 @@ function configureFakeProjectClients(
       role?: WorkspaceRole
       status?: WorkspaceMemberStatus
     }>,
+    workspaceMemberNameUpdates: [] as Array<{
+      actorMemberKey: string
+      expectedVersion: number
+      memberKey: string
+      name?: string
+    }>,
     workspaceReconciliations: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
@@ -1907,7 +1919,10 @@ function configureFakeProjectClients(
     id: memberKey,
     memberKey,
     email: memberKey,
-    name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
+    // Members start with the Cognito name they signed up with, as reconciliation copies it.
+    name: options.workspaceMemberNames && memberKey in options.workspaceMemberNames
+      ? options.workspaceMemberNames[memberKey] ?? undefined
+      : createFakeCognitoProfile(memberKey).name,
     role: memberKey === 'demo@example.com'
       ? workspaceRole
       : options.guestWorkspaceMemberKeys?.includes(memberKey)
@@ -2809,6 +2824,15 @@ function configureFakeProjectClients(
           createWorkspaceMember('viewer@example.com'),
         ].filter((member) => member.status === 'active')
       },
+      async listMembers() {
+        if (options.workspaceMemberListFails) throw new Error('Workspace member Query was throttled.')
+        return [
+          createWorkspaceMember('demo@example.com'),
+          createWorkspaceMember('sato@example.com'),
+          createWorkspaceMember('suzuki@example.com'),
+          createWorkspaceMember('viewer@example.com'),
+        ]
+      },
       async getAccessSnapshot(_workspaceId, memberKey) {
         const currentMember = createWorkspaceMember(memberKey)
         return {
@@ -3023,6 +3047,21 @@ function configureFakeProjectClients(
           ...createWorkspaceMember(memberKey),
           role: input.role ?? createWorkspaceMember(memberKey).role,
           status: input.status ?? createWorkspaceMember(memberKey).status,
+          version: input.expectedVersion + 1,
+        }
+      },
+      async updateMemberName(_workspaceId, actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMemberName', context: auditContext })
+        calls.workspaceMemberNameUpdates.push({
+          actorMemberKey,
+          memberKey,
+          expectedVersion: input.expectedVersion,
+          ...(input.name === undefined ? {} : { name: input.name }),
+        })
+        const { name: _previousName, ...member } = createWorkspaceMember(memberKey)
+        return {
+          ...member,
+          ...(input.name === undefined ? {} : { name: input.name }),
           version: input.expectedVersion + 1,
         }
       },
@@ -3702,6 +3741,9 @@ async function configureEnterpriseScimGuestRoleScenario(
     },
     async listActiveMembers() {
       return [...members.values()].filter((member) => member.status === 'active')
+    },
+    async listMembers() {
+      return [...members.values()]
     },
     async reconcileDirectoryMember(
       _workspaceId: string,
