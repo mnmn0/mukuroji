@@ -28,3 +28,11 @@ export const WorkflowTemplate: Story = {
     locale: 'ja',
   },
 }
+
+/** Work Item template edited through the form, with the schedule and custom fields in the advanced JSON. */
+export const WorkItemTemplateForm: Story = {
+  args: {
+    initialKind: 'work-item',
+    locale: 'ja',
+  },
+}

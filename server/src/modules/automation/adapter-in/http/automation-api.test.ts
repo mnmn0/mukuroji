@@ -395,6 +395,9 @@ function createAutomationRecurringSchedulePort(
     async completeRecurringWork() {
       return unexpectedAutomationPortCall()
     },
+    async deferRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
     async deleteRecurringWork() {
       return unexpectedAutomationPortCall()
     },

@@ -40,13 +40,20 @@ export {
   type AutomationInboundWebhookSecretCleanup,
   type AutomationInboundWebhookSecretReference,
   type AutomationInboundWebhookSecretStore,
+  type AutomationDueWorkItem,
+  type AutomationDueWorkItemSource,
   type AutomationRecurringSchedulePort,
   type AutomationRepository,
+  type AutomationWorkCalendarSource,
   type AutomationRuleTemplatePort,
   type BulkItemApplyResult,
   type BulkItemPreviewResult,
   type BulkOperationAdapter,
 } from './application/ports'
+export {
+  createDynamoDbAutomationDueWorkItemSource,
+  type DynamoDbAutomationDueWorkItemSourceOptions,
+} from './adapter-out/dynamodb/due-work-item-source'
 export {
   SecretsManagerAutomationInboundWebhookSecretStore,
 } from './adapter-out/secrets-manager/inbound-webhook-secret-store'
@@ -77,6 +84,7 @@ export {
   getRecurringOccurrences,
   selectCatchUpOccurrences,
   validateRecurringSchedule,
+  type RecurringWorkCalendar,
 } from './domain/recurring-schedule'
 export {
   evaluateAutomationCondition,

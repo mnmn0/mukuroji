@@ -1981,6 +1981,47 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return recurring
   }
 
+  /**
+   * Moves a recurring definition's next run later without completing a slot.
+   *
+   * @param workspaceId - Workspace that owns the definition.
+   * @param recurringWorkId - Definition to defer.
+   * @param expectedRevision - Revision the scheduler read.
+   * @param nextRunAt - New next run, later than the current one.
+   * @returns The deferred definition.
+   */
+  async deferRecurringWork(
+    workspaceId: string,
+    recurringWorkId: string,
+    expectedRevision: number,
+    nextRunAt: string,
+  ) {
+    const current = await this.requireRecurringWork(workspaceId, recurringWorkId)
+    assertExpectedRevision(current.revision, expectedRevision)
+    if (!current.enabled) {
+      throw new AutomationError('conflict', 'RecurringWorkDisabled', 'Recurring Work definition is disabled.')
+    }
+    const normalizedNextRunAt = normalizeTimestamp(nextRunAt)
+    if (normalizedNextRunAt <= normalizeTimestamp(current.nextRunAt)) {
+      throw invalidInput('A deferred recurring run must be later than the current next run.')
+    }
+    const recurring: RecurringWork = {
+      ...current,
+      revision: current.revision + 1,
+      nextRunAt: normalizedNextRunAt,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.putCurrentUpdate(
+      workspaceId,
+      `RECURRING#${encodeKey(recurring.id)}`,
+      'recurring',
+      recurring,
+      current.revision,
+      recurringIndexAttributes(recurring),
+    )
+    return recurring
+  }
+
   /** Recurring definition を削除します。 */
   async deleteRecurringWork(workspaceId: string, recurringWorkId: string, expectedRevision: number) {
     await this.deleteCurrent(workspaceId, `RECURRING#${encodeKey(recurringWorkId)}`, expectedRevision)

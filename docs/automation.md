@@ -20,10 +20,11 @@ Trigger は次を扱う。
 - baseline slip（Project の今の schedule baseline より予定終了日が遅れた変更。下の「baseline slip trigger」を参照）
 - custom field
 - comment
+- approval（承認依頼の決定。下の「承認の決定 trigger」を参照）
 - relation（Work Item の親子・blocker・関連 link の変更と兄弟の並べ替え）
 - form
 - webhook
-- schedule
+- schedule（`dueWorkItems` で期限の n 日前の Work Item ごとにも動かせる。下の「期限前の schedule rule」を参照）
 
 Relation trigger は `eventTypes`（1〜10 件、[relation の event](./event-audit.md#work-item-relation-の-event) の `work-item.parent-changed` などから選ぶ）で対象を絞り、省略するとすべての relation 変更で動く。relation の event は両端の Work Item に 1 件ずつ記録されるので、1 つの変更で両端の event type がそれぞれ一致すればルールは両端で 1 回ずつ動き、`workItem.` の condition と action は event を記録した側の Work Item を対象にする。相手の Work Item は `event.metadata.relatedWorkItemId`（親の変更では `parentWorkItemId` / `previousParentWorkItemId`）で condition に使える。Rule を編集できるのは Workspace 管理者だけなので、相手が管理者の見られない Project にあっても問題にならない。
 
@@ -42,6 +43,16 @@ Rule を作った member は `createdByMemberKey` に記録する（fingerprint 
 `POST /api/automation/rule-dry-runs` は保存前の rule 定義（`CreateAutomationRuleInput` と同じ検証）を、Team と Work Item ID で指定した 1 件に当てて評価する。Trigger は起きたものとして、空の event と今の Work Item snapshot で top level の条件を 1 つずつ評価し、すべて一致したときだけ各 action の予定（assign・move・update は今の値と違う field の before/after、notify・approval は宛先、webhook は host）を返す。同じ field を書く action が続くときは、前の action の結果に対して次の action の変化を示す。Action は実行せず、何も書き込まない。`event.` を読む条件は実際の event で結果が変わるため `readsEventFields` で示す。Workspace 管理者だけが呼べ、Team が無効なら `409` を返し、Work Item が読めなければ通常の Work Item 参照と同じ error を返す。
 
 削除は `DELETE /api/automation/rules/{ruleId}`、`DELETE /api/automation/templates/{templateId}`、`DELETE /api/recurring-work/{recurringWorkId}` に `{ "expectedRevision": n }` を付けて行い、成功すると `204` を返す。Rule と recurring work は current row を消すので、event consumer と schedule worker は以後実行しない（予約済み execution は固定済み version で終わる）。Template は、create action を持つ rule か recurring work が参照している間は `409 AutomationTemplateInUse` で拒否する。参照の確認から削除までに rule や recurring が保存されないよう、削除は確認時に読んだ definition revision を condition にする。逆に、template を参照する rule・recurring work の保存は、読んだ template の revision と有効状態を同じ transaction で condition check するため、確認の後に消された template を参照する定義は保存されない。
+
+### 承認の決定 trigger
+
+`{ "type": "approval", "decision": "rejected" }` は Work Item（または file version）の承認依頼が決まったときに動く。`decision` は `approved`（全 reviewer が承認した `approval.completed`）、`rejected`（`approval.rejected`）、`changes-requested`（`approval.changes-requested`）のどれかで、省略するとすべての決定で動く。1 人の reviewer の承認だけの `approval.approved` では動かない。`workItem.` の条件と action は承認依頼の Work Item を対象にし、`event.metadata.approvalId`、`approvalStatus`、`reviewerStatus`、`subjectType` を条件で読める。
+
+### 期限前の schedule rule
+
+`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
+
+Notify action の `notifyAssignee: true` は、rule が対象にしている Work Item の担当者にも通知する。`recipientMemberKeys` は空でもよいが、どちらか一方は必要。「期限 3 日前に担当者へ通知」は、毎日 9:00 の schedule に `dueWorkItems: { daysBefore: 3 }` と `{ "type": "notify", "recipientMemberKeys": [], "notifyAssignee": true, "title": "期限まで3日" }` で作る。
 
 ### baseline slip trigger
 
@@ -150,6 +161,8 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 ## Recurring work
 
 Recurring definition は Work Item template、Team、IANA timezone、local wall-clock time、日次/週次/月次 cadence、catch-up policy を保持する。`nextRunAt` は UTC instant として保存し、`ScheduleDueIndex` で期限到来分だけを取得する。
+
+月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を実際の営業日へ後ろへずらす。休日の変更は次の実行時に反映される（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
 
 DST の扱いは次で固定する。
 

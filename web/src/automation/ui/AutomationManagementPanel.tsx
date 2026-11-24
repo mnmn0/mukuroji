@@ -65,6 +65,7 @@ const triggerTypeLabelKeys: Record<string, MessageKey> = {
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
+  approval: 'automation.trigger.approval',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
   schedule: 'automation.trigger.schedule',

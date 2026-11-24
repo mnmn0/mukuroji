@@ -1,8 +1,24 @@
-import type {
-  RecurringCatchUpPolicy,
-  RecurringSchedule,
+import {
+  RECURRING_MAX_BUSINESS_DAY,
+  RECURRING_MONTHLY_DAYS,
+  type RecurringCatchUpPolicy,
+  type RecurringMonthlyDay,
+  type RecurringSchedule,
 } from '@mukuroji/contracts'
 import { AutomationError } from './automation-error'
+
+/**
+ * Work calendar a `business-day` monthly schedule counts working days on.
+ *
+ * Without one, a business-day schedule matches calendar day n, which is the earliest day its nth
+ * business day can fall on.
+ */
+export type RecurringWorkCalendar = {
+  /** Working weekdays, 0 for Sunday through 6 for Saturday. */
+  workingWeekdays: ReadonlySet<number>
+  /** Non-working `YYYY-MM-DD` dates. */
+  holidays: ReadonlySet<string>
+}
 
 /**
  * Validates and normalizes an untrusted recurring schedule.
@@ -64,9 +80,27 @@ export function validateRecurringSchedule(value: unknown): RecurringSchedule {
     throw invalidInput('Only weekly recurring schedules can define daysOfWeek.')
   }
   if (schedule.frequency === 'monthly') {
-    result.dayOfMonth = requireInteger(schedule.dayOfMonth, 'Recurring month day', 1, 31)
+    const monthlyDay = readMonthlyDay(schedule.monthlyDay)
+    if (monthlyDay === 'last-day') {
+      if (schedule.dayOfMonth !== undefined) {
+        throw invalidInput('A last-day recurring schedule cannot define dayOfMonth.')
+      }
+      result.monthlyDay = monthlyDay
+    } else if (monthlyDay === 'business-day') {
+      result.dayOfMonth = requireInteger(
+        schedule.dayOfMonth,
+        'Recurring business day',
+        1,
+        RECURRING_MAX_BUSINESS_DAY,
+      )
+      result.monthlyDay = monthlyDay
+    } else {
+      result.dayOfMonth = requireInteger(schedule.dayOfMonth, 'Recurring month day', 1, 31)
+    }
   } else if (schedule.dayOfMonth !== undefined) {
     throw invalidInput('Only monthly recurring schedules can define dayOfMonth.')
+  } else if (schedule.monthlyDay !== undefined) {
+    throw invalidInput('Only monthly recurring schedules can define monthlyDay.')
   }
   if (schedule.maxCatchUpOccurrences !== undefined) {
     result.maxCatchUpOccurrences = requireInteger(
@@ -85,12 +119,14 @@ export function validateRecurringSchedule(value: unknown): RecurringSchedule {
  * @param scheduleValue - Recurring schedule to evaluate.
  * @param fromExclusive - Exclusive lower UTC bound.
  * @param toInclusive - Inclusive upper UTC bound.
+ * @param calendar - Work calendar a `business-day` schedule counts on; see {@link RecurringWorkCalendar}.
  * @returns Ordered UTC occurrences.
  */
 export function getRecurringOccurrences(
   scheduleValue: RecurringSchedule,
   fromExclusive: Date,
   toInclusive: Date,
+  calendar?: RecurringWorkCalendar,
 ): Date[] {
   const schedule = validateRecurringSchedule(scheduleValue)
   if (!isValidDate(fromExclusive) || !isValidDate(toInclusive) || fromExclusive >= toInclusive) {
@@ -105,7 +141,7 @@ export function getRecurringOccurrences(
     date = addIsoDays(date, 1), count += 1
   ) {
     if (count > 20_000) throw new RangeError('Recurring occurrence window is too large.')
-    if (date < schedule.startDate || !scheduleMatchesDate(schedule, date)) continue
+    if (date < schedule.startDate || !scheduleMatchesDate(schedule, date, calendar)) continue
     const instant = resolveLocalOccurrence(date, schedule.localTime, schedule.timeZone)
     if (instant > fromExclusive && instant <= toInclusive) occurrences.push(instant)
   }
@@ -117,11 +153,13 @@ export function getRecurringOccurrences(
  *
  * @param schedule - Recurring schedule to evaluate.
  * @param after - Exclusive lower UTC bound.
+ * @param calendar - Work calendar a `business-day` schedule counts on.
  * @returns The next occurrence, or `undefined` when the supported horizon is exhausted.
  */
 export function getNextRecurringOccurrence(
   schedule: RecurringSchedule,
   after: Date,
+  calendar?: RecurringWorkCalendar,
 ): Date | undefined {
   if (!isValidDate(after)) throw invalidInput('Recurring after timestamp is invalid.')
   const windows = [366, 1_830, 3_660]
@@ -130,11 +168,28 @@ export function getNextRecurringOccurrence(
       schedule,
       after,
       new Date(after.getTime() + days * 86_400_000),
+      calendar,
     )
     const first = occurrences[0]
     if (first) return first
   }
   return undefined
+}
+
+/**
+ * Returns the due date a due-soon schedule occurrence looks for.
+ *
+ * @param occurrence - Schedule occurrence instant.
+ * @param timeZone - IANA time zone of the schedule.
+ * @param daysBefore - Days from the occurrence's local date to the due date.
+ * @returns The `YYYY-MM-DD` due date.
+ */
+export function getDueDateForOccurrence(
+  occurrence: Date,
+  timeZone: string,
+  daysBefore: number,
+): string {
+  return addIsoDays(zonedDate(occurrence, timeZone), daysBefore)
 }
 
 /**
@@ -166,8 +221,19 @@ export function selectCatchUpOccurrences(
   ))
 }
 
-/** Tests whether an ISO date is selected by a recurring schedule. */
-function scheduleMatchesDate(schedule: RecurringSchedule, date: string): boolean {
+/**
+ * Tests whether an ISO date is selected by a recurring schedule.
+ *
+ * @param schedule - Validated schedule.
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param calendar - Work calendar a `business-day` schedule counts on.
+ * @returns Whether the schedule runs on the date.
+ */
+function scheduleMatchesDate(
+  schedule: RecurringSchedule,
+  date: string,
+  calendar: RecurringWorkCalendar | undefined,
+): boolean {
   const dayDifference = daysBetween(schedule.startDate, date)
   if (dayDifference < 0) return false
   if (schedule.frequency === 'daily') return dayDifference % schedule.interval === 0
@@ -176,8 +242,53 @@ function scheduleMatchesDate(schedule: RecurringSchedule, date: string): boolean
       Boolean(schedule.daysOfWeek?.includes(isoDateWeekday(date)))
   }
   const monthDifference = monthsBetween(schedule.startDate, date)
-  return monthDifference >= 0 && monthDifference % schedule.interval === 0 &&
-    Number(date.slice(8, 10)) === schedule.dayOfMonth
+  if (monthDifference < 0 || monthDifference % schedule.interval !== 0) return false
+  const day = Number(date.slice(8, 10))
+  if (schedule.monthlyDay === 'last-day') return addIsoDays(date, 1).slice(8, 10) === '01'
+  if (schedule.monthlyDay === 'business-day' && calendar) {
+    return isWorkingDate(date, calendar) &&
+      countWorkingDatesInMonthThrough(date, calendar) === schedule.dayOfMonth
+  }
+  return day === schedule.dayOfMonth
+}
+
+/**
+ * Tests whether a date is a working day of a work calendar.
+ *
+ * @param date - `YYYY-MM-DD` date.
+ * @param calendar - Work calendar.
+ * @returns Whether the date is a working weekday and not a holiday.
+ */
+function isWorkingDate(date: string, calendar: RecurringWorkCalendar): boolean {
+  return calendar.workingWeekdays.has(isoDateWeekday(date)) && !calendar.holidays.has(date)
+}
+
+/**
+ * Counts the working days from the first of a date's month through that date.
+ *
+ * @param date - `YYYY-MM-DD` date.
+ * @param calendar - Work calendar.
+ * @returns The number of working days, including the date itself when it is one.
+ */
+function countWorkingDatesInMonthThrough(date: string, calendar: RecurringWorkCalendar): number {
+  let count = 0
+  for (let current = `${date.slice(0, 8)}01`; current <= date; current = addIsoDays(current, 1)) {
+    if (isWorkingDate(current, calendar)) count += 1
+  }
+  return count
+}
+
+/**
+ * Reads the monthly day rule of an untrusted schedule.
+ *
+ * @param value - Untrusted `monthlyDay` value.
+ * @returns The rule, `day-of-month` when omitted.
+ */
+function readMonthlyDay(value: unknown): RecurringMonthlyDay {
+  if (value === undefined) return 'day-of-month'
+  const monthlyDay = RECURRING_MONTHLY_DAYS.find((candidate) => candidate === value)
+  if (!monthlyDay) throw invalidInput('Recurring monthly day rule is invalid.')
+  return monthlyDay
 }
 
 /** Resolves a local scheduled time across daylight-saving transitions. */

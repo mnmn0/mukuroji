@@ -36,6 +36,11 @@ export {
 } from './inbound-webhook-secret-store'
 export { type AutomationRecurringSchedulePort } from './recurring-schedule-port'
 export { type AutomationRuleTemplatePort } from './rule-template-port'
+export {
+  type AutomationDueWorkItem,
+  type AutomationDueWorkItemSource,
+  type AutomationWorkCalendarSource,
+} from './schedule-context-port'
 
 import type { AutomationBulkOperationPort } from './bulk-operation-port'
 import type { AutomationExecutionPort } from './execution-port'

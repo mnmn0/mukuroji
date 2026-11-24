@@ -1,10 +1,13 @@
 import {
+  AUTOMATION_APPROVAL_DECISIONS,
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
+  AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE,
   isWorkItemRelationEventType,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type AutomationAction,
+  type AutomationApprovalDecision,
   type AutomationConditionOperator,
   type AutomationProjectTemplatePayload,
   type AutomationScheduleTrigger,
@@ -55,7 +58,18 @@ export function isAutomationTriggerConfigurationValid(
   if (type === 'due' && value && value !== 'changed' && value !== 'due' && value !== 'overdue') return false
   if (type === 'baseline-slip' && value && readBaselineSlipDays(value) === undefined) return false
   if (type === 'relation' && value && !isWorkItemRelationEventType(value)) return false
+  if (type === 'approval' && value && readApprovalDecision(value) === undefined) return false
   return true
+}
+
+/**
+ * Reads the approval decision chosen for an approval trigger.
+ *
+ * @param value - Trimmed editor value.
+ * @returns The decision, or `undefined` when the value is not one.
+ */
+function readApprovalDecision(value: string): AutomationApprovalDecision | undefined {
+  return AUTOMATION_APPROVAL_DECISIONS.find((decision) => decision === value)
 }
 
 /**
@@ -329,6 +343,7 @@ export function isAutomationScheduleConfigurationValid(
 /** Schedule editor の値を recurrence を含む trigger payload へ変換します。 */
 export function createAutomationScheduleTrigger(
   input: RecurringScheduleInput,
+  dueDaysBefore?: number,
 ): AutomationScheduleTrigger {
   return {
     type: 'schedule',
@@ -336,7 +351,22 @@ export function createAutomationScheduleTrigger(
       ...input,
       timeZone: input.timeZone.trim(),
     }),
+    ...(dueDaysBefore === undefined ? {} : { dueWorkItems: { daysBefore: dueDaysBefore } }),
   }
+}
+
+/**
+ * Reads the days-before value typed for a due-soon schedule rule.
+ *
+ * @param value - Editor value; blank means the rule runs once per occurrence.
+ * @returns `null` when blank, the whole number of days when valid, or `undefined` when invalid.
+ */
+export function readAutomationDueDaysBefore(value: string): number | null | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (!/^\d+$/.test(trimmed)) return undefined
+  const days = Number(trimmed)
+  return days <= AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE ? days : undefined
 }
 
 /** Work Item Type change direction accepted by the Automation rule editor. */
@@ -373,6 +403,10 @@ export function createAutomationTrigger(
       return { type, ...(value ? { assigneeMemberKey: value } : {}) }
     case 'comment':
       return { type, kind: 'any' }
+    case 'approval': {
+      const decision = readApprovalDecision(value)
+      return { type, ...(decision === undefined ? {} : { decision }) }
+    }
     case 'custom-field':
       return { type, fieldId: value }
     case 'work-item-type':

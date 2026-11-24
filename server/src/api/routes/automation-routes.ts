@@ -21,6 +21,7 @@ import {
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
   type WorkItemConfiguration,
+  type WorkItemScheduleWeekday,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -99,6 +100,7 @@ import {
   type AutomationEvent,
   type AutomationExecutionFailureKind,
   type AutomationExecutionFailureNotifier,
+  type AutomationWorkCalendarSource,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
   type AutomationInboundWebhookSecretReference,
@@ -1729,7 +1731,7 @@ export function createAutomationActionExecutor(
           await emitAutomationOutboxEvent(
             'automation.notification.requested',
             action.title,
-            action.recipientMemberKeys,
+            readAutomationNotificationRecipients(action, context),
             context,
             { body: action.body ?? '' },
             dependencies,
@@ -2313,6 +2315,27 @@ async function executeAutomationComment(
 }
 
 /**
+ * Lists the members a notify action reaches: its listed keys, plus the assignee of the Work Item
+ * the rule runs for when the action asks for it and the Work Item has one.
+ *
+ * @param action - Validated notify action.
+ * @param context - Durable Automation execution context.
+ * @returns Distinct recipient member keys.
+ */
+function readAutomationNotificationRecipients(
+  action: Extract<AutomationAction, { type: 'notify' }>,
+  context: AutomationActionExecutionContext,
+): string[] {
+  const assignee = action.notifyAssignee === true
+    ? context.event.workItem?.assigneeUserId
+    : undefined
+  return [...new Set([
+    ...action.recipientMemberKeys,
+    ...(typeof assignee === 'string' && assignee.trim() ? [assignee.trim()] : []),
+  ])]
+}
+
+/**
  * Appends an Automation notification or approval event to the audit outbox.
  *
  * @param eventType - Stable audit event type.
@@ -2415,6 +2438,43 @@ const AUTOMATION_RATE_LIMIT_NOTIFICATION_BUCKET_MS = 60 * 60_000
 
 /** Settings page that lists Automation execution history. */
 const AUTOMATION_EXECUTION_HISTORY_PATH = '/settings/workspace?automationTab=runs'
+
+/** Sunday-based weekday number of each work calendar weekday. */
+const WORK_CALENDAR_WEEKDAY_NUMBERS: Record<WorkItemScheduleWeekday, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+}
+
+/**
+ * Creates the source a business-day Recurring Work reads its Team's effective work calendar from.
+ *
+ * @param dependencies - Work calendar reads.
+ * @returns The work calendar source.
+ */
+export function createAutomationWorkCalendarSource(
+  dependencies: Pick<AutomationActionExecutorDependencies, 'workCalendarSources'> =
+    ambientAutomationActionExecutorDependencies,
+): AutomationWorkCalendarSource {
+  return {
+    async readTeamWorkCalendar(workspaceId, teamId) {
+      const policy = await readWorkspaceWorkItemCalendarPolicy(
+        workspaceId,
+        { teamId },
+        dependencies.workCalendarSources,
+      )
+      return {
+        workingWeekdays: new Set(policy.workingWeekdays.map((weekday) =>
+          WORK_CALENDAR_WEEKDAY_NUMBERS[weekday])),
+        holidays: new Set(policy.holidays),
+      }
+    },
+  }
+}
 
 /**
  * Creates the reporter that tells a rule's creator and the Workspace administrators that the

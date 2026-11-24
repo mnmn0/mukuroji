@@ -1,6 +1,7 @@
 import {
   createAutomationActionExecutor,
   createAutomationExecutionFailureNotifier,
+  createAutomationWorkCalendarSource,
   shouldEnableWorkspaceSearchProjection,
   type AutomationActionExecutorDependencies,
 } from '../../api/api-router'
@@ -16,6 +17,7 @@ import {
   processAutomationEventBatch,
   type AutomationScheduleEvent,
   AutomationEngine,
+  createDynamoDbAutomationDueWorkItemSource,
   type AutomationRuleTemplatePort,
   type DynamoStreamEvent,
   processAutomationSchedule,
@@ -100,6 +102,19 @@ function readRequiredEnterpriseIdentityTableName() {
 }
 
 /**
+ * Reads the Work Items table that due-soon schedule rules query.
+ *
+ * @returns The configured table name.
+ */
+function readRequiredWorkItemsTableName() {
+  const tableName = loadServerConfig().environment.WORK_ITEMS_TABLE_NAME?.trim()
+  if (!tableName) {
+    throw new TypeError('WORK_ITEMS_TABLE_NAME is required by Automation schedules.')
+  }
+  return tableName
+}
+
+/**
  * Creates the production Automation event-stream processor.
  *
  * @returns A handler for Automation DynamoDB stream batches.
@@ -138,10 +153,13 @@ export function createProductionAutomationEventHandler() {
 export function createProductionAutomationScheduleHandler() {
   const automationRepository = createAutomationRepository()
   const inboundWebhookSecrets = createAutomationInboundWebhookSecretStore()
-  const actionDependencies = createAutomationActionDependencies(
-    automationRepository,
-    new DynamoDbTeamIssuesClient(),
-  )
+  const teamIssues = new DynamoDbTeamIssuesClient()
+  const actionDependencies = createAutomationActionDependencies(automationRepository, teamIssues)
+  const dueWorkItems = createDynamoDbAutomationDueWorkItemSource({
+    documentClient: createDynamoDbDocumentClient(createDynamoDbClient()),
+    workItemsTableName: readRequiredWorkItemsTableName(),
+  })
+  const workCalendars = createAutomationWorkCalendarSource(actionDependencies)
   const actionExecutor = createAutomationActionExecutor(actionDependencies)
   const failureNotifier = createAutomationExecutionFailureNotifier(actionDependencies)
   const tenantFeatureGate = createProductionTenantFeatureGate()
@@ -157,6 +175,9 @@ export function createProductionAutomationScheduleHandler() {
         actionExecutor,
         failureNotifier,
         inboundWebhookSecrets,
+        dueWorkItems,
+        workItems: teamIssues,
+        workCalendars,
       },
     )
 }

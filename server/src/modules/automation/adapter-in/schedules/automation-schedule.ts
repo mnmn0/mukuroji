@@ -17,12 +17,19 @@ import {
 } from '../../application/execution-identifiers'
 import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../../domain/execution-policy'
 import {
+  getDueDateForOccurrence,
   getNextRecurringOccurrence,
   getRecurringOccurrences,
   selectCatchUpOccurrences,
+  type RecurringWorkCalendar,
 } from '../../domain/recurring-schedule'
+import {
+  hydrateAutomationWorkItem,
+  type AutomationWorkItemReader,
+} from '../events/automation-event'
 import type {
   AutomationActionExecutor,
+  AutomationDueWorkItemSource,
   AutomationExecutionFailureNotifier,
   AutomationExecutionClaimToken,
   AutomationExecutionServicePort,
@@ -32,6 +39,7 @@ import type {
   AutomationInboundWebhookSecretStore,
   AutomationRecurringSchedulePort,
   AutomationRuleTemplatePort,
+  AutomationWorkCalendarSource,
 } from '../../application/ports'
 import type { AutomationEvent } from '../../domain/rule-evaluation'
 import { AUTOMATION_SCHEDULE_SHARD_COUNT } from '../../application/schedule-shard'
@@ -64,6 +72,12 @@ export type AutomationScheduleDependencies = {
   failureNotifier?: AutomationExecutionFailureNotifier
   /** Revoke 済み inbound webhook secret の durable cleanup store です。 */
   inboundWebhookSecrets?: AutomationInboundWebhookSecretStore
+  /** Lists the Work Items a due-soon schedule rule runs for. */
+  dueWorkItems?: AutomationDueWorkItemSource
+  /** Reads the Work Item each due-soon run reads and acts on. */
+  workItems?: AutomationWorkItemReader
+  /** Reads the Team calendar a business-day Recurring Work counts on. */
+  workCalendars?: AutomationWorkCalendarSource
 }
 
 /** EventBridge schedule event のうち handler が利用する最小表現です。 */
@@ -279,6 +293,19 @@ export async function processScheduledAutomationRule(
   )
 
   for (const occurrence of selected) {
+    if (rule.trigger.dueWorkItems) {
+      const completed = await runDueWorkItemOccurrence(
+        rule,
+        rule.trigger.dueWorkItems.daysBefore,
+        rule.trigger.schedule.timeZone,
+        occurrence,
+        engine,
+        now,
+        dependencies,
+      )
+      if (!completed) return rule
+      continue
+    }
     let execution: AutomationExecution | undefined
     try {
       execution = await engine.handleEvent(rule, {
@@ -319,6 +346,72 @@ export async function processScheduledAutomationRule(
   }
 }
 
+/**
+ * Runs a due-soon schedule rule once for each open Work Item due the given number of days after
+ * one occurrence.
+ *
+ * Each Work Item gets its own execution keyed by the occurrence and the Work Item, so a repeated
+ * tick resumes the executions it already made. A failed execution retries on its own schedule,
+ * so the occurrence still completes.
+ *
+ * @param rule - Enabled schedule rule.
+ * @param daysBefore - Days from the occurrence date to the due date.
+ * @param timeZone - Time zone of the schedule.
+ * @param occurrence - Occurrence being run.
+ * @param engine - Rule execution engine.
+ * @param now - Processing time.
+ * @param dependencies - Schedule dependencies.
+ * @returns False when a concurrent runner holds the occurrence, true otherwise.
+ * @throws AutomationError `AutomationDueWorkItemsUnavailable` without a due Work Item source.
+ */
+async function runDueWorkItemOccurrence(
+  rule: AutomationRule,
+  daysBefore: number,
+  timeZone: string,
+  occurrence: Date,
+  engine: AutomationEngine,
+  now: Date,
+  dependencies: AutomationScheduleDependencies,
+): Promise<boolean> {
+  if (!dependencies.dueWorkItems || !dependencies.workItems) {
+    throw new AutomationError(
+      'unavailable',
+      'AutomationDueWorkItemsUnavailable',
+      'Due Work Item lookup is not configured.',
+      true,
+    )
+  }
+  const dueDate = getDueDateForOccurrence(occurrence, timeZone, daysBefore)
+  const items = await dependencies.dueWorkItems.listOpenWorkItemsDueOn(rule.workspaceId, dueDate)
+  const ordered = [...items].sort((first, second) =>
+    first.teamId.localeCompare(second.teamId) || first.workItemId.localeCompare(second.workItemId)
+  )
+  for (const item of ordered) {
+    const event = await hydrateAutomationWorkItem({
+      eventId: `scheduled-rule:${rule.id}:${occurrence.toISOString()}:due:${item.teamId}:${item.workItemId}`,
+      eventType: 'automation.schedule',
+      workspaceId: rule.workspaceId,
+      occurredAt: occurrence.toISOString(),
+      changes: [],
+      metadata: {
+        ruleId: rule.id,
+        scheduledFor: occurrence.toISOString(),
+        teamId: item.teamId,
+        issueId: item.workItemId,
+        dueDate: item.dueDate,
+      },
+    }, dependencies.workItems)
+    if (event.workItem?.dueDate !== dueDate) continue
+    try {
+      await engine.handleEvent(rule, event, {}, now)
+    } catch (error) {
+      if (isBenignRetryRace(error)) return false
+      throw error
+    }
+  }
+  return true
+}
+
 /** 一つの recurring definition の due/catch-up slots を実行し CAS で進めます。 */
 export async function processRecurringWorkDefinition(
   scheduledDefinition: RecurringWork,
@@ -334,10 +427,28 @@ export async function processRecurringWorkDefinition(
   if (!await dependencies.entitlement.isAutomationEnabled(definition.workspaceId)) {
     return definition
   }
-  const dueStart = new Date(new Date(definition.nextRunAt).getTime() - 1)
-  const dueOccurrences = getRecurringOccurrences(definition.schedule, dueStart, now)
-  const fallbackOccurrence = new Date(definition.nextRunAt)
-  const occurrences = dueOccurrences.length > 0 ? dueOccurrences : [fallbackOccurrence]
+  const calendar = await readRecurringWorkCalendar(definition, dependencies)
+  let occurrences: Date[]
+  let fallbackOccurrence: Date
+  if (calendar) {
+    const businessDayOccurrences = getRecurringOccurrences(
+      definition.schedule,
+      new Date(definition.lastRunAt ?? definition.createdAt),
+      now,
+      calendar,
+    )
+    const firstBusinessDayOccurrence = businessDayOccurrences[0]
+    if (!firstBusinessDayOccurrence) {
+      return await deferRecurringWorkToBusinessDay(definition, calendar, dependencies)
+    }
+    occurrences = businessDayOccurrences
+    fallbackOccurrence = firstBusinessDayOccurrence
+  } else {
+    const dueStart = new Date(new Date(definition.nextRunAt).getTime() - 1)
+    const dueOccurrences = getRecurringOccurrences(definition.schedule, dueStart, now)
+    fallbackOccurrence = new Date(definition.nextRunAt)
+    occurrences = dueOccurrences.length > 0 ? dueOccurrences : [fallbackOccurrence]
+  }
   const selected = await selectRecurringDueOccurrences(
     definition,
     occurrences,
@@ -358,7 +469,7 @@ export async function processRecurringWorkDefinition(
   }
 
   const lastCompleted = selected.at(-1) ?? occurrences.at(-1)!
-  const nextRun = getNextRecurringOccurrence(definition.schedule, lastCompleted)
+  const nextRun = getNextRecurringOccurrence(definition.schedule, lastCompleted, calendar)
   if (!nextRun) {
     throw new AutomationError('conflict', 'RecurringScheduleExhausted', 'Recurring schedule has no next occurrence.')
   }
@@ -373,6 +484,69 @@ export async function processRecurringWorkDefinition(
   } catch (error) {
     const current = await dependencies.client.getRecurringWork(definition.workspaceId, definition.id)
     if (current?.lastRunAt && current.lastRunAt >= lastCompleted.toISOString()) return current
+    throw error
+  }
+}
+
+/**
+ * Reads the Team calendar of a business-day Recurring Work.
+ *
+ * @param definition - Recurring definition.
+ * @param dependencies - Schedule dependencies.
+ * @returns The calendar, or undefined when the schedule does not count business days.
+ * @throws AutomationError `RecurringWorkCalendarUnavailable` without a calendar source.
+ */
+async function readRecurringWorkCalendar(
+  definition: RecurringWork,
+  dependencies: AutomationScheduleDependencies,
+): Promise<RecurringWorkCalendar | undefined> {
+  if (definition.schedule.monthlyDay !== 'business-day') return undefined
+  if (!dependencies.workCalendars) {
+    throw new AutomationError(
+      'unavailable',
+      'RecurringWorkCalendarUnavailable',
+      'Work calendar lookup is not configured.',
+      true,
+    )
+  }
+  return await dependencies.workCalendars.readTeamWorkCalendar(
+    definition.workspaceId,
+    definition.teamId,
+  )
+}
+
+/**
+ * Moves a business-day Recurring Work to its working day when the run it was due for, which is
+ * stored as the earliest day that working day can fall on, comes before it.
+ *
+ * @param definition - Recurring definition that is due.
+ * @param calendar - Team calendar.
+ * @param dependencies - Schedule dependencies.
+ * @returns The deferred definition, or the current one when another runner already moved it.
+ */
+async function deferRecurringWorkToBusinessDay(
+  definition: RecurringWork,
+  calendar: RecurringWorkCalendar,
+  dependencies: AutomationScheduleDependencies,
+): Promise<RecurringWork> {
+  const nextRun = getNextRecurringOccurrence(
+    definition.schedule,
+    new Date(definition.lastRunAt ?? definition.createdAt),
+    calendar,
+  )
+  if (!nextRun) {
+    throw new AutomationError('conflict', 'RecurringScheduleExhausted', 'Recurring schedule has no next occurrence.')
+  }
+  try {
+    return await dependencies.client.deferRecurringWork(
+      definition.workspaceId,
+      definition.id,
+      definition.revision,
+      nextRun.toISOString(),
+    )
+  } catch (error) {
+    const current = await dependencies.client.getRecurringWork(definition.workspaceId, definition.id)
+    if (current && current.revision !== definition.revision) return current
     throw error
   }
 }

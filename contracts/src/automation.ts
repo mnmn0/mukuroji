@@ -104,12 +104,29 @@ export type AutomationRelationTrigger = {
   eventTypes?: WorkItemRelationEventType[]
 }
 
+/** Most days before the due date a due-soon schedule trigger can look ahead. */
+export const AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE = 365
+
+/**
+ * Runs a schedule trigger once for each open Work Item whose due date is a fixed number of days
+ * after the occurrence's local date in the schedule's time zone.
+ */
+export type AutomationDueWorkItemsSelection = {
+  /** Days from the occurrence date to the due date, from 0 (due that day) to the maximum. */
+  daysBefore: number
+}
+
 /** Scheduled occurrence を検出する trigger です。 */
 export type AutomationScheduleTrigger = {
   /** Trigger discriminator です。 */
   type: 'schedule'
   /** IANA timezone と recurrence を含む schedule です。 */
   schedule: RecurringSchedule
+  /**
+   * When set, each occurrence runs the rule once per open Work Item due that many days later,
+   * and conditions and actions read that Work Item. Omitted runs the rule once per occurrence.
+   */
+  dueWorkItems?: AutomationDueWorkItemsSelection
 }
 
 /** Longest delay, in days, a baseline-slip trigger can wait for. */
@@ -130,7 +147,26 @@ export type AutomationBaselineSlipTrigger = {
   minDelayDays?: number
 }
 
-/** Automation rule が扱える11種類の trigger です。 */
+/** Approval decisions an approval trigger can filter on. */
+export const AUTOMATION_APPROVAL_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
+
+/** Approval decision an approval trigger can filter on. */
+export type AutomationApprovalDecision = (typeof AUTOMATION_APPROVAL_DECISIONS)[number]
+
+/**
+ * Detects a decided approval request on a Work Item.
+ *
+ * `approved` fires once every reviewer has approved, while `rejected` and `changes-requested` fire
+ * on the reviewer decision that sets the request to that state.
+ */
+export type AutomationApprovalTrigger = {
+  /** Trigger discriminator. */
+  type: 'approval'
+  /** Decision that starts the rule; omitted matches every decision. */
+  decision?: AutomationApprovalDecision
+}
+
+/** Automation rule が扱える12種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
@@ -139,6 +175,7 @@ export type AutomationTrigger =
   | AutomationCustomFieldTrigger
   | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger
+  | AutomationApprovalTrigger
   | AutomationRelationTrigger
   | AutomationFormTrigger
   | AutomationWebhookTrigger
@@ -249,6 +286,11 @@ export type AutomationNotifyAction = {
   type: 'notify'
   /** Notification recipient の member keys です。 */
   recipientMemberKeys: string[]
+  /**
+   * Also notifies the assignee of the Work Item the rule runs for. The rule needs at least one
+   * recipient key or this flag.
+   */
+  notifyAssignee?: boolean
   /** Notification title です。 */
   title: string
   /** Notification body です。 */
@@ -1004,13 +1046,32 @@ export type RecurringSchedule = {
   startDate: string
   /** Weekly cadence の曜日です。0 が Sunday です。 */
   daysOfWeek?: number[]
-  /** Monthly cadence の日です。 */
+  /**
+   * Monthly cadence の日です。With `monthlyDay: 'business-day'` it is the business day number
+   * instead, and with `'last-day'` it is omitted.
+   */
   dayOfMonth?: number
+  /**
+   * How a monthly cadence picks its day. `day-of-month` (the default) uses {@link dayOfMonth},
+   * `last-day` uses the month's last calendar day, and `business-day` uses the
+   * {@link dayOfMonth}th working day of the owner Team's work calendar. `business-day` is only
+   * accepted on Recurring Work.
+   */
+  monthlyDay?: RecurringMonthlyDay
   /** Missed occurrence の catch-up policy です。 */
   catchUpPolicy: RecurringCatchUpPolicy
   /** 一回の catch-up で生成する最大 occurrence 数です。 */
   maxCatchUpOccurrences?: number
 }
+
+/** Ways a monthly recurring schedule picks its day. */
+export const RECURRING_MONTHLY_DAYS = ['day-of-month', 'last-day', 'business-day'] as const
+
+/** Way a monthly recurring schedule picks its day. */
+export type RecurringMonthlyDay = (typeof RECURRING_MONTHLY_DAYS)[number]
+
+/** Highest business day number a `business-day` monthly schedule accepts. */
+export const RECURRING_MAX_BUSINESS_DAY = 23
 
 /** Template から繰り返し Work Item を作成する定義です。 */
 export type RecurringWork = {
