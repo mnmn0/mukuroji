@@ -127,6 +127,11 @@ export function TeamWorkloadView({
                 {t('workload.redacted').replace('{count}', String(snapshot.redactedAssignmentCount))}
               </span>
             ) : null}
+            {snapshot?.workspaceTotalsUnavailable ? (
+              <span className="text-xs font-semibold text-fg-amber-800" data-testid="team-workload-workspace-unavailable" role="status">
+                {t('workload.workspaceTotalsUnavailable')}
+              </span>
+            ) : null}
             {snapshot?.contributorShares && snapshot.contributorShares.length > 0 ? (
               <span className="text-xs font-semibold text-[var(--workbench-muted)]" data-testid="team-workload-contributor-shares">
                 {t('workload.contributorShares').replace('{count}', String(snapshot.contributorShares.length))}

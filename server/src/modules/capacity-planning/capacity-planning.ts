@@ -108,7 +108,12 @@ export type CapacityPlanningDataSource = {
     /** Exclusive instant upper bound. */
     to: string
   }): Promise<WorkloadTimeEntry[]>
-  /** Lists the canonical Work Item estimates and remaining effort for the selected Team. */
+  /**
+   * Lists the canonical Work Item estimates and remaining effort for the selected Team.
+   *
+   * @throws CapacityPlanningError with code {@link WORKLOAD_ESTIMATES_LIMIT_EXCEEDED} when the
+   *   Team has too many Work Items to read.
+   */
   listEstimates(workspaceId: string, teamId: string): Promise<WorkloadEstimate[]>
 }
 
@@ -218,6 +223,8 @@ export type WorkloadSnapshotInput = {
    * the member's Workspace-wide capacity, allocation, and status.
    */
   workspaceTeamStates?: readonly TeamCapacityPlanningState[]
+  /** Marks the snapshot as leaving out the Workspace-wide totals that could not be read. */
+  workspaceTotalsUnavailable?: boolean
   /**
    * Teams that are not archived, for the Workspace-wide totals; every stored Team counts when
    * omitted. The Team being read always counts.
@@ -242,6 +249,9 @@ export type WorkloadWhatIfInput = WorkloadSnapshotInput & {
   /** Preview planned effort minutes. */
   plannedEffortMinutes: number
 }
+
+/** Error code of a Team whose Work Items are too many to read their estimates. */
+export const WORKLOAD_ESTIMATES_LIMIT_EXCEEDED = 'WorkloadEstimatesLimitExceeded'
 
 /** Stable capacity-planning validation and authorization error. */
 export class CapacityPlanningError extends Error {
@@ -376,6 +386,7 @@ export function buildWorkloadSnapshot(
     assignments: visibleAssignments.map(clone),
     contributorShares,
     redactedAssignmentCount,
+    ...(input.workspaceTotalsUnavailable ? { workspaceTotalsUnavailable: true } : {}),
     redactedRequestCount,
     revision: state.revision,
     generatedAt,
@@ -595,19 +606,23 @@ export class CapacityPlanningService {
       input.teamId,
       state,
     )
-    // Another Team's estimates, such as one over the Work Item read limit, must not fail this
-    // Team's view. Without them the Workspace totals would be too low, so they are left out.
+    // Another Team over the Work Item read limit must not fail this Team's view. Without its
+    // shares the Workspace totals would be too low, so they are left out and marked as such.
+    // Any other failure is not expected and fails the read.
     const teamEstimates = await this.readTeamEstimates(
       input.workspaceId,
       teamStates,
       { teamId: input.teamId, estimates },
-    ).catch(() => undefined)
+    ).catch((error: unknown) => {
+      if (error instanceof CapacityPlanningError && error.code === WORKLOAD_ESTIMATES_LIMIT_EXCEEDED) return undefined
+      throw error
+    })
     return buildWorkloadSnapshot(
       state,
       entries,
       estimates,
       teamEstimates === undefined
-        ? input
+        ? { ...input, workspaceTotalsUnavailable: true }
         : {
             ...input,
             workspaceTeamStates: withContributorReservations(teamStates, teamEstimates, input.workspaceId, generatedAt),

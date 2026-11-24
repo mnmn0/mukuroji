@@ -75,6 +75,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  type AutomationValue,
   createDefaultDueDateWorkItemSchedule,
   createWorkItemHierarchyRankBetween,
   DEFAULT_WORK_ITEM_TYPE,
@@ -705,6 +706,51 @@ test('leaves an unchanged inactive owner out of a share-only handover undo', asy
   const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
   // The owner did not move, so the undo neither writes them back nor checks them as a new assignee.
   expect(stored?.items[0]?.undoPayload).not.toHaveProperty('assigneeUserId')
+
+  const runUndo = async (undoPayload: Record<string, AutomationValue>) => {
+    configureFakeProjectClients(true, {
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys: ['sato@example.com'],
+      issueContributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'demo@example.com', plannedEffortMinutes: 60, status: 'planned' },
+      ],
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-share-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'demo@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload,
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, { method: 'POST', headers })
+    expect(response.status).toBe(200)
+    return response.json()
+  }
+  const contributorAssignments = [
+    { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+  ]
+  expect(await runUndo({ contributorAssignments })).toMatchObject({ status: 'undone' })
+  // A payload that wrote the inactive owner back would fail the same undo.
+  expect(await runUndo({ assigneeUserId: 'sato@example.com', contributorAssignments }))
+    .not.toMatchObject({ status: 'undone' })
 })
 
 test('refuses a bulk reassignment to the same member and fails items the member is not on', async () => {

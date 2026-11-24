@@ -21,6 +21,7 @@ export const capacityPlanningMessages = {
   'workload.legend.over': '超過',
   'workload.legend.unavailable': '利用不可',
   'workload.contributorShares': 'Work Item の Contributor 予定工数を含む: {count} 件',
+  'workload.workspaceTotalsUnavailable': '他の Team の Work Item が多すぎて読めないため、Team をまたいだ負荷は表示していません。',
   'workload.redacted': '機密割り当てを非表示: {count}',
   'workload.table.label': 'チーム負荷ヒートマップ',
   'workload.table.member': 'メンバー',

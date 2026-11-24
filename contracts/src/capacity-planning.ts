@@ -335,6 +335,11 @@ export type WorkloadSnapshot = {
    * servers that predate contributor workload.
    */
   contributorShares?: WorkloadContributorShare[]
+  /**
+   * True when the cells leave out the Workspace-wide totals because another Team has too many
+   * Work Items to read its contributor shares; absent otherwise.
+   */
+  workspaceTotalsUnavailable?: boolean
   /** Number of assignments hidden by confidential visibility. */
   redactedAssignmentCount: number
   /** Number of requests hidden by confidential visibility. */

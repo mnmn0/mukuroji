@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, within } from 'storybook/test'
 import { MemoryRouter } from 'react-router'
 import type { WorkloadSnapshot } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -106,6 +107,21 @@ export const OverAcrossTeams: Story = {
         }
         : member),
     },
+  },
+}
+
+/**
+ * Another Team has too many Work Items to read, so the cells leave out the Workspace-wide totals
+ * and the view says so instead of showing this Team's status as if it were the whole picture.
+ */
+export const WorkspaceTotalsUnavailable: Story = {
+  ...DayHeatmap,
+  args: {
+    ...DayHeatmap.args,
+    snapshot: { ...snapshot, workspaceTotalsUnavailable: true },
+  },
+  play: async ({ canvasElement }) => {
+    await expect(within(canvasElement).getByTestId('team-workload-workspace-unavailable')).toBeVisible()
   },
 }
 

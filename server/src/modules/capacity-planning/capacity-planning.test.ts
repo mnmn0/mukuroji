@@ -8,10 +8,12 @@ import {
 import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import {
   buildWorkloadSnapshot,
+  CapacityPlanningError,
   CapacityPlanningService,
   DynamoDbCapacityPlanningRepository,
   createDefaultWorkingSchedule,
   InMemoryCapacityPlanningRepository,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
@@ -1046,15 +1048,18 @@ describe('Workspace-wide workload', () => {
     const service = new CapacityPlanningService(repository, {
       listTimeEntries: async () => [],
       listEstimates: async (_workspaceId, teamId) => {
-        if (teamId === 'team-2') throw new Error('Too many Work Items.')
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
         return []
       },
     }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
 
     const teamSnapshot = await service.getSnapshot(createInput())
     expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300 })
-    // Totals that would miss team-2's shares are left out rather than shown too low.
+    // Totals that would miss team-2's shares are left out rather than shown too low, and say so.
     expect(teamSnapshot.members[0]?.cells[0]).not.toHaveProperty('workspaceAllocatedMinutes')
+    expect(teamSnapshot.workspaceTotalsUnavailable).toBe(true)
 
     await expect(service.getWorkspaceSnapshot({
       workspaceId: 'workspace-1',
@@ -1064,6 +1069,21 @@ describe('Workspace-wide workload', () => {
       viewerMemberId: 'viewer-1',
       teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
     })).rejects.toThrow('Too many Work Items.')
+  })
+
+  test('fails a Team view when another Team\'s estimates fail for an unexpected reason', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') throw new Error('Storage unavailable.')
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
   })
 
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
