@@ -65,6 +65,7 @@ export function SettingsPage() {
             workspaceConfiguration: workspace.canManageWorkspaceConfiguration,
             softwareFactory: workspace.softwareFactoryEnabled,
             teamManagement: workspace.canManageTeams,
+            workspaceTimePeriods: workspace.canManageWorkspaceTimePeriods,
           })}
           t={t}
         />
@@ -192,7 +193,7 @@ export function SettingsPage() {
                     />
                   </SettingsPanelAnchor>
                 ) : null}
-                {workspace.canManageWorkspaceConfiguration ? (
+                {workspace.canManageWorkspaceTimePeriods ? (
                   <SettingsPanelAnchor panel="time-periods">
                     <WorkspaceTimePeriodContainer
                       accessToken={workspace.accessToken}
@@ -296,6 +297,8 @@ type SettingsPanelAvailability = {
   softwareFactory: boolean
   /** Whether the member manages Teams, which shows the Team profile panel. */
   teamManagement: boolean
+  /** Whether the member closes months for every Team. */
+  workspaceTimePeriods: boolean
 }
 
 /**
@@ -326,7 +329,7 @@ function listSettingsPanels(
           signedIn && 'members',
           signedIn && available.workspaceConfiguration && 'tenant',
           signedIn && available.workspaceConfiguration && 'directory',
-          signedIn && available.workspaceConfiguration && 'time-periods',
+          signedIn && available.workspaceTimePeriods && 'time-periods',
           signedIn && 'developer-platform',
           signedIn && 'automation',
           signedIn && available.auditLog && 'audit-log',

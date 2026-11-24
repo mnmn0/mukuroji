@@ -405,10 +405,11 @@ test('tells the Web that a Workspace-wide role with teams.manage and members.rea
       updatedAt: '2026-11-19T00:00:00.000Z',
     })
     await assignToFixtureMember(identity, 'custom:team-desk')
-    expect(await readMe()).toMatchObject({ canManageTeams: false })
+    expect(await readMe()).toMatchObject({ canManageTeams: false, canManageWorkspaceTimePeriods: false })
 
     await assignToFixtureMember(identity, 'workspace:admin')
-    expect(await readMe()).toMatchObject({ canManageTeams: true })
+    // The Workspace month close follows the assignment's workspace.manage, not the legacy role.
+    expect(await readMe()).toMatchObject({ canManageTeams: true, canManageWorkspaceTimePeriods: true })
   })
 })
 
