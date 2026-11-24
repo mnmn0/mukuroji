@@ -81,6 +81,32 @@ describe('automation rule definition draft', () => {
     expect(createAutomationRuleDraftUpdate(nested, draft).conditions).toEqual(nested.conditions)
   })
 
+  test('saves number and boolean custom field values with their type', () => {
+    const typed: AutomationRule = {
+      ...rule,
+      conditions: [
+        { type: 'field', field: 'workItem.customFieldValues.estimate', operator: 'greater-than', value: 3 },
+        { type: 'field', field: 'workItem.customFieldValues.billable', operator: 'equals', value: true },
+      ],
+    }
+    const draft = createAutomationRuleDraft(typed)
+
+    expect(draft.conditions.map((condition) => condition.valueType)).toEqual(['number', 'boolean'])
+    expect(createAutomationRuleDraftUpdate(typed, draft).conditions).toEqual(typed.conditions)
+    const notANumber = { ...draft, conditions: [{ ...draft.conditions[0]!, value: 'three' }] }
+    expect(isAutomationRuleDraftValid(notANumber)).toBe(false)
+  })
+
+  test('keeps a saved create action with values and a pinned version out of a name-only edit', () => {
+    const pinned: AutomationRule = {
+      ...rule,
+      actions: [{ type: 'create', templateId: 'template-1', templateVersion: 3, values: { title: 'Follow up' } }],
+    }
+    const draft = { ...createAutomationRuleDraft(pinned), name: 'Renamed' }
+
+    expect(createAutomationRuleDraftUpdate(pinned, draft).actions).toBeUndefined()
+  })
+
   test('reorders actions and rejects incomplete ones', () => {
     const notify = createEmptyAutomationRuleActionDraft('notify', 'Due soon')
     const webhook = createEmptyAutomationRuleActionDraft('webhook', 'Due soon')

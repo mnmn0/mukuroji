@@ -16,6 +16,7 @@ export {
   undoBulkOperation,
 } from './application/bulk-operation-service'
 export { orderBulkArchiveItems } from './application/bulk-archive-order'
+export { deleteUnusedAutomationTemplate } from './application/template-deletion'
 export {
   type AutomationActionExecutionContext,
   type AutomationActionExecutor,

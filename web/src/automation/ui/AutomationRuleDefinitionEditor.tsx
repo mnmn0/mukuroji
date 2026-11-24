@@ -64,7 +64,7 @@ export type AutomationRuleDefinitionEditorProps = {
 }
 
 /** Kind of value a condition field compares. */
-type ConditionFieldKind = 'status' | 'member' | 'priority' | 'project' | 'team' | 'text'
+type ConditionFieldKind = 'status' | 'member' | 'priority' | 'project' | 'team' | 'number' | 'boolean' | 'text'
 
 /** A condition field the editor offers by name. */
 type ConditionFieldPreset = {
@@ -236,10 +236,12 @@ export function AutomationRuleDefinitionEditor({
                 className="workbench-button-secondary min-h-9 px-3"
                 data-testid="automation-rule-edit-reset-conditions"
                 type="button"
-                onClick={() => setDraft((current) => {
-                  const { savedConditions: _saved, ...rest } = current
-                  return { ...rest, match: 'all', conditions: [] }
-                })}
+                onClick={() => setDraft((current) => ({
+                  name: current.name,
+                  match: 'all',
+                  conditions: [],
+                  actions: current.actions,
+                }))}
               >
                 {t('automation.ruleEdit.resetConditions')}
               </button>
@@ -439,7 +441,9 @@ function ConditionRow({ condition, index, onChange, onRemove, options, presets, 
                 return
               }
               setCustomField(false)
-              onChange({ ...condition, field: event.target.value, value: '' })
+              const selected = presets.find((candidate) => candidate.field === event.target.value)
+              const valueType = selected?.kind === 'number' || selected?.kind === 'boolean' ? selected.kind : undefined
+              onChange({ field: event.target.value, operator: condition.operator, value: '', ...(valueType ? { valueType } : {}) })
             }}
           >
             {presets.map((candidate) => (
@@ -456,7 +460,7 @@ function ConditionRow({ condition, index, onChange, onRemove, options, presets, 
             data-testid={`automation-rule-edit-condition-path-${index}`}
             placeholder="workItem.customFieldValues.field-id"
             value={condition.field}
-            onChange={(event) => onChange({ ...condition, field: event.target.value })}
+            onChange={(event) => onChange({ field: event.target.value, operator: condition.operator, value: condition.value })}
           />
         ) : null}
       </div>
@@ -528,11 +532,30 @@ function ValuePicker({ kind, label, onChange, options, t, testId, value }: Value
           : kind === 'priority'
             ? priorityValues.map((priority) => ({ id: priority, label: t(priorityLabelKeys[priority]) }))
             : undefined
+  if (kind === 'boolean') {
+    return (
+      <label className={labelClassName}>
+        {label}
+        <select className={inputClassName} data-testid={testId} value={value} onChange={(event) => onChange(event.target.value)}>
+          <option value="">{t('automation.ruleEdit.choose')}</option>
+          <option value="true">{t('automation.ruleEdit.booleanTrue')}</option>
+          <option value="false">{t('automation.ruleEdit.booleanFalse')}</option>
+        </select>
+      </label>
+    )
+  }
   if (!choices) {
     return (
       <label className={labelClassName}>
         {label}
-        <input className={inputClassName} data-testid={testId} value={value} onChange={(event) => onChange(event.target.value)} />
+        <input
+          className={inputClassName}
+          data-testid={testId}
+          inputMode={kind === 'number' ? 'decimal' : undefined}
+          type={kind === 'number' ? 'number' : 'text'}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
       </label>
     )
   }
@@ -1109,10 +1132,10 @@ function createConditionFieldPresets(t: Translate, customFields: AutomationRuleP
     { field: 'workItem.assignedProjectId', label: t('automation.ruleEdit.field.project'), kind: 'project' },
     { field: 'workItem.teamId', label: t('automation.ruleEdit.field.team'), kind: 'team' },
     { field: 'workItem.title', label: t('automation.ruleEdit.field.title'), kind: 'text' },
-    ...customFields.map((field) => ({
+    ...customFields.map((field): ConditionFieldPreset => ({
       field: `workItem.customFieldValues.${field.id}`,
       label: `${t('automation.ruleEdit.field.customField')}: ${field.label}`,
-      kind: 'text' as const,
+      kind: field.valueType ?? 'text',
     })),
   ]
 }

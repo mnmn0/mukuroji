@@ -39,9 +39,9 @@ Condition は event snapshot と現在の Work Item snapshot のどちらを読�
 
 Rule を作った member は `createdByMemberKey` に記録する（fingerprint には含めない。この変更より前の rule にはない）。
 
-`POST /api/automation/rule-dry-runs` は保存前の rule 定義（`CreateAutomationRuleInput` と同じ検証）を、Team と Work Item ID で指定した 1 件に当てて評価する。Trigger は起きたものとして、空の event と今の Work Item snapshot で top level の条件を 1 つずつ評価し、すべて一致したときだけ各 action の予定（assign・move・update は今の値と違う field の before/after、notify・approval は宛先、webhook は host）を返す。Action は実行せず、何も書き込まない。`event.` を読む条件は実際の event で結果が変わるため `readsEventFields` で示す。Workspace 管理者だけが呼べ、Team が無効なら `409` を返し、Work Item が読めなければ通常の Work Item 参照と同じ error を返す。
+`POST /api/automation/rule-dry-runs` は保存前の rule 定義（`CreateAutomationRuleInput` と同じ検証）を、Team と Work Item ID で指定した 1 件に当てて評価する。Trigger は起きたものとして、空の event と今の Work Item snapshot で top level の条件を 1 つずつ評価し、すべて一致したときだけ各 action の予定（assign・move・update は今の値と違う field の before/after、notify・approval は宛先、webhook は host）を返す。同じ field を書く action が続くときは、前の action の結果に対して次の action の変化を示す。Action は実行せず、何も書き込まない。`event.` を読む条件は実際の event で結果が変わるため `readsEventFields` で示す。Workspace 管理者だけが呼べ、Team が無効なら `409` を返し、Work Item が読めなければ通常の Work Item 参照と同じ error を返す。
 
-削除は `DELETE /api/automation/rules/{ruleId}`、`DELETE /api/automation/templates/{templateId}`、`DELETE /api/recurring-work/{recurringWorkId}` に `{ "expectedRevision": n }` を付けて行い、成功すると `204` を返す。Rule と recurring work は current row を消すので、event consumer と schedule worker は以後実行しない（予約済み execution は固定済み version で終わる）。Template は、create action を持つ rule か recurring work が参照している間は `409 AutomationTemplateInUse` で拒否する。参照の確認から削除までに rule や recurring が保存されないよう、削除は確認時に読んだ definition revision を condition にする。
+削除は `DELETE /api/automation/rules/{ruleId}`、`DELETE /api/automation/templates/{templateId}`、`DELETE /api/recurring-work/{recurringWorkId}` に `{ "expectedRevision": n }` を付けて行い、成功すると `204` を返す。Rule と recurring work は current row を消すので、event consumer と schedule worker は以後実行しない（予約済み execution は固定済み version で終わる）。Template は、create action を持つ rule か recurring work が参照している間は `409 AutomationTemplateInUse` で拒否する。参照の確認から削除までに rule や recurring が保存されないよう、削除は確認時に読んだ definition revision を condition にする。逆に、template を参照する rule・recurring work の保存は、読んだ template の revision と有効状態を同じ transaction で condition check するため、確認の後に消された template を参照する定義は保存されない。
 
 ### baseline slip trigger
 

@@ -329,6 +329,22 @@ function createIdempotencyDocumentClient() {
           }
           return false
         })
+        const templateChecks = (command.input.TransactItems as Array<{
+          ConditionCheck?: {
+            Key: Record<string, unknown>
+            ConditionExpression: string
+            ExpressionAttributeValues: Record<string, unknown>
+          }
+        }>).flatMap((item) =>
+          item.ConditionCheck?.ConditionExpression === '#revision = :revision AND #enabled = :enabled'
+            ? [item.ConditionCheck]
+            : [])
+        for (const check of templateChecks) {
+          const existing = items.get(itemKey(check.Key))
+          conflicts.push(
+            existing?.revision !== check.ExpressionAttributeValues[':revision'] || existing?.enabled !== true,
+          )
+        }
         if (conflicts.some(Boolean)) {
           throw Object.assign(new Error('ConditionalCheckFailed'), {
             name: 'TransactionCanceledException',
@@ -459,6 +475,48 @@ describe('automation management create idempotency', () => {
       ...recurringInput,
       teamId: 'other-team',
     }, 'shared-key')).rejects.toMatchObject({ code: 'IdempotencyConflict' })
+  })
+
+  test('rejects a rule or recurring work whose template is deleted between its read and its write', async () => {
+    const { documentClient, items } = createIdempotencyDocumentClient()
+    let deleteTemplateBeforeWrite = false
+    const racingClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        if (deleteTemplateBeforeWrite && Array.isArray(command.input.TransactItems)) {
+          for (const key of items.keys()) {
+            if (key.endsWith('\0TEMPLATE#template-race')) items.delete(key)
+          }
+        }
+        return await documentClient.send(command as never)
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', racingClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'work-item',
+      name: 'Racing template',
+      enabled: true,
+      payload: { schedule: createDefaultUnscheduledWorkItemSchedule(), title: 'Race' },
+    }, 'template-race-key')
+    for (const key of items.keys()) {
+      const item = items.get(key)
+      if (item?.recordKey === `TEMPLATE#${template.id}`) {
+        items.delete(key)
+        items.set(key.replace(`TEMPLATE#${template.id}`, 'TEMPLATE#template-race'), {
+          ...item,
+          recordKey: 'TEMPLATE#template-race',
+          id: 'template-race',
+        })
+      }
+    }
+    deleteTemplateBeforeWrite = true
+
+    await expect(client.createRule('workspace-1', {
+      name: 'Racing rule',
+      enabled: true,
+      trigger: { type: 'status', toStatusId: 'done' },
+      actions: [{ type: 'create', templateId: 'template-race' }],
+    })).rejects.toMatchObject({ code: 'AutomationTemplateNotFound' })
+    expect([...items.values()].some((item) => item.entryType === 'rule')).toBe(false)
   })
 
   test('pins server-resolved immutable template versions for rules and recurring work', async () => {

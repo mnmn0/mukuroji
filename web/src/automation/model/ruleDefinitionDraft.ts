@@ -7,12 +7,17 @@ import type {
   UpdateAutomationRuleInput,
 } from '@mukuroji/contracts'
 
+/** Type a condition compares its value as; omitted compares text. */
+export type AutomationRuleConditionValueType = 'number' | 'boolean'
+
 /** One choice a rule editor picker offers. */
 export type AutomationRulePickerOption = {
   /** Stored identifier. */
   id: string
   /** Label shown to the administrator. */
   label: string
+  /** For a custom field, the type its stored values have when it is not text. */
+  valueType?: AutomationRuleConditionValueType
 }
 
 /** How the condition rows of a rule combine. */
@@ -26,6 +31,11 @@ export type AutomationRuleConditionDraft = {
   operator: AutomationConditionOperator
   /** Comparison value as typed; ignored by `exists` and `not-exists`. */
   value: string
+  /**
+   * Type the value is saved as. Automation compares values by type, so a number field needs a
+   * number value to ever match; omitted saves text.
+   */
+  valueType?: AutomationRuleConditionValueType
 }
 
 /** Fields of a Work Item an update action can set from the editor. */
@@ -210,7 +220,27 @@ export function moveAutomationRuleDraftItem<TItem>(items: readonly TItem[], inde
 export function isAutomationRuleConditionDraftValid(condition: AutomationRuleConditionDraft): boolean {
   const field = condition.field.trim()
   if (!/^(event|workItem|variables)\.[A-Za-z0-9_.-]+$/.test(field)) return false
-  return isExistenceOperator(condition.operator) || condition.value.trim().length > 0
+  if (isExistenceOperator(condition.operator)) return true
+  return readConditionValue(condition) !== undefined
+}
+
+/**
+ * Converts the typed value of a condition row to the value it saves.
+ *
+ * @param condition - Condition row.
+ * @returns The value, or undefined when it is empty or not of the row's type.
+ */
+function readConditionValue(condition: AutomationRuleConditionDraft): AutomationValue | undefined {
+  const value = condition.value.trim()
+  if (!value) return undefined
+  if (condition.valueType === 'number') {
+    const number = Number(value)
+    return Number.isFinite(number) ? number : undefined
+  }
+  if (condition.valueType === 'boolean') {
+    return value === 'true' ? true : value === 'false' ? false : undefined
+  }
+  return value
 }
 
 /**
@@ -266,12 +296,15 @@ export function isAutomationRuleDraftValid(draft: AutomationRuleDraft): boolean 
 export function createAutomationRuleDraftConditions(draft: AutomationRuleDraft): AutomationCondition[] {
   if (draft.savedConditions) return structuredClone(draft.savedConditions)
   if (draft.conditions.length === 0) return []
-  const rows: AutomationCondition[] = draft.conditions.map((condition) => ({
-    type: 'field',
-    field: condition.field.trim(),
-    operator: condition.operator,
-    ...(isExistenceOperator(condition.operator) ? {} : { value: condition.value.trim() }),
-  }))
+  const rows: AutomationCondition[] = draft.conditions.map((condition) => {
+    const value = readConditionValue(condition)
+    return {
+      type: 'field',
+      field: condition.field.trim(),
+      operator: condition.operator,
+      ...(isExistenceOperator(condition.operator) || value === undefined ? {} : { value }),
+    }
+  })
   return draft.match === 'any' ? [{ type: 'any', conditions: rows }] : rows
 }
 
@@ -303,7 +336,8 @@ export function createAutomationRuleDraftUpdate(
     conditions: createAutomationRuleDraftConditions(draft),
     // Sending actions makes the server pin create actions to the current template version, so
     // unchanged actions are left out and keep the version they were saved with.
-    ...(canonicalJson(actions) === canonicalJson(rule.actions.map(withoutPinnedTemplateVersion))
+    ...(canonicalJson(actions.map(withoutPinnedTemplateVersion)) ===
+      canonicalJson(rule.actions.map(withoutPinnedTemplateVersion))
       ? {}
       : { actions }),
   }
@@ -334,8 +368,11 @@ function canonicalJson(value: unknown): string {
  */
 function withoutPinnedTemplateVersion(action: AutomationAction): AutomationAction {
   if (action.type !== 'create' || action.templateVersion === undefined) return action
-  const { templateVersion: _pinned, ...rest } = action
-  return rest
+  return {
+    type: 'create',
+    ...(action.templateId === undefined ? {} : { templateId: action.templateId }),
+    ...(action.values === undefined ? {} : { values: action.values }),
+  }
 }
 
 /**
@@ -367,8 +404,18 @@ function readFieldRows(conditions: readonly AutomationCondition[]): AutomationRu
   const rows: AutomationRuleConditionDraft[] = []
   for (const condition of conditions) {
     if (condition.type !== 'field') return undefined
-    if (condition.value !== undefined && typeof condition.value !== 'string') return undefined
-    rows.push({ field: condition.field, operator: condition.operator, value: condition.value ?? '' })
+    const value = condition.value
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      rows.push({
+        field: condition.field,
+        operator: condition.operator,
+        value: String(value),
+        valueType: typeof value === 'number' ? 'number' : 'boolean',
+      })
+      continue
+    }
+    if (value !== undefined && typeof value !== 'string') return undefined
+    rows.push({ field: condition.field, operator: condition.operator, value: value ?? '' })
   }
   return rows
 }

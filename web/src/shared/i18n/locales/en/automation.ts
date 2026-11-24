@@ -391,4 +391,6 @@ export const automationMessages = {
   'automation.ruleEdit.dryRunConditionNotMet': 'Not matched',
   'automation.ruleEdit.dryRunEventFields': 'This condition reads trigger event fields, so the real result depends on the event.',
   'automation.ruleEdit.dryRunNoChange': 'No change.',
+  'automation.ruleEdit.booleanTrue': 'Yes',
+  'automation.ruleEdit.booleanFalse': 'No',
 } as const

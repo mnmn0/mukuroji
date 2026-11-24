@@ -46,10 +46,27 @@ export function dryRunAutomationRule(
     matched,
     triggerType: rule.trigger.type,
     conditions,
-    actions: matched
-      ? rule.actions.map((action, index) => planAutomationAction(action, index, workItem))
-      : [],
+    actions: matched ? planAutomationActions(rule.actions, workItem) : [],
   }
+}
+
+/**
+ * Plans actions in order, each against the Work Item as the earlier actions would leave it.
+ *
+ * @param actions - Actions in execution order.
+ * @param workItem - Work Item snapshot before the first action.
+ * @returns One plan per action.
+ */
+function planAutomationActions(
+  actions: readonly AutomationAction[],
+  workItem: Record<string, AutomationValue>,
+): AutomationRuleDryRunActionPlan[] {
+  let current = { ...workItem }
+  return actions.map((action, index) => {
+    const plan = planAutomationAction(action, index, current)
+    for (const change of plan.changes ?? []) current = { ...current, [change.field]: change.after }
+    return plan
+  })
 }
 
 /**

@@ -387,4 +387,6 @@ export const automationMessages = {
   'automation.ruleEdit.dryRunConditionNotMet': '不一致',
   'automation.ruleEdit.dryRunEventFields': 'トリガーのイベント項目を読むため、実際の結果はイベントによって変わります。',
   'automation.ruleEdit.dryRunNoChange': '変更はありません。',
+  'automation.ruleEdit.booleanTrue': 'はい',
+  'automation.ruleEdit.booleanFalse': 'いいえ',
 } as const

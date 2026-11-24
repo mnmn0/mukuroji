@@ -72,6 +72,7 @@ import {
   applyBulkOperation,
   deliverAutomationWebhook,
   createAutomationCommentId,
+  deleteUnusedAutomationTemplate,
   dryRunAutomationRule,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
@@ -3381,37 +3382,11 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const principal = await authenticateAutomationPrincipal(c, true)
       const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
       const templateId = c.req.param('templateId')
-      const workspaceId = principal.directoryId
-      const definitionRevision = await automationDependencies.ruleTemplates
-        .getAutomationDefinitionRevision(workspaceId)
-      if (!await automationDependencies.ruleTemplates.getTemplate(workspaceId, templateId)) {
-        throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
-      }
-      const [rules, recurringWorks] = await Promise.all([
-        automationDependencies.ruleTemplates.listRules(workspaceId),
-        automationDependencies.recurringSchedules.listRecurringWorks(workspaceId),
-      ])
-      const users = [
-        ...rules
-          .filter((rule) => rule.actions.some((action) =>
-            action.type === 'create' && action.templateId === templateId))
-          .map((rule) => rule.name),
-        ...recurringWorks
-          .filter((definition) => definition.templateId === templateId)
-          .map((definition) => definition.name),
-      ]
-      if (users.length > 0) {
-        throw new AutomationError(
-          'conflict',
-          'AutomationTemplateInUse',
-          `Automation template is used by: ${users.slice(0, 5).join(', ')}.`,
-        )
-      }
-      await automationDependencies.ruleTemplates.deleteTemplate(
-        workspaceId,
+      await deleteUnusedAutomationTemplate(
+        automationDependencies,
+        principal.directoryId,
         templateId,
         input.expectedRevision,
-        definitionRevision,
       )
       return c.body(null, 204)
     } catch (error) {

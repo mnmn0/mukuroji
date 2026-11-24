@@ -364,12 +364,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       }
       throw error
     }
+    const pinned = await this.pinWorkItemTemplateVersions(
+      normalizedWorkspaceId,
+      requestedDefinition.actions,
+    )
     const definition = {
       ...requestedDefinition,
-      actions: await this.pinWorkItemTemplateVersions(
-        normalizedWorkspaceId,
-        requestedDefinition.actions,
-      ),
+      actions: pinned.actions,
     }
     const now = new Date().toISOString()
     const nextRunAt = definition.trigger.type === 'schedule'
@@ -400,9 +401,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         rule,
         scheduledRuleIndexAttributes(rule),
         createIdentity,
-        webhookTriggerEndpoint
-          ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
-          : [],
+        [
+          ...(webhookTriggerEndpoint
+            ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
+            : []),
+          ...pinned.templateChecks,
+        ],
       )
     } catch (error) {
       if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
@@ -415,6 +419,8 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         )
         if (replay) return replay
       }
+      // A referenced template that changed or disappeared reports as unavailable, not as a conflict.
+      await this.pinWorkItemTemplateVersions(normalizedWorkspaceId, requestedDefinition.actions)
       if (webhookTriggerEndpoint) {
         await this.assertActiveInboundWebhookTrigger(
           normalizedWorkspaceId,
@@ -450,9 +456,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const webhookTriggerEndpoint = webhookTriggerChanged || webhookRuleEnabled
       ? await this.assertActiveInboundWebhookTrigger(workspaceId, normalized.trigger)
       : undefined
-    const pinnedActions = input.actions === undefined
-      ? current.actions
+    const pinned = input.actions === undefined
+      ? { actions: current.actions, templateChecks: [] }
       : await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions)
+    const pinnedActions = pinned.actions
     const scheduleChanged = normalized.trigger.type === 'schedule' && (
       current.trigger.type !== 'schedule' ||
       canonicalString(current.trigger.schedule) !== canonicalString(normalized.trigger.schedule)
@@ -492,13 +499,19 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         rule,
         current.revision,
         scheduledRuleIndexAttributes(rule),
-        webhookTriggerEndpoint
-          ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
-          : [],
+        [
+          ...(webhookTriggerEndpoint
+            ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
+            : []),
+          ...pinned.templateChecks,
+        ],
       )
     } catch (error) {
       if (webhookTriggerEndpoint) {
         await this.assertActiveInboundWebhookTrigger(workspaceId, normalized.trigger)
+      }
+      if (input.actions !== undefined) {
+        await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions)
       }
       throw error
     }
@@ -1859,9 +1872,14 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         recurring,
         recurringIndexAttributes(recurring),
         createIdentity,
+        [createTemplateReferenceConditionCheck(this.tableName, normalizedWorkspaceId, template)],
       )
     } catch (error) {
-      if (!createIdentity || !isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
+      if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
+      if (!createIdentity) {
+        await this.requireEnabledWorkItemTemplate(normalizedWorkspaceId, normalized.templateId)
+        throw persistenceError(error)
+      }
       return await this.getIdempotentCreateReplay<RecurringWork>(
         normalizedWorkspaceId,
         currentKey,
@@ -1898,9 +1916,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       ? new Date(current.nextRunAt)
       : getNextRecurringOccurrence(normalized.schedule, now)
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
-    const templateVersion = input.templateId === undefined
-      ? current.templateVersion
-      : (await this.requireEnabledWorkItemTemplate(workspaceId, normalized.templateId)).version
+    const template = input.templateId === undefined
+      ? undefined
+      : await this.requireEnabledWorkItemTemplate(workspaceId, normalized.templateId)
+    const templateVersion = template?.version ?? current.templateVersion
     const recurring: RecurringWork = {
       ...current,
       ...normalized,
@@ -1918,6 +1937,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       recurring,
       current.revision,
       recurringIndexAttributes(recurring),
+      template ? [createTemplateReferenceConditionCheck(this.tableName, workspaceId, template)] : [],
     )
     return recurring
   }
@@ -2933,16 +2953,33 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return template
   }
 
-  /** Create actions の template reference を current immutable version へ固定します。 */
+  /**
+   * Create actions の template reference を current immutable version へ固定します。
+   *
+   * The returned checks make the definition write fail when a referenced template was changed or
+   * deleted after this read, so a template delete that passed its reference check cannot leave a
+   * saved definition pointing at a missing template.
+   *
+   * @param workspaceId - Workspace that owns the templates.
+   * @param actions - Actions to pin.
+   * @returns Pinned actions and one condition check per referenced template.
+   */
   private async pinWorkItemTemplateVersions(
     workspaceId: string,
     actions: readonly AutomationAction[],
   ) {
-    return await Promise.all(actions.map(async (action): Promise<AutomationAction> => {
+    const templates = new Map<string, AutomationTemplate>()
+    const pinnedActions = await Promise.all(actions.map(async (action): Promise<AutomationAction> => {
       if (action.type !== 'create' || !action.templateId) return action
       const template = await this.requireEnabledWorkItemTemplate(workspaceId, action.templateId)
+      templates.set(template.id, template)
       return { ...action, templateVersion: template.version }
     }))
+    return {
+      actions: pinnedActions,
+      templateChecks: [...templates.values()].map((template) =>
+        createTemplateReferenceConditionCheck(this.tableName, workspaceId, template)),
+    }
   }
 
   /** Recurring definition を必須取得します。 */
@@ -3626,6 +3663,33 @@ function createInboundWebhookActiveConditionCheck(
  * @param endpoint - Endpoint record referenced by the rule trigger.
  * @returns The transaction item wrapping the condition check.
  */
+/**
+ * Builds the check that a template a definition references is still the enabled row it read.
+ *
+ * @param tableName - Automation table.
+ * @param workspaceId - Workspace that owns the template.
+ * @param template - Template row read before the write.
+ * @returns A condition check transaction item.
+ */
+function createTemplateReferenceConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  template: AutomationTemplate,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: automationScopeKey(workspaceId),
+        recordKey: `TEMPLATE#${encodeKey(template.id)}`,
+      },
+      ConditionExpression: '#revision = :revision AND #enabled = :enabled',
+      ExpressionAttributeNames: { '#revision': 'revision', '#enabled': 'enabled' },
+      ExpressionAttributeValues: { ':revision': template.revision, ':enabled': true },
+    },
+  }
+}
+
 function createInboundWebhookRuleActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,

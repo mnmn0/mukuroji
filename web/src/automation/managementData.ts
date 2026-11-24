@@ -3,10 +3,14 @@ import type {
   AutomationInboundWebhookEndpoint,
   AutomationRule,
   AutomationTemplate,
+  CustomFieldType,
   RecurringWork,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
-import type { AutomationRulePickerOption } from './model/ruleDefinitionDraft'
+import type {
+  AutomationRuleConditionValueType,
+  AutomationRulePickerOption,
+} from './model/ruleDefinitionDraft'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { getWorkItemConfiguration } from '../work-items/api'
 import type { AutomationWorkflowTargetOption } from './ui/AutomationManagementPanel'
@@ -70,8 +74,31 @@ export async function loadAutomationManagementData(
     statusOptions: collectPickerOptions(configurations.configurations, readWorkflowStatuses),
     customFieldOptions: collectPickerOptions(
       configurations.configurations,
-      (configuration) => configuration.customFields ?? [],
+      (configuration) => (configuration.customFields ?? []).map((field) => {
+        const valueType = readCustomFieldValueType(field.type)
+        return { id: field.id, name: field.name, ...(valueType ? { valueType } : {}) }
+      }),
     ),
+  }
+}
+
+/**
+ * Tells which type a custom field's stored values have, for typed condition values.
+ *
+ * @param type - Custom field type.
+ * @returns `number` or `boolean`, or undefined for fields compared as text.
+ */
+function readCustomFieldValueType(type: CustomFieldType): AutomationRuleConditionValueType | undefined {
+  switch (type) {
+    case 'number':
+    case 'currency':
+    case 'duration':
+    case 'formula':
+      return 'number'
+    case 'boolean':
+      return 'boolean'
+    default:
+      return undefined
   }
 }
 
@@ -96,12 +123,21 @@ function readWorkflowStatuses(configuration: WorkItemConfiguration): Array<{ id:
  */
 function collectPickerOptions(
   configurations: WorkItemConfiguration[],
-  read: (configuration: WorkItemConfiguration) => Array<{ id: string; name: string }>,
+  read: (configuration: WorkItemConfiguration) => Array<{
+    id: string
+    name: string
+    valueType?: AutomationRuleConditionValueType
+  }>,
 ): AutomationRulePickerOption[] {
   const options = new Map<string, AutomationRulePickerOption>()
   for (const configuration of configurations) {
     for (const entry of read(configuration)) {
-      if (!options.has(entry.id)) options.set(entry.id, { id: entry.id, label: entry.name })
+      if (options.has(entry.id)) continue
+      options.set(entry.id, {
+        id: entry.id,
+        label: entry.name,
+        ...(entry.valueType ? { valueType: entry.valueType } : {}),
+      })
     }
   }
   return [...options.values()].sort((first, second) => first.label.localeCompare(second.label))
