@@ -46,6 +46,7 @@ export const timeTrackingMessages = {
   'timeTracking.form.create': '追加',
   'timeTracking.form.saveChanges': '変更を保存',
   'timeTracking.form.cancel': 'キャンセル',
+  'timeTracking.form.sessionDraftRestored': 'セッションが切れる前に入力していた内容を戻しました。確認して保存してください。',
   'timeTracking.entry.billable': '請求対象',
   'timeTracking.entry.timer': 'タイマー',
   'timeTracking.entry.edit': '編集',

@@ -1,5 +1,6 @@
 import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState } from 'react'
+import { hasPendingSessionDraft } from '../../../auth/useSessionDraft'
 import type { IndirectTimeEntryInput, TimeEntryDraftInput, TimesheetTransitionResult } from '../api/timeEntries'
 import {
   buildTimeEntryWeekRows,
@@ -8,6 +9,7 @@ import {
   sumTimeEntryMinutesInDays,
 } from '../model/timeEntryLifecycle'
 import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
+import { createTimeEntryFormSessionDraftKey } from '../model/timeEntryFormSessionDraft'
 import { IndirectTimeEntryForm, type IndirectTimeEntryTargets } from './IndirectTimeEntryForm'
 import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
@@ -22,6 +24,12 @@ import {
   type TimeTrackingTranslator,
 } from './timeTrackingText'
 import { useTimeEntryCategories } from './timeEntryCategoryContext'
+
+/** Key of the timesheet's new Work Item time form, kept across an ended session. */
+const workItemEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('work-item', ['timesheet'])
+
+/** Key of the timesheet's new indirect work form, kept across an ended session. */
+const indirectEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet'])
 
 /** Props of the member's weekly timesheet. */
 export type PersonalTimesheetProps = {
@@ -103,7 +111,11 @@ export function PersonalTimesheet({
 }: PersonalTimesheetProps) {
   const id = useId()
   const categories = useTimeEntryCategories()
-  const [creating, setCreating] = useState<'work-item' | 'indirect'>()
+  // A form whose input was kept when the session ended opens again so the input comes back.
+  const [creating, setCreating] = useState<'work-item' | 'indirect' | undefined>(() =>
+    hasPendingSessionDraft(workItemEntrySessionDraftKey)
+      ? 'work-item'
+      : hasPendingSessionDraft(indirectEntrySessionDraftKey) ? 'indirect' : undefined)
   const canRecordIndirect = indirectTargets !== undefined &&
     (indirectTargets.allowNoProject || indirectTargets.projects.length > 0)
   const [isSubmittingWeek, setIsSubmittingWeek] = useState(false)
@@ -206,6 +218,7 @@ export function PersonalTimesheet({
         <TimeEntryForm
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
+          sessionDraftKey={workItemEntrySessionDraftKey}
           onSave={async (input) => {
             const saved = await onCreateEntry(input)
             setCreating(undefined)
@@ -219,6 +232,7 @@ export function PersonalTimesheet({
         <IndirectTimeEntryForm
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
+          sessionDraftKey={indirectEntrySessionDraftKey}
           onSave={async (input) => {
             const saved = await onCreateIndirectEntry(input)
             setCreating(undefined)

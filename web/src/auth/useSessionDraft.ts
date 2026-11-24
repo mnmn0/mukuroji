@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { readAccessTokenSubject, readStoredAuthSession } from './session'
-import { registerSessionDraft, takeSessionDraft } from './sessionDrafts'
+import { hasSessionDraft, registerSessionDraft, takeSessionDraft } from './sessionDrafts'
 
 /** Options of {@link useSessionDraft}. */
 export type UseSessionDraftOptions<Draft> = {
@@ -10,7 +10,12 @@ export type UseSessionDraftOptions<Draft> = {
    */
   key: string | undefined
   /** Current unsaved value, or `undefined` when the input has nothing to keep. */
-  value: Draft | undefined
+  value?: Draft
+  /**
+   * Reads the current unsaved value at the moment the session ends, in place of `value`, for an
+   * input whose unsaved state lives outside React state.
+   */
+  read?: () => Draft | undefined
   /** Validates a preserved value read back from storage. */
   parse: (value: unknown) => Draft | undefined
   /** Puts a preserved value back into the input after the same account signed in again. */
@@ -26,14 +31,16 @@ export type UseSessionDraftOptions<Draft> = {
  *
  * @param options - Input key, current value, and how to validate and restore a preserved value.
  */
-export function useSessionDraft<Draft>({ key, value, parse, onRestore }: UseSessionDraftOptions<Draft>) {
+export function useSessionDraft<Draft>({ key, value, read, parse, onRestore }: UseSessionDraftOptions<Draft>) {
   const valueRef = useRef(value)
+  const readRef = useRef(read)
   const parseRef = useRef(parse)
   const onRestoreRef = useRef(onRestore)
   const restoredKeyRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
     valueRef.current = value
+    readRef.current = read
     parseRef.current = parse
     onRestoreRef.current = onRestore
   })
@@ -49,8 +56,19 @@ export function useSessionDraft<Draft>({ key, value, parse, onRestore }: UseSess
 
   useEffect(() => {
     if (!key) return undefined
-    return registerSessionDraft(key, readTabAccountOwner(), () => valueRef.current)
+    return registerSessionDraft(key, readTabAccountOwner(), () => readRef.current ? readRef.current() : valueRef.current)
   }, [key])
+}
+
+/**
+ * Tells whether an input's value from an ended session waits to be restored for the account
+ * signed in to this tab, so a page can open the form that restores it.
+ *
+ * @param key - Identifies the input.
+ * @returns Whether mounting the input would restore a value.
+ */
+export function hasPendingSessionDraft(key: string): boolean {
+  return hasSessionDraft(key, readTabAccountOwner())
 }
 
 /**

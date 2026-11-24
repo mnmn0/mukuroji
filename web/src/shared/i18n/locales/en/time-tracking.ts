@@ -46,6 +46,7 @@ export const timeTrackingMessages = {
   'timeTracking.form.create': 'Add',
   'timeTracking.form.saveChanges': 'Save changes',
   'timeTracking.form.cancel': 'Cancel',
+  'timeTracking.form.sessionDraftRestored': 'Restored what you entered before your session ended. Check it and save.',
   'timeTracking.entry.billable': 'Billable',
   'timeTracking.entry.timer': 'Timer',
   'timeTracking.entry.edit': 'Edit',

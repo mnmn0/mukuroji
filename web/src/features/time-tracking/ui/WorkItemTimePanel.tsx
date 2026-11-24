@@ -1,5 +1,7 @@
 import type { RunningTimer, TimeEntry } from '@mukuroji/contracts'
 import { useId, useMemo, useState } from 'react'
+import { hasPendingSessionDraft } from '../../../auth/useSessionDraft'
+import { createTimeEntryFormSessionDraftKey } from '../model/timeEntryFormSessionDraft'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import type { TimeEntryDraftInput } from '../api/timeEntries'
@@ -208,7 +210,9 @@ export function WorkItemTimePanel({
   workItemId,
 }: WorkItemTimePanelProps) {
   const id = useId()
-  const [isCreating, setIsCreating] = useState(false)
+  const entrySessionDraftKey = createTimeEntryFormSessionDraftKey('work-item', ['work-item', teamId, workItemId])
+  // A form whose input was kept when the session ended opens again so the input comes back.
+  const [isCreating, setIsCreating] = useState(() => !readOnly && hasPendingSessionDraft(entrySessionDraftKey))
   const [pendingAction, setPendingAction] = useState<'start' | 'stop' | 'discard'>()
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const isTimerOnItem = timer?.teamId === teamId && timer.workItemId === workItemId
@@ -397,6 +401,7 @@ export function WorkItemTimePanel({
             defaultDate={today ?? toLocalDateKey(now)}
             fixedWorkItemId={workItemId}
             onCancel={() => setIsCreating(false)}
+            sessionDraftKey={entrySessionDraftKey}
             onSave={async (input) => {
               const saved = await onCreateEntry(input)
               setIsCreating(false)

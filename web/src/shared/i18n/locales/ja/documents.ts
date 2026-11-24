@@ -220,6 +220,8 @@ export const documentsMessages = {
   'documents.editor.untitledBlock': '無題',
   'documents.editor.overwriteRetry': '最新リビジョンへ上書き保存',
   'documents.editor.retrySave': '保存を再試行',
+  'documents.editor.sessionDraftRestored':
+    'セッションが切れる前に保存されていなかった変更を戻しました。',
   'documents.editor.unsavedNavigation':
     '未保存の変更があります。変更を破棄して移動しますか？',
   'documents.editor.saveBeforeActionError':

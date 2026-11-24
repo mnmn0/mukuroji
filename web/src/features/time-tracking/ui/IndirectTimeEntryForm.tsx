@@ -5,6 +5,7 @@ import { selectSelectableTimeEntryCategories } from '../model/timeEntryCategorie
 import { useTimeEntryCategories } from './timeEntryCategoryContext'
 import { parseHoursInput, readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { describeTimeEntryCategory, describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
+import { useTimeEntryFormSessionDraft } from './useTimeEntryFormSessionDraft'
 
 /** A Project a member may record indirect work on. */
 export type IndirectTimeEntryProjectOption = {
@@ -36,6 +37,11 @@ export type IndirectTimeEntryFormProps = {
   onSave: (input: IndirectTimeEntryInput) => Promise<void>
   /** Closes the form without saving. */
   onCancel: () => void
+  /**
+   * Identifies new indirect work's form, so its input survives an ended session and comes back
+   * after the same account signs in again. Without it nothing is kept.
+   */
+  sessionDraftKey?: string
 }
 
 /**
@@ -60,20 +66,32 @@ export function IndirectTimeEntryForm({
   entry,
   onCancel,
   onSave,
+  sessionDraftKey,
   t,
   targets,
 }: IndirectTimeEntryFormProps) {
   const id = useId()
+  const sessionDraft = useTimeEntryFormSessionDraft(sessionDraftKey)
+  const restoredFields = sessionDraft.restored?.fields
   const categories = useTimeEntryCategories()
   const categoryOptions = selectSelectableTimeEntryCategories(categories, entry?.category)
-  const defaultCategory = entry?.category ?? (categoryOptions.includes('meeting') ? 'meeting' : categoryOptions[0] ?? '')
+  const restoredCategory = restoredFields?.category !== undefined && categoryOptions.includes(restoredFields.category)
+    ? restoredFields.category
+    : undefined
+  const defaultCategory = entry?.category ?? restoredCategory ?? (categoryOptions.includes('meeting') ? 'meeting' : categoryOptions[0] ?? '')
   const [error, setError] = useState<string>()
   const [isSaving, setIsSaving] = useState(false)
   const currentProjectId = entry?.projectId
   const hasCurrentProject = currentProjectId === undefined || targets.projects.some((project) => project.id === currentProjectId)
-  const defaultProjectId = entry ? currentProjectId ?? '' : targets.allowNoProject ? '' : targets.projects[0]?.id ?? ''
-  const defaultDateText = entry ? toLocalDateKey(entry.startAt) : defaultDate
-  const defaultHoursText = entry ? formatHoursInput(entry.durationMinutes) : '1'
+  const restoredProjectId = restoredFields?.projectId !== undefined &&
+    (restoredFields.projectId === '' ? targets.allowNoProject : targets.projects.some((project) => project.id === restoredFields.projectId))
+    ? restoredFields.projectId
+    : undefined
+  const defaultProjectId = entry
+    ? currentProjectId ?? ''
+    : restoredProjectId ?? (targets.allowNoProject ? '' : targets.projects[0]?.id ?? '')
+  const defaultDateText = entry ? toLocalDateKey(entry.startAt) : restoredFields?.date ?? defaultDate
+  const defaultHoursText = entry ? formatHoursInput(entry.durationMinutes) : restoredFields?.hours ?? '1'
 
   /**
    * Validates the inputs and saves the work.
@@ -123,6 +141,7 @@ export function IndirectTimeEntryForm({
         billable: data.get('billable') === 'on',
         ...(keepRecordedInterval ? { keepRecordedInterval } : {}),
       })
+      sessionDraft.forget()
     } catch (saveError) {
       setError(describeTimeTrackingFailure(t, saveError))
     } finally {
@@ -135,9 +154,14 @@ export function IndirectTimeEntryForm({
       aria-label={entry ? t('timeTracking.indirect.editTitle') : t('timeTracking.indirect.createTitle')}
       className="grid min-w-0 gap-3 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3"
       data-testid="indirect-time-entry-form"
+      key={sessionDraft.formKey}
       noValidate
+      onChange={sessionDraft.handleChange}
       onSubmit={(event) => { void submit(event) }}
     >
+      {sessionDraft.restored ? (
+        <p className="text-xs font-semibold text-fg-amber-900" role="status">{t('timeTracking.form.sessionDraftRestored')}</p>
+      ) : null}
       {entry ? null : <p className="text-sm text-[var(--workbench-muted)]">{t('timeTracking.indirect.hint')}</p>}
       <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-category`}>
@@ -196,14 +220,14 @@ export function IndirectTimeEntryForm({
         {t('timeTracking.form.description')}
         <textarea
           className="workbench-input min-h-16 w-full min-w-0 px-3 py-2"
-          defaultValue={entry?.description ?? ''}
+          defaultValue={entry?.description ?? restoredFields?.description ?? ''}
           id={`${id}-description`}
           maxLength={4000}
           name="description"
         />
       </label>
       <label className="flex items-center gap-2 text-sm font-medium text-[var(--workbench-text)]">
-        <input defaultChecked={entry?.billable ?? false} name="billable" type="checkbox" />
+        <input defaultChecked={entry?.billable ?? sessionDraft.restored?.billable ?? false} name="billable" type="checkbox" />
         {t('timeTracking.form.billable')}
       </label>
       {error ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{error}</p> : null}
@@ -211,7 +235,7 @@ export function IndirectTimeEntryForm({
         <button className="workbench-button-primary min-h-9 px-4" disabled={isSaving} type="submit">
           {entry ? t('timeTracking.form.saveChanges') : t('timeTracking.form.create')}
         </button>
-        <button className="workbench-button-secondary min-h-9 px-4" disabled={isSaving} onClick={onCancel} type="button">
+        <button className="workbench-button-secondary min-h-9 px-4" disabled={isSaving} onClick={() => { sessionDraft.forget(); onCancel() }} type="button">
           {t('timeTracking.form.cancel')}
         </button>
       </div>

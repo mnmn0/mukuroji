@@ -220,6 +220,8 @@ export const documentsMessages = {
   'documents.editor.untitledBlock': 'Untitled',
   'documents.editor.overwriteRetry': 'Overwrite latest revision',
   'documents.editor.retrySave': 'Retry save',
+  'documents.editor.sessionDraftRestored':
+    'Restored the changes that were not saved when your session ended.',
   'documents.editor.unsavedNavigation':
     'You have unsaved changes. Discard them and continue?',
   'documents.editor.saveBeforeActionError':

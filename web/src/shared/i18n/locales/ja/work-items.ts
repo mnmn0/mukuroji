@@ -424,6 +424,7 @@ export const workItemsMessages = {
   'tasks.workspaceCalendar.staleError': 'Workspace の稼働カレンダーを読み直せませんでした。新しい Work Item と Gantt は、前回読み込んだカレンダーを使っています。',
   'tasks.workspaceCalendar.retry': 'もう一度読み込む',
   'tasks.create.titlePlaceholder': '例: リリース前チェック',
+  'tasks.create.sessionDraftRestored': 'セッションが切れる前に入力していた内容を戻しました。確認して作成してください。',
   'tasks.create.assignee': '担当者',
   'tasks.create.assigneeRequired': '担当者を選択してから登録してください。',
   'tasks.create.assigneeContextInvalid': '引き継いだ担当者は現在の候補にいません。担当者を選択してください。',
