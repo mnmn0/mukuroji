@@ -4775,6 +4775,27 @@ const LOCAL_INBOX_DIGEST_INDEX: GlobalSecondaryIndex = {
   Projection: { ProjectionType: 'KEYS_ONLY' },
 }
 
+/**
+ * Waits until the local Planning table's Inbox digest index can be queried; a GSI added by
+ * `UpdateTable` stays `CREATING` for a while and rejects Queries until it is `ACTIVE`.
+ *
+ * @param tableName - Local Planning table name.
+ * @param client - DynamoDB client for the local endpoint.
+ */
+async function waitUntilLocalInboxDigestIndexActive(tableName: string, client: DynamoDBClient): Promise<void> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
+    const status = response.Table?.GlobalSecondaryIndexes
+      ?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)?.IndexStatus
+    if (status === 'ACTIVE') return
+    if (Date.now() >= deadline) {
+      throw new Error(`Local DynamoDB index "${LOCAL_INBOX_DIGEST_INDEX.IndexName}" on "${tableName}" did not become ACTIVE.`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
 /** Local DynamoDB に CDK 互換の Planning table を作成します。 */
 export async function ensureLocalPlanningTable(tableName: string, client: DynamoDBClient) {
   const current = localTableInitializers.get(tableName)
@@ -4785,7 +4806,8 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
       if (!isPlanningTableDescription(response.Table)) {
         throw new Error(`Local DynamoDB table "${tableName}" has an incompatible schema.`)
       }
-      if (!response.Table?.GlobalSecondaryIndexes?.some((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)) {
+      const digestIndex = response.Table?.GlobalSecondaryIndexes?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)
+      if (!digestIndex) {
         // Tables created before the Inbox digest job lack its index; add it like the CDK table.
         await client.send(new UpdateTableCommand({
           TableName: tableName,
@@ -4793,6 +4815,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
           GlobalSecondaryIndexUpdates: [{ Create: LOCAL_INBOX_DIGEST_INDEX }],
         }))
       }
+      if (digestIndex?.IndexStatus !== 'ACTIVE') await waitUntilLocalInboxDigestIndexActive(tableName, client)
       return
     } catch (error) {
       if (!isNamedError(error, 'ResourceNotFoundException')) throw error

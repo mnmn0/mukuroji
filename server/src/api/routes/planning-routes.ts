@@ -2997,7 +2997,9 @@ async function ensureTenantProfileForInboxDigest(workspaceId: string): Promise<v
     throw toTenantLifecycleBoundaryError(error)
   })
   if (profile) return
-  await initializeLegacyTenantAdministration(workspaceId)
+  await initializeLegacyTenantAdministration(workspaceId).catch((error: unknown) => {
+    throw toTenantLifecycleBoundaryError(error)
+  })
 }
 
 /** Reuses current background-member and Feed authorization without constructing HTTP requests.

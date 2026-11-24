@@ -10,7 +10,7 @@ export const updatesMessages = {
   "updates.inbox.inactive": "未読の Update を1件のダイジェストにまとめて受信トレイに届けます。日次は毎日、週次は毎週月曜の UTC 0:00（日本時間 9:00）以降に届きます。",
   "updates.inbox.enabled": "更新ダイジェストを受信トレイで受け取る",
   "updates.inbox.save": "受信設定を保存",
-  "updates.inbox.optedIn": "受信設定を保存しました。次の配信時刻から受信トレイに届きます。",
+  "updates.inbox.optedIn": "受信設定を保存しました。配信が動いている間は、次の配信時刻から受信トレイに届きます。",
   "updates.inbox.disabled": "ダイジェストの受信はオフです。",
   "updates.digest.title": "ダイジェストのプレビュー",
   "updates.digest.previewOnly": "プレビューのみ・通知は送信されません",

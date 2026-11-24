@@ -10,7 +10,7 @@ export const updatesMessages = {
   "updates.inbox.inactive": "Unread updates arrive in your Inbox as one digest: daily after 00:00 UTC, or weekly on Mondays after 00:00 UTC.",
   "updates.inbox.enabled": "Receive update digests in Inbox",
   "updates.inbox.save": "Save Inbox settings",
-  "updates.inbox.optedIn": "Delivery preference saved. Digests arrive in your Inbox from the next delivery time.",
+  "updates.inbox.optedIn": "Delivery preference saved. While delivery is running, digests arrive in your Inbox from the next delivery time.",
   "updates.inbox.disabled": "Inbox digests are off.",
   "updates.digest.title": "Digest preview",
   "updates.digest.previewOnly": "Preview only · No notifications are sent",
