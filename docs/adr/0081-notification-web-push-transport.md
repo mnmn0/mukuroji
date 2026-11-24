@@ -35,7 +35,9 @@ Web Push の購読登録 API と `PushSubscriptionsTable` は実装済みだっ�
 - 送信先は recipient の購読のうち、期限内で、endpoint の所有者 row がまだその member を指すものだけにする。
   送る直前に endpoint を登録時と同じ allowlist で再検証し、redirect は追わない。
 - push service が `404` / `410` を返した購読は、送った時点の `updatedAt` を条件に削除する（その間に同じ endpoint を
-  登録し直した browser の行は消さない）。`429` / `5xx` / 通信失敗は再試行し、`Retry-After` を尊重する。
+  登録し直した browser の行は消さない）。`429` / `5xx` / 通信失敗は再試行し、`Retry-After` を
+  短くせずに尊重する（不正な値で時刻が壊れないよう、通知の保持期間より長い 31 日で頭打ちにする）。送信直前に
+  endpoint の所有者を強く読み直し、一覧の後に別メンバーへ移った端末には送らない。
   `400` / `401` / `403` / `413` は VAPID や payload の問題として失敗にし、alarm の対象にする。
   保存された endpoint や鍵が使えない購読は消さずに `PushSubscriptionInvalid` で失敗にする（データ破損を隠さないため）。
   端末へは最大 4 台ずつ同時に送り、応答しない push service が他の端末の送信を締め出さないようにする。
@@ -63,5 +65,6 @@ Web Push の購読登録 API と `PushSubscriptionsTable` は実装済みだっ�
 - scheduled-jobs Lambda の role は managed policy が 10 個の上限に達するため、文が少ない Cycle schedule の権限を
   inline policy に移した。
 - 運用者は鍵を作り、秘密鍵を secret に置いてから `WebPushVapidPublicKey` を設定する。順序が逆だと配信は
-  `PushKeysUnavailable` で再試行され、`PushNotificationBacklogAlarm` が出る。
+  `PushKeysUnavailable` で再試行され、約 8 分で 5 試行を終えて `failed` になり、その失敗を `ScheduledJobsDlqAlarm`
+  が検知する。`PushNotificationBacklogAlarm` は、期限を 15 分以上過ぎた配信が 3 回続いた場合にだけ出る。
 - 更新した文書: `docs/notifications.md`、`docs/operational-readiness.md`、`docs/guide/member.md`、`cdk/README.md`。

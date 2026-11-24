@@ -275,11 +275,11 @@ Email job は stack の SES configuration set を指定して送り、message ta
 2. 秘密鍵（32 byte の scalar、padding なし base64url）を、Secrets Manager の secret `mukuroji/web-push/vapid-private-key` の値（SecretString そのもの）として保存します。
 3. 公開鍵を `WebPushVapidPublicKey` に設定して deploy します。
 
-worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対であることを確かめてから使います（違えば送らず `PushKeysUnavailable` で再試行し、alarm が出ます）。IAM はこの secret の `secretsmanager:GetSecretValue` だけを許します。鍵を変えると、以前の鍵で作った browser の購読は使えなくなり、各端末が次に Workspace を開いたときに作り直します（[購読](#web-push-の購読)）。
+worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対であることを確かめてから使います（違えば送らず `PushKeysUnavailable` で再試行し、約8分で5試行を終えて `failed` になると `ScheduledJobsDlqAlarm` が出ます。`PushNotificationBacklogAlarm` は期限を15分以上過ぎた配信が3回続いたときだけ出ます）。IAM はこの secret の `secretsmanager:GetSecretValue` だけを許します。鍵を変えると、以前の鍵で作った browser の購読は使えなくなり、各端末が次に Workspace を開いたときに作り直します（[購読](#web-push-の購読)）。
 
 ### 宛先
 
-送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
+送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません（読み直しと送信の間に残る隙間は1回の読み取りの時間だけです）。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
 
 ### 配信の規則
 
@@ -293,7 +293,7 @@ push service の応答は次のように扱います。
 | --- | --- |
 | `2xx` | その端末は受け付け済み |
 | `404` / `410` | 購読が失効。送った時点の `updatedAt` を条件にその購読の行を削除する（その間に登録し直した行は消さない） |
-| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があれば最大 1 時間まで従う |
+| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（不正な値に備えて 31 日で頭打ち） |
 | `400` / `401` / `403` / `413` | VAPID 鍵や payload の問題として失敗にする（`PushDeliveryRejected`） |
 | `404` / `410` で購読を消せなかった（DynamoDB の一時障害など） | 受け付けた端末がなければ再試行し、そのときに消し直す（`PushCleanupUnavailable`） |
 | （送る前）保存された endpoint か鍵が使えない | 購読を消さずに失敗にし、運用者が調べられるよう残す（`PushSubscriptionInvalid`） |
