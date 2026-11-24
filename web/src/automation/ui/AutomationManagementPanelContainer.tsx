@@ -30,7 +30,11 @@ import {
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
 import { useAutomationManagement } from '../queries/useAutomationManagement'
-import { selectOwnedAutomationData, selectTeamTemplateOptions } from '../model/ownedDefinitions'
+import {
+  selectOwnedAutomationData,
+  selectTeamTemplateOptions,
+  selectWorkspaceTemplateOptions,
+} from '../model/ownedDefinitions'
 import { useAutomationPlanningParents } from '../queries/useAutomationPlanningParents'
 
 /** Automation management panel container の props です。 */
@@ -74,7 +78,11 @@ export function AutomationManagementPanelContainer({
     [isTeamScope, loadedData, ownerTeamId],
   )
   const templateOptions = useMemo(
-    () => loadedData && isTeamScope ? selectTeamTemplateOptions(loadedData.templates, ownerTeamId) : undefined,
+    () => loadedData
+      ? isTeamScope
+        ? selectTeamTemplateOptions(loadedData.templates, ownerTeamId)
+        : selectWorkspaceTemplateOptions(loadedData.templates)
+      : undefined,
     [isTeamScope, loadedData, ownerTeamId],
   )
   const canManageWorkspace = canManage && !isTeamScope

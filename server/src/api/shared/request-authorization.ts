@@ -2029,6 +2029,23 @@ export async function requireRequestAdministration(c: Context) {
 }
 
 /**
+ * Reports which Request form scopes the caller can change. Enterprise role holders are judged
+ * by the Workspace `requests.manage` grant, because the read route admits `requests.read`.
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The Workspace flag and the Teams whose forms the caller can change.
+ * @throws RequestIntakeError when the bearer token is missing.
+ */
+export async function readRequestFormManagementScopes(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  return listDelegatedManagementScopes(principal, 'requests.manage')
+}
+
+/**
  * Authenticates a Request form manager: a Workspace administrator, or a Team manager who
  * manages the forms scoped to their own Teams (ADR 0087).
  *

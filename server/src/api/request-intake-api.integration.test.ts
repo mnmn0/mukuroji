@@ -655,7 +655,7 @@ test('delegates Request Form publish revision checks to the Request Intake clien
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ expectedRevision: 2 }),
+    body: JSON.stringify({ expectedRevision: requestForm.revision }),
   })
 
   expect(response.status).toBe(409)

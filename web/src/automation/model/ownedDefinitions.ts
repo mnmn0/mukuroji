@@ -41,3 +41,16 @@ export function selectTeamTemplateOptions(
     template.ownerTeamId === undefined || template.ownerTeamId === ownerTeamId
   )
 }
+
+/**
+ * Lists the templates a Workspace definition may use as input. Team templates are left out,
+ * because the server only lets definitions of the same Team use them.
+ *
+ * @param templates - Workspace-wide template list.
+ * @returns Templates selectable in the Workspace rule and recurring Work editors.
+ */
+export function selectWorkspaceTemplateOptions(
+  templates: readonly AutomationTemplate[],
+): AutomationTemplate[] {
+  return templates.filter((template) => template.ownerTeamId === undefined)
+}

@@ -1,4 +1,10 @@
-import type { CreateRequestFormInput, PublishRequestFormInput, RequestForm, UpdateRequestFormInput } from '@mukuroji/contracts'
+import type {
+  AutomationManagementScopes,
+  CreateRequestFormInput,
+  PublishRequestFormInput,
+  RequestForm,
+  UpdateRequestFormInput,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { RequestIntakeApiError } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
@@ -18,6 +24,32 @@ export async function getRequestForms(accessToken: string) {
   )
 
   return response.forms
+}
+
+/**
+ * Reads the request form scopes the caller can change (ADR 0087).
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @returns Whether Workspace forms are manageable and which Teams' forms are.
+ * @throws RequestIntakeApiError when the API fails or returns another shape.
+ */
+export async function getRequestFormManagementScopes(
+  accessToken: string,
+): Promise<AutomationManagementScopes> {
+  const response = await requestJson<unknown>(
+    `${requestsApiBaseUrl}/request-forms/management-scopes`,
+    { accessToken },
+  )
+  const record = readRecord(response)
+  const teamIds = record.teamIds
+  if (
+    typeof record.workspace !== 'boolean' ||
+    !Array.isArray(teamIds) ||
+    !teamIds.every((teamId): teamId is string => typeof teamId === 'string')
+  ) {
+    throw new RequestIntakeApiError(502, defaultRequestApiErrorMessage, 'InvalidRequestIntakeResponse')
+  }
+  return { workspace: record.workspace, teamIds: [...teamIds] }
 }
 
 /**

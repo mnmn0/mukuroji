@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono'
 import type { RequestIntakeTransactionItems } from '../../request-intake'
 import type {
+  AutomationManagementScopes,
   CreateRequestFormInput,
   PublishRequestFormInput,
   RequestForm,
@@ -132,6 +133,13 @@ export type AdminRequestIntakeRouterDependencies = {
    * @returns The form manager, who manages the Workspace or at least one Team.
    */
   requireFormManagement(context: Context): Promise<RequestFormManager>
+  /** Verifies the bearer token and reports which form scopes the caller can change, judged by
+   * the `requests.manage` grant for Enterprise role holders.
+   *
+   * @param context The Hono request context.
+   * @returns The Workspace flag and Team identifiers whose forms the caller can change.
+   */
+  readFormManagementScopes(context: Context): Promise<AutomationManagementScopes>
   /** Safely parses request JSON, returning undefined when parsing fails.
    *
    * @param request The request object to parse.
@@ -219,6 +227,14 @@ export function createAdminRequestIntakeRouter(
   dependencies: AdminRequestIntakeRouterDependencies,
 ) {
   const router = new Hono()
+
+  router.get('/api/request-forms/management-scopes', async (context) => {
+    try {
+      return context.json(await dependencies.readFormManagementScopes(context))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
 
   router.get('/api/request-forms', async (context) => {
     try {

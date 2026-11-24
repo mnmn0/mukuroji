@@ -9,13 +9,14 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(576)
-  expect(new Set(inventory).size).toBe(572)
+  expect(inventory).toHaveLength(577)
+  expect(new Set(inventory).size).toBe(573)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
   expect(inventory).toContain('GET /api/automation/management-scopes')
+  expect(inventory).toContain('GET /api/request-forms/management-scopes')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('PUT /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('DELETE /api/planning/entities/:entityId/watch')
@@ -162,6 +163,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'faae8c9b090cafb1cfd131d5d76ca5a1f2e4c1f52f32a8a177625d07e35986b9',
+    '2fe36cc15a855c8f0ba078eb31e838adfbf45ff249356f7bc5138ade3bea175e',
   )
 })

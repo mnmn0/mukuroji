@@ -5,7 +5,6 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import useSWR from 'swr'
-import { getAutomationManagementScopes } from '../automation/api'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
@@ -39,6 +38,7 @@ import {
   applyRequestSubmissionAction,
   createRequestAttachmentAccess,
   createRequestForm,
+  getRequestFormManagementScopes,
   publishRequestForm,
   updateRequestForm,
 } from './api'
@@ -121,7 +121,7 @@ export function RequestIntakePage() {
     accessToken && user && !currentUserError && !isWorkspaceStructureManager
       ? ['request-form-management-scopes', accessToken]
       : null,
-    () => getAutomationManagementScopes(accessToken ?? ''),
+    () => getRequestFormManagementScopes(accessToken ?? ''),
     apiSWRConfig,
   )
   const canManageWorkspaceForms = isWorkspaceStructureManager || managementScopes?.workspace === true

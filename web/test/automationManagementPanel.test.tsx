@@ -34,7 +34,11 @@ import { submitAutomationEditorCreate } from '../src/automation/model/editorSubm
 import { runAutomationManagementMutation } from '../src/automation/mutations/runAutomationManagementMutation'
 import { resolveAutomationManagementTabTarget } from '../src/automation/model/tabs'
 import { refreshAutomationTemplateApplication } from '../src/automation/model/templateApplicationRefresh'
-import { selectOwnedAutomationData, selectTeamTemplateOptions } from '../src/automation/model/ownedDefinitions'
+import {
+  selectOwnedAutomationData,
+  selectTeamTemplateOptions,
+  selectWorkspaceTemplateOptions,
+} from '../src/automation/model/ownedDefinitions'
 import {
   activeAutomationRuleFixture,
   activeInboundWebhookEndpointFixture,
@@ -1217,6 +1221,10 @@ describe('Team-owned Automation definitions', () => {
       { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' },
       { ...workItemAutomationTemplateFixture, id: 'template-other', ownerTeamId: 'ops-team' },
     ], 'core-team').map((template) => template.id)).toEqual([workItemAutomationTemplateFixture.id, 'template-team'])
+    expect(selectWorkspaceTemplateOptions([
+      workItemAutomationTemplateFixture,
+      { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' },
+    ]).map((template) => template.id)).toEqual([workItemAutomationTemplateFixture.id])
 
     const markup = renderToStaticMarkup(
       <AutomationManagementPanel

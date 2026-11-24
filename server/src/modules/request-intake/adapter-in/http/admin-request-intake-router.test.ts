@@ -141,6 +141,10 @@ function createDependencies(
       calls.push({ operation: 'requireFormManagement', value: context })
       return { ...principal, workspace: true, teamIds: [] }
     },
+    async readFormManagementScopes(context) {
+      calls.push({ operation: 'readFormManagementScopes', value: context })
+      return { workspace: false, teamIds: ['core'] }
+    },
     readJson: async (request) => await request.json(),
     async validateFormRoutingReferences(workspaceId: string, draft: RequestFormDraft) {
       calls.push({ operation: 'validateFormRoutingReferences', value: { workspaceId, draft } })
@@ -447,5 +451,14 @@ describe('admin request intake router', () => {
     expect(update.status).toBe(409)
     expect(publish.status).toBe(409)
     expect(calls.some(({ operation }) => operation === 'updateForm' || operation === 'publishForm')).toBe(false)
+  })
+
+  test('reports the form scopes the caller can change before the form detail route', async () => {
+    const { calls, router } = createDependencies()
+
+    const response = await router.request('/api/request-forms/management-scopes')
+
+    expect(await response.json()).toEqual({ workspace: false, teamIds: ['core'] })
+    expect(calls.some(({ operation }) => operation === 'getForm')).toBe(false)
   })
 })
