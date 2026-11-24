@@ -48,8 +48,9 @@ export function useFileVersionInlineUrl(
 ): FileVersionInlineUrlState {
   const scope = controller?.scope
   const scopeKey = scope ? JSON.stringify(scope) : ''
+  // The viewer is part of the key, so another account never reuses this viewer's URL or failure.
   const key = controller && scope && file && version
-    ? ['file-version-inline-url', scopeKey, file.id, version.id, attempt] as const
+    ? ['file-version-inline-url', controller.viewerCacheKey ?? '', scopeKey, file.id, version.id, attempt] as const
     : null
   const { data, error, isLoading } = useSWR(
     key,

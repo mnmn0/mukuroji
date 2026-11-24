@@ -196,7 +196,9 @@ export function IssueConversationTab({
   const [editDraft, setEditDraft] = useState<TargetedCommentComposerDraft>()
   const replyingToId = replyDraft?.commentId
   const editingId = editDraft?.commentId
-  const pendingAttachmentUploadsRef = useRef(0)
+  /** Uploads in progress per `slot:lifetimeId`, read synchronously by the submit guard. */
+  const pendingAttachmentUploadsRef = useRef<Record<string, number>>({})
+  const [pendingAttachmentUploads, setPendingAttachmentUploads] = useState<Record<string, number>>({})
   const draftStateRef = useRef<{
     /** Current root composer slot used by asynchronous ownership checks. */
     root: CommentComposerDraft
@@ -262,6 +264,7 @@ export function IssueConversationTab({
   /** Claims one fixed composer slot synchronously before starting its request. */
   function beginSlotSubmission(slot: CommentComposerSlot, lifetimeId: number) {
     if (pendingSlotLifetimesRef.current[slot] !== undefined) return false
+    if (pendingAttachmentUploadsRef.current[createAttachmentUploadKey(slot, lifetimeId)]) return false
     pendingSlotLifetimesRef.current[slot] = lifetimeId
     setPendingSlotLifetimes({ ...pendingSlotLifetimesRef.current })
     if (mountedRef.current) onDraftDirtyChange?.(true)
@@ -269,14 +272,34 @@ export function IssueConversationTab({
   }
 
   /**
-   * Counts attachment uploads in progress in any composer, so the conversation reports itself
-   * dirty and stays mounted until each reference has been inserted.
+   * Counts attachment uploads in progress per composer slot and draft lifetime. The count lives
+   * here rather than in the composer, so a composer that remounts mid-upload still cannot save
+   * that draft, and the conversation reports itself dirty until each reference is inserted.
    *
-   * @param isUploading - Whether one composer's uploads started or finished.
+   * @param slot - Composer slot the upload belongs to.
+   * @param lifetimeId - Draft lifetime when the upload started.
+   * @param isUploading - Whether the upload started or finished.
    */
-  function trackAttachmentUpload(isUploading: boolean) {
-    pendingAttachmentUploadsRef.current = Math.max(0, pendingAttachmentUploadsRef.current + (isUploading ? 1 : -1))
+  function trackAttachmentUpload(slot: CommentComposerSlot, lifetimeId: number, isUploading: boolean) {
+    const key = createAttachmentUploadKey(slot, lifetimeId)
+    const next = { ...pendingAttachmentUploadsRef.current }
+    const count = Math.max(0, (next[key] ?? 0) + (isUploading ? 1 : -1))
+    if (count > 0) next[key] = count
+    else delete next[key]
+    pendingAttachmentUploadsRef.current = next
+    if (mountedRef.current) setPendingAttachmentUploads(next)
     reportDraftDirty(draftStateRef.current.root, draftStateRef.current.reply, draftStateRef.current.edit)
+  }
+
+  /**
+   * Tells whether a draft still has attachment uploads in progress.
+   *
+   * @param slot - Composer slot.
+   * @param lifetimeId - Draft lifetime of that slot.
+   * @returns Whether its save must wait.
+   */
+  function isDraftAttachmentUploading(slot: CommentComposerSlot, lifetimeId: number) {
+    return Boolean(pendingAttachmentUploads[createAttachmentUploadKey(slot, lifetimeId)])
   }
 
   /** Releases a slot only when the completion belongs to its active request. */
@@ -292,7 +315,7 @@ export function IssueConversationTab({
         current.root.isDirty ||
         Boolean(current.reply?.isDirty || current.edit?.isDirty) ||
         Object.keys(pendingSlotLifetimesRef.current).length > 0 ||
-        pendingAttachmentUploadsRef.current > 0,
+        Object.keys(pendingAttachmentUploadsRef.current).length > 0,
       )
     }
   }
@@ -318,7 +341,7 @@ export function IssueConversationTab({
         nextRoot.isDirty ||
         Boolean(nextReply?.isDirty || nextEdit?.isDirty) ||
         Object.keys(pendingSlotLifetimesRef.current).length > 0 ||
-        pendingAttachmentUploadsRef.current > 0,
+        Object.keys(pendingAttachmentUploadsRef.current).length > 0,
       )
     }
   }
@@ -696,7 +719,8 @@ export function IssueConversationTab({
           <CommentComposer
             artifacts={artifacts}
             key="root-comment-composer"
-            onAttachmentUploadingChange={trackAttachmentUpload}
+            attachmentUploadPending={isDraftAttachmentUploading('root', rootDraft.lifetimeId)}
+            onAttachmentUploadingChange={(lifetimeId, isUploading) => trackAttachmentUpload('root', lifetimeId, isUploading)}
             onInsertAttachment={(lifetimeId, insertion) => insertDraftAttachment('root', lifetimeId, insertion)}
             labelKey="collaboration.composer.label"
             members={members}
@@ -1021,6 +1045,7 @@ export function IssueConversationTab({
                 onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
                 onInsertDraftAttachment={insertDraftAttachment}
                 onAttachmentUploadingChange={trackAttachmentUpload}
+                isDraftAttachmentUploading={isDraftAttachmentUploading}
                 onEditConflictRetry={handleEditConflictRetry}
                 onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                 replyDraft={replyDraft?.commentId === thread.root.id ? replyDraft : undefined}
@@ -1054,7 +1079,8 @@ export function IssueConversationTab({
                       readOnlyMessage={readOnlyMessage}
                       onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
                       onInsertDraftAttachment={insertDraftAttachment}
-                onAttachmentUploadingChange={trackAttachmentUpload}
+                      onAttachmentUploadingChange={trackAttachmentUpload}
+                      isDraftAttachmentUploading={isDraftAttachmentUploading}
                       onEditConflictRetry={handleEditConflictRetry}
                       onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
                       replyDraft={replyDraft?.commentId === reply.id ? replyDraft : undefined}
@@ -1171,7 +1197,9 @@ type CommentCardProps = {
   /** Retains raw edit text after a comment refresh or tab switch. */
   onEditDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
   /** Tells the draft owner when a reply or edit composer's uploads start and finish. */
-  onAttachmentUploadingChange: (isUploading: boolean) => void
+  onAttachmentUploadingChange: (slot: 'edit' | 'reply', lifetimeId: number, isUploading: boolean) => void
+  /** Whether the reply or edit draft still has uploads in progress, kept by the draft owner. */
+  isDraftAttachmentUploading: (slot: 'edit' | 'reply', lifetimeId: number) => boolean
   /** Inserts an uploaded attachment reference into the reply or edit slot it started in. */
   onInsertDraftAttachment: (slot: 'edit' | 'reply', lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /** Explicitly adopts the displayed canonical revision for a conflict retry. */
@@ -1289,6 +1317,7 @@ function CommentCard({
   onAcceptResolution,
   onEditDraftChange,
   onAttachmentUploadingChange,
+  isDraftAttachmentUploading,
   onInsertDraftAttachment,
   onEditConflictRetry,
   onEditingChange,
@@ -1392,7 +1421,8 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={editDraft}
-                onAttachmentUploadingChange={onAttachmentUploadingChange}
+                attachmentUploadPending={isDraftAttachmentUploading('edit', editDraft.lifetimeId)}
+                onAttachmentUploadingChange={(lifetimeId, isUploading) => onAttachmentUploadingChange('edit', lifetimeId, isUploading)}
                 onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('edit', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.edit !== undefined}
                 key={`edit-${comment.id}`}
@@ -1583,7 +1613,8 @@ function CommentCard({
               <CommentComposer
                 artifacts={artifacts}
                 draft={replyDraft}
-                onAttachmentUploadingChange={onAttachmentUploadingChange}
+                attachmentUploadPending={isDraftAttachmentUploading('reply', replyDraft.lifetimeId)}
+                onAttachmentUploadingChange={(lifetimeId, isUploading) => onAttachmentUploadingChange('reply', lifetimeId, isUploading)}
                 onInsertAttachment={(lifetimeId, insertion) => onInsertDraftAttachment('reply', lifetimeId, insertion)}
                 externallySubmitting={pendingSlotLifetimes.reply !== undefined}
                 key={`reply-${comment.id}`}
@@ -2038,6 +2069,17 @@ function CommentFileAttachments({
   ) : null
 }
 
+/**
+ * Builds the key under which uploads of one composer draft are counted.
+ *
+ * @param slot - Composer slot.
+ * @param lifetimeId - Draft lifetime of that slot.
+ * @returns The key.
+ */
+function createAttachmentUploadKey(slot: CommentComposerSlot, lifetimeId: number) {
+  return `${slot}:${lifetimeId}`
+}
+
 /** An uploaded attachment reference and where the composer cursor was when it finished. */
 type DraftAttachmentInsertion = {
   /** Markdown reference of the uploaded file. */
@@ -2061,9 +2103,14 @@ type CommentComposerProps = {
    */
   onInsertAttachment?: (lifetimeId: number, insertion: DraftAttachmentInsertion) => void
   /**
-   * Tells the draft owner when this composer's uploads start and finish.
+   * Tells the draft owner when this composer's uploads for a draft lifetime start and finish.
    */
-  onAttachmentUploadingChange?: (isUploading: boolean) => void
+  onAttachmentUploadingChange?: (lifetimeId: number, isUploading: boolean) => void
+  /**
+   * Whether the draft owner still counts uploads for this draft, including ones started
+   * before this composer remounted. Saving waits until it is false.
+   */
+  attachmentUploadPending?: boolean
   /**
    * textarea に表示する label key です。
    */
@@ -2108,6 +2155,7 @@ type CommentComposerProps = {
  */
 function CommentComposer({
   artifacts,
+  attachmentUploadPending = false,
   draft,
   onAttachmentUploadingChange,
   onInsertAttachment,
@@ -2145,8 +2193,11 @@ function CommentComposer({
     controller: onInsertAttachment ? artifacts : undefined,
     disabled: isSubmitting || externallySubmitting,
     onInsert: insertAttachment,
-    onUploadingChange: onAttachmentUploadingChange,
+    onUploadingChange: onAttachmentUploadingChange
+      ? (isUploading) => onAttachmentUploadingChange(uploadDraftLifetimeId, isUploading)
+      : undefined,
   })
+  const isAttachmentUploading = attachmentUpload.isUploading || attachmentUploadPending
 
   /** Applies one atomic body-and-mention update to the persistent composer slot. */
   const updateDraft = (
@@ -2213,7 +2264,7 @@ function CommentComposer({
     event.preventDefault()
     const trimmedBody = currentBodyMarkdown.trim()
 
-    if (!trimmedBody || isSubmitting || externallySubmitting || submitInFlightRef.current) {
+    if (!trimmedBody || isSubmitting || externallySubmitting || isAttachmentUploading || submitInFlightRef.current) {
       textareaRef.current?.focus()
       return
     }
@@ -2353,7 +2404,7 @@ function CommentComposer({
       <div className="flex flex-wrap items-center gap-2">
         <button
           className="workbench-button-primary min-h-[44px] px-3 text-xs disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isSubmitting || externallySubmitting || attachmentUpload.isUploading || !currentBodyMarkdown.trim()}
+          disabled={isSubmitting || externallySubmitting || isAttachmentUploading || !currentBodyMarkdown.trim()}
           type="submit"
         >
           {t(isSubmitting || externallySubmitting ? 'collaboration.saving' : submitKey)}

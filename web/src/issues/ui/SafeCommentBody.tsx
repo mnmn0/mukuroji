@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
@@ -8,7 +8,10 @@ import {
   MarkdownAttachmentLink,
   type MarkdownAttachmentContext,
 } from '../../files/ui/MarkdownAttachment'
-import { useMarkdownAttachmentContext } from '../../files/ui/markdownAttachmentContext'
+import {
+  MarkdownAttachmentReactContext,
+  useMarkdownAttachmentContext,
+} from '../../files/ui/markdownAttachmentContext'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
@@ -46,6 +49,46 @@ const commentSanitizeSchema = {
 }
 
 /**
+ * Draws a Markdown link: an `attachment:` link becomes a download button resolved from the
+ * nearest attachment context, and any other link opens in a new tab.
+ *
+ * @param props - Link target and text from the Markdown body.
+ * @returns The link element.
+ */
+function CommentMarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
+  const attachments = useMarkdownAttachmentContext()
+  const fileId = readMarkdownAttachmentFileId(href)
+  if (fileId) {
+    return <MarkdownAttachmentLink attachments={attachments} fileId={fileId}>{children}</MarkdownAttachmentLink>
+  }
+  return href ? (
+    <a href={href} rel="noreferrer noopener" target="_blank">
+      {children}
+    </a>
+  ) : <span>{children}</span>
+}
+
+/**
+ * Draws a Markdown image only for an `attachment:` reference; external images are dropped.
+ *
+ * @param props - Image source and alt text from the Markdown body.
+ * @returns The attachment image, or nothing.
+ */
+function CommentMarkdownImage({ alt, src }: { alt?: string; src?: unknown }) {
+  const attachments = useMarkdownAttachmentContext()
+  const fileId = readMarkdownAttachmentFileId(typeof src === 'string' ? src : undefined)
+  return fileId ? <MarkdownAttachmentImage alt={alt} attachments={attachments} fileId={fileId} /> : null
+}
+
+/**
+ * Renderers shared by every comment body. They stay the same element types across renders.
+ */
+const commentMarkdownComponents: Components = {
+  a: ({ children, href }) => <CommentMarkdownLink href={href}>{children}</CommentMarkdownLink>,
+  img: ({ alt, src }) => <CommentMarkdownImage alt={alt} src={src} />,
+}
+
+/**
  * raw HTML を無効にし、GFM と sanitize を通した comment 本文を描画します。
  * 本文中の Work Item key（`PT-12`）は、Workspace に存在する prefix のものだけ key のページへの link にします。
  * `attachment:<fileId>` の画像と link は、閲覧者が読める scan 済みの添付だけを表示します。
@@ -56,29 +99,14 @@ export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: S
   const inheritedAttachments = useMarkdownAttachmentContext()
   const attachmentController = (attachments ?? inheritedAttachments)?.controller
   const attachmentTranslator = (attachments ?? inheritedAttachments)?.t
-  // Stable renderers keep attachment components mounted across parent re-renders.
-  const components = useMemo<Components>(() => {
-    const context = attachmentController && attachmentTranslator
+  // The renderers are fixed at module scope and read this context, so a new controller only
+  // re-renders attachment components instead of remounting them and losing their retry state.
+  const resolvedAttachments = useMemo<MarkdownAttachmentContext | undefined>(
+    () => attachmentController && attachmentTranslator
       ? { controller: attachmentController, t: attachmentTranslator }
-      : undefined
-    return {
-      a: ({ children, href }) => {
-        const fileId = readMarkdownAttachmentFileId(href)
-        if (fileId) {
-          return <MarkdownAttachmentLink attachments={context} fileId={fileId}>{children}</MarkdownAttachmentLink>
-        }
-        return href ? (
-          <a href={href} rel="noreferrer noopener" target="_blank">
-            {children}
-          </a>
-        ) : <span>{children}</span>
-      },
-      img: ({ alt, src }) => {
-        const fileId = readMarkdownAttachmentFileId(typeof src === 'string' ? src : undefined)
-        return fileId ? <MarkdownAttachmentImage alt={alt} attachments={context} fileId={fileId} /> : null
-      },
-    }
-  }, [attachmentController, attachmentTranslator])
+      : undefined,
+    [attachmentController, attachmentTranslator],
+  )
 
   return (
     <div
@@ -98,15 +126,17 @@ export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: S
         [&_th]:border [&_th]:border-[var(--workbench-border)] [&_th]:bg-[var(--workbench-surface-muted)] [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold
         [&>*:first-child]:mt-0 ${className}`}
     >
-      <Markdown
-        components={components}
-        rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
-        remarkPlugins={[remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
-        skipHtml
-        urlTransform={sanitizeCommentUrl}
-      >
-        {bodyMarkdown}
-      </Markdown>
+      <MarkdownAttachmentReactContext.Provider value={resolvedAttachments}>
+        <Markdown
+          components={commentMarkdownComponents}
+          rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
+          remarkPlugins={[remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
+          skipHtml
+          urlTransform={sanitizeCommentUrl}
+        >
+          {bodyMarkdown}
+        </Markdown>
+      </MarkdownAttachmentReactContext.Provider>
     </div>
   )
 }

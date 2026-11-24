@@ -1188,12 +1188,13 @@ export function TaskDetailPane({
       case 'description':
         return (
           <>
+            {/* The key changes once when the detail arrives, so the saved text seeds the field. */}
             <MarkdownDescriptionField
               artifacts={artifacts}
               defaultValue={seededDescription}
               disabled={isReadOnly || isWorkItemMutationPending}
               form={editorFormId}
-              key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
+              key={`description:${editorIdentity}:${issue ? 'loaded' : 'pending'}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
               label={t('tasks.detail.description')}
               name="description"
               onUploadingChange={setIsDescriptionUploading}

@@ -121,6 +121,11 @@ export type FileArtifactsController = {
    */
   scope?: FileArtifactScope
   /**
+   * Identifies the signed-in session the controller reads as. Caches of per-viewer results,
+   * such as short-lived file URLs, include it so a different account never reuses them.
+   */
+  viewerCacheKey?: string
+  /**
    * scope に添付された file 一覧です。
    */
   files: FileAttachment[]
@@ -617,7 +622,9 @@ export function useFileArtifacts({
     sessionErrors: [error, currentMutationError],
     scope,
     uploadFiles,
+    viewerCacheKey: accessToken,
   }), [
+    accessToken,
     addAnnotation,
     approvals,
     cancelApproval,
