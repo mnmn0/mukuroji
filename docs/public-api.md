@@ -57,7 +57,7 @@ API キーだけで、接続先の Team・Project・メンバーを調べられ�
 - `GET /api/v1/me` は credential 所有者を `{ schemaVersion, workspaceId, memberId, name?, email }` で返します。`memberId` は Work Item の `assigneeUserId` に使う値です。
 - `GET /api/v1/teams?locale=ja|en` は、所有者が閲覧できる Project と、その Project を持つ Team（Enterprise RBAC で Team を直接与えられた場合はその Team も）を Web の Project directory と同じ規則で返します。Project には `lifecycleState` と charter の要約（`code`、責任者の `ownerMemberId`、`plannedStartDate`、`plannedEndDate`）を含めます。
 - `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーは含めません。
-- `GET /api/v1/projects/{projectId}/raid-log?teamId={teamId}` は Project のリスク・課題・変更要求を、クローズ済みも含めて新しい順に返します。各登録には Web と同じ規則で決めた `severity`（`low`〜`critical`）、担当者の `ownerMemberId`、関連する `relatedWorkItemIds` を含めます。Web の登録簿と同じく、所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
+- `GET /api/v1/projects/{projectId}/raid-log?teamId={teamId}` は Project のリスク・課題・変更要求を、クローズ済みも含めて新しい順に返します。各登録には Web と同じ規則で決めた `severity`（`low`〜`critical`）、担当者の `ownerMemberId`、関連する `relatedWorkItemIds`、変更要求が求める日程の `scheduleChanges`、判断済みなら `decision`（`approved` / `rejected`、判断日時、判断した member、差し替えた `baselineId`）を含めます。Web の登録簿と同じく、所有者にその Project の viewer 以上の権限が要り、Workspace の guest には返しません。
 
 ## Work Item の作成と稼働カレンダー
 

@@ -1,5 +1,5 @@
 import {
-  deriveProjectRaidSeverity,
+  toPublicProjectRaidEntry,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
   type PublicProjectRaidLog,
@@ -155,7 +155,7 @@ async function listCredentialProjectRaidLog(
     schemaVersion: 1,
     teamId,
     projectId,
-    items: log.entries.map((entry) => ({ ...entry, severity: deriveProjectRaidSeverity(entry) })),
+    items: log.entries.map(toPublicProjectRaidEntry),
   }
 }
 

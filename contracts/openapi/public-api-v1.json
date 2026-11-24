@@ -2684,6 +2684,61 @@
             "format": "date-time",
             "type": "string"
           },
+          "decision": {
+            "description": "Decision that closed a change request. Only an approval names the baseline it replaced.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "baselineId": {
+                    "maxLength": 128,
+                    "type": "string"
+                  },
+                  "decidedAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "decidedByMemberId": {
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "const": "approved",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "decidedAt",
+                  "decidedByMemberId"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "decidedAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "decidedByMemberId": {
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "const": "rejected",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "decidedAt",
+                  "decidedByMemberId"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "description": {
             "maxLength": 2000,
             "type": "string"
@@ -2735,6 +2790,62 @@
           "revision": {
             "minimum": 1,
             "type": "integer"
+          },
+          "scheduleChanges": {
+            "description": "Date changes a change request asks for, at most one per related Work Item.",
+            "items": {
+              "properties": {
+                "operation": {
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "targetDate": {
+                          "format": "date",
+                          "type": "string"
+                        },
+                        "type": {
+                          "const": "move",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "targetDate"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "endDate": {
+                          "format": "date",
+                          "type": "string"
+                        },
+                        "type": {
+                          "const": "resize",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "endDate"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "workItemId": {
+                  "maxLength": 128,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workItemId",
+                "operation"
+              ],
+              "type": "object"
+            },
+            "maxItems": 10,
+            "type": "array"
           },
           "severity": {
             "enum": [
