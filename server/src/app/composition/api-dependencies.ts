@@ -134,6 +134,8 @@ import {
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { DynamoDbChannelPostStore } from '../../modules/notifications/adapter-out/dynamodb/channel-post-store'
+import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notifications/adapter-out/secrets-manager/slack-destination-secret-store'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
   DynamoDbAgentRunStore,
@@ -637,6 +639,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       getConfiguredNotificationsTableName(),
     ),
+    channelDestinations: new DynamoDbChannelPostStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
+    ),
+    notificationDestinationSecrets: new SecretsManagerSlackDestinationSecretStore(createSecretsManagerClient()),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',

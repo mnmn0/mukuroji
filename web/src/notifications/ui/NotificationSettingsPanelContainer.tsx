@@ -1,6 +1,8 @@
-import type { Locale } from '../../shared/i18n/i18n'
+import { useMemo } from 'react'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { useNotificationPreferences } from '../mutations/useNotifications'
 import { usePushDevice } from '../mutations/usePushDevice'
+import { useSlackDestination } from '../mutations/useSlackDestination'
 import type {
   NotificationPreferencesSessionErrorReporter,
 } from '../queries/useNotificationPreferences'
@@ -8,6 +10,7 @@ import type { PushRequestGuard } from '../queries/usePushDeviceStatus'
 import type { NotificationMuteTeam } from './NotificationRoutingFields'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 import { PushDeviceSettings } from './PushDeviceSettings'
+import { SlackDestinationPanel } from './SlackDestinationPanel'
 
 /**
  * Inputs for the notification settings feature container.
@@ -27,7 +30,7 @@ export type NotificationSettingsPanelContainerProps = {
 
 /**
  * Connects notification preference queries and mutations to their settings panel, followed by
- * this device's push registration.
+ * this device's push registration and the member's own Slack destination.
  *
  * @param props - Authentication, locale, and session-error forwarding inputs.
  * @returns The notification settings panel and push device card backed by their controllers.
@@ -45,6 +48,8 @@ export function NotificationSettingsPanelContainer({
     onSessionError,
   )
   const pushDevice = usePushDevice(accessToken, guardRequest ? { guardRequest } : {})
+  const slackDestination = useSlackDestination(accessToken, 'personal', locale)
+  const t = useMemo(() => createTranslator(locale), [locale])
 
   return (
     <div className="grid gap-4">
@@ -55,6 +60,7 @@ export function NotificationSettingsPanelContainer({
         muteTargets={muteTargets}
       />
       <PushDeviceSettings controller={pushDevice} locale={locale} />
+      <SlackDestinationPanel controller={slackDestination} kind="personal" t={t} />
     </div>
   )
 }

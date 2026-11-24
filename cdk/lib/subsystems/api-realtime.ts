@@ -916,6 +916,28 @@ export function buildApiRuntime(
       })],
     },
   ));
+  // Members and managers register Slack destinations from the settings screen (#399, ADR 0086).
+  // Writes are limited to the personal and channel Slack subdirectories of each tenant namespace.
+  apiRole.attachInlinePolicy(new iam.Policy(
+    scope,
+    'ApiNotificationSlackDestinationSecretPolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:DeleteSecret',
+          'secretsmanager:DescribeSecret',
+          'secretsmanager:PutSecretValue',
+        ],
+        resources: ['slack', 'slack-channel'].map((directory) => scope.formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          resourceName: `mukuroji/automation-webhooks/*/${directory}/*`,
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        })),
+      })],
+    },
+  ));
   apiRole.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiAutomationInboundWebhookSecretPolicy',

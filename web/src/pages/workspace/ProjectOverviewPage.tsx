@@ -30,6 +30,8 @@ import {
   type ProjectOverviewWorkItemsError,
 } from '../../projects/ui/ProjectOverviewView'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { useSlackDestination } from '../../notifications/mutations/useSlackDestination'
+import { SlackDestinationPanel } from '../../notifications/ui/SlackDestinationPanel'
 import { WorkItemConfigurationApiError } from '../../work-items/api/errors'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -146,6 +148,11 @@ export function ProjectOverviewPage() {
       : undefined,
     [planning.data, projectId, team],
   )
+  const slackChannelOwner = useMemo(
+    () => team && projectId && canRead ? { teamId: team.id, projectId } : undefined,
+    [canRead, projectId, team],
+  )
+  const slackChannel = useSlackDestination(workspace.accessToken, slackChannelOwner, workspace.locale)
   const memberSummary = useMemo(
     () => members.data
       ? summarizeProjectOverviewMembers(members.data.filter(isActiveProjectAssignmentCandidate))
@@ -210,6 +217,11 @@ export function ProjectOverviewPage() {
           workItemSummary={workItemSummary}
           workItemsError={workItemsError}
         />
+        {slackChannelOwner ? (
+          <div className="mt-5">
+            <SlackDestinationPanel controller={slackChannel} kind="project" t={t} />
+          </div>
+        ) : null}
       </div>
     </WorkspaceRouteContent>
   )

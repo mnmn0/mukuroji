@@ -94,3 +94,28 @@ export {
   type PlanningUpdateTargetReference,
   type PlanningUpdateTargetScheduleProjection,
 } from './adapter-in/schedules/notification-schedule'
+/** Exposes Team and Project channel posts: queuing from the projection and the scheduled sender. */
+export {
+  deliverDueChannelPosts,
+  enqueueChannelPost,
+  type ChannelPostEnqueueDependencies,
+  type ChannelPostFailure,
+} from './application/channel-posts'
+export { DynamoDbChannelPostStore, channelPostShards } from './adapter-out/dynamodb/channel-post-store'
+export { createSlackChannelPostSender, createSlackTestMessageSender } from './adapter-out/slack/slack-channel-post-sender'
+/** Exposes the destination settings use cases the HTTP routes call. */
+export {
+  deleteChannelDestination,
+  readChannelDestinationSaveBody,
+  readExpectedRevision,
+  readPersonalSlackWebhookUrl,
+  saveChannelDestination,
+  testNotificationDestination,
+  toPublicChannelDestination,
+} from './application/notification-destinations'
+export type { ChannelDestinationTarget } from './domain/channel-destination'
+export {
+  SecretsManagerSlackDestinationSecretStore,
+  slackChannelDestinationSecretId,
+} from './adapter-out/secrets-manager/slack-destination-secret-store'
+export { slackNotificationSecretId } from './adapter-out/slack/slack-sender'

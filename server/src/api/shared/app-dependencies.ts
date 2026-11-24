@@ -94,6 +94,12 @@ export const workItemDependencies: WorkItemDependencies = {
   get teamReminderSettings() {
     return requireAppDependencies().workItems.teamReminderSettings
   },
+  get channelDestinations() {
+    return requireAppDependencies().workItems.channelDestinations
+  },
+  get notificationDestinationSecrets() {
+    return requireAppDependencies().workItems.notificationDestinationSecrets
+  },
   get agentRuns() {
     return requireAppDependencies().workItems.agentRuns
   },

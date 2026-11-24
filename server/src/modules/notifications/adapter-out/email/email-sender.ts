@@ -1,4 +1,4 @@
-import type { NotificationMessageLocale } from '@mukuroji/contracts'
+import { formatNotificationReasons, type NotificationMessageLocale } from '@mukuroji/contracts'
 import type { ChannelDelivery, ChannelSendResult, NotificationLocaleReader } from '../../application/channel-delivery'
 import { DEFAULT_NOTIFICATION_LOCALE, resolveNotificationSummaryText } from '../../domain/notification-summary'
 import { formatNotificationHeading, resolveNotificationLinks } from '../notification-links'
@@ -133,10 +133,11 @@ export function renderEmailNotification(
   const subject = `[mukuroji] ${heading}`.slice(0, 200)
   const links = resolveNotificationLinks(notification, appOrigin)
   const link = links.open
+  const reasons = formatNotificationReasons(notification.reasons, locale)
   const text = [
     title,
     summary?.replace(/\r\n?/g, '\n').trim().slice(0, 2_000),
-    notification.reasons.length > 0 ? `通知の理由 / Reason: ${notification.reasons.join(', ')}` : undefined,
+    reasons ? `${locale === 'ja' ? '通知の理由' : 'Reason'}: ${reasons}` : undefined,
     '',
     `mukuroji で開く / Open in mukuroji: ${link}`,
     ...(links.workItemKey ? [`${links.workItemKey.key}: ${links.workItemKey.url}`] : []),

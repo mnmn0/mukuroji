@@ -61,6 +61,8 @@ import {
   requiresCurrentWorkItemAssignee,
   isSlackNotificationEligible,
   isNotificationRoutedToChannel,
+  enqueueChannelPost,
+  type ChannelPostEnqueueDependencies,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
   type NotificationRoutingSubject,
@@ -228,6 +230,8 @@ export interface CollaborationProjectionDependencies {
   weeklyReportReminders?: WeeklyReportReminderRevalidator
   /** Rereads Milestones and their watches; without it every Milestone notification is dropped. */
   planningMilestones?: PlanningMilestoneNotificationRevalidator
+  /** Queues Team and Project channel posts; without it no channel receives posts. */
+  channelPosts?: ChannelPostEnqueueDependencies
 }
 
 /** Reads the current state a Milestone notification depends on. */
@@ -960,6 +964,10 @@ async function processRecord(
       parentCondition,
     )),
   )
+  if (dependencies.channelPosts) {
+    // Planning update activity is posted under the target's current Team and Project.
+    await enqueueChannelPost(currentPlanningActivityEvent ?? authorizationEvent, dependencies.channelPosts)
+  }
   await publishRealtimeInvalidation(event, dependencies.realtime)
   await markProjectionProcessed(event.eventId)
 }

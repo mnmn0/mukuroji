@@ -25,6 +25,8 @@ import { loadServerConfig } from '../infrastructure/config/server-config'
 import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
 import { createConfiguredWeeklyReportReminderRevalidator } from '../app/composition/weekly-report-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from '../app/composition/planning-milestone-notifications'
+import { createDynamoDbClient, createDynamoDbDocumentClient } from '../infrastructure/aws/dynamodb-client'
+import { DynamoDbChannelPostStore, type ChannelPostEnqueueDependencies } from '../modules/notifications'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -51,6 +53,14 @@ const weeklyReportReminders = createConfiguredWeeklyReportReminderRevalidator(
 const planningMilestones = createConfiguredPlanningMilestoneNotificationRevalidator(
   readOptionalEnvironment('PLANNING_TABLE_NAME'),
 )
+
+const notificationsTableName = readOptionalEnvironment('NOTIFICATIONS_TABLE_NAME')
+const channelPostStore = notificationsTableName
+  ? new DynamoDbChannelPostStore(createDynamoDbDocumentClient(createDynamoDbClient()), notificationsTableName)
+  : undefined
+const channelPosts: ChannelPostEnqueueDependencies | undefined = channelPostStore
+  ? { destinations: channelPostStore, posts: channelPostStore, now: () => new Date() }
+  : undefined
 
 const curatedContextSearch = {
   /** Upserts the latest canonical non-superseded context item into Workspace search. */
@@ -166,6 +176,7 @@ export async function handler(event: DynamoStreamEvent) {
     ...(timesheetReminders ? { timesheetReminders } : {}),
     ...(weeklyReportReminders ? { weeklyReportReminders } : {}),
     ...(planningMilestones ? { planningMilestones } : {}),
+    ...(channelPosts ? { channelPosts } : {}),
   })
 }
 

@@ -2,7 +2,16 @@ import { randomUUID } from 'node:crypto'
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
-import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications } from '../../modules/notifications'
+import {
+  DynamoDbChannelPostStore,
+  SecretsManagerSlackDestinationSecretStore,
+  channelPostShards,
+  createSlackChannelPostSender,
+  createSlackDeliveryTelemetry,
+  createSlackNotificationSender,
+  deliverDueChannelPosts,
+  deliverDueSlackNotifications,
+} from '../../modules/notifications'
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
@@ -14,7 +23,8 @@ import { createConfiguredPlanningMilestoneNotificationRevalidator } from './plan
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
- * Creates a scheduled sender for opted-in recipients' durable Inbox notifications.
+ * Creates a scheduled sender for opted-in recipients' durable Inbox notifications and for the
+ * Team and Project channel posts.
  * @returns A handler with current tenant authorization and recipient-scoped credentials.
  */
 export function createProductionSlackNotificationHandler() {
@@ -43,9 +53,26 @@ export function createProductionSlackNotificationHandler() {
     })
     return response.SecretString
   }, fetch, appOrigin, createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)))
-  return () => {
-    return deliverDueSlackNotifications({
-      store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(), isAuthorized,
-    })
+  const channelPostStore = new DynamoDbChannelPostStore(documentClient, tableName)
+  const sendChannelPost = createSlackChannelPostSender(new SecretsManagerSlackDestinationSecretStore(secrets), fetch, appOrigin)
+  return async () => {
+    // Personal and channel queues run independently, so a failure in one never holds the other back.
+    const [personal, channel] = await Promise.allSettled([
+      deliverDueSlackNotifications({
+        store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(), isAuthorized,
+      }),
+      deliverDueChannelPosts({
+        destinations: channelPostStore,
+        posts: channelPostStore,
+        send: sendChannelPost,
+        shards: channelPostShards(),
+        reportFailure: (failure) => console.log(JSON.stringify({ event: 'SlackChannelPostFailed', ...failure })),
+        createToken: randomUUID,
+        now: () => new Date(),
+      }),
+    ])
+    if (personal.status === 'rejected') throw personal.reason
+    if (channel.status === 'rejected') throw channel.reason
+    return personal.value + channel.value
   }
 }
