@@ -66,6 +66,21 @@ describe('diffDocumentBlocks', () => {
     expect(changed?.kind === 'changed' ? changed.before : undefined).toEqual(paragraph('b', 'old scope'))
   })
 
+  test('keeps the older content of a block that moved and changed', () => {
+    const entries = diffDocumentBlocks(
+      [paragraph('a', 'first'), paragraph('b', 'second'), paragraph('c', 'third')],
+      [paragraph('c', 'third, edited'), paragraph('a', 'first'), paragraph('b', 'second')],
+    )
+    const moved = entries.find((entry) => entry.kind === 'moved')
+
+    expect(moved).toMatchObject({
+      kind: 'moved',
+      contentChanged: true,
+      before: { text: 'third' },
+      block: { text: 'third, edited' },
+    })
+  })
+
   test('reports a block that left the common order as moved at its new position', () => {
     const entries = diffDocumentBlocks(
       [paragraph('a', '1'), paragraph('b', '2'), paragraph('c', '3')],

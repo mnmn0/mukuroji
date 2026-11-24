@@ -4,7 +4,8 @@ import { MemoryRouter } from 'react-router'
 import { SWRConfig, unstable_serialize } from 'swr'
 import type { ApprovalRequest, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
-import { DocumentVersionReviewDialog } from '../src/documents/ui/DocumentVersionReview'
+import { DocumentVersionReviewDialog, type ApprovalsReadStatus } from '../src/documents/ui/DocumentVersionReview'
+import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const t = createTranslator('en')
@@ -49,6 +50,7 @@ function renderDialog(props: {
   approvals?: ApprovalRequest[]
   version?: DocumentVersion
   canEdit?: boolean
+  approvalsStatus?: ApprovalsReadStatus
 }) {
   const version = props.version ?? pinnedVersion
   const fallback = {
@@ -63,6 +65,7 @@ function renderDialog(props: {
         <DocumentVersionReviewDialog
           accessToken="token"
           approvals={props.approvals ?? []}
+          approvalsStatus={props.approvalsStatus}
           document={documentRecordFixture}
           initialTab={props.initialTab}
           locale="en"
@@ -124,5 +127,44 @@ describe('DocumentVersionReviewDialog', () => {
     expect(html).toContain('data-testid="document-approval-approval-1"')
     expect(html).toContain('Rina Reviewer')
     expect(html).toContain('Request approval')
+  })
+
+  test('shows a failed approvals read with a retry instead of an empty list', () => {
+    const html = renderDialog({ initialTab: 'approval', approvalsStatus: { kind: 'error', onRetry: () => undefined } })
+    expect(html).toContain('Approval statuses could not be loaded.')
+    expect(html).toContain('>Retry<')
+    expect(html).not.toContain('No approval has been requested yet.')
+  })
+
+  test('opens a deep-linked version that is not on the loaded history page through its detail', () => {
+    const olderVersion: DocumentVersion = { ...pinnedVersion, id: `${documentRecordFixture.id}:0`, revision: 0, name: 'v0.9 draft' }
+    const fallback = {
+      [unstable_serialize(['document-version-detail', 'token', documentRecordFixture.id, olderVersion.id])]: {
+        version: olderVersion,
+        document: createSnapshot(),
+      },
+      [unstable_serialize(['document-approvals', 'token', documentRecordFixture.id])]: [],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <SWRConfig value={{ fallback, provider: () => new Map() }}>
+          <DocumentContextPanel
+            activeTab="versions"
+            backlinks={[]}
+            comments={[]}
+            document={documentRecordFixture}
+            focusedVersionId={olderVersion.id}
+            linkAccessToken="token"
+            locale="en"
+            t={t}
+            versions={[pinnedVersion]}
+            onClose={() => undefined}
+            onTabChange={() => undefined}
+          />
+        </SWRConfig>
+      </MemoryRouter>,
+    )
+    expect(html).toContain('role="dialog"')
+    expect(html).toContain('v0.9 draft')
   })
 })

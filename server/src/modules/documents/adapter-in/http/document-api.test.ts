@@ -2506,6 +2506,38 @@ test('answers a write without waiting for a stalled change notification', async 
   expect(Date.now() - started).toBeLessThan(5_000)
 })
 
+test('requires Document edit permission to request approval of a version', async () => {
+  let requested = false
+  const app = createTestApp(createDocumentClient({
+    async get() {
+      return { ...pageDocument, capabilities: { ...pageDocument.capabilities, canEdit: false } }
+    },
+    async getVersion() {
+      throw new Error('The version must not be read without edit permission.')
+    },
+  }), {
+    async requestVersionApproval() {
+      requested = true
+      throw new Error('The approval must not be requested without edit permission.')
+    },
+  })
+
+  const response = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      teamId: 'core',
+      issueId: 'work-item-1',
+      reviewerMemberKeys: ['reviewer@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'DocumentEditDenied' })
+  expect(requested).toBe(false)
+})
+
 test('pins a named version and requests approval only for a pinned version', async () => {
   const pinnedNames: string[] = []
   const unpinnedVersion = {

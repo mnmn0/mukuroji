@@ -26,6 +26,19 @@ const CURRENT_CONTENT = 'current'
 /** Days added to today for the default approval due date. */
 const DEFAULT_APPROVAL_DUE_DAYS = 7
 
+/** Read state of the approvals shown in the dialog. */
+export type ApprovalsReadStatus =
+  | {
+      /** The first read is running. */
+      kind: 'loading'
+    }
+  | {
+      /** The read failed. */
+      kind: 'error'
+      /** Reads the approvals again. */
+      onRetry: () => void
+    }
+
 /** A view of the version review dialog. */
 type DocumentVersionReviewTab = 'preview' | 'compare' | 'approval'
 
@@ -46,6 +59,11 @@ export type DocumentVersionReviewDialogProps = {
   versions: readonly DocumentVersion[]
   /** Approvals requested for this version. */
   approvals: readonly ApprovalRequest[]
+  /**
+   * Read state of the approvals: `loading` before the first read, and `error` with a retry when
+   * the read failed, so a failure is never shown as an empty list.
+   */
+  approvalsStatus?: ApprovalsReadStatus
   /** Members offered as reviewers. */
   members?: readonly MentionableMember[]
   /** Locale used for dates and link labels. */
@@ -74,6 +92,7 @@ export type DocumentVersionReviewDialogProps = {
 export function DocumentVersionReviewDialog({
   accessToken,
   approvals,
+  approvalsStatus,
   document,
   initialTab = 'preview',
   locale,
@@ -216,6 +235,7 @@ export function DocumentVersionReviewDialog({
             <VersionApproval
               accessToken={accessToken}
               approvals={approvals}
+              approvalsStatus={approvalsStatus}
               document={document}
               locale={locale}
               members={members}
@@ -412,8 +432,9 @@ function BlockDiffEntry({
     <section className={`rounded-lg border px-4 py-3 ${blockDiffClassNames[entry.kind]}`} data-diff-kind={entry.kind}>
       <p className="m-0 mb-2 text-[11px] font-bold uppercase tracking-wide text-[var(--workbench-muted)]">
         {t(`documents.versionReview.diff.${entry.kind}`)}
+        {entry.kind === 'moved' && entry.contentChanged ? ` · ${t('documents.versionReview.diff.changed')}` : ''}
       </p>
-      {entry.kind === 'changed' ? (
+      {entry.kind === 'changed' || (entry.kind === 'moved' && entry.contentChanged) ? (
         <div className="grid gap-2">
           <div className="rounded-md bg-red-50 px-3 py-2 line-through decoration-red-400/70" aria-label={t('documents.versionReview.diff.before')}>
             <DocumentReadOnlyBlock block={entry.before} t={t} />
@@ -440,6 +461,7 @@ function BlockDiffEntry({
 function VersionApproval({
   accessToken,
   approvals,
+  approvalsStatus,
   document,
   locale,
   members,
@@ -453,6 +475,8 @@ function VersionApproval({
   accessToken: string
   /** Approvals requested for this version. */
   approvals: readonly ApprovalRequest[]
+  /** Read state of the approvals. */
+  approvalsStatus?: ApprovalsReadStatus
   /** Current Document whose linked Work Items are offered first. */
   document: DocumentRecord
   /** Locale used for dates and labels. */
@@ -483,7 +507,24 @@ function VersionApproval({
         <h3 className="m-0 text-sm font-semibold text-[var(--workbench-text)]">
           {t('documents.versionReview.approvals')}
         </h3>
-        {approvals.length === 0 ? (
+        {approvalsStatus?.kind === 'error' ? (
+          <div className="flex flex-wrap items-center gap-2" role="alert">
+            <p className="m-0 text-xs font-semibold text-[var(--workbench-danger)]">
+              {t('documents.versions.approvalsError')}
+            </p>
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={approvalsStatus.onRetry}
+              type="button"
+            >
+              {t('documents.versions.retry')}
+            </button>
+          </div>
+        ) : approvalsStatus?.kind === 'loading' ? (
+          <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]" role="status">
+            {t('documents.versions.approvalsLoading')}
+          </p>
+        ) : approvals.length === 0 ? (
           <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]">
             {t('documents.versionReview.noApprovals')}
           </p>

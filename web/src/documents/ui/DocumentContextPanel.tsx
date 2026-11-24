@@ -38,7 +38,7 @@ import {
   focusFirstModalElement,
   trapModalFocus,
 } from './modalFocus'
-import { useDocumentApprovals } from '../queries/useDocumentVersionReview'
+import { useDocumentApprovals, useDocumentVersionDetail } from '../queries/useDocumentVersionReview'
 import { useDocumentVersionReviewMutations } from '../mutations/useDocumentVersionReviewMutations'
 import { DocumentVersionReviewDialog } from './DocumentVersionReview'
 import { resolveApprovalStatusClassName } from '../model/versionApprovals'
@@ -1146,9 +1146,26 @@ function VersionsPanel({
   const [restoringVersionId, setRestoringVersionId] = useState<string>()
   const [restoreErrorMessage, setRestoreErrorMessage] = useState<string>()
   const [reviewingVersionId, setReviewingVersionId] = useState<string | undefined>(focusedVersionId)
-  const { data: approvals = [] } = useDocumentApprovals(reviewAccessToken, document.id)
+  const approvalsQuery = useDocumentApprovals(reviewAccessToken, document.id)
+  const approvals = approvalsQuery.data ?? []
   const reviewMutations = useDocumentVersionReviewMutations(reviewAccessToken, document.id)
-  const reviewingVersion = versions.find((version) => version.id === reviewingVersionId)
+  const listedReviewingVersion = versions.find((version) => version.id === reviewingVersionId)
+  // A deep link or a version from a later history page is not in the loaded list, so it is
+  // read through the version detail; a pin that reloads the first page keeps the dialog open.
+  const reviewingVersionDetail = useDocumentVersionDetail(
+    reviewAccessToken,
+    document.id,
+    listedReviewingVersion === undefined ? reviewingVersionId : undefined,
+  )
+  const resolvedReviewingVersion = listedReviewingVersion ?? reviewingVersionDetail.data?.version
+  // After a pin, the history reloads only its first page, so a version from a later page is read
+  // again through its detail. The last resolved copy keeps the dialog and its tab mounted meanwhile.
+  const [lastReviewingVersion, setLastReviewingVersion] = useState<DocumentVersion>()
+  if (resolvedReviewingVersion !== undefined && resolvedReviewingVersion !== lastReviewingVersion) {
+    setLastReviewingVersion(resolvedReviewingVersion)
+  }
+  const reviewingVersion = resolvedReviewingVersion ??
+    (lastReviewingVersion?.id === reviewingVersionId ? lastReviewingVersion : undefined)
   const canEdit = document.capabilities.canEdit
 
   return (
@@ -1163,6 +1180,59 @@ function VersionsPanel({
         >
           {restoreErrorMessage}
         </p>
+      ) : null}
+      {reviewAccessToken && approvalsQuery.error && !approvalsQuery.data ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+          role="alert"
+        >
+          <p className="m-0 text-xs font-semibold leading-5 text-fg-red-800">
+            {t('documents.versions.approvalsError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+            onClick={() => void approvalsQuery.mutate()}
+            type="button"
+          >
+            {t('documents.versions.retry')}
+          </button>
+        </div>
+      ) : null}
+      {reviewAccessToken && approvalsQuery.isLoading ? (
+        <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]" role="status">
+          {t('documents.versions.approvalsLoading')}
+        </p>
+      ) : null}
+      {reviewingVersionId && !reviewingVersion && reviewingVersionDetail.isLoading ? (
+        <p className="m-0 text-xs font-medium text-[var(--workbench-muted)]" role="status">
+          {t('documents.versions.versionLoading')}
+        </p>
+      ) : null}
+      {reviewingVersionId && !reviewingVersion && reviewingVersionDetail.error ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+          role="alert"
+        >
+          <p className="m-0 text-xs font-semibold leading-5 text-fg-red-800">
+            {t('documents.versions.versionError')}
+          </p>
+          <span className="flex gap-2">
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={() => void reviewingVersionDetail.mutate()}
+              type="button"
+            >
+              {t('documents.versions.retry')}
+            </button>
+            <button
+              className="workbench-button-secondary min-h-8 px-2.5 text-xs"
+              onClick={() => setReviewingVersionId(undefined)}
+              type="button"
+            >
+              {t('documents.action.cancel')}
+            </button>
+          </span>
+        </div>
       ) : null}
       {versions.length > 0 ? (
         versions.map((version) => {
@@ -1301,6 +1371,11 @@ function VersionsPanel({
         <DocumentVersionReviewDialog
           accessToken={reviewAccessToken}
           approvals={approvals.filter((approval) => approval.versionId === reviewingVersion.id)}
+          approvalsStatus={approvalsQuery.error && !approvalsQuery.data
+            ? { kind: 'error', onRetry: () => void approvalsQuery.mutate() }
+            : approvalsQuery.isLoading
+              ? { kind: 'loading' }
+              : undefined}
           document={document}
           initialTab={reviewingVersion.id === focusedVersionId ? 'approval' : 'preview'}
           locale={locale}

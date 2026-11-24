@@ -26,7 +26,8 @@ file の version と Work Item 本体にしかなかった。承認の結果は 
   `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>` / `APPROVAL#<createdAt>#<approvalId>` の不変な
   pointer row を承認作成と同じ transaction で書く。一覧では pointer から main row を batch read
   し、閲覧者が Work Item を見られる承認だけを返す。
-- Document の閲覧確認は documents module、Work Item の認可・reviewer 検証・承認の保存は
+- 固定と承認依頼はどちらも Document の編集権限を要する（閲覧だけの member は版を成果物として
+  公開できない）。Document の編集権限の確認は documents module、Work Item の認可・reviewer 検証・承認の保存は
   API composition（`server/src/api/shared/document-approval-access.ts`）が行う。documents module は
   `DocumentApiDependencies` の任意の callback を通してだけ承認に触れ、files module に依存しない。
 

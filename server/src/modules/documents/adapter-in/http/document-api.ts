@@ -753,6 +753,16 @@ export function registerDocumentApiRoutes(
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseCreateDocumentVersionApprovalInput(await readJson<unknown>(c))
       const documentId = readRequiredDocumentId(c)
+      // Requesting approval publishes the version as a deliverable, so it needs the same
+      // Document edit permission as pinning it, not only read access.
+      const current = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+      })
+      if (!current.capabilities.canEdit) {
+        throw new DocumentError(403, 'DocumentEditDenied', 'Document edit permission is required.')
+      }
       const detail = await dependencies.getClient().getVersion({
         workspaceId: principal.workspaceId,
         documentId,
