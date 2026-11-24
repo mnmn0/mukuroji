@@ -52,6 +52,7 @@ const settingsPanelLabelKeys: Record<SettingsPanelId, MessageKey> = {
   'members': 'workspace.settings.panel.members',
   'tenant': 'workspace.settings.panel.tenant',
   'directory': 'workspace.settings.panel.directory',
+  'time-periods': 'workspace.settings.panel.time-periods',
   'developer-platform': 'workspace.settings.panel.developer-platform',
   'automation': 'workspace.settings.panel.automation',
   'audit-log': 'workspace.settings.panel.audit-log',
