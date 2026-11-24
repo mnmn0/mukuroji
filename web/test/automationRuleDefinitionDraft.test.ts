@@ -80,6 +80,19 @@ describe('automation rule definition draft', () => {
     })
   })
 
+  test('leaves untouched actions with surrounding spaces out of a name-only edit', () => {
+    const saved: AutomationRule = {
+      ...rule,
+      actions: [
+        { type: 'update', patch: { title: '  Padded title ' } },
+        { type: 'create', templateId: 'template-1', templateVersion: 2 },
+      ],
+    }
+    const draft = { ...createAutomationRuleDraft(saved), name: 'Renamed' }
+
+    expect(createAutomationRuleDraftUpdate(saved, draft).actions).toBeUndefined()
+  })
+
   test('saves rows matched by any condition as one any group', () => {
     const draft = {
       ...createAutomationRuleDraft(rule),

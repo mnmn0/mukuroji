@@ -22,7 +22,6 @@ import {
 } from '../../domain/execution-policy'
 import {
   getBusinessDayWakeUp,
-  getDailySlots,
   getDueDateForOccurrence,
   getLocalMonthStart,
   getNextRecurringOccurrence,
@@ -446,6 +445,12 @@ function isOpenWorkItemDueOn(
       workItem.statusCategory === 'started')
 }
 
+/**
+ * How many of a business-day definition's newest executions are read to find a run that started
+ * this month; at most one run starts per month, and retries reuse its execution.
+ */
+const STARTED_BUSINESS_DAY_EXECUTION_LOOKUP_LIMIT = 5
+
 /** 一つの recurring definition の due/catch-up slots を実行し CAS で進めます。 */
 export async function processRecurringWorkDefinition(
   scheduledDefinition: RecurringWork,
@@ -466,7 +471,7 @@ export async function processRecurringWorkDefinition(
   let fallbackOccurrence: Date
   if (calendar) {
     const windowStart = readBusinessDayWindowStart(definition)
-    const startedOccurrence = await findStartedBusinessDayOccurrence(definition, windowStart, now, dependencies)
+    const startedOccurrence = await findStartedBusinessDayOccurrence(definition, now, dependencies)
     const businessDayOccurrences = startedOccurrence
       ? [
           startedOccurrence,
@@ -528,32 +533,45 @@ export async function processRecurringWorkDefinition(
 }
 
 /**
- * Finds a business-day run that already started in the window, so a retry resumes the same
- * occurrence (and Work Item) even when a calendar change since then would pick another day.
+ * Finds a business-day run that already started this month and has not completed, so a retry
+ * resumes the same occurrence (and Work Item) even when a calendar or schedule change since then
+ * would pick another day or time.
  *
- * Successful runs advance the definition past their month, so an execution found in the window
- * belongs to a run that has not completed.
+ * Reads the newest executions of the definition rather than the slots of the current schedule,
+ * so an edited local time does not hide the started run. Successful runs advance the definition
+ * past their month, so an execution after the window start belongs to a run that has not
+ * completed. A schedule change does not move this window: the started run finishes first.
  *
  * @param definition - Business-day recurring definition.
- * @param windowStart - Exclusive start of the window.
  * @param now - Processing time.
  * @param dependencies - Schedule dependencies.
  * @returns The earliest started occurrence, or `undefined` when none started.
  */
 async function findStartedBusinessDayOccurrence(
   definition: RecurringWork,
-  windowStart: Date,
   now: Date,
   dependencies: AutomationScheduleDependencies,
 ): Promise<Date | undefined> {
-  for (const slot of getDailySlots(definition.schedule, windowStart, now)) {
-    const execution = await dependencies.client.getExecution(
-      definition.workspaceId,
-      createRecurringExecutionId(definition.workspaceId, definition.id, slot.toISOString()),
-    )
-    if (execution) return slot
+  const monthStart = getLocalMonthStart(new Date(definition.nextRunAt), definition.schedule.timeZone)
+  const windowStart = Math.max(
+    monthStart.getTime() - 1,
+    Date.parse(definition.lastRunAt ?? definition.createdAt),
+  )
+  const prefix = `recurring:${definition.id}:`
+  const { executions } = await dependencies.client.listExecutions({
+    workspaceId: definition.workspaceId,
+    ruleId: `recurring:${definition.id}`,
+    limit: STARTED_BUSINESS_DAY_EXECUTION_LOOKUP_LIMIT,
+  })
+  let started: Date | undefined
+  for (const execution of executions) {
+    if (!execution.triggerEventId.startsWith(prefix)) continue
+    const occurrence = new Date(execution.triggerEventId.slice(prefix.length))
+    const time = occurrence.getTime()
+    if (!Number.isFinite(time) || time <= windowStart || time > now.getTime()) continue
+    if (!started || time < started.getTime()) started = occurrence
   }
-  return undefined
+  return started
 }
 
 /**

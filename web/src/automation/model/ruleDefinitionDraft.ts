@@ -341,9 +341,12 @@ export function createAutomationRuleDraftUpdate(
     name: draft.name.trim(),
     conditions: createAutomationRuleDraftConditions(draft),
     // Sending actions makes the server pin create actions to the current template version, so
-    // unchanged actions are left out and keep the version they were saved with.
-    ...(canonicalJson(actions.map(withoutPinnedTemplateVersion)) ===
-      canonicalJson(rule.actions.map(withoutPinnedTemplateVersion))
+    // unchanged actions are left out and keep the version they were saved with. Actions count as
+    // unchanged when the administrator left their drafts as loaded, even if rebuilding them would
+    // trim saved text, or when they rebuild to the saved actions.
+    ...(canonicalJson(draft.actions) === canonicalJson(rule.actions.map(createActionDraft)) ||
+      canonicalJson(actions.map(withoutPinnedTemplateVersion)) ===
+        canonicalJson(rule.actions.map(withoutPinnedTemplateVersion))
       ? {}
       : { actions }),
   }

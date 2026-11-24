@@ -243,19 +243,6 @@ export function getBusinessDayWakeUp(
 }
 
 /**
- * Lists the local time slots of a schedule on every day of a window, where a business-day run
- * may have started before a calendar change moved it.
- *
- * @param schedule - Validated schedule.
- * @param fromExclusive - Exclusive lower UTC bound.
- * @param toInclusive - Inclusive upper UTC bound.
- * @returns Daily slots in chronological order.
- */
-export function getDailySlots(schedule: RecurringSchedule, fromExclusive: Date, toInclusive: Date): Date[] {
-  return getRecurringOccurrences(toDailySchedule(schedule), fromExclusive, toInclusive)
-}
-
-/**
  * Tests whether two instants fall in the same local calendar month.
  *
  * @param instant - Instant to test.
