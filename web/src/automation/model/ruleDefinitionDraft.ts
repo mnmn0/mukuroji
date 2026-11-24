@@ -421,6 +421,8 @@ function readFieldRows(conditions: readonly AutomationCondition[]): AutomationRu
       continue
     }
     if (value !== undefined && typeof value !== 'string') return undefined
+    // A row with no value reads as unfinished, so a saved comparison with "" stays a saved condition.
+    if (value === '' && !isExistenceOperator(condition.operator)) return undefined
     rows.push({ field: condition.field, operator: condition.operator, value: value ?? '' })
   }
   return rows

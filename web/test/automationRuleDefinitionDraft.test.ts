@@ -64,6 +64,22 @@ describe('automation rule definition draft', () => {
     })
   })
 
+  test('keeps a saved empty-text comparison so unrelated edits still save', () => {
+    const saved: AutomationRule = {
+      ...rule,
+      conditions: [{ field: 'workItem.description', operator: 'equals', value: '' }],
+    }
+    const draft = { ...createAutomationRuleDraft(saved), name: 'Renamed' }
+
+    expect(draft.savedConditions).toEqual(saved.conditions)
+    expect(isAutomationRuleDraftValid(draft)).toBe(true)
+    expect(createAutomationRuleDraftUpdate(saved, draft)).toEqual({
+      expectedRevision: saved.revision,
+      name: 'Renamed',
+      conditions: saved.conditions,
+    })
+  })
+
   test('saves rows matched by any condition as one any group', () => {
     const draft = {
       ...createAutomationRuleDraft(rule),
