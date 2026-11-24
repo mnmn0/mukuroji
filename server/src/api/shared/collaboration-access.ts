@@ -23,7 +23,7 @@ import { ambientAutomationActionExecutorDependencies, workspaceDependencies } fr
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readRequiredRouteId } from './input-parsing'
 import {
-  createEnterpriseControlAuthorizationConditionCheck,
+  createEnterpriseAuthorizationConditionChecks,
   requireAssignedProjectPermission,
   requireTeamPermission,
   toProjectDataErrorResponse,
@@ -327,9 +327,9 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
     ) && principal.enterprisePermissions?.includes('teams.write') === true
 
   if (enterpriseProjectAccess || enterpriseTeamAccess || enterpriseRouteAccess) {
-    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
-    if (enterpriseControlCheck) {
-      checks.push(...readCollaborationAuthorizationConditionChecks([enterpriseControlCheck]))
+    const enterpriseChecks = createEnterpriseAuthorizationConditionChecks(principal)
+    if (enterpriseChecks.length > 0) {
+      checks.push(...readCollaborationAuthorizationConditionChecks(enterpriseChecks))
     }
     return checks
   }

@@ -36,6 +36,11 @@ export {
   type ReplaceOrgStructureCommand,
 } from './domain/org-structure'
 export {
+  createOrgStructureKey,
+  createOrgStructureRevisionConditionCheck,
+  ORG_STRUCTURE_ENTRY_TYPE,
+} from './adapter-out/dynamodb/org-structure-item'
+export {
   createProjectCharter,
   createProjectCharterPerson,
   isStoredProjectCharter,

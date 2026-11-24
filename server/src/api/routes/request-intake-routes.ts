@@ -51,7 +51,7 @@ import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-r
 import { readOptionalPositiveQueryInteger } from '../shared/input-parsing'
 import {
   createApiMutationContext,
-  createEnterpriseControlAuthorizationConditionCheck,
+  createEnterpriseAuthorizationConditionChecks,
   isEnterpriseTriageTeamScope,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -759,13 +759,12 @@ async function createTriageConfigurationAuthorizationConditionChecks(
 ): Promise<TriageAuthorizationConditionChecks> {
   if (principal.isSystemAdmin) return []
   if (isEnterpriseTriageTeamScope(principal, teamId)) {
-    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
     return mergeTriageConditionChecks(
       await createTriageActiveActorConditionChecks(
         principal,
         TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
       ),
-      enterpriseControlCheck ? [enterpriseControlCheck] : [],
+      createEnterpriseAuthorizationConditionChecks(principal),
     )
   }
   if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {

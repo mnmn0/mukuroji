@@ -5,7 +5,10 @@ import {
   createPortfolioOrgUnitRollup,
   resolvePortfolioOrgUnitTeamIds,
 } from '../src/features/portfolio-dashboard/model/orgUnitRollup'
-import { createPortfolioDashboardModel } from '../src/features/portfolio-dashboard/model/portfolioDashboard'
+import {
+  createPortfolioDashboardModel,
+  type PortfolioDashboardRow,
+} from '../src/features/portfolio-dashboard/model/portfolioDashboard'
 import { PortfolioDashboardView } from '../src/features/portfolio-dashboard/ui/PortfolioDashboardView'
 import type { ProjectDirectoryTeam } from '../src/projects/api'
 import {
@@ -137,13 +140,27 @@ describe('OrgUnit structure draft', () => {
 })
 
 describe('OrgUnit portfolio roll-up', () => {
-  test('sums descendants and counts a shared Project once', () => {
+  test('sums descendants, counting a shared Project once but every Team share of its Work Items', () => {
     const rollup = createPortfolioOrgUnitRollup(model.rows, teams.map((team) => team.id), structure)
     const sales = rollup.rows.find((row) => row.orgUnitId === 'sales')
-    expect(sales).toMatchObject({ depth: 0, teamCount: 2, projectCount: 2, workItems: { total: 16, open: 10, completed: 6, overdueOpen: 3 } })
-    expect(rollup.rows.find((row) => row.orgUnitId === 'east')).toMatchObject({ depth: 1, teamCount: 1, projectCount: 2 })
+    // CRM appears in both Sales HQ and East Team; each Team reports only its own Work Items.
+    expect(sales).toMatchObject({ depth: 0, teamCount: 2, projectCount: 2, workItems: { total: 26, open: 14, completed: 12, overdueOpen: 4 } })
+    expect(rollup.rows.find((row) => row.orgUnitId === 'east')).toMatchObject({ depth: 1, teamCount: 1, projectCount: 2, workItems: { total: 16 } })
     expect(rollup.rows.find((row) => row.orgUnitId === 'eng')).toMatchObject({ teamCount: 1, workItems: { total: 20 } })
     expect(rollup.unassigned).toMatchObject({ teamCount: 1, projectCount: 1, workItems: { total: 3 } })
+  })
+
+  test('counts a shared Project as off track when any of its Teams reports it off track', () => {
+    const rows = model.rows.map((row): PortfolioDashboardRow => {
+      if (row.projectId !== 'crm') return row
+      return { ...row, health: row.teamId === 'east-team' ? 'off-track' : 'on-track' }
+    })
+    const rollup = createPortfolioOrgUnitRollup(rows, teams.map((team) => team.id), structure)
+    expect(rollup.rows.find((row) => row.orgUnitId === 'sales')).toMatchObject({ projectCount: 2, offTrackCount: 1 })
+    // Sales HQ alone reports CRM on track, so the roll-up of only its Teams has nothing off track.
+    const salesHqOnly = { ...structure, teamAssignments: structure.teamAssignments.filter((assignment) => assignment.teamId !== 'east-team') }
+    expect(createPortfolioOrgUnitRollup(rows, teams.map((team) => team.id), salesHqOnly).rows.find((row) => row.orgUnitId === 'sales'))
+      .toMatchObject({ projectCount: 1, offTrackCount: 0 })
   })
 
   test('a Workspace without OrgUnits has no roll-up and no OrgUnit filter', () => {

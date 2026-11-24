@@ -95,12 +95,18 @@ function send(path: string, method = 'GET', body?: unknown) {
  *
  * @param roleId - Role assigned at the Sales OrgUnit.
  * @param structure - OrgUnit structure the directory returns.
+ * @param beforeTeamRenameCommit - Change to the stored structure between authorization and commit.
  */
-async function configureOrgUnitRole(roleId: EnterpriseRoleId, structure: OrgStructure = orgStructure) {
+async function configureOrgUnitRole(
+  roleId: EnterpriseRoleId,
+  structure: OrgStructure = orgStructure,
+  beforeTeamRenameCommit?: (setOrgStructure: (next: OrgStructure) => void) => void,
+) {
   configureFakeProjectClients(false, {
     workspaceRole: 'member',
     additionalTeams,
     orgStructure: structure,
+    ...(beforeTeamRenameCommit ? { beforeTeamRenameCommit } : {}),
   })
   const identity = new InMemoryEnterpriseIdentityClient()
   await identity.putMemberRoleAssignment({
@@ -154,6 +160,21 @@ test('lets an OrgUnit manager write on the Teams of its subtree only', async () 
       teamAssignments: [{ teamId: 'core-team', orgUnitId: 'sales' }],
     })
     expect(widened.status).toBe(403)
+  })
+})
+
+test('rejects an OrgUnit manager write when the structure changes between authorization and commit', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    // An administrator takes East Team out of Sales after the manager was authorized.
+    await configureOrgUnitRole('org-unit:manager', orgStructure, (setOrgStructure) => setOrgStructure({
+      ...orgStructure,
+      teamAssignments: orgStructure.teamAssignments.filter((assignment) => assignment.teamId !== 'east-team'),
+      revision: orgStructure.revision + 1,
+    }))
+
+    const renamed = await send('/api/teams/east-team', 'PATCH', { nameJa: '東チーム', nameEn: 'East' })
+    expect(renamed.status).toBe(403)
+    expect(await renamed.json()).toMatchObject({ code: 'DirectoryAuthorizationChanged' })
   })
 })
 

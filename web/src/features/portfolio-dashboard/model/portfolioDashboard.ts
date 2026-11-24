@@ -508,7 +508,7 @@ export function evaluatePortfolioDashboardAttention(
 }
 
 /** Rank of each reported health value, worst first. */
-const healthRank: Record<PlanningHealth, number> = { 'off-track': 0, 'at-risk': 1, unknown: 2, 'on-track': 3 }
+export const healthRank: Record<PlanningHealth, number> = { 'off-track': 0, 'at-risk': 1, unknown: 2, 'on-track': 3 }
 
 /**
  * Reads the sortable value of a row; `undefined` sorts last in either direction.

@@ -1604,8 +1604,17 @@ export class DynamoDbProjectDirectoryClient {
       updatedAt: new Date().toISOString(),
     }
     const isFirstSave = command.expectedRevision === 0
+    // The Put below already conditions the structure row, and a transaction may name a row once,
+    // so a caller fence on the same row is dropped. Replacing it needs Workspace administration,
+    // which no OrgUnit-derived permission grants.
+    const structureKey = createOrgStructureKey(directoryId)
+    const callerChecks = authorizationConditionChecks.filter((item) =>
+      item.ConditionCheck?.TableName !== this.tableName ||
+      item.ConditionCheck.Key?.directoryId !== structureKey.directoryId ||
+      item.ConditionCheck.Key?.entryKey !== structureKey.entryKey
+    )
     try {
-      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      await this.sendDirectoryAdministrationTransaction(callerChecks, [
         {
           Put: {
             TableName: this.tableName,

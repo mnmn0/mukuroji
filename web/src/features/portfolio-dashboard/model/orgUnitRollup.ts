@@ -1,10 +1,11 @@
 import {
   listOrgUnitTeamIds,
   type OrgStructure,
+  type PlanningHealth,
   type PortfolioProjectWorkItems,
 } from '@mukuroji/contracts'
 import { listOrgUnitTreeRows } from '../../../projects/model/orgStructure'
-import type { PortfolioDashboardRow } from './portfolioDashboard'
+import { healthRank, type PortfolioDashboardRow } from './portfolioDashboard'
 
 /** Totals of the Teams and Projects under one OrgUnit, its descendants included. */
 export type PortfolioOrgUnitRollupRow = {
@@ -18,7 +19,7 @@ export type PortfolioOrgUnitRollupRow = {
   teamCount: number
   /** Distinct Projects of those Teams that the reader may read. */
   projectCount: number
-  /** Projects reported off track. */
+  /** Distinct Projects whose worst reported health across the Teams is off track. */
   offTrackCount: number
   /** Work Item counts summed over those Projects. */
   workItems: PortfolioProjectWorkItems
@@ -33,8 +34,8 @@ export type PortfolioOrgUnitRollup = {
 }
 
 /**
- * Sums the portfolio rows of each OrgUnit, counting every Project once even when several Teams
- * under the OrgUnit share it.
+ * Sums the portfolio rows of each OrgUnit. A Project shared by several Teams under the OrgUnit is
+ * counted once, while the Work Items of every Team's share of it are added up.
  *
  * @param rows - Portfolio rows of every Team the reader could read.
  * @param teamIds - Directory Teams, so Teams without readable Projects still count.
@@ -80,24 +81,28 @@ export function resolvePortfolioOrgUnitTeamIds(
 /**
  * Sums the rows of a set of Teams.
  *
+ * Each Team's portfolio covers only its own Work Items, so the rows of a Project shared by several
+ * of the Teams are all added up. The Project itself is counted once, with the worst health any of
+ * its Teams reported.
+ *
  * @param rows - Portfolio rows.
  * @param teamIds - Teams to include.
  * @returns Team and Project counts and Work Item totals.
  */
 function summarizeTeams(rows: readonly PortfolioDashboardRow[], teamIds: ReadonlySet<string>) {
-  const projects = new Map<string, PortfolioDashboardRow>()
-  for (const row of rows) {
-    if (!teamIds.has(row.teamId) || projects.has(row.projectId)) continue
-    projects.set(row.projectId, row)
-  }
+  const projectHealth = new Map<string, PlanningHealth>()
   const workItems: PortfolioProjectWorkItems = { total: 0, open: 0, completed: 0, overdueOpen: 0 }
-  let offTrackCount = 0
-  for (const row of projects.values()) {
+  for (const row of rows) {
+    if (!teamIds.has(row.teamId)) continue
     workItems.total += row.metrics.workItems.total
     workItems.open += row.metrics.workItems.open
     workItems.completed += row.metrics.workItems.completed
     workItems.overdueOpen += row.metrics.workItems.overdueOpen
-    if (row.health === 'off-track') offTrackCount += 1
+    const current = projectHealth.get(row.projectId)
+    if (current === undefined || healthRank[row.health] < healthRank[current]) {
+      projectHealth.set(row.projectId, row.health)
+    }
   }
-  return { teamCount: teamIds.size, projectCount: projects.size, offTrackCount, workItems }
+  const offTrackCount = [...projectHealth.values()].filter((health) => health === 'off-track').length
+  return { teamCount: teamIds.size, projectCount: projectHealth.size, offTrackCount, workItems }
 }

@@ -563,8 +563,11 @@ export function hasUnqualifiedEnterpriseProjectScope(
 
 /** Directory state that resolves Enterprise scopes naming a Project or an OrgUnit. */
 export type EnterpriseScopeDirectory = ProjectDirectoryResponse & {
-  /** OrgUnit tree and Team memberships. Without it, OrgUnit scopes grant nothing. */
-  orgStructure?: Pick<OrgStructure, 'orgUnits' | 'teamAssignments'>
+  /**
+   * OrgUnit tree and Team memberships. Without it, OrgUnit scopes grant nothing. Its revision, when
+   * read from storage, fences mutations that the expanded scopes authorize.
+   */
+  orgStructure?: Pick<OrgStructure, 'orgUnits' | 'teamAssignments'> & Partial<Pick<OrgStructure, 'revision'>>
 }
 
 /**

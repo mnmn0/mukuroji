@@ -70,6 +70,8 @@ export type DocumentAuthorizationFenceSnapshot = {
   planningRevision?: number
   /** Enterprise Identity control revision observed during authorization. */
   enterpriseControlRevision?: number
+  /** OrgUnit structure revision that expanded the caller's OrgUnit scopes (ADR 0097). */
+  orgStructureRevision?: number
 }
 
 /**

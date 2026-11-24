@@ -32,6 +32,11 @@ Team ごとに割り当てるか、Workspace 全体に広げるしかなかっ�
   OrgUnit のロールは何も許可しない（deny by default）。構造がない、OrgUnit が消えた、有効な Team がないなどで
   展開できない scope は、展開せずに残す。何にも一致しないが割り当てとしては数えるので、そのメンバーが
   元の Workspace ロールの権限に戻ることはない。
+- 展開に使った構造の revision を principal に記録し、更新系の transaction に構造の行への条件
+  （その revision のまま、または行がないまま）を加える。認可から commit までの間に管理者が Team を部門から
+  外すと、部門のロールで許可した更新は失敗する。条件を加えるのは、Enterprise CONTROL の revision で
+  fence している既存の経路（呼び出し元の認可条件、Work Item・文書・curated context・AI assistance の
+  認可 snapshot）と同じ箇所。
 - 部門別の集計は、既存の Team ごとの portfolio 読み取りを Web で OrgUnit の配下ごとに合計する。新しい集計 API は作らない。
 - テナント削除では、既存の sidecar と同じく Workspace ごとの partition を削除対象の末尾に加える。データ整合性検査では
   `org-structure` 行を既知の補助行として検証する。

@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { ProjectDataError } from '../../project-data-error'
+import { createOrgStructureRevisionConditionCheck } from './org-structure-item'
 import { DynamoDbProjectDirectoryClient } from './project-directory-client'
 
 const workspaceId = 'workspace/1'
@@ -169,4 +170,46 @@ test('refuses unknown Teams, a stale revision, and a lost condition', async () =
   })
   await expect(lost).rejects.toBeInstanceOf(ProjectDataError)
   await expect(lost).rejects.toMatchObject({ status: 409, code: 'OrgStructureConflict' })
+})
+
+test('fences an authorization on the structure revision it read', () => {
+  expect(createOrgStructureRevisionConditionCheck('DirectoryTable', workspaceId, 3)).toEqual({
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: { directoryId: 'ORG_STRUCTURE#workspace%2F1', entryKey: 'STRUCTURE' },
+      ConditionExpression: '#entryType = :orgStructureEntryType AND #revision = :expectedOrgStructureRevision',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#revision': 'revision' },
+      ExpressionAttributeValues: { ':orgStructureEntryType': 'org-structure', ':expectedOrgStructureRevision': 3 },
+    },
+  })
+  // Before the first save no row exists, and creating one must also invalidate the decision.
+  expect(createOrgStructureRevisionConditionCheck('DirectoryTable', workspaceId, 0)).toEqual({
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: { directoryId: 'ORG_STRUCTURE#workspace%2F1', entryKey: 'STRUCTURE' },
+      ConditionExpression: 'attribute_not_exists(#entryKey)',
+      ExpressionAttributeNames: { '#entryKey': 'entryKey' },
+    },
+  })
+})
+
+test('drops a caller fence on the structure row it replaces, since a transaction names a row once', async () => {
+  const { client, sent } = createClient(storedRow)
+  const memberFence = {
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId, recordKey: 'MEMBER#admin' },
+      ConditionExpression: 'attribute_exists(recordKey)',
+    },
+  }
+
+  await client.replaceOrgStructure(workspaceId, {
+    expectedRevision: 1,
+    orgUnits: [],
+    teamAssignments: [],
+  }, undefined, [createOrgStructureRevisionConditionCheck('DirectoryTable', workspaceId, 1), memberFence])
+
+  const items = sent.find((command) => 'TransactItems' in command.input)?.input.TransactItems
+  expect(Array.isArray(items) ? items.length : 0).toBe(2)
+  expect(items).toMatchObject([{ Put: { TableName: 'DirectoryTable' } }, memberFence])
 })

@@ -1658,6 +1658,11 @@ function configureFakeProjectClients(
     projectQuickAccessPreference?: ProjectQuickAccessPreferences
     /** OrgUnit structure the fake directory returns first. */
     orgStructure?: OrgStructure
+    /**
+     * Runs after a Team rename is authorized and before it commits, with a setter for the stored
+     * OrgUnit structure, to model an administrator's change racing the mutation.
+     */
+    beforeTeamRenameCommit?: (setOrgStructure: (next: OrgStructure) => void) => void
     /** Team Issue fake が返す canonical Work Item 数です。 */
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
@@ -2623,7 +2628,13 @@ function configureFakeProjectClients(
           }],
         }
       },
-      async renameTeam(directoryId, teamId, input) {
+      async renameTeam(directoryId, teamId, input, _auditContext, authorizationConditionChecks = []) {
+        options.beforeTeamRenameCommit?.((next) => {
+          orgStructure = next
+        })
+        if (hasStaleOrgStructureFence(authorizationConditionChecks, orgStructure.revision)) {
+          throw new ProjectDataError(403, 'DirectoryAuthorizationChanged', 'Your permission changed. Reload and try again.')
+        }
         calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
 
         return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
@@ -4211,4 +4222,35 @@ export function createApiTestHarness() {
 export type {
   AppDependencyOverrides,
   ObservedWorkspaceMutationAuditContext,
+}
+
+/**
+ * Evaluates the OrgUnit structure fences of a fake transaction the way DynamoDB would.
+ *
+ * @param checks - Caller authorization condition checks.
+ * @param currentRevision - Stored structure revision, 0 when no row exists.
+ * @returns Whether any fence expects a revision other than the stored one.
+ */
+function hasStaleOrgStructureFence(checks: readonly unknown[], currentRevision: number): boolean {
+  return checks.some((check) => {
+    if (!isRecord(check) || !isRecord(check.ConditionCheck)) return false
+    const condition = check.ConditionCheck
+    if (!isRecord(condition.Key) || condition.Key.entryKey !== 'STRUCTURE') return false
+    if (typeof condition.Key.directoryId !== 'string' || !condition.Key.directoryId.startsWith('ORG_STRUCTURE#')) {
+      return false
+    }
+    const values = isRecord(condition.ExpressionAttributeValues) ? condition.ExpressionAttributeValues : {}
+    const expected = values[':expectedOrgStructureRevision'] ?? 0
+    return expected !== currentRevision
+  })
+}
+
+/**
+ * Narrows an unknown value to a plain object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

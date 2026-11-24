@@ -21,7 +21,9 @@ import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
+  createOrgStructureKey,
   normalizeProjectMemberKey,
+  ORG_STRUCTURE_ENTRY_TYPE,
   ProjectDataError,
   type ProjectDirectoryTeamResponse,
   type ProjectRole,
@@ -961,7 +963,7 @@ async function createAiAssistanceAuthorizationConditions(
  * Builds the current actor rows that authorize a member preference write.
  *
  * Preference updates have no source request, so this intentionally fences only
- * the authenticated Workspace membership and Enterprise control rows. The
+ * the authenticated Workspace membership, Enterprise control, and OrgUnit structure rows. The
  * caller must still bind these rows to the actor identity before persistence.
  *
  * @param principal - Freshly authenticated Workspace principal.
@@ -998,8 +1000,7 @@ function createAiAssistancePrincipalAuthorizationConditions(
           version: principal.workspaceMember.version,
         },
       }]
-  if (principal.enterpriseIdentityControlRevision !== undefined) {
-    if (!enterpriseTableName) return conditions
+  if (principal.enterpriseIdentityControlRevision !== undefined && enterpriseTableName) {
     conditions.push({
       kind: 'enterprise-control',
       tableName: enterpriseTableName,
@@ -1014,6 +1015,17 @@ function createAiAssistancePrincipalAuthorizationConditions(
       ...(principal.enterpriseIdentityControlRevision === 0
         ? { allowMissingWhenExpectedZero: true }
         : {}),
+    })
+  }
+  const orgStructureRevision = principal.enterpriseOrgStructureRevision
+  if (orgStructureRevision !== undefined) {
+    // OrgUnit roles reach Teams through the structure, so its revision fences them (ADR 0097).
+    conditions.push({
+      kind: 'directory-reference',
+      tableName: getEnv('PROJECT_DIRECTORY_TABLE_NAME') ?? 'mukuroji-project-directory-local',
+      key: createOrgStructureKey(principal.directoryId),
+      expectedAttributes: { entryType: ORG_STRUCTURE_ENTRY_TYPE, revision: orgStructureRevision },
+      ...(orgStructureRevision === 0 ? { allowMissingWhenExpectedZero: true } : {}),
     })
   }
   return conditions

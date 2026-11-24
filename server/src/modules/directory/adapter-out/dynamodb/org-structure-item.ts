@@ -1,4 +1,11 @@
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { OrgStructure, OrgUnit, OrgUnitTeamAssignment } from '@mukuroji/contracts'
+
+/** One read-only DynamoDB transaction condition. */
+export type OrgStructureConditionCheck = {
+  /** Condition on the OrgUnit structure row. */
+  ConditionCheck: NonNullable<NonNullable<TransactWriteCommandInput['TransactItems']>[number]['ConditionCheck']>
+}
 
 /** Row discriminator of the OrgUnit structure row. */
 export const ORG_STRUCTURE_ENTRY_TYPE = 'org-structure'
@@ -94,4 +101,45 @@ export function isOrgStructureItem(
     row.entryKey === ORG_STRUCTURE_ENTRY_KEY &&
     row.entryType === ORG_STRUCTURE_ENTRY_TYPE &&
     row.workspaceId === workspaceId
+}
+
+/**
+ * Builds the commit-time fence on the OrgUnit structure revision an authorization decision read.
+ *
+ * An OrgUnit role reaches Teams through the structure (ADR 0097), so a mutation authorized through
+ * it must fail when the structure changed after the decision. Revision 0 means no structure row
+ * existed, so the fence then requires that none was created since.
+ *
+ * @param tableName - Project Directory table.
+ * @param workspaceId - Workspace whose structure was read.
+ * @param revision - Structure revision observed at authorization.
+ * @returns A DynamoDB transaction `ConditionCheck` item.
+ */
+export function createOrgStructureRevisionConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  revision: number,
+): OrgStructureConditionCheck {
+  if (revision === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: createOrgStructureKey(workspaceId),
+        ConditionExpression: 'attribute_not_exists(#entryKey)',
+        ExpressionAttributeNames: { '#entryKey': 'entryKey' },
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: createOrgStructureKey(workspaceId),
+      ConditionExpression: '#entryType = :orgStructureEntryType AND #revision = :expectedOrgStructureRevision',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#revision': 'revision' },
+      ExpressionAttributeValues: {
+        ':orgStructureEntryType': ORG_STRUCTURE_ENTRY_TYPE,
+        ':expectedOrgStructureRevision': revision,
+      },
+    },
+  }
 }

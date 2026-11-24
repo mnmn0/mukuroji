@@ -233,6 +233,9 @@ export async function resolveDeveloperCredentialPrincipal(
       ? {}
       : { enterprisePermissions: requestAccess.permissions }),
     enterpriseIdentityControlRevision: snapshot.controlRevision,
+    ...(enterpriseDirectory?.orgStructure?.revision === undefined
+      ? {}
+      : { enterpriseOrgStructureRevision: enterpriseDirectory.orgStructure.revision }),
     enterpriseAuthorizationResource: requestAccess.resource,
     enterpriseGrantedRoutePermission: requestAccess.grantedRoutePermission,
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,

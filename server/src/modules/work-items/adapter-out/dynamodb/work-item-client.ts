@@ -26,7 +26,9 @@ import type {
 } from '../../../developer-platform'
 import {
   createDirectoryProjectId,
+  createOrgStructureKey,
   normalizeProjectMemberKey,
+  ORG_STRUCTURE_ENTRY_TYPE,
   ProjectDataError,
 } from '../../../directory'
 import {
@@ -263,6 +265,8 @@ export type WorkItemAuthorizationSnapshot = {
   planningRevision: number
   /** Enterprise Identity control revision observed during authorization. */
   enterpriseControlRevision?: number
+  /** OrgUnit structure revision that expanded the caller's OrgUnit scopes (ADR 0097). */
+  orgStructureRevision?: number
 }
 
 /** Result of measuring one Work Item change against its Project's active schedule baseline. */
@@ -295,7 +299,7 @@ function createScheduleBaselineChangedConflictError() {
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
 type WorkItemAuthorizationGenerationGuard = {
   /** Stable semantic purpose used to classify transaction cancellations safely. */
-  kind: 'workspace-member' | 'planning' | 'enterprise-control'
+  kind: 'workspace-member' | 'planning' | 'enterprise-control' | 'org-structure'
   /** DynamoDB table containing the authorization row. */
   tableName: string
   /** Complete primary key of the authorization row. */
@@ -484,6 +488,21 @@ function createAuthorizationSnapshotConditionEntries(
             : {}),
         } satisfies WorkItemAuthorizationGenerationGuard]
       : []),
+    ...(snapshot.orgStructureRevision !== undefined &&
+        Number.isSafeInteger(snapshot.orgStructureRevision) &&
+        snapshot.orgStructureRevision >= 0
+      ? [{
+          kind: 'org-structure',
+          tableName: environment.PROJECT_DIRECTORY_TABLE_NAME ?? 'mukuroji-project-directory-local',
+          key: createOrgStructureKey(snapshot.workspaceId),
+          generationAttribute: 'revision',
+          expectedGeneration: snapshot.orgStructureRevision,
+          requiredAttributes: { entryType: ORG_STRUCTURE_ENTRY_TYPE },
+          ...(snapshot.orgStructureRevision === 0
+            ? { allowMissingWhenExpectedZero: true }
+            : {}),
+        } satisfies WorkItemAuthorizationGenerationGuard]
+      : []),
   ]
   const transactWriteItems = createDynamoDbWorkItemAuthorizationConditionChecks(guards)
   return guards.flatMap((guard, index) => {
@@ -572,7 +591,8 @@ function throwAuthorizationConditionFailureIfPresent(
   ))
   if (
     failureKinds.has('workspace-member') ||
-    failureKinds.has('enterprise-control')
+    failureKinds.has('enterprise-control') ||
+    failureKinds.has('org-structure')
   ) {
     throw createWorkItemAuthorizationChangedError()
   }

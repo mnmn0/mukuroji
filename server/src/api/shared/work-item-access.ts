@@ -311,6 +311,9 @@ export function createWorkItemAuthorizationSnapshot(
           enterpriseControlRevision:
             principal.enterpriseIdentityControlRevision,
         }),
+    ...(principal.enterpriseOrgStructureRevision === undefined
+      ? {}
+      : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
   }
 }
 
