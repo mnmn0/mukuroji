@@ -1343,6 +1343,60 @@ describe('notification schedule handler', () => {
       })
   })
 
+  test('emits Team target overdue events while the Team is active and suppresses an archived Team', async () => {
+    let archived = false
+    const targetRow = createPlanningProjectUpdateTarget({
+      recordKey: 'UPDATE_TARGET#TEAM#core-team',
+      target: { type: 'team', teamId: 'core-team' },
+    })
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') return { ScannedCount: 0, Items: [] }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [targetRow])
+        if (duePage) return duePage
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'team',
+            teamId: 'core-team',
+            ...(archived ? { archivedAt: '2026-07-11T00:00:00.000Z' } : {}),
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [targetRow])
+        if (target) return target
+      }
+      return {}
+    })
+    const options = createRunOptions(recording.client, {
+      now: new Date('2026-07-12T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    })
+
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({ emittedEvents: 1 })
+    expect(recording.commands.find((command) => command.name === 'PutCommand')?.input.Item)
+      .toMatchObject({
+        eventType: 'planning-update.overdue',
+        entityId: 'team/core-team',
+        metadata: {
+          teamId: 'core-team',
+          deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+          planningTargetType: 'team',
+          planningTargetId: 'core-team',
+          planningTargetRecordKey: 'UPDATE_TARGET#TEAM#core-team',
+          notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'overdue' }],
+        },
+      })
+
+    archived = true
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({
+      duplicateEvents: 0,
+      emittedEvents: 0,
+    })
+  })
+
   test('advances the sparse Planning due index after each notification stage', async () => {
     const targetRow = createPlanningProjectUpdateTarget({
       nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(

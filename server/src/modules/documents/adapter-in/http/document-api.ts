@@ -25,7 +25,7 @@ import type {
   WhiteboardContent,
   WhiteboardObjectStyle,
 } from '@mukuroji/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import { resolveTrustedClientAddress } from '../../../../infrastructure/http/trusted-request-source'
 import {
@@ -310,6 +310,7 @@ export function registerDocumentApiRoutes(
       const document = input.kind === 'page' && input.templateId
         ? await dependencies.getClient().instantiateTemplate({
             workspaceId: principal.workspaceId,
+            auditContext: createDocumentAuditContext(c, principal),
             templateId: input.templateId,
             access,
             scope: input.scope,
@@ -326,6 +327,7 @@ export function registerDocumentApiRoutes(
           })
         : await dependencies.getClient().create({
             workspaceId: principal.workspaceId,
+            auditContext: createDocumentAuditContext(c, principal),
             access,
             kind: input.kind,
             scope: input.scope,
@@ -416,6 +418,7 @@ export function registerDocumentApiRoutes(
       }
       const document = await dependencies.getClient().update({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId,
         access,
         expectedRevision: readExpectedRevision(input?.expectedRevision),
@@ -523,6 +526,7 @@ export function registerDocumentApiRoutes(
       const documentId = readRequiredDocumentId(c)
       const document = await dependencies.getClient().archive({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId,
         access,
         expectedRevision: readExpectedRevision(input?.expectedRevision),
@@ -560,6 +564,7 @@ export function registerDocumentApiRoutes(
         )
       const document = await dependencies.getClient().restoreArchived({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId,
         access,
         expectedRevision,
@@ -624,6 +629,7 @@ export function registerDocumentApiRoutes(
       }
       const document = await dependencies.getClient().instantiateTemplate({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         templateId: readRequiredDocumentId(c),
         access,
         scope: body.scope,
@@ -669,6 +675,7 @@ export function registerDocumentApiRoutes(
       }
       const document = await dependencies.getClient().restoreVersion({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId: readRequiredDocumentId(c),
         versionId,
         expectedRevision: readExpectedRevision(body?.expectedRevision),
@@ -940,6 +947,7 @@ export function registerDocumentApiRoutes(
         ]
         const updated = await dependencies.getClient().update({
           workspaceId: principal.workspaceId,
+          auditContext: createDocumentAuditContext(c, principal),
           documentId,
           access,
           expectedRevision: document.revision,
@@ -965,6 +973,7 @@ export function registerDocumentApiRoutes(
 
       const created = await dependencies.getClient().createPublicShare({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId,
         access,
         expiresAt: input.expiresAt,
@@ -1003,6 +1012,7 @@ export function registerDocumentApiRoutes(
         })
         const updated = await dependencies.getClient().update({
           workspaceId: principal.workspaceId,
+          auditContext: createDocumentAuditContext(c, principal),
           documentId,
           access,
           expectedRevision: document.revision,
@@ -1022,6 +1032,7 @@ export function registerDocumentApiRoutes(
       } else {
         await dependencies.getClient().revokePublicShare({
           workspaceId: principal.workspaceId,
+          auditContext: createDocumentAuditContext(c, principal),
           documentId,
           shareId: input.publicShareId,
           access,
@@ -1038,6 +1049,7 @@ export function registerDocumentApiRoutes(
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const rendered = await dependencies.getClient().exportDocument({
         workspaceId: principal.workspaceId,
+        auditContext: createDocumentAuditContext(c, principal),
         documentId: readRequiredDocumentId(c),
         access,
         format: readDocumentExportFormat(c.req.query('format')),
@@ -1208,6 +1220,61 @@ export function registerDocumentApiRoutes(
       return toDocumentApiErrorResponse(c, error)
     }
   })
+}
+
+/**
+ * Creates the audit context of one Document lifecycle request.
+ *
+ * The `Idempotency-Key` header, when present, makes a retried request reuse its audit event ID.
+ *
+ * @param c - Hono request context.
+ * @param principal - Authenticated Document caller.
+ * @returns Audit context recorded with the Document change.
+ */
+function createDocumentAuditContext(
+  c: Context,
+  principal: DocumentApiPrincipal,
+): MutationAuditContext {
+  const url = new URL(c.req.url)
+  const path = url.pathname
+  // The query is part of the request, such as an export's format, so the same key with another
+  // query is another request rather than a retry of the recorded one.
+  const query = url.search
+  const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+  const correlationId = c.req.header('X-Correlation-Id')?.trim()
+  try {
+    return createMutationAuditContext({
+      workspaceId: principal.workspaceId,
+      actor: {
+        id: principal.memberKey,
+        kind: 'user',
+        displayName: principal.displayName,
+      },
+      idempotencyKey: idempotencyKey
+        // A digest keeps any key the Document store accepts within the audit key length limit.
+        ? `document-request:${createHash('sha256').update(`${c.req.method}\0${path}\0${query}\0${idempotencyKey}`).digest('hex')}`
+        : randomUUID(),
+      request: {
+        method: c.req.method,
+        path,
+        body: { path, query },
+      },
+      source: {
+        kind: 'api',
+        requestId: c.req.header('X-Request-Id'),
+        method: c.req.method,
+        route: path,
+        ipAddress: resolveTrustedClientAddress(c),
+        userAgent: c.req.header('User-Agent'),
+      },
+      ...(correlationId ? { correlationId } : {}),
+    })
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw new DocumentError(400, 'InvalidDocumentRequest', error.message)
+    }
+    throw error
+  }
 }
 
 function createDocumentCommentAuditContext(

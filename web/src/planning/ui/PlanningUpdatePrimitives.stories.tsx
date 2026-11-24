@@ -6,6 +6,9 @@ import { PlanningStatusUpdateComposer } from './PlanningUpdatePrimitives'
 import { createPlanningLabels } from './labels'
 import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
 
+/** Japanese labels shared by the stories and their play assertions. */
+const storyLabels = createPlanningLabels('ja')
+
 const evidenceCandidates = {
   planningEntities: [{
     entityId: 'milestone-beta',
@@ -28,7 +31,7 @@ const meta = {
   args: {
     evidenceCandidates,
     health: 'at-risk',
-    labels: createPlanningLabels('ja'),
+    labels: storyLabels,
     onPublish: async () => undefined,
     progress: 58,
   },
@@ -120,5 +123,38 @@ export const AiGenerationIdle: Story = {
         type: 'planning-target',
       },
     },
+  },
+}
+
+/** Workspace template text and required fields; publishing an empty required field is refused. */
+export const WorkspaceRequiredFields: Story = {
+  args: {
+    template: {
+      requiredFields: ['riskSummary', 'nextAction'],
+      template: {
+        summary: '今週の完了事項:\n来週の予定:',
+        nextAction: '担当と期日を書く',
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByLabelText(/^リスク.*（必須）/)).toBeRequired()
+    await userEvent.click(canvas.getByRole('button', { name: storyLabels.publishUpdate }))
+    await expect(await canvas.findByText(/この Workspace では次の項目が必須です/)).toBeVisible()
+  },
+}
+
+/** The composer waits while the Workspace settings load, so a late template never replaces typed text. */
+export const WorkspaceTemplateLoading: Story = {
+  args: { templateLoadState: { status: 'loading' } },
+}
+
+/** The Workspace settings failed to load; the form stays usable and offers a retry. */
+export const WorkspaceTemplateLoadFailed: Story = {
+  args: { templateLoadState: { status: 'error', onRetry: () => undefined } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: storyLabels.retryHistory })).toBeEnabled()
   },
 }

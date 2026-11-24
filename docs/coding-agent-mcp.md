@@ -269,7 +269,7 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `list_task_documents` | タスクに link された Document のうち credential 所有者が閲覧できるものを `{ id, title }` でページ取得。見えない Document は除くため、`hasMore: true` の空ページもある |
 | `read_document` | タスクに link された Document（ページ・テンプレート）の本文を Markdown で取得。link されていない Document と閲覧できない Document は `not_found`、フォルダーとホワイトボードは `unsupported_document` |
-| `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール。稼働日は Workspace の稼働カレンダーで数える |
+| `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール。稼働日は Workspace の稼働カレンダーで数える。`templateId`（`get_configuration` の `catalog.templates`。Public API の `GET /api/v1/work-item-templates` から読む）を渡すと、テンプレートが省略した説明・Type・状態・優先度を埋め、custom field と受け入れ条件を付ける |
 | `update_task` | タイトル・説明・優先度・custom field・見積（`plannedEffortMinutes`）・残工数（`remainingEffortMinutes`）・手入力の進捗率（`progressPercent`）をrevision付きで更新（`null` で消す）。見積は Public API の `plannedEffortMinutes` として送り、server が保存済みの schedule に書き込むため、変更時は `expectedRevision` が最新の revision と一致している必要がある。応答を失った再試行は、途中で期限が動いても同じ request として replay される。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
 | `move_task` | 作業中から同じstartedカテゴリーの「レビュー中」「ブロック中」などへ移動 |

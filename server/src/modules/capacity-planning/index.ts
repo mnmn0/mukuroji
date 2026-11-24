@@ -7,6 +7,7 @@ export {
   createDefaultWorkingSchedule,
   DynamoDbCapacityPlanningRepository,
   InMemoryCapacityPlanningRepository,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   type CapacityPlanningDataSource,
   type CapacityPlanningRepository,
   type CapacityPlanningState,

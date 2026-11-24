@@ -679,6 +679,11 @@ describe('collaboration projection pure helpers', () => {
       ]))
       expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
       expect(await authorizeNotificationDelivery({ ...team, eventType: 'work-item.updated' }, memberKey, identity, cache)).toBe(false)
+      // A Team workload event follows the workload API, which shows the Team through any visible Project.
+      const workload = { ...team, eventType: 'workload.time-off.approved', entityType: 'team-workload', entityId: 'core' }
+      expect(await authorizeNotificationDelivery(workload, memberKey, identity, cache)).toBe(true)
+      // A workload event for one Project still needs that Project.
+      expect(await authorizeNotificationDelivery({ ...workload, projectId: 'private' }, memberKey, identity, cache)).toBe(false)
       // An Enterprise recipient whose Work Item read covers one Project reads shared reports, as
       // the Analytics routes and Inbox allow; the generic rule needs a Workspace-wide grant.
       let scoped = createRealtimeEnterpriseSnapshot({

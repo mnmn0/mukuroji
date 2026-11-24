@@ -1,10 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import type { WorkloadHoliday, WorkloadSnapshot, WorkingSchedule } from '@mukuroji/contracts'
+import type { WorkloadHoliday, WorkloadSnapshot, WorkloadTimeOff, WorkloadTimeOffStatus, WorkingSchedule } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createWorkloadAssignment,
   createWorkloadRequest,
   previewWorkloadAssignment,
+  reviewWorkloadTimeOff,
   saveWorkloadProfile,
   saveWorkloadTimeOff,
   updateWorkloadRequest,
@@ -14,6 +15,7 @@ import {
   type SaveWorkloadProfileRequest,
 } from '../api'
 import { WorkloadRequestList, type WorkloadRequestChange } from './WorkloadRequestList'
+import { WorkloadTimeOffList } from './WorkloadTimeOffList'
 
 /** A Team member option used by workload planning controls. */
 export type WorkloadPlanningMemberOption = {
@@ -111,6 +113,19 @@ export function WorkloadPlanningControls({
     () => members.find((member) => member.id === selectedMemberId)?.name ?? selectedMemberId,
     [members, selectedMemberId],
   )
+  const memberNames = useMemo(() => new Map([
+    ...(snapshot?.members ?? []).map((member) => [member.memberId, member.displayName ?? member.memberId] as const),
+    ...members.map((member) => [member.id, member.name] as const),
+  ]), [members, snapshot?.members])
+  const activeAssignmentCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const assignment of snapshot?.assignments ?? []) {
+      if (assignment.requestId && assignment.status !== 'canceled') {
+        counts.set(assignment.requestId, (counts.get(assignment.requestId) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [snapshot?.assignments])
 
   if (members.length === 0) return null
 
@@ -144,6 +159,16 @@ export function WorkloadPlanningControls({
     return await runMutation(() => updateWorkloadRequest(accessToken, teamId, request.id, {
       ...change,
       expectedRevision: request.revision,
+      expectedTeamRevision: teamRevision,
+    }))
+  }
+
+  /** Approves, rejects, reopens, or withdraws one absence at its current revision. */
+  const reviewTimeOff = async (memberId: string, timeOff: WorkloadTimeOff, status: WorkloadTimeOffStatus): Promise<boolean> => {
+    if (!accessToken || !teamId) return false
+    return await runMutation(() => reviewWorkloadTimeOff(accessToken, teamId, memberId, timeOff.id, {
+      status,
+      expectedRevision: timeOff.revision,
       expectedTeamRevision: teamRevision,
     }))
   }
@@ -308,7 +333,18 @@ export function WorkloadPlanningControls({
       </div>
 
       {snapshot ? (
+        <WorkloadTimeOffList
+          isSaving={isSaving}
+          memberNames={memberNames}
+          onReview={reviewTimeOff}
+          snapshot={snapshot}
+          t={t}
+        />
+      ) : null}
+
+      {snapshot ? (
         <WorkloadRequestList
+          activeAssignmentCounts={activeAssignmentCounts}
           isSaving={isSaving}
           onUpdate={updateRequest}
           projects={projects}

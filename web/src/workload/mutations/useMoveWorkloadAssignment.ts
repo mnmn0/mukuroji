@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { WorkloadSnapshot } from '@mukuroji/contracts'
+import type { ResourceAssignmentStatus, WorkloadSnapshot } from '@mukuroji/contracts'
 import { updateWorkloadAssignment } from '../api'
 import { addWorkloadCalendarDays, countWorkloadCalendarDays } from '../model/dateRange'
 
@@ -19,6 +19,8 @@ export type UseMoveWorkloadAssignmentOptions = {
 export type UseMoveWorkloadAssignmentResult = {
   /** Moves an assignment to another member and start date. */
   move: (assignmentId: string, memberId: string, targetDate: string) => void
+  /** Confirms, returns to tentative, or cancels an assignment. */
+  setStatus: (assignmentId: string, status: ResourceAssignmentStatus) => void
   /** Latest mutation error. */
   error?: Error
   /** Whether an assignment move is currently in flight. */
@@ -62,5 +64,25 @@ export function useMoveWorkloadAssignment({
     }).finally(() => setIsPending(false))
   }
 
-  return { error, isPending, move }
+  /** Changes an assignment's lifecycle state at its current revision. */
+  const setStatus = (assignmentId: string, status: ResourceAssignmentStatus) => {
+    if (isPending) return
+    const currentSnapshot = snapshot
+    const assignment = currentSnapshot?.assignments.find((candidate) => candidate.id === assignmentId)
+    if (!assignment || !accessToken || !teamId || !currentSnapshot) return
+    setError(undefined)
+    setIsPending(true)
+    void updateWorkloadAssignment(accessToken, teamId, assignment.id, {
+      status,
+      expectedRevision: assignment.revision,
+      expectedTeamRevision: currentSnapshot.revision,
+    }).then(async () => {
+      await refresh()
+    }).catch(async (cause: unknown) => {
+      setError(cause instanceof Error ? cause : new Error('The workload assignment could not be changed.'))
+      await refresh().catch(() => undefined)
+    }).finally(() => setIsPending(false))
+  }
+
+  return { error, isPending, move, setStatus }
 }

@@ -32,6 +32,7 @@ import { factoryBoardMessages } from './factory-board'
 import { timeTrackingMessages } from './time-tracking'
 import { accountSecurityMessages } from './account-security'
 import { auditLogMessages } from './audit-log'
+import { portfolioDashboardMessages } from './portfolio-dashboard'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -83,5 +84,6 @@ export const enMessages = defineMessages({
   ...timeTrackingMessages,
   ...accountSecurityMessages,
   ...auditLogMessages,
+  ...portfolioDashboardMessages,
 })
 import { updatesMessages } from './updates'

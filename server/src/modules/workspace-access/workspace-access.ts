@@ -19,12 +19,14 @@ import {
   createPlanningRevisionFenceWriterDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
 import {
+  createAuditEventId,
   createAuditFieldChanges,
   createMutationAuditEventPut,
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
   ensureLocalAuditEventsTable,
   getConfiguredAuditTableName,
+  normalizeAuditEvent,
   type MutationAuditContext,
   type MutationAuditEventInput,
 } from '../audit'
@@ -135,8 +137,18 @@ export type WorkspaceMember = {
  *
  * - `password-reset-requested`: invalidated the password and sent a reset code
  * - `mfa-reset`: removed the registered authenticator app (TOTP)
+ * - `system-administrator-granted`: added the member to the system administrator group
+ * - `system-administrator-revoked`: removed the member from the system administrator groups
  */
-export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-reset'
+export type WorkspaceMemberCredentialAction =
+  | 'password-reset-requested'
+  | 'mfa-reset'
+  | WorkspaceMemberSystemAdministratorAction
+
+/** Owner-only actions that change whether a member is a system administrator (ADR 0067). */
+export type WorkspaceMemberSystemAdministratorAction =
+  | 'system-administrator-granted'
+  | 'system-administrator-revoked'
 
 /**
  * How far an administrator credential action under one idempotency key got.
@@ -146,6 +158,15 @@ export type WorkspaceMemberCredentialAction = 'password-reset-requested' | 'mfa-
  * - `completed`: the Cognito change finished
  */
 export type WorkspaceMemberCredentialProgress = 'none' | 'recorded' | 'completed'
+
+/** Options of recording an administrator credential action. */
+export type WorkspaceMemberCredentialRecordOptions = {
+  /**
+   * Records the action as already finished, for a request whose requested state is already in
+   * place, so that a retry with the same key returns it instead of resuming a change.
+   */
+  completed?: boolean
+}
 
 /** Result of recording a credential action for a member. */
 export type WorkspaceMemberCredentialRecord = {
@@ -310,6 +331,14 @@ export type UpdateWorkspaceMemberInput = {
   authorizationConditionChecks?: readonly WorkspaceAccessTransactWriteItem[]
 }
 
+/** Input that changes a member's display name. */
+export type UpdateWorkspaceMemberNameInput = {
+  /** New display name; undefined or blank removes it so the member is shown by email. */
+  name?: string
+  /** Member version read before the change. */
+  expectedVersion: number
+}
+
 /** Directory reconciliation で member を作成または収束させる入力です。 */
 export type ReconcileDirectoryWorkspaceMemberInput = {
   /** Workspace 内で既存参照が使う immutable member key です。 */
@@ -395,6 +424,8 @@ export interface WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` records the action as already finished, for a request that
+   *   needs no change in Cognito, so that no retry can resume it.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease.
@@ -405,6 +436,7 @@ export interface WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options?: WorkspaceMemberCredentialRecordOptions,
   ): Promise<WorkspaceMemberCredentialRecord>
   /**
    * Reads how far an administrator credential action under the same idempotency key got.
@@ -460,6 +492,11 @@ export interface WorkspaceAccessClient {
   getAccessSnapshot(workspaceId: string, actorMemberKey: string): Promise<WorkspaceAccessResponse>
   /** Project assignment 候補に利用できる active member を取得します。 */
   listActiveMembers(workspaceId: string): Promise<WorkspaceMember[]>
+  /**
+   * Lists every member row of the Workspace, deactivated members included, for readers that show
+   * names of people who may have left.
+   */
+  listMembers?(workspaceId: string): Promise<WorkspaceMember[]>
   /** 新しい invitation を provisioning 状態で作成します。 */
   createInvitation(
     workspaceId: string,
@@ -574,6 +611,14 @@ export interface WorkspaceAccessClient {
     actorMemberKey: string,
     targetMemberKey: string,
     input: UpdateWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
+  /** Changes a member's own or managed member's display name. */
+  updateMemberName(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberNameInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
   /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
@@ -883,6 +928,17 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async listActiveMembers(workspaceId: string) {
     const items = await this.queryItems(workspaceId, 'MEMBER#')
     return items.map(toWorkspaceMember).filter((member) => member.status === 'active').sort(compareWorkspaceMembers)
+  }
+
+  /**
+   * Lists every member row of the Workspace, deactivated members included.
+   *
+   * @param workspaceId - Workspace ID.
+   * @returns Members in display order.
+   */
+  async listMembers(workspaceId: string) {
+    const items = await this.queryItems(workspaceId, 'MEMBER#')
+    return items.map(toWorkspaceMember).sort(compareWorkspaceMembers)
   }
 
   /** invitation を 7 日間有効な provisioning item として作成します。 */
@@ -1799,6 +1855,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` writes the progress record as finished, with no lease, for a
+   *   request that needs no change in Cognito.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease, and 503 `AccountSecurityUnavailable` when no audit table is configured,
@@ -1810,6 +1868,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options: WorkspaceMemberCredentialRecordOptions = {},
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
@@ -1820,14 +1879,24 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     if (actor.memberKey === target.memberKey) {
-      throw new WorkspaceAccessError(
-        409,
-        'WorkspaceSelfCredentialReset',
-        'Change your own password and MFA from your account settings.',
-      )
+      throw isSystemAdministratorAction(action)
+        ? new WorkspaceAccessError(
+          409,
+          'WorkspaceSelfSystemAdministratorChange',
+          'Ask another owner to change whether you are a system administrator.',
+        )
+        : new WorkspaceAccessError(
+          409,
+          'WorkspaceSelfCredentialReset',
+          'Change your own password and MFA from your account settings.',
+        )
     }
 
-    assertCanManageMemberCredentials(actor, target)
+    if (isSystemAdministratorAction(action)) {
+      assertCanManageSystemAdministrator(actor, target, action)
+    } else {
+      assertCanManageMemberCredentials(actor, target)
+    }
 
     const auditPut = this.createMemberCredentialAuditPut(
       normalizedWorkspaceId,
@@ -1865,9 +1934,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
                 memberKey: target.memberKey,
                 actorKey: auditItem.actorKey,
                 action,
-                status: 'recorded',
+                ...(options.completed
+                  ? { status: 'completed' }
+                  : { status: 'recorded', leaseUntil: now.getTime() + credentialActionLeaseMs }),
                 recordedAt: now.toISOString(),
-                leaseUntil: now.getTime() + credentialActionLeaseMs,
                 // The record answers retries for as long as the audit event keeps the key taken.
                 ...(typeof auditItem.expiresAt === 'number' ? { expiresAt: auditItem.expiresAt } : {}),
               },
@@ -1876,7 +1946,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           },
         ],
       }))
-      return { member: target, alreadyRecorded: false, completed: false }
+      return { member: target, alreadyRecorded: false, completed: options.completed === true }
     } catch (error) {
       const replayed = !isTransactionConditionalFailureAt(error, 0) &&
         !isTransactionConditionalFailureAt(error, 1) &&
@@ -2508,6 +2578,261 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       }
       throw toWorkspaceAccessError(error)
     }
+  }
+
+  /**
+   * Changes a member's display name, or removes it so the member is shown by email.
+   *
+   * Members change their own name. Owners change every member's name, and admins change the
+   * names of members and guests, as with role changes. A directory (SCIM) member's name comes
+   * from the directory and is refused. The Cognito `name` attribute is not changed: sign-in reads
+   * it only when the membership is created.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param actorMemberKey - Member key of the signed-in member.
+   * @param targetMemberKey - Member key of the member to rename.
+   * @param input - New name and the member version read before the change.
+   * @param auditContext - Audit context of the request.
+   * @returns The updated member, or the unchanged member when the name is the same.
+   * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not rename the
+   *   target, 409 `WorkspaceMemberNameDirectoryManaged` for a directory member, and 409
+   *   `WorkspaceVersionConflict` when the member changed since it was read.
+   */
+  async updateMemberName(
+    workspaceId: string,
+    actorMemberKey: string,
+    targetMemberKey: string,
+    input: UpdateWorkspaceMemberNameInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
+    const target = await this.getMember(normalizedWorkspaceId, normalizeMemberKey(targetMemberKey))
+
+    if (!target) {
+      throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
+    }
+
+    const isSelf = actor.memberKey === target.memberKey
+    if (!isSelf) assertCanUpdateMember(actor, target, target.role)
+    if (target.provisioningSource === 'directory') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceMemberNameDirectoryManaged',
+        'The directory manages this member\'s name.',
+      )
+    }
+    const name = normalizeOptional(input.name)
+    if (target.version !== input.expectedVersion) {
+      const replayed = await this.findReplayedMemberRename(normalizedWorkspaceId, target, input, auditContext)
+      if (replayed) return replayed
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+
+    if (name === target.name) {
+      return await this.recordUnchangedMemberRename(normalizedWorkspaceId, actor, target, input, isSelf, auditContext)
+    }
+
+    const nowIso = this.clock().toISOString()
+    const nextMember = {
+      ...target,
+      name,
+      version: target.version + 1,
+      updatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.renamed',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, target.memberKey),
+      action: 'renamed',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        target,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: {
+        kind: 'workspace-member',
+        expectedVersion: input.expectedVersion,
+        ...(isSelf ? { source: 'self' } : {}),
+      },
+      sequence: 0,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    if (!isSelf) transactItems.push(this.actorCondition(normalizedWorkspaceId, actor))
+    transactItems.push({
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(target.memberKey),
+        },
+        UpdateExpression: name
+          ? 'SET #name = :name, updatedAt = :now, version = version + :one'
+          : 'SET updatedAt = :now, version = version + :one REMOVE #name',
+        // A member who became directory-managed after the read keeps the directory's name.
+        ConditionExpression: isSelf
+          ? 'attribute_exists(workspaceId) AND version = :expectedVersion AND (attribute_not_exists(provisioningSource) OR provisioningSource <> :directory) AND #status = :active'
+          : 'attribute_exists(workspaceId) AND version = :expectedVersion AND (attribute_not_exists(provisioningSource) OR provisioningSource <> :directory)',
+        ExpressionAttributeNames: {
+          '#name': 'name',
+          ...(isSelf ? { '#status': 'status' } : {}),
+        },
+        ExpressionAttributeValues: {
+          ...(name ? { ':name': name } : {}),
+          ':now': nowIso,
+          ':one': 1,
+          ':expectedVersion': input.expectedVersion,
+          ':directory': 'directory',
+          ...(isSelf ? { ':active': 'active' } : {}),
+        },
+      },
+    })
+    if (memberAuditPut) transactItems.push(memberAuditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
+        // The event can exist at the expected version when the key was first used for an unchanged name.
+        const replayed = current
+          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext, true)
+          : undefined
+        if (replayed) return replayed
+        await this.classifyMemberUpdateConflict(
+          normalizedWorkspaceId,
+          actor,
+          target,
+          input.expectedVersion,
+          false,
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Answers a rename to the name the member already has. Nothing on the member row changes, but the
+   * request's audit event is still written, with no field changes, so its idempotency key stays
+   * bound to this input: the same key sent later with another name is refused rather than applied.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param actor - Active actor as read.
+   * @param target - Member as read, already at the expected version.
+   * @param input - Requested change.
+   * @param isSelf - Whether members rename themselves.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The unchanged member.
+   * @throws WorkspaceAccessError 409 when the member or actor changed, or the key was used for another change.
+   */
+  private async recordUnchangedMemberRename(
+    workspaceId: string,
+    actor: WorkspaceMember,
+    target: WorkspaceMember,
+    input: UpdateWorkspaceMemberNameInput,
+    isSelf: boolean,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<WorkspaceMember> {
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: workspaceId,
+      eventType: 'member.renamed',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(workspaceId, target.memberKey),
+      action: 'renamed',
+      occurredAt: this.clock().toISOString(),
+      changes: [],
+      metadata: {
+        kind: 'workspace-member',
+        expectedVersion: input.expectedVersion,
+        unchanged: true,
+        ...(isSelf ? { source: 'self' } : {}),
+      },
+      sequence: 0,
+    })
+    if (!auditPut) return target
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    if (!isSelf) transactItems.push(this.actorCondition(workspaceId, actor))
+    transactItems.push({
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: createMemberRecordKey(target.memberKey) },
+        ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
+        ExpressionAttributeValues: { ':expectedVersion': input.expectedVersion },
+      },
+    })
+    transactItems.push(auditPut)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return target
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        const current = await this.getMember(workspaceId, target.memberKey)
+        const replayed = current
+          ? await this.findReplayedMemberRename(workspaceId, current, input, auditContext, true)
+          : undefined
+        if (replayed) return replayed
+        await this.classifyMemberUpdateConflict(workspaceId, actor, target, input.expectedVersion, false)
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
+   * Recognizes a retry of a rename that already committed, so that a lost response does not turn
+   * a saved name into a version conflict. The rename's audit event has an ID derived from the
+   * request's idempotency key and records the version the change started from; finding it proves
+   * that this request, not a concurrent edit, moved the member past the expected version.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param current - Member row as it is now.
+   * @param input - Requested change, with the version it was based on.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @param atAnyVersion - Also look when the member is still at the expected version, which only an
+   *   unchanged-name request leaves behind; otherwise such a member cannot have been renamed yet.
+   * @returns The current member when the request already committed, otherwise undefined.
+   * @throws WorkspaceAccessError 409 when the same idempotency key was used for another change.
+   */
+  private async findReplayedMemberRename(
+    workspaceId: string,
+    current: WorkspaceMember,
+    input: UpdateWorkspaceMemberNameInput,
+    auditContext: MutationAuditContext | undefined,
+    atAnyVersion = false,
+  ): Promise<WorkspaceMember | undefined> {
+    if (!this.auditTableName || !auditContext) return undefined
+    if (!atAnyVersion && current.version <= input.expectedVersion) return undefined
+    const entityId = this.createMemberAuditEntityId(workspaceId, current.memberKey)
+    const eventId = createAuditEventId(auditContext, 'member.renamed', { type: 'member', id: entityId }, 0)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.auditTableName,
+      Key: { directoryId: workspaceId, eventId },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const event = normalizeAuditEvent(response.Item)
+    if (event.eventType !== 'member.renamed' || event.entity.id !== entityId) return undefined
+    // The request fingerprint covers the requested name and version, so the same key sent with
+    // another change is refused whatever happened to the member since.
+    if (
+      event.requestFingerprint !== auditContext.requestFingerprint ||
+      event.actor.id !== auditContext.actor.id ||
+      event.metadata?.expectedVersion !== input.expectedVersion
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceIdempotencyConflict',
+        'This idempotency key was already used for a different operation.',
+      )
+    }
+    return current
   }
 
   /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
@@ -3696,6 +4021,49 @@ function capabilitiesForRole(role: WorkspaceRole): WorkspaceAccessCapabilities {
  * @param actor - Active administrator performing the action.
  * @param target - Active member whose credentials change.
  */
+/**
+ * Tells whether a recorded member action changes system administrator membership.
+ *
+ * @param action - Recorded member action.
+ * @returns True for the system administrator grant and revoke.
+ */
+export function isSystemAdministratorAction(
+  action: WorkspaceMemberCredentialAction,
+): action is WorkspaceMemberSystemAdministratorAction {
+  return action === 'system-administrator-granted' || action === 'system-administrator-revoked'
+}
+
+/**
+ * Checks that the actor may grant or revoke system administrator access for the target.
+ *
+ * Only an owner may do either, and a guest cannot be granted it (ADR 0067).
+ *
+ * @param actor - Active actor member as read.
+ * @param target - Active target member as read.
+ * @param action - Grant or revoke.
+ * @throws WorkspaceAccessError 403 for a non-owner actor and 409 for a guest grant.
+ */
+function assertCanManageSystemAdministrator(
+  actor: WorkspaceMember,
+  target: WorkspaceMember,
+  action: WorkspaceMemberSystemAdministratorAction,
+) {
+  if (actor.role !== 'owner') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Only an owner can change who is a system administrator.',
+    )
+  }
+  if (action === 'system-administrator-granted' && target.role === 'guest') {
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceGuestSystemAdministrator',
+      'A guest cannot be a system administrator. Change the role first.',
+    )
+  }
+}
+
 function assertCanManageMemberCredentials(actor: WorkspaceMember, target: WorkspaceMember) {
   if (actor.role === 'owner') {
     return

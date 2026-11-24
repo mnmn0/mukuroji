@@ -38,6 +38,7 @@ export const READ_ONLY_POST_ROUTES: readonly string[] = Object.freeze([
   '/api/enterprise/security/policy/preview',
   '/api/teams/:teamId/issues/:issueId/schedule/preview',
   '/api/teams/:teamId/issues/:issueId/work-item-type-preview',
+  '/api/teams/:teamId/projects/:projectId/status-report/pdf',
 ])
 
 /** Methods that never change data. */

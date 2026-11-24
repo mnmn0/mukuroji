@@ -31,6 +31,7 @@ import { factoryBoardMessages } from './factory-board'
 import { timeTrackingMessages } from './time-tracking'
 import { accountSecurityMessages } from './account-security'
 import { auditLogMessages } from './audit-log'
+import { portfolioDashboardMessages } from './portfolio-dashboard'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
@@ -70,6 +71,7 @@ export const jaMessages = {
   ...timeTrackingMessages,
   ...accountSecurityMessages,
   ...auditLogMessages,
+  ...portfolioDashboardMessages,
 } as const
 
 /**

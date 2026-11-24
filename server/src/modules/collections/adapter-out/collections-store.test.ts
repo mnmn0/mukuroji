@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { COLLECTION_LIMIT } from '@mukuroji/contracts'
+import { createMutationAuditContext } from '../../audit'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import type { StoredCollection } from '../domain/collections'
 import { DynamoDbCollectionsStore } from './collections-store'
@@ -621,4 +622,42 @@ test('fails closed on a corrupt row while preparing the Work Item reference clea
 
   await expect(store.prepareWorkItemReferenceCleanup('w', 'core-team', 'item-1'))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+test('commits the audit event last in the same transaction and reports its failure as a conflict', async () => {
+  const transactions: unknown[][] = []
+  let failAudit = false
+  const client = clientFor(async (command) => {
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    const items = command.input.TransactItems ?? []
+    transactions.push(items)
+    if (failAudit) {
+      throw Object.assign(new Error('cancelled'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: items.map((_, index) => ({ Code: index === items.length - 1 ? 'ConditionalCheckFailed' : 'None' })),
+      })
+    }
+    return {}
+  })
+  const store = new DynamoDbCollectionsStore('planning', client, checks, undefined, undefined, 'audit-events')
+  const audit = {
+    context: createMutationAuditContext({
+      workspaceId: 'w',
+      actor: { id: 'actor-1', kind: 'user' },
+      idempotencyKey: 'collection-request',
+      request: { method: 'PATCH', path: '/api/collections/c1' },
+      source: { kind: 'api' },
+    }),
+    event: { directoryId: 'w', eventType: 'collection.updated', entityType: 'collection', entityId: 'c1', action: 'updated' },
+  }
+  await store.put('w', { ...collection, revision: 2 }, 1, undefined, audit)
+  await store.delete('w', 'c1', 2, { createFingerprint: 'f'.repeat(64), deletedRevision: 2 }, audit)
+  for (const items of transactions) {
+    expect(items.at(-1)).toEqual({ Put: expect.objectContaining({ TableName: 'audit-events', ConditionExpression: expect.stringContaining('attribute_not_exists') }) })
+    expect(items.at(-2)).toEqual(checks[0])
+  }
+
+  failAudit = true
+  await expect(store.put('w', { ...collection, revision: 2 }, 1, undefined, audit)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
+  await expect(store.delete('w', 'c1', 2, { createFingerprint: 'f'.repeat(64), deletedRevision: 2 }, audit)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
 })
