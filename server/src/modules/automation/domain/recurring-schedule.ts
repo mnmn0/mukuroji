@@ -193,6 +193,17 @@ export function getDueDateForOccurrence(
 }
 
 /**
+ * Returns the start of the local calendar month that contains an instant.
+ *
+ * @param instant - Instant inside the month.
+ * @param timeZone - IANA time zone the month is counted in.
+ * @returns The first instant of the month's first local day.
+ */
+export function getLocalMonthStart(instant: Date, timeZone: string): Date {
+  return resolveLocalOccurrence(`${zonedDate(instant, timeZone).slice(0, 8)}01`, '00:00', timeZone)
+}
+
+/**
  * Applies a catch-up policy to missed recurring occurrences.
  *
  * @param occurrences - Candidate occurrences.

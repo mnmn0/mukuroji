@@ -83,6 +83,8 @@ export type AutomationRuleActionDraft =
     type: 'notify'
     /** Recipients. */
     memberKeys: string[]
+    /** Also notifies the assignee of the Work Item the rule runs for. */
+    notifyAssignee: boolean
     /** Notification title. */
     title: string
     /** Optional body. */
@@ -186,7 +188,7 @@ export function createEmptyAutomationRuleActionDraft(
     case 'comment':
       return { type, body: '' }
     case 'notify':
-      return { type, memberKeys: [], title: ruleName, body: '' }
+      return { type, memberKeys: [], notifyAssignee: false, title: ruleName, body: '' }
     case 'approval':
       return { type, memberKeys: [], dueInHours: 24, completionStatusId: '' }
     case 'webhook':
@@ -262,7 +264,7 @@ export function isAutomationRuleActionDraftValid(action: AutomationRuleActionDra
     case 'comment':
       return action.body.trim().length > 0
     case 'notify':
-      return action.memberKeys.length > 0 && action.title.trim().length > 0
+      return (action.memberKeys.length > 0 || action.notifyAssignee) && action.title.trim().length > 0
     case 'approval':
       return action.memberKeys.length > 0 && Number.isInteger(action.dueInHours) && action.dueInHours >= 1
     case 'webhook':
@@ -447,7 +449,13 @@ function createActionDraft(action: AutomationAction): AutomationRuleActionDraft 
     case 'comment':
       return { type: 'comment', body: action.body }
     case 'notify':
-      return { type: 'notify', memberKeys: [...action.recipientMemberKeys], title: action.title, body: action.body ?? '' }
+      return {
+        type: 'notify',
+        memberKeys: [...action.recipientMemberKeys],
+        notifyAssignee: action.notifyAssignee === true,
+        title: action.title,
+        body: action.body ?? '',
+      }
     case 'approval':
       return {
         type: 'approval',
@@ -486,6 +494,7 @@ function createActionFromDraft(draft: AutomationRuleActionDraft): AutomationActi
       return {
         type: 'notify',
         recipientMemberKeys: [...draft.memberKeys],
+        ...(draft.notifyAssignee ? { notifyAssignee: true } : {}),
         title: draft.title.trim(),
         ...(draft.body.trim() ? { body: draft.body.trim() } : {}),
       }

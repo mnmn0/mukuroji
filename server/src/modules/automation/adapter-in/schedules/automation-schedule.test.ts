@@ -1462,6 +1462,58 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
     })).rejects.toThrow('Due Work Item lookup is not configured.')
   })
 
+  test('does not catch up business-day months that passed before the current next run', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-01-01',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'all',
+      },
+      // Paused since April and re-enabled with the next run on 2026-08-01.
+      lastRunAt: '2026-04-01T00:00:00.000Z',
+      nextRunAt: '2026-08-01T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    let current = structuredClone(definition)
+    const occurrences: string[] = []
+    const client: AutomationSchedulePort = {
+      ...harness.client,
+      async getRecurringWork() {
+        return structuredClone(current)
+      },
+      async deferRecurringWork(_workspaceId, _id, _revision, nextRunAt) {
+        current = { ...current, revision: current.revision + 1, nextRunAt }
+        harness.setCurrentDefinition(current)
+        return structuredClone(current)
+      },
+    }
+
+    const deferred = await processRecurringWorkDefinition(definition, new Date('2026-08-01T00:00:00.000Z'), {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() }
+        },
+      },
+    })
+
+    expect(occurrences).toEqual([])
+    // 2026-08-01 is a Saturday, so the first business day is Monday the 3rd.
+    expect(deferred.nextRunAt).toBe('2026-08-03T00:00:00.000Z')
+  })
+
   test('defers a business-day Recurring Work to its working day and runs it there', async () => {
     const definition: RecurringWork = {
       ...createRecurringWork(),

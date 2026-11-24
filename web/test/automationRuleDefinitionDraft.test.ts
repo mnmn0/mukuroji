@@ -107,6 +107,26 @@ describe('automation rule definition draft', () => {
     expect(createAutomationRuleDraftUpdate(pinned, draft).actions).toBeUndefined()
   })
 
+  test('keeps the assignee flag of a notify action through an edit', () => {
+    const assigneeRule: AutomationRule = {
+      ...rule,
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const draft = createAutomationRuleDraft(assigneeRule)
+    expect(isAutomationRuleDraftValid(draft)).toBe(true)
+    const update = createAutomationRuleDraftUpdate(assigneeRule, { ...draft, name: 'Renamed' })
+    expect(update.actions).toBeUndefined()
+    const action = draft.actions[0]
+    if (action?.type !== 'notify') throw new Error('Expected a notify draft.')
+    const changed = createAutomationRuleDraftUpdate(assigneeRule, {
+      ...draft,
+      actions: [{ ...action, title: 'Due in 3 days' }],
+    })
+    expect(changed.actions).toEqual([
+      { type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due in 3 days' },
+    ])
+  })
+
   test('reorders actions and rejects incomplete ones', () => {
     const notify = createEmptyAutomationRuleActionDraft('notify', 'Due soon')
     const webhook = createEmptyAutomationRuleActionDraft('webhook', 'Due soon')

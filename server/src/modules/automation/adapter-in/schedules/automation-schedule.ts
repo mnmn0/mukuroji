@@ -18,6 +18,7 @@ import {
 import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../../domain/execution-policy'
 import {
   getDueDateForOccurrence,
+  getLocalMonthStart,
   getNextRecurringOccurrence,
   getRecurringOccurrences,
   selectCatchUpOccurrences,
@@ -433,7 +434,7 @@ export async function processRecurringWorkDefinition(
   if (calendar) {
     const businessDayOccurrences = getRecurringOccurrences(
       definition.schedule,
-      new Date(definition.lastRunAt ?? definition.createdAt),
+      readBusinessDayWindowStart(definition),
       now,
       calendar,
     )
@@ -516,6 +517,23 @@ async function readRecurringWorkCalendar(
 }
 
 /**
+ * Returns the exclusive start of the window a business-day Recurring Work looks for its due run in.
+ *
+ * The stored next run is calendar day n, which is in the same month as the nth business day, so
+ * the window starts at that month's beginning: a holiday removed after a deferral still runs the
+ * earlier day, and months missed while the definition was paused are not caught up. It never
+ * starts before the last completed run, nor before the definition was created.
+ *
+ * @param definition - Business-day recurring definition.
+ * @returns The exclusive window start.
+ */
+function readBusinessDayWindowStart(definition: RecurringWork): Date {
+  const monthStart = getLocalMonthStart(new Date(definition.nextRunAt), definition.schedule.timeZone)
+  const floor = Date.parse(definition.lastRunAt ?? definition.createdAt)
+  return new Date(Math.max(monthStart.getTime() - 1, floor))
+}
+
+/**
  * Moves a business-day Recurring Work to its working day when the run it was due for, which is
  * stored as the earliest day that working day can fall on, comes before it.
  *
@@ -531,7 +549,7 @@ async function deferRecurringWorkToBusinessDay(
 ): Promise<RecurringWork> {
   const nextRun = getNextRecurringOccurrence(
     definition.schedule,
-    new Date(definition.lastRunAt ?? definition.createdAt),
+    readBusinessDayWindowStart(definition),
     calendar,
   )
   if (!nextRun) {

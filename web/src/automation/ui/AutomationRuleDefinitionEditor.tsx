@@ -754,6 +754,15 @@ function ActionSettings({ action, index, onChange, options, t }: ActionSettingsP
             testId={`${testId}-recipients`}
             onChange={(memberKeys) => onChange({ ...action, memberKeys })}
           />
+          <label className="flex items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            <input
+              checked={action.notifyAssignee}
+              data-testid={`${testId}-notify-assignee`}
+              type="checkbox"
+              onChange={(event) => onChange({ ...action, notifyAssignee: event.target.checked })}
+            />
+            {t('automation.rule.notifyAssignee')}
+          </label>
           <label className={labelClassName}>
             {t('automation.ruleEdit.notificationTitle')}
             <input
