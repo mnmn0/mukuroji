@@ -245,6 +245,10 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 本文は ja / en 併記のプレーンテキストです。digest の件名は `[mukuroji] 通知のまとめ（N 件） / Notification digest (N)` で、本文は発生の古い順に番号・タイトル・概要・deep link を並べます。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
 
+### 他の機能から Email に送る
+
+他の機能が受信者に Email（と Slack・Web Push）で知らせたい場合は、Email を直接送らず、受信者ごとに 1 件の audit outbox event を AuditEvents へ書きます。collaboration projection がそれを Inbox 行にし、受信者の通知設定（channel・frequency・quiet hours・種類とミュート）に従って同じ配信 queue に載せるため、digest・再認可・再試行・bounce の抑止もそのまま効きます。event ID は送る単位（例: 配信の occurrence と受信者）から決めて重複を防ぎます。Analytics の定期配信（`analytics.report.delivered`、[docs/analytics.md](analytics.md)）がこの形です。Update Feed の Inbox digest（#241）は Inbox 行を直接書く in-app 専用の機能で、Email には載せません。
+
 ### bounce と complaint
 
 Email job は stack の SES configuration set を指定して送り、message tag `mukuroji-recipient` に recipient key（`<workspaceId>#<memberKey>`）の base64url を付けます。configuration set は bounce と complaint を EventBridge の default bus に出し、rule が SQS queue `NotificationEmailFeedbackQueue` に入れます。毎分の scheduled job `email-feedback` がこれを読みます。
