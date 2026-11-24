@@ -8,6 +8,7 @@ import {
 import { createPortal, flushSync } from 'react-dom'
 import type {
   DocumentChecklistItem,
+  DocumentMention,
   DocumentPresenceSelection,
   WhiteboardNoteObject,
 } from '@mukuroji/contracts'
@@ -62,6 +63,7 @@ import {
   createDocument,
   createDocumentComment,
   createDocumentShare,
+  deleteDocumentComment,
   deleteDocumentPresence,
   deleteDocumentShare,
   exportDocument,
@@ -75,6 +77,7 @@ import {
   instantiateDocument,
   markDocumentRecent,
   resolveDocumentComment,
+  updateDocumentComment,
   restoreDocument,
   restoreDocumentVersion,
   unfavoriteDocument,
@@ -397,6 +400,21 @@ export type DocumentScreenActions = {
    * Comment resolve action です。
    */
   resolveComment?: (
+    documentId: string,
+    commentId: string,
+  ) => Promise<void>
+  /**
+   * Edits the body and mentions of the viewer's own comment.
+   */
+  editComment?: (
+    documentId: string,
+    commentId: string,
+    input: { body: string; mentions: DocumentMention[] },
+  ) => Promise<void>
+  /**
+   * Deletes the viewer's own comment.
+   */
+  deleteComment?: (
     documentId: string,
     commentId: string,
   ) => Promise<void>
@@ -1338,6 +1356,45 @@ export function DocumentPage() {
     await mutateComments()
   }
 
+  /**
+   * Replaces one loaded comment with the server's copy and reloads the first page.
+   *
+   * @param changed - Comment returned by an edit or delete.
+   */
+  const replaceLoadedComment = async (changed: DocumentComment) => {
+    setOlderComments((current) =>
+      current.map((comment) => comment.id === changed.id ? changed : comment),
+    )
+    await mutateComments()
+  }
+
+  const handleEditComment = async (
+    selectedId: string,
+    commentId: string,
+    input: { body: string; mentions: DocumentMention[] },
+  ) => {
+    if (!accessToken) return
+    const edited = await mutationRunner.run(
+      `document:comment:edit:${selectedId}:${commentId}`,
+      JSON.stringify(input),
+      (context) => updateDocumentComment(accessToken, selectedId, commentId, input, context),
+    )
+    await replaceLoadedComment(edited)
+  }
+
+  const handleDeleteComment = async (
+    selectedId: string,
+    commentId: string,
+  ) => {
+    if (!accessToken) return
+    const deleted = await mutationRunner.run(
+      `document:comment:delete:${selectedId}:${commentId}`,
+      commentId,
+      (context) => deleteDocumentComment(accessToken, selectedId, commentId, context),
+    )
+    await replaceLoadedComment(deleted)
+  }
+
   const handleRestoreVersion = async (
     selectedId: string,
     versionId: string,
@@ -1543,6 +1600,8 @@ export function DocumentPage() {
         applyOperations: handleApplyOperations,
         archiveDocument: handleArchiveDocument,
         createComment: handleCreateComment,
+        deleteComment: handleDeleteComment,
+        editComment: handleEditComment,
         createDocument: handleCreateDocument,
         createDocumentFromBuiltInTemplate:
           builtInTemplateCreation.createFromTemplate,
@@ -2428,6 +2487,24 @@ export function DocumentScreen({
                         }
                       : undefined
                   }
+                  currentMemberKey={data.currentUserKey}
+                  onEditComment={
+                    selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
+                    actions.editComment
+                      ? (commentId, body, mentions) =>
+                          actions.editComment?.(selectedDocument.id, commentId, { body, mentions }) ??
+                            Promise.resolve()
+                      : undefined
+                  }
+                  onDeleteComment={
+                    selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
+                    actions.deleteComment
+                      ? (commentId) =>
+                          actions.deleteComment?.(selectedDocument.id, commentId) ?? Promise.resolve()
+                      : undefined
+                  }
                   onResolveComment={
                     selectedDocument.capabilities.canComment &&
                     !isAiOperationPending &&
@@ -2511,6 +2588,7 @@ export function DocumentScreen({
       {isShareDialogOpen && selectedDocument ? (
         <DocumentShareDialog
           document={selectedDocument}
+          members={mentionMembers}
           shares={data.shares}
           t={t}
           onClose={() => setIsShareDialogOpen(false)}

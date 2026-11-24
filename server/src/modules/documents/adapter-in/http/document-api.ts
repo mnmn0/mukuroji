@@ -7,6 +7,7 @@ import type {
   ApplyDocumentOperationsInput,
   ArchiveDocumentInput,
   CreateDocumentCommentInput,
+  DocumentMention,
   CreateDocumentInput,
   CreateDocumentShareInput,
   DocumentBlock,
@@ -884,6 +885,48 @@ export function registerDocumentApiRoutes(
     })
   })
 
+  app.patch('/api/documents/:documentId/comments/:commentId', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const input = parseEditDocumentCommentInput(await readJson<unknown>(c))
+      const commentId = readRequiredCommentId(c)
+      const documentId = readRequiredDocumentId(c)
+      await validateMentionMembers(dependencies, principal.workspaceId, input)
+      const comment = await dependencies.getClient().updateComment({
+        workspaceId: principal.workspaceId,
+        documentId,
+        commentId,
+        access,
+        body: input.body,
+        mentions: input.mentions,
+        auditContext: createDocumentCommentAuditContext(c, principal, input),
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
+      })
+      return c.json({ comment })
+    })
+  })
+
+  app.delete('/api/documents/:documentId/comments/:commentId', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const commentId = readRequiredCommentId(c)
+      const documentId = readRequiredDocumentId(c)
+      const comment = await dependencies.getClient().deleteComment({
+        workspaceId: principal.workspaceId,
+        documentId,
+        commentId,
+        access,
+        auditContext: createDocumentCommentAuditContext(c, principal, { commentId }),
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
+      })
+      return c.json({ comment })
+    })
+  })
+
   app.get('/api/documents/:documentId/presence', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const documentId = readRequiredDocumentId(c)
@@ -1317,7 +1360,7 @@ export function registerDocumentApiRoutes(
 function createDocumentCommentAuditContext(
   c: Context,
   principal: DocumentApiPrincipal,
-  input: CreateDocumentCommentInput,
+  input: object,
   idempotencyKey?: string,
 ): MutationAuditContext {
   const path = new URL(c.req.url).pathname
@@ -1816,6 +1859,66 @@ function validateDocumentOperationShape(operation: Record<string, unknown>): voi
     case 'delete-relation':
       requireId('relationId')
   }
+}
+
+/**
+ * Reads the comment ID path parameter.
+ *
+ * @param c - Hono request context.
+ * @returns The trimmed comment ID.
+ * @throws DocumentError when the ID is missing.
+ */
+function readRequiredCommentId(c: Context): string {
+  const commentId = c.req.param('commentId')?.trim()
+  if (!commentId) {
+    throw new DocumentError(400, 'InvalidDocumentComment', 'Comment ID is required.')
+  }
+  return commentId
+}
+
+/**
+ * Parses the body and mentions of a comment edit.
+ *
+ * @param value - Untrusted request body.
+ * @returns The new body and mentions.
+ * @throws DocumentError when the body or a mention is invalid.
+ */
+function parseEditDocumentCommentInput(value: unknown): { body: string; mentions: DocumentMention[] } {
+  const input = requireDocumentRecord(
+    value,
+    'InvalidDocumentComment',
+    'Comment input is required.',
+  )
+  requireNonEmptyString(input.body, 'InvalidDocumentComment', 'Comment body is required.')
+  return { body: input.body, mentions: parseDocumentCommentMentions(input.mentions) }
+}
+
+/**
+ * Validates the shape of comment mentions.
+ *
+ * @param value - Untrusted mentions.
+ * @returns The mentions.
+ * @throws DocumentError when the list or a mention is invalid.
+ */
+function parseDocumentCommentMentions(value: unknown): DocumentMention[] {
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new DocumentError(400, 'InvalidDocumentMention', 'Comment mentions are invalid.')
+  }
+  return value.map((mention: unknown) => {
+    if (
+      !isRecord(mention) ||
+      typeof mention.userId !== 'string' ||
+      typeof mention.offset !== 'number' ||
+      typeof mention.length !== 'number' ||
+      !Number.isSafeInteger(mention.offset) ||
+      !Number.isSafeInteger(mention.length) ||
+      mention.offset < 0 ||
+      mention.length < 1
+    ) {
+      throw new DocumentError(400, 'InvalidDocumentMention', 'A comment mention is invalid.')
+    }
+    return { userId: mention.userId, offset: mention.offset, length: mention.length }
+  })
 }
 
 function parseCreateDocumentCommentInput(value: unknown): CreateDocumentCommentInput {
@@ -2631,7 +2734,7 @@ function toPublicWhiteboardStyle(
 async function validateMentionMembers(
   dependencies: DocumentApiDependencies,
   workspaceId: string,
-  input: CreateDocumentCommentInput,
+  input: Pick<CreateDocumentCommentInput, 'mentions'>,
 ) {
   const memberKeys = [...new Set(input.mentions.map((mention) => mention.userId))]
   if (!await everyActiveDocumentMember(dependencies, workspaceId, memberKeys)) {

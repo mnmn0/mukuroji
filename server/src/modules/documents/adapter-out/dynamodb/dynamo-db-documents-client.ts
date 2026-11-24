@@ -83,6 +83,8 @@ import type {
   ResolvedDocumentPublicShare,
   ResolvedDocumentSearchAccess,
   ResolveDocumentCommentRequest,
+  UpdateDocumentCommentRequest,
+  DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
@@ -110,6 +112,7 @@ import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_COMMENT_MAX_LENGTH,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
+  DOCUMENT_THREAD_PARTICIPANT_PAGE_LIMIT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
   DOCUMENT_MAX_TREE_DEPTH,
@@ -3022,18 +3025,26 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         },
       },
     })
+    const actorMemberKey = normalizeCommentMemberKey(input.access.memberKey)
+    const mentionedMemberKeys = new Set(
+      mentions
+        .map(({ userId }) => normalizeCommentMemberKey(userId))
+        .filter((memberKey) => memberKey !== actorMemberKey),
+    )
+    const threadParticipants = storedParent === undefined
+      ? []
+      : (await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent))
+          .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
     const notificationCandidates = [
-      ...new Set(
-        mentions
-          .map(({ userId }) => userId.trim().toLowerCase())
-          .filter((memberKey) =>
-            memberKey !== input.access.memberKey.trim().toLowerCase()
-          ),
-      ),
-    ].map((memberKey) => ({
-      memberKey,
-      reason: 'mention',
-    }))
+      ...[...mentionedMemberKeys].map((memberKey) => ({
+        memberKey,
+        reason: 'mention',
+      })),
+      ...threadParticipants.map((memberKey) => ({
+        memberKey,
+        reason: 'reply',
+      })),
+    ]
     const auditPut = createMutationAuditEventPut(
       this.auditTableName,
       input.auditContext,
@@ -3058,7 +3069,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         ),
         summary: parentCommentId === undefined
           ? 'A document comment mentioned you.'
-          : 'A document reply mentioned you.',
+          : 'A document thread you joined received a reply.',
         metadata: {
           actorMemberKey: input.access.memberKey,
           commentId: id,
@@ -3437,6 +3448,229 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       throw normalizeDynamoError(error)
     }
     return stripCommentStorageFields(next)
+  }
+
+  /**
+   * Edits the body and mentions of the actor's own comment and notifies members newly mentioned.
+   *
+   * @param input - Comment identity, new body, and mentions.
+   * @returns Updated comment.
+   */
+  async updateComment(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment> {
+    assertText(input.body, 'body', DOCUMENT_COMMENT_MAX_LENGTH, false)
+    const mentions = structuredClone(input.mentions)
+    validateMentions(input.body, mentions)
+    return this.writeOwnComment(input, 'updated', (stored, now) => ({
+      ...stored,
+      body: input.body,
+      mentions,
+      updatedAt: now,
+      editedAt: now,
+    }), (stored) => {
+      const actorKey = normalizeCommentMemberKey(input.access.memberKey)
+      const previous = new Set(stored.mentions.map(({ userId }) => normalizeCommentMemberKey(userId)))
+      return [...new Set(mentions.map(({ userId }) => normalizeCommentMemberKey(userId)))]
+        .filter((memberKey) => memberKey !== actorKey && !previous.has(memberKey))
+        .map((memberKey) => ({ memberKey, reason: 'mention' }))
+    })
+  }
+
+  /**
+   * Deletes the actor's own comment. The row stays as an empty placeholder so replies keep
+   * their thread and the deletion is visible to the other participants.
+   *
+   * @param input - Comment identity.
+   * @returns Deleted comment placeholder.
+   */
+  async deleteComment(
+    input: DeleteDocumentCommentRequest,
+  ): Promise<StoredDocumentComment> {
+    return this.writeOwnComment(input, 'deleted', (stored, now) => ({
+      ...stored,
+      body: '',
+      mentions: [],
+      updatedAt: now,
+      deletedAt: now,
+    }), () => [])
+  }
+
+  /**
+   * Rewrites one comment of the actor under the Document authorization fence.
+   *
+   * @param input - Comment identity, actor access, and audit context.
+   * @param action - Audited action name.
+   * @param change - Builds the next stored comment from the current one.
+   * @param notify - Builds notification candidates from the current comment.
+   * @returns Updated comment without storage fields.
+   */
+  private async writeOwnComment(
+    input: DeleteDocumentCommentRequest,
+    action: 'updated' | 'deleted',
+    change: (stored: StoredDocumentCommentItem, now: string) => StoredDocumentCommentItem,
+    notify: (stored: StoredDocumentCommentItem) => Array<{ memberKey: string; reason: string }>,
+  ): Promise<StoredDocumentComment> {
+    await this.ensureTable()
+    assertIdentifier(input.commentId, 'commentId')
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canComment',
+        'DocumentCommentDenied',
+        true,
+      )
+    const stored = await this.findStoredComment(
+      input.workspaceId,
+      input.documentId,
+      input.commentId,
+    )
+    if (normalizeCommentMemberKey(stored.authorUserId) !== normalizeCommentMemberKey(input.access.memberKey)) {
+      throw new DocumentError(403, 'DocumentCommentAuthorRequired', 'Only the author can change this comment.')
+    }
+    if (stored.deletedAt !== undefined) {
+      throw new DocumentError(409, 'DocumentCommentDeleted', 'The comment was deleted.')
+    }
+    const now = this.now().toISOString()
+    const next = change(stored, now)
+    const notificationCandidates = notify(stored)
+    const deepLink =
+      `/documents/${encodeURIComponent(input.documentId)}` +
+      `?context=comments&commentId=${encodeURIComponent(stored.id)}` +
+      (stored.parentCommentId === undefined
+        ? ''
+        : `&rootCommentId=${encodeURIComponent(stored.parentCommentId)}`)
+    const auditPut = createMutationAuditEventPut(
+      this.auditTableName,
+      input.auditContext,
+      {
+        directoryId: input.workspaceId,
+        eventType: `document.comment.${action}`,
+        entityType: 'document',
+        entityId: input.documentId,
+        target: {
+          type: 'comment',
+          id: `document/${input.documentId}/comment/${stored.id}`,
+        },
+        action,
+        occurredAt: now,
+        changes: createAuditFieldChanges(
+          { body: stored.body },
+          { body: next.body },
+          ['body'],
+          ['body'],
+        ),
+        summary: action === 'updated'
+          ? 'A document comment was edited.'
+          : 'A document comment was deleted.',
+        metadata: {
+          actorMemberKey: input.access.memberKey,
+          commentId: stored.id,
+          ...(stored.parentCommentId === undefined
+            ? {}
+            : { rootCommentId: stored.parentCommentId }),
+          deepLink,
+          notificationTitle: authorization.documentRow.document.title,
+          notificationCandidates,
+        },
+      },
+    )
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.workspaceId,
+        input.access.authorizationSnapshots,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: next,
+          ConditionExpression: 'updatedAt = :updatedAt AND attribute_not_exists(deletedAt)',
+          ExpressionAttributeValues: {
+            ':updatedAt': stored.updatedAt,
+          },
+        },
+      },
+      ...(auditPut === undefined ? [] : [auditPut]),
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: actions,
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        if (
+          !await this.authorizationGuardsMatch(
+            mutationAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while changing the comment.',
+          )
+        }
+        throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
+      }
+      throw normalizeDynamoError(error)
+    }
+    return stripCommentStorageFields(next)
+  }
+
+  /**
+   * Reads the members who wrote in one comment thread: the root author and every replier.
+   *
+   * The scan of the Document's comment rows is bounded; past the bound the thread keeps the
+   * participants found so far, because the notification is best effort.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document that owns the thread.
+   * @param root - Root comment of the thread.
+   * @returns Normalized member keys of the thread participants.
+   */
+  private async readThreadParticipants(
+    workspaceId: string,
+    documentId: string,
+    root: StoredDocumentCommentItem,
+  ): Promise<string[]> {
+    const participants = new Set([normalizeCommentMemberKey(root.authorUserId)])
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    for (let page = 0; page < DOCUMENT_THREAD_PARTICIPANT_PAGE_LIMIT; page += 1) {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        FilterExpression: 'parentCommentId = :rootCommentId AND entryType = :entryType',
+        ProjectionExpression: 'authorUserId',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': `COMMENT#${encodeKeyPart(documentId)}#`,
+          ':rootCommentId': root.id,
+          ':entryType': 'document-comment',
+        },
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }))
+      for (const item of result.Items ?? []) {
+        if (typeof item.authorUserId === 'string' && item.authorUserId) {
+          participants.add(normalizeCommentMemberKey(item.authorUserId))
+        }
+      }
+      exclusiveStartKey = result.LastEvaluatedKey
+      if (exclusiveStartKey === undefined) break
+    }
+    return [...participants]
   }
 
   /** Presence lease を更新します。 */
@@ -6447,6 +6681,16 @@ function recentKey(
   return `${recentPrefix(memberKey)}${reverseTimestamp}#${encodeKeyPart(documentId)}`
 }
 
+
+/**
+ * Normalizes a comment author or mention member key for comparisons.
+ *
+ * @param memberKey - Stored or requested member key.
+ * @returns Trimmed lowercase member key.
+ */
+function normalizeCommentMemberKey(memberKey: string): string {
+  return memberKey.trim().toLowerCase()
+}
 
 function commentKey(documentId: string, createdAt: string, commentId: string): string {
   return `COMMENT#${encodeKeyPart(documentId)}#${createdAt}#${encodeKeyPart(commentId)}`

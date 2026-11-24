@@ -250,8 +250,10 @@ const enterpriseRoutePermissionRules = [
     permission: 'documents.manage',
     alternativePermissions: ['documents.write', 'documents.read'],
   },
+  // Commenters, including readers, edit and delete only their own comments; the Documents
+  // client enforces authorship.
   {
-    method: 'POST',
+    method: '*',
     pathPattern: '/api/documents/:documentId/comments*',
     permission: 'documents.manage',
     alternativePermissions: ['documents.write', 'documents.read'],

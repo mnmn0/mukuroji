@@ -772,6 +772,8 @@ function createDocumentFake(
     createComment: unsupported,
     listComments: unsupported,
     resolveComment: unsupported,
+    updateComment: unsupported,
+    deleteComment: unsupported,
     heartbeatPresence: unsupported,
     leavePresence: unsupported,
     listPresence: unsupported,

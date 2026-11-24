@@ -12,6 +12,7 @@ import {
   MarkdownAttachmentReactContext,
   useMarkdownAttachmentContext,
 } from '../../files/ui/markdownAttachmentContext'
+import { remarkHtmlAsText } from '../model/markdownHtmlAsText'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
@@ -33,6 +34,11 @@ export type SafeCommentBodyProps = {
    * references are shown as placeholders.
    */
   attachments?: MarkdownAttachmentContext
+  /**
+   * How raw HTML in the body is shown: `skip` drops it (the default for comments), and `escape`
+   * shows it as literal text so prose such as `<div>` stays readable. Neither runs it as HTML.
+   */
+  rawHtml?: 'skip' | 'escape'
 }
 
 /**
@@ -94,7 +100,12 @@ const commentMarkdownComponents: Components = {
  * `attachment:<fileId>` の画像と link は、閲覧者が読める scan 済みの添付だけを表示します。
  * 外部 URL の画像は読み込みません。
  */
-export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: SafeCommentBodyProps) {
+export function SafeCommentBody({
+  attachments,
+  bodyMarkdown,
+  className = '',
+  rawHtml = 'skip',
+}: SafeCommentBodyProps) {
   const prefixes = useWorkItemKeyPrefixes()
   const inheritedAttachments = useMarkdownAttachmentContext()
   const attachmentController = (attachments ?? inheritedAttachments)?.controller
@@ -130,8 +141,10 @@ export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: S
         <Markdown
           components={commentMarkdownComponents}
           rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
-          remarkPlugins={[remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
-          skipHtml
+          remarkPlugins={rawHtml === 'escape'
+            ? [remarkGfm, remarkHtmlAsText, [remarkWorkItemKeyLinks, { prefixes }]]
+            : [remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
+          skipHtml={rawHtml === 'skip'}
           urlTransform={sanitizeCommentUrl}
         >
           {bodyMarkdown}

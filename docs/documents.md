@@ -107,7 +107,12 @@ polling に戻ります。ADR 0041 を参照してください。一覧は評価
 Comment は root / reply、block・text・whiteboard object anchor を保持します。解決済み root
 への reply は、reply 保存 transaction 内でも root の未解決状態を condition check して拒否します。
 Mention は active Workspace member を検証し、comment と同じ transaction で audit event を保存
-します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
+します。Reply の通知は mention された member に加え、thread の root の作成者とそれまでの返信者
+（reply 作成者自身を除く）にも届きます。返信者は Document の comment row を最大 10 page まで
+読んで集め、それを超える古い返信者は通知から漏れることがあります。Comment の作成者は自分の
+comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
+し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
+thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
 化・archive された Document は表示されません。
 
 Favorite と最終 open 時刻は、preference revision の条件付き transaction を競合時に再試行して
@@ -160,6 +165,7 @@ Document 最大 payload の末尾まで検索対象になります。
 - `POST /api/documents/{documentId}/versions/{versionId}/approvals`
 - `GET /api/documents/{documentId}/approvals`
 - `GET|POST /api/documents/{documentId}/comments`
+- `PATCH|DELETE /api/documents/{documentId}/comments/{commentId}`（作成者だけ）
 - `POST /api/documents/{documentId}/comments/{commentId}/resolve`
 - `GET|PUT /api/documents/{documentId}/presence`
 - `DELETE /api/documents/{documentId}/presence/{clientId}`
@@ -193,6 +199,17 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
 
+Paragraph block は Markdown として表示します（GFM の箇条書き・番号付きリスト・link・強調・
+引用・表・inline code。単独の改行もそのまま改行として表示）。描画は Work Item のコメントと同じ
+sanitize 済み renderer で、raw HTML は実行せず文字として表示し、外部 URL の画像は読み込みません。
+Editor 右上の「プレビュー」で編集中のページを表示どおりに確認できます。Block は各 block の
+「+」から直下に挿入でき、table は行と列を個別に削除できます（列は 1 つ以上残します）。
+Diagram block の `text` 形式は `A → B` の流れとして描画します。Mermaid の描画 library は同梱して
+いないため、新しい diagram では Mermaid を選べず、取り込み済みの Mermaid は source として表示します。
+
+「共有とアクセス」のメンバー追加は、Workspace の active member を名前で選べます（member key や
+メールの直接入力もできます）。共有済みの一覧とコメントの作成者は表示名で表示します。
+
 右 panel の version 一覧では各 version の「確認・比較・承認」から dialog を開き、read-only の
 preview、別の version または現在の内容との block 単位の差分（追加・削除・変更・移動）、
 名前を付けた固定、Work Item への承認依頼と結果の確認ができます。Work Item の承認一覧の
@@ -214,7 +231,8 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
   `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
 - 段落・リスト・引用・リンク・画像・HTML は、Markdown の backslash escape だけを外して paragraph
-  block の text として残します。paragraph は text として表示するので、HTML やリンクは描画しません。
+  block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
+  描画され、HTML は文字のまま表示されます。画像は描画しません。
 - folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
 
 ### 同梱テンプレートと宿題の Work Item 化

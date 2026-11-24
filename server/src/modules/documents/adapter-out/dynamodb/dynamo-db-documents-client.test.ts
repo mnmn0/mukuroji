@@ -4445,6 +4445,125 @@ test('stores document mention notification source events atomically with comment
   })
 })
 
+test('notifies thread participants of replies and lets authors edit and delete only their own comments', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(
+    memory,
+    () => new Date(clock += 1_000),
+    'audit-events-table',
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Thread source',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const replierAccess = { ...ownerAccess, memberKey: 'mina@example.com' }
+  const thirdAccess = { ...ownerAccess, memberKey: 'kai@example.com' }
+  /**
+   * Builds an audit context for one comment mutation.
+   *
+   * @param key - Idempotency key of the mutation.
+   * @param actorId - Member who acts.
+   * @returns Mutation audit context.
+   */
+  const audit = (key: string, actorId: string) => createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: actorId, kind: 'user', displayName: actorId },
+    idempotencyKey: key,
+    request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { key } },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+  const root = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: replierAccess,
+    body: 'First reply',
+    mentions: [],
+    parentCommentId: root.id,
+    auditContext: audit('reply-1', replierAccess.memberKey),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: thirdAccess,
+    body: 'Second reply',
+    mentions: [],
+    parentCommentId: root.id,
+    commentId: 'reply-2',
+    auditContext: audit('reply-2', thirdAccess.memberKey),
+  })
+
+  const secondReplyEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'reply-2')
+  expect(secondReplyEvent).toMatchObject({
+    metadata: {
+      notificationCandidates: [
+        { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+        { memberKey: 'mina@example.com', reason: 'reply' },
+      ],
+    },
+  })
+
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: replierAccess,
+    body: 'Not mine',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 403, code: 'DocumentCommentAuthorRequired' })
+
+  const edited = await client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+    body: 'Edited for @Mina',
+    mentions: [{ userId: 'mina@example.com', offset: 11, length: 5 }],
+    auditContext: audit('edit-1', thirdAccess.memberKey),
+  })
+  expect(edited).toMatchObject({ body: 'Edited for @Mina', editedAt: expect.any(String) })
+  expect(memory.items().find(({ eventType }) => eventType === 'document.comment.updated')).toMatchObject({
+    metadata: { notificationCandidates: [{ memberKey: 'mina@example.com', reason: 'mention' }] },
+  })
+
+  const deleted = await client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+  })
+  expect(deleted).toMatchObject({ body: '', mentions: [], deletedAt: expect.any(String) })
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+    body: 'Again',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentDeleted' })
+  const listed = await client.listComments({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })
+  expect(listed.comments.find(({ id }) => id === 'reply-2')).toMatchObject({ body: '', deletedAt: expect.any(String) })
+})
+
 test('advances the Document comment-window revision with each insertion', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -7035,6 +7154,11 @@ function createMemoryDocumentClient() {
               ),
           )
         }
+        if (input.FilterExpression === 'parentCommentId = :rootCommentId AND entryType = :entryType') {
+          matches = matches.filter((candidate) =>
+            candidate.parentCommentId === values[':rootCommentId'] &&
+            candidate.entryType === values[':entryType'])
+        }
         matches = matches
           .sort((left, right) => String(left.recordKey).localeCompare(String(right.recordKey)))
         if (input.ScanIndexForward === false) matches.reverse()
@@ -7188,6 +7312,9 @@ function matchesCondition(
   }
   if (condition === 'updatedAt = :updatedAt') {
     return current?.updatedAt === values[':updatedAt']
+  }
+  if (condition === 'updatedAt = :updatedAt AND attribute_not_exists(deletedAt)') {
+    return current?.updatedAt === values[':updatedAt'] && current?.deletedAt === undefined
   }
   if (condition === 'preferenceRevision = :expectedPreferenceRevision') {
     return (

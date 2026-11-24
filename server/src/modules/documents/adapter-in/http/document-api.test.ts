@@ -2457,6 +2457,58 @@ test('signals content-free Document changes after writes and keeps the write whe
   ])
 })
 
+test('edits and deletes a comment through the author-only comment routes', async () => {
+  const calls: unknown[] = []
+  const comment: DocumentComment = {
+    id: 'comment-1',
+    documentId: 'document-1',
+    anchor: { type: 'document' },
+    body: 'Edited',
+    mentions: [],
+    authorUserId: 'owner@example.com',
+    resolved: false,
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:01:00.000Z',
+    editedAt: '2026-07-18T00:01:00.000Z',
+  }
+  const app = createTestApp(createDocumentClient({
+    async updateComment(input) {
+      calls.push({ kind: 'update', commentId: input.commentId, body: input.body, mentions: input.mentions })
+      return comment
+    },
+    async deleteComment(input) {
+      calls.push({ kind: 'delete', commentId: input.commentId })
+      return { ...comment, body: '', deletedAt: '2026-07-18T00:02:00.000Z' }
+    },
+  }))
+  const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
+
+  const invalid = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ body: '', mentions: [] }),
+  })
+  const edited = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ body: 'Edited', mentions: [] }),
+  })
+  const deleted = await app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'DELETE',
+    headers,
+  })
+
+  expect(invalid.status).toBe(400)
+  expect(edited.status).toBe(200)
+  expect(await edited.json()).toMatchObject({ comment: { body: 'Edited' } })
+  expect(deleted.status).toBe(200)
+  expect(await deleted.json()).toMatchObject({ comment: { body: '', deletedAt: '2026-07-18T00:02:00.000Z' } })
+  expect(calls).toEqual([
+    { kind: 'update', commentId: 'comment-1', body: 'Edited', mentions: [] },
+    { kind: 'delete', commentId: 'comment-1' },
+  ])
+})
+
 test('does not signal a presence heartbeat that only extends the lease', async () => {
   const changes: unknown[] = []
   const app = createTestApp(

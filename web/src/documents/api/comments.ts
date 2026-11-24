@@ -1,4 +1,9 @@
-import type { CreateDocumentCommentInput, DocumentComment, DocumentCommentsResponse } from '@mukuroji/contracts'
+import type {
+  CreateDocumentCommentInput,
+  DocumentComment,
+  DocumentCommentsResponse,
+  DocumentMention,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
@@ -105,6 +110,54 @@ export async function resolveDocumentComment(
     `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/comments/${encodeURIComponent(commentId)}/resolve`,
     accessToken,
     createJsonMutationInit('POST', { resolved: true }, context),
+  )
+  return readObjectValue(value, 'comment') as DocumentComment
+}
+
+/**
+ * Edits the body and mentions of the viewer's own Document comment.
+ *
+ * @param accessToken - Workspace access token.
+ * @param documentId - Document that owns the comment.
+ * @param commentId - Comment to edit.
+ * @param input - New body and mentions.
+ * @param context - Idempotency and audit context of the mutation.
+ * @returns The edited comment.
+ */
+export async function updateDocumentComment(
+  accessToken: string,
+  documentId: string,
+  commentId: string,
+  input: { body: string; mentions: DocumentMention[] },
+  context: MutationRequestContext,
+) {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    createJsonMutationInit('PATCH', input, context),
+  )
+  return readObjectValue(value, 'comment') as DocumentComment
+}
+
+/**
+ * Deletes the viewer's own Document comment, leaving a placeholder in its thread.
+ *
+ * @param accessToken - Workspace access token.
+ * @param documentId - Document that owns the comment.
+ * @param commentId - Comment to delete.
+ * @param context - Idempotency and audit context of the mutation.
+ * @returns The deleted comment placeholder.
+ */
+export async function deleteDocumentComment(
+  accessToken: string,
+  documentId: string,
+  commentId: string,
+  context: MutationRequestContext,
+) {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/comments/${encodeURIComponent(commentId)}`,
+    accessToken,
+    { headers: createMutationHeaders(context), method: 'DELETE' },
   )
   return readObjectValue(value, 'comment') as DocumentComment
 }

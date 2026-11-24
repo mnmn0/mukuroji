@@ -145,6 +145,18 @@ export type DocumentContextPanelProps = {
    */
   onResolveComment?: (commentId: string) => Promise<void>
   /**
+   * Normalized member key of the viewer, used to offer edit and delete on their own comments.
+   */
+  currentMemberKey?: string
+  /**
+   * Edits the body and mentions of the viewer's own comment.
+   */
+  onEditComment?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /**
+   * Deletes the viewer's own comment.
+   */
+  onDeleteComment?: (commentId: string) => Promise<void>
+  /**
    * 次の comment page を取得する callback です。
    */
   onLoadMoreComments?: () => Promise<void>
@@ -216,6 +228,9 @@ export function DocumentContextPanel({
   onLoadMoreBacklinks,
   onLoadMoreComments,
   onLoadMoreVersions,
+  currentMemberKey,
+  onDeleteComment,
+  onEditComment,
   onResolveComment,
   onRestoreVersion,
   onTabChange,
@@ -392,7 +407,10 @@ export function DocumentContextPanel({
             mentionMembers={mentionMembers ?? emptyMentionMembers}
             mentionSuggestionsFailure={mentionSuggestionsFailure}
             t={t}
+            currentMemberKey={currentMemberKey}
             onCreateComment={onCreateComment}
+            onDeleteComment={onDeleteComment}
+            onEditComment={onEditComment}
             onLoadMore={onLoadMoreComments}
             onResolveComment={onResolveComment}
           />
@@ -491,11 +509,14 @@ const emptyCommentDraft: MemberMentionDraft = { body: '', mentionMemberKeys: [] 
 
 function CommentsPanel({
   comments,
+  currentMemberKey,
   defaultAnchorId,
   document,
   focusedCommentId,
   hasMore,
   onCreateComment,
+  onDeleteComment,
+  onEditComment,
   onLoadMore,
   onResolveComment,
   mentionMembers,
@@ -503,6 +524,12 @@ function CommentsPanel({
   t,
 }: {
   comments: DocumentComment[]
+  /** Normalized member key of the viewer. */
+  currentMemberKey?: string
+  /** Edits the viewer's own comment. */
+  onEditComment?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /** Deletes the viewer's own comment. */
+  onDeleteComment?: (commentId: string) => Promise<void>
   defaultAnchorId?: string
   mentionMembers: readonly MentionableMember[]
   mentionSuggestionsFailure?: MentionSuggestionsFailure
@@ -577,6 +604,14 @@ function CommentsPanel({
   }
   const hasVisibleComments =
     rootComments.length > 0 || orphanReplies.length > 0
+  /** Shared props that let a card show its author and change the viewer's own comment. */
+  const cardProps = {
+    currentMemberKey,
+    mentionMembers,
+    mentionSuggestionsFailure,
+    onDelete: onDeleteComment,
+    onEdit: onEditComment,
+  }
 
   const handleReplySubmit = async (
     event: FormEvent<HTMLFormElement>,
@@ -698,6 +733,7 @@ function CommentsPanel({
           {rootComments.map((root) => (
             <section className="grid gap-2" key={root.id}>
               <CommentCard
+                {...cardProps}
                 comment={root}
                 focused={focusedCommentId === root.id}
                 t={t}
@@ -722,6 +758,7 @@ function CommentsPanel({
                 >
                   {(repliesByRoot.get(root.id) ?? []).map((reply) => (
                     <CommentCard
+                      {...cardProps}
                       comment={reply}
                       focused={focusedCommentId === reply.id}
                       isReply
@@ -785,6 +822,7 @@ function CommentsPanel({
               key={reply.id}
             >
               <CommentCard
+                {...cardProps}
                 comment={reply}
                 focused={focusedCommentId === reply.id}
                 isReply
@@ -809,21 +847,91 @@ function CommentsPanel({
   )
 }
 
+/**
+ * One comment with its author's display name, and edit and delete actions on the viewer's own
+ * comment.
+ *
+ * @param props - Comment, viewer, and actions.
+ * @returns The comment card.
+ */
 function CommentCard({
   comment,
+  currentMemberKey,
   focused = false,
   isReply = false,
+  mentionMembers,
+  mentionSuggestionsFailure,
+  onDelete,
+  onEdit,
   onReply,
   onResolve,
   t,
 }: {
+  /** Comment to show. */
   comment: DocumentComment
+  /** Normalized member key of the viewer. */
+  currentMemberKey?: string
+  /** Whether a deep link points at the comment. */
   focused?: boolean
+  /** Whether the comment is a reply. */
   isReply?: boolean
+  /** Members whose names stand in for member keys and are offered as mentions. */
+  mentionMembers: readonly MentionableMember[]
+  /** Why mention suggestions could not be read, if they could not. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Deletes the viewer's own comment. */
+  onDelete?: (commentId: string) => Promise<void>
+  /** Edits the viewer's own comment. */
+  onEdit?: (commentId: string, body: string, mentions: DocumentMention[]) => Promise<void>
+  /** Starts a reply. */
   onReply?: () => void
+  /** Resolves the thread. */
   onResolve?: () => Promise<void>
+  /** Translator. */
   t: (key: MessageKey) => string
 }) {
+  const [editDraft, setEditDraft] = useState<MemberMentionDraft>()
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState(false)
+  const authorName = resolveCommentAuthorName(comment.authorUserId, mentionMembers)
+  const deleted = comment.deletedAt !== undefined
+  const own = !deleted &&
+    currentMemberKey !== undefined &&
+    comment.authorUserId.trim().toLowerCase() === currentMemberKey.trim().toLowerCase()
+  const canEdit = own && onEdit !== undefined
+  const canDelete = own && onDelete !== undefined
+
+  /**
+   * Runs one change of the comment and keeps the form open with an error when it fails.
+   *
+   * @param change - Server request to run.
+   * @returns Whether the change succeeded.
+   */
+  const runChange = async (change: () => Promise<void>) => {
+    setIsSaving(true)
+    setError(false)
+    try {
+      await change()
+      return true
+    } catch {
+      setError(true)
+      return false
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const body = editDraft?.body.trim() ?? ''
+    if (!editDraft || !onEdit || !body || isSaving) return
+    const saved = await runChange(() =>
+      onEdit(comment.id, body, resolveDocumentMentions(body, editDraft.mentionMemberKeys, mentionMembers)),
+    )
+    if (saved) setEditDraft(undefined)
+  }
+
   return (
     <article
       className={`rounded-lg border p-3 outline-none ${
@@ -840,15 +948,19 @@ function CommentCard({
       tabIndex={-1}
     >
       <div className="flex items-start gap-3">
-        <span className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
-          {comment.authorUserId.charAt(0).toUpperCase()}
+        <span
+          aria-hidden="true"
+          className="grid h-8 w-8 flex-none place-items-center rounded-full bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]"
+        >
+          {authorName.charAt(0).toUpperCase()}
         </span>
         <div className="min-w-0 flex-1">
-          <p className="m-0 truncate text-xs font-bold text-[var(--workbench-text)]">
-            {comment.authorUserId}
+          <p className="m-0 truncate text-xs font-bold text-[var(--workbench-text)]" title={comment.authorUserId}>
+            {authorName}
           </p>
           <time className="mt-0.5 block text-[11px] font-medium text-[var(--workbench-muted)]">
             {formatTimestamp(comment.createdAt)}
+            {comment.editedAt && !deleted ? ` · ${t('documents.comments.edited')}` : ''}
           </time>
         </div>
         {isReply ? (
@@ -857,15 +969,84 @@ function CommentCard({
           </span>
         ) : null}
       </div>
-      <p className="m-0 mt-3 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">
-        {renderCommentBody(comment)}
-      </p>
+      {editDraft ? (
+        <form className="mt-3 grid gap-2" onSubmit={(event) => void handleEditSubmit(event)}>
+          <MemberMentionTextarea
+            ariaLabel={t('documents.comments.editBody')}
+            autoFocus
+            className="workbench-input min-h-20 w-full resize-y p-3 text-sm"
+            draft={editDraft}
+            members={mentionMembers}
+            suggestionsFailure={mentionSuggestionsFailure}
+            suggestionsLabel={t('documents.comments.mentionSuggestions')}
+            onDraftChange={setEditDraft}
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              className="workbench-button min-h-8 px-3"
+              onClick={() => {
+                setEditDraft(undefined)
+                setError(false)
+              }}
+              type="button"
+            >
+              {t('documents.comments.cancelEdit')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-8 px-3 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!editDraft.body.trim() || isSaving}
+              type="submit"
+            >
+              {isSaving ? t('documents.comments.saving') : t('documents.comments.saveEdit')}
+            </button>
+          </div>
+        </form>
+      ) : deleted ? (
+        <p className="m-0 mt-3 text-sm font-medium italic text-[var(--workbench-muted)]">
+          {t('documents.comments.deleted')}
+        </p>
+      ) : (
+        <p className="m-0 mt-3 whitespace-pre-wrap text-sm font-medium leading-6 text-[var(--workbench-text)]">
+          {renderCommentBody(comment)}
+        </p>
+      )}
       {comment.anchor.type !== 'document' ? (
         <span className="workbench-badge mt-3">
           #{readCommentAnchorId(comment.anchor)}
         </span>
       ) : null}
-      {onReply || onResolve ? (
+      {error ? (
+        <p className="m-0 mt-2 text-xs font-semibold text-[var(--workbench-danger)]" role="alert">
+          {t('documents.comments.changeError')}
+        </p>
+      ) : null}
+      {isConfirmingDelete ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3" role="group" aria-label={t('documents.comments.deleteConfirm')}>
+          <span className="text-xs font-semibold text-[var(--workbench-text)]">
+            {t('documents.comments.deleteConfirm')}
+          </span>
+          <button
+            className="text-xs font-semibold text-[var(--workbench-danger)] hover:underline disabled:opacity-50"
+            disabled={isSaving}
+            onClick={() => {
+              if (!onDelete) return
+              void runChange(() => onDelete(comment.id)).then((done) => {
+                if (done) setIsConfirmingDelete(false)
+              })
+            }}
+            type="button"
+          >
+            {t('documents.comments.confirmDelete')}
+          </button>
+          <button
+            className="text-xs font-semibold text-[var(--workbench-muted)] hover:underline"
+            onClick={() => setIsConfirmingDelete(false)}
+            type="button"
+          >
+            {t('documents.comments.cancelEdit')}
+          </button>
+        </div>
+      ) : !editDraft && (onReply || onResolve || canEdit || canDelete) ? (
         <div className="mt-3 flex items-center gap-3">
           {onReply ? (
             <button
@@ -885,10 +1066,50 @@ function CommentCard({
               {t('documents.comments.resolve')}
             </button>
           ) : null}
+          {canEdit ? (
+            <button
+              className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+              onClick={() => {
+                setError(false)
+                setEditDraft({
+                  body: comment.body,
+                  mentionMemberKeys: comment.mentions.map((mention) => mention.userId),
+                })
+              }}
+              type="button"
+            >
+              {t('documents.comments.edit')}
+            </button>
+          ) : null}
+          {canDelete ? (
+            <button
+              className="text-xs font-semibold text-[var(--workbench-danger)] hover:underline"
+              onClick={() => {
+                setError(false)
+                setIsConfirmingDelete(true)
+              }}
+              type="button"
+            >
+              {t('documents.comments.delete')}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </article>
   )
+}
+
+/**
+ * Resolves the name shown for a comment author, falling back to the member key.
+ *
+ * @param memberKey - Stored author member key.
+ * @param members - Workspace members with display names.
+ * @returns The author's display name or member key.
+ */
+function resolveCommentAuthorName(memberKey: string, members: readonly MentionableMember[]) {
+  const normalized = memberKey.trim().toLowerCase()
+  const member = members.find((candidate) => candidate.memberKey.trim().toLowerCase() === normalized)
+  return member?.name?.trim() || memberKey
 }
 
 function renderCommentBody(comment: DocumentComment) {

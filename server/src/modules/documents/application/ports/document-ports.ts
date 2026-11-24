@@ -37,6 +37,8 @@ import type {
   ResolvedDocumentPublicShare,
   ResolvedDocumentSearchAccess,
   ResolveDocumentCommentRequest,
+  UpdateDocumentCommentRequest,
+  DeleteDocumentCommentRequest,
   ResolveDocumentSearchAccessRequest,
   RestoreDocumentVersionRequest,
   StoredDocumentComment,
@@ -289,6 +291,20 @@ export interface DocumentCommentsPort {
    * @returns Updated comment.
    */
   resolveComment(input: ResolveDocumentCommentRequest): Promise<StoredDocumentComment>
+  /**
+   * Edits the body and mentions of the actor's own comment.
+   *
+   * @param input - Comment identity, new body, and mentions.
+   * @returns Updated comment.
+   */
+  updateComment(input: UpdateDocumentCommentRequest): Promise<StoredDocumentComment>
+  /**
+   * Deletes the actor's own comment, keeping a placeholder so the thread stays readable.
+   *
+   * @param input - Comment identity.
+   * @returns Deleted comment placeholder.
+   */
+  deleteComment(input: DeleteDocumentCommentRequest): Promise<StoredDocumentComment>
 }
 
 /** Maintains short-lived collaborative presence leases. */
