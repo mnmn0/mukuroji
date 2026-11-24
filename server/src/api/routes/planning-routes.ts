@@ -148,6 +148,7 @@ import {
 import {
   createApiMutationContext,
   getEffectiveProjectScopeAccessList,
+  hasEnterprisePermissionAtResource,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -3089,6 +3090,19 @@ export async function syncProjectUpdateOwnerWithCharter(
       const current = findPlanningUpdateTargetSummary(snapshot, target)
       if (!current?.cadence || current.archivedAt) return 'not-configured'
       if (current.cadence.updateOwnerMemberKey.toLowerCase() === ownerMemberKey.toLowerCase()) return 'unchanged'
+      // The charter route authorized projects.manage, so an Enterprise principal is evaluated again
+      // for the planning.write permission the cadence endpoint requires at this Project.
+      if (
+        principal.enterprisePermissions !== undefined &&
+        !hasEnterprisePermissionAtResource(principal, 'planning.write', {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: projectId,
+          parentTeamId: teamId,
+        })
+      ) {
+        return 'not-permitted'
+      }
       const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
       try {
         await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, target, 'manager')
@@ -3143,7 +3157,12 @@ export async function syncProjectUpdateOwnerWithCharter(
           },
           workItemState,
           [
-            ...createPlanningCallerAuthorizationConditionChecks(principal, recipients),
+            // A service account has no membership row to fence; recipients and CONTROL still are.
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              recipients,
+              principal.principalKind !== 'service-account',
+            ),
             ...(charterOwnerCheck ? [{ ConditionCheck: charterOwnerCheck }] : []),
           ],
         )

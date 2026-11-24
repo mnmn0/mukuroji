@@ -104,6 +104,14 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   verifyWorkItemAccess(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member'): Promise<CustomerWorkItemAuthorization>
   /** Resolves and authorizes a Project before reading or mutating its associations. */
   verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<CustomerProjectAuthorization>
+  /**
+   * Decides which Projects an Enterprise-managed caller may view, from its own Project grants
+   * rather than the Customer route's authorization.
+   *
+   * @returns The viewable Project IDs, or undefined when the caller is not Enterprise-managed and
+   * each Project goes through `verifyProjectAccess` instead.
+   */
+  listEnterpriseViewableProjectIds?(principal: Principal, projectIds: readonly string[]): Promise<ReadonlySet<string> | undefined>
   /** Returns the Triage operations used for Customer associations. */
   getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
   /** Safely parses a JSON request body. */
@@ -159,6 +167,15 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const links = await dependencies.getCustomers().listProjectCustomerLinks(principal.directoryId)
+      const enterpriseViewable = await dependencies.listEnterpriseViewableProjectIds?.(
+        principal,
+        links.map((link) => link.projectId),
+      )
+      if (enterpriseViewable) {
+        return context.json({
+          items: links.filter((link) => enterpriseViewable.has(link.projectId)),
+        } satisfies ProjectCustomerLinkList)
+      }
       const items = await mapWithConcurrency(links, PROJECT_LINK_AUTHORIZATION_CONCURRENCY, async (link) => {
         try {
           await dependencies.verifyProjectAccess(principal, link.projectId, 'viewer')

@@ -22,7 +22,7 @@ Issue #638 は「charter の責任者を変えると health update の owner も
   責任者を外したとき、責任者以外の項目だけを保存したときは cadence に触れない。
 - この書き込みは cadence endpoint と同じ確認を通す。呼び出した人が Project の update target の manager で
   あること、新しい責任者がその Project の member 以上で publish できること、既存の escalation 先が viewer 以上で
-  あること。commit 時の fence も cadence endpoint と同じものを付ける。
+  あること。Enterprise 管理の人は charter の route が `projects.manage` で認可されているので、その Project での `planning.write` を別に評価し、なければ `not-permitted` にする。commit 時の fence も cadence endpoint と同じものを付ける（service account には membership 行がないので、その fence だけ除く）。
 - cadence の transaction には、charter の責任者がまだこの人であるという条件も付ける。連続した2回の保存が
   重なり、先の保存の書き換えが後から終わっても、後の保存の責任者を上書きしない。条件が外れたときは
   `superseded` を返す。

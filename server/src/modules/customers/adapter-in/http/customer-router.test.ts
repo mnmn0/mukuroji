@@ -22,7 +22,11 @@ type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 
 /** Optional live-resource authorization replacements used by router tests. */
 type CustomerTestAuthorization = Partial<Pick<
   CustomerRouterDependencies,
-  'verifyCustomerOwner' | 'verifyWorkItemAccess' | 'verifyProjectAccess' | 'createTriageAuthorizationConditionChecks'
+  | 'verifyCustomerOwner'
+  | 'verifyWorkItemAccess'
+  | 'verifyProjectAccess'
+  | 'createTriageAuthorizationConditionChecks'
+  | 'listEnterpriseViewableProjectIds'
 >>
 
 /** Creates a router with an in-memory Customer client and deterministic authorization. */
@@ -47,6 +51,9 @@ function createTestApp(
     verifyCustomerOwner: authorization.verifyCustomerOwner ?? (async () => []),
     verifyWorkItemAccess: authorization.verifyWorkItemAccess ?? (async () => ({ projectId: 'project-1', isCompleted: false })),
     verifyProjectAccess: authorization.verifyProjectAccess ?? (async () => ({})),
+    ...(authorization.listEnterpriseViewableProjectIds
+      ? { listEnterpriseViewableProjectIds: authorization.listEnterpriseViewableProjectIds }
+      : {}),
     createTriageAuthorizationConditionChecks:
       authorization.createTriageAuthorizationConditionChecks ?? (async () => []),
     getTriage: () => triage,
@@ -285,6 +292,38 @@ test('lists the Customers linked to each Project and leaves out Projects the cal
     }],
   })
   expect(checked.sort()).toEqual(['hidden:viewer', 'project-1:viewer'])
+})
+
+test('filters Project Customer links by Enterprise Project grants when the caller is Enterprise-managed', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const acme = await createCustomer(client)
+  const request = await createRequest(client, acme.id)
+  await client.linkRequestToProject('workspace-1', request.id, 'member-1', { projectId: 'project-1' })
+  await client.linkRequestToProject('workspace-1', request.id, 'member-1', { projectId: 'hidden' })
+  const asked: string[][] = []
+  const app = createTestApp(
+    client,
+    { directoryId: 'workspace-1', userKey: 'member-1', canViewSensitiveData: false },
+    undefined,
+    undefined,
+    {
+      verifyProjectAccess: async () => {
+        throw new Error('Enterprise callers are not checked through legacy Project access.')
+      },
+      listEnterpriseViewableProjectIds: async (_principal, projectIds) => {
+        asked.push([...projectIds])
+        return new Set(['project-1'])
+      },
+    },
+  )
+
+  const response = await app.request('/api/customers/project-links')
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    items: [{ projectId: 'project-1', customers: [{ customerId: acme.id, name: 'Acme Corporation', requestCount: 1 }] }],
+  })
+  expect(asked).toEqual([['hidden', 'project-1']])
 })
 
 test('prepares a completion candidate when the link route targets a completed Work Item', async () => {
