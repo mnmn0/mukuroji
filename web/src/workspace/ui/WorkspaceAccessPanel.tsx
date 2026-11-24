@@ -49,8 +49,8 @@ import { sendBulkWorkspaceInvitations, type BulkInvitationOutcome } from '../mut
 import {
   createWorkspaceMemberCsv,
   emptyWorkspaceMemberFilter,
-  workspaceMemberSorts,
   filterWorkspaceMembers,
+  workspaceMemberSorts,
   type WorkspaceMemberFilter,
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'

@@ -95,7 +95,7 @@ export async function createAuthenticationResponse(
     if (!continuation) {
       await recordMemberSignIn(principal.directoryId, principal.userKey)
     }
-    const claims =decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
+    const claims = decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
     const authenticatedAt = readNumericClaim(claims?.auth_time) ??
       readNumericClaim(claims?.iat) ??
       Math.floor(Date.now() / 1_000)
