@@ -27,7 +27,8 @@ export function selectOwnedAutomationData(
 
 /**
  * Lists the templates a Team definition may use as input: the Team's own templates and
- * Workspace templates, which the server accepts unless they create Work in another Team.
+ * Workspace templates, leaving out Work Item templates fixed to another Team, which the server
+ * rejects for the Team.
  *
  * @param templates - Workspace-wide template list.
  * @param ownerTeamId - Team that owns the definition being edited.
@@ -38,7 +39,8 @@ export function selectTeamTemplateOptions(
   ownerTeamId: string,
 ): AutomationTemplate[] {
   return templates.filter((template) =>
-    template.ownerTeamId === undefined || template.ownerTeamId === ownerTeamId
+    template.ownerTeamId === ownerTeamId ||
+    template.ownerTeamId === undefined && !createsWorkInAnotherTeam(template, ownerTeamId)
   )
 }
 
@@ -53,4 +55,17 @@ export function selectWorkspaceTemplateOptions(
   templates: readonly AutomationTemplate[],
 ): AutomationTemplate[] {
   return templates.filter((template) => template.ownerTeamId === undefined)
+}
+
+/**
+ * Tests whether a Work Item template is fixed to create Work in a Team other than the given one.
+ *
+ * @param template - Template to inspect.
+ * @param teamId - Team the Work would be created for.
+ * @returns Whether the template's payload names another Team.
+ */
+function createsWorkInAnotherTeam(template: AutomationTemplate, teamId: string): boolean {
+  if (template.kind !== 'work-item') return false
+  const payloadTeamId = template.payload.teamId
+  return typeof payloadTeamId === 'string' && payloadTeamId !== '' && payloadTeamId !== teamId
 }

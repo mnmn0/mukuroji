@@ -4,7 +4,6 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
-import useSWR from 'swr'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
@@ -38,12 +37,12 @@ import {
   applyRequestSubmissionAction,
   createRequestAttachmentAccess,
   createRequestForm,
-  getRequestFormManagementScopes,
   publishRequestForm,
   updateRequestForm,
 } from './api'
 import {
   useRequestForm,
+  useRequestFormManagementScopes,
   useRequestForms,
   useRequestQueue,
   useRequestSubmission,
@@ -117,12 +116,9 @@ export function RequestIntakePage() {
   )
   const isWorkspaceStructureManager = canManageWorkspaceStructure(user)
   // A Team manager manages the forms scoped to their own Teams (ADR 0087).
-  const { data: managementScopes } = useSWR(
-    accessToken && user && !currentUserError && !isWorkspaceStructureManager
-      ? ['request-form-management-scopes', accessToken]
-      : null,
-    () => getRequestFormManagementScopes(accessToken ?? ''),
-    apiSWRConfig,
+  const { data: managementScopes } = useRequestFormManagementScopes(
+    accessToken,
+    Boolean(user) && !currentUserError && !isWorkspaceStructureManager,
   )
   const canManageWorkspaceForms = isWorkspaceStructureManager || managementScopes?.workspace === true
   const formTeams = useMemo(

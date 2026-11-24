@@ -1,8 +1,7 @@
 import { useMemo, useState } from 'react'
-import useSWR from 'swr'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
-import { getAutomationManagementScopes } from '../api'
+import { useAutomationManagementScopes } from '../queries/useAutomationManagementScopes'
 import { AutomationManagementPanelContainer } from './AutomationManagementPanelContainer'
 
 /** Props of {@link TeamAutomationPanelContainer}. */
@@ -26,10 +25,7 @@ export function TeamAutomationPanelContainer({ accessToken, locale, teams }: Tea
   const t = useMemo(() => createTranslator(locale), [locale])
   const [selectedTeamId, setSelectedTeamId] = useState(teams[0]?.id)
   const team = teams.find((candidate) => candidate.id === selectedTeamId) ?? teams[0]
-  const scopes = useSWR(
-    ['automation-management-scopes', accessToken],
-    () => getAutomationManagementScopes(accessToken),
-  )
+  const scopes = useAutomationManagementScopes(accessToken)
   const teamList = useMemo(() => (team ? [team] : []), [team])
 
   if (!team) return null

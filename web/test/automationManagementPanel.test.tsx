@@ -1220,6 +1220,11 @@ describe('Team-owned Automation definitions', () => {
       workItemAutomationTemplateFixture,
       { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' },
       { ...workItemAutomationTemplateFixture, id: 'template-other', ownerTeamId: 'ops-team' },
+      {
+        ...workItemAutomationTemplateFixture,
+        id: 'template-ops-payload',
+        payload: { ...workItemAutomationTemplateFixture.payload, teamId: 'ops-team' },
+      },
     ], 'core-team').map((template) => template.id)).toEqual([workItemAutomationTemplateFixture.id, 'template-team'])
     expect(selectWorkspaceTemplateOptions([
       workItemAutomationTemplateFixture,

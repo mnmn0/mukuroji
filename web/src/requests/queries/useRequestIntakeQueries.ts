@@ -3,6 +3,7 @@ import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import {
   getRequestForm,
+  getRequestFormManagementScopes,
   getRequestForms,
 } from '../api/forms'
 import {
@@ -105,6 +106,25 @@ export function useRequestForm(
   return useSWR(
     key,
     ([, token, currentFormId]) => getRequestForm(currentFormId, token),
+    requestIntakeQueryConfig,
+  )
+}
+
+/**
+ * Reads which request form scopes the caller can change (ADR 0087).
+ *
+ * @param accessToken - Request API access token.
+ * @param enabled - Whether the caller may hold Team scopes; Workspace administrators skip it.
+ * @returns The SWR state of the form management scopes.
+ */
+export function useRequestFormManagementScopes(accessToken?: string, enabled = true) {
+  const key = accessToken && enabled
+    ? ['request-form-management-scopes', accessToken] as const
+    : null
+
+  return useSWR(
+    key,
+    ([, token]) => getRequestFormManagementScopes(token),
     requestIntakeQueryConfig,
   )
 }
