@@ -132,6 +132,29 @@ describe('Document drafts', () => {
     })
   })
 
+  /** Verifies kept positions past the blocks that remain are sent as positions the API accepts. */
+  test('moves inserts and moves past the remaining blocks to the end', () => {
+    const blockCount = documentRecordFixture.kind === 'page' ? documentRecordFixture.blocks.length : 0
+    const inserted = { id: 'new-block', text: 'Added near the end', type: 'paragraph' }
+    const draft = parseDocumentSessionDraft({
+      baseRevision: 7,
+      operations: [
+        // Made when the page had more blocks than it has now.
+        { block: inserted, index: blockCount + 3, operationId: 'operation-1', type: 'insert-block' },
+        { blockId: 'paragraph-context', index: blockCount + 5, operationId: 'operation-2', type: 'move-block' },
+        { blockId: 'heading-context', index: 0, operationId: 'operation-3', type: 'move-block' },
+      ],
+    })
+    if (!draft) throw new Error('The draft should parse.')
+
+    expect(recoverDocumentSessionDraftOperations(documentRecordFixture, draft.operations).operations).toEqual([
+      { block: inserted, index: blockCount, operationId: 'operation-1', type: 'insert-block' },
+      // A move names a position among the existing blocks, so the last one is blockCount.
+      { blockId: 'paragraph-context', index: blockCount, operationId: 'operation-2', type: 'move-block' },
+      draft.operations[2],
+    ])
+  })
+
   /** Verifies a kept value with an unknown or incomplete operation is not restored at all. */
   test('drops drafts with operations the Document API would not accept', () => {
     expect(parseDocumentSessionDraft({ baseRevision: 7, operations: [{ ...blockUpdate, type: 'rename-block' }] }))

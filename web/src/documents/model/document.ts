@@ -337,12 +337,24 @@ export async function saveAllPendingDocumentChanges(controller: {
 }
 
 /**
+ * Receives each operation chunk the Document API saved, while later chunks may still be sent.
+ *
+ * @param chunk - Operations the API accepted.
+ * @param result - Revision and Document after the chunk was saved.
+ */
+export type DocumentOperationChunkSavedListener = (
+  chunk: readonly DocumentOperation[],
+  result: DocumentOperationSaveResult,
+) => void
+
+/**
  * Pending operation を API 上限ずつ保存し、各 response revision を
  * 次 chunk の base revision へ連鎖させます。
  *
  * @param operations - 保存順を維持する pending operation です。
  * @param baseRevision - 最初の chunk が基準にする revision です。
  * @param saveChunk - 一つの chunk を保存する callback です。
+ * @param onChunkSaved - Chunk が保存されるたびに、その chunk と結果を受け取る callback です。
  * @returns 最後に保存された operation 結果、または空入力なら undefined です。
  * @throws {DocumentOperationChunkSaveError} 途中失敗時に未送信 operation を保持します。
  */
@@ -353,6 +365,7 @@ export async function saveDocumentOperationChunks(
     revision: number,
     chunk: DocumentOperation[],
   ) => Promise<DocumentOperationSaveResult>,
+  onChunkSaved?: DocumentOperationChunkSavedListener,
 ) {
   let revision = baseRevision
   let lastSavedResult: DocumentOperationSaveResult | undefined
@@ -376,6 +389,7 @@ export async function saveDocumentOperationChunks(
         lastSavedResult,
       )
     }
+    onChunkSaved?.(chunk, lastSavedResult)
   }
 
   return lastSavedResult

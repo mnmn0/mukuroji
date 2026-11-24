@@ -25,6 +25,8 @@ type DocumentsMockState = {
   savedBatches: ApplyDocumentOperationsInput[]
   /** Whether the next operation batch fails as a request from an ended session. */
   rejectNextSave: boolean
+  /** Number of accepted batches after which the next one fails as a request from an ended session. */
+  rejectSaveAfterBatches?: number
 }
 
 /**
@@ -68,11 +70,17 @@ async function mockDocuments(page: Page): Promise<DocumentsMockState> {
     json: { document: { ...documentRecordFixture, blocks: state.blocks, revision: state.revision } },
   }))
   await page.route((url) => url.pathname === `/api/documents/${documentRecordFixture.id}/operations`, (route) => {
-    if (state.rejectNextSave) {
+    if (state.rejectNextSave || state.rejectSaveAfterBatches === state.savedBatches.length) {
       state.rejectNextSave = false
+      delete state.rejectSaveAfterBatches
       return route.fulfill({ status: 401, json: { code: 'Unauthorized', message: 'Unauthorized' } })
     }
     const input: ApplyDocumentOperationsInput = route.request().postDataJSON()
+    // A tab signed in again has another client identity, so a saved operation ID is refused.
+    const savedOperationIds = new Set(state.savedBatches.flatMap((batch) => batch.operations.map((operation) => operation.operationId)))
+    if (input.operations.some((operation) => savedOperationIds.has(operation.operationId))) {
+      return route.fulfill({ status: 409, json: { code: 'DocumentOperationIdempotencyConflict', message: 'Already used.' } })
+    }
     if (input.baseRevision !== state.revision) {
       return route.fulfill({ status: 409, json: { code: 'DocumentRevisionConflict', message: 'Conflict.' } })
     }
@@ -163,5 +171,33 @@ test.describe('Document editing across an ended session', () => {
     await expect.poll(() => state.savedBatches.length).toBe(1)
     expect(state.savedBatches[0]?.operations.map((operation) => operation.type)).toEqual(['insert-block'])
     expect(state.blocks.at(-1)).toMatchObject({ text: 'Edited before someone deleted it.', type: 'paragraph' })
+  })
+
+  test('sends only the edits that were not saved yet when the session ends during a split save', async ({ page }) => {
+    const state = await mockDocuments(page)
+    await page.goto(`/documents/${documentRecordFixture.id}`)
+    // Five blocks edited at once are saved in two requests; the second meets the ended session.
+    state.rejectSaveAfterBatches = 1
+    await page.getByPlaceholder('Heading').fill('Context first')
+    await page.getByLabel('Text', { exact: true }).fill('Split save paragraph')
+    await page.getByLabel('Cell').first().fill('Quiet first')
+    await page.getByPlaceholder('Item').first().fill('Review first')
+    await page.getByPlaceholder('Enter code…').fill('const split = true')
+    await expect(page.getByRole('button', { name: 'Retry save' })).toBeVisible()
+    expect(state.savedBatches).toHaveLength(1)
+    expect(state.savedBatches[0]?.operations).toHaveLength(4)
+
+    await page.reload()
+    await page.getByLabel('Email address').fill('member-a@example.com')
+    await page.getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByLabel('Password', { exact: true }).fill('MemberA123!')
+    await page.getByRole('button', { name: 'Log in', exact: true }).click()
+
+    await expect(page.getByPlaceholder('Enter code…')).toHaveValue('const split = true')
+    await expect.poll(() => state.savedBatches.length).toBe(2)
+    // Only the edit that was not saved goes again, on the revision the first request made.
+    expect(state.savedBatches[1]?.baseRevision).toBe(documentRecordFixture.revision + 1)
+    expect(state.savedBatches[1]?.operations).toHaveLength(1)
+    await expect(page.getByRole('button', { name: 'Overwrite latest revision' })).toHaveCount(0)
   })
 })

@@ -88,7 +88,8 @@ export type RecoveredDocumentSessionDraftOperations = {
  * Someone else may have deleted a block or Whiteboard object while the session was over. An
  * update to it would be ignored on screen and refused by the Document API, so the edited block
  * or object is added back instead: a block at the end of the page, an object on the board.
- * Moving or deleting an element that is already gone is dropped.
+ * Moving or deleting an element that is already gone is dropped, and a kept position past the
+ * blocks that remain is moved to the end.
  *
  * @param document - Current Document the operations are restored onto.
  * @param operations - Kept operations, in the order they were made.
@@ -107,8 +108,10 @@ export function recoverDocumentSessionDraftOperations(
 
   for (const operation of operations) {
     if (operation.type === 'insert-block') {
-      blockIds.splice(clampIndex(operation.index, blockIds.length), 0, operation.block.id)
-      recovered.push(operation)
+      // Blocks deleted meanwhile can leave a kept position past the end, which the API refuses.
+      const index = clampIndex(operation.index, blockIds.length)
+      blockIds.splice(index, 0, operation.block.id)
+      recovered.push(index === operation.index ? operation : { ...operation, index })
     } else if (operation.type === 'update-block') {
       if (blockIds.includes(operation.blockId)) {
         recovered.push(operation)
@@ -121,8 +124,10 @@ export function recoverDocumentSessionDraftOperations(
       const currentIndex = blockIds.indexOf(operation.blockId)
       if (currentIndex < 0) continue
       blockIds.splice(currentIndex, 1)
-      blockIds.splice(clampIndex(operation.index, blockIds.length), 0, operation.blockId)
-      recovered.push(operation)
+      // A move names a position among the blocks that exist, so it ends at the last one at most.
+      const index = clampIndex(operation.index, blockIds.length)
+      blockIds.splice(index, 0, operation.blockId)
+      recovered.push(index === operation.index ? operation : { ...operation, index })
     } else if (operation.type === 'delete-block') {
       const currentIndex = blockIds.indexOf(operation.blockId)
       if (currentIndex < 0) continue

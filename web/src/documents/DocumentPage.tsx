@@ -179,6 +179,7 @@ import {
   shouldAdoptIncomingDocument,
   shouldScheduleDocumentAutosave,
   type DocumentDraftSaveGuard,
+  type DocumentOperationChunkSavedListener,
   type PendingPublicShareCreateRequest,
   type DocumentSaveStatus,
 } from './model/document'
@@ -367,6 +368,7 @@ export type DocumentScreenActions = {
     documentId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => Promise<DocumentOperationSaveResult>
   /**
    * Tree node を別 folder/scope へ移動する action です。
@@ -1101,6 +1103,7 @@ export function DocumentPage() {
     selectedId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => {
     if (!accessToken) {
       throw new Error('Missing access token.')
@@ -1135,6 +1138,7 @@ export function DocumentPage() {
                 ),
             )
           },
+          onChunkSaved,
         )
       } catch (error) {
         if (error instanceof DocumentOperationChunkSaveError) {
@@ -2613,6 +2617,7 @@ type DocumentWorkspaceProps = {
     documentId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => Promise<DocumentOperationSaveResult>
   /**
    * Context drawer open callback です。
@@ -2705,6 +2710,8 @@ function DocumentWorkspace({
   const pendingOperationsRef = useRef<DocumentOperation[]>([])
   /** Operations sent in the save request now running, kept when the session ends mid-save. */
   const inFlightOperationsRef = useRef<DocumentOperation[]>([])
+  // Revision the unsaved part of the running save is based on, advanced as each chunk is saved.
+  const flushBaseRevisionRef = useRef<number | undefined>(undefined)
   const saveTimerRef = useRef<number | undefined>(undefined)
   const revisionRef = useRef(selectedDocument.revision)
   const generationRef = useRef(0)
@@ -2797,14 +2804,22 @@ function DocumentWorkspace({
         inFlightOperationsRef.current = operations
         const savedGeneration = generationRef.current
         const expectedRevision = revisionRef.current
+        flushBaseRevisionRef.current = expectedRevision
 
         try {
           const saved = await onApplyOperations(
             localDocument.id,
             expectedRevision,
             operations,
+            (chunk, result) => {
+              // Chunks already saved must not be sent again after the session ends: the next
+              // session uses another client identity, so the API would refuse their IDs.
+              inFlightOperationsRef.current = inFlightOperationsRef.current.slice(chunk.length)
+              flushBaseRevisionRef.current = result.committedRevision
+            },
           )
           inFlightOperationsRef.current = []
+          flushBaseRevisionRef.current = undefined
           const updated = saved.document
           const canAdoptSavedDocument =
             generationRef.current === savedGeneration &&
@@ -2824,6 +2839,7 @@ function DocumentWorkspace({
           )
         } catch (error) {
           inFlightOperationsRef.current = []
+          flushBaseRevisionRef.current = undefined
           const chunkError =
             error instanceof DocumentOperationChunkSaveError
               ? error
@@ -3092,7 +3108,7 @@ function DocumentWorkspace({
       ])
       if (operations.length === 0 && !titleDirtyRef.current) return undefined
       return {
-        baseRevision: revisionRef.current,
+        baseRevision: flushBaseRevisionRef.current ?? revisionRef.current,
         conflicted: saveStatusRef.current === 'conflict',
         operations,
         ...(titleDirtyRef.current ? { title: titleValueRef.current } : {}),

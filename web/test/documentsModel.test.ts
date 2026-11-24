@@ -409,6 +409,28 @@ describe('Document operation chunk saving', () => {
     )
   })
 
+  /** Verifies a caller learns of each saved chunk before a later one is sent. */
+  test('reports each saved chunk while later chunks are still to be sent', async () => {
+    const reported: Array<{ ids: string[]; revision: number }> = []
+    let calls = 0
+    await saveDocumentOperationChunks(
+      operations,
+      7,
+      async (revision) => {
+        calls += 1
+        if (calls === 2) {
+          // The first chunk is reported before the second one is sent.
+          expect(reported.map((entry) => entry.revision)).toEqual([8])
+          throw new Error('session ended')
+        }
+        return { committedRevision: revision + 1, document: { ...documentRecordFixture, revision: revision + 1 } }
+      },
+      (chunk, result) => reported.push({ ids: chunk.map((operation) => operation.operationId), revision: result.committedRevision }),
+    ).catch(() => undefined)
+
+    expect(reported).toEqual([{ ids: ['operation-0', 'operation-1', 'operation-2', 'operation-3'], revision: 8 }])
+  })
+
   test('refreshes every affected cache after a partial operation save', async () => {
     const lastSavedDocument = {
       ...documentRecordFixture,
