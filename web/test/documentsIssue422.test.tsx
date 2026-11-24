@@ -175,6 +175,37 @@ describe('Document editing and comments (#422)', () => {
     ])
   })
 
+  test('keeps each stored mention on its own token across picked overlaps, renames, and order', () => {
+    const ann = { memberKey: 'ann@example.com', name: 'Ann', email: 'ann@example.com', status: 'active' }
+    const annSmith = { memberKey: 'ann.smith@example.com', name: 'Ann Smith', email: 'ann.smith@example.com', status: 'active' }
+    const bob = { memberKey: 'bob@example.com', name: 'Bob', email: 'bob@example.com', status: 'active' }
+    for (const picked of [annSmith, bob]) {
+      for (const renamed of [false, true]) {
+        for (const pickedFirst of [false, true]) {
+          for (const prefilled of [false, true]) {
+            const people = [renamed ? { ...ann, name: 'Anne' } : ann, annSmith, bob]
+            const original = { body: 'cc @Ann', mentions: [{ userId: ann.memberKey, offset: 3, length: 4 }] }
+            const pickedToken = `@${picked.name}`
+            const body = pickedFirst ? `${pickedToken} and cc @Ann` : `cc @Ann and ${pickedToken}`
+            const storedOffset = body.indexOf('cc @Ann') + 3
+            const pickedOffset = body.indexOf(pickedToken)
+            // The edit form starts with the stored members picked; a new pick is added to them.
+            const selected = [...(prefilled ? [ann.memberKey] : []), picked.memberKey]
+            const label = `picked=${picked.name} renamed=${renamed} pickedFirst=${pickedFirst} prefilled=${prefilled}`
+
+            expect({ label, mentions: resolveEditedDocumentMentions(original, body, selected, people) }).toEqual({
+              label,
+              mentions: [
+                { userId: ann.memberKey, offset: storedOffset, length: 4 },
+                { userId: picked.memberKey, offset: pickedOffset, length: pickedToken.length },
+              ].sort((left, right) => left.offset - right.offset),
+            })
+          }
+        }
+      }
+    }
+  })
+
   test('puts an edited comment into the cached thread opened by a deep link', async () => {
     const root = createComment({ id: 'root' })
     const reply = createComment({ id: 'reply', parentCommentId: 'root', body: 'Before' })

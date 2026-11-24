@@ -72,8 +72,9 @@ export function resolveDocumentMentions(
  * picking `@Ann Smith` where `@Ann` was mentioned mentions the newly picked member, while a
  * picked `@Ann` elsewhere never cuts a stored `@Ann Smith` short. A stored mention keeps its
  * member, so a member renamed since the comment was written stays mentioned and an unrelated edit
- * is not rejected. The n-th occurrence of a stored token takes the n-th stored mention with that
- * token; typed `@member-key` tokens in the rest of the body are read like in a new comment.
+ * is not rejected. The n-th occurrence of a stored token, outside longer stored tokens and picked
+ * tokens at least as long, takes the n-th stored mention with that token; typed `@member-key`
+ * tokens in the rest of the body are read like in a new comment.
  *
  * @param original - Stored body and mentions of the comment.
  * @param body - Edited plain text body.
@@ -96,10 +97,16 @@ export function resolveEditedDocumentMentions(
     .map((range) => ({ length: range.length, offset: range.offset, userId: range.memberKey }))
   const storedCandidates: DocumentMention[] = []
   // Longer stored tokens take their occurrences first, so `@Ann` is not read inside `@Ann Smith`.
+  // An occurrence inside a picked token at least as long is that token's, so it does not use up
+  // the stored mentions before the occurrence that is really theirs.
   const storedTokens = [...storedByToken].sort(([left], [right]) => right.length - left.length)
   for (const [token, stored] of storedTokens) {
+    const claimed = picked.filter((mention) => mention.length >= token.length)
     findTokenOccurrences(body, token)
-      .filter((offset) => !overlapsMentionRanges({ offset, length: token.length }, storedCandidates))
+      .filter((offset) => {
+        const range = { offset, length: token.length }
+        return !overlapsMentionRanges(range, claimed) && !overlapsMentionRanges(range, storedCandidates)
+      })
       .slice(0, stored.length)
       .forEach((offset, index) => {
         const mention = stored[index]
