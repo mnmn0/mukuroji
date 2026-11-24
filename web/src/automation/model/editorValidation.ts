@@ -577,9 +577,10 @@ function readAutomationWorkItemSchedule(value: unknown): WorkItemSchedule | unde
 function readAutomationScheduleCalendarPolicy(
   value: unknown,
 ): WorkItemScheduleCalendarPolicy | undefined {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['holidays', 'timeZone', 'workingWeekdays'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['holidays', 'timeZone', 'workingWeekdays', 'calendarSource'])) {
     return undefined
   }
+  if (value.calendarSource !== undefined && value.calendarSource !== 'shared') return undefined
   if (
     typeof value.timeZone !== 'string' ||
     !value.timeZone ||
@@ -626,6 +627,7 @@ function readAutomationScheduleCalendarPolicy(
     holidays: [...holidays],
     timeZone: value.timeZone,
     workingWeekdays: [...workingWeekdays],
+    ...(value.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
   }
 }
 

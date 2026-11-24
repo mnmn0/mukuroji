@@ -66,6 +66,7 @@ export function DashboardPage() {
           onOpenPlanningUpdate={(teamId, projectId) => navigate(
             createPlanningProjectUpdatePath(teamId, projectId),
           )}
+          onOpenPortfolioDashboard={() => navigate('/dashboard/portfolio')}
           onOpenTask={workspace.onOpenTask}
           planningUpdateTargets={planning.data?.updateTargets}
           planningUpdatesErrorMessage={planning.error

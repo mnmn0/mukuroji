@@ -2527,6 +2527,28 @@ function canonicalString(value: unknown) {
   return JSON.stringify(toAuditValue(value, new Set<object>(), false))
 }
 
+/**
+ * Derives the audit context of one part of a mutation that writes several independent events,
+ * such as one grant of a Team-wide member add. The part keeps the mutation's correlation, actor,
+ * and request, and gets an idempotency identity bound to the part, so its event ID stays stable
+ * on retries however the other parts change.
+ *
+ * @param context - Audit context of the whole mutation.
+ * @param part - Stable identifier of the part, such as a Project ID.
+ * @returns The audit context of the part.
+ */
+export function deriveMutationAuditPartContext(
+  context: MutationAuditContext,
+  part: string,
+): MutationAuditContext {
+  return {
+    ...context,
+    idempotencyKeyHash: hashText(
+      `audit-idempotency-part-v1\0${context.idempotencyKeyHash}\0${requireText(part, 'Audit part')}`,
+    ),
+  }
+}
+
 function hashCanonical(value: unknown) {
   return hashText(JSON.stringify(toAuditValue(value, new Set<object>(), false)))
 }

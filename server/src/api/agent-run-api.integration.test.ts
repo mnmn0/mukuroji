@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { classifyFactoryBoardItem, type AgentRunReportKind, type TeamAgentRunBoardResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
+import { createCanonicalPublicAgentTelemetryService } from './routes/public-agent-telemetry-service'
 import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
 import {
   InMemoryAgentRunStore,
+  InMemoryAgentRunUsageStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
   createAgentRunCommitConflictError,
@@ -11,6 +13,7 @@ import {
   createAgentRunNotActiveError,
   createDefaultAgentSettings,
   finishAgentRun,
+  formatUsageBucketStart,
   hashAgentInstanceId,
   readReportAgentRunRequest,
   readStartAgentRunRequest,
@@ -2664,6 +2667,52 @@ describe('Factory board route', () => {
     expect(JSON.stringify(body)).not.toContain('cursor')
   })
 
+  test('adds up the telemetry usage of the period\'s runs per Project and Work Item, without the cost for non-managers', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-refero', statusCategory: 'completed', assignedProjectId: 'refero' },
+      { id: 'task-loose', statusCategory: 'completed' },
+      { id: 'task-hidden', statusCategory: 'completed', assignedProjectId: 'secret' },
+    ])
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    store.seed(finishAgentRun(createRunAt('task-refero', new Date(now - 3 * hourMs)), 'completed', 'agent', new Date(now - 2 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-loose', new Date(now - 5 * hourMs)), 'completed', 'agent', new Date(now - 4 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-hidden', new Date(now - 7 * hourMs)), 'completed', 'agent', new Date(now - 6 * hourMs)))
+    /**
+     * Records one bucket of the fixture member's laptop instance.
+     *
+     * @param at - Bucket time.
+     * @param inputTokens - Input tokens.
+     * @param batchId - Export ID.
+     */
+    const record = (at: number, inputTokens: number, batchId: string) => usage.recordBatch(workspaceId, 'demo@example.com', batchId, [{
+      bucketStart: formatUsageBucketStart(at), instanceIdHash: hashAgentInstanceId('laptop-1'), model: 'claude-sonnet-5-5',
+      inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: inputTokens * 10, requestCount: 1,
+    }])
+    await record(now - 2.5 * hourMs, 500, 'refero')
+    await record(now - 4.5 * hourMs, 200, 'loose')
+    await record(now - 6.5 * hourMs, 900, 'hidden')
+    // Usage outside every run is not part of the period's runs.
+    await record(now - 3.5 * hourMs, 50, 'between')
+
+    const body = await readAnalytics(now)
+    expect(body.usage).toEqual({
+      total: { inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, models: ['claude-sonnet-5-5'], hasMore: false },
+      projects: [
+        { projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
+        { usage: expect.objectContaining({ inputTokens: 200 }) },
+      ],
+      workItems: [
+        { workItemId: 'task-refero', title: 'Title of task-refero', projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
+        { workItemId: 'task-loose', title: 'Title of task-loose', usage: expect.objectContaining({ inputTokens: 200 }) },
+      ],
+      runsHasMore: false,
+    })
+    expect(JSON.stringify(body)).not.toContain('estimatedCostMicroUsd')
+    expect(JSON.stringify(body)).not.toContain('task-hidden')
+  })
+
   test('reads a past period without spending its budget on runs that finished after it', async () => {
     const now = Date.now()
     const { store } = configureBoard([{ id: 'task-past', statusCategory: 'completed' }])
@@ -2747,5 +2796,135 @@ describe('Public Work Item key', () => {
     // A Work Item created before keys existed has none.
     expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-2')))
       .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-2', createdAt: expect.any(String) })
+  })
+})
+
+describe('Agent telemetry usage', () => {
+  const headers = { Authorization: 'Bearer test-token' }
+
+  /**
+   * Builds a Claude Code logs export with one `api_request` record.
+   *
+   * @param at - Request time.
+   * @param instanceId - Raw agent instance ID.
+   * @returns OTLP JSON export.
+   */
+  function usageExport(at: Date, instanceId: string): Record<string, unknown> {
+    return {
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'mukuroji.agent_instance', value: { stringValue: instanceId } }] },
+        scopeLogs: [{
+          logRecords: [{
+            timeUnixNano: `${BigInt(at.getTime()) * 1_000_000n}`,
+            body: { stringValue: 'claude_code.api_request' },
+            attributes: [
+              { key: 'model', value: { stringValue: 'claude-sonnet-5-5' } },
+              { key: 'input_tokens', value: { intValue: '100' } },
+              { key: 'output_tokens', value: { intValue: '20' } },
+              { key: 'cost_usd', value: { doubleValue: 0.01 } },
+            ],
+          }],
+        }],
+      }],
+    }
+  }
+
+  /**
+   * Reads the resource logs of an export built by {@link usageExport}.
+   *
+   * @param body - Export.
+   * @returns Its resource logs.
+   */
+  function readResourceLogs(body: Record<string, unknown>): unknown[] {
+    return Array.isArray(body.resourceLogs) ? body.resourceLogs : []
+  }
+
+  test('attributes received usage to the run of the same member and instance, with cost only for managers', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop')
+    store.seed(held)
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    // A retried export adds nothing.
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: true })
+    // Usage of another instance of the same member is not this run's.
+    await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, usageExport(new Date(Date.now() - 20_000), 'desktop')))
+
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(history.status).toBe(200)
+    const listed: unknown = await history.json()
+    expect(listed).toMatchObject({
+      items: [{ runId: held.runId, usage: { inputTokens: 100, outputTokens: 20, requestCount: 1, models: ['claude-sonnet-5-5'] } }],
+      usageTotal: { inputTokens: 100, requestCount: 1 },
+    })
+    expect(JSON.stringify(listed)).not.toContain('estimatedCostMicroUsd')
+
+    configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'manager' })
+    const managerStore = getTestAppDependencies().workItems.agentRuns
+    if (!(managerStore instanceof InMemoryAgentRunStore)) throw new Error('Expected the in-memory store.')
+    managerStore.seed(held)
+    setTestAppDependencies({ agentRunUsage: usage })
+    const managed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(await managed.json()).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
+  })
+
+  test('recognizes a retried export after one of its events aged out of the accepted window', async () => {
+    configureUnstartedAssignedWorkItem()
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    let clock = new Date('2026-11-22T18:00:00.000Z')
+    const telemetry = createCanonicalPublicAgentTelemetryService(() => clock)
+    const old = usageExport(new Date(clock.getTime() - 7 * 86_400_000 + 1_000), 'laptop')
+    const fresh = usageExport(new Date(clock.getTime() - 20_000), 'laptop')
+    const body = { resourceLogs: [...readResourceLogs(old), ...readResourceLogs(fresh)] }
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    // The response was lost and the exporter retries after the old event left the 7-day window.
+    clock = new Date(clock.getTime() + 5_000)
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 1, duplicate: true })
+    expect([...usage.buckets.values()].reduce((sum, bucket) => sum + bucket.inputTokens, 0)).toBe(200)
+  })
+
+  test('accepts usage from a member whose Enterprise write role is scoped to one Team', async () => {
+    configureUnstartedAssignedWorkItem()
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    const at = '2026-11-23T00:00:00.000Z'
+    identity.getSnapshot = async (requestedWorkspaceId) => ({
+      ...await readSnapshot(requestedWorkspaceId),
+      customRoles: [{
+        workspaceId,
+        roleId: 'custom:team-writer',
+        name: 'Team writer',
+        permissions: ['work-items.read', 'work-items.write'],
+        guestAssignable: false,
+        revision: 1,
+        createdAt: at,
+        updatedAt: at,
+      }],
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'team-writer',
+        principalKind: 'member',
+        principalId: 'demo@example.com',
+        roleId: 'custom:team-writer',
+        scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+        source: 'direct',
+      }],
+    })
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ enterpriseIdentity: identity, agentRunUsage: usage })
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(credential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    expect(usage.buckets.size).toBe(1)
+  })
+
+  test('refuses an export that is not an OTLP logs request', async () => {
+    configureUnstartedAssignedWorkItem()
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    await expect(runWithTestAppDependencies(() => telemetry.ingestLogs(credential, { resourceLogs: 'x' }))).rejects.toMatchObject({ status: 400 })
   })
 })

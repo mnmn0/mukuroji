@@ -163,6 +163,40 @@ describe('Agent Run API', () => {
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 
+  test('shows token usage per run and for the Work Item, with the cost only when the server sends it', async () => {
+    const usage = {
+      inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7,
+      models: ['claude-sonnet-5-5'], hasMore: false,
+    }
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('Expected a fixture run.')
+    const runs = [{ ...active, usage }, ...rest]
+    const html = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={runs} usageTotal={usage} />,
+    )
+    expect(html).toContain('data-testid="work-item-agent-run-usage"')
+    expect(html).toContain('Input 1,200 · output 300 · cache read 40,000 · cache write 500')
+    expect(html).toContain('42,000 tokens')
+    expect(html).not.toContain('Est.')
+    const managed = renderToStaticMarkup(
+      <WorkItemAgentRunsPanel
+        formatDateTime={(value) => value}
+        labels={labels}
+        runs={runs}
+        usageTotal={{ ...usage, estimatedCostMicroUsd: 1_234_567, hasMore: true }}
+      />,
+    )
+    expect(managed).toContain('7 requests · Est. $1.23')
+    expect(managed).toContain(labels.usagePartial)
+
+    globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, usageTotal: usage })
+    expect((await listWorkItemAgentRuns('token', 'core', 'task')).usageTotal).toEqual(usage)
+    globalThis.fetch = async () => Response.json({ items: runs, hasMore: false, usageTotal: { ...usage, inputTokens: -1 } })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => Response.json({ items: [{ ...active, usage: { ...usage, models: [1] } }], hasMore: false })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+  })
+
   test('sends release with idempotency headers and surfaces server errors', async () => {
     let headers: Headers | undefined
     globalThis.fetch = async (_input, init) => {

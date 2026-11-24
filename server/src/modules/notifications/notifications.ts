@@ -11,10 +11,13 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
-import type {
-  NotificationCategoryChannels,
-  NotificationMutes,
-  PersonalNotificationReminderDays,
+import {
+  isCanonicalWorkItemKey,
+  parseNotificationMessage,
+  type NotificationCategoryChannels,
+  type NotificationMessage,
+  type NotificationMutes,
+  type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
 import {
@@ -136,8 +139,12 @@ export type NotificationItem = {
   actorLabel?: string
   /** 対象 Work Item などの表示タイトルです。 */
   title?: string
+  /** Short key such as `ABC-123` of the target Work Item, when it has one. */
+  workItemKey?: string
   /** Event の安全な短い概要です。 */
   summary?: string
+  /** System が書いた概要の code と値です。読む人の言語で文にします。 */
+  message?: NotificationMessage
   /** App 内で対象を開く相対 path です。 */
   deepLink?: string
   /** 対象 Team ID です。 */
@@ -1201,6 +1208,7 @@ export function toNotificationItem(
     return undefined
   }
   const deepLink = readText(value.deepLink)
+  const message = parseNotificationMessage(value.message)
   return {
     id: encodeNotificationIdentifier(recipientKey, notificationKey),
     eventId,
@@ -1211,7 +1219,9 @@ export function toNotificationItem(
       ? { actorLabel: readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId) }
       : {}),
     ...(readText(value.title) ? { title: readText(value.title) } : {}),
+    ...(isCanonicalWorkItemKey(value.workItemKey) ? { workItemKey: value.workItemKey } : {}),
     ...(readText(value.summary) ? { summary: readText(value.summary) } : {}),
+    ...(message ? { message } : {}),
     ...(deepLink?.startsWith('/') && !deepLink.startsWith('//') ? { deepLink } : {}),
     ...(readText(value.teamId) ? { teamId: readText(value.teamId) } : {}),
     ...(readText(value.projectId) ? { projectId: readText(value.projectId) } : {}),

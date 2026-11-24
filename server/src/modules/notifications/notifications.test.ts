@@ -11,6 +11,7 @@ import {
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
   requiresCurrentWorkItemContributor,
+  toNotificationItem,
   type NotificationAction,
   type NotificationState,
 } from './notifications'
@@ -116,6 +117,31 @@ describe('notification store', () => {
     const first = parseStoredNotificationPreferences(undefined)
     first.channels.inApp = false
     expect(parseStoredNotificationPreferences(undefined).channels.inApp).toBe(true)
+  })
+
+  test('returns a stored summary message code and drops one it cannot read', async () => {
+    const rows = [
+      createNotificationRow({ message: { code: 'work-item.due-today', params: { title: 'Release' } } }),
+      createNotificationRow({ notificationKey: '2026-07-12T11:00:00.000Z#evt-2', notificationId: 'evt-2', eventId: 'evt-2',
+        occurredAt: '2026-07-12T11:00:00.000Z', message: { code: 'work-item.unknown' } }),
+    ]
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name !== 'QueryCommand') return {}
+      queryCount += 1
+      return queryCount === 1 ? { Items: [] } : { Items: rows }
+    })
+
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1', memberKey: 'member@example.com', limit: 2, now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(page.notifications[0]).toMatchObject({
+      summary: 'A reply mentioned you.',
+      message: { code: 'work-item.due-today', params: { title: 'Release' } },
+    })
+    expect(page.notifications[1]).toMatchObject({ summary: 'A reply mentioned you.' })
+    expect(page.notifications[1]).not.toHaveProperty('message')
   })
 
   test('preserves Planning target metadata for current-visibility checks', async () => {
@@ -1063,5 +1089,30 @@ describe('notification store', () => {
       notificationId: notification.id,
       action: 'mark-read',
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
+  })
+})
+
+describe('Notification row Work Item key', () => {
+  /** Builds a minimal stored notification row for one recipient. */
+  const row = (workItemKey: unknown) => ({
+    recipientKey: 'workspace-1#member@example.com',
+    notificationKey: '2026-07-12T12:00:00.000Z#event-1',
+    recipientStatusKey: 'workspace-1#member@example.com#unread',
+    itemType: 'notification',
+    version: 1,
+    eventId: 'event-1',
+    eventType: 'comment.created',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    reasons: ['mention'],
+    title: 'Review',
+    workItemKey,
+  })
+
+  test('returns only a canonical stored key', () => {
+    const now = new Date('2026-07-12T13:00:00.000Z')
+    expect(toNotificationItem(row('CORE-12'), 'workspace-1#member@example.com', now)?.workItemKey).toBe('CORE-12')
+    for (const value of ['core-12', 'CORE-0', 12, undefined]) {
+      expect(toNotificationItem(row(value), 'workspace-1#member@example.com', now)).not.toHaveProperty('workItemKey')
+    }
   })
 })

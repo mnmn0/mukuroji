@@ -63,6 +63,7 @@ const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
   'watcher': 'auditLog.resource.watcher',
   'webhook': 'auditLog.resource.webhook',
   'work-item': 'auditLog.resource.work-item',
+  'work-item-key-prefix': 'auditLog.resource.work-item-key-prefix',
   'workflow': 'auditLog.resource.workflow',
 }
 
@@ -166,6 +167,7 @@ export const suggestedAuditEventTypes: readonly string[] = [
   'comment.deleted',
   'member.created',
   'member.role-changed',
+  'member.renamed',
   'member.removed',
   'invitation.created',
   'invitation.revoked',

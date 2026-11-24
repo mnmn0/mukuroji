@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   resolveSettingsSection,
+  settingsPanelAnchorId,
+  settingsPanelPath,
   settingsSectionPaths,
 } from '../src/workspace/model/settingsSections'
 
@@ -24,5 +26,12 @@ describe('resolveSettingsSection', () => {
     expect(
       resolveSettingsSection(settingsSectionPaths.team, '?developerSection=connectors'),
     ).toBe('team')
+  })
+})
+
+describe('settingsPanelPath', () => {
+  test('links a panel by its area URL and fragment', () => {
+    expect(settingsPanelPath('workspace', 'members')).toBe('/settings/workspace#settings-members')
+    expect(settingsPanelAnchorId('profile')).toBe('settings-profile')
   })
 })

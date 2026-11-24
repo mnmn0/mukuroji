@@ -9,19 +9,26 @@ import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/Ag
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
+import { TeamProfilePanelContainer } from '../../projects/ui/TeamProfilePanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
+import { WorkItemKeyPrefixPanelContainer } from '../../work-items/ui/WorkItemKeyPrefixPanelContainer'
 import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAccessPanel'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { resolveSettingsSection } from '../../workspace/model/settingsSections'
 import { EnterpriseSecuritySettingsLink } from '../../workspace/ui/EnterpriseSecuritySettingsLink'
-import { SettingsSectionNav } from '../../workspace/ui/SettingsSectionNav'
+import { SettingsSectionNav, type SettingsPanelLink } from '../../workspace/ui/SettingsSectionNav'
+import { MemberProfileSectionContainer } from '../../workspace/ui/MemberProfileSection'
+import { SettingsPanelAnchor } from '../../workspace/ui/SettingsPanelAnchor'
+import { useSettingsPanelScroll } from '../../workspace/ui/useSettingsPanelScroll'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 import { TenantAdministrationPanelContainer } from '../../workspace/ui/TenantAdministrationPanel'
+import { WorkCalendarPanelContainer } from '../../workspace/ui/WorkCalendarPanelContainer'
+import { WorkspaceWorkCalendarAdjustment } from '../../workspace/ui/WorkspaceWorkCalendarAdjustment'
 
 /**
  * Renders the settings routes: `/settings` and `/settings/personal` for personal settings,
@@ -38,6 +45,7 @@ export function SettingsPage() {
   const appInstall = useAppInstallPrompt()
   const badgePermission = useAppBadgePermission()
   const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed' | 'failed'>()
+  useSettingsPanelScroll(location.hash, location.key)
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'
@@ -46,16 +54,30 @@ export function SettingsPage() {
   return (
     <WorkspaceRouteContent>
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <SettingsSectionNav current={section} t={t} />
+        <SettingsSectionNav
+          current={section}
+          panels={listSettingsPanels(section, {
+            accessToken: Boolean(workspace.accessToken),
+            aiAssistance: aiAssistanceUiEnabled,
+            auditLog: workspace.canReadAuditLog || workspace.canExportAuditLog,
+            workspaceConfiguration: workspace.canManageWorkspaceConfiguration,
+            softwareFactory: workspace.softwareFactoryEnabled,
+            teamManagement: workspace.canManageTeams,
+          })}
+          t={t}
+        />
         {section === 'personal' ? (
           <WorkspaceSettingsView
             accountSections={workspace.accessToken ? (
               <>
-                <AccountSecurityPanelContainer
-                  accessToken={workspace.accessToken}
-                  locale={workspace.locale}
-                />
+                <SettingsPanelAnchor panel="account-security">
+                  <AccountSecurityPanelContainer
+                    accessToken={workspace.accessToken}
+                    locale={workspace.locale}
+                  />
+                </SettingsPanelAnchor>
                 {aiAssistanceUiEnabled ? (
+                  <SettingsPanelAnchor panel="ai-assistance">
                   <AiAssistanceSettingsPanelContainer
                     accessToken={workspace.accessToken}
                     canManagePolicy={workspace.canManageAiAssistance}
@@ -64,6 +86,7 @@ export function SettingsPage() {
                     locale={workspace.locale}
                     workspaceId={workspace.workspaceId}
                   />
+                  </SettingsPanelAnchor>
                 ) : null}
               </>
             ) : undefined}
@@ -111,6 +134,7 @@ export function SettingsPage() {
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
                 guardRequest={workspace.guardEnterpriseSession}
+                memberTimeZone={workspace.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone}
                 muteTargets={workspace.teams}
                 onSessionError={workspace.reportNotificationPreferencesError}
               />
@@ -119,6 +143,13 @@ export function SettingsPage() {
             onThemePreferenceChange={workspace.onThemePreferenceChange}
             onLocaleChange={workspace.onLocaleChange}
             onTimeZoneChange={workspace.onTimeZoneChange}
+            profileSection={workspace.accessToken ? (
+              <MemberProfileSectionContainer
+                accessToken={workspace.accessToken}
+                t={t}
+                userLabel={workspace.userLabel}
+              />
+            ) : undefined}
             isPreferencesSaveFailed={workspace.isMemberPreferencesSaveFailed}
             onRetryPreferencesSave={workspace.onRetryMemberPreferencesSave}
             t={t}
@@ -127,47 +158,65 @@ export function SettingsPage() {
         ) : null}
         {section === 'workspace' ? (
           <>
-            <EnterpriseSecuritySettingsLink t={t} />
+            <SettingsPanelAnchor panel="enterprise-security">
+              <EnterpriseSecuritySettingsLink t={t} />
+            </SettingsPanelAnchor>
             {workspace.accessToken ? (
               <>
-                <WorkspaceAccessPanelContainer
-                  accessToken={workspace.accessToken}
-                  locale={workspace.locale}
-                  workspaceId={workspace.workspaceId}
-                />
-                {workspace.canManageWorkspaceConfiguration ? (
-                  <TenantAdministrationPanelContainer
+                <SettingsPanelAnchor panel="members">
+                  <WorkspaceAccessPanelContainer
                     accessToken={workspace.accessToken}
                     locale={workspace.locale}
+                    workspaceId={workspace.workspaceId}
                   />
+                </SettingsPanelAnchor>
+                {workspace.canManageWorkspaceConfiguration ? (
+                  <SettingsPanelAnchor panel="tenant">
+                    <TenantAdministrationPanelContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
+                    <WorkspaceWorkCalendarAdjustment
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
+                  </SettingsPanelAnchor>
                 ) : null}
                 {workspace.canManageWorkspaceConfiguration ? (
-                  <DirectoryAdministrationPanelContainer
-                    accessToken={workspace.accessToken}
-                    locale={workspace.locale}
-                  />
+                  <SettingsPanelAnchor panel="directory">
+                    <DirectoryAdministrationPanelContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
+                  </SettingsPanelAnchor>
                 ) : null}
-                <DeveloperPlatformSettingsPanelContainer
-                  accessToken={workspace.accessToken}
-                  initialSection={developerPlatformInitialSection}
-                  locale={workspace.locale}
-                  teams={workspace.teams}
-                />
-                <AutomationManagementPanelContainer
-                  accessToken={workspace.accessToken}
-                  canManage={workspace.canManageWorkspaceConfiguration}
-                  locale={workspace.locale}
-                  teams={[...workspace.teams]}
-                />
+                <SettingsPanelAnchor panel="developer-platform">
+                  <DeveloperPlatformSettingsPanelContainer
+                    accessToken={workspace.accessToken}
+                    initialSection={developerPlatformInitialSection}
+                    locale={workspace.locale}
+                    teams={workspace.teams}
+                  />
+                </SettingsPanelAnchor>
+                <SettingsPanelAnchor panel="automation">
+                  <AutomationManagementPanelContainer
+                    accessToken={workspace.accessToken}
+                    canManage={workspace.canManageWorkspaceConfiguration}
+                    locale={workspace.locale}
+                    teams={[...workspace.teams]}
+                  />
+                </SettingsPanelAnchor>
                 {workspace.canReadAuditLog || workspace.canExportAuditLog ? (
-                  <AuditLogPanelContainer
-                    accessToken={workspace.accessToken}
-                    canExport={workspace.canExportAuditLog}
-                    canSearch={workspace.canReadAuditLog}
-                    guardRequest={workspace.guardEnterpriseSession}
-                    locale={workspace.locale}
-                    timeZone={workspace.timeZone}
-                  />
+                  <SettingsPanelAnchor panel="audit-log">
+                    <AuditLogPanelContainer
+                      accessToken={workspace.accessToken}
+                      canExport={workspace.canExportAuditLog}
+                      canSearch={workspace.canReadAuditLog}
+                      guardRequest={workspace.guardEnterpriseSession}
+                      locale={workspace.locale}
+                      timeZone={workspace.timeZone}
+                    />
+                  </SettingsPanelAnchor>
                 ) : null}
               </>
             ) : null}
@@ -175,26 +224,107 @@ export function SettingsPage() {
         ) : null}
         {section === 'team' && workspace.accessToken ? (
           <>
-            <WorkItemConfigurationPanelContainer
-              accessToken={workspace.accessToken}
-              canManageWorkspaceConfiguration={
-                workspace.canManageWorkspaceConfiguration
-              }
-              canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
-              locale={workspace.locale}
-              teams={workspace.teams}
-            />
-            {workspace.softwareFactoryEnabled ? (
-              <AgentSettingsPanelContainer
+            {workspace.canManageTeams ? (
+              <SettingsPanelAnchor panel="team-profile">
+                <TeamProfilePanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
+              </SettingsPanelAnchor>
+            ) : null}
+            <SettingsPanelAnchor panel="work-item-configuration">
+              <WorkItemConfigurationPanelContainer
                 accessToken={workspace.accessToken}
+                canManageWorkspaceConfiguration={
+                  workspace.canManageWorkspaceConfiguration
+                }
                 canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
                 locale={workspace.locale}
                 teams={workspace.teams}
               />
+            </SettingsPanelAnchor>
+            <SettingsPanelAnchor panel="work-calendar">
+              <WorkCalendarPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
+            <SettingsPanelAnchor panel="work-item-key-prefix">
+              <WorkItemKeyPrefixPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
+            {workspace.softwareFactoryEnabled ? (
+              <SettingsPanelAnchor panel="agent-settings">
+                <AgentSettingsPanelContainer
+                  accessToken={workspace.accessToken}
+                  canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
+                  locale={workspace.locale}
+                  teams={workspace.teams}
+                />
+              </SettingsPanelAnchor>
             ) : null}
           </>
         ) : null}
       </div>
     </WorkspaceRouteContent>
   )
+}
+
+/** Which conditionally shown settings panels are on the page. */
+type SettingsPanelAvailability = {
+  /** Whether the member is signed in, which every API-backed panel needs. */
+  accessToken: boolean
+  /** Whether the AI assistance panel is rolled out. */
+  aiAssistance: boolean
+  /** Whether the member can search or export the audit log. */
+  auditLog: boolean
+  /** Whether the member manages the Workspace configuration. */
+  workspaceConfiguration: boolean
+  /** Whether the Software factory is enabled. */
+  softwareFactory: boolean
+  /** Whether the member manages Teams, which shows the Team profile panel. */
+  teamManagement: boolean
+}
+
+/**
+ * Lists the panels shown in a settings area, in page order, for the in-page links.
+ *
+ * @param section - Settings area on the page.
+ * @param available - Which conditional panels are shown.
+ * @returns Links to the panels on the page.
+ */
+function listSettingsPanels(
+  section: ReturnType<typeof resolveSettingsSection>,
+  available: SettingsPanelAvailability,
+): SettingsPanelLink[] {
+  const signedIn = available.accessToken
+  const panels: Array<SettingsPanelLink['panel'] | false> = section === 'personal'
+    ? [
+        'profile',
+        'display',
+        // The install card hides itself where the browser cannot install the app, so it is not linked.
+        signedIn && 'notifications',
+        signedIn && 'account-security',
+        signedIn && available.aiAssistance && 'ai-assistance',
+        'agent-connection',
+      ]
+    : section === 'workspace'
+      ? [
+          'enterprise-security',
+          signedIn && 'members',
+          signedIn && available.workspaceConfiguration && 'tenant',
+          signedIn && available.workspaceConfiguration && 'directory',
+          signedIn && 'developer-platform',
+          signedIn && 'automation',
+          signedIn && available.auditLog && 'audit-log',
+        ]
+      : [
+          signedIn && available.teamManagement && 'team-profile',
+          signedIn && 'work-item-configuration',
+          signedIn && 'work-calendar',
+          signedIn && 'work-item-key-prefix',
+          signedIn && available.softwareFactory && 'agent-settings',
+        ]
+  return panels.filter((panel) => panel !== false).map((panel) => ({ panel, section }))
 }

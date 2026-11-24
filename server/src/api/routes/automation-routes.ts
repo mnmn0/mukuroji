@@ -201,7 +201,10 @@ import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
 } from '../shared/workspace-access'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import {
+  applySharedCalendarToNewSchedule,
+  readWorkspaceWorkItemCalendarPolicy,
+} from '../shared/workspace-calendar'
 
 async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
@@ -2125,10 +2128,20 @@ async function executeAutomationWorkItemCreate(
     context.execution.workspaceId,
     teamId,
   )
+  const automationProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
-    normalizedBody,
+    {
+      ...normalizedBody,
+      // A schedule that follows the shared calendar takes the Team or Project one (ADR 0058).
+      schedule: await applySharedCalendarToNewSchedule(
+        context.execution.workspaceId,
+        { teamId, ...(automationProjectId ? { projectId: automationProjectId } : {}) },
+        normalizedBody.schedule,
+        dependencies.workCalendarSources,
+      ),
+    },
     configuration,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
@@ -3161,14 +3174,20 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       // A Project template's WBS keeps the calendar of the first request on every retry; a retry
       // returns its receipt without reading the calendar again. A new receipt must match the
       // preview the caller accepted, so the dates it creates are the dates the caller saw.
+      // The WBS counts its working days on the target Team's calendar, which the new Project starts
+      // from (ADR 0058).
+      const target = input.target
       const application = await automationDependencies.ruleTemplates.reserveTemplateApplication(
         principal.directoryId,
         principal.actorId,
         c.req.param('templateId'),
-        input.target,
+        target,
         idempotencyKey,
         async (templateVersion) => {
-          const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
+          const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
+            principal.directoryId,
+            target.kind === 'project' ? { teamId: target.teamId } : undefined,
+          )
           const expected = input.expectedPreview
           if (
             expected !== undefined && (
@@ -3223,7 +3242,8 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         template,
         input.target,
         names.nameJa,
-        await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+        // The preview counts on the same Team calendar the apply uses (ADR 0058).
+        await readWorkspaceWorkItemCalendarPolicy(principal.directoryId, { teamId: input.target.teamId }),
       ))
     } catch (error) {
       return toAutomationErrorResponse(c, error)

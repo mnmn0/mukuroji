@@ -49,6 +49,13 @@ function createDependencies(
       })
       return { reports: [{ id: 'report-1' }], nextCursor: 'next-report' }
     },
+    async listDeliveries(value, limit, cursor) {
+      calls.push({
+        operation: 'listDeliveries',
+        value: { principal: value, limit, cursor },
+      })
+      return { deliveries: [{ reportId: 'report-1' }] }
+    },
     async createReport(value, input) {
       calls.push({ operation: 'createReport', value: { principal: value, input } })
       return { id: 'report-1' }
@@ -96,6 +103,7 @@ describe('createAnalyticsRouter', () => {
       'POST /api/analytics/evidence',
       'POST /api/analytics/export',
       'GET /api/analytics/reports',
+      'GET /api/analytics/deliveries',
       'POST /api/analytics/reports',
       'PATCH /api/analytics/reports/:reportId',
       'DELETE /api/analytics/reports/:reportId',

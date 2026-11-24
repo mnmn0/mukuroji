@@ -3,7 +3,40 @@
 Workspace の稼働カレンダーは、稼働曜日・会社の休日・日本の祝日を使うかどうかで決まる（`WorkspaceCalendarSettings`）。
 新しい Work Item はこの稼働カレンダーから作った calendar policy（`createWorkspaceWorkItemCalendarPolicy`）を
 `schedule.calendarPolicy` に写して保存し、稼働日数はその policy で数える。保存済みの Work Item の日程は、
-Workspace の設定を変えても変わらない。
+Workspace の設定を保存しただけでは変わらない（下の「Team・Project のカレンダーと変更の適用」で揃える）。
+
+## Team・Project のカレンダーと変更の適用
+
+Team と Project は Workspace の稼働カレンダーへの上書きを持てる（[ADR 0058](adr/0058-team-project-shared-work-calendars.md)）。
+
+- 上書きできるのは稼働曜日、日本の祝日を使うかどうか、足す会社の休日（最大 128 日）。省いた項目は継承する。
+  解決順は Workspace → Team → Project で、稼働曜日と祝日の有無は後の層が勝ち、会社の休日は足し合わせる。
+- 行は tenant administration table の Workspace partition に置く（Team は `WORK_CALENDAR#TEAM#<teamId>#`、
+  Project は `WORK_CALENDAR#TEAM#<teamId>#PROJECT#<projectId>`）。`revision` の条件付きで保存し、古い revision は 409。
+- Work Item の policy の `calendarSource: 'shared'` は「共有カレンダーの写し」を表し、カレンダーの変更で書き換えてよい。
+  ない policy は個別の上書きで、カレンダーを変えても変わらない。既存の row は `calendarSource` を持たないので移行は要らない。
+- 新しい Work Item は、policy が `shared` なら server が作成先の Team・Project のカレンダーで写し直す（開始日と終了日を保ち、稼働日数を数え直す）。
+
+| API | 権限 | 内容 |
+| --- | --- | --- |
+| `GET /api/teams/:teamId/work-calendar[?projectId=]` | Team（と Project）の viewer | 保存済みの上書き、解決済みの policy、変更できるか |
+| `POST /api/teams/:teamId/work-calendar/preview` | Team 設定の管理者、Project は Project manager も | 保存せずに影響を返す |
+| `PUT /api/teams/:teamId/work-calendar` | 同上 | 保存し、従う Work Item を書き換える |
+| `POST /api/workspace/work-calendar/preview` | Workspace 管理者 | 候補の Workspace 設定の影響を返す |
+| `POST /api/workspace/work-calendar/apply` | Workspace 管理者 | 保存済みの Workspace 設定に `shared` な Work Item を揃える |
+
+- 調整は `keep-duration`（開始日と稼働日数を保ち、終了日を動かす）と `keep-end-date`（開始日と終了日を保ち、稼働日数を数え直す。
+  0 日になるものは `keep-duration`）から選ぶ。選んだ調整はカレンダーの行に保存する。
+  次の既定にするのは Team の行の調整だけで、Project の画面も Team の行の調整を最初に選ぶ。
+- 従う Work Item は `shared` のものと、Team・Project の変更では変更前の解決済み policy と同じ規則を持つ旧来の Work Item。
+  旧来の Work Item は書き換えるときに `shared` にする。書き換えるのは新しいカレンダーと規則が違う Work Item だけ。
+  Workspace の apply は旧来の Work Item を取り込まない。
+- 書き換えは schedule cascade の書き込み（24 件ずつ、Work Item の revision で fence、audit は `schedule-cascade-updated`）を使う。
+  1回に書き換えるのは 480 件まで、1 Team の Work Item が 1000 件を超えるときも 413。衝突した transaction は読み直して1件ずつ再試行し、それでも衝突した Work Item は件数だけ返す。
+- Project のカレンダーの変更は、その Project に割り当てられた Work Item だけを書き換える。
+- 書き換えの途中で同じ範囲のカレンダーが保存し直されたら、残りは新しい変更に任せて衝突として数える。
+- 書き換えは日程 dependency を伝播させない。制約を満たさなくなった Work Item は Planning の constraint conflict として表示される。
+- preview の例は開始日順に最大 10 件で、読む人が見られる Work Item だけを出す。
 
 ## 休日の決まり方
 
@@ -18,17 +51,21 @@ Workspace の設定を変えても変わらない。
 
 | 経路 | calendar policy |
 | --- | --- |
-| Web の task 画面、Team の Issue 画面 | 読み込んだ Workspace の稼働カレンダー（読み込み前・失敗時は月〜金・休日なし） |
+| Web の task 画面、Team の Issue 画面 | 選んだ Team・Project のカレンダー（読み込み前は Workspace の稼働カレンダー、それも読めなければ月〜金・休日なし）。server が作成先のカレンダーで写し直す |
 | Public API `POST /api/v1/work-items` | `schedule` を省いたとき server が Workspace の稼働カレンダーを付ける（`dueDate` があれば期限付き、なければ未スケジュール）。`schedule` を送ったときはその policy のまま |
 | MCP `create_task` | `schedule` を省いて Public API に送るので、Public API と同じ |
-| Project template の WBS 適用 | Workspace の稼働カレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける。適用の受付時に稼働カレンダーを固定し、再試行でも同じものを使う |
-| 依頼フォーム・Triage からの作成 | Workspace の稼働カレンダー |
+| Project template の WBS 適用 | 対象 Team のカレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける。適用の受付時に稼働カレンダーを固定し、再試行でも同じものを使う |
+| 依頼フォーム・Triage からの作成 | 作成先の Team・Project のカレンダー |
+| Automation の作成 action | 作成先の Team のカレンダー |
 | CSV / JSON import | 行の `schedule` に `calendarPolicy` がないとき Workspace の稼働カレンダー。日付範囲で `durationDays` もないときは、その policy で数える。commit した job は作成時の稼働カレンダーを保存し、worker の再試行でも同じものを使う |
 
+上の表の「Workspace の稼働カレンダー」は、作成先の Team・Project にカレンダーがあればそれで上書きしたもの（Public API・MCP・import は Team まで）。
+
 期限・期限超過の判定は policy の time zone で今日の日付を決めて期限日と比べるだけで、休日を使わない。
-Planning の critical path（Planning entity と Work Item の依存関係）は、日付範囲の暦日数と暦日の lag で数える。
-Work Item の稼働日数は policy の休日を除いて数え、日付範囲の始点と終点はすでに休日を避けて置かれているので、
-critical path は休日を数え直さない。
+期限日は policy の休日を避けて置かれ、policy は Team・Project のカレンダーの写しなので、critical path と同じカレンダーで判定される。
+Work Item の critical path は日付範囲の稼働日数（`durationDays`）で数える。Planning entity の critical path は
+forecast（無ければ baseline）の日付範囲を Workspace の稼働カレンダーで数えた稼働日数（最小 1）で数える。
+lag は稼働日の差として足す（日程 dependency の伝播は従来どおり暦日の lag で動かす）。
 
 ## 祝日データの出典と更新
 
