@@ -496,6 +496,9 @@ async function deliverDigestBatch(run: DeliveryRun, digest: ChannelDigestDepende
     if (run.dependencies.now().getTime() >= run.deadline) break
     // A longer lease covers checking every row; each is renewed again right before the send.
     const claimed = await claimDelivery(run, candidate, 120_000)
+    // An overlapping run that holds the opener is assembling this recipient's digest; claiming
+    // its companions here would split one digest into two.
+    if (!claimed && candidate === opener) return { identities }
     if (claimed && await checkClaimed(run, claimed)) checked.push(claimed)
   }
   const renewed: ClaimedDelivery[] = []

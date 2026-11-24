@@ -240,6 +240,20 @@ describe('Email digest delivery', () => {
     expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1', second.notificationKey]])
     expect(f.finishes.map((finish) => finish.key).at(-1)).toBe(first.notificationKey)
   })
+  test('leaves the companions alone when an overlapping run already holds the opener', async () => {
+    const f = digestFixture(2)
+    const claimed: string[] = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      store: { ...f.dependencies.store, claim: async (delivery) => {
+        claimed.push(delivery.notificationKey)
+        return delivery.notificationKey !== '2026-09-26T11:00:00.000Z#event-1'
+      } },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(0)
+    expect(claimed).toEqual(['2026-09-26T11:00:00.000Z#event-1'])
+    expect(f.digests).toEqual([])
+  })
   test('sends instant rows on their own even with a digest sender', async () => {
     const f = fixture({ succeeded: true, retryable: false }, emailOn)
     let digests = 0
