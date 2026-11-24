@@ -574,6 +574,7 @@ export const workspaceMessages = {
   'workspace.settings.panel.members': 'Members and invitations',
   'workspace.settings.panel.tenant': 'Tenant administration',
   'workspace.settings.panel.directory': 'Teams and Projects',
+  'workspace.settings.panel.time-periods': 'Month close for every Team',
   'workspace.settings.panel.developer-platform': 'API and integrations',
   'workspace.settings.panel.automation': 'Automation',
   'workspace.settings.panel.audit-log': 'Audit log',

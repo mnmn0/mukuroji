@@ -574,6 +574,7 @@ export const workspaceMessages = {
   'workspace.settings.panel.members': 'メンバーと招待',
   'workspace.settings.panel.tenant': 'テナント管理',
   'workspace.settings.panel.directory': 'Team と Project の管理',
+  'workspace.settings.panel.time-periods': '全 Team の月締め',
   'workspace.settings.panel.developer-platform': 'API と外部連携',
   'workspace.settings.panel.automation': '自動化',
   'workspace.settings.panel.audit-log': '監査ログ',
