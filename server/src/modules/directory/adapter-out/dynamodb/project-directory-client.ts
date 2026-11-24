@@ -832,6 +832,20 @@ export type ProjectDirectoryClient = {
     memberKey: string,
     minimumRole: ProjectRole,
   ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined>
+  /** Builds a commit-time condition proving a Project charter still names the given owner.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project whose charter is checked.
+   * @param ownerUserId - Member key the charter owner must still be.
+   * @returns A DynamoDB condition check for the dependent transaction.
+   */
+  createProjectCharterOwnerConditionCheck?(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    ownerUserId: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]>
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
@@ -1465,6 +1479,50 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /** Builds a commit-time condition for one active direct Project membership. */
+  /** Builds a commit-time condition proving a Project charter still names the given owner.
+   *
+   * A later charter save that moved the owner again fails the dependent transaction, so a
+   * superseded save cannot apply its owner elsewhere.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project whose charter is checked.
+   * @param ownerUserId - Member key the charter owner must still be.
+   * @returns A DynamoDB condition check on the Project row.
+   */
+  async createProjectCharterOwnerConditionCheck(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    ownerUserId: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number]> {
+    const { project } = await this.readTeamProjectItem(directoryId, teamId, projectId)
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: project.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+          'attribute_not_exists(#archivedAt) AND #charter.#owner.#userId = :ownerUserId',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#charter': 'charter',
+          '#entryType': 'entryType',
+          '#owner': 'owner',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+          '#userId': 'userId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':ownerUserId': ownerUserId,
+          ':projectId': projectId,
+          ':teamId': teamId,
+        },
+      },
+    }
+  }
+
   async createProjectAccessConditionCheck(
     directoryId: string,
     projectId: string,

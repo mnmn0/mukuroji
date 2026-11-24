@@ -139,6 +139,7 @@ export type ProjectCharterState = {
  * - `not-configured`: the Project has no update cadence, so there is no owner to move.
  * - `not-permitted`: the caller may not change the Project's update cadence.
  * - `owner-not-eligible`: the new charter owner lacks the member access an update owner needs.
+ * - `superseded`: a later charter save changed the owner again before this one moved it.
  * - `failed`: the cadence could not be written; the charter itself was saved.
  */
 export type ProjectCharterUpdateOwnerSync =
@@ -147,6 +148,7 @@ export type ProjectCharterUpdateOwnerSync =
   | 'not-configured'
   | 'not-permitted'
   | 'owner-not-eligible'
+  | 'superseded'
   | 'failed'
 
 /** Charter actions the requesting member may take. */

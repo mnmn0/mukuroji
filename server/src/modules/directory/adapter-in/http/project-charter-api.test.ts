@@ -1,11 +1,14 @@
 import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
+import { syncProjectUpdateOwnerWithCharter } from '../../../../api/routes/planning-routes'
+import { authenticateWorkspacePrincipal } from '../../../../api/shared/request-authorization'
 const {
   app,
   configureFakeProjectClients,
   planningApiRequest,
   resetTestApp,
+  runWithTestAppDependencies,
 } = createApiTestHarness()
 import { afterEach, describe, expect, test } from 'bun:test'
 
@@ -112,6 +115,27 @@ describe('Project charter API', () => {
       updateOwnerSync: 'owner-not-eligible',
     })
     expect(await readUpdateOwner()).toBe('demo@example.com')
+  })
+
+  test('does not apply an owner that a later charter save already replaced', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    await configureUpdateCadence('demo@example.com')
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(await saved.json()).toMatchObject({ updateOwnerSync: 'synced' })
+
+    // An earlier save that named demo@example.com finishes its synchronization only now.
+    const late = await runWithTestAppDependencies(async () => await syncProjectUpdateOwnerWithCharter(
+      await authenticateWorkspacePrincipal('test-token'),
+      'core-team',
+      'refero',
+      'demo@example.com',
+    ))
+
+    expect(late).toBe('superseded')
+    expect(await readUpdateOwner()).toBe('sato@example.com')
   })
 
   test('reports a Project without an update cadence and keeps the charter saved', async () => {

@@ -186,6 +186,7 @@ const updateOwnerSyncValues: readonly unknown[] = [
   'not-configured',
   'not-permitted',
   'owner-not-eligible',
+  'superseded',
   'failed',
 ] satisfies readonly ProjectCharterUpdateOwnerSync[]
 

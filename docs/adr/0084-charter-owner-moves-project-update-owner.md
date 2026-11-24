@@ -23,9 +23,12 @@ Issue #638 は「charter の責任者を変えると health update の owner も
 - この書き込みは cadence endpoint と同じ確認を通す。呼び出した人が Project の update target の manager で
   あること、新しい責任者がその Project の member 以上で publish できること、既存の escalation 先が viewer 以上で
   あること。commit 時の fence も cadence endpoint と同じものを付ける。
+- cadence の transaction には、charter の責任者がまだこの人であるという条件も付ける。連続した2回の保存が
+  重なり、先の保存の書き換えが後から終わっても、後の保存の責任者を上書きしない。条件が外れたときは
+  `superseded` を返す。
 - charter の保存と cadence の書き換えは1つの transaction にしない。charter は先に確定し、cadence の結果は
   charter の応答の `updateOwnerSync`（`synced`、`unchanged`、`not-configured`、`not-permitted`、
-  `owner-not-eligible`、`failed`）で返す。Web は `synced` 以外の失敗を保存後のメッセージで示す。
+  `owner-not-eligible`、`superseded`、`failed`）で返す。Web は `synced` 以外の失敗を保存後のメッセージで示す。
 - Planning の revision が読み取りと書き込みの間に進んだときは、読み直して3回まで試す。
 - 逆向き（Planning で担当者を変えたとき charter の責任者を変える）は行わない。進捗報告だけを
   別の人に任せる運用を残すため。

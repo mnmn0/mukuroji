@@ -3064,8 +3064,10 @@ const CHARTER_UPDATE_OWNER_SYNC_ATTEMPTS = 3
  *
  * The charter is already saved, so nothing here undoes it. The cadence is rewritten with only its
  * owner changed, under the same checks as the cadence endpoint: the caller must manage the
- * Project's update target, and the new owner must be able to publish updates in it. A Planning
- * revision that moved between the read and the write is read again and retried a few times.
+ * Project's update target, and the new owner must be able to publish updates in it. The cadence
+ * write is fenced on the charter still naming this owner, so an older save that finishes after a
+ * newer one cannot apply its owner. A Planning revision that moved between the read and the write
+ * is read again and retried a few times.
  *
  * @param principal - Principal that saved the charter.
  * @param teamId - Team that owns the Project.
@@ -3123,6 +3125,14 @@ export async function syncProjectUpdateOwnerWithCharter(
           throw error
         }
       }
+      // A later save that moved the charter owner again owns the update owner from here on.
+      if (await isCharterOwnerSuperseded(principal, teamId, projectId, ownerMemberKey)) return 'superseded'
+      const charterOwnerCheck = (await workspaceDependencies.projectDirectory.createProjectCharterOwnerConditionCheck?.(
+        principal.directoryId,
+        teamId,
+        projectId,
+        ownerMemberKey,
+      ))?.ConditionCheck
       try {
         await workItemDependencies.planning.configureUpdateCadence(
           principal.directoryId,
@@ -3132,17 +3142,21 @@ export async function syncProjectUpdateOwnerWithCharter(
             expectedRevision: snapshot.revision,
           },
           workItemState,
-          createPlanningCallerAuthorizationConditionChecks(principal, recipients),
+          [
+            ...createPlanningCallerAuthorizationConditionChecks(principal, recipients),
+            ...(charterOwnerCheck ? [{ ConditionCheck: charterOwnerCheck }] : []),
+          ],
         )
         return 'synced'
       } catch (error) {
+        if (!(error instanceof PlanningError)) throw error
         if (
-          attempt < CHARTER_UPDATE_OWNER_SYNC_ATTEMPTS &&
-          error instanceof PlanningError &&
-          error.code === 'PlanningRevisionConflict'
+          error.code === 'PlanningAuthorizationChanged' &&
+          await isCharterOwnerSuperseded(principal, teamId, projectId, ownerMemberKey)
         ) {
-          continue
+          return 'superseded'
         }
+        if (attempt < CHARTER_UPDATE_OWNER_SYNC_ATTEMPTS && error.code === 'PlanningRevisionConflict') continue
         throw error
       }
     }
@@ -3150,6 +3164,29 @@ export async function syncProjectUpdateOwnerWithCharter(
     console.error('Moving the Project update owner to the charter owner failed.', error)
     return 'failed'
   }
+}
+
+/**
+ * Checks whether a later charter save has replaced the owner this synchronization applies.
+ *
+ * @param principal - Principal that saved the charter.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose charter owner changed.
+ * @param ownerMemberKey - Member key the synchronization moves the update owner to.
+ * @returns Whether the stored charter now names another owner or none.
+ */
+async function isCharterOwnerSuperseded(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  ownerMemberKey: string,
+): Promise<boolean> {
+  const { charter } = await workspaceDependencies.projectDirectory.getProjectCharter(
+    principal.directoryId,
+    teamId,
+    projectId,
+  )
+  return charter.owner?.userId !== ownerMemberKey
 }
 
 /**
