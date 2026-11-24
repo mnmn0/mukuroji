@@ -13,6 +13,8 @@ const {
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
+import type { EnterpriseCustomRole } from '@mukuroji/contracts'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import {
   DynamoDbTeamIssuesClient,
 } from '../../../work-items'
@@ -1027,6 +1029,86 @@ test('does not read any deliverable when the Project is not readable', async () 
 
   expect(response.status).toBe(403)
   expect(reads).toBe(0)
+})
+
+test('reads no attachment of a Work Item whose canonical row moved to another Project', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'viewer',
+    canonicalProjectIssueIds: ['visible-item', 'moved-item'],
+    detailAssignedProjectIds: { 'moved-item': 'other-project' },
+  })
+  const reads: string[] = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push(scope.issueId ?? scope.kind)
+        return scope.kind === 'project'
+          ? []
+          : [createDeliverableSummaryFixture(`${scope.issueId}-file`, 'none', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as { deliverables: Array<{ file: { id: string } }> }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['visible-item-file'])
+  expect(reads).toEqual(['project', 'visible-item'])
+  expect(calls.issueDetails.map((read) => ({ issueId: read.issueId, readOptions: read.readOptions })))
+    .toEqual([
+      { issueId: 'visible-item', readOptions: { consistentIssueRead: true, includeEvents: false } },
+      { issueId: 'moved-item', readOptions: { consistentIssueRead: true, includeEvents: false } },
+    ])
+})
+
+test('returns only Project files to an Enterprise role without work-items.read', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    canonicalProjectIssueIds: ['visible-item'],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:files-only', name: 'Files only',
+    permissions: ['teams.read', 'projects.read', 'files.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'files-only',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  const reads: string[] = []
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push(scope.issueId ?? scope.kind)
+        return [createDeliverableSummaryFixture(`${scope.issueId ?? 'project'}-file`, 'none', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as { deliverables: Array<{ file: { id: string } }>; nextCursor?: string }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['project-file'])
+  expect(body.nextCursor).toBeUndefined()
+  expect(reads).toEqual(['project'])
+  expect(JSON.stringify(body)).not.toContain('visible-item')
 })
 
 test('requests approval of a Project file without a Work Item completion target', async () => {

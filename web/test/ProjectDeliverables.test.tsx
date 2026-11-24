@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { SWRConfig } from 'swr'
 import { getProjectDeliverables } from '../src/files/api/deliverables'
 import {
+  fileAnnotationFixtures,
   fileArtifactsControllerFixture,
+  imageFileFixture,
   projectDeliverableFixtures,
   projectDeliverablesControllerFixture,
 } from '../src/files/fixtures'
+import { useFileArtifacts, type FileArtifactsController } from '../src/files/mutations/useFileArtifacts'
 import { createProjectDeliverablesCsv } from '../src/files/model/projectDeliverables'
 import { loadAllProjectDeliverables } from '../src/files/queries/useProjectDeliverables'
 import { IssueArtifactsPanel } from '../src/files/ui/IssueArtifactsPanel'
@@ -121,6 +125,47 @@ describe('Project deliverables', () => {
     )
     expect(emptyHtml).toContain('No deliverables match the filters.')
     expect(emptyHtml).not.toContain('Load more')
+  })
+
+  test('reloads the files and the deliverables after a new annotation', async () => {
+    const requests: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET'
+      requests.push(`${method} ${String(input)}`)
+      return new Response(JSON.stringify(method === 'POST'
+        ? { annotation: fileAnnotationFixtures[0] }
+        : { files: [], approvals: [], capabilities: { canUpload: true, canRequestApproval: true, canGrantGuestAccess: false } }))
+    }) as typeof fetch
+    let deliverableRefreshes = 0
+    let controller: FileArtifactsController | undefined
+
+    /** Captures the file controller of a Project scope. */
+    function ControllerProbe() {
+      controller = useFileArtifacts({
+        accessToken: 'token',
+        onRefreshed: () => {
+          deliverableRefreshes += 1
+        },
+        scope: { kind: 'project', teamId: 'core', projectId: 'refero' },
+      })
+      return null
+    }
+    renderToStaticMarkup(
+      <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false }}>
+        <ControllerProbe />
+      </SWRConfig>,
+    )
+    if (!controller) throw new Error('The file controller was not rendered.')
+
+    const annotation = await controller.createAnnotation(imageFileFixture, imageFileFixture.currentVersion, {
+      anchor: { kind: 'image', x: 0.5, y: 0.5 },
+      bodyMarkdown: 'Check the contrast.',
+    })
+
+    expect(annotation?.id).toBe(fileAnnotationFixtures[0]!.id)
+    expect(requests[0]).toStartWith('POST /api/teams/core/projects/refero/files/')
+    // The file collection reload ends by reloading the deliverables list.
+    expect(deliverableRefreshes).toBe(1)
   })
 
   test('shows open review comments on files and approval requests', () => {

@@ -88,7 +88,7 @@ GET /api/teams/{teamId}/projects/{projectId}/deliverables?approval=all|unapprove
 Project に直接添付した file と、Project の Work Item（comment 添付を含む）の file を 1 つの一覧で返す。各行は file（最新 version と scan 状態）、添付先（Project または Work Item の key・タイトル）、現在 version の承認状態（取り消されていない最新の file-version approval。なければ `none`）、現在 version の未解決 annotation 件数、更新日を持つ。
 
 - 1 page は Project の Work Item 一覧（`assignedProjectId` index）の順に `limit`（既定 50、最大 100）件の Work Item を読み、その Work Item の file をすべて返す。1 page 目だけ Project 自体の file も含める。`nextCursor` は Work Item 一覧の opaque cursor をそのまま使う。page 内は file の更新日の新しい順に並べる。
-- 読む Work Item は、URL の Team が所有し、現在の `assignedProjectId` が URL の Project で、archive されておらず、呼び出し元が Project を閲覧できるものに限る。file row に保存された作成時の Project ではなく Work Item の現在の割り当てで判定するため、別 Project へ移した Work Item の添付は出ない。Guest には `guestAccess` の file だけを返す。
+- 読む Work Item は、URL の Team が所有し、現在の `assignedProjectId` が URL の Project で、archive されておらず、呼び出し元が Project を閲覧できるものに限る。index は結果整合のため、候補の canonical Work Item を strongly consistent read で読み直し、その現在の割り当て・archive・閲覧権限で判定してから添付を読む。file row に保存された作成時の Project ではなく Work Item の現在の割り当てで判定するため、別 Project へ移した Work Item の添付は出ない。Enterprise role で Project の `work-items.read` を持たない人には Work Item を読まず、Project 自体の file だけを返す。Guest には `guestAccess` の file だけを返す。
 - Work Item ごとの partition は `FILE#` を先に Query し、表示できる file がある partition だけ `APPROVAL#` と `ANNOTATION#` を Query する。同時に読む partition は 8 件までにする。
 - 承認状態と未解決の絞り込みは page 内で行うため、条件に合う行がない page もある。CSV 出力は Web が全 page を読んで作る。
 

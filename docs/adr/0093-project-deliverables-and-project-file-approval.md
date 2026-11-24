@@ -23,8 +23,11 @@ Work Item を別の Project へ移しても書き換えない。
   Query する。1 page 目だけ Project 自体の partition も読む。cursor は Work Item 一覧の cursor をそのまま使う。
 - 読む Work Item は「URL の Team が所有し、現在の `assignedProjectId` が URL の Project で、archive されておらず、
   呼び出し元が Project を閲覧できる」ものに限る。file row の作成時の Project ではなく Work Item の現在の割り当てで
-  判定するので、閲覧できない Work Item や移動済みの Work Item の添付は返らない。Guest には `guestAccess` の
-  file だけを返す。
+  判定するので、閲覧できない Work Item や移動済みの Work Item の添付は返らない。index は結果整合なので、
+  候補ごとに canonical Work Item を strongly consistent read で読み直してから判定する。Guest には
+  `guestAccess` の file だけを返す。
+- Work Item の添付と持ち主（key・タイトル）は、Project の `work-items.read` を持つ人にだけ返す。
+  `files.read` だけを持つ Enterprise role には Project 自体の file だけを返す。
 - 各 partition は `FILE#` を先に読み、表示できる file があるときだけ `APPROVAL#` と `ANNOTATION#` を読む。
   同時に読む partition は 8 件までにする。
 - 承認状態と未解決の絞り込みは page 内で行う。CSV はブラウザが全 page を読んで作る。
@@ -45,7 +48,7 @@ Work Item を別の Project へ移しても書き換えない。
 ## 結果
 
 - 新しい index や schema version の変更、データ移行は不要。
-- 1 page の読み取りは Work Item 数に比例する。Work Item が多い Project では、絞り込み後に行がない page がありうる。
+- 1 page の読み取りは Work Item 数に比例し、Work Item ごとに canonical row の GetItem が 1 回増える。Work Item が多い Project では、絞り込み後に行がない page がありうる。
 - Project 横断の集計 row を持たないため、成果物数の合計や全体の並べ替えはできない。必要になったら
   projection を別途検討する。
 - Project の approval は Focus に出ない。対応は別の判断にする。

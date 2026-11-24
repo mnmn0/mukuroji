@@ -6,7 +6,7 @@ import {
   type ProjectDeliverablePage,
 } from '@mukuroji/contracts'
 import { FileProofingError, type FileDeliverableSummary } from '../../modules/files/file-proofing'
-import type { TeamIssueResponseItem } from '../../modules/work-items'
+import { isTeamIssueNotFoundError, type TeamIssueResponseItem } from '../../modules/work-items'
 import { mapInOrderWithConcurrency } from './agent-run-access'
 import { workItemDependencies } from './app-dependencies'
 import {
@@ -15,6 +15,7 @@ import {
 } from './collaboration-access'
 import { canAccessAssignedProject, type WorkspacePrincipal } from './project-access'
 import { readScopedWorkItemPage } from './scoped-work-item-page'
+import { createProjectReadCheck } from './team-project-read'
 import { canWriteTeamIssue } from './work-item-access'
 
 /** Largest number of Work Item file partitions read at once for one deliverables page. */
@@ -73,9 +74,12 @@ export function readProjectDeliverableQuery(
  * the Work Items of the Project that the principal can read.
  *
  * A page reads up to `limit` Work Items of the Project in list order and returns all of their
- * matching files; the first page also returns the Project's own files. Work Items of another
- * Team, of another Project, archived, or outside the principal's Project access are never read,
- * so their attachments never appear.
+ * matching files; the first page also returns the Project's own files. The Project list index is
+ * eventually consistent, so each candidate Work Item is read again with a strongly consistent
+ * read, and its files are read only while the canonical Work Item is in the Team, assigned to
+ * the Project, not archived, and readable by the principal. Work Item attachments are read only
+ * when the principal holds `work-items.read` at the Project; Project files need only the route's
+ * file access.
  *
  * @param principal - Authenticated Workspace principal.
  * @param teamId - Team that owns the Project.
@@ -90,22 +94,32 @@ export async function listProjectDeliverables(
   query: ProjectDeliverableQuery,
 ): Promise<ProjectDeliverablePage> {
   const { scope, actor, context } = await loadProjectFileProofingContext(principal, teamId, projectId)
-  const page = await readScopedWorkItemPage(
-    principal.directoryId,
-    { kind: 'project', id: projectId, includeArchived: false },
-    { limit: query.limit, ...(query.cursor ? { cursor: query.cursor } : {}) },
-    (issue) => issue.teamId === teamId &&
-      issue.assignedProjectId === projectId &&
-      canAccessAssignedProject(principal, context, issue.assignedProjectId, 'viewer'),
-  )
+  const canReadWorkItems = createProjectReadCheck(principal, context)(projectId)
   const projectDeliverables = query.cursor
     ? []
     : (await workItemDependencies.fileProofing.listDeliverables(scope, actor))
         .map((summary) => toProjectDeliverable(summary, { kind: 'project', teamId, projectId }))
+  if (!canReadWorkItems) {
+    return { deliverables: filterAndSortDeliverables(projectDeliverables, query) }
+  }
+  const isReadable = (issue: TeamIssueResponseItem) => issue.teamId === teamId &&
+    issue.assignedProjectId === projectId &&
+    issue.archivedAt === undefined &&
+    canAccessAssignedProject(principal, context, issue.assignedProjectId, 'viewer')
+  const page = await readScopedWorkItemPage(
+    principal.directoryId,
+    { kind: 'project', id: projectId, includeArchived: false },
+    { limit: query.limit, ...(query.cursor ? { cursor: query.cursor } : {}) },
+    isReadable,
+  )
   const workItemDeliverables = await mapInOrderWithConcurrency(
     page.issues,
     DELIVERABLE_SCOPE_READ_CONCURRENCY,
-    async (issue) => {
+    async (candidate) => {
+      const issue = await readCanonicalWorkItem(principal.directoryId, teamId, candidate.id)
+      if (!issue || !isReadable(issue)) {
+        return []
+      }
       const summaries = await workItemDependencies.fileProofing.listDeliverables(
         {
           workspaceId: principal.directoryId,
@@ -125,13 +139,48 @@ export async function listProjectDeliverables(
       return summaries.map((summary) => toProjectDeliverable(summary, toWorkItemOwner(issue)))
     },
   )
-  const deliverables = [...projectDeliverables, ...workItemDeliverables.flat()]
-    .filter((deliverable) => matchesProjectDeliverableQuery(deliverable, query))
-    .sort((left, right) => right.file.updatedAt.localeCompare(left.file.updatedAt))
   return {
-    deliverables,
+    deliverables: filterAndSortDeliverables([...projectDeliverables, ...workItemDeliverables.flat()], query),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
+}
+
+/**
+ * Reads the canonical Work Item with a strongly consistent read, for an authorization decision.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item ID taken from the list index.
+ * @returns The canonical Work Item, or `undefined` when it no longer exists.
+ */
+async function readCanonicalWorkItem(directoryId: string, teamId: string, issueId: string) {
+  try {
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true, includeEvents: false },
+    )
+    return detail.issue
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) {
+      return undefined
+    }
+    throw error
+  }
+}
+
+/**
+ * Applies the page filters and orders the rows newest update first.
+ *
+ * @param deliverables - Rows read for the page.
+ * @param query - Page query with the filters.
+ * @returns The rows to return.
+ */
+function filterAndSortDeliverables(deliverables: readonly ProjectDeliverable[], query: ProjectDeliverableQuery) {
+  return deliverables
+    .filter((deliverable) => matchesProjectDeliverableQuery(deliverable, query))
+    .sort((left, right) => right.file.updatedAt.localeCompare(left.file.updatedAt))
 }
 
 /**

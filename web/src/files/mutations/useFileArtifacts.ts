@@ -471,13 +471,14 @@ export function useFileArtifacts({
               context,
             ),
       )
-
+      // The new annotation is unresolved, so the file and approval counts change.
+      await refresh().catch(() => undefined)
       return response.annotation
     } catch (annotationError) {
       console.error('File annotation failed:', annotationError)
       return undefined
     }
-  }, [accessToken, operationToken, runMutation, scope, scopeKey])
+  }, [accessToken, operationToken, refresh, runMutation, scope, scopeKey])
 
   const changeAnnotationResolution = useCallback(async (
     file: FileAttachment,
