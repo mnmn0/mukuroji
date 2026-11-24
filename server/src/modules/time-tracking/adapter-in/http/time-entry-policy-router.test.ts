@@ -40,6 +40,7 @@ function createFixture(scope: { canManage: boolean; wholeTeam: boolean }, timeZo
     authenticate: async () => ({ directoryId: 'workspace-1', userKey: 'manager-1' }),
     requireWrite: () => {},
     requireTeamPermission: async () => {},
+    listTimeTrackingTeams: async () => [],
     canManageRates: async () => scope.canManage,
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,
