@@ -98,6 +98,11 @@ const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.myTasks.title',
   descriptionKey: 'workspace.myTasks.description',
 }
+const workspaceWorkloadRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'workspaceWorkload.eyebrow',
+  titleKey: 'workspaceWorkload.title',
+  descriptionKey: 'workspaceWorkload.description',
+}
 const workItemsRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'work-items',
   eyebrowKey: 'workItems.crossProject.eyebrow',
@@ -746,6 +751,8 @@ function resolveWorkspaceRouteMetadata(
   if (matchPath('/my-tasks', pathname)) {
     return myTasksRouteMetadata
   }
+
+  if (matchPath('/workload', pathname)) return workspaceWorkloadRouteMetadata
 
   if (matchPath('/work-items', pathname)) {
     return workItemsRouteMetadata
