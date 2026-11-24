@@ -4536,7 +4536,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       await requireProjectPermission(principal, projectId, 'manager')
       const body = await readJson<UpdateProjectMemberRequestBody>(c.req)
       const profile = await authenticationDependencies.cognito.getUserProfile(memberKey)
-      const workspaceMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      const activeMember = await workspaceDependencies.workspaceAccess.getActiveMember(principal.directoryId, profile.id)
+      // A member whose access expired keeps an active row until their roles are handed over, so
+      // their Project role can still be lowered, but never raised or newly given (ADR 0095).
+      const expiredMember = activeMember
+        ? undefined
+        : await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, profile.id)
+      const workspaceMember = activeMember ??
+        (expiredMember?.status === 'active' ? expiredMember : undefined)
 
       if (!workspaceMember) {
         throw new WorkspaceAccessError(
@@ -4564,6 +4571,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               memberKey: profile.id,
               ...body,
             }),
+            activeMember ? {} : { demotionOnly: true },
           ),
           principal.directoryId,
         ),

@@ -768,6 +768,18 @@ export type UpdateProjectMemberRequestBody = {
   role?: unknown
 }
 
+/** Options of a Project member role update. */
+export type UpdateProjectMemberOptions = {
+  /**
+   * Refuses the update unless the member already holds a higher role in the Project, so the
+   * update never creates a membership or raises a role.
+   */
+  demotionOnly?: boolean
+}
+
+/** Rank of each Project role, higher for more access. */
+const projectRoleRank: Readonly<Record<ProjectRole, number>> = { viewer: 1, member: 2, manager: 3 }
+
 /**
  * プロジェクトメンバー更新 API が返す response body です。
  */
@@ -928,6 +940,10 @@ export type ProjectDirectoryClient = {
   ): Promise<ProjectMembersResponse>
   /**
    * DynamoDB の project member role を作成または更新します。
+   *
+   * With `options.demotionOnly`, only lowers the role of an existing Project member, so a member
+   * who may no longer be given anything, such as one whose access expired, can still hand over
+   * a manager role (ADR 0095).
    */
   updateProjectMember(
     directoryId: string,
@@ -936,6 +952,7 @@ export type ProjectDirectoryClient = {
     input: UpdateProjectMemberRequestBody,
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
+    options?: UpdateProjectMemberOptions,
   ): Promise<UpdateProjectMemberResponse>
   /**
    * Grants a Project role only when the member has none, so an existing role is never changed.
@@ -1893,6 +1910,7 @@ export class DynamoDbProjectDirectoryClient {
     input: UpdateProjectMemberRequestBody,
     expectedWorkspaceMemberVersion: number,
     auditContext?: MutationAuditContext,
+    options: UpdateProjectMemberOptions = {},
   ) {
     await this.ensureLocalAuditTable()
     const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
@@ -1913,6 +1931,17 @@ export class DynamoDbProjectDirectoryClient {
         isActiveDirectoryItem(item),
       )
       existingMemberExpected = existingMember !== undefined
+      // The member Put is conditioned on the row this read returned, so the check holds at write.
+      if (
+        options.demotionOnly &&
+        (!existingMember || projectRoleRank[role] >= projectRoleRank[existingMember.role])
+      ) {
+        throw new ProjectDataError(
+          409,
+          'ProjectMemberDemotionOnly',
+          'Only a lower Project role can be given to a member who is not an active Workspace member.',
+        )
+      }
 
       const guardManager = (
         existingMember?.role === 'manager' &&

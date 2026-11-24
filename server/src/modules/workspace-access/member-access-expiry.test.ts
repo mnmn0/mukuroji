@@ -11,6 +11,7 @@ import {
 import {
   canMemberAccessExpire,
   isMemberAccessExpired,
+  isWorkspaceMemberRowActive,
   readMemberAccessExpiry,
 } from './domain/member-access-expiry'
 import {
@@ -116,6 +117,16 @@ test('treats a passed or unreadable expiry as expired and never expires an owner
   expect(isMemberAccessExpired({ accessExpiresAt: 'not-a-date' }, now)).toBe(true)
   expect(canMemberAccessExpire('owner')).toBe(false)
   expect(canMemberAccessExpire('guest')).toBe(true)
+})
+
+test('treats a stored member row as active only while it is active and unexpired', () => {
+  expect(isWorkspaceMemberRowActive({ status: 'active' }, now)).toBe(true)
+  expect(isWorkspaceMemberRowActive({ status: 'deactivated' }, now)).toBe(false)
+  expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: '2026-11-24T00:00:01.000Z' }, now)).toBe(true)
+  expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: '2026-11-24T00:00:00.000Z' }, now)).toBe(false)
+  // A malformed expiry fails closed.
+  expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: 0 }, now)).toBe(false)
+  expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: 'soon' }, now)).toBe(false)
 })
 
 test('refuses sign-in and membership checks for a member whose access expired', async () => {

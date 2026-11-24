@@ -24,6 +24,28 @@ export function isMemberAccessExpired(
 }
 
 /**
+ * Reports whether a stored Workspace member row grants access now: it is active and its access
+ * expiry, if any, has not passed.
+ *
+ * Readers that load the member row directly, such as notification delivery and realtime, use it
+ * so a member whose expiry passed is refused before the scheduled job writes the deactivation
+ * (ADR 0095).
+ *
+ * @param row - Stored member row; only `status` and `accessExpiresAt` are read.
+ * @param now - Current instant.
+ * @returns Whether the member is active and not expired; a malformed expiry fails closed.
+ */
+export function isWorkspaceMemberRowActive(
+  row: { readonly status?: unknown, readonly accessExpiresAt?: unknown },
+  now: Date,
+): boolean {
+  if (row.status !== 'active') return false
+  if (row.accessExpiresAt === undefined) return true
+  if (typeof row.accessExpiresAt !== 'string') return false
+  return !isMemberAccessExpired({ accessExpiresAt: row.accessExpiresAt }, now)
+}
+
+/**
  * Reports whether a Workspace role can be given an access expiry.
  *
  * Owners are left out so a Workspace cannot lose its last owner by expiry.

@@ -27,6 +27,7 @@ import {
 } from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
+import { isWorkspaceMemberRowActive } from '../../../workspace-access'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -2925,14 +2926,25 @@ function readWorkspaceNotificationRole(
     : undefined
 }
 
-/** Workspace member row が現在も notification recipient として有効かを判定します。 */
+/**
+ * Workspace member row が現在も notification recipient として有効かを判定します。
+ *
+ * A member whose access expiry has passed receives nothing, even while a pending handover keeps
+ * the row active (ADR 0095).
+ *
+ * @param memberKey - Normalized recipient member key.
+ * @param member - Stored Workspace member row.
+ * @param now - Current instant used for the access expiry.
+ * @returns Whether the row is the recipient's active, unexpired membership.
+ */
 export function isActiveWorkspaceNotificationMember(
   memberKey: string,
   member: Record<string, unknown> | undefined,
+  now: Date = new Date(),
 ): member is Record<string, unknown> {
   return member !== undefined &&
     member.entryType === 'workspace-member' &&
-    member.status === 'active' &&
+    isWorkspaceMemberRowActive(member, now) &&
     normalizeMemberKey(String(member.memberKey ?? member.email ?? '')) === memberKey
 }
 

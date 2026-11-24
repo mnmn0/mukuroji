@@ -6,6 +6,7 @@ const {
   configureFakeProjectClients,
   createAccessToken,
   createCyclePlanningInput,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -765,6 +766,46 @@ test('updates a project member role when the current user is project manager', a
     },
   ])
   expect(calls.userProfiles).toEqual(['sato@example.com', 'sato@example.com'])
+})
+
+test('lets a manager only lower the Project role of a member whose access expired (ADR 0095)', async () => {
+  configureFakeProjectClients(true, { role: 'manager', inactiveWorkspaceMemberKeys: ['ito@example.com'] })
+  const { workspaceAccess, projectDirectory } = getTestAppDependencies().workspace
+  const options: unknown[] = []
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getActiveMember(workspaceId, memberKey) {
+        return memberKey === 'sato@example.com' ? undefined : workspaceAccess.getActiveMember(workspaceId, memberKey)
+      },
+      async getMember(workspaceId, memberKey) {
+        const member = await workspaceAccess.getMember(workspaceId, memberKey)
+        return member && memberKey === 'sato@example.com'
+          ? { ...member, accessExpiresAt: '2020-01-01T00:00:00.000Z' }
+          : member
+      },
+    },
+    projectDirectory: {
+      ...projectDirectory,
+      async updateProjectMember(directoryId, projectId, memberKey, input, version, auditContext, memberOptions) {
+        options.push(memberOptions)
+        return projectDirectory.updateProjectMember(directoryId, projectId, memberKey, input, version, auditContext, memberOptions)
+      },
+    },
+  })
+  const patch = (memberKey: string) => app.request(`/api/projects/refero/members/${encodeURIComponent(memberKey)}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: memberKey, role: 'viewer' }),
+  })
+
+  expect((await patch('sato@example.com')).status).toBe(200)
+  expect(options).toEqual([{ demotionOnly: true }])
+  // A deactivated member still cannot be given a Project role.
+  const deactivated = await patch('ito@example.com')
+  expect(deactivated.status).toBe(409)
+  expect(await deactivated.json()).toMatchObject({ code: 'WorkspaceMemberInactive' })
+  expect(options).toHaveLength(1)
 })
 
 test('lets a system admin update project members without a project role', async () => {

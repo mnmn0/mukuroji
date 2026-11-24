@@ -2486,6 +2486,32 @@ test('DynamoDB directory client keeps at least one project manager', async () =>
   expect(sentInputs).toHaveLength(2)
 })
 
+test('DynamoDB directory client only lowers an existing role for a demotion-only update (ADR 0095)', async () => {
+  let includeTargetMember = true
+  const transactions: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) {
+        return { Items: createProjectMemberFixtureItems({ includeTargetMember }) }
+      }
+      if ('TransactItems' in command.input) transactions.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  const update = (role: 'manager' | 'member') => client.updateProjectMember(
+    'user#demo@example.com', 'refero', 'demo@example.com', { email: 'demo@example.com', role }, 1, undefined, { demotionOnly: true },
+  )
+
+  await expect(update('manager')).rejects.toMatchObject({ code: 'ProjectMemberDemotionOnly', status: 409 })
+  expect(transactions).toHaveLength(0)
+  await expect(update('member')).resolves.toBeDefined()
+  expect(transactions).toHaveLength(1)
+  includeTargetMember = false
+  await expect(update('member')).rejects.toMatchObject({ code: 'ProjectMemberDemotionOnly', status: 409 })
+  expect(transactions).toHaveLength(1)
+})
+
 test('DynamoDB directory client treats manager guard transaction cancellation as last manager conflict', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   let queryReads = 0

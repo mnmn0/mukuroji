@@ -3173,6 +3173,22 @@ describe('collaboration projection pure helpers', () => {
     })).toBe(true)
   })
 
+  test('excludes members whose access expired while a handover keeps them active (ADR 0095)', () => {
+    const now = new Date('2026-11-24T00:00:00.000Z')
+    const guest = (accessExpiresAt: unknown) => ({
+      entryType: 'workspace-member',
+      memberKey: 'guest@example.com',
+      status: 'active',
+      accessExpiresAt,
+    })
+
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-23T00:00:00.000Z'), now)).toBe(false)
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-24T00:00:00.000Z'), now)).toBe(false)
+    // A malformed expiry fails closed.
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest(42), now)).toBe(false)
+    expect(isActiveWorkspaceNotificationMember('guest@example.com', guest('2026-11-25T00:00:00.000Z'), now)).toBe(true)
+  })
+
   test('checks every current Cognito group page for the system-admin fallback', async () => {
     const activeDirectory: ProjectDirectoryItem[] = [
       { entryType: 'team', teamId: 'core' },

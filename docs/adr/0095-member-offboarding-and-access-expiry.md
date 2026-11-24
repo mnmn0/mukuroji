@@ -38,6 +38,10 @@
   期限を過ぎたメンバーを active として扱いません。
   - 期限を過ぎた時点で、サインイン、API、Public API、Webhook の配信がすべて止まります。job の実行を待ちません。
   - 読めない値は期限切れとして扱います（fail closed）。
+  - member row を直接読む箇所（通知の宛先判定、外部配信の認可、メール宛先、realtime）も、
+    同じ判定 `isWorkspaceMemberRowActive` を使います。
+  - 期限を過ぎたメンバーの Project role は、下げることだけできます。上げることと新しく付けることはできません。
+    これで、止める項目が残るメンバーからもマネージャーを引き継げます。
 - **毎時の job で無効化する**: scheduled-jobs Lambda の `member-access-expiry` job が 60 分ごとに実行し、
   期限を過ぎた active なメンバーを利用停止します。
   - 対象は WorkspaceAccess table の Scan で探します。

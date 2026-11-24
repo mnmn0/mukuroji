@@ -3,6 +3,7 @@ export type { WorkspaceRole } from './domain/workspace-role'
 export {
   canMemberAccessExpire,
   isMemberAccessExpired,
+  isWorkspaceMemberRowActive,
   readMemberAccessExpiry,
 } from './domain/member-access-expiry'
 export {
