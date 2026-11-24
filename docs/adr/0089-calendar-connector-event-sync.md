@@ -35,9 +35,14 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   - 予定の作成後にリンクの作成が失敗すると、予定だけが残ることがある。これは許容する。
 - Inbound の同期で変えるのは日付だけにする。予定の題名を変えても Work Item の題名は変えない。
   - 期限だけの Work Item は、予定の最終日を期限にする。
-  - 期間のある Work Item は、予定の期間に合わせて稼働日数を計算し直す。期間に稼働日がなければ
-    `ConnectorCalendarDatesInvalid` で拒否する。
+  - 期間のある Work Item は、予定の期間に合わせて稼働日数を計算し直す。期間に稼働日がなければ拒否する。
   - 日付のない Work Item は、予定が 1 日なら期限、複数日なら期間にする。
+  - 日程の依存関係がある Work Item の日付は、Public API の日程変更と同じく予定から動かさない
+    （依存先への影響はプレビューと確認が必要なため）。
+  - 拒否した日付は poll の失敗にせず、競合として記録する。同じ予定で installation の poll 全体が止まらず、
+    利用者が Work Item 側の日付を残すか、マージで稼働日のある日付を選ぶ。予定側の日付を選ぶ解決は同じ理由で拒否する。
+- 予定を作る操作 ID は、API の冪等性の予約と同じく credential ごとに分ける。別の credential が同じ
+  `Idempotency-Key` を送っても、別の予定を作る。
 - 両側で日付が変わった場合は、既存の競合の記録で `schedule` の差分として残し、利用者に解決してもらう。
 - 予定の version は provider の ETag（Google の `etag`、Graph の `@odata.etag`）とし、更新は `If-Match` で条件付きにする。
   最後に読んだ後で予定が動いていれば `412` になり、outbound は書かずに skip する。次の poll がその変更を読み、

@@ -93,6 +93,20 @@ export type ConnectorWorkItemApplyResult =
     /** Current Work Item snapshot です。 */
     workItem: ConnectorWorkItemSnapshot
   }
+  | {
+    /** The Work Item cannot take the patch, so nothing was written. */
+    kind: 'rejected'
+    /** Current Work Item snapshot. */
+    workItem: ConnectorWorkItemSnapshot
+    /**
+     * Why the patch was refused: the event dates hold no working day of the Work Item calendar,
+     * or the Work Item has schedule dependencies that a direct date move would break.
+     */
+    reason: ConnectorWorkItemRejection
+  }
+
+/** Reasons the Work Item gateway refuses an external patch without writing it. */
+export type ConnectorWorkItemRejection = 'calendar-dates-invalid' | 'schedule-dependency'
 
 /** Connector worker と canonical Work Item service の境界です。 */
 export interface ConnectorWorkItemGateway {
@@ -642,7 +656,9 @@ export class ConnectorSyncEngine {
       patch,
       operationId,
     })
-    if (applied.kind === 'conflict') {
+    if (applied.kind === 'conflict' || applied.kind === 'rejected') {
+      // Dates the Work Item cannot take become a conflict too: the link stops retrying the same
+      // event, other events keep synchronizing, and someone chooses which dates to keep.
       return this.persistConflict(
         input.workspaceId,
         link,
@@ -1072,6 +1088,19 @@ export class ConnectorSyncEngine {
         throw new ConnectorRuntimeError(
           'ConnectorSyncConflictChanged',
           'Work Item changed while resolving this sync conflict.',
+        )
+      }
+      if (applied.kind === 'rejected') {
+        await this.persistence.releaseConflictResolution(
+          actor.workspaceId,
+          conflictId,
+          operationId,
+        )
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncConflictDatesRejected',
+          applied.reason === 'schedule-dependency'
+            ? 'The Work Item has schedule dependencies, so its dates cannot be moved from the calendar.'
+            : 'The chosen dates hold no working day of the Work Item calendar.',
         )
       }
       synchronizedWorkItem = applied.workItem

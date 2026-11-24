@@ -4334,12 +4334,13 @@ async function resolveExternalLinkTarget<
     teamId,
     workItemId,
     resourceType: 'calendar-event',
-    // The ID leaves out the credential: hashing values from API key authentication is flagged as
-    // a weak password hash, and the Work Item, Installation, key and body already scope the event.
+    // Idempotency reservations are scoped by credential, so the provider operation is too: two
+    // credentials sending the same key create separate events. The credential ID is not a secret.
     operationId: createHash('sha256')
       .update(
         `connector-linked-resource-v2\0${workspaceId}\0${teamId}\0${workItemId}` +
-        `\0${body.installationId}\0${idempotency.idempotencyKey}\0${idempotency.requestFingerprint}`,
+        `\0${body.installationId}\0${idempotency.credentialId}` +
+        `\0${idempotency.idempotencyKey}\0${idempotency.requestFingerprint}`,
       )
       .digest('hex'),
   })

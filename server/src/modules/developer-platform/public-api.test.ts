@@ -2689,6 +2689,64 @@ describe('public API router', () => {
     expect(hidden.status).toBe(404)
   })
 
+  test('creates a separate calendar event for each credential that reuses an idempotency key', async () => {
+    const operationIds: string[] = []
+    const notUsed = async (): Promise<never> => {
+      throw new Error('not used')
+    }
+    const connectorAuthorization: ConnectorAuthorizationService = {
+      begin: notUsed,
+      completeCallback: notUsed,
+      abortCallback: notUsed,
+      reauthorize: notUsed,
+      disconnect: notUsed,
+      listConflicts: notUsed,
+      resolveConflict: notUsed,
+      async createLinkedResource(input) {
+        operationIds.push(input.operationId)
+        const externalId = `event-${operationIds.length}`
+        return { externalId, externalUrl: `https://calendar.google.com/event?eid=${externalId}` }
+      },
+    }
+    const { platform, router } = createTestRouter({ connectorAuthorization })
+    const installation = await platform.installConnector({
+      workspaceId: 'workspace-1',
+      installedByUserId: 'user-1',
+      input: {
+        category: 'calendar',
+        provider: 'google-calendar',
+        name: 'Team calendar',
+        scopes: ['https://www.googleapis.com/auth/calendar.events'],
+        credential: 'connector-credential',
+      },
+    })
+    const scopes: ApiScope[] = ['work-items:read', 'work-items:write', 'integrations:read', 'integrations:write']
+    const keys = [await createApiKey(platform, scopes), await createApiKey(platform, scopes)]
+
+    for (const key of keys) {
+      const created = await router.request(
+        'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key.secret}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'shared-calendar-key',
+          },
+          body: JSON.stringify({
+            installationId: installation.id,
+            resourceType: 'calendar-event',
+            syncDirection: 'bidirectional',
+          }),
+        },
+      )
+      expect(created.status).toBe(201)
+    }
+
+    expect(operationIds).toHaveLength(2)
+    expect(operationIds[0]).not.toBe(operationIds[1])
+  })
+
   test('retains the local connector credential when provider disconnect fails', async () => {
     let disconnectAttempts = 0
     let disconnectPlatform: InMemoryDeveloperPlatformStorage | undefined

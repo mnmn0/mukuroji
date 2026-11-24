@@ -18,6 +18,7 @@ import {
   ConnectorSyncEngine,
   InMemoryConnectorSyncPersistence,
   type ConnectorWorkItemGateway,
+  type ConnectorWorkItemRejection,
   type ConnectorWorkItemSnapshot,
 } from './connector-sync-runtime'
 
@@ -167,6 +168,7 @@ async function createCalendarFixture() {
     schedule: { startDate: '2026-11-30', endDate: '2026-11-30', timeZone: calendarPolicy.timeZone },
   }
   const patches: unknown[] = []
+  let rejection: ConnectorWorkItemRejection | undefined
   const workItems: ConnectorWorkItemGateway = {
     async authorize() {},
     async get() {
@@ -174,6 +176,9 @@ async function createCalendarFixture() {
     },
     async applyExternal(input) {
       if (input.expectedRevision !== workItem.revision) return { kind: 'conflict', workItem: structuredClone(workItem) }
+      if (rejection && input.patch.schedule) {
+        return { kind: 'rejected', workItem: structuredClone(workItem), reason: rejection }
+      }
       patches.push(structuredClone(input.patch))
       workItem = {
         ...workItem,
@@ -203,6 +208,9 @@ async function createCalendarFixture() {
     getWorkItem: () => structuredClone(workItem),
     setWorkItem: (next: ConnectorWorkItemSnapshot) => {
       workItem = structuredClone(next)
+    },
+    rejectSchedules: (reason: ConnectorWorkItemRejection | undefined) => {
+      rejection = reason
     },
     advance: (milliseconds: number) => {
       currentTime = new Date(currentTime.getTime() + milliseconds)
@@ -633,6 +641,51 @@ describe('calendar connectors (ADR 0089)', () => {
     expect(resolved.status).toBe('resolved')
     expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-12', endDate: '2026-12-13' })
     expect(fixture.google.events.get(conflict.externalId)).toMatchObject({ start: { date: '2026-12-12' }, end: { date: '2026-12-14' } })
+  })
+
+  test('records dates the Work Item cannot take as a conflict instead of failing the poll', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-05' }, end: { date: '2026-12-07' }, etag: '"moved-to-weekend"' })
+    fixture.rejectSchedules('calendar-dates-invalid')
+
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+
+    expect(polled.results).toMatchObject([{ kind: 'conflict' }])
+    expect(fixture.patches).toEqual([])
+    const conflictId = polled.results[0]?.kind === 'conflict' ? polled.results[0].conflict.id : ''
+    // Polling again keeps the same open conflict and still writes nothing.
+    const again = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(again.results).toMatchObject([{ kind: 'conflict', conflict: { id: conflictId, status: 'open' } }])
+    expect(fixture.patches).toEqual([])
+    // Taking the calendar dates is refused, and the conflict stays open for another choice.
+    await expect(fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      conflictId,
+      { resolution: 'use-external' },
+    )).rejects.toMatchObject({ code: 'ConnectorSyncConflictDatesRejected' })
+    const kept = await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      conflictId,
+      { resolution: 'use-local' },
+    )
+    expect(kept.status).toBe('resolved')
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-11-30' } })
   })
 
   test('uses the built-in protocol for calendar providers configured from the environment', async () => {
