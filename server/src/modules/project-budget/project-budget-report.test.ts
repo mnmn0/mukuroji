@@ -171,4 +171,10 @@ describe('createProjectBudgetReport', () => {
 
     expect(report.points.map((point) => point.date)).toEqual(['9999-12-30', '9999-12-31'])
   })
+
+  test('ends a weekly series on the last valid date without stepping past it', () => {
+    const report = createProjectBudgetReport(input({ from: '9999-12-30', to: '9999-12-31', today: '2026-01-07', interval: 'week' }))
+
+    expect(report.points.map((point) => point.date)).toEqual(['9999-12-30'])
+  })
 })
