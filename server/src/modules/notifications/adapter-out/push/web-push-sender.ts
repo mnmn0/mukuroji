@@ -59,8 +59,11 @@ const PUSH_TTL_SECONDS = 24 * 60 * 60
 /** Longest body text placed in the payload. */
 const MAX_BODY_CHARACTERS = 500
 
-/** Outcome of one device request. */
-type DeviceOutcome = 'accepted' | 'gone' | 'retryable' | 'rejected'
+/** Outcome of one device request; `invalid` is a stored registration that cannot be used. */
+type DeviceOutcome = 'accepted' | 'gone' | 'retryable' | 'rejected' | 'invalid'
+
+/** Devices sent to at once, so one stalled push service cannot use the whole deadline alone. */
+const DEVICE_CONCURRENCY = 4
 
 /**
  * Creates a sender that encrypts one notification for every device the recipient still owns and
@@ -100,21 +103,28 @@ export function createWebPushNotificationSender(options: WebPushNotificationSend
     const plaintext = Buffer.from(JSON.stringify(renderPushNotification(delivery, options.appOrigin, locale)))
     const outcomes: DeviceOutcome[] = []
     let retryAfterMs = 0
-    for (const device of devices) {
-      if (signal.aborted) { outcomes.push('retryable'); break }
-      const result = await sendToDevice(options, keys, device, plaintext, signal, now())
-      if (result.retryAfterMs) retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs)
-      if (result.outcome === 'gone') {
-        try {
-          await options.devices.removeGoneDevice(delivery.workspaceId, delivery.memberKey, device, signal)
-        } catch { /* The next delivery reports the same status and removes it again. */ }
+    const pending = [...devices]
+    // A few workers share the deadline, so a stalled device never keeps the others from being tried.
+    const worker = async () => {
+      for (let device = pending.shift(); device; device = pending.shift()) {
+        if (signal.aborted) { outcomes.push('retryable'); return }
+        const result = await sendToDevice(options, keys, device, plaintext, signal, now())
+        if (result.retryAfterMs) retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs)
+        if (result.outcome === 'gone') {
+          try {
+            await options.devices.removeGoneDevice(delivery.workspaceId, delivery.memberKey, device, signal)
+          } catch { /* The next delivery reports the same status and removes it again. */ }
+        }
+        outcomes.push(result.outcome)
       }
-      outcomes.push(result.outcome)
     }
+    await Promise.all(Array.from({ length: Math.min(DEVICE_CONCURRENCY, devices.length) }, worker))
     if (outcomes.includes('accepted')) return { succeeded: true, retryable: false }
     if (outcomes.includes('retryable')) {
       return { succeeded: false, retryable: true, code: 'PushDeliveryUnavailable', ...(retryAfterMs ? { retryAfterMs } : {}) }
     }
+    // A corrupt registration is kept for an operator and fails loudly instead of being deleted.
+    if (outcomes.includes('invalid')) return { succeeded: false, retryable: false, code: 'PushSubscriptionInvalid' }
     if (outcomes.includes('rejected')) return { succeeded: false, retryable: false, code: 'PushDeliveryRejected' }
     return { succeeded: false, retryable: false, suppressed: true, code: 'PushNoDevices' }
   }
@@ -150,7 +160,7 @@ async function sendToDevice(
     endpoint = readPushEndpoint(device.endpoint)
     body = encryptWebPushPayload(plaintext, device.keys)
   } catch {
-    return { outcome: 'gone' }
+    return { outcome: 'invalid' }
   }
   let response: WebPushResponse
   try {

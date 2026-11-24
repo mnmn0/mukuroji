@@ -37,6 +37,8 @@ Web Push の購読登録 API と `PushSubscriptionsTable` は実装済みだっ�
 - push service が `404` / `410` を返した購読は、送った時点の `updatedAt` を条件に削除する（その間に同じ endpoint を
   登録し直した browser の行は消さない）。`429` / `5xx` / 通信失敗は再試行し、`Retry-After` を尊重する。
   `400` / `401` / `403` / `413` は VAPID や payload の問題として失敗にし、alarm の対象にする。
+  保存された endpoint や鍵が使えない購読は消さずに `PushSubscriptionInvalid` で失敗にする（データ破損を隠さないため）。
+  端末へは最大 4 台ずつ同時に送り、応答しない push service が他の端末の送信を締め出さないようにする。
 - 1 台でも受け付ければ送信済みとする。別の端末が一時的に失敗しても再試行しない（受け付けた端末に同じ通知を
   2 回出さないため）。購読が 1 つもなければ alarm を出さずに抑止する。
 - opt-in の境界は Email と同じく server が保存する `pushEnabledAt` とし、transport 導入前に push を選んでいた

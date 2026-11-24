@@ -95,11 +95,35 @@ describe('Web Push notification sender', () => {
       .toMatchObject({ retryable: true, code: 'PushDevicesUnavailable' })
   })
 
-  test('never posts to an endpoint outside the push service allowlist', async () => {
+  test('never posts to an endpoint outside the push service allowlist, and keeps corrupt registrations for an operator', async () => {
     const f = sender([{ ...device('a'), endpoint: 'https://attacker.example.test/push' }], {})
-    expect(await f.send(delivery)).toMatchObject({ suppressed: true })
+    expect(await f.send(delivery)).toEqual({ succeeded: false, retryable: false, code: 'PushSubscriptionInvalid' })
     expect(f.requests).toEqual([])
-    expect(f.removed).toEqual(['a'])
+    expect(f.removed).toEqual([])
+    const corrupt = sender([{ ...device('b'), keys: { p256dh: 'not-a-key', auth: 'x' } }], {})
+    expect(await corrupt.send(delivery)).toEqual({ succeeded: false, retryable: false, code: 'PushSubscriptionInvalid' })
+    expect(corrupt.removed).toEqual([])
+    // A healthy device still receives the notification.
+    expect(await sender([{ ...device('c'), keys: { p256dh: 'not-a-key', auth: 'x' } }, device('d')], {}).send(delivery))
+      .toEqual({ succeeded: true, retryable: false })
+  })
+
+  test('still tries the other devices while one push service stalls until the deadline', async () => {
+    const stalled = device('stalled')
+    const attempted: string[] = []
+    const send = createWebPushNotificationSender({
+      appOrigin: 'https://app.example.test', loadKeys: async () => keys, deadlineMs: 200,
+      post: async (endpoint, request) => {
+        attempted.push(endpoint)
+        if (endpoint === stalled.endpoint) {
+          await new Promise((_resolve, reject) => { request.signal.addEventListener('abort', () => reject(new Error('aborted'))) })
+        }
+        return { status: 201, headers: { get: () => null } }
+      },
+      devices: { listDevices: async () => [stalled, device('healthy')], removeGoneDevice: async () => {} },
+    })
+    expect(await send(delivery)).toEqual({ succeeded: true, retryable: false })
+    expect(attempted).toEqual([stalled.endpoint, device('healthy').endpoint])
   })
 
   test('keeps the payload within one record and links only to the app origin', () => {
