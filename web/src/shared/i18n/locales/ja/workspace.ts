@@ -551,18 +551,21 @@ export const workspaceMessages = {
   'workspace.settings.notifications.version': '設定 v{version}',
   'workspace.settings.notifications.channelsTitle': '配信チャネル',
   'workspace.settings.notifications.channelsDescription':
-    'アプリ内とSlackは次の通知から反映されます。メールとプッシュは配信基盤接続後に使う事前設定です。',
+    '変更は次の通知から反映されます。この環境で送信できないチャネルには「無効」と表示します。',
   'workspace.settings.notifications.channel.inApp': 'アプリ内',
   'workspace.settings.notifications.channel.inAppDescription': '受信箱と未読バッジへ表示します。',
   'workspace.settings.notifications.channel.email': 'メール',
   'workspace.settings.notifications.channel.emailDescription':
-    'メール配信基盤の接続後に使う受信設定を保存します。',
+    'アカウントの確認済みメールアドレスに届きます。',
   'workspace.settings.notifications.channel.push': 'プッシュ',
   'workspace.settings.notifications.channel.slack': 'Slack',
   'workspace.settings.notifications.channel.slackDescription':
     '同じ通知を自分のSlack送信先にも配信します。管理者による接続設定が必要です。',
   'workspace.settings.notifications.channel.pushDescription':
-    '下の「このデバイスのプッシュ通知」で登録したデバイスに、プッシュ配信の開始後に届きます。',
+    '下の「このデバイスのプッシュ通知」で登録したデバイスに届きます。',
+  'workspace.settings.notifications.channelUnavailable': '無効',
+  'workspace.settings.notifications.channelUnavailableDescription':
+    'この環境では送信元が設定されていないため送信されません。設定は保存され、管理者が有効にした後の通知から届きます。',
   'workspace.settings.notifications.categoriesTitle': '種類ごとの配信先',
   'workspace.settings.notifications.categoriesDescription': '通知の種類ごとに、受け取るチャネルを選びます。上の配信チャネルを切っているチャネルには届きません。',
   'workspace.settings.notifications.categoryColumn': '通知の種類',

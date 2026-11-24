@@ -8,6 +8,7 @@ export {
   requiresCurrentWorkItemAssignee,
   isSlackNotificationEligible,
   isEmailNotificationEligible,
+  isPushNotificationEligible,
   isNotificationRoutedToChannel,
   toNotificationItem,
   type CountUnreadNotificationsInput,
@@ -44,6 +45,17 @@ export { deliverDueSlackNotifications } from './application/slack-delivery'
 export { emailDeliveryShard } from './domain/channel-delivery'
 /** Exposes the application workflow that delivers due Email notifications. */
 export { deliverDueEmailNotifications } from './application/email-delivery'
+/** Exposes the deterministic shard key used when queuing Web Push notifications. */
+export { pushDeliveryShard } from './domain/channel-delivery'
+/** Exposes the deploy-time check that turns Web Push subscriptions and delivery on. */
+export { isPushTransportConfigured } from './domain/push-subscription'
+/** Exposes the application workflow that delivers due Web Push notifications. */
+export { deliverDuePushNotifications } from './application/push-delivery'
+/** Exposes the encrypted Web Push transport factory and its VAPID key validation. */
+export { createWebPushNotificationSender, type WebPushHttpClient } from './adapter-out/push/web-push-sender'
+export { readVapidKeys, type VapidKeys } from './adapter-out/push/web-push-crypto'
+/** Exposes the device directory port the Web Push sender reads. */
+export type { PushDevice, PushDeviceDirectory } from './application/ports/push-device-directory'
 /** Exposes the shared delivery ports the Email composition implements. */
 export type { ChannelDelivery, NotificationLocaleReader } from './application/channel-delivery'
 /** Exposes the verified-address Email transport factory. */

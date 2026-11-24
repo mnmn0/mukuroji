@@ -13,9 +13,9 @@ const scheduledJobIds = [
   'AgentRunTriage',
   'SlackNotification',
   'EmailNotification',
+  'PushNotification',
   'AnalyticsSchedule',
   'NotificationSchedule',
-  'CycleSchedule',
 ];
 
 test('runs every periodic job from one Lambda on one every-minute rule', () => {

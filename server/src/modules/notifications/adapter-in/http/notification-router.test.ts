@@ -77,15 +77,21 @@ describe('createNotificationRouter', () => {
     }
     expect((await router.request('/api/notifications/bulk', { method: 'POST' })).status).toBe(401)
   })
-  test('omits internal Slack activation metadata from preference reads', async () => {
+  test('omits internal activation metadata from preference reads and reports deliverable transports', async () => {
     const dependencies = createDependencies(1)
     const router = createNotificationRouter({ ...dependencies, getNotifications: () => ({
       ...dependencies.getNotifications(),
-      getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z' }),
+      getPreferences: async () => ({
+        ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z',
+        emailEnabledAt: '2026-09-26T10:00:00.000Z', pushEnabledAt: '2026-09-26T10:00:00.000Z',
+      }),
     }) })
     const response = await router.request('/api/notification-preferences', { headers: { Authorization: 'Bearer token' } })
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual(DEFAULT_NOTIFICATION_PREFERENCES)
+    expect(await response.json()).toEqual({ ...DEFAULT_NOTIFICATION_PREFERENCES, transports: { email: false, push: false } })
+    const configured = createNotificationRouter({ ...dependencies, getTransports: () => ({ email: true, push: false }) })
+    const configuredResponse = await configured.request('/api/notification-preferences', { headers: { Authorization: 'Bearer token' } })
+    expect(await configuredResponse.json()).toMatchObject({ transports: { email: true, push: false } })
   })
   test('keeps notification clients isolated between app instances', async () => {
     const first = createNotificationRouter(createDependencies(1))

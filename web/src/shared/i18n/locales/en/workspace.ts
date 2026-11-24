@@ -551,18 +551,21 @@ export const workspaceMessages = {
   'workspace.settings.notifications.version': 'Settings v{version}',
   'workspace.settings.notifications.channelsTitle': 'Delivery channels',
   'workspace.settings.notifications.channelsDescription':
-    'Inbox and Slack changes apply to new notifications. Email and push are saved in advance for their future transports.',
+    'Changes apply to new notifications. A channel this deployment cannot send is marked Off.',
   'workspace.settings.notifications.channel.inApp': 'In-app',
   'workspace.settings.notifications.channel.inAppDescription': 'Show updates in Inbox and the unread badge.',
   'workspace.settings.notifications.channel.email': 'Email',
   'workspace.settings.notifications.channel.emailDescription':
-    'Save the setting that will be used after the email transport is connected.',
+    'Sent to the verified email address of your account.',
   'workspace.settings.notifications.channel.push': 'Push',
   'workspace.settings.notifications.channel.slack': 'Slack',
   'workspace.settings.notifications.channel.slackDescription':
     'Send these notifications to your Slack destination. Administrator setup is required.',
   'workspace.settings.notifications.channel.pushDescription':
-    'Delivered to devices registered under Push notifications on this device once push delivery starts.',
+    'Delivered to devices registered under Push notifications on this device.',
+  'workspace.settings.notifications.channelUnavailable': 'Off',
+  'workspace.settings.notifications.channelUnavailableDescription':
+    'This deployment has no sender configured, so nothing is sent. Your choice is saved and applies to notifications after an administrator turns it on.',
   'workspace.settings.notifications.categoriesTitle': 'Channels by notification type',
   'workspace.settings.notifications.categoriesDescription': 'Choose which channels receive each type of notification. A channel switched off above receives nothing.',
   'workspace.settings.notifications.categoryColumn': 'Notification type',

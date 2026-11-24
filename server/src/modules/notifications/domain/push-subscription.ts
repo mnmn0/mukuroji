@@ -182,6 +182,17 @@ export function createPushConfiguration(vapidPublicKey: string | undefined): Pus
 }
 
 /**
+ * Reports whether this deployment can deliver Web Push: the same public key check that lets
+ * browsers subscribe. The delivery worker reads the matching private key from Secrets Manager.
+ *
+ * @param vapidPublicKey - Deploy-time VAPID public key.
+ * @returns `true` when push subscriptions and delivery are enabled.
+ */
+export function isPushTransportConfigured(vapidPublicKey: string | undefined): boolean {
+  return createPushConfiguration(vapidPublicKey).enabled
+}
+
+/**
  * Returns whether bytes encode a point on the P-256 curve, so a mistyped key that browsers
  * would reject leaves push disabled instead of offering a feature that cannot subscribe.
  *

@@ -50,6 +50,7 @@ import {
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
 import { defineEmailNotificationJob } from '../subsystems/workers/email-notifications';
+import { definePushNotificationJob } from '../subsystems/workers/push-notifications';
 import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
 import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
@@ -322,6 +323,7 @@ export class MukurojiStack extends cdk.Stack {
         ...(softwareFactoryEnabled ? [defineAgentRunTriageJob({ dataStores, parameters })] : []),
         defineSlackNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
+        definePushNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),

@@ -13,6 +13,7 @@ import {
   NOTIFICATION_BULK_ACTIONS,
   NOTIFICATION_BULK_MAXIMUM,
   type NotificationBulkAction,
+  type NotificationTransports,
 } from '@mukuroji/contracts'
 import { updateNotificationsInBulk } from '../../application/bulk-notification-update'
 import { normalizePersonalReminderDays } from '../../domain/reminder-days'
@@ -52,6 +53,8 @@ export type NotificationRouterDependencies<
   mapError(context: Context, error: unknown): Response
   /** Request JSON を安全に parse し、失敗時は undefined を返します。 */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
+  /** Reports which external channels this deployment can deliver; omitted reports none. */
+  getTransports?(): NotificationTransports
 }
 
 /**
@@ -203,7 +206,7 @@ export function createNotificationRouter<
 
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      return context.json(toPublicPreferences(await dependencies.getNotifications().getPreferences({
+      return context.json(toPublicPreferences(dependencies, await dependencies.getNotifications().getPreferences({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
       })))
@@ -227,7 +230,7 @@ export function createNotificationRouter<
         memberKey: principal.userKey,
         preferences: readNotificationPreferencesInput(body),
       })
-      return context.json(toPublicPreferences(preferences))
+      return context.json(toPublicPreferences(dependencies, preferences))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -236,10 +239,24 @@ export function createNotificationRouter<
   return router
 }
 
-/** Removes internal delivery eligibility metadata from the existing HTTP preference contract. */
-function toPublicPreferences(preferences: NotificationPreferences) {
-  const { slackEnabledAt: _internalActivation, emailEnabledAt: _internalEmailActivation, ...publicPreferences } = preferences
-  return publicPreferences
+/**
+ * Removes internal delivery eligibility metadata from the HTTP preference contract and adds which
+ * external channels the deployment can deliver.
+ * @param dependencies - Router dependencies holding the optional transport report.
+ * @param preferences - Stored preferences.
+ * @returns Preferences without activation times, with `transports`.
+ */
+function toPublicPreferences(
+  dependencies: Pick<NotificationRouterDependencies<NotificationPrincipal>, 'getTransports'>,
+  preferences: NotificationPreferences,
+) {
+  const {
+    slackEnabledAt: _internalActivation,
+    emailEnabledAt: _internalEmailActivation,
+    pushEnabledAt: _internalPushActivation,
+    ...publicPreferences
+  } = preferences
+  return { ...publicPreferences, transports: dependencies.getTransports?.() ?? { email: false, push: false } }
 }
 
 /** Removes persistence-only authorization metadata before a notification is serialized. */

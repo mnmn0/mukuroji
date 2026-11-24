@@ -1,6 +1,7 @@
 import type {
   NotificationCategoryChannels,
   NotificationMutes,
+  NotificationTransports,
   PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
@@ -90,6 +91,11 @@ export type NotificationPreferences = {
    * 最終更新日時です。
    */
   updatedAt?: string
+  /**
+   * Server-reported channels this deployment can send; read-only and never saved. Omitted by
+   * servers that predate the field, in which case no channel is marked off.
+   */
+  transports?: NotificationTransports
 }
 
 const notificationsApiBaseUrl = resolveApiBaseUrl()
@@ -122,11 +128,13 @@ export function updateNotificationPreferences(
   preferences: NotificationPreferences,
   mutationContext: MutationRequestContext,
 ) {
+  // The transport report is server-owned and not part of the saved preferences.
+  const { transports: _transports, ...saved } = preferences
   return requestJson<NotificationPreferences>(
     `${notificationsApiBaseUrl}/notification-preferences`,
     accessToken,
     {
-      body: JSON.stringify(preferences),
+      body: JSON.stringify(saved),
       headers: {
         'Content-Type': 'application/json',
         ...createMutationHeaders(mutationContext),

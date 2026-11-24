@@ -124,12 +124,22 @@ export function NotificationSettingsPanel({
                 key={channel}
               >
                 <span className="min-w-0">
-                  <strong className="block text-sm font-semibold text-[var(--workbench-text)]">
+                  <strong className="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
                     {t(`workspace.settings.notifications.channel.${channel}`)}
+                    {isChannelUnavailable(draft, channel) ? (
+                      <span className="workbench-badge-warning" data-testid={`notification-channel-${channel}-unavailable`}>
+                        {t('workspace.settings.notifications.channelUnavailable')}
+                      </span>
+                    ) : null}
                   </strong>
                   <span className="mt-1 block text-xs font-medium leading-5 text-[var(--workbench-muted)]">
                     {t(`workspace.settings.notifications.channel.${channel}Description`)}
                   </span>
+                  {isChannelUnavailable(draft, channel) ? (
+                    <span className="mt-1 block text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+                      {t('workspace.settings.notifications.channelUnavailableDescription')}
+                    </span>
+                  ) : null}
                 </span>
                 <input
                   checked={Boolean(draft.channels[channel])}
@@ -301,6 +311,16 @@ function clonePreferences(preferences: NotificationPreferences): NotificationPre
     ...(preferences.categoryChannels ? { categoryChannels: structuredClone(preferences.categoryChannels) } : {}),
     ...(preferences.mutes ? { mutes: structuredClone(preferences.mutes) } : {}),
   }
+}
+
+/**
+ * Reports whether the server said this deployment cannot send a channel.
+ * @param preferences - Loaded preferences with the optional transport report.
+ * @param channel - Channel row being rendered.
+ * @returns `true` only for Email or push that the server reported as not configured.
+ */
+function isChannelUnavailable(preferences: NotificationPreferences, channel: keyof NotificationChannels): boolean {
+  return (channel === 'email' || channel === 'push') && preferences.transports?.[channel] === false
 }
 
 function readNotificationFrequency(value: string): NotificationFrequency {
