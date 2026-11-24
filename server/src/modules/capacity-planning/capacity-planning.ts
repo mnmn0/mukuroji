@@ -253,6 +253,16 @@ export type WorkloadWhatIfInput = WorkloadSnapshotInput & {
 /** Error code of a Team whose Work Items are too many to read their estimates. */
 export const WORKLOAD_ESTIMATES_LIMIT_EXCEEDED = 'WorkloadEstimatesLimitExceeded'
 
+/**
+ * Tells whether an error is a Team having too many Work Items to read its estimates.
+ *
+ * @param error - Thrown value.
+ * @returns True for the {@link WORKLOAD_ESTIMATES_LIMIT_EXCEEDED} capacity-planning error.
+ */
+function isWorkloadEstimatesLimitExceeded(error: unknown): boolean {
+  return error instanceof CapacityPlanningError && error.code === WORKLOAD_ESTIMATES_LIMIT_EXCEEDED
+}
+
 /** Stable capacity-planning validation and authorization error. */
 export class CapacityPlanningError extends Error {
   /** HTTP status used by the transport adapter. */
@@ -614,7 +624,7 @@ export class CapacityPlanningService {
       teamStates,
       { teamId: input.teamId, estimates },
     ).catch((error: unknown) => {
-      if (error instanceof CapacityPlanningError && error.code === WORKLOAD_ESTIMATES_LIMIT_EXCEEDED) return undefined
+      if (isWorkloadEstimatesLimitExceeded(error)) return undefined
       throw error
     })
     return buildWorkloadSnapshot(
@@ -1038,9 +1048,18 @@ export class CapacityPlanningService {
     teamStates: readonly TeamCapacityPlanningState[],
     known?: { teamId: string; estimates: readonly WorkloadEstimate[] },
   ): Promise<Map<string, readonly WorkloadEstimate[]>> {
-    const estimates = await Promise.all(teamStates.map(({ teamId }) =>
+    const results = await Promise.allSettled(teamStates.map(({ teamId }) =>
       known?.teamId === teamId ? known.estimates : this.dataSource.listEstimates(workspaceId, teamId)))
-    return new Map(teamStates.map(({ teamId }, index) => [teamId, estimates[index] ?? []]))
+    // Every read settles first, so an unexpected failure is reported even when another Team is
+    // only over the read limit.
+    const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+    const unexpected = failures.find((reason) => !isWorkloadEstimatesLimitExceeded(reason))
+    if (unexpected !== undefined) throw unexpected
+    if (failures.length > 0) throw failures[0]
+    return new Map(teamStates.map(({ teamId }, index) => {
+      const result = results[index]
+      return [teamId, result?.status === 'fulfilled' ? result.value : []]
+    }))
   }
 
   /** Applies one state mutation with a Team-wide optimistic concurrency check. */

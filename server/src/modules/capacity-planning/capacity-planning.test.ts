@@ -1086,6 +1086,29 @@ describe('Workspace-wide workload', () => {
     await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
   })
 
+  test('reports an unexpected failure even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
+        if (teamId === 'team-3') {
+          // Fails after the limit error, so a fail-fast read would never see it.
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          throw new Error('Storage unavailable.')
+        }
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
+  })
+
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
     const service = await createWorkspaceService(twoTeams())
 
