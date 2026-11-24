@@ -14,6 +14,7 @@ import type {
   AiSummaryDraft,
   CuratedContextSource,
 } from '@mukuroji/contracts'
+import { MarkdownAttachmentReactContext } from '../../files/ui/markdownAttachmentContext'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { WatchIcon } from '../../shared/ui/icons'
@@ -166,6 +167,10 @@ export function IssueCollaborationPanel({
   route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const markdownAttachments = useMemo(
+    () => artifacts ? { controller: artifacts, t } : undefined,
+    [artifacts, t],
+  )
   const [uncontrolledTab, setUncontrolledTab] = useState(defaultTab)
   const [promotedContextDraft, setPromotedContextDraft] =
     useState<IssueContextDraft>()
@@ -375,6 +380,7 @@ export function IssueCollaborationPanel({
   }
 
   return (
+    <MarkdownAttachmentReactContext.Provider value={markdownAttachments}>
     <section
       className={`border-t border-[var(--workbench-border)] bg-surface ${className}`}
       data-testid="issue-collaboration-panel"
@@ -636,6 +642,7 @@ export function IssueCollaborationPanel({
         ) : null}
       </div>
     </section>
+    </MarkdownAttachmentReactContext.Provider>
   )
 }
 
