@@ -402,8 +402,9 @@ export async function issueCalendarFeedUseCase<AuditContext, Completion>(
   const decision = await receipts.reserve(receiptKey)
   if (decision.status === 'replay') return readIssueReceipt(decision.response)
   if (decision.status === 'in-progress') {
+    // Transient: the client keeps the same key and retries, so the first request's receipt replays.
     throw new CalendarFeedError(
-      'conflict',
+      'unavailable',
       'CalendarFeedIssueInProgress',
       'The same calendar feed request is still in progress. Retry shortly.',
     )

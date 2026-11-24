@@ -182,7 +182,10 @@ function feedNotFound(c: Context) {
 function toCalendarFeedErrorResponse(c: Context, error: unknown) {
   if (error instanceof CalendarFeedError) {
     const status = CATEGORY_STATUS[error.category]
-    if (status >= 500) {
+    if (error.code === 'CalendarFeedIssueInProgress') {
+      // The first request with this key is still running; the client retries with the same key.
+      c.header('Retry-After', '1')
+    } else if (status >= 500) {
       console.error('Calendar feed request failed.', {
         requestId: c.req.header('X-Request-Id'),
         code: error.code,

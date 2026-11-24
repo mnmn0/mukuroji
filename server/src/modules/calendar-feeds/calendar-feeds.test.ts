@@ -108,6 +108,23 @@ test('returns the first URL again when an issue request is retried with the same
   expect(await resolveCalendarFeedTokenUseCase(store, first.feedPath.split('/').at(-1))).toBeUndefined()
 })
 
+test('answers a retry during the first request as temporarily unavailable, so the key is kept', async () => {
+  const store = new InMemoryCalendarFeedStore()
+  const receipts: CalendarFeedIssueReceipts<never> = {
+    reserve: async () => ({ status: 'in-progress' }),
+    prepareCompletion: async () => undefined,
+    complete: async () => undefined,
+    release: async () => undefined,
+  }
+  const retried = issueCalendarFeedUseCase(store, owner, { kind: 'member' }, {
+    now: '2026-11-24T00:00:00.000Z',
+    canReadProject,
+    idempotency: { receipts, key: 'issue-1' },
+  })
+  await expect(retried).rejects.toMatchObject({ category: 'unavailable', code: 'CalendarFeedIssueInProgress' })
+  expect(await store.list({ workspaceId: owner.workspaceId, memberKey: owner.memberKey })).toEqual([])
+})
+
 test('refuses a Project feed for a Project the owner cannot read', async () => {
   const store = new InMemoryCalendarFeedStore()
   const issued = issueCalendarFeedUseCase(store, owner, { kind: 'project', teamId: 't', projectId: 'hidden' }, {
