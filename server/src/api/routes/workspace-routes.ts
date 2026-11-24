@@ -23,8 +23,10 @@ import {
 import {
   requirePrivateDocumentManagerContinuity,
 } from '../../modules/workspace-access/document-manager-lifecycle'
+import { revokeMemberCredentials } from '../../modules/developer-platform'
 import {
   authenticationDependencies,
+  developerPlatformDependencies,
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
@@ -938,6 +940,17 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
         },
         auditContext,
       )
+      if (member.status === 'deactivated') {
+        // API keys and OAuth tokens act as their creator, so they are revoked with the membership
+        // and stay revoked if the member comes back (ADR 0095). Revocation is idempotent, so
+        // repeating the deactivation after a failure here finishes it.
+        await revokeMemberCredentials(
+          developerPlatformDependencies,
+          principal.directoryId,
+          member.memberKey,
+          principal.userKey,
+        )
+      }
 
       return c.json({ member })
     } catch (error) {

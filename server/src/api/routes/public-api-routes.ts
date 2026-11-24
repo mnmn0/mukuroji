@@ -3844,6 +3844,21 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       enforceActiveWorkspace: async (workspaceId) => {
         await enforceActiveTenantForWorkspace(workspaceId)
       },
+      requireActiveCredentialSubject: async (credential) => {
+        // An API key or OAuth token acts as its creator, so it stops working the moment the
+        // creator is deactivated or their access expires, whatever the route (ADR 0095).
+        const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+          credential.workspaceId,
+          credential.subjectUserId,
+        )
+        if (!member) {
+          throw new PublicApiServiceError(
+            403,
+            'forbidden',
+            'The credential owner is not an active Workspace member.',
+          )
+        }
+      },
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),

@@ -1935,3 +1935,62 @@ describe('weekly report reminders', () => {
     expect(await run('2026-11-19T00:00:00.000Z')).toEqual([])
   })
 })
+
+describe('member access expiry notices', () => {
+  test('tells each manager of the member once, a week ahead, and again when the expiry moves', async () => {
+    const windows: Array<[string, string]> = []
+    let accessExpiresAt = '2026-11-28T00:00:00.000Z'
+    const memberAccessExpiryReader = {
+      async listMembersExpiringBetween(after: Date, before: Date) {
+        windows.push([after.toISOString(), before.toISOString()])
+        return [{
+          workspaceId: 'workspace-1',
+          memberKey: 'guest@example.com',
+          displayName: 'Guest',
+          accessExpiresAt,
+        }]
+      },
+      async readMemberProjects() {
+        return [
+          { teamId: 'core-team', projectId: 'api', managerMemberKeys: ['guest@example.com', 'lead@example.com'] },
+          { teamId: 'core-team', projectId: 'web', managerMemberKeys: ['lead@example.com', 'pm@example.com'] },
+        ]
+      },
+    }
+    const run = async () => {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand' ? { Items: [] } : {})
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date('2026-11-24T00:00:00.000Z'),
+        memberAccessExpiryReader,
+      }))
+      return recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => readPutItem(input))
+        .filter((event) => event.eventType === 'workspace-member.access-expiring')
+    }
+
+    const notices = await run()
+    expect(windows).toEqual([['2026-11-24T00:00:00.000Z', '2026-12-01T00:00:00.000Z']])
+    expect(notices.map((notice) => notice.metadata)).toEqual([
+      expect.objectContaining({
+        teamId: 'core-team',
+        projectId: 'api',
+        deepLink: '/teams/core-team/members',
+        notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'member-access-expiry' }],
+      }),
+      expect.objectContaining({
+        projectId: 'web',
+        notificationCandidates: [{ memberKey: 'pm@example.com', reason: 'member-access-expiry' }],
+      }),
+    ])
+    expect(notices[0]).toMatchObject({ summary: expect.stringContaining('Guest') })
+    // The member's email address stays out of the entity ID.
+    expect(String(notices[0]?.entityId)).not.toContain('guest@example.com')
+
+    const retried = await run()
+    expect(retried.map((notice) => notice.eventId)).toEqual(notices.map((notice) => notice.eventId))
+    accessExpiresAt = '2026-11-30T00:00:00.000Z'
+    const moved = await run()
+    expect(moved[0]?.eventId).not.toBe(notices[0]?.eventId)
+  })
+})

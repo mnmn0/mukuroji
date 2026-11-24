@@ -12,6 +12,7 @@ test('keeps the cadence and retry policy each scheduled worker had as its own La
       { name: 'analytics-schedule', everyMinutes: 5, attempts: 3 },
       { name: 'notification-schedule', everyMinutes: 60, attempts: 3 },
       { name: 'cycle-schedule', everyMinutes: 60, attempts: 3 },
+      { name: 'member-access-expiry', everyMinutes: 60, attempts: 3 },
       { name: 'inbox-digest', everyMinutes: 15, attempts: 1 },
       { name: 'japanese-public-holiday-sync', everyMinutes: 360, attempts: 2 },
     ])
@@ -29,6 +30,7 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
     'email-notifications-handler',
     'inbox-digest-worker-handler',
     'japanese-public-holiday-sync-handler',
+    'member-access-expiry-handler',
     'notification-schedule-handler',
     'slack-notifications-handler',
     'triage-schedule-handler',
@@ -47,6 +49,7 @@ test('leaves the Agent Run triage job out when Software factory is not deployed'
     'analytics-schedule',
     'notification-schedule',
     'cycle-schedule',
+    'member-access-expiry',
     'inbox-digest',
     'japanese-public-holiday-sync',
   ])

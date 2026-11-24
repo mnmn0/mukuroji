@@ -46,6 +46,7 @@ import {
   defineAnalyticsScheduleJob,
   defineCycleScheduleJob,
   defineInboxDigestJob,
+  defineMemberAccessExpiryJob,
   defineJapanesePublicHolidaySyncJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
@@ -326,6 +327,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),
+        defineMemberAccessExpiryJob({ dataStores, parameters }),
         defineInboxDigestJob({ dataStores, parameters }),
         defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
       ],

@@ -1,6 +1,11 @@
 /** Workspace Access module public application and domain surface. */
 export type { WorkspaceRole } from './domain/workspace-role'
 export {
+  canMemberAccessExpire,
+  isMemberAccessExpired,
+  readMemberAccessExpiry,
+} from './domain/member-access-expiry'
+export {
   requirePrivateDocumentManagerContinuity,
   type DocumentManagerLifecycleDependencies,
 } from './document-manager-lifecycle'
@@ -11,10 +16,12 @@ export {
   isWorkspaceIdentitySafeToDelete,
   type CreateWorkspaceInvitationInput,
   type DeprovisionDirectoryWorkspaceMemberInput,
+  type ExpireWorkspaceMemberInput,
   type MarkWorkspaceInvitationCleanupFailureInput,
   type MarkWorkspaceInvitationDeliveryInput,
   type ReconcileAuthenticatedWorkspaceMemberInput,
   type ReconcileDirectoryWorkspaceMemberInput,
+  type UpdateWorkspaceMemberAccessExpiryInput,
   type UpdateWorkspaceMemberInput,
   type WorkspaceAccessCapabilities,
   type WorkspaceAccessClient,

@@ -298,6 +298,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/members/sign-in-security',
     permission: 'members.manage',
   },
+  // What a departing member manages, owns, and created is for administrators (ADR 0095).
+  {
+    method: 'GET',
+    pathPattern: '/api/workspace/members/:memberKey/offboarding',
+    permission: 'members.manage',
+  },
   // Applying or previewing a Workspace calendar change rewrites Work Item schedules (ADR 0058).
   {
     method: '*',

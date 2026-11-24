@@ -1,6 +1,7 @@
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
+import { grantPlanningRevisionFenceAccess } from '../../policies/planning-revision-fence';
 import type { ScheduledJobGrant } from './scheduled-jobs';
 
 /**
@@ -192,9 +193,10 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
         actions: ['dynamodb:GetItem'],
         resources: [notificationsTable.tableArn],
       }));
-      // Members' current display names for weekly report reminders (ADR 0074).
+      // Members' current display names for weekly report reminders (ADR 0074), and the members
+      // whose access ends soon for access expiry notices (ADR 0095).
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:Query'],
+        actions: ['dynamodb:Query', 'dynamodb:Scan'],
         resources: [workspaceAccessTable.tableArn],
       }));
       // Unsubmitted time entries for timesheet reminders.
@@ -381,6 +383,91 @@ export function defineJapanesePublicHolidaySyncJob(input: ScheduleWorkerInput): 
             'dynamodb:LeadingKeys': ['system#public-holidays'],
           },
         },
+      }));
+    },
+  };
+}
+
+/**
+ * Defines the hourly job that deactivates members whose access expiry has passed (ADR 0095).
+ *
+ * The job reads the Project directory, Planning owners, and private Document managers to leave
+ * active a member who still manages or owns something, and writes the deactivation in one
+ * transaction fenced by the Planning revision, the Document ACL generation, and the tenant state.
+ *
+ * @param input Shared data stores and parameters.
+ * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
+ */
+export function defineMemberAccessExpiryJob(input: ScheduleWorkerInput): ScheduledJobGrant {
+  const {
+    auditEventsTable,
+    documentsTable,
+    planningTable,
+    projectDirectoryTable,
+    tenantAdministrationTable,
+    workspaceAccessTable,
+    workspaceAuditPseudonymSecret,
+  } = input.dataStores;
+  const { apiRuntimeConfigurationRevision, auditRetentionDays } = input.parameters;
+
+  return {
+    id: 'MemberAccessExpiry',
+    runtimeScope: 'notification-schedule',
+    // The role already holds ten managed policies with every optional module on.
+    policy: 'shared-role',
+    environment: {
+      AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
+      AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+      DOCUMENTS_TABLE_NAME: documentsTable.tableName,
+      // Secret ARN only: the job reads the value at cold start, and a new revision replaces
+      // warm environments that cached the old one.
+      MUKUROJI_WORKER_SECRET_REVISION: apiRuntimeConfigurationRevision.valueAsString,
+      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY_SECRET_ARN: workspaceAuditPseudonymSecret.secretArn,
+      PLANNING_TABLE_NAME: planningTable.tableName,
+      PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
+      WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+    },
+    grant: (grantee) => {
+      workspaceAuditPseudonymSecret.grantRead(grantee);
+      // Expired members are found by a filtered scan; the deactivation is a member row update.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan', 'dynamodb:UpdateItem'],
+        resources: [workspaceAccessTable.tableArn],
+      }));
+      // Planning owners and the Document managers are read; their revisions fence the write.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [planningTable.tableArn, documentsTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [documentsTable.tableArn],
+        conditions: {
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [planningTable.tableArn],
+        conditions: {
+          'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['FENCE#*'] },
+          StringEquals: { 'dynamodb:EnclosingOperation': 'TransactWriteItems' },
+        },
+      }));
+      grantPlanningRevisionFenceAccess(planningTable, grantee);
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [projectDirectoryTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [auditEventsTable.tableArn],
+      }));
+      // A closing tenant refuses the membership write inside the same transaction.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:GetItem'],
+        resources: [tenantAdministrationTable.tableArn],
       }));
     },
   };

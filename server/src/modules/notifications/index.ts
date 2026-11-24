@@ -77,9 +77,18 @@ export type { UnsubmittedTimeEntry } from './application/timesheet-reminders'
 export type { ScheduledWeeklyReportReader } from './application/ports/weekly-report-reminder-reader'
 export type { WeeklyReportTeamRoster } from './application/weekly-report-reminders'
 export { createDynamoDbWeeklyReportRosterReader } from './adapter-out/dynamodb/weekly-report-roster-reader'
+/** Exposes the member access expiry notice reader port and its Project Directory adapter. */
+export type {
+  ExpiringMemberProject,
+  ExpiringWorkspaceMember,
+  ScheduledMemberAccessExpiryReader,
+} from './application/member-access-expiry-notices'
+export { createDynamoDbMemberProjectReader } from './adapter-out/dynamodb/member-project-reader'
 /** Exposes reminder override validation shared by HTTP adapters. */
 export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {
+  MEMBER_ACCESS_EXPIRING_EVENT_TYPE,
+  MEMBER_ACCESS_EXPIRY_REASON,
   TIMESHEET_REMINDER_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
   WEEKLY_REPORT_ESCALATION_REASON,

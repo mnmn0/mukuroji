@@ -94,6 +94,14 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'A member has not submitted the weekly report for the week of {weekStart}.',
     ja: '{weekStart} の週の週報を提出していないメンバーがいます。',
   },
+  'workspace-member.access-expiring': {
+    en: 'Access of {member} ends on {date}. Hand over their work before then.',
+    ja: '{member} さんの利用期限は {date} です。それまでに担当を引き継いでください。',
+  },
+  'workspace-member.access-expiring-unnamed': {
+    en: 'A member of your Project loses access on {date}. Hand over their work before then.',
+    ja: 'Project のメンバーの利用期限が {date} に切れます。それまでに担当を引き継いでください。',
+  },
   'planning-update.health-changed': {
     en: 'Health changed to {health}: {excerpt}',
     ja: 'Health が{health}になりました: {excerpt}',
