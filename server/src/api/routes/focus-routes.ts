@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import {
   type ApprovalRequest,
   type CanonicalWorkItem,
+  type PlanningEntity,
   type PlanningSnapshot,
+  type PlanningUpdateTargetSummary,
   type PlanningWorkItemSummary,
   type FocusEffectivePolicy,
   type FocusItem,
@@ -45,6 +47,7 @@ import {
   createFocusPolicyMutationPreview,
   createFocusPolicyRevisionConditionCheck,
   createFocusQueue,
+  createFocusUpdateReviewKey,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
   focusQueueUsesApprovalSummary,
   focusQueueUsesScheduleBaseline,
@@ -1554,6 +1557,7 @@ async function readFocusQueue(
       initiativeTitlesById: readFocusInitiativeTitlesById(snapshot, planning),
     }
   })
+  const acknowledgedUpdateKeysPromise = readFocusAcknowledgedUpdateKeys(principal)
   const relationGraphsPromise = Promise.resolve(
     filterFocusRelationGraphs(rawRelationGraphs, accessibleWorkItems),
   )
@@ -1586,6 +1590,7 @@ async function readFocusQueue(
     state,
     projectTitlesByKey,
     scheduleBaselines,
+    acknowledgedUpdateKeys,
     projectLog,
   ] =
     await Promise.all([
@@ -1599,6 +1604,7 @@ async function readFocusQueue(
       statePromise,
       projectTitlesPromise,
       scheduleBaselinesPromise,
+      acknowledgedUpdateKeysPromise,
       projectLogSourcesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
@@ -1608,6 +1614,7 @@ async function readFocusQueue(
     planning,
     projectTitlesByKey,
     initiativeTitlesById,
+    acknowledgedUpdateKeys,
     projectLogSources: projectLog.sources,
     ...(projectLog.incomplete ? { projectLogIncomplete: true } : {}),
     relationGraphs,
@@ -2060,6 +2067,7 @@ function filterFocusPlanningSnapshotForPrincipal(
   const updateTargets = snapshot.updateTargets.filter((summary) => {
     const target = summary.target
     if (principal.enterpriseAuthorizationEvaluation !== undefined) {
+      if (target.type === 'team') return canReadPlanningResource(target.teamId)
       return target.type === 'project'
         ? canReadPlanningResource(target.teamId, target.projectId)
         : entityIds.has(target.entityId)
@@ -2072,6 +2080,7 @@ function filterFocusPlanningSnapshotForPrincipal(
         createFocusWorkItemKey(target.teamId, target.projectId),
       )
     }
+    if (target.type === 'team') return legacyUpdateTargetScope.teamIds.has(target.teamId)
     const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
     if (entity === undefined) return false
     if (entity.projectId !== undefined) {
@@ -2081,7 +2090,7 @@ function filterFocusPlanningSnapshotForPrincipal(
     }
     if (entity.teamId !== undefined) return legacyUpdateTargetScope.teamIds.has(entity.teamId)
     return legacyUpdateTargetScope.workspaceReadable
-  })
+  }).map((summary) => withholdFocusMovedLatestUpdate(summary, snapshot.entities))
   return {
     ...snapshot,
     entities: scopedEntities,
@@ -2106,6 +2115,41 @@ function filterFocusPlanningSnapshotForPrincipal(
       workItemLinks,
     ),
   }
+}
+
+/**
+ * Drops the latest update when it was published under a scope other than the target's current one.
+ *
+ * Moving an Initiative keeps its update target and the scope captured at publish time. The
+ * target filter authorizes the current scope only, so content captured elsewhere stays hidden,
+ * as in the Planning snapshot and Update Feed readers.
+ *
+ * @param summary - Update target summary already authorized through its current scope.
+ * @param entities - Unfiltered Planning entities used to resolve an Initiative's current scope.
+ * @returns The summary, without its latest update when the captured scope differs.
+ */
+function withholdFocusMovedLatestUpdate(
+  summary: PlanningUpdateTargetSummary,
+  entities: readonly PlanningEntity[],
+): PlanningUpdateTargetSummary {
+  const latest = summary.latestUpdate
+  if (latest === undefined) return summary
+  const target = summary.target
+  const currentScope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined =
+    target.type === 'initiative'
+      ? entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative')
+      : target.type === 'project'
+      ? { teamId: target.teamId, projectId: target.projectId }
+      : { teamId: target.teamId }
+  const captured = latest.capturedScope
+  if (
+    currentScope !== undefined && captured !== undefined &&
+    captured.teamId === currentScope.teamId && captured.projectId === currentScope.projectId
+  ) {
+    return summary
+  }
+  const { latestUpdate: _withheld, ...withoutLatestUpdate } = summary
+  return withoutLatestUpdate
 }
 
 /**
@@ -2138,6 +2182,26 @@ type FocusLegacyUpdateTargetScope = {
   teamIds: ReadonlySet<string>
   /** Whether Workspace-scoped Planning content is readable. */
   workspaceReadable: boolean
+}
+
+/**
+ * Reads which latest update versions already carry the reviewer acknowledgement.
+ *
+ * The keys hold no update content; Focus only uses them to drop acknowledged reviews from targets
+ * that already passed the Planning read filter.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Acknowledged update keys made with createFocusUpdateReviewKey.
+ */
+async function readFocusAcknowledgedUpdateKeys(
+  principal: WorkspacePrincipal,
+): Promise<ReadonlySet<string>> {
+  const activities = await workItemDependencies.planning.getUpdateActivities(principal.directoryId)
+  return new Set(activities.flatMap((activity) =>
+    activity.acknowledgement === undefined
+      ? []
+      : [createFocusUpdateReviewKey(activity.target, activity.version)]
+  ))
 }
 
 /**

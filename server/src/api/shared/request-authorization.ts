@@ -2022,6 +2022,13 @@ async function resolvePlanningUpdateAuthorizationResource(
     }
   }
   if (
+    target.type === 'team' &&
+    typeof target.teamId === 'string' &&
+    target.teamId.trim()
+  ) {
+    return { workspaceId, kind: 'team', targetId: target.teamId.trim() }
+  }
+  if (
     target.type !== 'initiative' ||
     typeof target.entityId !== 'string' ||
     !target.entityId.trim()

@@ -930,6 +930,91 @@ test('lists health update deadlines the viewer owns in Projects readable by ACL'
   }])
 })
 
+test('withholds an update review published under the Initiative\'s previous scope', async () => {
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const planning = new InMemoryPlanningClient()
+  const emptyWorkItems: PlanningWorkItemState = { workItems: [] }
+  const hierarchy = [
+    { id: 'workspace-portfolio', type: 'portfolio' },
+    { id: 'workspace-roadmap', type: 'roadmap', parentId: 'workspace-portfolio' },
+    { id: 'workspace-initiative', type: 'initiative', parentId: 'workspace-roadmap' },
+  ] as const
+  for (const [index, entity] of hierarchy.entries()) {
+    await planning.create('user#demo@example.com', {
+      ...entity,
+      title: entity.id,
+      ownerMemberKey: 'owner@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'none',
+      progressMode: 'automatic',
+      baseline: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      forecast: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      expectedRevision: index,
+    }, emptyWorkItems)
+  }
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'workspace-initiative' }
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'owner@example.com',
+      reviewerMemberKey: 'sato@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2099-01-06T09:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: hierarchy.length,
+  }, emptyWorkItems)
+  const readSnapshot = planning.get.bind(planning)
+  /** Adds a latest update whose captured scope is the given Team and Project. */
+  const withLatestUpdate = (capturedScope: { teamId?: string, projectId?: string }) => {
+    planning.get = async (...args) => {
+      const snapshot = await readSnapshot(...args)
+      return {
+        ...snapshot,
+        updateTargets: snapshot.updateTargets.map((summary) => ({
+          ...summary,
+          latestUpdate: {
+            id: 'update-1',
+            version: 1,
+            health: 'at-risk',
+            risk: 'medium',
+            summary: 'Report written while the Initiative belonged to another Project.',
+            progressSnapshot: { percent: 0, linkedWorkItemCount: 0 },
+            authorMemberKey: 'owner@example.com',
+            coveredDueAt: '2099-01-06T09:00:00.000Z',
+            createdAt: '2020-01-06T08:00:00.000Z',
+            capturedScope,
+          },
+        })),
+      }
+    }
+  }
+  setTestAppDependencies({ planning })
+
+  withLatestUpdate({ teamId: 'hidden-team', projectId: 'hidden-project' })
+  const moved = await focusRequest('/api/focus')
+  expect(moved.status).toBe(200)
+  const movedBody: unknown = await moved.json()
+  if (!isRecord(movedBody)) throw new Error('Expected a Focus response.')
+  expect(movedBody.updateReviews ?? []).toEqual([])
+
+  withLatestUpdate({})
+  const current = await focusRequest('/api/focus')
+  const currentBody: unknown = await current.json()
+  if (!isRecord(currentBody) || !Array.isArray(currentBody.updateReviews)) {
+    throw new Error('Expected Focus update reviews.')
+  }
+  expect(currentBody.updateReviews.map((review: unknown) =>
+    isRecord(review) ? review.summary : undefined
+  )).toEqual(['Report written while the Initiative belonged to another Project.'])
+})
+
 test('drops Focus mention notifications whose collaboration source was removed', async () => {
   configureFocusSources()
   const notification = {

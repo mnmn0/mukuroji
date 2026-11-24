@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { PlanningUpdateReaction } from '@mukuroji/contracts'
 import {
   planningSnapshotFixture,
   planningUpdateHistoryFixture,
@@ -16,10 +15,10 @@ import {
   derivePlanningUpdateAcknowledgement,
   createPlanningUpdateWorkItemEvidenceValue,
   extractPlanningUpdateCommentMentions,
+  planningUpdateTargetsAreEqual,
   readPlanningEvidenceHttpsUrl,
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
 } from '../src/planning/model/statusUpdateView'
 import {
   PlanningStatusUpdateComposer,
@@ -53,6 +52,80 @@ describe('Planning update evidence composer', () => {
     expect(html).toContain(statusUpdate.summary)
     expect(html).toContain(statusUpdate.nextAction)
     expect(publishCount).toBe(0)
+  })
+
+  test('starts a fresh form from the Workspace template and marks required fields', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={labels}
+        onPublish={() => undefined}
+        progress={40}
+        template={{
+          requiredFields: ['riskSummary', 'evidence'],
+          template: { summary: 'Done this week:', helpNeeded: 'None' },
+        }}
+      />,
+    )
+    expect(html).toContain('>Done this week:</textarea>')
+    expect(html).toContain('>None</textarea>')
+    expect(html).toContain('Risk (required)')
+    expect(html).toContain('Evidence links (required)')
+    expect(html).toContain('name="riskSummary" required=""')
+    expect(html).not.toContain('Decision (required)')
+  })
+
+  test('waits for the Workspace settings before the author can type', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={{ ...labels, templateLoading: 'Loading required fields' }}
+        onPublish={() => undefined}
+        progress={40}
+        templateLoadState={{ status: 'loading' }}
+      />,
+    )
+    expect(html).toContain('role="status">Loading required fields</p>')
+    expect(html).toMatch(/<textarea[^>]*disabled=""[^>]*name="summary"/)
+  })
+
+  test('keeps the form usable and offers a retry when the Workspace settings fail to load', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        labels={{ ...labels, templateLoadFailed: 'Required fields could not be loaded' }}
+        onPublish={() => undefined}
+        progress={40}
+        templateLoadState={{ status: 'error', onRetry: () => undefined }}
+      />,
+    )
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('Required fields could not be loaded')
+    expect(html).toContain(`>${labels.retryHistory}</button>`)
+    expect(html).not.toMatch(/<textarea[^>]*disabled=""[^>]*name="summary"/)
+  })
+
+  test('keeps an AI or saved draft instead of the template', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        initialDraft={{
+          health: 'on-track',
+          risk: 'none',
+          summary: 'Drafted summary',
+          riskSummary: '',
+          decisionSummary: '',
+          helpNeeded: '',
+          nextAction: 'Next',
+        }}
+        labels={labels}
+        onPublish={() => undefined}
+        progress={40}
+        template={{ requiredFields: [], template: { summary: 'Template summary' } }}
+      />,
+    )
+    expect(html).toContain('Drafted summary')
+    expect(html).not.toContain('Template summary')
   })
 
   /** Verifies an in-flight AI decision cannot race the canonical publish action. */
@@ -256,45 +329,41 @@ describe('Planning update evidence composer', () => {
   })
 })
 
-/**
- * Builds one reaction row on the onboarding Initiative used by acknowledgement tests.
- *
- * @param memberKey - Member that added the reaction.
- * @param emoji - Reaction token.
- * @param updateVersion - Immutable update version that owns the reaction.
- * @returns Contract reaction row.
- */
-function createReaction(
-  memberKey: string,
-  emoji: string,
-  updateVersion: number,
-): PlanningUpdateReaction {
-  return {
-    target: { type: 'initiative', entityId: 'initiative-onboarding' },
-    updateVersion,
-    emoji,
-    memberKey,
-    createdAt: '2026-07-16T01:00:00.000Z',
-  }
-}
+describe('Planning update target identity', () => {
+  test('matches Team targets by Team and never across target kinds', () => {
+    expect(
+      planningUpdateTargetsAreEqual({ type: 'team', teamId: 'team-a' }, { type: 'team', teamId: 'team-a' }),
+    ).toBe(true)
+    expect(
+      planningUpdateTargetsAreEqual({ type: 'team', teamId: 'team-a' }, { type: 'team', teamId: 'team-b' }),
+    ).toBe(false)
+    expect(
+      planningUpdateTargetsAreEqual(
+        { type: 'team', teamId: 'team-a' },
+        { type: 'project', teamId: 'team-a', projectId: 'project-a' },
+      ),
+    ).toBe(false)
+  })
+})
 
 describe('Planning update reviewer acknowledgement', () => {
-  test('is absent when the cadence has no escalation reviewer', () => {
-    expect(derivePlanningUpdateAcknowledgement([], 2, undefined)).toBeUndefined()
-    expect(derivePlanningUpdateAcknowledgement([], 2, '  ')).toBeUndefined()
+  test('is absent when the cadence has no reviewer and nobody acknowledged', () => {
+    expect(derivePlanningUpdateAcknowledgement({}, undefined)).toBeUndefined()
+    expect(derivePlanningUpdateAcknowledgement({}, '  ')).toBeUndefined()
   })
 
-  test('counts only the reviewer confirmation reaction on the same version', () => {
-    const reactions = [
-      createReaction('member@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 2),
-      createReaction('Manager@Example.com', '👍', 2),
-      createReaction('manager@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 1),
-    ]
-    expect(derivePlanningUpdateAcknowledgement(reactions, 2, 'manager@example.com')).toEqual({
+  test('waits for the cadence reviewer until the version records an acknowledgement', () => {
+    expect(derivePlanningUpdateAcknowledgement({}, ' manager@example.com ')).toEqual({
       reviewerMemberKey: 'manager@example.com',
     })
-    expect(derivePlanningUpdateAcknowledgement(reactions, 1, ' MANAGER@example.com ')).toEqual({
-      reviewerMemberKey: 'MANAGER@example.com',
+    expect(derivePlanningUpdateAcknowledgement({
+      acknowledgement: {
+        memberKey: 'manager@example.com',
+        commentId: 'comment-1',
+        acknowledgedAt: '2026-07-16T01:00:00.000Z',
+      },
+    }, undefined)).toEqual({
+      reviewerMemberKey: 'manager@example.com',
       acknowledgedAt: '2026-07-16T01:00:00.000Z',
     })
   })
@@ -326,6 +395,38 @@ describe('Planning update reviewer acknowledgement', () => {
     )
     expect(markup).toContain('Awaiting review · manager@example.com')
     expect(markup).toContain('Reviewed · manager@example.com · ')
+  })
+
+  test('offers the acknowledge action beside the comment box only on pending reviews', () => {
+    const summary = planningSnapshotFixture.updateTargets.find((candidate) =>
+      candidate.target.type === 'initiative' &&
+      candidate.target.entityId === 'initiative-onboarding'
+    )
+    if (!summary) throw new Error('Missing onboarding update target fixture.')
+    const markup = renderToStaticMarkup(
+      <PlanningStatusUpdateLedger
+        collaboration={{
+          acknowledgementsByUpdateId: {
+            'update-initiative-1': {
+              reviewerMemberKey: 'manager@example.com',
+              acknowledgedAt: '2026-07-09T00:00:00.000Z',
+            },
+            'update-initiative-2': { reviewerMemberKey: 'manager@example.com' },
+          },
+          commentsByUpdateId: {},
+          isLoading: false,
+          isPending: false,
+          onAcknowledge: () => undefined,
+          reactionsByUpdateId: {},
+        }}
+        labels={labels}
+        updateView={createPlanningTargetUpdateView(summary, planningUpdateHistoryFixture)}
+      />,
+    )
+    expect(markup.split('data-testid="planning-update-acknowledge"')).toHaveLength(2)
+    expect(markup.indexOf('name="comment"')).toBeLessThan(
+      markup.indexOf('data-testid="planning-update-acknowledge"'),
+    )
   })
 
   test('renders no acknowledgement badge without a configured reviewer', () => {
