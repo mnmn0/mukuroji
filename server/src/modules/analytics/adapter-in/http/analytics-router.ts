@@ -40,6 +40,12 @@ export type AnalyticsRouterDependencies<
     limit: string | undefined,
     cursor: string | undefined,
   ): Promise<object>
+  /** Lists the scheduled deliveries to the current principal, newest first. */
+  listDeliveries(
+    principal: Principal,
+    limit: string | undefined,
+    cursor: string | undefined,
+  ): Promise<object>
   /** Creates an Analytics report visible under the requested policy. */
   createReport(principal: Principal, input: Record<string, unknown>): Promise<object>
   /** Updates an Analytics report after authorization and revision checks. */
@@ -155,6 +161,24 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
   }
 
   router.get('/api/analytics/reports', handleListReports)
+
+  /** Lists the scheduled deliveries to the authenticated principal. */
+  async function handleListDeliveries(context: Context) {
+    const access = await authenticateRequest(context, dependencies)
+    if (access instanceof Response) return access
+
+    try {
+      return context.json(await dependencies.listDeliveries(
+        access,
+        context.req.query('limit'),
+        context.req.query('cursor'),
+      ))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  }
+
+  router.get('/api/analytics/deliveries', handleListDeliveries)
 
   /** Creates an Analytics report for the authenticated principal. */
   async function handleCreateReport(context: Context) {

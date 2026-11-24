@@ -22,7 +22,12 @@ import {
 } from '../../../planning'
 import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import { isCanonicalWorkItemRecord, isWorkItemKeyRegistryRecord } from '../../../work-items'
-import { NOTIFICATION_REMINDER_DAYS_MAXIMUM } from '@mukuroji/contracts'
+import {
+  NOTIFICATION_REMINDER_DAYS_MAXIMUM,
+  createNotificationMessage,
+  formatNotificationMessage,
+  type NotificationMessage,
+} from '@mukuroji/contracts'
 import { normalizeTeamReminderDays } from '../../domain/reminder-days'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 import type { ScheduledProjectManagerReader } from '../../application/ports/project-manager-reader'
@@ -42,7 +47,7 @@ import {
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
 import {
   evaluateWeeklyReportReminders,
-  resolveWeeklyReportReminderRun,
+  resolveWeeklyReportReminderRuns,
   toWeeklyReportReminderTiming,
   weeklyReportWeekStart,
   type WeeklyReportReminderCandidate,
@@ -611,27 +616,30 @@ export async function runNotificationSchedule(
     const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
     for (const workspaceId of workspaceIds) {
       const settings = await weeklyReportReader.readWorkspaceSettings(workspaceId)
-      const timing = toWeeklyReportReminderTiming(settings.reminders)
-      const run = timing ? resolveWeeklyReportReminderRun(now, timing) : undefined
-      if (!run) continue
-      const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)
-      for (const roster of await weeklyReportReader.readTeamRosters(workspaceId)) {
-        const memberKeys = [...new Set(roster.projects.flatMap((project) =>
-          project.writers.map((writer) => writer.memberKey)))]
-        if (memberKeys.length === 0) continue
-        const submitted = await weeklyReportReader.readSubmittedMembers(
-          workspaceId,
-          roster.teamId,
-          memberKeys,
-          weekStart,
-        )
-        for (const candidate of evaluateWeeklyReportReminders(roster, run.kind, weekStart, submitted)) {
-          await putScheduledAuditEvent(
-            options.documentClient,
-            auditEventsTableName,
-            createWeeklyReportReminderAuditEvent(candidate, now, auditRetentionDays, options.requestId),
-            result,
+      const timing = toWeeklyReportReminderTiming(settings.reminders, settings.timeZone)
+      const runs = timing ? resolveWeeklyReportReminderRuns(now, timing) : []
+      if (runs.length === 0) continue
+      const rosters = await weeklyReportReader.readTeamRosters(workspaceId)
+      for (const run of runs) {
+        const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)
+        for (const roster of rosters) {
+          const memberKeys = [...new Set(roster.projects.flatMap((project) =>
+            project.writers.map((writer) => writer.memberKey)))]
+          if (memberKeys.length === 0) continue
+          const submitted = await weeklyReportReader.readSubmittedMembers(
+            workspaceId,
+            roster.teamId,
+            memberKeys,
+            weekStart,
           )
+          for (const candidate of evaluateWeeklyReportReminders(roster, run.kind, weekStart, submitted)) {
+            await putScheduledAuditEvent(
+              options.documentClient,
+              auditEventsTableName,
+              createWeeklyReportReminderAuditEvent(candidate, now, auditRetentionDays, options.requestId),
+              result,
+            )
+          }
         }
       }
     }
@@ -1185,14 +1193,16 @@ function createScheduledNotificationAuditEvent(
         reason: scheduledNotificationCandidateReason(candidate.reason),
       }]
 
+  const message = createScheduledNotificationMessage(candidate)
   return createAuditEvent({
     context,
     eventType: `work-item.${candidate.reason}`,
     entity: { type: 'work-item', id: entityId },
     action: candidate.reason,
     changes: [],
-    summary: createScheduledNotificationSummary(candidate),
+    summary: formatNotificationMessage(message, 'en'),
     metadata: {
+      notificationMessage: message,
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
       issueId: candidate.issueId,
@@ -1290,16 +1300,18 @@ function createTimesheetReminderAuditEvent(
   // The browser resolves the instant to the week in the reader's own timezone.
   const search = new URLSearchParams({ week: candidate.oldestStartAt })
   const oldestDate = candidate.oldestStartAt.slice(0, 10)
+  const message = candidate.unsubmittedCount === 1
+    ? createNotificationMessage('timesheet.unsubmitted-one', { date: oldestDate })
+    : createNotificationMessage('timesheet.unsubmitted-many', { count: candidate.unsubmittedCount, date: oldestDate })
   return createAuditEvent({
     context,
     eventType: TIMESHEET_REMINDER_EVENT_TYPE,
     entity: { type: 'timesheet', id: entityId },
     action: 'submission-reminder',
     changes: [],
-    summary: candidate.unsubmittedCount === 1
-      ? `1 time entry from ${oldestDate} has not been submitted.`
-      : `${candidate.unsubmittedCount} time entries since ${oldestDate} have not been submitted.`,
+    summary: formatNotificationMessage(message, 'en'),
     metadata: {
+      notificationMessage: message,
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
       // Recipients are authorized against the entries' Project, which the timesheet lists.
@@ -1372,17 +1384,21 @@ function createWeeklyReportReminderAuditEvent(
     view: escalation ? 'team-weekly-reports' : 'weekly-report',
     week: candidate.weekStart,
   })
-  const author = candidate.authorDisplayName ?? 'A member'
+  const weekStart = candidate.weekStart
+  const message = !escalation
+    ? createNotificationMessage('weekly-report.unsubmitted', { weekStart })
+    : candidate.authorDisplayName
+      ? createNotificationMessage('weekly-report.author-unsubmitted', { author: candidate.authorDisplayName, weekStart })
+      : createNotificationMessage('weekly-report.member-unsubmitted', { weekStart })
   return createAuditEvent({
     context,
     eventType,
     entity: { type: 'weekly-report', id: entityId },
     action: escalation ? 'submission-escalation' : 'submission-reminder',
     changes: [],
-    summary: escalation
-      ? `${author} has not submitted the weekly report for the week of ${candidate.weekStart}.`
-      : `Your weekly report for the week of ${candidate.weekStart} has not been submitted.`,
+    summary: formatNotificationMessage(message, 'en'),
     metadata: {
+      notificationMessage: message,
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
       // The author writes in this Project and, for an escalation, the recipient manages it.
@@ -1416,24 +1432,29 @@ function scheduledNotificationCandidateReason(stage: ScheduledNotificationReason
  * digests, and retries can deliver them on a later calendar day than the scan.
  *
  * @param candidate - Work Item stage and its day offsets.
- * @returns English summary stored on the audit event.
+ * @returns The notification message; its English text is the audit summary.
  */
-function createScheduledNotificationSummary(candidate: ScheduledNotificationCandidate) {
+function createScheduledNotificationMessage(candidate: ScheduledNotificationCandidate): NotificationMessage {
   const overdueDays = -(candidate.daysUntilDue ?? 0)
+  const title = candidate.title
+  const dueDate = candidate.dueDate ?? ''
   switch (candidate.reason) {
     case 'due':
-      return `Work Item "${candidate.title}" is due today.`
+      return createNotificationMessage('work-item.due-today', { title })
     case 'due-soon':
-      return `Work Item "${candidate.title}" is due on ${candidate.dueDate}.`
+      return createNotificationMessage('work-item.due-soon', { title, dueDate })
     case 'overdue':
-      return `Work Item "${candidate.title}" is overdue.`
+      return createNotificationMessage('work-item.overdue', { title })
     case 'overdue-reminder':
-      return `Work Item "${candidate.title}" was due on ${candidate.dueDate} and is still overdue.`
+      return createNotificationMessage('work-item.overdue-reminder', { title, dueDate })
     case 'overdue-escalation':
       // Escalations are delivered only while at least this overdue, so the lower bound holds.
-      return `Work Item "${candidate.title}" was due on ${candidate.dueDate} and has been overdue for at least ${overdueDays} days.`
+      return createNotificationMessage('work-item.overdue-escalation', { title, dueDate, overdueDays })
     case 'stale':
-      return `Work Item "${candidate.title}" is in progress and has not been updated since ${(candidate.workItemUpdatedAt ?? '').slice(0, 10)}.`
+      return createNotificationMessage('work-item.stale', {
+        title,
+        updatedOn: (candidate.workItemUpdatedAt ?? '').slice(0, 10),
+      })
   }
 }
 

@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto'
 import {
   CYCLE_WORK_ITEMS_BATCH_LIMIT,
+  createProjectScheduleBaselineEntry,
+  isProjectScheduleBaselineId,
+  normalizeProjectScheduleBaselineName,
+  PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH,
+  type CaptureCycleScheduleBaselineRequest,
+  type CycleScheduleBaselineEntry,
+  type CycleScheduleBaselineResponse,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type ConfigurePlanningUpdateCadenceInput,
@@ -16,6 +23,7 @@ import {
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type PlanningEntity,
+  type PlanningReadScope,
   type PlanningRevisionInput,
   type PlanningSnapshot,
   type PlanningUpdateCadence,
@@ -43,6 +51,7 @@ import {
 } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
 } from '../../modules/collaboration/collaboration'
@@ -56,7 +65,9 @@ import {
   resolveEnterpriseDirectoryPrincipal,
 } from '../../modules/enterprise-identity'
 import {
+  captureCycleScheduleBaselineUseCase,
   PlanningError,
+  readCycleScheduleBaselineUseCase,
   type PlanningCallerAuthorizationConditionCheck,
   createPlanningEntityWithAssignedId,
   type PlanningEntityCreation,
@@ -102,6 +113,7 @@ import {
   hasUnqualifiedEnterpriseProjectScope,
   qualifyEnterpriseProjectScopes,
 } from '../shared/enterprise-access'
+import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
 import {
@@ -743,6 +755,29 @@ function createPlanningEntityRouteAuditTransaction(
   )
 }
 
+/**
+ * Finds a Milestone the caller can watch in the caller's filtered Planning snapshot.
+ *
+ * @param snapshot - Planning snapshot already filtered to the caller's readable scopes.
+ * @param entityId - Untrusted route entity ID.
+ * @returns The visible, unarchived Milestone.
+ * @throws PlanningError 404 when the entity is hidden or missing, 400 when it is not a Milestone,
+ *   and 409 when it is archived.
+ */
+function requireWatchablePlanningMilestone(snapshot: PlanningSnapshot, entityId: string | undefined) {
+  const normalizedEntityId = readPlanningRouteId(entityId, 'Planning entity ID')
+  const entity = snapshot.entities.find((candidate) => candidate.id === normalizedEntityId)
+  if (!entity) {
+    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+  }
+  if (entity.type !== 'milestone') {
+    throw new PlanningError(400, 'PlanningEntityNotWatchable', 'Only a Milestone can be watched.')
+  }
+  if (entity.archivedAt !== undefined) {
+    throw new PlanningError(409, 'PlanningEntityArchived', 'An archived Milestone cannot be watched.')
+  }
+  return entity
+}
 
 /**
  * Composes the feed reader with current directory and Planning authorization.
@@ -3022,6 +3057,42 @@ function createPlanningRevisionConditionCheck(
 }
 
 /**
+ * Reads the optional `teamId` / `projectId` / `portfolioId` scope of `GET /api/planning`.
+ *
+ * @param c - Request context.
+ * @returns The requested scope, or undefined for the whole Workspace.
+ */
+function readPlanningReadScopeQuery(c: Context): PlanningReadScope | undefined {
+  if (['teamId', 'projectId', 'portfolioId'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
+    throw new PlanningError(
+      400,
+      'PlanningReadScopeInvalid',
+      'Planning read scope parameters must occur at most once.',
+    )
+  }
+  const teamId = c.req.query('teamId')
+  const projectId = c.req.query('projectId')
+  const portfolioId = c.req.query('portfolioId')
+  if (portfolioId !== undefined) {
+    if (teamId !== undefined || projectId !== undefined) {
+      throw new PlanningError(
+        400,
+        'PlanningReadScopeInvalid',
+        'A Portfolio read cannot also name a Team or Project.',
+      )
+    }
+    return { type: 'portfolio', portfolioId }
+  }
+  if (projectId !== undefined) {
+    if (teamId === undefined) {
+      throw new PlanningError(400, 'PlanningReadScopeInvalid', 'A Project read needs its Team ID.')
+    }
+    return { type: 'project', teamId, projectId }
+  }
+  return teamId === undefined ? undefined : { type: 'team', teamId }
+}
+
+/**
  * Registers the planning HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -3036,11 +3107,33 @@ export function registerPlanningRoutes(routeApp: Hono): void {
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      const workItemState = await readPlanningWorkItemState(principal)
-      return c.json(filterPlanningSnapshotForPrincipal(
+      const readScope = readPlanningReadScopeQuery(c)
+      if (readScope === undefined) {
+        const workItemState = await readPlanningWorkItemState(principal)
+        return c.json(filterPlanningSnapshotForPrincipal(
+          principal,
+          await workItemDependencies.planning.get(principal.directoryId, workItemState),
+        ))
+      }
+      const snapshot = filterPlanningSnapshotForPrincipal(
         principal,
-        await workItemDependencies.planning.get(principal.directoryId, workItemState),
-      ))
+        await workItemDependencies.planning.getScoped(
+          principal.directoryId,
+          readScope,
+          (envelope) => readPlanningWorkItemState(principal, envelope),
+        ),
+      )
+      // An unreadable Portfolio answers like a missing one, so its existence does not leak.
+      if (
+        readScope.type === 'portfolio' &&
+        !snapshot.entities.some((entity) => entity.id === readScope.portfolioId)
+      ) {
+        return c.json({
+          code: 'PlanningEntityNotFound',
+          message: `Portfolio "${readScope.portfolioId}" was not found.`,
+        }, 404)
+      }
+      return c.json(snapshot)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -3959,6 +4052,83 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           : await workItemDependencies.collaboration.unsubscribe(mutationInput)
         return c.json({ watch })
       } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
+        return toPlanningErrorResponse(c, error)
+      }
+    })
+  }
+
+  /** Current user の Milestone watcher state を返します。 */
+  routeApp.get('/api/planning/entities/:entityId/watch', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const snapshot = await workItemDependencies.planning.get(
+        principal.directoryId,
+        await readPlanningWorkItemState(principal),
+      )
+      const milestone = requireWatchablePlanningMilestone(
+        filterPlanningSnapshotForPrincipal(principal, snapshot),
+        c.req.param('entityId'),
+      )
+      const watch = await workItemDependencies.collaboration.getWatcherState({
+        entityKey: createPlanningEntityCollaborationEntityKey(principal.directoryId, milestone.id),
+        memberKey: principal.userKey,
+      })
+      return c.json({ watch })
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  for (const planningEntityWatchMethod of ['PUT', 'DELETE'] as const) {
+    /** Milestone の watcher を subscribe/unsubscribe します。完了と予定変更が Inbox に届きます。 */
+    routeApp.on(planningEntityWatchMethod, '/api/planning/entities/:entityId/watch', async (c) => {
+      const accessToken = readBearerAccessToken(c)
+      if (!accessToken) {
+        return c.json({ message: 'Bearer token is required.' }, 401)
+      }
+
+      try {
+        const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+        // Anyone who can read the Milestone may watch it: watching only delivers what they can
+        // already read, and every notification rechecks that access.
+        const snapshot = await workItemDependencies.planning.get(
+          principal.directoryId,
+          await readPlanningWorkItemState(principal),
+        )
+        const milestone = requireWatchablePlanningMilestone(
+          filterPlanningSnapshotForPrincipal(principal, snapshot),
+          c.req.param('entityId'),
+        )
+        const mutationInput = {
+          workspaceId: principal.directoryId,
+          entityKey: createPlanningEntityCollaborationEntityKey(principal.directoryId, milestone.id),
+          planningEntityId: milestone.id,
+          memberKey: principal.userKey,
+          ...(milestone.teamId === undefined ? {} : { teamId: milestone.teamId }),
+          ...(milestone.projectId === undefined ? {} : { projectId: milestone.projectId }),
+          authorizationConditionChecks: [
+            ...createPlanningCallerAuthorizationConditionChecks(principal),
+            createPlanningRevisionConditionCheck(principal.directoryId, snapshot.revision),
+          ],
+          auditContext: createApiMutationContext(c, principal, {
+            planningEntityId: milestone.id,
+            method: planningEntityWatchMethod,
+          }),
+        }
+        const watch = planningEntityWatchMethod === 'PUT'
+          ? await workItemDependencies.collaboration.subscribe(mutationInput)
+          : await workItemDependencies.collaboration.unsubscribe(mutationInput)
+        return c.json({ watch })
+      } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
         return toPlanningErrorResponse(c, error)
       }
     })
@@ -4988,4 +5158,164 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       return toPlanningErrorResponse(c, error)
     }
   })
+
+  /**
+   * Returns the newest, or one saved (`?baselineId=`), schedule baseline of a Cycle the reader
+   * may see, with only the entries of Work Items the reader may currently see.
+   */
+  routeApp.get('/api/planning/cycles/:cycleId/schedule-baselines', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const baselineId = readCycleBaselineIdQuery(c.req.query('baselineId'))
+      const workItemState = await readPlanningWorkItemState(principal)
+      const visible = filterPlanningSnapshotForPrincipal(
+        principal,
+        await workItemDependencies.planning.get(principal.directoryId, workItemState),
+      )
+      requireVisibleCycle(visible, cycleId)
+      const visibleKeys = new Set(visible.workItems.map((workItem) => createCycleBaselineEntryKey(workItem.teamId, workItem.id)))
+      return c.json(await readCycleScheduleBaselineUseCase(
+        workItemDependencies.cycleScheduleBaselines,
+        { workspaceId: principal.directoryId, cycleId },
+        (entry) => visibleKeys.has(createCycleBaselineEntryKey(entry.teamId, entry.workItemId)),
+        baselineId,
+      ) satisfies CycleScheduleBaselineResponse)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Saves the current plan of the Cycle's Work Items as a new named baseline. Only a manager of
+   * the Cycle may save one, and each save is recorded in the audit log in the same transaction.
+   */
+  routeApp.post('/api/planning/cycles/:cycleId/schedule-baselines', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CaptureCycleScheduleBaselineRequest>(c.req)
+      const name = normalizeProjectScheduleBaselineName(input.name)
+      if (name === null) {
+        throw new PlanningError(
+          400,
+          'InvalidPlanningInput',
+          `The baseline name must be text of at most ${PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH} characters without control characters.`,
+        )
+      }
+      const response = await captureCycleScheduleBaselineUseCase(
+        workItemDependencies.cycleScheduleBaselines,
+        { workspaceId: principal.directoryId, cycleId },
+        {
+          capturedAt: new Date().toISOString(),
+          ...(name === undefined ? {} : { name }),
+          readPlan: async () => {
+            // Pin the revision before reading Work Items: a Work Item write advances it, so a
+            // schedule read before that write cannot pair with the newer graph revision.
+            const pinnedRevision = await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId)
+            const snapshot = await workItemDependencies.planning.get(
+              principal.directoryId,
+              await readPlanningWorkItemState(principal),
+            )
+            if (snapshot.revision !== pinnedRevision) {
+              throw new PlanningError(
+                409,
+                'CycleScheduleBaselineConflict',
+                'The Cycle baselines or your permissions changed. Reload and try again.',
+              )
+            }
+            const cycle = await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
+            if (cycle.type !== 'cycle') {
+              throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+            }
+            return {
+              entries: readCycleBaselineEntries(filterPlanningSnapshotForPrincipal(principal, snapshot), cycleId),
+              planningRevision: pinnedRevision,
+            }
+          },
+          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+          auditContext: createApiMutationContext(c, principal, { cycleId, ...(name === undefined ? {} : { name }) }),
+        },
+      )
+      return c.json(response satisfies CycleScheduleBaselineResponse, 201)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+}
+
+/**
+ * Builds the key that matches a Cycle baseline entry to a Work Item.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns A key unique per Team and Work Item.
+ */
+function createCycleBaselineEntryKey(teamId: string, workItemId: string) {
+  return JSON.stringify([teamId, workItemId])
+}
+
+/**
+ * Freezes the current plan of the Cycle's Work Items that a filtered snapshot shows.
+ *
+ * @param visible - Planning snapshot filtered for the caller.
+ * @param cycleId - Cycle whose Work Items are frozen.
+ * @returns One entry per visible Work Item linked to the Cycle.
+ */
+function readCycleBaselineEntries(visible: PlanningSnapshot, cycleId: string): CycleScheduleBaselineEntry[] {
+  const workItems = new Map(visible.workItems.map((workItem) => [
+    createCycleBaselineEntryKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  return visible.workItemLinks
+    .filter((link) => link.cycleId === cycleId)
+    .flatMap((link) => {
+      const workItem = workItems.get(createCycleBaselineEntryKey(link.teamId, link.workItemId))
+      return workItem
+        ? [{ teamId: workItem.teamId, ...createProjectScheduleBaselineEntry(workItem.id, workItem.schedule) }]
+        : []
+    })
+}
+
+/**
+ * Reads the optional `baselineId` query of a Cycle baseline read.
+ *
+ * @param value - Raw query value.
+ * @returns The baseline ID, or undefined for the newest baseline.
+ * @throws PlanningError 400 when the ID is invalid.
+ */
+function readCycleBaselineIdQuery(value: string | undefined) {
+  if (value === undefined) return undefined
+  if (!isProjectScheduleBaselineId(value)) {
+    throw new PlanningError(400, 'InvalidPlanningInput', 'baselineId is invalid.')
+  }
+  return value
+}
+
+/**
+ * Requires a Cycle that the reader's filtered snapshot holds.
+ *
+ * @param visible - Planning snapshot filtered for the reader.
+ * @param cycleId - Requested Cycle ID.
+ * @throws PlanningError 404 when the Cycle is missing, hidden, or not a Cycle.
+ */
+function requireVisibleCycle(visible: PlanningSnapshot, cycleId: string) {
+  if (!visible.entities.some((entity) => entity.id === cycleId && entity.type === 'cycle')) {
+    throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+  }
 }

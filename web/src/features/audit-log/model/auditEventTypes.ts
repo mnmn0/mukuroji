@@ -63,6 +63,7 @@ const resourceLabelKeys: Readonly<Record<string, MessageKey>> = {
   'watcher': 'auditLog.resource.watcher',
   'webhook': 'auditLog.resource.webhook',
   'work-item': 'auditLog.resource.work-item',
+  'work-item-key-prefix': 'auditLog.resource.work-item-key-prefix',
   'workflow': 'auditLog.resource.workflow',
 }
 

@@ -278,13 +278,9 @@ const expectedWorkflowConfiguration = {
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),
   PUSH_SUBSCRIPTIONS_TABLE_NAME: base64(ref('PushSubscriptionsTable14F60E9C')),
   AGENT_RUNS_TABLE_NAME: base64(ref('AgentRunsTableB0DA56A7')),
-  WEB_APP_ORIGINS: base64({
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      join('', ['https://', ref('WebDomainName'), ',https://', getAtt('WebDistribution59C46482', 'DomainName')]),
-      join('', ['https://', getAtt('WebDistribution59C46482', 'DomainName')]),
-    ],
-  }),
+  WEB_APP_ORIGINS: base64(
+    join('', ['https://', getAtt('WebDistribution59C46482', 'DomainName')]),
+  ),
   WEB_PUSH_VAPID_PUBLIC_KEY: base64(ref('WebPushVapidPublicKey')),
   CAPACITY_PLANNING_TABLE_NAME: base64(ref('CapacityPlanningTable0EECD517')),
   PLANNING_TABLE_NAME: base64(ref('PlanningTable2A0D4CC5')),

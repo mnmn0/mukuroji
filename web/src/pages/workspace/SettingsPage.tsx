@@ -9,11 +9,13 @@ import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/Ag
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
+import { TeamProfilePanelContainer } from '../../projects/ui/TeamProfilePanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
+import { WorkItemKeyPrefixPanelContainer } from '../../work-items/ui/WorkItemKeyPrefixPanelContainer'
 import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAccessPanel'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -25,6 +27,8 @@ import { SettingsPanelAnchor } from '../../workspace/ui/SettingsPanelAnchor'
 import { useSettingsPanelScroll } from '../../workspace/ui/useSettingsPanelScroll'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 import { TenantAdministrationPanelContainer } from '../../workspace/ui/TenantAdministrationPanel'
+import { WorkCalendarPanelContainer } from '../../workspace/ui/WorkCalendarPanelContainer'
+import { WorkspaceWorkCalendarAdjustment } from '../../workspace/ui/WorkspaceWorkCalendarAdjustment'
 
 /**
  * Renders the settings routes: `/settings` and `/settings/personal` for personal settings,
@@ -170,6 +174,10 @@ export function SettingsPage() {
                       accessToken={workspace.accessToken}
                       locale={workspace.locale}
                     />
+                    <WorkspaceWorkCalendarAdjustment
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                    />
                   </SettingsPanelAnchor>
                 ) : null}
                 {workspace.canManageWorkspaceConfiguration ? (
@@ -214,6 +222,9 @@ export function SettingsPage() {
         ) : null}
         {section === 'team' && workspace.accessToken ? (
           <>
+            {workspace.canManageTeams ? (
+              <TeamProfilePanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
+            ) : null}
             <SettingsPanelAnchor panel="work-item-configuration">
               <WorkItemConfigurationPanelContainer
                 accessToken={workspace.accessToken}
@@ -225,6 +236,16 @@ export function SettingsPage() {
                 teams={workspace.teams}
               />
             </SettingsPanelAnchor>
+            <WorkCalendarPanelContainer
+              accessToken={workspace.accessToken}
+              locale={workspace.locale}
+              teams={workspace.teams}
+            />
+            <WorkItemKeyPrefixPanelContainer
+              accessToken={workspace.accessToken}
+              locale={workspace.locale}
+              teams={workspace.teams}
+            />
             {workspace.softwareFactoryEnabled ? (
               <SettingsPanelAnchor panel="agent-settings">
                 <AgentSettingsPanelContainer

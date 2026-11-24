@@ -770,6 +770,14 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'The same item already exists.' }, 409)
   }
 
+  if (error.code === 'InvalidWorkItemKeyPrefix') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (error.code === 'WorkItemKeyPrefixTaken' || error.code === 'WorkItemKeyPrefixChanged') {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
   if (error.code === 'WorkItemRevisionConflict') {
     return c.json({
       code: error.code,
@@ -1225,6 +1233,38 @@ export async function requireTeamPermission(
     'ProjectAccessDenied',
     `User "${principal.userKey}" cannot access team "${teamId}".`,
   )
+}
+
+/**
+ * Lists the Teams on which the principal holds at least the given role.
+ *
+ * The directory and the principal's Project access list are read once for all Teams; Teams the
+ * principal cannot access are left out.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param minimumRole - Minimum role the principal must hold on each Team.
+ * @returns Each permitted Team with its permission context, in directory order.
+ */
+export async function listPermittedTeams(
+  principal: ProjectPrincipal,
+  minimumRole: ProjectRole,
+): Promise<TeamPermissionContext[]> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
+  const readContext: TeamPermissionReadContext = {
+    directory,
+    readProjectAccesses: () => projectAccesses ??= getEffectiveProjectScopeAccessList(principal),
+  }
+  const permitted: TeamPermissionContext[] = []
+  for (const team of directory.teams) {
+    try {
+      permitted.push(await requireTeamPermission(principal, team.id, minimumRole, readContext))
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.status === 403) continue
+      throw error
+    }
+  }
+  return permitted
 }
 
 /**

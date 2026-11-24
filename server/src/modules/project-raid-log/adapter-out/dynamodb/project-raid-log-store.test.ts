@@ -218,6 +218,22 @@ test('reads every page of a log', async () => {
   expect(queries[1]?.input.ExclusiveStartKey).toEqual(pages[0]?.lastEvaluatedKey)
 })
 
+test('reads every page of the open entries one member owns, filtered on the server', async () => {
+  const sent: SentCommand[] = []
+  const owned = { ...entry, ownerMemberId: 'sato@example.com' }
+  const pages = [
+    { items: [], lastEvaluatedKey: { workspaceId: 'w', recordKey: 'PROJECT_RAID#t#p#ENTRY#e0' } },
+    { items: [entryRow(owned)] },
+  ]
+  const store = new DynamoDbProjectRaidLogStore('planning', fakeClient({ pages, sent }))
+  expect(await store.listOpenOwnedBy(scope, 'sato@example.com')).toEqual([owned])
+  const queries = sent.filter((command) => command.constructor.name === 'QueryCommand')
+  expect(queries).toHaveLength(2)
+  expect(queries[0]?.input.FilterExpression).toBe('#status = :open AND #owner = :owner')
+  expect(queries[0]?.input.ExpressionAttributeValues).toMatchObject({ ':open': 'open', ':owner': 'sato@example.com' })
+  expect(queries[1]?.input.ExclusiveStartKey).toEqual(pages[0]?.lastEvaluatedKey)
+})
+
 test('reports a lost caller fence as a conflict and throttling as retryable', async () => {
   expect(await createWith(fakeClient({ writeError: cancellation(['None', 'None', 'ConditionalCheckFailed', 'None']) })))
     .toMatchObject({ status: 409 })

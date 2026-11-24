@@ -110,4 +110,66 @@ describe('Slack transport', () => {
     secretSpy.mockRejectedValue(new Error(url))
     expect(await createSlackNotificationSender(secretSpy)(delivery)).toEqual({ succeeded: false, retryable: true, code: 'SlackDestinationUnavailable' })
   })
+  test('writes a coded summary in the recipient language and keeps a plain stored summary', async () => {
+    secretSpy.mockResolvedValue(url)
+    const coded: SlackDelivery = { ...delivery, notification: { ...delivery.notification, title: 'Release',
+      summary: 'Work Item was completed.', message: { code: 'work-item.completed' } } }
+    const texts: string[] = []
+    const post = async (_endpoint: URL, request: RequestInit) => {
+      texts.push(JSON.parse(String(request.body)).blocks[0].text.text)
+      return new Response('ok', { status: 200 })
+    }
+    const recipients: string[] = []
+    await createSlackNotificationSender(secretSpy, post, undefined, async (recipient) => {
+      recipients.push(`${recipient.workspaceId}/${recipient.memberKey}`)
+      return 'en'
+    })(coded)
+    await createSlackNotificationSender(secretSpy, post, undefined, async () => 'ja')(coded)
+    await createSlackNotificationSender(secretSpy, post)(coded)
+    await createSlackNotificationSender(secretSpy, post, undefined, async () => 'en')(delivery)
+    expect(recipients).toEqual(['workspace-1/member@example.test'])
+    expect(texts[0]).toContain('Work Item was completed.')
+    expect(texts[1]).toContain('Work Item が完了しました。')
+    expect(texts[2]).toContain('Work Item が完了しました。')
+    expect(texts[3]).toContain('Please review')
+  })
+  test('retries without sending when the recipient language cannot be read', async () => {
+    secretSpy.mockResolvedValue(url)
+    const result = await createSlackNotificationSender(secretSpy, async () => { throw new Error('Must not send') },
+      undefined, async () => { throw new Error('directory unavailable') })(delivery)
+    expect(result).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
+    // A reader that ignores its deadline and answers late still never posts.
+    const late = await createSlackNotificationSender(secretSpy, async () => { throw new Error('Must not send') },
+      undefined, async (_recipient, signal) => {
+        await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+        return 'ja'
+      })(delivery)
+    expect(late).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
+  }, 10_000)
+  test('prefixes the Work Item key and links its key page and the deep link when an origin is set', async () => {
+    secretSpy.mockResolvedValue(url)
+    let payload: { text: string; blocks: Array<{ type: string; elements?: Array<{ type: string; text: string }> }> } | undefined
+    const keyed: SlackDelivery = {
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'CORE-12', deepLink: '/teams/core/issues/i-1?x=a|b&y=<z>' },
+    }
+    await createSlackNotificationSender(secretSpy, async (_endpoint, request) => {
+      payload = JSON.parse(String(request.body))
+      return new Response('ok', { status: 200 })
+    }, 'https://app.example.test')(keyed)
+    expect(payload?.text.split('\n')[0]).toBe('CORE-12 Review')
+    expect(payload?.blocks[1]?.type).toBe('context')
+    const links = payload?.blocks[1]?.elements?.[0]?.text ?? ''
+    expect(links).toContain('<https://app.example.test/browse/CORE-12|CORE-12>')
+    expect(links).toContain('<https://app.example.test/teams/core/issues/i-1?x=a%7Cb&amp;y=%3Cz%3E|Open in mukuroji>')
+  })
+  test('omits link blocks without an application origin', async () => {
+    secretSpy.mockResolvedValue(url)
+    let blocks: unknown[] = []
+    await createSlackNotificationSender(secretSpy, async (_endpoint, request) => {
+      blocks = JSON.parse(String(request.body)).blocks
+      return new Response('ok', { status: 200 })
+    })({ ...delivery, notification: { ...delivery.notification, workItemKey: 'CORE-12' } })
+    expect(blocks).toHaveLength(1)
+  })
 })

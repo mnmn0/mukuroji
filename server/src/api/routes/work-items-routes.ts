@@ -34,6 +34,7 @@ import {
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
   type WorkItemKeyLookupResponse,
+  type WorkItemKeyPrefixesResponse,
   type WorkItemOpenChildCountResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -310,7 +311,10 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import {
+  applySharedCalendarToNewSchedule,
+  readWorkspaceWorkItemCalendarPolicy,
+} from '../shared/workspace-calendar'
 import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
@@ -3875,6 +3879,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       )
       const normalized = normalizeTeamIssueInput({
         ...conversion.input,
+        // The Request becomes a Work Item of its target Team and Project, so it takes their
+        // shared calendar (ADR 0058).
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          {
+            teamId: conversion.target.teamId,
+            ...(conversion.target.projectId ? { projectId: conversion.target.projectId } : {}),
+          },
+          conversion.input.schedule,
+        ),
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
@@ -4317,6 +4331,36 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
   })
 
   /**
+   * Lists the Work Item key prefixes of the Teams whose Work Items the caller can read.
+   *
+   * Clients link only key-shaped text with one of these prefixes, so words such as `UTF-8` stay
+   * text. A Team the caller cannot read is left out, as a key lookup would reveal nothing either.
+   */
+  routeApp.get('/api/work-items/key-prefixes', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const [contexts, assignments] = await Promise.all([
+        resolveAccessibleWorkItemTeamContexts(principal),
+        workItemDependencies.teamIssues.listWorkItemKeyPrefixes(principal.directoryId),
+      ])
+      const readableTeamIds = new Set(contexts.map((context) => context.team.id))
+      const prefixes = [...new Set(assignments
+        .filter((assignment) => readableTeamIds.has(assignment.teamId))
+        .map((assignment) => assignment.keyPrefix))]
+        .sort()
+      return c.json({ prefixes } satisfies WorkItemKeyPrefixesResponse)
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
    * Resolves a Work Item key such as `ABC-123` to the Work Item it names.
    *
    * Answers 404 alike for text that is not a key, an unused key, a deleted Work Item, and a
@@ -4727,21 +4771,32 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       }
       // Built from public fields only; the raw body never reaches the adapter input.
       const requestBody = readPublicWorkItemCreateBody(rawRequestBody)
-      const body = normalizeTeamIssueInput(
+      const normalizedBody = normalizeTeamIssueInput(
         requestBody,
         context.team,
       )
       const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
         principal.directoryId,
         context.team,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
       )
       requireAssignedProjectPermission(
         principal,
         context,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
         'member',
       )
+      // A schedule that follows the shared calendar takes the Team or Project calendar the server
+      // resolves, not the copy the client showed (ADR 0058).
+      const newWorkItemProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
+      const body = {
+        ...normalizedBody,
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          { teamId, ...(newWorkItemProjectId ? { projectId: newWorkItemProjectId } : {}) },
+          normalizedBody.schedule,
+        ),
+      }
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,

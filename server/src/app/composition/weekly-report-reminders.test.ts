@@ -187,6 +187,7 @@ describe('weekly report reminder adapters', () => {
               workingWeekdays: ['monday'],
               holidays: [],
               publicHolidays: 'none',
+              timeZone: 'Pacific/Honolulu',
             },
             weeklyReportReminders: {
               enabled: false,
@@ -200,6 +201,7 @@ describe('weekly report reminder adapters', () => {
     })
     expect(await reader.readWorkspaceSettings('sunday')).toEqual({
       weekStartDay: 0,
+      timeZone: 'Pacific/Honolulu',
       reminders: {
         enabled: false,
         reminder: { weekday: 4, hour: 9 },
@@ -209,10 +211,12 @@ describe('weekly report reminder adapters', () => {
     })
     expect(await reader.readWorkspaceSettings('workspace-1')).toEqual({
       weekStartDay: 1,
+      timeZone: 'Asia/Tokyo',
       reminders: DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
     })
     expect(await reader.readWorkspaceSettings('closing')).toEqual({
       weekStartDay: 1,
+      timeZone: 'Asia/Tokyo',
       reminders: { ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, enabled: false },
     })
     expect([...await reader.readSubmittedMembers('workspace-1', 'core', ['a@example.com', 'b@example.com', 'c@example.com'], '2026-11-16')])

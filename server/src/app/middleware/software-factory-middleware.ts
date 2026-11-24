@@ -26,7 +26,7 @@ type SoftwareFactoryRoute = Readonly<{
 /**
  * Routes that exist only for Software factory: the Web Factory board, Agent Run history,
  * reports, and analytics, Team agent settings, the Public API Agent Run and agent context
- * endpoints that coding agents call through MCP. Personal credentials stay available, because
+ * endpoints that coding agents call through MCP, and the agent telemetry receiver. Personal credentials stay available, because
  * the Workspace MCP profile reads the Workspace with them whether or not the module is on.
  */
 const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
@@ -48,6 +48,7 @@ const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
       '/api/v1/agent-settings/*',
       '/api/v1/agent-context',
       '/api/v1/agent-context/*',
+      '/api/v1/agent-telemetry/*',
     ],
   },
 ]

@@ -32,6 +32,7 @@ describe('workload API', () => {
     await saveWorkloadProfile('token', 'team/1', 'member/1', {
       displayName: 'Hanako',
       skills: ['typescript'],
+      calendarSource: 'workspace',
       timeZone: 'Asia/Tokyo',
       schedule,
       holidays: [],

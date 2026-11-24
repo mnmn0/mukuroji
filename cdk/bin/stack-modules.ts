@@ -1,5 +1,11 @@
 import type { Construct } from 'constructs';
 import type { MukurojiStackProps } from '../lib/stacks/mukuroji-stack';
+import {
+  WEB_CERTIFICATE_ARN_CONTEXT_KEY,
+  WEB_DOMAIN_NAME_CONTEXT_KEY,
+  WEB_HOSTED_ZONE_ID_CONTEXT_KEY,
+  type WebCustomDomainSettings,
+} from '../lib/subsystems/web-distribution';
 
 /** Context key that turns on the optional restore drill. */
 export const RESTORE_DRILL_CONTEXT_KEY = 'mukuroji:restoreDrill';
@@ -68,5 +74,38 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
     tenantLifecycleEnabled: readBooleanContext(app, TENANT_LIFECYCLE_CONTEXT_KEY),
     softwareFactoryEnabled: readBooleanContext(app, SOFTWARE_FACTORY_CONTEXT_KEY),
     demoDataEnabled: readBooleanContext(app, DEMO_DATA_CONTEXT_KEY),
+  };
+}
+
+/**
+ * Reads a string CDK context value given in `cdk.json` or as `-c key=value`.
+ *
+ * @param scope Construct whose context is read.
+ * @param key Context key.
+ * @returns The value, or an empty string when the key is not set.
+ * @throws Error when the value is set but is not a string.
+ */
+function readStringContext(scope: Construct, key: string): string {
+  const value: unknown = scope.node.tryGetContext(key);
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') {
+    throw new Error(`CDK context ${key} must be a string.`);
+  }
+  return value;
+}
+
+/**
+ * Reads the optional custom domain for the Web app from the app's CDK context.
+ *
+ * The stack validates the values, so this only collects them.
+ *
+ * @param app App whose context holds the `mukuroji:web*` keys.
+ * @returns Custom domain settings to pass to `MukurojiStack`.
+ */
+export function readWebCustomDomainSettings(app: Construct): WebCustomDomainSettings {
+  return {
+    domainName: readStringContext(app, WEB_DOMAIN_NAME_CONTEXT_KEY),
+    certificateArn: readStringContext(app, WEB_CERTIFICATE_ARN_CONTEXT_KEY),
+    hostedZoneId: readStringContext(app, WEB_HOSTED_ZONE_ID_CONTEXT_KEY),
   };
 }

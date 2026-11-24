@@ -41,10 +41,12 @@ afterEach(() => {
  * Configures one Team-scoped enterprise group mapping for the authenticated fixture member.
  *
  * @param permissions - Exact custom-role permissions granted on the fixture Team.
+ * @param projectPermissions - Permissions of a second role granted on the `refero` Project, if any.
  * @returns The bearer authorization header for the configured member.
  */
 async function configureEnterpriseTeamAccess(
   permissions: EnterprisePermissionId[],
+  projectPermissions?: EnterprisePermissionId[],
 ): Promise<string> {
   configureFakeProjectClients(false, {
     workspaceRole: 'member',
@@ -118,6 +120,30 @@ async function configureEnterpriseTeamAccess(
     revision: 1,
     updatedAt: now,
   })
+  if (projectPermissions) {
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:project-api-access',
+      name: 'Project API access',
+      permissions: projectPermissions,
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'project-api-access-mapping',
+      identityProviderId: 'idp-team-api-access',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:project-api-access',
+      scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' },
+      enabled: true,
+      priority: 1,
+      revision: 1,
+      updatedAt: now,
+    })
+  }
   setTestAppDependencies({ enterpriseIdentity: identity })
   const accessToken = createAccessToken([], {
     client_id: 'mukuroji-main-client',
@@ -210,6 +236,79 @@ test('uses Team teams.write access for time-entry creation', async () => {
         userId: 'demo@example.com',
       },
     })
+  })
+})
+
+test('lets a Team-scoped grant read workload and submit time across its Teams only', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.write'])
+
+    const workload = await app.request('/api/workload?from=2026-08-10&to=2026-08-10&granularity=day', {
+      headers: { Authorization: authorization },
+    })
+    expect(workload.status).toBe(200)
+    expect((await workload.json()).teams.map((team: { teamId: string }) => team.teamId)).toEqual(['core-team'])
+
+    const period = 'from=2026-08-10T00:00:00.000Z&to=2026-08-11T00:00:00.000Z'
+    const timesheet = await app.request(`/api/time-tracking/my-timesheet?${period}`, {
+      headers: { Authorization: authorization },
+    })
+    expect(timesheet.status).toBe(200)
+    expect((await timesheet.json()).teams.map((team: { teamId: string }) => team.teamId)).toEqual(['core-team'])
+
+    const created = await app.request('/api/teams/core-team/time-entries', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workItemId: 'onboarding-friction',
+        startAt: '2026-08-10T09:00:00.000Z',
+        endAt: '2026-08-10T10:00:00.000Z',
+        billable: false,
+        currency: 'USD',
+      }),
+    })
+    expect(created.status).toBe(201)
+    const draft = (await created.json()).entry
+
+    const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: '2026-08-10T00:00:00.000Z',
+        to: '2026-08-11T00:00:00.000Z',
+        entries: [{ teamId: 'core-team', entryId: draft.id, expectedRevision: draft.revision }],
+      }),
+    })
+    expect(submitted.status).toBe(200)
+    expect(await submitted.json()).toMatchObject({
+      count: 1,
+      failedEntryIds: [],
+      partialFailure: false,
+      teams: [{ teamId: 'core-team', count: 1, failedEntryIds: [] }],
+    })
+
+    const after = await app.request(`/api/time-tracking/my-timesheet?${period}`, {
+      headers: { Authorization: authorization },
+    })
+    const afterTeams: { entries: { id: string; status: string }[] }[] = (await after.json()).teams
+    expect(afterTeams[0]?.entries.find((entry) => entry.id === draft.id)?.status).toBe('submitted')
+  })
+})
+
+test('rejects submitting time across Teams without Team teams.write access', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+
+    const submitted = await app.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: '2026-08-10T00:00:00.000Z',
+        to: '2026-08-11T00:00:00.000Z',
+        entries: [{ teamId: 'core-team', entryId: 'entry-1', expectedRevision: 1 }],
+      }),
+    })
+    expect(submitted.status).toBe(403)
   })
 })
 
@@ -330,5 +429,101 @@ test('rejects capacity request creation when Team teams.manage access is missing
     expect(await response.json()).toMatchObject({
       message: 'Project access is denied.',
     })
+  })
+})
+
+test('requires projects.manage on every Project to add a member to all Projects of a Team', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const send = (authorization: string) => app.request('/api/teams/core-team/members', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memberKey: 'sato@example.com', role: 'member' }),
+    })
+
+    const teamOnly = await send(await configureEnterpriseTeamAccess(['teams.read', 'teams.manage']))
+    expect(teamOnly.status).toBe(403)
+    expect(await teamOnly.json()).toMatchObject({ code: 'TeamProjectsManageDenied' })
+
+    const withProjects = await send(
+      await configureEnterpriseTeamAccess(['teams.read', 'teams.manage', 'projects.manage']),
+    )
+    expect(withProjects.status).toBe(200)
+    expect(await withProjects.json()).toMatchObject({ addedProjectIds: ['refero'] })
+  })
+})
+
+test('shows the Team work calendar as read-only to a teams.read grant without teams.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'])
+
+    const read = await app.request('/api/teams/core-team/work-calendar', {
+      headers: { Authorization: authorization },
+    })
+    const preview = await app.request('/api/teams/core-team/work-calendar/preview', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overrides: { additionalHolidays: [] }, adjustment: 'keep-duration' }),
+    })
+
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ canManage: false })
+    expect(preview.status).toBe(403)
+  })
+})
+
+test('shows a Project work calendar as editable to a Project-scoped teams.manage grant', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read'], ['teams.read', 'teams.manage'])
+
+    const projectRead = await app.request('/api/teams/core-team/work-calendar?projectId=refero', {
+      headers: { Authorization: authorization },
+    })
+    const teamRead = await app.request('/api/teams/core-team/work-calendar', {
+      headers: { Authorization: authorization },
+    })
+
+    expect(projectRead.status).toBe(200)
+    expect(await projectRead.json()).toMatchObject({ canManage: true })
+    expect(teamRead.status).toBe(200)
+    expect(await teamRead.json()).toMatchObject({ canManage: false })
+  })
+})
+
+test('lets a Team teams.manage grant change the Work Item key prefix without teams.write', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.manage'])
+
+    const settings = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      headers: { Authorization: authorization },
+    })
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toMatchObject({ teamId: 'core-team', canManage: true })
+
+    const response = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      method: 'PUT',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyPrefix: 'CORE', expectedKeyPrefix: null }),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ teamId: 'core-team', keyPrefix: 'CORE', canManage: true })
+  })
+})
+
+test('does not offer or allow a Work Item key prefix change without Team teams.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess(['teams.read', 'teams.write'])
+
+    const settings = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      headers: { Authorization: authorization },
+    })
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toMatchObject({ canManage: false })
+
+    const response = await app.request('/api/teams/core-team/work-item-key-prefix', {
+      method: 'PUT',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyPrefix: 'CORE', expectedKeyPrefix: null }),
+    })
+    expect(response.status).toBe(403)
   })
 })

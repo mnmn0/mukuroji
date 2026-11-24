@@ -87,6 +87,10 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
       }),
     ]),
   }));
+  // Agent telemetry usage rows and export receipts expire; run rows never carry the attribute.
+  expect(resources.AgentRunsTableB0DA56A7.Properties).toEqual(expect.objectContaining({
+    TimeToLiveSpecification: { AttributeName: 'usageExpiresAt', Enabled: true },
+  }));
 
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
@@ -673,13 +677,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
     ]],
   };
-  const webOrigins = {
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      [{ 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] }, distributionOrigin],
-      [distributionOrigin],
-    ],
-  };
+  const webOrigins = [distributionOrigin];
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {
