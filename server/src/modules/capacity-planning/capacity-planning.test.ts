@@ -854,9 +854,22 @@ describe('capacity planning reviews and retention', () => {
     await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 9, expectedTeamRevision: 2 }))
       .rejects.toMatchObject({ code: 'WorkloadTimeOffRevisionConflict', status: 409 })
     const approved = await service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }, { auditContext })
+    // The approval sent again after a lost response gets the saved result instead of a conflict,
+    // without another write; another reviewer or decision still conflicts.
+    const auditBatches = repository.auditLog.length
+    expect(await service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }, { auditContext }))
+      .toEqual(approved)
+    expect(repository.auditLog).toHaveLength(auditBatches)
+    await expect(service.reviewTimeOff({ ...review, actorMemberId: 'manager-2', status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    await expect(service.reviewTimeOff({ ...review, status: 'rejected', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
     const reopened = await service.reviewTimeOff({ ...review, status: 'planned', expectedRevision: 2, expectedTeamRevision: 3 })
 
     expect(approved).toMatchObject({ status: 'approved', reviewedBy: 'manager-1', reviewedAt: '2026-08-01T00:00:00.000Z', revision: 2 })
+    // Once the decision changed again, the old approval is no longer the saved result.
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
     expect(reopened.reviewedBy).toBeUndefined()
     expect(reopened.submittedAt).toBe('2026-08-01T00:00:00.000Z')
     expect(upgradeLegacyTimeOff(reopened)).toEqual(reopened)

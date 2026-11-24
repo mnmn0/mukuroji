@@ -620,6 +620,8 @@ export class CapacityPlanningService {
   async reviewTimeOff(input: ReviewWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
     validateIdentifier(input.memberId, 'Member ID')
     validateIdentifier(input.timeOffId, 'Time-off ID')
+    const replayed = findReplayedReview(await this.repository.getState(input.workspaceId, input.teamId), input)
+    if (replayed) return replayed
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const profile = requireProfile(state, input.memberId)
       const current = profile.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
@@ -2237,6 +2239,29 @@ export function pruneCapacityPlanningState(state: CapacityPlanningState, today: 
   state.assignments = state.assignments.filter(keep)
   const referencedRequestIds = new Set(state.assignments.flatMap((assignment) => assignment.requestId ? [assignment.requestId] : []))
   state.requests = state.requests.filter((request) => referencedRequestIds.has(request.id) || keep(request))
+}
+
+/**
+ * Finds the saved result of an approval or rejection that is being sent again after its response
+ * was lost: the absence is one revision past the one the request expected, with the requested
+ * decision by the same reviewer. The revisions would otherwise refuse the retry with a conflict.
+ *
+ * @param state - Current Team state.
+ * @param input - Review request.
+ * @returns The saved absence when the request already succeeded, otherwise `undefined`.
+ */
+function findReplayedReview(state: CapacityPlanningState, input: ReviewWorkloadTimeOffInput): WorkloadTimeOff | undefined {
+  if (input.status !== 'approved' && input.status !== 'rejected') return undefined
+  const current = state.profiles
+    .find((profile) => profile.memberId === input.memberId)
+    ?.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
+  if (
+    !current ||
+    current.revision !== input.expectedRevision + 1 ||
+    current.status !== input.status ||
+    current.reviewedBy !== input.actorMemberId
+  ) return undefined
+  return clone(current)
 }
 
 /**

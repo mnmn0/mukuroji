@@ -57,6 +57,9 @@ manager が「空いていない」と判断した後に休暇が取り消され
 - transaction の取消は、audit event の条件だけが失敗したとき（同じ idempotency key の再送）に `409 CapacityPlanningDuplicateRequest`、
   Team の revision が失敗したときに `409 CapacityPlanningRevisionConflict` を返す。throttling や transaction conflict は
   基盤のエラーのまま返し、記録して再試行できるようにする。
+- 応答が失われた承認・却下の再送は、休暇がその要求の revision の次の版で、同じ判断・同じ承認者になっていれば、
+  保存済みの休暇を成功として返す（書き込みも audit も増やさない）。そうでなければ従来どおり revision の 409 になる。
+  休暇の状態そのものが durable receipt になるので、別の receipt 行は作らない。
 - 監査を書く書き込みだけ TransactWrite にする。IAM は既存の capacity table の `PutItem` と audit table の書き込み権限で足りる。
 
 ### row の整理
