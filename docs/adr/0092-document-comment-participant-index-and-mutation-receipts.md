@@ -28,6 +28,9 @@ Issue #422 で、Document comment の返信を thread の作成者とそれま�
   - comment を作るたびに、作成者の row を条件なしの Put で書く（同じ member は上書きになるだけ）。
   - 返信時は、その thread の prefix を `LastEvaluatedKey` が尽きるまで読む。件数は thread の
     参加者数で決まる。
+  - 同じ Document の comment は comment window row の revision で直列化される。条件に負けた返信は
+    参加者を読み直し、参加者 row と audit event の通知先を作り直してから再試行する。読んだ後に
+    先に保存された返信の作成者も、通知先と index に入る。
 - **Index 完了 marker row**
   - sort key: `COMMENT_PARTICIPANT_INDEX#<documentId>#<rootCommentId>`
   - entryType: `document-comment-participant-index`

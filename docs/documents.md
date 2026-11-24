@@ -120,6 +120,8 @@ Mention は active Workspace member を検証し、comment と同じ transaction
 （`COMMENT_PARTICIPANT_INDEX#<documentId>#<rootCommentId>`）も書きます。marker のない、index が
 できる前の thread は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
 transaction で参加者 row と marker を書き足します。どちらも page を途中で打ち切りません（ADR 0092）。
+同じ Document の別の comment が先に保存されて comment window の条件に負けた返信は、参加者を読み直して
+参加者 row と通知先を作り直してから再試行するので、同時に初めて返信した member にも通知が届きます。
 既存の thread は data migration `0002-document-comment-participant-index` で参加者 row と marker を
 一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
@@ -261,8 +263,11 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
   描画しません。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の開始
   `<` だけを escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。
-  fence は取り込みと同じ規則で判定し、info string に backtick を含む backtick の行は fence に
-  しません。fence を閉じるのは marker だけの行です。
+  raw HTML は、画面の描画と同じ CommonMark + GFM の parser（`mdast-util-from-markdown` と
+  `micromark-extension-gfm`）で段落を解析して見つけ、HTML block と inline HTML の範囲だけを escape します。
+  そのため複数行にまたがる code span や fence の判定も描画と一致します。HTML block を escape すると
+  中の行が新たに HTML になることがあるので、HTML が無くなるまで解析し直し、数回で収まらない場合は
+  段落全体の HTML の開始を escape します。
   そのため書き出したページを取り込み直しても段落の表示は変わりません。この変更より前に取り込んだ段落は escape を外して保存
   しているため、`*` などを含むと強調として表示されることがあります。
 - folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。

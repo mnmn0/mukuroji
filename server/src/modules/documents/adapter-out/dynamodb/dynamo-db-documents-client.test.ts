@@ -10,6 +10,9 @@ import {
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
 import { createMutationAuditContext } from '../../../audit/audit'
 import {
   assertValidDataMigrationRegistry,
@@ -22,6 +25,8 @@ import {
   createMemoryCheckpointStore,
 } from '../../../data-migration/test-support/data-migration-fakes'
 import { documentCommentParticipantIndexMigration } from '../../document-comment-participant-index-migration'
+import { findMarkdownHtmlRanges } from '../../application/markdown-html-finder'
+import { createCommentParticipantItem } from './document-comment-records'
 import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
@@ -5087,6 +5092,72 @@ test('retries a comment when only the comment-window fence changed concurrently'
   })).toBe(2)
 })
 
+test('re-reads thread participants when a concurrent reply wins the comment-window fence', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Concurrent replies',
+    blocks: [],
+  })
+  const reply = (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  await reply('mina@example.com', 'reply-1')
+  // Ren's first reply commits after Kai read the participants and before Kai's transaction.
+  memory.beforeTransaction(() => {
+    memory.put({
+      workspaceId: 'workspace-1',
+      recordKey: `COMMENT_WINDOW#${Buffer.from(document.id, 'utf8').toString('base64url')}`,
+      entryType: 'document-comment-window',
+      documentId: document.id,
+      revision: 3,
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    })
+    memory.put(createCommentParticipantItem('workspace-1', document.id, 'root', 'ren@example.com'))
+    throw transactionCancellationError(['None', 'None', 'None', 'ConditionalCheckFailed'])
+  })
+
+  await reply('kai@example.com', 'reply-2')
+
+  const event = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'reply-2')
+  const candidates = event && typeof event.metadata === 'object' && event.metadata !== null &&
+    'notificationCandidates' in event.metadata ? event.metadata.notificationCandidates : undefined
+  expect(candidates).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+    { memberKey: 'ren@example.com', reason: 'reply' },
+  ])
+})
+
 test('stores at most one replaceable presence lease per Workspace member', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -5717,6 +5788,24 @@ test('exports a private canonical document through a redacted viewer projection'
   })
 })
 
+/**
+ * Lists the raw HTML a CommonMark and GFM renderer finds in Markdown.
+ *
+ * @param markdown - Markdown text.
+ * @returns The source of every HTML block and inline HTML node.
+ */
+function findMarkdownHtml(markdown: string): string[] {
+  const found: string[] = []
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.pop()
+    if (typeof node !== 'object' || node === null) continue
+    if ('type' in node && node.type === 'html' && 'value' in node) found.push(String(node.value))
+    if ('children' in node && Array.isArray(node.children)) pending.push(...node.children)
+  }
+  return found
+}
+
 test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloads', () => {
   const page = createPage({
     title: 'Export / document',
@@ -5730,6 +5819,12 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       { id: 'block-u', type: 'paragraph', text: 'run \\``<b>`' },
       { id: 'block-v', type: 'paragraph', text: '```a`b\n<img src=x onerror=alert(1)>' },
       { id: 'block-w', type: 'paragraph', text: '```\n``` <b>\n<i>still code</i>\n```' },
+      { id: 'block-x', type: 'paragraph', text: 'span `first\n<b>bold</b>\nlast` end' },
+      { id: 'block-d', type: 'paragraph', text: 'span `first\n<div>\nlast` end' },
+      { id: 'block-y', type: 'paragraph', text: '<div>\n<span>inner</span>\n</div>' },
+      { id: 'block-z', type: 'paragraph', text: '<div>\n\\<i>raw</i>' },
+      { id: 'block-l', type: 'paragraph', text: '> - item <img src=x onerror=alert(1)> <!-- note -->' },
+      { id: 'block-g', type: 'paragraph', text: '| a |\n| - |\n| <b>x</b> `<c>` |' },
       {
         id: 'block-b',
         type: 'table',
@@ -5738,8 +5833,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       },
     ],
   })
-  const markdown = renderDocumentExport(page, 'markdown')
-  const json = renderDocumentExport(page, 'json')
+  const markdown = renderDocumentExport(page, 'markdown', findMarkdownHtmlRanges)
+  const json = renderDocumentExport(page, 'json', findMarkdownHtmlRanges)
   expect(markdown.fileName).toBe('Export - document.md')
   expect(markdown.content).toContain('\\<script>alert(1)\\</script>')
   // Only raw HTML is escaped: the blockquote marker, an autolink, and code keep their text.
@@ -5755,6 +5850,18 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   // after it is escaped; only a bare marker line closes a fence.
   expect(markdown.content).toContain('\n```a`b\n\\<img src=x onerror=alert(1)>\n')
   expect(markdown.content).toContain('\n```\n``` <b>\n<i>still code</i>\n```\n')
+  // A code span may cross lines; its content stays as written. A `<div>` line is different: it
+  // starts an HTML block that interrupts the paragraph, so there is no code span to keep.
+  expect(markdown.content).toContain('\nspan `first\n<b>bold</b>\nlast` end\n')
+  expect(markdown.content).toContain('\nspan `first\n\\<div>\nlast` end\n')
+  // Every tag of an HTML block is escaped, including a backslash-escaped one, which is raw HTML
+  // inside the block and becomes text once the block is escaped.
+  expect(markdown.content).toContain('\n\\<div>\n\\<span>inner\\</span>\n\\</div>\n')
+  expect(markdown.content).toContain('\n\\<div>\n\\<i>raw\\</i>\n')
+  expect(markdown.content).toContain('\n> - item \\<img src=x onerror=alert(1)> \\<!-- note -->\n')
+  expect(markdown.content).toContain('\n| \\<b>x\\</b> `<c>` |\n')
+  // The exported file has no raw HTML for any Markdown renderer.
+  expect(findMarkdownHtml(markdown.content)).toEqual([])
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
   expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')
@@ -5771,6 +5878,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       }],
     }),
     'markdown',
+    findMarkdownHtmlRanges,
   )
   expect(fencedCode.content).toContain(
     '````typescript\n',
@@ -5808,6 +5916,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     renderPublicDocumentExport(
       legacyPublicPage,
       'markdown',
+      findMarkdownHtmlRanges,
     )
   expect(legacyPublicMarkdown.content).toContain(
     '````\nlegacy ``` source\n````',
@@ -5817,7 +5926,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   )
 
   const whiteboard = createWhiteboard()
-  const svg = renderDocumentExport(whiteboard, 'svg')
+  const svg = renderDocumentExport(whiteboard, 'svg', findMarkdownHtmlRanges)
   expect(svg.content).toContain('&lt;unsafe&gt;')
   expect(svg.content).not.toContain('<unsafe>')
   whiteboard.whiteboard.objects.push({
@@ -5827,7 +5936,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     bounds: { x: 140, y: 20, width: 100, height: 80 },
     zIndex: 2,
   })
-  expect(renderDocumentExport(whiteboard, 'svg').content).toContain(
+  expect(renderDocumentExport(whiteboard, 'svg', findMarkdownHtmlRanges).content).toContain(
     'Work item: team/team-a/issue/authenticated-work-item-id',
   )
 

@@ -8,6 +8,16 @@ import {
   validateDocumentPayload,
 } from './document-content'
 
+/**
+ * Stands in for the Markdown parser in pages without raw HTML; the export escaping itself is
+ * tested with the real parser next to the DynamoDB client.
+ *
+ * @returns No HTML ranges.
+ */
+function findNoMarkdownHtml(): [] {
+  return []
+}
+
 test('reduces independent stale-base operations without mutating the input snapshot', () => {
   const original = createPage({ revision: 2 })
   const reduced = reduceDocumentOperations({
@@ -82,7 +92,7 @@ test('validates, renders, and collects relations without AWS or Hono dependencie
   })
 
   expect(() => validateDocumentPayload(page)).not.toThrow()
-  expect(renderDocumentExport(page, 'markdown').content).toContain('# Document')
+  expect(renderDocumentExport(page, 'markdown', findNoMarkdownHtml).content).toContain('# Document')
   expect(collectDocumentRelationTargets(page)).toEqual([{
     kind: 'work-item',
     workItemId: 'team/team-1/issue/issue-1',
@@ -102,7 +112,7 @@ test('renders a table as one GitHub Flavored Markdown table without blank lines 
     }],
   })
 
-  expect(renderDocumentExport(page, 'markdown').content).toBe(
+  expect(renderDocumentExport(page, 'markdown', findNoMarkdownHtml).content).toBe(
     '# Document\n\n| Name | Note |\n| --- | --- |\n| A | x |\n| B | y |\n',
   )
 })

@@ -308,17 +308,20 @@ function countElementLinks(document: DocumentDetail): Map<string, number> {
  *
  * @param document - Canonical document snapshot to render.
  * @param format - Requested export format.
+ * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
+  findHtml: MarkdownHtmlFinder,
 ): RenderedDocumentExport {
   validateDocumentPayload(document)
   return renderDocumentArtifact(
     document,
     format,
     document.id,
+    findHtml,
   )
 }
 
@@ -327,16 +330,19 @@ export function renderDocumentExport(
  *
  * @param document - Public document projection to render.
  * @param format - Requested export format.
+ * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
  * @returns Safe rendered artifact.
  */
 export function renderPublicDocumentExport(
   document: PublicDocument,
   format: DocumentExportFormat,
+  findHtml: MarkdownHtmlFinder,
 ): RenderedDocumentExport {
   return renderDocumentArtifact(
     document,
     format,
     'document',
+    findHtml,
   )
 }
 
@@ -345,13 +351,15 @@ export function renderPublicDocumentExport(
  *
  * @param document - Permission-filtered document projection.
  * @param format - Requested text export format.
+ * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentProjectionExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
+  findHtml: MarkdownHtmlFinder,
 ): RenderedDocumentExport {
-  return renderDocumentArtifact(document, format, document.id)
+  return renderDocumentArtifact(document, format, document.id, findHtml)
 }
 
 /**
@@ -360,12 +368,14 @@ export function renderDocumentProjectionExport(
  * @param document - Document projection to render.
  * @param format - Requested export format.
  * @param fallbackFileName - File name to use when the document title is empty.
+ * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
  * @returns Rendered export content and metadata.
  */
 function renderDocumentArtifact(
   document: DocumentDetail | PublicDocument,
   format: DocumentExportFormat,
   fallbackFileName: string,
+  findHtml: MarkdownHtmlFinder,
 ): RenderedDocumentExport {
   const safeBaseName = sanitizeFileName(
     document.title || fallbackFileName,
@@ -401,7 +411,7 @@ function renderDocumentArtifact(
       format,
       contentType: 'text/markdown; charset=utf-8',
       fileName: `${safeBaseName}.md`,
-      content: renderMarkdown(document.title, document.blocks),
+      content: renderMarkdown(document.title, document.blocks, findHtml),
     }
   }
   throw new DocumentError(400, 'UnsupportedDocumentExport', `Unsupported export format: ${String(format)}.`)
@@ -1184,16 +1194,21 @@ export function validateCanonicalDocumentWorkItemId(
  *
  * @param title - Document title.
  * @param blocks - Blocks to render.
+ * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
  * @returns Markdown document text.
  */
-function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string {
+function renderMarkdown(
+  title: string,
+  blocks: readonly DocumentBlock[],
+  findHtml: MarkdownHtmlFinder,
+): string {
   const parts = [`# ${escapeMarkdownText(title)}`]
   for (const block of blocks) {
     switch (block.type) {
       case 'paragraph':
         // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
         // runnable HTML, and the page imports back with the same rendering.
-        parts.push(escapeMarkdownHtml(block.text))
+        parts.push(escapeMarkdownHtml(block.text, findHtml))
         break
       case 'heading':
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
@@ -1524,95 +1539,65 @@ function escapeMarkdownText(value: string): string {
 /** The start of a raw HTML tag, comment, declaration, or processing instruction. */
 const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
 
-/** A line that may open a code fence: the fence marker and the info string after it. */
-const CODE_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/u
-
-/** A line of only a fence marker and trailing spaces, which may close a code fence. */
-const CODE_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u
-
 /**
- * Reads the marker of a line that opens a code fence, as Markdown does: a backtick fence's info
- * string must not contain a backtick, or the line is an inline code span instead.
- *
- * @param line - One Markdown line outside fenced code.
- * @returns The fence marker, or `undefined` when the line does not open a fence.
+ * Parses that look for raw HTML again after escaping. Escaping an HTML block can turn its other
+ * lines into Markdown with HTML of its own, so the text is parsed again until none is left.
  */
-function readCodeFenceOpen(line: string): string | undefined {
-  const match = CODE_FENCE_OPEN.exec(line)
-  const marker = match?.[1]
-  if (!marker) return undefined
-  if (marker.startsWith('`') && (match?.[2] ?? '').includes('`')) return undefined
-  return marker
+const MARKDOWN_HTML_ESCAPE_MAX_PASSES = 4
+
+/** Source range of one raw HTML node, as offsets into the parsed text. */
+export type MarkdownSourceRange = {
+  /** Offset of the first character. */
+  start: number
+  /** Offset after the last character. */
+  end: number
 }
 
 /**
- * Escapes the `<` that would start raw HTML in Markdown, so the exported file never carries
- * runnable HTML. Blockquote markers, autolinks, other Markdown, and the contents of code spans
- * and fenced code stay as written, so the text imports back with the same rendering.
+ * Finds the raw HTML in Markdown text with the CommonMark and GFM grammar the app renders
+ * paragraphs with. The parser is a library, so it is supplied from outside the domain.
+ *
+ * @param text - Markdown text.
+ * @returns Non-overlapping source ranges of HTML blocks and inline HTML, in source order.
+ */
+export type MarkdownHtmlFinder = (text: string) => readonly MarkdownSourceRange[]
+
+/**
+ * Escapes the raw HTML in Markdown, so the exported file never carries runnable HTML.
+ *
+ * The text is parsed with the same CommonMark and GFM grammar the app renders paragraphs with,
+ * and only the source ranges of HTML blocks and inline HTML are changed. Blockquote markers,
+ * autolinks, code spans (also across lines), fenced code, and backslash escapes stay as written,
+ * so the text imports back with the same rendering. If HTML is still found after a few passes,
+ * every raw HTML start in the text is escaped instead, which is safe but may show a backslash
+ * inside code.
  *
  * @param value - Markdown text.
+ * @param findHtml - Finds the raw HTML ranges in Markdown.
  * @returns Markdown whose HTML tags are shown as text.
  */
-function escapeMarkdownHtml(value: string): string {
-  let fence: string | undefined
-  return value.split('\n').map((line) => {
-    if (fence !== undefined) {
-      const close = CODE_FENCE_CLOSE.exec(line)?.[1]
-      if (close !== undefined && close[0] === fence[0] && close.length >= fence.length) fence = undefined
-      return line
+function escapeMarkdownHtml(value: string, findHtml: MarkdownHtmlFinder): string {
+  let text = value
+  for (let pass = 0; pass < MARKDOWN_HTML_ESCAPE_MAX_PASSES; pass += 1) {
+    const ranges = findHtml(text)
+    if (ranges.length === 0) return text
+    let escaped = ''
+    let index = 0
+    for (const { start, end } of ranges) {
+      escaped += text.slice(index, start) + escapeRawHtmlStarts(text.slice(start, end))
+      index = end
     }
-    const marker = readCodeFenceOpen(line)
-    if (marker !== undefined) {
-      fence = marker
-      return line
-    }
-    return escapeRawHtmlOutsideCodeSpans(line)
-  }).join('\n')
-}
-
-/**
- * Escapes raw HTML starts in one line, outside its code spans.
- *
- * @param line - One Markdown line outside fenced code.
- * @returns The line with `<` escaped where it would start raw HTML.
- */
-function escapeRawHtmlOutsideCodeSpans(line: string): string {
-  let result = ''
-  let index = 0
-  while (index < line.length) {
-    const open = line.indexOf('`', index)
-    if (open === -1) break
-    let backslashes = 0
-    while (line[open - 1 - backslashes] === '\\') backslashes += 1
-    if (backslashes % 2 === 1) {
-      // A backslash-escaped backtick is literal text and does not open a code span; the rest of
-      // its run may still open one.
-      result += escapeRawHtmlStarts(line.slice(index, open + 1))
-      index = open + 1
-      continue
-    }
-    let runEnd = open
-    while (line[runEnd] === '`') runEnd += 1
-    const run = line.slice(open, runEnd)
-    const close = findClosingBacktickRun(line, runEnd, run.length)
-    if (close === -1) {
-      // An unclosed backtick run is literal text; keep scanning after it.
-      result += escapeRawHtmlStarts(line.slice(index, runEnd))
-      index = runEnd
-      continue
-    }
-    result += escapeRawHtmlStarts(line.slice(index, open)) + line.slice(open, close + run.length)
-    index = close + run.length
+    text = escaped + text.slice(index)
   }
-  return result + escapeRawHtmlStarts(line.slice(index))
+  return findHtml(text).length === 0 ? text : escapeRawHtmlStarts(value)
 }
 
 /**
- * Escapes each `<` that starts raw HTML in text outside code. A `<` already escaped by an odd
- * number of backslashes is left as it is, so exporting an imported page does not add another
- * backslash on each round trip.
+ * Escapes each `<` that starts raw HTML in text. A `<` already escaped by an odd number of
+ * backslashes is left as it is, so exporting an imported page does not add another backslash on
+ * each round trip.
  *
- * @param text - Markdown text outside code spans and fenced code.
+ * @param text - Markdown text, or the source of one raw HTML node.
  * @returns The text with unescaped raw HTML starts escaped.
  */
 function escapeRawHtmlStarts(text: string): string {
@@ -1621,25 +1606,6 @@ function escapeRawHtmlStarts(text: string): string {
     while (text[offset - 1 - backslashes] === '\\') backslashes += 1
     return backslashes % 2 === 1 ? match : '\\<'
   })
-}
-
-/**
- * Finds the backtick run of exactly the given length that closes a code span.
- *
- * @param line - Markdown line.
- * @param from - Index after the opening run.
- * @param length - Length of the opening run.
- * @returns Start index of the closing run, or -1 when the span is not closed.
- */
-function findClosingBacktickRun(line: string, from: number, length: number): number {
-  let index = line.indexOf('`', from)
-  while (index !== -1) {
-    let end = index
-    while (line[end] === '`') end += 1
-    if (end - index === length) return index
-    index = line.indexOf('`', end)
-  }
-  return -1
 }
 
 /**

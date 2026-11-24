@@ -125,6 +125,7 @@ import {
   DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS,
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
+import { findMarkdownHtmlRanges } from '../../application/markdown-html-finder'
 import {
   DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
   commentKey,
@@ -3081,83 +3082,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         .map(({ userId }) => normalizeCommentMemberKey(userId))
         .filter((memberKey) => memberKey !== actorMemberKey),
     )
-    const threadRead = storedParent === undefined
+    let threadRead = storedParent === undefined
       ? undefined
       : await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
-    const threadParticipants = (threadRead?.participants ?? [])
-      .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
-    // The participant index of the thread: every comment adds its author, a new root marks its
-    // index complete, and a reply to an older thread backfills it and marks it complete only
-    // when every participant was written.
-    const rootCommentId = storedParent?.id ?? id
-    const participantPuts = [
-      ...[...new Set([...(threadRead?.backfill ?? []), actorMemberKey])].map((memberKey) => ({
-        Put: {
-          TableName: this.tableName,
-          Item: createCommentParticipantItem(input.workspaceId, input.documentId, rootCommentId, memberKey),
-        },
-      })),
-      ...(storedParent === undefined || threadRead?.completesIndex === true
-        ? [{
-            Put: {
-              TableName: this.tableName,
-              Item: createCommentParticipantIndexItem(input.workspaceId, input.documentId, rootCommentId),
-            },
-          }]
-        : []),
-    ]
-    const notificationCandidates = [
-      ...[...mentionedMemberKeys].map((memberKey) => ({
-        memberKey,
-        reason: 'mention',
-      })),
-      ...threadParticipants.map((memberKey) => ({
-        memberKey,
-        reason: 'reply',
-      })),
-    ]
-    const auditPut = createMutationAuditEventPut(
-      this.auditTableName,
-      input.auditContext,
-      {
-        directoryId: input.workspaceId,
-        eventType: parentCommentId === undefined
-          ? 'document.comment.created'
-          : 'document.comment.replied',
-        entityType: 'document',
-        entityId: input.documentId,
-        target: {
-          type: 'comment',
-          id: `document/${input.documentId}/comment/${id}`,
-        },
-        action: parentCommentId === undefined ? 'commented' : 'replied',
-        occurredAt: now,
-        changes: createAuditFieldChanges(
-          undefined,
-          { body: input.body },
-          ['body'],
-          ['body'],
-        ),
-        summary: parentCommentId === undefined
-          ? 'A document comment mentioned you.'
-          : 'A document thread you joined received a reply.',
-        metadata: {
-          actorMemberKey: input.access.memberKey,
-          commentId: id,
-          ...(parentCommentId === undefined
-            ? {}
-            : { rootCommentId: parentCommentId }),
-          deepLink:
-            `/documents/${encodeURIComponent(input.documentId)}` +
-            `?context=comments&commentId=${encodeURIComponent(id)}` +
-            (parentCommentId === undefined
-              ? ''
-              : `&rootCommentId=${encodeURIComponent(parentCommentId)}`),
-          notificationTitle: document.title,
-          notificationCandidates,
-        },
-      },
-    )
     const mutationAuthorizationGuards =
       mergeAuthorizationGuards(
         input.workspaceId,
@@ -3168,47 +3095,128 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           [authorization],
         ),
       )
-    const actions: NonNullable<
-      TransactWriteCommandInput['TransactItems']
-    > = [
-      ...(storedParent === undefined
-        ? []
-        : [{
-            ConditionCheck: {
-              TableName: this.tableName,
-              Key: {
-                workspaceId: input.workspaceId,
-                recordKey: storedParent.recordKey,
+    /**
+     * Builds the comment transaction from the thread participants last read, so a retry after
+     * a concurrent comment notifies and indexes the participants that comment added.
+     *
+     * @returns The transaction actions.
+     */
+    const buildActions = (): NonNullable<TransactWriteCommandInput['TransactItems']> => {
+      const threadParticipants = (threadRead?.participants ?? [])
+        .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
+      // The participant index of the thread: every comment adds its author, a new root marks its
+      // index complete, and a reply to an older thread backfills it and marks it complete only
+      // when every participant was written.
+      const rootCommentId = storedParent?.id ?? id
+      const participantPuts = [
+        ...[...new Set([...(threadRead?.backfill ?? []), actorMemberKey])].map((memberKey) => ({
+          Put: {
+            TableName: this.tableName,
+            Item: createCommentParticipantItem(input.workspaceId, input.documentId, rootCommentId, memberKey),
+          },
+        })),
+        ...(storedParent === undefined || threadRead?.completesIndex === true
+          ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createCommentParticipantIndexItem(input.workspaceId, input.documentId, rootCommentId),
               },
-              ConditionExpression:
-                'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
-              ExpressionAttributeValues: {
-                ':unresolved': false,
-                ':parentUpdatedAt': storedParent.updatedAt,
+            }]
+          : []),
+      ]
+      const notificationCandidates = [
+        ...[...mentionedMemberKeys].map((memberKey) => ({
+          memberKey,
+          reason: 'mention',
+        })),
+        ...threadParticipants.map((memberKey) => ({
+          memberKey,
+          reason: 'reply',
+        })),
+      ]
+      const auditPut = createMutationAuditEventPut(
+        this.auditTableName,
+        input.auditContext,
+        {
+          directoryId: input.workspaceId,
+          eventType: parentCommentId === undefined
+            ? 'document.comment.created'
+            : 'document.comment.replied',
+          entityType: 'document',
+          entityId: input.documentId,
+          target: {
+            type: 'comment',
+            id: `document/${input.documentId}/comment/${id}`,
+          },
+          action: parentCommentId === undefined ? 'commented' : 'replied',
+          occurredAt: now,
+          changes: createAuditFieldChanges(
+            undefined,
+            { body: input.body },
+            ['body'],
+            ['body'],
+          ),
+          summary: parentCommentId === undefined
+            ? 'A document comment mentioned you.'
+            : 'A document thread you joined received a reply.',
+          metadata: {
+            actorMemberKey: input.access.memberKey,
+            commentId: id,
+            ...(parentCommentId === undefined
+              ? {}
+              : { rootCommentId: parentCommentId }),
+            deepLink:
+              `/documents/${encodeURIComponent(input.documentId)}` +
+              `?context=comments&commentId=${encodeURIComponent(id)}` +
+              (parentCommentId === undefined
+                ? ''
+                : `&rootCommentId=${encodeURIComponent(parentCommentId)}`),
+            notificationTitle: document.title,
+            notificationCandidates,
+          },
+        },
+      )
+      return [
+        ...(storedParent === undefined
+          ? []
+          : [{
+              ConditionCheck: {
+                TableName: this.tableName,
+                Key: {
+                  workspaceId: input.workspaceId,
+                  recordKey: storedParent.recordKey,
+                },
+                ConditionExpression:
+                  'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
+                ExpressionAttributeValues: {
+                  ':unresolved': false,
+                  ':parentUpdatedAt': storedParent.updatedAt,
+                },
               },
-            },
-          }]),
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: 'attribute_not_exists(workspaceId)',
+            }]),
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(workspaceId)',
+          },
         },
-      },
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: receipt,
-          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: receipt,
+            ConditionExpression: 'attribute_not_exists(workspaceId)',
+          },
         },
-      },
-      createCommentWindowAction(),
-      ...participantPuts,
-      ...(auditPut === undefined ? [] : [auditPut]),
-      ...authorizationGuardConditionChecks(
-        mutationAuthorizationGuards,
-      ),
-    ]
+        createCommentWindowAction(),
+        ...participantPuts,
+        ...(auditPut === undefined ? [] : [auditPut]),
+        ...authorizationGuardConditionChecks(
+          mutationAuthorizationGuards,
+        ),
+      ]
+    }
+    let actions = buildActions()
     assertTransactionSize(actions)
     const commentWindowActionIndex = (storedParent === undefined ? 0 : 1) + 2
     for (
@@ -3235,7 +3243,13 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             revision: commentWindowRevision + 1,
             updatedAt: this.now().toISOString(),
           }
-          actions[commentWindowActionIndex] = createCommentWindowAction()
+          // Another comment of this Document committed first; it may have joined this thread,
+          // so the participants, their index rows, and the notification candidates are re-read.
+          if (storedParent !== undefined) {
+            threadRead = await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
+          }
+          actions = buildActions()
+          assertTransactionSize(actions)
           continue
         }
         if (
@@ -5028,7 +5042,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       'DocumentExportDenied',
     )
     validateDocumentPayload(row.document)
-    return renderDocumentProjectionExport(projected, input.format)
+    return renderDocumentProjectionExport(projected, input.format, findMarkdownHtmlRanges)
   }
 
   private async ensureTable(): Promise<void> {
