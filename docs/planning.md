@@ -151,7 +151,7 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 ### Project charter の責任者との同期（Issue #638、ADR 0084）
 
-`PUT /api/teams/:teamId/projects/:projectId/charter` が責任者（`ownerUserId`）を変えたとき、保存に続けて Project の update target の cadence を、`updateOwnerMemberKey` だけを新しい責任者にして書き直します。cadence endpoint と同じく、呼び出した人に update target の manager、新しい責任者に Project の member 以上（escalation 先は viewer 以上）を求め、同じ commit 時の fence を付けます。Planning の revision が途中で進んだときは3回まで読み直します。charter は先に確定するので、結果は charter の応答の `updateOwnerSync` に返します: `synced`、`unchanged`（すでに同じ人）、`not-configured`（cadence がない、または archive 済み）、`not-permitted`（呼び出した人が cadence を変えられない）、`owner-not-eligible`（新しい責任者が担当者になれない）、`failed`（書き込みの失敗）。責任者を変えない保存では `updateOwnerSync` を返さず、cadence にも触れません。Planning で担当者を変えても charter の責任者は変わりません。
+`PUT /api/teams/:teamId/projects/:projectId/charter` が責任者（`ownerUserId`）を変えたとき、保存に続けて Project の update target の cadence を、`updateOwnerMemberKey` だけを新しい責任者にして書き直します。cadence endpoint と同じく、呼び出した人に update target の manager、新しい責任者に Project の member 以上（escalation 先は viewer 以上）を求め、同じ commit 時の fence を付けます。Planning の revision が途中で進んだときは3回まで読み直します。charter は先に確定するので、結果は charter の応答の `updateOwnerSync` に返します: `synced`、`unchanged`（すでに同じ人）、`not-configured`（cadence がない、または archive 済み）、`not-permitted`（呼び出した人が cadence を変えられない）、`owner-not-eligible`（新しい責任者が担当者になれない）、`failed`（書き込みの失敗、または escalation 先が見られなくなっている）。責任者を変えない保存では `updateOwnerSync` を返さず、cadence にも触れません。Planning で担当者を変えても charter の責任者は変わりません。
 
 ### Update Feed read model (Issue #241, first slice)
 

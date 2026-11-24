@@ -94,6 +94,26 @@ describe('Project charter API', () => {
     expect(await readUpdateOwner()).toBe('demo@example.com')
   })
 
+  test('keeps the update owner when the new charter owner cannot publish updates in the Project', async () => {
+    // A Workspace owner without Project roles; owner@example.com has no access to the Project.
+    configureFakeProjectClients(false, {
+      workspaceRole: 'owner',
+      systemAdminMemberKeys: ['demo@example.com'],
+    })
+    await configureUpdateCadence('demo@example.com')
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'owner@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      charter: { owner: { userId: 'owner@example.com' } },
+      updateOwnerSync: 'owner-not-eligible',
+    })
+    expect(await readUpdateOwner()).toBe('demo@example.com')
+  })
+
   test('reports a Project without an update cadence and keeps the charter saved', async () => {
     configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
 

@@ -3094,26 +3094,35 @@ export async function syncProjectUpdateOwnerWithCharter(
         if (isAccessRefusal(error)) return 'not-permitted'
         throw error
       }
-      let recipients: WorkspaceMember[]
+      let owner: WorkspaceMember
       try {
-        recipients = await Promise.all([
-          requirePlanningCadenceRecipientTargetPermission(principal, visibleSnapshot, target, ownerMemberKey, 'member'),
-          ...(current.cadence.escalationMemberKey
-            ? [requirePlanningCadenceRecipientTargetPermission(
-                principal,
-                visibleSnapshot,
-                target,
-                current.cadence.escalationMemberKey,
-                'viewer',
-              )]
-            : []),
-        ])
+        owner = await requirePlanningCadenceRecipientTargetPermission(
+          principal,
+          visibleSnapshot,
+          target,
+          ownerMemberKey,
+          'member',
+        )
       } catch (error) {
         if (isAccessRefusal(error)) return 'owner-not-eligible'
         throw error
       }
-      const [owner] = recipients
-      if (!owner) return 'owner-not-eligible'
+      const recipients: WorkspaceMember[] = [owner]
+      if (current.cadence.escalationMemberKey) {
+        try {
+          recipients.push(await requirePlanningCadenceRecipientTargetPermission(
+            principal,
+            visibleSnapshot,
+            target,
+            current.cadence.escalationMemberKey,
+            'viewer',
+          ))
+        } catch (error) {
+          // The escalation recipient lost access; the cadence must be fixed in Planning by hand.
+          if (isAccessRefusal(error)) return 'failed'
+          throw error
+        }
+      }
       try {
         await workItemDependencies.planning.configureUpdateCadence(
           principal.directoryId,
