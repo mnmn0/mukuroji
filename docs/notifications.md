@@ -266,7 +266,7 @@ worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対で
 
 ### 宛先
 
-送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません。push service への送信は所有者の変更と原子的にはできないため、読み直しから送信の開始まで（暗号化と request の開始の間）に所有者が変わると、変わる前の所有者宛ての通知がその browser に届くことがあります。同じ browser を別の member が登録し直したのがその短い間に重なった場合に限られるため、この残りのリスクは受け入れています。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
+送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません。push service への送信は所有者の変更と原子的にはできないため、次の場合は変わる前の所有者宛ての通知がその browser に表示されることがあります。読み直しから送信の開始まで（暗号化と request の開始の間）に所有者が変わった場合と、所有者が変わる前に push service が受け付けた通知を、browser がオフラインだったなどで TTL（24時間）以内に後から受け取った場合です。service worker は受け取った通知を所有者を確かめずに表示します。サインアウトでは browser の購読を取り消すため、push service にたまった通知も届かなくなります。残るのは、別のアカウントがサインアウトせずに同じ browser で通知を有効にし直した場合です。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
 
 ### 配信の規則
 
