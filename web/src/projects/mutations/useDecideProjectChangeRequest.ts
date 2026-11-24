@@ -1,4 +1,5 @@
 import {
+  isProjectScheduleBaselineName,
   PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH,
   type DecideProjectRaidChangeRequest,
   type ProjectRaidChangeDecisionOutcome,
@@ -53,6 +54,21 @@ function truncate(text: string, maxLength: number) {
   const last = text.charCodeAt(end - 1)
   if (last >= 0xd800 && last <= 0xdbff) end -= 1
   return text.slice(0, end)
+}
+
+/**
+ * Turns a display text into a valid baseline name. Control characters such as tabs and line
+ * breaks, which a request title may hold, become spaces, and the result is trimmed and shortened
+ * to the name limit.
+ *
+ * @param text - Name in the display language, built from the request title.
+ * @returns The name to save the baseline under.
+ * @throws Error when nothing valid is left, so that approval stops before any date moves.
+ */
+function toBaselineName(text: string): string {
+  const name = truncate(text.replace(/\p{Cc}+/gu, ' ').trim(), PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH).trim()
+  if (!isProjectScheduleBaselineName(name)) throw new Error('The baseline name is empty.')
+  return name
 }
 
 /**
@@ -197,8 +213,11 @@ export function createDecisionRefreshFilter(
 
 /** A decision request whose outcome is not known yet, kept to send again unchanged. */
 type PendingDecision = {
-  /** Team, Project, entry, and revision the request decides. */
-  entryKey: string
+  /**
+   * Team, Project, entry, and revision keys the attempt is kept under: the revision the decision
+   * started from and, after an approval hold, the held revision a refreshed log shows.
+   */
+  entryKeys: readonly string[]
   /** The decision request, including the baseline captured for it. */
   request: DecideProjectRaidChangeRequest
   /** Idempotency context of the request. */
@@ -206,13 +225,29 @@ type PendingDecision = {
 }
 
 /**
- * Drops a retained decision once its outcome is known, unless a newer attempt replaced it.
+ * Drops a retained decision under every key once its outcome is known, except keys a newer
+ * attempt took over.
  *
  * @param pending - Retained decisions by entry key.
  * @param attempt - The attempt whose outcome is known.
  */
 function forgetDecision(pending: Map<string, PendingDecision>, attempt: PendingDecision) {
-  if (pending.get(attempt.entryKey) === attempt) pending.delete(attempt.entryKey)
+  for (const key of attempt.entryKeys) {
+    if (pending.get(key) === attempt) pending.delete(key)
+  }
+}
+
+/**
+ * Builds the key of one revision of a change request.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project of the request.
+ * @param entryId - Change request.
+ * @param revision - Revision of the request.
+ * @returns The key of the retained decisions map.
+ */
+function decisionKey(teamId: string, projectId: string, entryId: string, revision: number) {
+  return JSON.stringify([teamId, projectId, entryId, revision])
 }
 
 /**
@@ -257,17 +292,20 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       mutate(projectRaidLogKey(accessToken, teamId, projectId)),
       mutate(createDecisionRefreshFilter(accessToken, teamId, projectId, affected)),
     ])
-    const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision])
+    const entryKey = decisionKey(teamId, projectId, entry.id, entry.revision)
     // A decision whose outcome is unknown is sent again as it was, with its own outcome, before
     // any date change or baseline capture runs, so a lost response neither repeats them nor
     // changes the plan of a request that may already be rejected. A different outcome can be
-    // chosen only once the server has answered the retained one.
+    // chosen only once the server has answered the retained one. An approval is also kept under
+    // its held revision, which the log shows once it reloads after a lost response.
     let attempt = pendingDecisions.current.get(entryKey)
     if (attempt === undefined) {
       let baselineId: string | undefined
       let expectedRevision = entry.revision
       try {
         if (outcome === 'approved') {
+          // Checked first, so that a title the name cannot hold stops approval before any date moves.
+          const baselineName = options.replaceBaseline ? toBaselineName(options.baselineName) : undefined
           // The hold refuses a request someone else has since edited, decided, or closed, and keeps
           // others from rejecting or editing it until the decision, so no rejection can land
           // after its dates have moved.
@@ -284,14 +322,9 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
           }
           await renewHold()
           await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [], affected, renewHold)
-          if (options.replaceBaseline) {
+          if (baselineName !== undefined) {
             await renewHold()
-            const captured = await captureProjectScheduleBaseline(
-              teamId,
-              projectId,
-              accessToken,
-              truncate(options.baselineName, PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH),
-            )
+            const captured = await captureProjectScheduleBaseline(teamId, projectId, accessToken, baselineName)
             baselineId = captured.activeBaselineId
           }
         }
@@ -299,8 +332,9 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
         void refresh()
         throw error
       }
+      const heldKey = decisionKey(teamId, projectId, entry.id, expectedRevision)
       attempt = {
-        entryKey,
+        entryKeys: heldKey === entryKey ? [entryKey] : [entryKey, heldKey],
         request: {
           expectedRevision,
           outcome,
@@ -308,7 +342,7 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
         },
         context: createMutationRequestContext(),
       }
-      pendingDecisions.current.set(entryKey, attempt)
+      for (const key of attempt.entryKeys) pendingDecisions.current.set(key, attempt)
     }
     let decided: ProjectRaidEntry
     try {

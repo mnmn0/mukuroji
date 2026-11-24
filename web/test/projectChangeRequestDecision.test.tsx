@@ -326,6 +326,49 @@ describe('approving a change request', () => {
     expect(calls.decisions[0]?.body).toMatchObject({ baselineId: 'baseline-1' })
   })
 
+  test('sends an unknown approval again when it is retried from the reloaded, held request', async () => {
+    const calls = installFakeApi({
+      a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
+    }, [503, 200])
+    const entry = changeRequest([{ workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } }])
+    const decide = captureDecide()
+
+    await expect(decide(entry, 'approved', { replaceBaseline: true, baselineName: '変更要求' })).rejects.toThrow()
+    const decisionRevision = isRecord(calls.decisions[0]?.body) ? calls.decisions[0].body.expectedRevision : undefined
+    expect(decisionRevision).toBe(3)
+    // The log reloaded after the lost response shows the request at its held revision.
+    await decide({ ...entry, revision: 3 }, 'approved', { replaceBaseline: true, baselineName: '変更要求' })
+
+    expect(calls.holds).toEqual([1, 2])
+    expect(calls.captures).toBe(1)
+    expect(calls.decisions).toHaveLength(2)
+    expect(calls.decisions[1]).toEqual(calls.decisions[0])
+  })
+
+  test('turns line breaks in the title into spaces before any date moves', async () => {
+    const calls = installFakeApi({
+      a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
+    }, [])
+    let capturedName: unknown
+    const fakeFetch = globalThis.fetch
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.endsWith('/schedule-baseline') && typeof init?.body === 'string') {
+        const body: unknown = JSON.parse(init.body)
+        capturedName = isRecord(body) ? body.name : undefined
+      }
+      return fakeFetch(input, init)
+    }
+    const entry = changeRequest([{ workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } }])
+
+    await captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: ' 承認:\t日程の\r\n変更 ' })
+    expect(capturedName).toBe('承認: 日程の 変更')
+
+    await expect(captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: '\n\t' })).rejects.toThrow()
+    expect(calls.confirms).toEqual(['a:2026-11-25'])
+    expect(calls.holds).toEqual([1, 2])
+  })
+
   test('keeps the unknown outcome of one request while another request is decided', async () => {
     const calls = installFakeApi({}, [503, 200, 200])
     const first = changeRequest([])

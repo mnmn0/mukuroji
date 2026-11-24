@@ -9562,13 +9562,27 @@ test.describe('authenticated task page', () => {
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
       await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries, viewer: { canEdit: true, canDecide: true } } })
     })
+    const holds: unknown[] = []
+    let heldRevision = request.revision
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log\/entries\/cr-launch\/approval-hold$/, async (route) => {
+      const body: unknown = route.request().postDataJSON()
+      holds.push(body)
+      heldRevision += 1
+      const entry = {
+        ...request,
+        revision: heldRevision,
+        approvalHold: { heldByMemberId: 'demo@example.com', heldAt: '2026-06-02T00:00:00.000Z', expiresAt: '2026-06-02T00:10:00.000Z' },
+      }
+      entries = [entry]
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entry } })
+    })
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log\/entries\/cr-launch\/decision$/, async (route) => {
       const body: unknown = route.request().postDataJSON()
       decisions.push(body)
       const entry = {
         ...request,
         status: 'closed',
-        revision: 2,
+        revision: heldRevision + 1,
         updatedAt: '2026-06-02T00:00:00.000Z',
         closedAt: '2026-06-02T00:00:00.000Z',
         decision: { outcome: 'approved', decidedAt: '2026-06-02T00:00:00.000Z', decidedByMemberId: 'demo@example.com', baselineId: 'baseline-cr' },
@@ -9606,7 +9620,9 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => decisions.length).toBe(1)
     expect(requestCounts.scheduleConfirms).toBe(1)
     expect(captures).toEqual([{ name: '変更要求: リリース日の延期' }])
-    expect(decisions).toEqual([{ expectedRevision: 1, outcome: 'approved', baselineId: 'baseline-cr' }])
+    // The hold is taken first and renewed before the baseline capture.
+    expect(holds).toEqual([{ expectedRevision: 1 }, { expectedRevision: 2 }])
+    expect(decisions).toEqual([{ expectedRevision: 3, outcome: 'approved', baselineId: 'baseline-cr' }])
     await panel.getByLabel('クローズ済みも表示').check()
     await expect(panel.getByTestId('project-raid-log-decision')).toContainText('承認')
     await expect(panel.getByTestId('project-raid-log-decision')).toContainText('（ベースラインを差し替え）')
