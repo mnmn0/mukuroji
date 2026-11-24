@@ -2,8 +2,10 @@ import { expect, test } from 'bun:test'
 import {
   formatAccessExpiryLastDay,
   hasMemberAccessExpired,
+  listOffboardingSuccessors,
   readAccessExpiryFromLastDay,
 } from '../src/workspace/model/memberAccessExpiry'
+import type { WorkspaceMember } from '../src/workspace/api/access'
 
 test('ends access when the chosen last day ends, and shows that day again', () => {
   const accessExpiresAt = readAccessExpiryFromLastDay('2026-12-24')
@@ -28,4 +30,41 @@ test('treats a passed or unreadable expiry as expired', () => {
   expect(hasMemberAccessExpired('2026-11-25T00:00:00.000Z', now)).toBe(false)
   expect(hasMemberAccessExpired('2026-11-24T00:00:00.000Z', now)).toBe(true)
   expect(hasMemberAccessExpired('garbage', now)).toBe(true)
+})
+
+/**
+ * Builds a Workspace member for the successor list.
+ *
+ * @param memberKey - Member key and email.
+ * @param fields - Role, status, and expiry to override.
+ * @returns A Workspace member.
+ */
+function member(memberKey: string, fields: Partial<Pick<WorkspaceMember, 'role' | 'status' | 'accessExpiresAt'>> = {}): WorkspaceMember {
+  return {
+    id: memberKey,
+    memberKey,
+    email: memberKey,
+    role: 'member',
+    status: 'active',
+    version: 1,
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T00:00:00.000Z',
+    ...fields,
+  }
+}
+
+test('offers only active, unexpired non-guest members other than the leaver as successors', () => {
+  const now = new Date('2026-11-24T00:00:00.000Z')
+  const members = [
+    member('leaver@example.com'),
+    member('admin@example.com', { role: 'admin' }),
+    member('later@example.com', { accessExpiresAt: '2026-12-01T00:00:00.000Z' }),
+    // Expired members keep an active row until their own handover, but cannot be promoted.
+    member('expired@example.com', { accessExpiresAt: '2026-11-23T00:00:00.000Z' }),
+    member('guest@example.com', { role: 'guest' }),
+    member('gone@example.com', { status: 'deactivated' }),
+  ]
+
+  expect(listOffboardingSuccessors('leaver@example.com', members, now).map((candidate) => candidate.memberKey))
+    .toEqual(['admin@example.com', 'later@example.com'])
 })

@@ -27,68 +27,95 @@ export type MemberOffboardingActions = {
 }
 
 /**
+ * Builds the handover actions of a leaving member. After each step, whatever its outcome, the
+ * handover summary and the Workspace member list are read again.
+ *
+ * A Project role change raises the Workspace member version of both the leaver and the
+ * successor, so the member list is read again too; otherwise the next expiry save or
+ * deactivation would send a stale version.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member who is leaving.
+ * @param reloadSummary - Reads the handover summary again.
+ * @param reloadMembers - Reads the Workspace member list again.
+ * @returns The handover actions.
+ */
+export function createMemberOffboardingActions(
+  accessToken: string,
+  memberKey: string,
+  reloadSummary: () => Promise<unknown>,
+  reloadMembers: () => Promise<unknown>,
+): MemberOffboardingActions {
+  const runner = createMutationRequestRunner()
+  /**
+   * Runs a handover step and reads the summary and member list again whatever its outcome.
+   *
+   * @param step - Requests of the step.
+   */
+  const withReload = async (step: () => Promise<void>) => {
+    try {
+      await step()
+    } finally {
+      await Promise.all([reloadSummary(), reloadMembers()])
+    }
+  }
+  return {
+    transferProjects: (offboarding, successorKey) => withReload(async () => {
+      for (const project of offboarding.managedProjects) {
+        // The successor becomes a manager first, so the Project never lacks one.
+        for (const [key, role] of [[successorKey, 'manager'], [memberKey, 'member']] as const) {
+          await runner.run(
+            `project-member:update:${project.projectId}:${key}`,
+            JSON.stringify({ role }),
+            (context) => updateProjectMember(accessToken, project.projectId, key, { role }, context),
+          )
+        }
+      }
+    }),
+    transferPlanningEntities: (offboarding, successorKey) => withReload(async () => {
+      let expectedRevision = offboarding.planningRevision
+      for (const entity of offboarding.ownedPlanningEntities) {
+        const input = { expectedRevision, patch: { ownerMemberKey: successorKey } }
+        const snapshot = await runner.run(
+          `planning-entity:owner:${entity.id}`,
+          JSON.stringify(input),
+          (context) => updatePlanningEntity(accessToken, entity.id, input, context),
+        )
+        expectedRevision = snapshot.revision
+      }
+    }),
+    revokeCredentials: () => withReload(async () => {
+      await runner.run(
+        `workspace-member:credentials-revoke:${memberKey}`,
+        '{}',
+        (context) => revokeWorkspaceMemberCredentials(accessToken, memberKey, context),
+      )
+    }),
+  }
+}
+
+/**
  * Hands a leaving member's Project manager roles and Planning ownership to a successor, and
- * revokes the member's credentials, reading the summary again after each step.
+ * revokes the member's credentials, reading the summary and the member list again after each
+ * step.
  *
  * Each step uses the existing Project member and Planning APIs, so their own permission and
  * revision checks apply. A step that fails part way leaves the summary showing what remains.
  *
  * @param accessToken - Access token of the session.
  * @param memberKey - Member who is leaving.
- * @param reload - Reads the summary again.
+ * @param reloadSummary - Reads the handover summary again.
+ * @param reloadMembers - Reads the Workspace member list again.
  * @returns The handover actions.
  */
 export function useMemberOffboardingActions(
   accessToken: string,
   memberKey: string,
-  reload: () => Promise<unknown>,
+  reloadSummary: () => Promise<unknown>,
+  reloadMembers: () => Promise<unknown>,
 ): MemberOffboardingActions {
-  return useMemo(() => {
-    const runner = createMutationRequestRunner()
-    /**
-     * Runs a handover step and reads the summary again whatever its outcome.
-     *
-     * @param step - Requests of the step.
-     */
-    const withReload = async (step: () => Promise<void>) => {
-      try {
-        await step()
-      } finally {
-        await reload()
-      }
-    }
-    return {
-      transferProjects: (offboarding, successorKey) => withReload(async () => {
-        for (const project of offboarding.managedProjects) {
-          // The successor becomes a manager first, so the Project never lacks one.
-          for (const [key, role] of [[successorKey, 'manager'], [memberKey, 'member']] as const) {
-            await runner.run(
-              `project-member:update:${project.projectId}:${key}`,
-              JSON.stringify({ role }),
-              (context) => updateProjectMember(accessToken, project.projectId, key, { role }, context),
-            )
-          }
-        }
-      }),
-      transferPlanningEntities: (offboarding, successorKey) => withReload(async () => {
-        let expectedRevision = offboarding.planningRevision
-        for (const entity of offboarding.ownedPlanningEntities) {
-          const input = { expectedRevision, patch: { ownerMemberKey: successorKey } }
-          const snapshot = await runner.run(
-            `planning-entity:owner:${entity.id}`,
-            JSON.stringify(input),
-            (context) => updatePlanningEntity(accessToken, entity.id, input, context),
-          )
-          expectedRevision = snapshot.revision
-        }
-      }),
-      revokeCredentials: () => withReload(async () => {
-        await runner.run(
-          `workspace-member:credentials-revoke:${memberKey}`,
-          '{}',
-          (context) => revokeWorkspaceMemberCredentials(accessToken, memberKey, context),
-        )
-      }),
-    }
-  }, [accessToken, memberKey, reload])
+  return useMemo(
+    () => createMemberOffboardingActions(accessToken, memberKey, reloadSummary, reloadMembers),
+    [accessToken, memberKey, reloadSummary, reloadMembers],
+  )
 }

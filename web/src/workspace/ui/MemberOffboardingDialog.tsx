@@ -3,7 +3,11 @@ import type { WorkspaceMemberOffboarding } from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import type { WorkspaceMember } from '../api/access'
-import { formatAccessExpiryLastDay, readAccessExpiryFromLastDay } from '../model/memberAccessExpiry'
+import {
+  formatAccessExpiryLastDay,
+  listOffboardingSuccessors,
+  readAccessExpiryFromLastDay,
+} from '../model/memberAccessExpiry'
 import type { MemberOffboardingActions } from '../mutations/useMemberOffboardingActions'
 
 /** What the offboarding dialog is loading or showing. */
@@ -33,7 +37,7 @@ export type MemberOffboardingDialogProps = {
   actions: MemberOffboardingActions
   /** Member who is leaving, as the member list shows them now. */
   member: WorkspaceMember
-  /** Every Workspace member; active non-guest members other than `member` can take over. */
+  /** Every Workspace member; active, unexpired non-guest members other than `member` can take over. */
   members: readonly WorkspaceMember[]
   /** Whether the administrator can set an access expiry on the member. */
   canEditAccessExpiry: boolean
@@ -87,11 +91,7 @@ export function MemberOffboardingDialog({
     if (!busy) onClose()
   })
 
-  const successors = members.filter((candidate) =>
-    candidate.memberKey !== member.memberKey &&
-    candidate.status === 'active' &&
-    candidate.role !== 'guest'
-  )
+  const successors = listOffboardingSuccessors(member.memberKey, members, new Date())
   const offboarding = loadState.status === 'loaded' ? loadState.offboarding : undefined
   const lastDayExpiry = readAccessExpiryFromLastDay(lastDay)
   const dateFormat = new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', { dateStyle: 'medium' })

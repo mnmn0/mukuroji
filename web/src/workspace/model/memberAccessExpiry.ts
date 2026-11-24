@@ -1,3 +1,5 @@
+import type { WorkspaceMember } from '../api/access'
+
 /**
  * Turns the last day a member may work into the instant their access ends.
  *
@@ -46,4 +48,29 @@ export function hasMemberAccessExpired(accessExpiresAt: string | undefined, now:
   if (!accessExpiresAt) return false
   const expiresAt = Date.parse(accessExpiresAt)
   return !Number.isFinite(expiresAt) || expiresAt <= now.getTime()
+}
+
+/**
+ * Lists the members who can take over from a leaving member: active, unexpired, non-guest
+ * members other than the leaver.
+ *
+ * A member whose access expired keeps an active row until their own roles are handed over, but
+ * can no longer be given a Project role, so they are not offered as a successor.
+ *
+ * @param leaverKey - Member key of the leaving member.
+ * @param members - Every Workspace member.
+ * @param now - Current instant.
+ * @returns The candidates, in the order of `members`.
+ */
+export function listOffboardingSuccessors(
+  leaverKey: string,
+  members: readonly WorkspaceMember[],
+  now: Date,
+): WorkspaceMember[] {
+  return members.filter((candidate) =>
+    candidate.memberKey !== leaverKey &&
+    candidate.status === 'active' &&
+    candidate.role !== 'guest' &&
+    !hasMemberAccessExpired(candidate.accessExpiresAt, now)
+  )
 }

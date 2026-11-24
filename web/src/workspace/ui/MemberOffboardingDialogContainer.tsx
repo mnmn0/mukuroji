@@ -1,6 +1,7 @@
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../api/access'
 import { useMemberOffboardingActions } from '../mutations/useMemberOffboardingActions'
+import { useWorkspaceAccess } from '../queries/useWorkspaceAccess'
 import { useWorkspaceMemberOffboarding } from '../queries/useWorkspaceMemberOffboarding'
 import { MemberOffboardingDialog, type MemberOffboardingLoadState } from './MemberOffboardingDialog'
 
@@ -10,7 +11,7 @@ export type MemberOffboardingDialogContainerProps = {
   accessToken: string
   /** Member who is leaving, as the member list shows them now. */
   member: WorkspaceMember
-  /** Every Workspace member; active non-guest members other than `member` can take over. */
+  /** Every Workspace member; active, unexpired non-guest members other than `member` can take over. */
   members: readonly WorkspaceMember[]
   /** Whether the administrator can set an access expiry on the member. */
   canEditAccessExpiry: boolean
@@ -44,7 +45,9 @@ export function MemberOffboardingDialogContainer({
 }: MemberOffboardingDialogContainerProps) {
   const query = useWorkspaceMemberOffboarding(accessToken, member.memberKey)
   const { mutate } = query
-  const actions = useMemberOffboardingActions(accessToken, member.memberKey, mutate)
+  // A Project handover raises the Workspace member versions, so the member list is read again too.
+  const { mutate: reloadMembers } = useWorkspaceAccess(accessToken)
+  const actions = useMemberOffboardingActions(accessToken, member.memberKey, mutate, reloadMembers)
   const loadState: MemberOffboardingLoadState = query.data
     ? { status: 'loaded', offboarding: query.data }
     : query.error
