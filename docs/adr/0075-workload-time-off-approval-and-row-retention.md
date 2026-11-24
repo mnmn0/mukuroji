@@ -63,6 +63,9 @@ manager が「空いていない」と判断した後に休暇が取り消され
   休暇の状態そのものが durable receipt になるので、別の receipt 行は作らない。
   終了から 30 日を過ぎた休暇の却下は、同じ書き込みで行が消えて本人も再送も結果を見つけられないため、
   `400 WorkloadDateOutOfRetention` で断る（承認は 400 日まで残るので受け付ける）。
+  Idempotency-Key と入力 fingerprint に束縛し、row の整理と独立に残る durable receipt は workload API 全体の設計変更になるため、
+  後続の変更で扱う（2026-11-24 に PR #771 を先に merge すると決定）。それまでは、同じ key で `expectedTeamRevision` だけが違う再送も
+  保存済みの判断を返し、整理後の行への再送は 409 になる。
 - 監査を書く書き込みだけ TransactWrite にする。IAM は既存の capacity table の `PutItem` と audit table の書き込み権限で足りる。
 
 ### row の整理
