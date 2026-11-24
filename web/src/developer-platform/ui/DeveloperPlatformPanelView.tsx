@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react'
+import { WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES } from '@mukuroji/contracts'
 import type {
   ApiScope,
   DeveloperPlatformOverview,
@@ -558,6 +559,9 @@ export function DeveloperPlatformPanel({
     const validation = await runAction(
       'import:dry-run',
       async () => {
+        if (importMappings.length > WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) {
+          throw new Error(`The mapping can have at most ${WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES} fields.`)
+        }
         const source = await readDeveloperImportSource(importFormat, importFile)
 
         if (

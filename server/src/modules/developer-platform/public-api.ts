@@ -3,6 +3,7 @@ import {
   isWorkItemProgressPercent,
   measureWorkItemImportContentBytes,
   WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
   WORK_ITEM_IMPORT_MAX_BYTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
@@ -4296,11 +4297,11 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
       `Import source mediaType must be ${expectedMediaType} for ${format}.`,
     )
   }
-  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > 200) {
+  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import mapping must contain between 1 and 200 fields.',
+      `Import mapping must contain between 1 and ${WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES} fields.`,
     )
   }
   const sourceFields = new Set<string>()

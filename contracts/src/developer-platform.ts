@@ -1510,6 +1510,9 @@ export function measureWorkItemImportContentBytes(content: string): number {
  */
 export const WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH = 256
 
+/** Most entries one import mapping accepts. With the field length, it bounds the mapping's size. */
+export const WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES = 200
+
 /** Most source rows that one Work Item import accepts. */
 export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000
 

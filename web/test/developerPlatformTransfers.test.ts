@@ -11,6 +11,7 @@ import {
 import {
   measureWorkItemImportContentBytes,
   WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
   WORK_ITEM_IMPORT_MAX_BYTES,
 } from '@mukuroji/contracts'
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
@@ -393,6 +394,12 @@ describe('Developer Platform Work Item export', () => {
     const long = `customFieldValues.${'x'.repeat(WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH)}`
 
     expect(suggestDeveloperImportMapping(['title', long]).map((entry) => entry.sourceField)).toEqual(['title'])
+  })
+
+  test('suggests at most as many mapping fields as an import accepts', () => {
+    const headers = Array.from({ length: WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES + 50 }, (_, index) => `customFieldValues.f${index}`)
+
+    expect(suggestDeveloperImportMapping(headers)).toHaveLength(WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES)
   })
 
   test('refuses a source whose escaped text exceeds the import limit', async () => {

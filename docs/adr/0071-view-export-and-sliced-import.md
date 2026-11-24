@@ -41,7 +41,9 @@ import は、毎回 timeout して retry を使い切る。
    lease を外すときは期限だけを過去にして lease owner は残す。message を積めなかったときは claim し直して
    今の message を retry にする（checkpoint があるので重複は起きない）。claim し直しも失敗した最後の受信でも、
    owner が残っているので retry 切れとして job を `failed` にでき、`running` のまま止まらない。
-   worker の role に import queue への `sqs:SendMessage` を足す。
+   worker の role に import queue への `sqs:SendMessage` を足す。同じ queue へ積むので Lambda の再帰ループ検出
+   （約 16 回で止める）に当たらないよう、関数に `RecursiveLoop: Allow` を設定する。1 回の実行は必ず 1 手順以上進め、
+   手順数は job の行と link の数までなので、連鎖は有限で終わる。
 5. **進捗**: worker は検証のたびに行と link の数を execution に `plannedSteps` として残す。
    `GET /api/developer/imports/{importJobId}/progress` が作成済みの行・適用済みの link とそれぞれの総数を返し、
    Developer Platform の画面は job が終わるまで 3 秒ごとに読む。`ImportJob` は閉じた schema なので、

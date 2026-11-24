@@ -1,6 +1,7 @@
 import type { FormEvent } from 'react'
 import {
   WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
   type ImportDryRunReport,
   type ImportJob,
   type ImportJobProgress,
@@ -194,6 +195,7 @@ export function ImportExportSection({
                 </div>
                 <button
                   className="workbench-button-secondary min-h-9 px-3"
+                  disabled={importMappings.length >= WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES}
                   onClick={() =>
                     onMappingChange([
                       ...importMappings,
