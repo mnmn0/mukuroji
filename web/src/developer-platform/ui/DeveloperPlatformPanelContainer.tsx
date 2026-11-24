@@ -116,7 +116,11 @@ export function DeveloperPlatformPanelContainer({
   } = useDeveloperPlatformResources(mutationSession.accessToken)
   const latestImport = resources ? selectLatestImport(resources.imports) : undefined
   // A job that ended while its progress was read refreshes the job list, which holds its report.
-  const { data: latestImportProgress } = useDeveloperImportProgress(
+  const {
+    data: latestImportProgress,
+    error: latestImportProgressError,
+    mutate: mutateLatestImportProgress,
+  } = useDeveloperImportProgress(
     mutationSession.accessToken,
     latestImport,
     () => {
@@ -269,6 +273,12 @@ export function DeveloperPlatformPanelContainer({
       latestImportProgress={latestImportProgress?.jobId === latestImport?.id
         ? latestImportProgress
         : undefined}
+      latestImportProgressFailed={latestImportProgressError !== undefined}
+      onRetryImportProgress={() => {
+        void mutateLatestImportProgress().catch(() => {
+          // The progress error stays visible with its retry action.
+        })
+      }}
       availableConnectorProviders={availableConnectorProviders}
       connectorAvailabilityErrorMessage={
         availableConnectorProvidersError && !availableConnectorProviders

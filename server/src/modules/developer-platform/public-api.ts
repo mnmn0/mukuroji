@@ -4389,17 +4389,28 @@ function readImportFileName(value: unknown) {
   return fileName
 }
 
+/**
+ * Reads the import source text from a request body.
+ *
+ * The size is counted as the JSON string the client sent, without its quotes, so that quotes,
+ * line breaks, and other escaped characters count too and the request stays within the 6 MB
+ * synchronous Lambda payload.
+ *
+ * @param value - `source.content` from the request body.
+ * @returns The source text.
+ * @throws PublicApiServiceError when the text is empty, too large, or contains NUL.
+ */
 function readImportContent(value: unknown) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > WORK_ITEM_IMPORT_MAX_BYTES ||
+    new TextEncoder().encode(JSON.stringify(value)).byteLength - 2 > WORK_ITEM_IMPORT_MAX_BYTES ||
     value.includes('\u0000')
   ) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text.`,
+      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text, counted after JSON string escaping.`,
     )
   }
   return value

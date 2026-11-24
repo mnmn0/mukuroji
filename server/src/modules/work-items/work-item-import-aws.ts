@@ -39,6 +39,9 @@ import { isRecord } from '../../infrastructure/runtime/value-guards'
 const executionRecordPrefix = 'IMPORT_EXECUTION#'
 const receiptRecordPrefix = 'IMPORT_RECEIPT#'
 
+/** Lease expiry a released lease carries: earlier than any claim time, so any worker can claim. */
+const RELEASED_LEASE_EXPIRES_AT = '1970-01-01T00:00:00.000Z'
+
 /** Versioned/encrypted S3 bucket を利用する import source store です。 */
 export class S3WorkItemImportSourceStore implements WorkItemImportSourceStore {
   /** AWS SDK S3 client です。 */
@@ -254,15 +257,26 @@ export class DynamoDbWorkItemImportExecutionStore implements WorkItemImportExecu
     }
   }
 
-  /** Current lease owner の marker を条件付きで除去します。 */
+  /**
+   * Expires the current lease owner's lease so that any invocation can claim the job at once.
+   * The owner stays recorded until another invocation claims the job, so this worker can still
+   * mark the job failed when its last retry is used up.
+   *
+   * @param workspaceId - Workspace of the import.
+   * @param jobId - Import job ID.
+   * @param leaseOwner - Worker that must still hold the lease.
+   */
   async releaseClaim(workspaceId: string, jobId: string, leaseOwner: string) {
     try {
       await this.documentClient.send(new UpdateCommand({
         TableName: this.tableName,
         Key: { workspaceId, recordKey: createExecutionRecordKey(jobId) },
-        UpdateExpression: 'REMOVE leaseOwner, leaseExpiresAt',
+        UpdateExpression: 'SET leaseExpiresAt = :released',
         ConditionExpression: 'leaseOwner = :leaseOwner',
-        ExpressionAttributeValues: { ':leaseOwner': leaseOwner },
+        ExpressionAttributeValues: {
+          ':leaseOwner': leaseOwner,
+          ':released': RELEASED_LEASE_EXPIRES_AT,
+        },
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) throw error

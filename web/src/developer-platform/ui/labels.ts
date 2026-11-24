@@ -719,8 +719,8 @@ export function createDeveloperPlatformLabels(
     importReportSummary: ja
       ? '{total} 行中 {valid} 行が有効です。{invalid} 行を修正してください。'
       : '{valid} of {total} rows are valid. {invalid} rows need attention.',
-    importProgressSummary: ja
-      ? '{totalRows} 行中 {rows} 行を作成、{totalLinks} 件中 {links} 件の親子・依存・関連を設定しました。'
-      : 'Created {rows} of {totalRows} rows and set {links} of {totalLinks} parents, dependencies, and relations.',
+    importProgressSummary: t('developerPlatform.importProgress.summary'),
+    importProgressLoadFailed: t('developerPlatform.importProgress.loadFailed'),
+    importProgressRetry: t('developerPlatform.importProgress.retry'),
   }
 }

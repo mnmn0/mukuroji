@@ -252,7 +252,12 @@ export interface WorkItemImportExecutionStore {
     leaseExpiresAt: string,
     now: string,
   ): Promise<WorkItemImportExecution | undefined>
-  /** Retry を早く再開できるよう現在 worker の lease を解放します。 */
+  /**
+   * Retry を早く再開できるよう現在 worker の lease を期限切れにします。
+   *
+   * The lease owner is kept, so until another invocation claims the job this worker can still
+   * mark it failed when its last retry is used up.
+   */
   releaseClaim(workspaceId: string, jobId: string, leaseOwner: string): Promise<void>
   /** Current lease owner だけが、validation で数えた row と link の数を保存できます。 */
   recordPlannedSteps(
@@ -699,7 +704,8 @@ async function processQueueRecord(
      * The lease is released first, so the next invocation can claim the job at once. An invocation
      * that has not recorded a step yet keeps going, so every slice moves the job forward. When the
      * next message cannot be queued, the lease is claimed again so this message's retry, or its
-     * retry exhaustion, still owns the job.
+     * retry exhaustion, still owns the job. Releasing keeps this worker as the lease owner, so even
+     * when that claim fails too, retry exhaustion can still mark the job failed.
      *
      * @returns Whether this invocation stops here.
      */

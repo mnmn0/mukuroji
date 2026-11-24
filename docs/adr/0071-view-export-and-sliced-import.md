@@ -27,13 +27,18 @@ import は、毎回 timeout して retry を使い切る。
    を足す。閲覧できない Team・Project を指定したときは 404 ではなく空の export を返し、存在を明かさない。
    実行できるのは従来どおり Workspace 管理者。
 3. **import の上限**: 1 回 10,000 行・4 MB にする。API は Lambda の同期呼び出しで、request の payload は
-   6 MB までなので、JSON の escape と event の分を残した値。5,000 行の WBS は 1〜2 MB 程度で収まる。
+   6 MB までなので、mapping と event の分を残した値。4 MB は request の JSON に入れた source の文字列
+   （`"`・改行・制御文字の escape 後）で数える。引用符や改行の多い CSV が escape で 6 MB を超え、
+   API Gateway で落ちるのを防ぐため。Web の画面も送る前に同じ数え方で確かめる。5,000 行の WBS は
+   1〜2 MB 程度で収まる。
    これより大きい source は、S3 へ直接 upload する経路が要るので今回は作らない。
 4. **時間で区切る処理**: worker は claim してから 10 分（`WORK_ITEM_IMPORT_SLICE_SECONDS`）を過ぎたら、
    次の行や link に進む前に lease を外し、同じ job の message を queue に積んで今の message を正常終了する。
    次の実行は checkpoint の次の手順から続ける。1 回の実行は少なくとも 1 手順を記録してから区切るので、
    検証が長くかかっても job は必ず進む。lease を先に外すので、次の実行がすぐ claim できる。
-   message を積めなかったときは今の message を retry にする（checkpoint があるので重複は起きない）。
+   lease を外すときは期限だけを過去にして lease owner は残す。message を積めなかったときは claim し直して
+   今の message を retry にする（checkpoint があるので重複は起きない）。claim し直しも失敗した最後の受信でも、
+   owner が残っているので retry 切れとして job を `failed` にでき、`running` のまま止まらない。
    worker の role に import queue への `sqs:SendMessage` を足す。
 5. **進捗**: worker は検証のたびに行と link の数を execution に `plannedSteps` として残す。
    `GET /api/developer/imports/{importJobId}/progress` が作成済みの行・適用済みの link とそれぞれの総数を返し、

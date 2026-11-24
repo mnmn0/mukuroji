@@ -103,3 +103,15 @@ export const RunningImport: Story = {
     },
   },
 }
+
+/** Displays the retry action when the running import's progress could not be loaded. */
+export const ImportProgressFailed: Story = {
+  args: {
+    latestImport: {
+      ...developerPlatformResourcesFixture.imports[0]!,
+      status: 'running',
+    },
+    latestImportProgressFailed: true,
+    onRetryImportProgress: () => undefined,
+  },
+}

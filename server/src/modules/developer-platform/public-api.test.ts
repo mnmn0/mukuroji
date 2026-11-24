@@ -2396,8 +2396,8 @@ describe('public API router', () => {
       },
     })
     const { router } = createTestRouter({ platform, workItems })
-    /** Sends a dry-run whose source holds the given number of bytes. */
-    const dryRun = (bytes: number, key: string) => router.request('http://localhost/developer/imports/dry-run', {
+    /** Sends a dry-run whose source holds the given number of bytes, padded with `filler`. */
+    const dryRun = (bytes: number, key: string, filler = 'x') => router.request('http://localhost/developer/imports/dry-run', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer session-token',
@@ -2409,7 +2409,7 @@ describe('public API router', () => {
         source: {
           fileName: 'work-items.csv',
           mediaType: 'text/csv',
-          content: `Title\n${'x'.repeat(bytes - 'Title\n'.length)}`,
+          content: `Title\n${filler.repeat(bytes - 'Title\n'.length)}`,
         },
         teamId: 'team-1',
         mapping: [{ sourceField: 'Title', targetField: 'title' }],
@@ -2419,6 +2419,8 @@ describe('public API router', () => {
     expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
     expect(validatedBytes).toEqual([3 * 1024 * 1024])
     expect((await dryRun(4 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
+    // Quotes are escaped in the request body, so 2.5 MiB of them count as 5 MiB.
+    expect((await dryRun(2.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
     expect(validatedBytes).toHaveLength(1)
   })
 

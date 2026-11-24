@@ -1482,8 +1482,9 @@ export type ImportJob = {
 }
 
 /**
- * Largest UTF-8 source, in bytes, that one Work Item import accepts. It leaves the JSON escaping
- * and event envelope room within the 6 MB synchronous Lambda request payload.
+ * Largest source, in UTF-8 bytes, that one Work Item import accepts. The size is counted after
+ * JSON string escaping (quotes, line breaks, and control characters), so that the request body,
+ * with its mapping and the event envelope, stays within the 6 MB synchronous Lambda payload.
  */
 export const WORK_ITEM_IMPORT_MAX_BYTES = 4 * 1024 * 1024
 

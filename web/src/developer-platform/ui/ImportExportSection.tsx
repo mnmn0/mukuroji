@@ -39,6 +39,7 @@ export function ImportExportSection({
   labels,
   latestImport,
   latestImportProgress,
+  latestImportProgressFailed = false,
   previewReport,
   onCommit,
   onExport,
@@ -46,6 +47,7 @@ export function ImportExportSection({
   onFormatChange,
   onMappingChange,
   onProjectChange,
+  onRetryImportProgress,
   onSubmit,
   onTeamChange,
 }: {
@@ -63,6 +65,7 @@ export function ImportExportSection({
   labels: DeveloperPlatformLabels
   latestImport?: ImportJob
   latestImportProgress?: ImportJobProgress
+  latestImportProgressFailed?: boolean
   previewReport?: ImportDryRunReport
   onCommit?: () => void
   onExport?: (format: DeveloperExportFormat) => Promise<void>
@@ -70,6 +73,7 @@ export function ImportExportSection({
   onFormatChange: (format: DeveloperImportFileFormat) => void
   onMappingChange: (mapping: DeveloperImportFieldMapping[]) => void
   onProjectChange: (projectId: string) => void
+  onRetryImportProgress?: () => void
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void
   onTeamChange: (teamId: string) => void
 }) {
@@ -346,6 +350,26 @@ export function ImportExportSection({
                   totalRows: latestImportProgress.totalRows,
                 })}
               </p>
+            ) : null}
+            {!previewReport && latestImportProgressFailed ? (
+              <div
+                className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+                data-testid="developer-import-progress-error"
+                role="alert"
+              >
+                <p className="text-xs font-semibold text-fg-red-800">
+                  {labels.importProgressLoadFailed}
+                </p>
+                {onRetryImportProgress ? (
+                  <button
+                    className="workbench-button-secondary min-h-8 px-3"
+                    onClick={onRetryImportProgress}
+                    type="button"
+                  >
+                    {labels.importProgressRetry}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
             {report?.errors.length ? (
               <ul className="mt-4 grid gap-2">

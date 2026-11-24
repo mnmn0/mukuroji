@@ -463,6 +463,8 @@ export const developerPlatformLabelsFixture = {
     '{valid} of {total} rows are valid. {invalid} rows need attention.',
   importProgressSummary:
     'Created {rows} of {totalRows} rows and set {links} of {totalLinks} parents, dependencies, and relations.',
+  importProgressLoadFailed: 'The import progress could not be loaded.',
+  importProgressRetry: 'Load again',
 } satisfies DeveloperPlatformLabels
 
 /**

@@ -108,4 +108,8 @@ export type DeveloperPlatformLabels = {
   importReportSummary: string
   /** Placeholder-based progress of a running or finished import. */
   importProgressSummary: string
+  /** Message shown when the import progress could not be loaded. */
+  importProgressLoadFailed: string
+  /** Button that loads the import progress again after it failed. */
+  importProgressRetry: string
 }

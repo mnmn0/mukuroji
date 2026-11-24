@@ -8,6 +8,7 @@ import {
   type TeamWorkItemHierarchyNode,
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
+import { WORK_ITEM_IMPORT_MAX_BYTES } from '@mukuroji/contracts'
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
 import { createMsProjectXml, readMsProjectXml } from '../src/developer-platform/model/msProjectXml'
 import { createSpreadsheetWorkbook, findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/shared/lib/files/spreadsheet'
@@ -374,6 +375,16 @@ describe('Developer Platform Work Item export', () => {
     const text = (await file.blob.text()).replace(/^\ufeff/u, '')
 
     expect(text).toContain(`"${JSON.stringify([{ key: 'a', type: 'finish-to-start', lagDays: 1, constraint }]).replaceAll('"', '""')}"`)
+  })
+
+  test('refuses a source whose JSON-escaped text exceeds the import limit', async () => {
+    const quotes = '"'.repeat(WORK_ITEM_IMPORT_MAX_BYTES / 2 + 1)
+    const fitting = 'a'.repeat(WORK_ITEM_IMPORT_MAX_BYTES - 1)
+
+    await expect(readDeveloperImportSource('csv', fileFrom('quotes.csv', new TextEncoder().encode(`title\n${quotes}`))))
+      .rejects.toThrow('The file is too large to import.')
+    expect((await readDeveloperImportSource('csv', fileFrom('plain.csv', new TextEncoder().encode(`t\n${fitting.slice(2)}`)))).headers)
+      .toEqual(['t'])
   })
 
   test('suggests a mapping for each custom field of a JSON export', async () => {

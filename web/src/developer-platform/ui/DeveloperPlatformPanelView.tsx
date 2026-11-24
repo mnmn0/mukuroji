@@ -71,6 +71,10 @@ export type DeveloperPlatformPanelProps = {
   resources?: DeveloperPlatformOverview
   /** Rows and links the latest import has processed, read while it runs. */
   latestImportProgress?: ImportJobProgress
+  /** Whether reading the latest import's progress failed. */
+  latestImportProgressFailed?: boolean
+  /** Reads the latest import's progress again after it failed. */
+  onRetryImportProgress?: () => void
   /** Connector providers configured in this environment; omitted while unknown, which offers none. */
   availableConnectorProviders?: readonly string[]
   /** Safe message shown when the configured connector providers cannot be loaded. */
@@ -194,6 +198,8 @@ export function DeveloperPlatformPanel({
   loadErrorMessage,
   resources,
   latestImportProgress,
+  latestImportProgressFailed,
+  onRetryImportProgress,
   availableConnectorProviders,
   connectorAvailabilityErrorMessage,
   isConnectorAvailabilityLoading,
@@ -998,6 +1004,8 @@ export function DeveloperPlatformPanel({
               labels={labels}
               latestImport={latestImport}
               latestImportProgress={latestImportProgress}
+              latestImportProgressFailed={latestImportProgressFailed}
+              onRetryImportProgress={onRetryImportProgress}
               previewReport={previewImportReport}
               onCommit={
                 onCommitImport &&

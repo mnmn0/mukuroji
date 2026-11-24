@@ -1,3 +1,4 @@
+import { WORK_ITEM_IMPORT_MAX_BYTES } from '@mukuroji/contracts'
 import type { DeveloperImportFieldMapping, DeveloperImportFormat } from './transfers'
 import { MS_PROJECT_IMPORT_COLUMNS, readMsProjectXml } from './msProjectXml'
 import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from '../../shared/lib/files/spreadsheet'
@@ -76,12 +77,35 @@ const suggestedTargets = new Map<string, string>([
  * a MS Project XML file are converted in the browser to JSON rows whose cells are text, the same
  * values a CSV file carries.
  *
+ * The source must fit the import limit as the JSON string the request carries, the same count the
+ * server makes, so an oversized file is refused before it is sent.
+ *
+ * @param format - Format the person chose.
+ * @param file - Chosen file.
+ * @returns Source text and its column names.
+ * @throws Error with a message for the person when the file cannot be read in that format or is
+ * too large to import.
+ */
+export async function readDeveloperImportSource(
+  format: DeveloperImportFileFormat,
+  file: DeveloperImportFile,
+): Promise<DeveloperImportSource> {
+  const source = await readSourceInFormat(format, file)
+  if (new TextEncoder().encode(JSON.stringify(source.content)).byteLength - 2 > WORK_ITEM_IMPORT_MAX_BYTES) {
+    throw new Error('The file is too large to import.')
+  }
+  return source
+}
+
+/**
+ * Reads a chosen file in the format the person chose, without the import size check.
+ *
  * @param format - Format the person chose.
  * @param file - Chosen file.
  * @returns Source text and its column names.
  * @throws Error with a message for the person when the file cannot be read in that format.
  */
-export async function readDeveloperImportSource(
+async function readSourceInFormat(
   format: DeveloperImportFileFormat,
   file: DeveloperImportFile,
 ): Promise<DeveloperImportSource> {
