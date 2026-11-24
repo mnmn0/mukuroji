@@ -27,8 +27,10 @@ import {
 import {
   ConnectorRuntimeError,
 } from '../../connector-oauth'
+import { applyConflictSnapshotRefresh } from '../../connector-sync-runtime'
 import type {
   CommitConnectorSyncStateInput,
+  ConnectorConflictSnapshotRefresh,
   ConnectorSyncConflictPage,
   ConnectorSyncPersistence,
   PersistedConnectorSyncState,
@@ -891,6 +893,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceIdValue: string,
     conflictIdValue: string,
     operationIdValue: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
   ) {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
@@ -905,7 +908,9 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       row.value.conflict.status !== 'open' ||
       row.value.resolutionOperationId !== operationId
     ) return false
-    const nextValue = { ...row.value }
+    const nextValue = refresh
+      ? applyConflictSnapshotRefresh(row.value, refresh)
+      : { ...row.value }
     delete nextValue.resolutionOperationId
     delete nextValue.resolutionStartedAt
     try {

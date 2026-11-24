@@ -110,6 +110,30 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
   }
 
   /**
+   * Reads one event, for example to refresh a conflict after a conditional write failed.
+   *
+   * @param request - Authenticated provider requester.
+   * @param resourceType - Must be `calendar-event`.
+   * @param externalId - Google event ID.
+   * @returns The event as it is now.
+   */
+  async read(
+    request: ConnectorProviderRequester,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ) {
+    requireCalendarResource(resourceType)
+    const response = await request({
+      method: 'GET',
+      path: `calendars/primary/events/${encodeURIComponent(readEventId(externalId))}`,
+      allowedStatuses: [404, 410],
+    })
+    if (response.status === 404 || response.status === 410) throw missingEvent()
+    if (isObject(response.payload) && response.payload.status === 'cancelled') throw missingEvent()
+    return readGoogleEvent(response.payload)
+  }
+
+  /**
    * Writes the Work Item title and dates to its event. The write is conditional on the event's
    * ETag, so an event changed since the last read is not overwritten.
    *
@@ -208,6 +232,36 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
         ? { nextCursor: toGraphCursor(nextLink) }
         : {}),
     }
+  }
+
+  /**
+   * Reads one event, for example to refresh a conflict after a conditional write failed.
+   *
+   * @param request - Authenticated provider requester.
+   * @param resourceType - Must be `calendar-event`.
+   * @param externalId - Graph event ID.
+   * @returns The event as it is now, with its dates in its stored time zone.
+   */
+  async read(
+    request: ConnectorProviderRequester,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ) {
+    requireCalendarResource(resourceType)
+    const response = await request({
+      method: 'GET',
+      path: `me/events/${encodeURIComponent(readEventId(externalId))}`,
+      query: {
+        $expand:
+          `singleValueExtendedProperties($filter=id eq '${GRAPH_ORIGIN_PROPERTY_ID}' or id eq '${GRAPH_TIME_ZONE_PROPERTY_ID}')`,
+        $select: 'id,subject,webLink,lastModifiedDateTime,start,end,isAllDay,isCancelled',
+      },
+      headers: GRAPH_UTC_PREFERENCE,
+      allowedStatuses: [404, 410],
+    })
+    if (response.status === 404 || response.status === 410) throw missingEvent()
+    if (isObject(response.payload) && response.payload.isCancelled === true) throw missingEvent()
+    return readGraphEvent(response.payload)
   }
 
   /**

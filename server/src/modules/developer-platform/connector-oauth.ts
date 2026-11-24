@@ -553,6 +553,33 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   }
 
   /**
+   * Reads one provider resource through the built-in resource protocol.
+   *
+   * @param credential - Installation credential.
+   * @param resourceType - Resource type of the link.
+   * @param externalId - Provider resource ID.
+   * @returns The resource as it is now.
+   */
+  async read(
+    credential: ConnectorCredential,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ) {
+    if (!this.resourceProtocol) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Connector cannot read a single provider resource.',
+      )
+    }
+    this.requireResourceCapability(resourceType)
+    return this.resourceProtocol.read(
+      this.createProviderRequester(credential),
+      resourceType,
+      requireNonEmpty(externalId, 'External resource ID'),
+    )
+  }
+
+  /**
    * Creates a provider resource for a Work Item through the built-in resource protocol.
    *
    * @param credential - Installation credential.

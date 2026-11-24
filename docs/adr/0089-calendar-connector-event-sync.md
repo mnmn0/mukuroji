@@ -41,7 +41,13 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
 - 両側で日付が変わった場合は、既存の競合の記録で `schedule` の差分として残し、利用者に解決してもらう。
 - 予定の version は provider の ETag（Google の `etag`、Graph の `@odata.etag`）とし、更新は `If-Match` で条件付きにする。
   最後に読んだ後で予定が動いていれば `412` になり、outbound は書かずに skip する。次の poll がその変更を読み、
-  Work Item も変わっていれば競合として記録する。競合の解決中に予定が動いた場合も、解決をやり直してもらう。
+  Work Item も変わっていれば競合として記録する。
+- ETag は順序を持たないので、カレンダーの予定は保存済みの version と同じときだけ「変更なし」とみなす
+  （他の connector の数値・文字列の大小比較は使わない）。
+- 競合の解決中に予定が動いた場合（`412`）は、予定を 1 件読み直して競合の外部側の値と version を新しくし、
+  解決をやり直してもらう。競合中の link は poll されないので、ここで読み直さないと古い ETag のまま失敗し続ける。
+- 日付の競合は「マージ」で開始日と終了日を選び直せる。カレンダーの競合のマージは `schedule` だけ、他の
+  connector の競合のマージは title・description・status だけを受け付ける。
 - Graph は日時を UTC で返すよう `Prefer: outlook.timezone="UTC"` を送り、予定を書いたときの IANA time zone を
   extended property `mukurojiTimeZone` に記録して、読むときにその time zone の日付へ戻す。
 

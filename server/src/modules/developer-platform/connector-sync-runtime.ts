@@ -186,6 +186,16 @@ export type StoredConnectorSyncConflict = {
   resolutionStartedAt?: string
 }
 
+/** Newer snapshots an open conflict takes when its resolution found the resource changed. */
+export type ConnectorConflictSnapshotRefresh = {
+  /** External record read after the conditional write failed. */
+  externalRecord: ConnectorExternalRecord
+  /** Work Item as it is now, which a merge may already have changed. */
+  localWorkItem: ConnectorWorkItemSnapshot
+  /** Fields that differ between the two snapshots. */
+  fields: WorkItemSyncConflictField[]
+}
+
 /** Conflict cursor page です。 */
 export type ConnectorSyncConflictPage = {
   /** Permission scope 内の conflict 一覧です。 */
@@ -251,11 +261,15 @@ export interface ConnectorSyncPersistence {
       startedAt: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined>
-  /** Side effect 前に失敗した current resolution claim を解放します。 */
+  /**
+   * Side effect 前に失敗した current resolution claim を解放します。`refresh` を渡すと、
+   * conflict の snapshot と revision も同じ書き込みで新しい値に置き換えます。
+   */
   releaseConflictResolution(
     workspaceId: string,
     conflictId: string,
     operationId: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
   ): Promise<boolean>
   /** Open conflict を一度だけ resolved/ignored へ遷移させます。 */
   completeConflict(
@@ -527,6 +541,8 @@ export class ConnectorSyncEngine {
       actualWorkItemRevision: workItem.revision,
       originSigningSecret: this.originSigningSecret,
       previousOriginSigningSecrets: this.previousOriginSigningSecrets,
+      // Calendar versions are ETags, which say only whether the event changed.
+      versionOrdering: link.resourceType === 'calendar-event' ? 'opaque' : 'ordered',
     })
     const pollGeneration = input.pollGeneration
     const isCurrentExactPoll =
@@ -929,6 +945,7 @@ export class ConnectorSyncEngine {
         actor.workspaceId,
         stored.conflict.externalLinkId,
       )
+      if (resolution.resolution === 'merge') requireMergeFitsLink(link, resolution.mergedValues)
       installationSnapshot = await this.requireInstallationSnapshot(
         actor.workspaceId,
         stored.installationId,
@@ -1019,12 +1036,20 @@ export class ConnectorSyncEngine {
         )
       } catch (error) {
         if (!isExternalVersionChanged(error)) throw error
-        // The resource changed after the conflict was detected; the user resolves again with the
-        // newer value once the next poll records it.
+        // The resource changed after the conflict was detected. Polling skips a link in conflict,
+        // so the conflict takes the newer resource here and the user resolves it again.
+        const refresh = await this.readConflictRefresh(
+          actor.workspaceId,
+          installation,
+          installationSnapshot.lifecycleRevision,
+          link,
+          synchronizedWorkItem,
+        )
         await this.persistence.releaseConflictResolution(
           actor.workspaceId,
           conflictId,
           operationId,
+          refresh,
         )
         throw new ConnectorRuntimeError(
           'ConnectorSyncConflictChanged',
@@ -1253,6 +1278,47 @@ export class ConnectorSyncEngine {
     }
   }
 
+  /**
+   * Reads the linked resource again after a conditional write failed, so the open conflict shows
+   * what the resource holds now.
+   *
+   * @param workspaceId - Workspace of the link.
+   * @param installation - Installation of the link.
+   * @param lifecycleRevision - Installation lifecycle revision read for the resolution.
+   * @param link - Link whose resource changed.
+   * @param workItem - Work Item as it is now.
+   * @returns The newer snapshots, or `undefined` when the provider cannot read one resource or
+   * the read fails; the claim is then released with the old snapshots.
+   */
+  private async readConflictRefresh(
+    workspaceId: string,
+    installation: ConnectorInstallation,
+    lifecycleRevision: number,
+    link: ExternalWorkItemLink,
+    workItem: ConnectorWorkItemSnapshot,
+  ): Promise<ConnectorConflictSnapshotRefresh | undefined> {
+    try {
+      const record = await this.withConnectorCredential(
+        workspaceId,
+        installation,
+        lifecycleRevision,
+        async (adapter, credential) =>
+          adapter.read
+            ? adapter.read(credential, link.resourceType, link.externalId)
+            : undefined,
+      )
+      if (!record) return undefined
+      validateLinkRecordBinding(link, record)
+      return {
+        externalRecord: record,
+        localWorkItem: workItem,
+        fields: createConflictFields(workItem, record),
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   /** User-visible conflict を deterministic ID で保存します。 */
   private async persistConflict(
     workspaceId: string,
@@ -1474,6 +1540,7 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceId: string,
     conflictId: string,
     operationId: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
   ) {
     const key = conflictKey(workspaceId, conflictId)
     const current = this.conflicts.get(key)
@@ -1482,7 +1549,7 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
       current.conflict.status !== 'open' ||
       current.resolutionOperationId !== operationId
     ) return false
-    const next = { ...current }
+    const next = refresh ? applyConflictSnapshotRefresh(current, refresh) : { ...current }
     delete next.resolutionOperationId
     delete next.resolutionStartedAt
     this.conflicts.set(key, next)
@@ -1663,6 +1730,33 @@ function createStoredConflict(
   }
 }
 
+/**
+ * Returns a conflict that shows newer snapshots and no longer holds a resolution claim.
+ *
+ * @param stored - Open conflict.
+ * @param refresh - Newer snapshots.
+ * @returns The conflict with the snapshots, fields and revisions replaced.
+ */
+export function applyConflictSnapshotRefresh(
+  stored: StoredConnectorSyncConflict,
+  refresh: ConnectorConflictSnapshotRefresh,
+): StoredConnectorSyncConflict {
+  const next: StoredConnectorSyncConflict = {
+    ...stored,
+    externalRecord: structuredClone(refresh.externalRecord),
+    localWorkItem: structuredClone(refresh.localWorkItem),
+    conflict: {
+      ...stored.conflict,
+      localRevision: refresh.localWorkItem.revision,
+      externalRevision: refresh.externalRecord.externalVersion,
+      fields: structuredClone(refresh.fields),
+    },
+  }
+  delete next.resolutionOperationId
+  delete next.resolutionStartedAt
+  return next
+}
+
 function createConflictFields(
   workItem: ConnectorWorkItemSnapshot,
   record: ConnectorExternalRecord,
@@ -1750,6 +1844,12 @@ function validateConflictResolution(
     )
   }
   const keys = Object.keys(input.mergedValues)
+  if (keys.length === 1 && keys[0] === 'schedule') {
+    return {
+      resolution: 'merge',
+      mergedValues: { schedule: readMergedSchedule(input.mergedValues.schedule) },
+    }
+  }
   if (
     keys.length === 0 ||
     keys.some((key) => !['title', 'description', 'status'].includes(key))
@@ -1771,6 +1871,71 @@ function validateConflictResolution(
     if (key === 'title' || key === 'description' || key === 'status') mergedValues[key] = value
   }
   return { resolution: 'merge', mergedValues }
+}
+
+/**
+ * Validates the dates of a calendar conflict merge.
+ *
+ * @param value - Merged `schedule` value from the request.
+ * @returns Inclusive dates with the start on or before the end.
+ * @throws {ConnectorRuntimeError} When the value is not a pair of real dates in order.
+ */
+function readMergedSchedule(value: unknown): { startDate: string; endDate: string } {
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some((key) => key !== 'startDate' && key !== 'endDate') ||
+    typeof value.startDate !== 'string' ||
+    typeof value.endDate !== 'string' ||
+    !isCalendarDate(value.startDate) ||
+    !isCalendarDate(value.endDate) ||
+    value.startDate > value.endDate
+  ) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncResolutionInvalid',
+      'Merged schedule must have a start date on or before its end date.',
+    )
+  }
+  return { startDate: value.startDate, endDate: value.endDate }
+}
+
+/**
+ * Checks a `YYYY-MM-DD` string names a real date.
+ *
+ * @param value - Candidate date.
+ * @returns Whether the value round-trips through UTC.
+ */
+function isCalendarDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+/**
+ * Narrows a value to a plain object.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a non-array object.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Requires a merge to name only the fields the link's resource syncs: dates for a calendar
+ * event, and title, description and status for other resources.
+ *
+ * @param link - Link of the conflict.
+ * @param patch - Validated merge values.
+ * @throws {ConnectorRuntimeError} When the merge names fields of the other kind.
+ */
+function requireMergeFitsLink(link: ExternalWorkItemLink, patch: ConnectorWorkItemPatch) {
+  const calendar = link.resourceType === 'calendar-event'
+  if (calendar !== (patch.schedule !== undefined)) {
+    throw new ConnectorRuntimeError(
+      'ConnectorSyncResolutionInvalid',
+      'Merge resolution contains unsupported fields.',
+    )
+  }
 }
 
 /**

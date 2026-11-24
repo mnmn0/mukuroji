@@ -51,6 +51,12 @@ export interface ConnectorResourceProtocol {
     resourceType: ExternalResourceType,
     cursor?: string,
   ): Promise<ConnectorPage<ConnectorExternalRecord>>
+  /** Reads one resource as it is now; a missing resource throws `ConnectorExternalResourceMissing`. */
+  read(
+    request: ConnectorProviderRequester,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ): Promise<ConnectorExternalRecord>
   /** Writes a Work Item to an existing resource. */
   push(
     request: ConnectorProviderRequester,

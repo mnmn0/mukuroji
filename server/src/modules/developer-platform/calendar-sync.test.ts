@@ -74,6 +74,10 @@ function createFakeGoogle(clock: () => Date) {
       events.set(id, next)
       return Response.json(next)
     }
+    if (id) {
+      const current = events.get(id)
+      return current ? Response.json(current) : Response.json({ error: 'missing' }, { status: 404 })
+    }
     const filter = url.searchParams.get('privateExtendedProperty')
     const items = [...events.values()].filter((event) => {
       const extended = event.extendedProperties
@@ -231,6 +235,38 @@ async function linkNewEvent(
       syncDirection,
     },
   })
+}
+
+/**
+ * Links an event, then moves both the Work Item and the event so the next poll records a
+ * schedule conflict.
+ *
+ * @param fixture - Calendar fixture.
+ * @returns The open conflict's ID and the event ID.
+ */
+async function createScheduleConflict(fixture: Awaited<ReturnType<typeof createCalendarFixture>>) {
+  const link = await linkNewEvent(fixture)
+  await fixture.engine.pollInstallation({
+    workspaceId: 'workspace-1',
+    installationId: fixture.installation.id,
+    resourceType: 'calendar-event',
+  })
+  fixture.setWorkItem({
+    ...fixture.getWorkItem(),
+    revision: 9,
+    schedule: { startDate: '2026-12-10', endDate: '2026-12-10', timeZone: 'Asia/Tokyo' },
+  })
+  const event = fixture.google.events.get(link.externalId)
+  if (!event) throw new Error('Expected the event.')
+  fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-11' }, end: { date: '2026-12-12' }, etag: '"moved-in-calendar"' })
+  const polled = await fixture.engine.pollInstallation({
+    workspaceId: 'workspace-1',
+    installationId: fixture.installation.id,
+    resourceType: 'calendar-event',
+  })
+  const result = polled.results[0]
+  if (result?.kind !== 'conflict') throw new Error(`Expected a conflict, got ${result?.kind}`)
+  return { id: result.conflict.id, externalId: link.externalId }
 }
 
 describe('calendar connectors (ADR 0089)', () => {
@@ -450,6 +486,76 @@ describe('calendar connectors (ADR 0089)', () => {
         }],
       },
     }])
+  })
+
+  test('applies an event edit whose ETag sorts before the stored one', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    // ETags say only that the event changed; this one sorts before the stored "etag-…".
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-11' }, end: { date: '2026-12-12' }, etag: '"a-moved"' })
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(polled.results).toMatchObject([{ kind: 'synced' }])
+    expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-11', endDate: '2026-12-11' })
+  })
+
+  test('refreshes a conflict whose event moved again before it was resolved', async () => {
+    const fixture = await createCalendarFixture()
+    const conflict = await createScheduleConflict(fixture)
+    const event = fixture.google.events.get(conflict.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(conflict.externalId, { ...event, start: { date: '2026-12-20' }, end: { date: '2026-12-21' }, etag: '"moved-again"' })
+    await expect(fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      conflict.id,
+      { resolution: 'use-local' },
+    )).rejects.toMatchObject({ code: 'ConnectorSyncConflictChanged' })
+    const refreshed = await fixture.persistence.getConflict('workspace-1', conflict.id)
+    expect(refreshed?.conflict).toMatchObject({
+      status: 'open',
+      externalRevision: '"moved-again"',
+      fields: [{ field: 'schedule', externalValue: { startDate: '2026-12-20', endDate: '2026-12-20' } }],
+    })
+    expect(refreshed?.resolutionOperationId).toBeUndefined()
+    // Resolving again writes the local dates over the event the user has now seen.
+    const resolved = await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      conflict.id,
+      { resolution: 'use-local' },
+    )
+    expect(resolved.status).toBe('resolved')
+    expect(fixture.google.events.get(conflict.externalId)).toMatchObject({ start: { date: '2026-12-10' }, end: { date: '2026-12-11' } })
+  })
+
+  test('merges chosen dates into a schedule conflict and refuses other merge fields', async () => {
+    const fixture = await createCalendarFixture()
+    const conflict = await createScheduleConflict(fixture)
+    const actor = { workspaceId: 'workspace-1', userId: 'installer-1' }
+    await expect(fixture.engine.resolveConflict(actor, conflict.id, {
+      resolution: 'merge',
+      mergedValues: { schedule: { startDate: '2026-12-13', endDate: '2026-12-12' } },
+    })).rejects.toMatchObject({ code: 'ConnectorSyncResolutionInvalid' })
+    await expect(fixture.engine.resolveConflict(actor, conflict.id, {
+      resolution: 'merge',
+      mergedValues: { title: 'Renamed' },
+    })).rejects.toMatchObject({ code: 'ConnectorSyncResolutionInvalid' })
+    const resolved = await fixture.engine.resolveConflict(actor, conflict.id, {
+      resolution: 'merge',
+      mergedValues: { schedule: { startDate: '2026-12-12', endDate: '2026-12-13' } },
+    })
+    expect(resolved.status).toBe('resolved')
+    expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-12', endDate: '2026-12-13' })
+    expect(fixture.google.events.get(conflict.externalId)).toMatchObject({ start: { date: '2026-12-12' }, end: { date: '2026-12-14' } })
   })
 
   test('uses the built-in protocol for calendar providers configured from the environment', async () => {

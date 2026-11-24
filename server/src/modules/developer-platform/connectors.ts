@@ -173,6 +173,15 @@ export interface ConnectorAdapter {
     resourceType: ExternalResourceType,
     cursor?: string,
   ): Promise<ConnectorPage<ConnectorExternalRecord>>
+  /**
+   * Reads one provider resource as it is now. Only providers with a built-in resource protocol,
+   * such as calendars, implement it.
+   */
+  read?(
+    credential: ConnectorCredential,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ): Promise<ConnectorExternalRecord>
   /** Work Item mutation を provider resource へ反映します。 */
   push(
     credential: ConnectorCredential,
@@ -430,6 +439,11 @@ export function decideConnectorInboundSync(input: {
   originSigningSecret: string
   /** Rotation grace period 中に検証だけ許可する旧 HMAC secrets です。 */
   previousOriginSigningSecrets?: readonly string[]
+  /**
+   * How versions compare. `opaque` versions, such as ETags, only say whether a resource changed,
+   * so only an equal version is stale. Defaults to `ordered`.
+   */
+  versionOrdering?: 'ordered' | 'opaque'
 }): ConnectorSyncDecision {
   if (input.eventId === input.state.lastExternalEventId) {
     return { kind: 'duplicate', reason: 'External event was already processed.' }
@@ -451,7 +465,9 @@ export function decideConnectorInboundSync(input: {
   }
   if (
     input.state.lastExternalVersion &&
-    compareExternalVersions(input.externalVersion, input.state.lastExternalVersion) <= 0
+    (input.versionOrdering === 'opaque'
+      ? input.externalVersion === input.state.lastExternalVersion
+      : compareExternalVersions(input.externalVersion, input.state.lastExternalVersion) <= 0)
   ) {
     return { kind: 'stale', reason: 'External resource version is not newer than the synced version.' }
   }
