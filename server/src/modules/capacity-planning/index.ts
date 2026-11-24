@@ -1,6 +1,7 @@
 /** Capacity planning module public application and persistence surface. */
 export {
   buildWorkloadSnapshot,
+  buildWorkspaceWorkloadSnapshot,
   CapacityPlanningError,
   CapacityPlanningService,
   createDefaultWorkingSchedule,
@@ -9,6 +10,9 @@ export {
   type CapacityPlanningDataSource,
   type CapacityPlanningRepository,
   type CapacityPlanningState,
+  type TeamCapacityPlanningState,
+  type WorkspaceWorkloadSnapshotInput,
+  type WorkspaceWorkloadTeamVisibility,
   type WorkloadEstimate,
   type WorkloadSnapshotInput,
   type WorkloadTimeEntry,

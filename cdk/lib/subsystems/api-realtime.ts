@@ -679,6 +679,8 @@ export function buildApiRuntime(
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
           'dynamodb:PutItem',
+          // The Workspace workload view reads every Team record of one Workspace partition.
+          'dynamodb:Query',
         ],
         resources: [capacityPlanningTable.tableArn],
       }),
