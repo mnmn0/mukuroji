@@ -120,7 +120,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
         } },
         ...(configurationSetName ? {
           ConfigurationSetName: configurationSetName,
-          EmailTags: [{ Name: EMAIL_RECIPIENT_TAG, Value: encodeEmailRecipientTag(message.recipientKey) }],
+          ...emailRecipientTags(message.recipientKey),
         } : {}),
       }), { abortSignal: signal })
     },
@@ -131,4 +131,14 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
     store, send, telemetry: createChannelDeliveryTelemetry('Email'), createToken: randomUUID, now: () => new Date(), isAuthorized,
     digest: { listCompanions: (delivery, now, limit) => store.listCompanions(delivery, now, limit), send: sendDigest },
   })
+}
+
+/**
+ * Builds the SES tag that lets bounce and complaint events find the recipient again.
+ * @param recipientKey - Recipient partition of the notification.
+ * @returns The tag list, or nothing when the partition does not fit an SES tag value.
+ */
+function emailRecipientTags(recipientKey: string): { EmailTags?: Array<{ Name: string, Value: string }> } {
+  const value = encodeEmailRecipientTag(recipientKey)
+  return value ? { EmailTags: [{ Name: EMAIL_RECIPIENT_TAG, Value: value }] } : {}
 }

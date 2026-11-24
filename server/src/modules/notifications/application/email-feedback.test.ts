@@ -53,6 +53,10 @@ describe('Email feedback parsing', () => {
       expect(decodeEmailRecipientTag(value)).toBeUndefined()
     }
   })
+  test('leaves out the tag for a partition that does not fit an SES tag value', () => {
+    expect(encodeEmailRecipientTag(`workspace-1#${'a'.repeat(180)}`)).toHaveLength(256)
+    expect(encodeEmailRecipientTag(`workspace-1#${'a'.repeat(181)}`)).toBeUndefined()
+  })
 })
 
 describe('Email feedback drain', () => {

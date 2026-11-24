@@ -138,6 +138,24 @@ describe('Email digest delivery', () => {
       { key: '2026-09-26T11:00:00.000Z#event-1', status: 'pending', code: 'EmailRateLimited' },
     ])
   })
+  test('hands every row back without sending when the renewals outlast the budget for the send', async () => {
+    const f = digestFixture(2)
+    let clock = Date.parse('2026-09-26T12:00:00.000Z')
+    const released: string[] = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      now: () => new Date(clock),
+      store: {
+        ...f.dependencies.store,
+        renew: async () => { clock += 10_000; return true },
+        release: async (delivery) => { released.push(delivery.notificationKey) },
+      },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(0)
+    expect(f.digests).toEqual([])
+    expect(f.finishes).toEqual([])
+    expect(released).toHaveLength(3)
+  })
   test('sends instant rows on their own even with a digest sender', async () => {
     const f = fixture({ succeeded: true, retryable: false }, emailOn)
     let digests = 0

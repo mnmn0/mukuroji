@@ -41,13 +41,19 @@ export function isEmailAddressSuppressed(suppression: EmailSuppression, address:
   return suppression.addressHash === hashEmailAddress(address)
 }
 
+/** Longest value SES accepts for a message tag. */
+const EMAIL_TAG_VALUE_MAX_LENGTH = 256
+
 /**
- * Encodes a recipient partition as an SES tag value, which allows only letters, digits, `_`, and `-`.
+ * Encodes a recipient partition as an SES tag value, which allows only letters, digits, `_`, and
+ * `-`, up to 256 characters.
  * @param recipientKey - `<workspaceId>#<memberKey>` partition.
- * @returns Unpadded base64url text.
+ * @returns Unpadded base64url text, or undefined when the partition is too long for a tag (over
+ * 192 UTF-8 bytes); such mail is sent without the tag and relies on the SES suppression list.
  */
-export function encodeEmailRecipientTag(recipientKey: string): string {
-  return Buffer.from(recipientKey, 'utf8').toString('base64url')
+export function encodeEmailRecipientTag(recipientKey: string): string | undefined {
+  const value = Buffer.from(recipientKey, 'utf8').toString('base64url')
+  return value.length <= EMAIL_TAG_VALUE_MAX_LENGTH ? value : undefined
 }
 
 /**
@@ -56,7 +62,7 @@ export function encodeEmailRecipientTag(recipientKey: string): string {
  * @returns The recipient partition, or undefined when the value is not one.
  */
 export function decodeEmailRecipientTag(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(value)) return undefined
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined
   const decoded = Buffer.from(value, 'base64url').toString('utf8')
   if (encodeEmailRecipientTag(decoded) !== value) return undefined
   const separator = decoded.indexOf('#')

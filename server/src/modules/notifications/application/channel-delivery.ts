@@ -156,6 +156,13 @@ export type ChannelDigestDependencies = {
 /** Most notifications one digest message carries; any more are sent in the next run. */
 export const MAX_DIGEST_NOTIFICATIONS = 50
 
+/**
+ * Longest the digest may spend renewing its rows. A renewal grants 60 seconds and the transport
+ * allows itself 30, so finishing the renewals within 25 seconds keeps every included lease valid,
+ * with a margin, until the send has finished.
+ */
+const DIGEST_RENEWAL_BUDGET_MS = 25_000
+
 /** Channel identity and opt-in rule that parameterize the shared delivery loop. */
 export type ChannelDeliveryPolicy = {
   /** Queue attribute prefix and shard prefix. */
@@ -329,6 +336,20 @@ async function renewClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise
 }
 
 /**
+ * Gives a claimed delivery back without consuming an attempt. A failed release is left to the
+ * lease expiry, which frees the row just the same.
+ * @param run - Invocation state.
+ * @param claimed - Delivery and the lease token this invocation holds.
+ */
+async function releaseClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise<void> {
+  try {
+    await run.dependencies.store.release(claimed.delivery, claimed.token, run.dependencies.now())
+  } catch {
+    // The lease expires on its own.
+  }
+}
+
+/**
  * Records one transport outcome on a claimed delivery.
  * @param run - Invocation state.
  * @param claimed - Delivery that was handed to the transport.
@@ -419,8 +440,15 @@ async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies
     if (claimed && await checkClaimed(run, claimed)) checked.push(claimed)
   }
   const ready: ClaimedDelivery[] = []
+  // The first renewal's lease expires first, so the renewals and the send must both fit inside it.
+  const renewalStartedAt = run.dependencies.now().getTime()
   for (const claimed of checked) {
     if (await renewClaimed(run, claimed)) ready.push(claimed)
+  }
+  if (ready.length > 0 && run.dependencies.now().getTime() - renewalStartedAt > DIGEST_RENEWAL_BUDGET_MS) {
+    // Too slow to keep every lease through the send: hand the rows back untouched for the next run.
+    for (const claimed of ready) await releaseClaimed(run, claimed)
+    return candidates.map(deliveryIdentity)
   }
   if (ready.length > 0) {
     let result: ChannelSendResult | undefined

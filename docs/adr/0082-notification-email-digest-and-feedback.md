@@ -31,7 +31,8 @@ list に任せていたが、アプリからは止まったことが見えず、
   絞って読む（最大 10 page）。1 通に入れるのは 50 件までで、残りは次の実行で送る。
 - 各 row は単独の送信と同じく 1 件ずつ claim し、試行回数・保持期限・opt-in・種類とミュート・再認可・quiet hours・
   snooze を確かめる。通らない row はその場で終える。送信直前に全 row の lease を延長し、延長できた row だけを
-  本文に入れ、SES の結果（送信済み・再試行・失敗）を全 row に同じく記録する。
+  本文に入れ、SES の結果（送信済み・再試行・失敗）を全 row に同じく記録する。延長が25秒を超えたら、最初の
+  lease（60秒）が送信（最大30秒）中に切れないよう、送らずに lease を返す。
 - claim の条件に「自分の channel の期限内の lease がない」を足す。期限前の row を読むようになったため、他の worker が
   lease 中の row を取らないようにする。
 - digest は Email だけに適用する。Slack と Web Push は通知ごとに送る。
@@ -48,7 +49,9 @@ list に任せていたが、アプリからは止まったことが見えず、
   読めない event は queue に残し、DLQ と alarm に回す。権限は文が 2 つなので shared role の inline policy に置く。
 - Email job は宛先を読んだ後に suppression を読み、ハッシュが今のアドレスと一致すれば `EmailRecipientSuppressed`
   で抑止する（alarm は出さない）。アドレスを変えた場合と、記録の後に Email を無効にしてから有効にし直した場合
-  （`emailEnabledAt` が新しくなる）は送る。configuration set でも SES の suppression list を有効にする。
+  （`emailEnabledAt` が新しくなる）は送る。configuration set でも SES の suppression list を有効にし、同じアドレスで
+  再開するときは運用者が SES から外す（外さなければ SES の bounce でまた記録される）。recipient key が SES の
+  tag 値の上限（256文字）に収まらない宛先は tag なしで送り、SES の suppression list だけに任せる。
 - 運用者は `EmailRecipientSuppressed` ログ、`Mukuroji/Notifications` の `EmailSuppressions` metric、row の
   `emailLastCode` で確認する。
 

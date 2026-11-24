@@ -241,7 +241,7 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 配信 queue は [Slack 配信](#slack-配信) と同じ実装を使い、属性と index だけが分かれています。通知と同じ transaction で `emailQueueShard`（`email#<番号>`）・`emailNextAttemptAt`・`emailDeliveryStatus`・`emailAttempts` を保存し、16 shard の sparse GSI `EmailDeliveryIndex` から毎分最大32件を処理します。Slack と Email を両方有効にした通知は、それぞれ独立に送ります。どちらの channel の更新も通知 row の `version` を進めるため、一方が期限内の lease を持っている間は他方は claim せず、次の実行で取り直します（互いの送信直前の version 確認を取り消し合わないため）。
 
-再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency が instant 以外の通知は、delivery plan の遅延（1時間・1日・1週間）が過ぎた最初の 1 件を起点に、同じ受信者のほかの instant 以外の Email 通知（期限前でも、一度も試行していない `pending` のもの）を同じ shard から集め、最大50件を 1 通の digest にします。各通知は 1 件ずつ claim して上の確認をすべて通し、送信直前に lease を延長できたものだけを本文に入れ、SES の結果を全件に同じく記録します。再試行の待ち中の通知と、ほかの worker が lease 中の通知は含めません。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
+再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency が instant 以外の通知は、delivery plan の遅延（1時間・1日・1週間）が過ぎた最初の 1 件を起点に、同じ受信者のほかの instant 以外の Email 通知（期限前でも、一度も試行していない `pending` のもの）を同じ shard から集め、最大50件を 1 通の digest にします。各通知は 1 件ずつ claim して上の確認をすべて通し、送信直前に lease を延長できたものだけを本文に入れ、SES の結果を全件に同じく記録します。延長に25秒を超えた場合は、最初に延長した lease が送信中に切れないよう、送らずに全件の lease を返して次の実行に回します。再試行の待ち中の通知と、ほかの worker が lease 中の通知は含めません。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
 
 本文は ja / en 併記のプレーンテキストです。digest の件名は `[mukuroji] 通知のまとめ（N 件） / Notification digest (N)` で、本文は発生の古い順に番号・タイトル・概要・deep link を並べます。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
 
@@ -251,11 +251,11 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 ### bounce と complaint
 
-Email job は stack の SES configuration set を指定して送り、message tag `mukuroji-recipient` に recipient key（`<workspaceId>#<memberKey>`）の base64url を付けます。configuration set は bounce と complaint を EventBridge の default bus に出し、rule が SQS queue `NotificationEmailFeedbackQueue` に入れます。毎分の scheduled job `email-feedback` がこれを読みます。
+Email job は stack の SES configuration set を指定して送り、message tag `mukuroji-recipient` に recipient key（`<workspaceId>#<memberKey>`）の base64url を付けます。SES の tag 値は256文字までのため、recipient key が192 byte を超える宛先には tag を付けません。そうした宛先の bounce と complaint はアプリに記録されず、SES の suppression list だけが止めます。configuration set は bounce と complaint を EventBridge の default bus に出し、rule が SQS queue `NotificationEmailFeedbackQueue` に入れます。毎分の scheduled job `email-feedback` がこれを読みます。
 
 - permanent bounce と complaint（`complaintFeedbackType: not-spam` を除く）は、Notifications table の `<recipientKey>` / `!EMAIL_SUPPRESSION` row（`itemType: email-suppression`）に、アドレスの SHA-256・理由（`bounce` / `complaint`）・時刻を記録します。アドレスそのものは保存しません。古い event が新しい記録を上書きすることはありません。
 - transient・undetermined の bounce、tag のない mail は何もしません。読めない event は queue に残り、5 回で DLQ `NotificationEmailFeedbackDlq` に移って `NotificationEmailFeedbackDlqAlarm` を出します。
-- 送信時は宛先を読んだ後に suppression を確かめ、記録したハッシュが今のアドレスと一致すれば送らずに抑止します（`emailLastCode: EmailRecipientSuppressed`、alarm なし）。メンバーが Cognito のアドレスを変えた場合、または記録の後に通知設定で Email を無効にしてから有効にし直した場合は、また送ります。suppression を読めない場合は送らずに再試行します（`EmailSuppressionUnavailable`）。
+- 送信時は宛先を読んだ後に suppression を確かめ、記録したハッシュが今のアドレスと一致すれば送らずに抑止します（`emailLastCode: EmailRecipientSuppressed`、alarm なし）。メンバーが Cognito のアドレスを変えた場合、または記録の後に通知設定で Email を無効にしてから有効にし直した場合は、また送ります。ただし configuration set の SES suppression list にも同じアドレスが残るため、同じアドレスで再開するには運用者が先に `aws sesv2 delete-suppressed-destination --email-address <address>` で SES から外します。外さずに再開した場合、SES は送らずに permanent bounce（subtype `OnAccountSuppressionList`）を返すため、アプリはまた抑止を記録します。suppression を読めない場合は送らずに再試行します（`EmailSuppressionUnavailable`）。
 - 運用者は CloudWatch Logs の `EmailRecipientSuppressed`（理由だけを含む）と `Mukuroji/Notifications` の `EmailSuppressions` metric（`Reason` dimension）で件数を、該当通知 row の `emailLastCode` で対象を確認できます。
 
 ### 失敗の調査
