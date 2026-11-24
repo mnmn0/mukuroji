@@ -263,6 +263,11 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
   **再接続** も同じで、押した本人が完了します。
+  Google Calendar と Outlook Calendar を接続すると、Work Item の **外部リンク** で「カレンダーの予定」を追加できます。
+  接続した account の既定カレンダーに、Work Item の日付で終日の予定を作り、日付を双方向に同期します。
+  カレンダーで予定を動かすと Work Item の期限や期間が動き、Work Item の日付を変えると予定が動きます。
+  題名は同期しません。日付のない Work Item には予定を作れません。両方で日付を変えた場合は競合として表示されます。
+  自分のカレンダーに表示するだけなら、各メンバーがカレンダーフィードを使えます（[メンバー向けガイド](member.md)）。
 - **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
   export には親子・WBS 番号・依存・relation・Contributor・受け入れ条件が入り、そのまま import し直せます。
   ただし MS Project XML には依存の日付制約（「この日より後に終える」など）を書けないため、制約のある依存を

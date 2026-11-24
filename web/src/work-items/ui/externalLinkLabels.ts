@@ -72,6 +72,8 @@ export type WorkItemExternalLinksLabels = {
   externalUrlPlaceholder: string
   /** Display key input placeholder です。 */
   displayKeyPlaceholder: string
+  /** カレンダーの予定を Work Item の日付から作成することの説明です。 */
+  calendarEventHint: string
   /** Resource type の表示名です。 */
   resourceTypeLabels: Record<ExternalResourceType, string>
   /** Sync direction の表示名です。 */
@@ -94,8 +96,8 @@ export function createWorkItemExternalLinksLabels(
   return {
     title: ja ? '外部リンク' : 'External links',
     description: ja
-      ? 'Issue、merge request、commit、deploy をこの Work Item と同期します。'
-      : 'Synchronize issues, merge requests, commits, and deployments with this Work Item.',
+      ? 'Issue、merge request、commit、deploy、カレンダーの予定をこの Work Item と同期します。'
+      : 'Synchronize issues, merge requests, commits, deployments, and calendar events with this Work Item.',
     readOnly: ja ? '参照のみ' : 'Read only',
     loading: ja ? '外部リンクを読み込み中' : 'Loading external links',
     loadError: ja ? '外部リンクを読み込めませんでした。' : 'External links could not be loaded.',
@@ -138,11 +140,15 @@ export function createWorkItemExternalLinksLabels(
     externalIdPlaceholder: ja ? '例: 12345 または commit SHA' : 'e.g. 12345 or commit SHA',
     externalUrlPlaceholder: 'https://github.com/org/repository/issues/123',
     displayKeyPlaceholder: ja ? '例: GH-123' : 'e.g. GH-123',
+    calendarEventHint: ja
+      ? '接続した account の既定カレンダーに、この Work Item の日付で終日の予定を作成します。日付のない Work Item には作成できません。'
+      : 'Creates an all-day event on the connected account\'s primary calendar from this Work Item\'s dates. Work Items without dates cannot be added.',
     resourceTypeLabels: {
       issue: 'Issue',
       'merge-request': 'Merge request',
       commit: 'Commit',
       deploy: ja ? 'Deploy' : 'Deployment',
+      'calendar-event': ja ? 'カレンダーの予定' : 'Calendar event',
     },
     syncDirectionLabels: {
       inbound: 'Provider → mukuroji',

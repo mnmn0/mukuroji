@@ -477,7 +477,7 @@ function readTimestamp(value: unknown) {
  * @returns The ID.
  */
 function readEventId(value: unknown) {
-  if (typeof value !== 'string' || value === '' || value.length > 1_024 || /[\0-\x1f]/u.test(value)) {
+  if (typeof value !== 'string' || value === '' || value.length > 1_024 || hasControlCharacter(value)) {
     throw malformed('Calendar event ID is invalid.')
   }
   return value
@@ -555,7 +555,7 @@ function hashOperation(operationId: string) {
  * @returns The cursor.
  */
 function readCursor(value: string) {
-  if (value === '' || value.length > CURSOR_MAX_LENGTH || /[\0-\x1f]/u.test(value)) {
+  if (value === '' || value.length > CURSOR_MAX_LENGTH || hasControlCharacter(value)) {
     throw malformed('Calendar event page cursor is invalid.')
   }
   return value
@@ -649,4 +649,14 @@ function isObject(value: unknown): value is Record<string, unknown> {
  */
 function malformed(message: string) {
   return new ConnectorRuntimeError('ConnectorProviderResponseMalformed', message)
+}
+
+/**
+ * Checks for control characters, which no provider ID or cursor contains.
+ *
+ * @param value - Candidate text.
+ * @returns Whether the text has a character below U+0020 or U+007F.
+ */
+function hasControlCharacter(value: string) {
+  return [...value].some((character) => character < ' ' || character === '\x7f')
 }

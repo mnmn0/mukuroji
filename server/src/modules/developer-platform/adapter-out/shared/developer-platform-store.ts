@@ -265,6 +265,7 @@ const EXTERNAL_LINK_RESOURCE_TYPES = [
   'merge-request',
   'commit',
   'deploy',
+  'calendar-event',
 ] as const satisfies readonly ExternalWorkItemLink['resourceType'][]
 
 /** External link index を一度に評価する page size です。 */
@@ -4142,10 +4143,11 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
         'External links require a connected connector installation.',
       )
     }
-    if (installation.category !== 'source-control') {
+    const requiredCategory = resourceType === 'calendar-event' ? 'calendar' : 'source-control'
+    if (installation.category !== requiredCategory) {
       throw conflict(
         'ConnectorCapabilityUnsupported',
-        `${resourceType} external links require a source-control connector.`,
+        `${resourceType} external links require a ${requiredCategory} connector.`,
       )
     }
     const externalId = readExternalIdentifier(input.externalId)
@@ -8692,7 +8694,8 @@ function readExternalResourceType(value: ExternalWorkItemLink['resourceType']) {
     value === 'issue' ||
     value === 'merge-request' ||
     value === 'commit' ||
-    value === 'deploy'
+    value === 'deploy' ||
+    value === 'calendar-event'
   ) return value
   throw invalid('ExternalResourceTypeInvalid', 'External resource type is invalid.')
 }

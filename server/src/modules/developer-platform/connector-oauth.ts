@@ -15,6 +15,7 @@ import {
   type ExternalResourceType,
 } from './connectors'
 
+import { createBuiltInConnectorResourceProtocol } from './calendar-event-protocols'
 import { ConnectorRuntimeError } from './connector-runtime-error'
 import type {
   ConnectorProviderRequest,
@@ -1546,10 +1547,12 @@ export function createOAuthConnectorRegistryFromEnvironment(
         'Connector provider is not supported by this runtime.',
       )
     }
+    const resourceProtocol = createBuiltInConnectorResourceProtocol(entry.provider)
     return new ConfiguredOAuthConnectorAdapter({
       ...entry,
       definition,
       clientSecret: secret,
+      ...(resourceProtocol ? { resourceProtocol } : {}),
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.clock ? { clock: options.clock } : {}),
     })

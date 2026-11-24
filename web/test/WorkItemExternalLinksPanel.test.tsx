@@ -1,3 +1,4 @@
+import type { ConnectorInstallation } from '@mukuroji/contracts'
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
@@ -110,5 +111,34 @@ describe('WorkItemExternalLinksPanel', () => {
     expect(html).toContain('Previously loaded links are still shown.')
     expect(html).toContain('Load more')
     expect(html).toContain('Reload')
+  })
+  test('shows a calendar event link from a calendar account', () => {
+    const calendarInstallation: ConnectorInstallation = {
+      ...externalLinkInstallationFixtures[0],
+      id: 'calendar-installation',
+      provider: 'google-calendar',
+      category: 'calendar',
+    }
+    const html = renderToStaticMarkup(
+      <WorkItemExternalLinksPanel
+        canManage
+        installations={[calendarInstallation]}
+        labels={labels}
+        links={[{
+          ...externalWorkItemLinkFixtures[0],
+          installationId: 'calendar-installation',
+          resourceType: 'calendar-event',
+          externalId: 'mk0123',
+          externalUrl: 'https://calendar.google.com/calendar/event?eid=mk0123',
+          displayKey: 'Release review',
+        }]}
+        onCreate={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('Calendar event')
+    expect(html).toContain('Release review')
+    expect(html).toContain('Add external resource')
+    expect(html).not.toContain('A connected account is required')
   })
 })

@@ -1218,9 +1218,11 @@
             "type": "string"
           },
           "externalId": {
+            "description": "Provider resource ID. Omit both externalId and externalUrl for calendar-event to create the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
+            "description": "HTTPS URL of the resource in the provider UI. Omitted together with externalId for a new calendar-event.",
             "format": "uri",
             "type": "string"
           },
@@ -1232,7 +1234,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },
@@ -1253,8 +1256,6 @@
           "teamId",
           "installationId",
           "resourceType",
-          "externalId",
-          "externalUrl",
           "syncDirection"
         ],
         "type": "object"
@@ -1368,9 +1369,11 @@
             "type": "string"
           },
           "externalId": {
+            "description": "Provider resource ID. Omit both externalId and externalUrl for calendar-event to create the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
+            "description": "HTTPS URL of the resource in the provider UI. Omitted together with externalId for a new calendar-event.",
             "format": "uri",
             "type": "string"
           },
@@ -1382,7 +1385,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },
@@ -1399,8 +1403,6 @@
         "required": [
           "installationId",
           "resourceType",
-          "externalId",
-          "externalUrl",
           "syncDirection"
         ],
         "type": "object"
@@ -1803,7 +1805,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },

@@ -27,6 +27,7 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import { createMutationAuditContext, type MutationAuditContext } from '../../modules/audit/audit'
 import {
+  calculateWorkItemScheduleDurationDays,
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
   createWorkItemAuthorizationChangedError,
@@ -102,6 +103,7 @@ import {
 } from '../../modules/developer-platform/adapter-out/dynamodb/connector-sync-persistence'
 import {
   ConnectorSyncEngine,
+  toConnectorEventScheduleField,
   type ConnectorSyncHealthReporter,
   type ConnectorWorkItemGateway,
   type ConnectorWorkItemSnapshot,
@@ -2378,6 +2380,9 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           ...(input.patch.status !== undefined
             ? { workflowStatusId: input.patch.status }
             : {}),
+          ...(input.patch.schedule !== undefined
+            ? { schedule: moveScheduleToCalendarDates(detail.issue.schedule, input.patch.schedule) }
+            : {}),
         }, permission.team)
         const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
           input.workspaceId,
@@ -2501,6 +2506,66 @@ function toConnectorWorkItemSnapshot(
     title: issue.title,
     ...(issue.description ? { description: issue.description } : {}),
     status: issue.workflowStatusId,
+    ...toConnectorEventScheduleField(issue.schedule),
+  }
+}
+
+/**
+ * Moves a Work Item schedule to the dates of its calendar event (ADR 0089). The schedule keeps its
+ * mode and calendar policy: a deadline takes the event's last day, a milestone its first day, and
+ * a date range both days with the working days counted again. A Work Item without dates gets a
+ * deadline for a one-day event and a date range otherwise.
+ *
+ * @param current - Current schedule.
+ * @param dates - Inclusive event dates.
+ * @returns The new schedule.
+ * @throws ConnectorRuntimeError when the dates hold no working day for a date range.
+ */
+function moveScheduleToCalendarDates(
+  current: WorkItemSchedule,
+  dates: { startDate: string, endDate: string },
+): WorkItemSchedule {
+  const toRange = (): WorkItemSchedule => {
+    const durationDays = calculateWorkItemScheduleDurationDays(
+      dates.startDate,
+      dates.endDate,
+      current.calendarPolicy,
+    )
+    if (durationDays === 0) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCalendarDatesInvalid',
+        'The calendar event covers no working day of the Work Item calendar.',
+      )
+    }
+    return {
+      calendarPolicy: current.calendarPolicy,
+      ...(current.plannedEffortMinutes === undefined
+        ? {}
+        : { plannedEffortMinutes: current.plannedEffortMinutes }),
+      mode: 'date-range',
+      startDate: dates.startDate,
+      endDate: dates.endDate,
+      durationDays,
+    }
+  }
+  switch (current.mode) {
+    case 'due-date':
+      return { ...current, dueDate: dates.endDate }
+    case 'milestone':
+      return { ...current, startDate: dates.startDate, endDate: dates.startDate }
+    case 'date-range':
+      return toRange()
+    case 'unscheduled':
+      return dates.startDate === dates.endDate
+        ? {
+            calendarPolicy: current.calendarPolicy,
+            ...(current.plannedEffortMinutes === undefined
+              ? {}
+              : { plannedEffortMinutes: current.plannedEffortMinutes }),
+            mode: 'due-date',
+            dueDate: dates.endDate,
+          }
+        : toRange()
   }
 }
 
@@ -2781,6 +2846,10 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
   async resolveConflict(principal, conflictId, input) {
     return (await requireConfiguredConnectorAuthorization())
       .resolveConflict(principal, conflictId, input)
+  },
+  async createLinkedResource(input) {
+    const record = await (await requireConfiguredConnectorSyncEngine()).createLinkedResource(input)
+    return { externalId: record.externalId, externalUrl: record.externalUrl }
   },
 }
 

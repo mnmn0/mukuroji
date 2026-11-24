@@ -9,6 +9,7 @@ export type ConnectorPollProjectionResourceType =
   | 'merge-request'
   | 'commit'
   | 'deploy'
+  | 'calendar-event'
 
 /** Installation/resource ごとの materialized poll target row key を返します。 */
 export function createConnectorPollTargetRecordKey(

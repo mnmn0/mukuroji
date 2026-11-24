@@ -450,7 +450,8 @@ function readResourceType(value: unknown): ConnectorWorkItemResourceType {
     value === 'issue' ||
     value === 'merge-request' ||
     value === 'commit' ||
-    value === 'deploy'
+    value === 'deploy' ||
+    value === 'calendar-event'
   ) return value
   throw storedRowInvalid()
 }

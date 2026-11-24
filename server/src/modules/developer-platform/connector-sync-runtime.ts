@@ -4,6 +4,7 @@ import type {
   ConnectorInstallation,
   ExternalWorkItemLink,
   ResolveWorkItemSyncConflictInput,
+  WorkItemSchedule,
   WorkItemSyncConflict,
   WorkItemSyncConflictField,
 } from '@mukuroji/contracts'
@@ -20,6 +21,7 @@ import {
   ConnectorRegistry,
   createConnectorOriginMarker,
   decideConnectorInboundSync,
+  type ConnectorEventSchedule,
   type ConnectorExternalRecord,
   type ConnectorOutboundMutation,
   type ConnectorSyncState,
@@ -31,12 +33,13 @@ import {
   serializeConnectorCredential,
 } from './connector-oauth'
 
-/** Work Item link で同期できる source-control resource type です。 */
+/** Work Item link で同期できる resource type です（calendar events: ADR 0089）。 */
 export type ConnectorWorkItemResourceType =
   | 'issue'
   | 'merge-request'
   | 'commit'
   | 'deploy'
+  | 'calendar-event'
 
 /** Sync engine が Work Item から利用する normalized snapshot です。 */
 export type ConnectorWorkItemSnapshot = {
@@ -52,6 +55,8 @@ export type ConnectorWorkItemSnapshot = {
   description?: string
   /** Provider adapter が理解する normalized status です。 */
   status?: string
+  /** All-day dates of the Work Item schedule; absent while it is unscheduled. */
+  schedule?: ConnectorEventSchedule
 }
 
 /** External record から Work Item へ適用する canonical fields です。 */
@@ -62,6 +67,16 @@ export type ConnectorWorkItemPatch = {
   description?: string
   /** External status が存在する場合の normalized status です。 */
   status?: string
+  /**
+   * Calendar event dates to move the Work Item to; the gateway keeps the schedule mode and
+   * calendar policy.
+   */
+  schedule?: {
+    /** First day, inclusive. */
+    startDate: string
+    /** Last day, inclusive. */
+    endDate: string
+  }
 }
 
 /** CAS 付き external patch の結果です。 */
@@ -336,6 +351,7 @@ export type ConnectorSyncResult =
       | 'stale'
       | 'paused'
       | 'conflict'
+      | 'unscheduled'
   }
   | {
     /** User-visible conflict を保存しました。 */
@@ -343,6 +359,22 @@ export type ConnectorSyncResult =
     /** 保存した public conflict です。 */
     conflict: WorkItemSyncConflict
   }
+
+/** Input of {@link ConnectorSyncEngine.createLinkedResource}. */
+export type CreateConnectorLinkedResourceInput = {
+  /** Workspace of the installation. */
+  workspaceId: string
+  /** Installation that owns the resource. */
+  installationId: string
+  /** Team of the Work Item. */
+  teamId: string
+  /** Work Item the resource mirrors. */
+  workItemId: string
+  /** Resource type to create. */
+  resourceType: ConnectorWorkItemResourceType
+  /** Stable operation ID; a retry with it returns the same resource. */
+  operationId: string
+}
 
 /** Installation polling input です。 */
 export type PollConnectorInstallationInput = {
@@ -537,6 +569,21 @@ export class ConnectorSyncEngine {
       }
       return { kind: 'skipped', linkId: link.id, reason: decision.kind }
     }
+    const patch = recordToPatch(input.record)
+    if (isUnchangedCalendarPatch(link, patch, workItem)) {
+      // An event that already shows the Work Item dates, such as one Mukuroji just created,
+      // only records the provider version.
+      await this.commitSyncedState(
+        input.workspaceId,
+        link,
+        persisted,
+        workItem.revision,
+        input.record,
+        input.eventId,
+        !isCurrentExactPoll,
+      )
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
     // A revision conflict intentionally reaches the idempotent gateway. If a
     // previous attempt applied the same operation but crashed before the sync
     // state commit, its receipt wins over the now-stale revision snapshot.
@@ -546,7 +593,7 @@ export class ConnectorSyncEngine {
       workItemId: link.workItemId,
       actorUserId: installation.installedByUserId,
       expectedRevision: state.workItemRevision,
-      patch: recordToPatch(input.record),
+      patch,
       operationId,
     })
     if (applied.kind === 'conflict') {
@@ -607,6 +654,10 @@ export class ConnectorSyncEngine {
       link.teamId,
       link.workItemId,
     )
+    if (link.resourceType === 'calendar-event' && !workItem.schedule) {
+      // A Work Item without dates keeps its event as it was; the next dated change moves it.
+      return { kind: 'skipped', linkId: link.id, reason: 'unscheduled' }
+    }
     const persisted = await this.persistence.getLinkState(
       input.workspaceId,
       link.id,
@@ -641,6 +692,78 @@ export class ConnectorSyncEngine {
       workItemRevision: workItem.revision,
       externalVersion: record.externalVersion,
     }
+  }
+
+  /**
+   * Creates the provider resource a new link points to, such as the calendar event of a Work
+   * Item (ADR 0089). The installer must still be able to change the Work Item, and the Work Item
+   * must have dates. Retrying the same operation returns the same resource.
+   *
+   * @param input - Workspace, installation, Work Item, resource type, and stable operation ID.
+   * @returns The created resource.
+   */
+  async createLinkedResource(input: CreateConnectorLinkedResourceInput): Promise<ConnectorExternalRecord> {
+    requireStableValue(input.operationId, 'Connector create operation ID')
+    if (input.resourceType !== 'calendar-event') {
+      throw new ConnectorRuntimeError(
+        'ConnectorCapabilityUnsupported',
+        'Only calendar events can be created for a Work Item link.',
+      )
+    }
+    const installationSnapshot = await this.requireInstallationSnapshot(
+      input.workspaceId,
+      input.installationId,
+    )
+    const installation = installationSnapshot.installation
+    await this.workItems.authorize(
+      input.workspaceId,
+      installation.installedByUserId,
+      input.teamId,
+      input.workItemId,
+      true,
+    )
+    const workItem = await this.workItems.get(input.workspaceId, input.teamId, input.workItemId)
+    if (!workItem.schedule) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCalendarScheduleRequired',
+        'Set a due date or dates on the Work Item before adding it to a calendar.',
+      )
+    }
+    const record = await this.withConnectorCredential(
+      input.workspaceId,
+      installation,
+      installationSnapshot.lifecycleRevision,
+      async (adapter, credential) => {
+        if (!adapter.create) {
+          throw new ConnectorRuntimeError(
+            'ConnectorCapabilityUnsupported',
+            'Connector cannot create provider resources.',
+          )
+        }
+        return adapter.create(credential, {
+          resourceType: input.resourceType,
+          workItemRevision: workItem.revision,
+          title: workItem.title,
+          ...(workItem.description === undefined ? {} : { description: workItem.description }),
+          ...(workItem.schedule ? { schedule: workItem.schedule } : {}),
+          originMarker: createConnectorOriginMarker(
+            installation.id,
+            `create-${createHash('sha256').update(input.operationId).digest('hex').slice(0, 40)}`,
+            workItem.revision,
+            input.operationId,
+            this.originSigningSecret,
+          ),
+          operationId: input.operationId,
+        })
+      },
+    )
+    if (record.resourceType !== input.resourceType) {
+      throw new ConnectorRuntimeError(
+        'ConnectorExternalRecordMismatch',
+        'Connector created a resource of another type.',
+      )
+    }
+    return record
   }
 
   /** Provider pages を bounded に poll し、既存 links だけを inbound sync します。 */
@@ -1393,6 +1516,29 @@ export function createConnectorWorkItemSnapshot(
     title: workItem.title,
     description: workItem.description,
     status: workItem.workflowStatusId,
+    ...toConnectorEventScheduleField(workItem.schedule),
+  }
+}
+
+/**
+ * Converts a Work Item schedule to the all-day dates of its calendar event.
+ *
+ * @param schedule - Work Item schedule.
+ * @returns `{ schedule }` with inclusive dates and the calendar time zone, or `{}` when the
+ *   Work Item has no dates.
+ */
+export function toConnectorEventScheduleField(
+  schedule: WorkItemSchedule,
+): { schedule?: ConnectorEventSchedule } {
+  const timeZone = schedule.calendarPolicy.timeZone
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return {}
+    case 'due-date':
+      return { schedule: { startDate: schedule.dueDate, endDate: schedule.dueDate, timeZone } }
+    case 'date-range':
+    case 'milestone':
+      return { schedule: { startDate: schedule.startDate, endDate: schedule.endDate, timeZone } }
   }
 }
 
@@ -1426,13 +1572,15 @@ function createOutboundMutation(
   originSigningSecret: string,
   expectedExternalVersion?: string,
 ): ConnectorOutboundMutation {
+  const calendar = link.resourceType === 'calendar-event'
   return {
     externalId: link.externalId,
     resourceType: readWorkItemResourceType(link.resourceType),
     workItemRevision: workItem.revision,
     title: workItem.title,
     description: workItem.description,
-    status: workItem.status,
+    ...(calendar ? {} : { status: workItem.status }),
+    ...(calendar && workItem.schedule ? { schedule: workItem.schedule } : {}),
     originMarker: createConnectorOriginMarker(
       link.installationId,
       link.id,
@@ -1487,9 +1635,20 @@ function createConflictFields(
   record: ConnectorExternalRecord,
 ) {
   const fields: WorkItemSyncConflictField[] = []
-  appendConflictField(fields, 'title', workItem.title, record.title)
-  appendConflictField(fields, 'description', workItem.description, record.description)
-  appendConflictField(fields, 'status', workItem.status, record.status)
+  if (record.resourceType === 'calendar-event') {
+    // Only the dates sync back from a calendar.
+    const local = workItem.schedule
+      ? { startDate: workItem.schedule.startDate, endDate: workItem.schedule.endDate }
+      : null
+    const external = recordToPatch(record).schedule
+    if (external && (local?.startDate !== external.startDate || local.endDate !== external.endDate)) {
+      fields.push({ field: 'schedule', localValue: local, externalValue: external })
+    }
+  } else {
+    appendConflictField(fields, 'title', workItem.title, record.title)
+    appendConflictField(fields, 'description', workItem.description, record.description)
+    appendConflictField(fields, 'status', workItem.status, record.status)
+  }
   if (fields.length === 0) {
     fields.push({
       field: 'revision',
@@ -1512,6 +1671,12 @@ function appendConflictField(
 }
 
 function recordToPatch(record: ConnectorExternalRecord): ConnectorWorkItemPatch {
+  if (record.resourceType === 'calendar-event') {
+    // A calendar owns only the dates; its title and notes never rename the Work Item.
+    return record.schedule
+      ? { schedule: { startDate: record.schedule.startDate, endDate: record.schedule.endDate } }
+      : {}
+  }
   return {
     ...(record.title !== undefined ? { title: record.title } : {}),
     ...(record.description !== undefined ? { description: record.description } : {}),
@@ -1570,9 +1735,28 @@ function validateConflictResolution(
         'Merged connector field value is invalid.',
       )
     }
-    mergedValues[key as keyof ConnectorWorkItemPatch] = value
+    if (key === 'title' || key === 'description' || key === 'status') mergedValues[key] = value
   }
   return { resolution: 'merge', mergedValues }
+}
+
+/**
+ * Returns whether a calendar patch would leave the Work Item dates as they are.
+ *
+ * @param link - Link of the record.
+ * @param patch - Patch from the record.
+ * @param workItem - Current Work Item.
+ * @returns Whether applying the patch can be skipped.
+ */
+function isUnchangedCalendarPatch(
+  link: ExternalWorkItemLink,
+  patch: ConnectorWorkItemPatch,
+  workItem: ConnectorWorkItemSnapshot,
+) {
+  if (link.resourceType !== 'calendar-event') return false
+  if (!patch.schedule) return true
+  return workItem.schedule?.startDate === patch.schedule.startDate &&
+    workItem.schedule.endDate === patch.schedule.endDate
 }
 
 function validateLinkRecordBinding(
@@ -1611,7 +1795,8 @@ function isConnectorCredentialCasConflict(error: unknown) {
 function readSupportedProvider(provider: ConnectorInstallation['provider']) {
   const definition = BUILT_IN_CONNECTOR_CATALOG.find(
     (candidate) =>
-      candidate.id === provider && candidate.category === 'source-control',
+      candidate.id === provider &&
+      (candidate.category === 'source-control' || candidate.category === 'calendar'),
   )
   if (definition) return definition.id
   throw new ConnectorRuntimeError(
@@ -1625,7 +1810,8 @@ function readWorkItemResourceType(value: ExternalResourceType) {
     value === 'issue' ||
     value === 'merge-request' ||
     value === 'commit' ||
-    value === 'deploy'
+    value === 'deploy' ||
+    value === 'calendar-event'
   ) {
     return value
   }

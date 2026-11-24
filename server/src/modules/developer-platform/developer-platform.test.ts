@@ -1885,8 +1885,9 @@ describe('DynamoDB developer platform persistence', () => {
     expect(installationLinks.map(({ id }) => id).sort()).toEqual(
       [link, ...extraLinks].map(({ id }) => id).sort(),
     )
+    // One indexed query per linkable resource type, calendar events included.
     expect(memory.commands.filter(({ name }) => name === 'QueryCommand'))
-      .toHaveLength(4)
+      .toHaveLength(5)
   })
 })
 

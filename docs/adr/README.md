@@ -89,3 +89,4 @@
 | [0068](0068-workspace-workload-across-teams.md) | 要員の負荷を Workspace の全 Team の record を合算して見せ、詳細は Team ごとの可視性で絞る | 提案 |
 | [0080](0080-team-grant-request-receipt.md) | Team の管理操作の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける | 提案 |
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
+| [0089](0089-calendar-connector-event-sync.md) | Google Calendar / Outlook の予定を既存の connector link で双方向に同期する | 提案 |
