@@ -27,9 +27,11 @@ import は、毎回 timeout して retry を使い切る。
    を足す。閲覧できない Team・Project を指定したときは 404 ではなく空の export を返し、存在を明かさない。
    実行できるのは従来どおり Workspace 管理者。
 3. **import の上限**: 1 回 10,000 行・4 MB にする。API は Lambda の同期呼び出しで、request の payload は
-   6 MB までなので、mapping と event の分を残した値。4 MB は request の JSON に入れた source の文字列
-   （`"`・改行・制御文字の escape 後）で数える。引用符や改行の多い CSV が escape で 6 MB を超え、
-   API Gateway で落ちるのを防ぐため。Web の画面も送る前に同じ数え方で確かめる。5,000 行の WBS は
+   6 MB までなので、mapping と event の分を残した値。4 MB は source を request の JSON 文字列にし、
+   さらに API Gateway が Lambda event の JSON 文字列に入れた後の大きさ（`"`・`\`・改行・制御文字は
+   2 回 escape される）で数える（contracts の `measureWorkItemImportContentBytes`）。引用符や改行の多い
+   CSV が escape で 6 MB を超え、Lambda に届く前に落ちるのを防ぐため。Web の画面も送る前に同じ数え方で
+   確かめる。5,000 行の WBS は
    1〜2 MB 程度で収まる。
    これより大きい source は、S3 へ直接 upload する経路が要るので今回は作らない。
 4. **時間で区切る処理**: worker は claim してから 10 分（`WORK_ITEM_IMPORT_SLICE_SECONDS`）を過ぎたら、

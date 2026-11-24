@@ -1482,11 +1482,27 @@ export type ImportJob = {
 }
 
 /**
- * Largest source, in UTF-8 bytes, that one Work Item import accepts. The size is counted after
- * JSON string escaping (quotes, line breaks, and control characters), so that the request body,
- * with its mapping and the event envelope, stays within the 6 MB synchronous Lambda payload.
+ * Largest source, in UTF-8 bytes, that one Work Item import accepts. The size is counted with
+ * {@link measureWorkItemImportContentBytes}, so that the request, with its mapping and the event
+ * envelope, stays within the 6 MB synchronous Lambda payload.
  */
 export const WORK_ITEM_IMPORT_MAX_BYTES = 4 * 1024 * 1024
+
+/**
+ * Measures an import source the way the import limit counts it.
+ *
+ * The source travels as a JSON string inside the request body, and API Gateway puts that body as
+ * a JSON string inside the Lambda event, so quotes, backslashes, line breaks, and control
+ * characters are escaped twice. The size is the UTF-8 length of the source after both escapes,
+ * without the surrounding quotes.
+ *
+ * @param content - Source text.
+ * @returns Size in bytes that counts toward {@link WORK_ITEM_IMPORT_MAX_BYTES}.
+ */
+export function measureWorkItemImportContentBytes(content: string): number {
+  const inRequest = JSON.stringify(content).slice(1, -1)
+  return new TextEncoder().encode(JSON.stringify(inRequest)).byteLength - 2
+}
 
 /** Most source rows that one Work Item import accepts. */
 export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000

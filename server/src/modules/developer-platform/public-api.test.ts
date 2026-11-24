@@ -2419,8 +2419,8 @@ describe('public API router', () => {
     expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
     expect(validatedBytes).toEqual([3 * 1024 * 1024])
     expect((await dryRun(4 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
-    // Quotes are escaped in the request body, so 2.5 MiB of them count as 5 MiB.
-    expect((await dryRun(2.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
+    // Quotes are escaped in the request body and again in the Lambda event, so 1.5 MiB of them count as 6 MiB.
+    expect((await dryRun(1.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
     expect(validatedBytes).toHaveLength(1)
   })
 

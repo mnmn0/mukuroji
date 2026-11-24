@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   isWorkItemProgressPercent,
+  measureWorkItemImportContentBytes,
   WORK_ITEM_IMPORT_MAX_BYTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
@@ -4392,9 +4393,9 @@ function readImportFileName(value: unknown) {
 /**
  * Reads the import source text from a request body.
  *
- * The size is counted as the JSON string the client sent, without its quotes, so that quotes,
- * line breaks, and other escaped characters count too and the request stays within the 6 MB
- * synchronous Lambda payload.
+ * The size is counted with `measureWorkItemImportContentBytes`, after the escaping the request
+ * body and the Lambda event add, so that the request stays within the 6 MB synchronous Lambda
+ * payload.
  *
  * @param value - `source.content` from the request body.
  * @returns The source text.
@@ -4404,13 +4405,13 @@ function readImportContent(value: unknown) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    new TextEncoder().encode(JSON.stringify(value)).byteLength - 2 > WORK_ITEM_IMPORT_MAX_BYTES ||
+    measureWorkItemImportContentBytes(value) > WORK_ITEM_IMPORT_MAX_BYTES ||
     value.includes('\u0000')
   ) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text, counted after JSON string escaping.`,
+      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text, counted after JSON string escaping in the request and the event.`,
     )
   }
   return value
