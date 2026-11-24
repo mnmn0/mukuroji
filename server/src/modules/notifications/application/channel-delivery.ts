@@ -510,12 +510,11 @@ async function deliverDigestBatch(run: DeliveryRun, digest: ChannelDigestDepende
     return { identities }
   }
   // Checking up to 50 rows takes time, so a row checked early may have passed its retention since.
+  // The rows are split at one instant and the send starts with nothing awaited in between; the
+  // expired ones are finished afterwards.
   const nowSeconds = run.dependencies.now().getTime() / 1_000
-  const ready: ClaimedDelivery[] = []
-  for (const claimed of renewed) {
-    if (claimed.delivery.expiresAt > nowSeconds) ready.push(claimed)
-    else await suppressExpired(run, claimed)
-  }
+  const ready = renewed.filter((claimed) => claimed.delivery.expiresAt > nowSeconds)
+  const expired = renewed.filter((claimed) => claimed.delivery.expiresAt <= nowSeconds)
   if (ready.length > 0) {
     let result: ChannelSendResult | undefined
     try {
@@ -527,6 +526,7 @@ async function deliverDigestBatch(run: DeliveryRun, digest: ChannelDigestDepende
     const outcome = result
     if (outcome) await Promise.all(ready.map((claimed) => completeClaimed(run, claimed, outcome)))
   }
+  await Promise.all(expired.map((claimed) => suppressExpired(run, claimed)))
   return overflow ? { identities, overflow } : { identities }
 }
 

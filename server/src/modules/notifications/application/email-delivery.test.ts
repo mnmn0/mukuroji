@@ -215,6 +215,31 @@ describe('Email digest delivery', () => {
     expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1', second.notificationKey]])
     expect(f.finishes).toContainEqual({ key: first.notificationKey, status: 'suppressed', code: undefined })
   })
+  test('does not wait on finishing an expired row between the retention check and the send', async () => {
+    const f = digestFixture(2)
+    const start = Date.parse('2026-09-26T12:00:00.000Z')
+    let clock = start
+    const [first, second] = f.companions
+    if (!first || !second) throw new Error('Missing companions.')
+    f.companions[0] = { ...first, expiresAt: start / 1_000 + 2 }
+    // The second row expires while the first one is being finished.
+    f.companions[1] = { ...second, expiresAt: start / 1_000 + 4 }
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      now: () => new Date(clock),
+      store: {
+        ...f.dependencies.store,
+        renew: async () => { clock += 1_000; return true },
+        finish: async (delivery, token, status, next, code) => {
+          if (delivery.notificationKey === first.notificationKey) clock += 10_000
+          await f.dependencies.store.finish(delivery, token, status, next, code)
+        },
+      },
+    }
+    await deliverDueEmailNotifications(dependencies)
+    expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1', second.notificationKey]])
+    expect(f.finishes.map((finish) => finish.key).at(-1)).toBe(first.notificationKey)
+  })
   test('sends instant rows on their own even with a digest sender', async () => {
     const f = fixture({ succeeded: true, retryable: false }, emailOn)
     let digests = 0
