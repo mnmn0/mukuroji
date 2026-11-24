@@ -72,6 +72,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'notification-schedule',
   },
   {
+    filename: 'push-notifications-handler.ts',
+    exportName: 'handler',
+    surface: 'notification-schedule',
+  },
+  {
     filename: 'slack-notifications-handler.ts',
     exportName: 'handler',
     surface: 'notification-schedule',

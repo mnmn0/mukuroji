@@ -55,6 +55,9 @@ import {
   slackDeliveryShard,
   emailDeliveryShard,
   isEmailNotificationEligible,
+  pushDeliveryShard,
+  isPushNotificationEligible,
+  isPushTransportConfigured,
   isDocumentDeliveryVisible,
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
@@ -419,6 +422,8 @@ export type NotificationProjectionDeliveryState = {
   deliveryFrequency: NotificationPreferences['frequency']
   /** Whether the Email transport queue receives this notification; set only when it does. */
   emailQueued?: true
+  /** Whether the Web Push transport queue receives this notification; set only when it does. */
+  pushQueued?: true
 }
 
 /** Projection 時点で強整合 read した Work Item scope です。 */
@@ -1677,6 +1682,10 @@ export function createNotificationProjectionDeliveryState(
     ...(isEmailTransportEnabled() && routed('email') && isEmailNotificationEligible(preferences, occurredAt)
       ? { emailQueued: true }
       : {}),
+    ...(isPushTransportConfigured(loadServerConfig().environment.WEB_PUSH_VAPID_PUBLIC_KEY) && routed('push') &&
+      isPushNotificationEligible(preferences, occurredAt)
+      ? { pushQueued: true }
+      : {}),
   }
 }
 
@@ -1755,6 +1764,12 @@ export function createNotificationProjectionItem(
       emailNextAttemptAt: deliveryState.deliveryAfter,
       emailDeliveryStatus: 'pending',
       emailAttempts: 0,
+    } : {}),
+    ...(deliveryState.pushQueued && deliveryState.deliveryChannels.includes('push') ? {
+      pushQueueShard: pushDeliveryShard(recipientKey),
+      pushNextAttemptAt: deliveryState.deliveryAfter,
+      pushDeliveryStatus: 'pending',
+      pushAttempts: 0,
     } : {}),
     ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
     occurredAt: event.occurredAt,

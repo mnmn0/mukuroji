@@ -292,6 +292,7 @@ function bindApiRuntimeConfiguration(
     requestTokenHashSecret,
     edgeOriginSecret,
     webPushVapidPublicKey,
+    notificationEmailSender,
     systemAdminGroups,
     apiAllowedOrigins,
     workspaceDirectoryId,
@@ -376,6 +377,8 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       // The same parameter feeds the notification schedule, so both see one set of defaults.
       NOTIFICATION_REMINDER_DEFAULT_DAYS: notificationReminderDefaultDays.valueAsString,
+      // Read only to tell members on the settings screen whether Email can be delivered.
+      NOTIFICATION_EMAIL_SENDER: notificationEmailSender.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
       PUSH_SUBSCRIPTIONS_TABLE_NAME: pushSubscriptionsTable.tableName,
