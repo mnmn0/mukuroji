@@ -258,6 +258,8 @@ describe('Project overview blocked count', () => {
     expect(summarizeProjectOverviewWorkItems(
       workItems, 'core-team', referenceDate, [{ ...planningItem, teamId: 'core-team' }],
     ).blockedCount).toBe(1)
+    // Without the Planning snapshot, such as after a denied read, the outside blocker is not counted.
+    expect(summarizeProjectOverviewWorkItems(workItems, 'core-team', referenceDate).blockedCount).toBe(0)
     expect(summarizeProjectOverviewWorkItems(
       workItems, 'core-team', referenceDate, [{ ...planningItem, teamId: 'design-team' }],
     ).blockedCount).toBe(0)

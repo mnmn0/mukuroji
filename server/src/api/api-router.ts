@@ -18,6 +18,7 @@ import { registerWorkItemKeyPrefixRoutes } from './routes/work-item-key-prefix-r
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
+import { registerProjectStatusReportRoutes } from './routes/project-status-report-routes'
 import { registerWeeklyReportRoutes } from './routes/weekly-report-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
 import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
@@ -178,6 +179,7 @@ registerWorkItemsRoutes(routeApp)
 registerWorkItemKeyPrefixRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
 registerProjectRaidLogRoutes(routeApp)
+registerProjectStatusReportRoutes(routeApp)
 registerWeeklyReportRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
 registerWorkCalendarRoutes(routeApp)

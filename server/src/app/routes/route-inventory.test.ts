@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(578)
-  expect(new Set(inventory).size).toBe(574)
+  expect(inventory).toHaveLength(584)
+  expect(new Set(inventory).size).toBe(580)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
@@ -39,6 +39,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-report/pdf')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/status-shares')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/status-shares/:shareId/revoke')
+  expect(inventory).toContain('GET /api/public/project-status/:token')
+  expect(inventory).toContain('GET /api/public/project-status/:token/pdf')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
   expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
@@ -164,6 +170,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '6788346ebe64fecb3ae8b829ce078951b1ab12512a5d1d21350d779e1b50a6a8',
+    '5bbd264d222d000f216e0bcfe1a0f5e2705dd9c604179e4bacc847cbac0748e0',
   )
 })

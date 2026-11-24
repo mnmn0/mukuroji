@@ -645,6 +645,22 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.write',
   },
   {
+    // Rendering a PDF reads the Project; the POST only carries the report to render.
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-report/pdf',
+    permission: 'projects.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares*',
+    permission: 'projects.write',
+  },
+  {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
     permission: 'projects.read',

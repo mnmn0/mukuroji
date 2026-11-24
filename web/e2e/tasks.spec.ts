@@ -4256,6 +4256,161 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
   })
 
+  test('Issue #349: 概要から進捗レポートを開き、Markdown を保存して社外共有リンクを発行する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    const shares: unknown[] = []
+    let createdBody: unknown
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        createdBody = route.request().postDataJSON()
+        const share = {
+          id: 'share-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          label: '顧客A 定例',
+          sections: ['health', 'schedule'],
+          showPeopleNames: false,
+          expiresAt: '2026-12-01T00:00:00.000Z',
+          createdAt: '2026-11-23T00:00:00.000Z',
+          createdByMemberKey: 'member-demo',
+          reportAsOf: '2026-11-23T00:00:00.000Z',
+          viewCount: 0,
+        }
+        shares.unshift(share)
+        await route.fulfill({ status: 201, json: { share, url: '/share/project-status/token-value' } })
+        return
+      }
+      await route.fulfill({ json: { shares } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+
+    const download = page.waitForEvent('download')
+    await dialog.getByTestId('project-status-report-export-markdown').click()
+    expect((await download).suggestedFilename()).toMatch(/\.md$/)
+
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A 定例')
+    await share.getByRole('checkbox', { name: '進捗' }).uncheck()
+    await share.getByTestId('project-status-share-create').click()
+    await expect(share.getByTestId('project-status-share-url')).toHaveValue(/\/share\/project-status\/token-value$/)
+    await expect(share.getByTestId('project-status-share-list')).toContainText('顧客A 定例')
+    expect(createdBody).toMatchObject({
+      label: '顧客A 定例',
+      showPeopleNames: false,
+      sections: expect.not.arrayContaining(['progress']),
+    })
+  })
+
+  test('Issue #349: レポートに使う情報を読み込めなかったら書き出させず、読み込み直すと出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    let raidReads = 0
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      raidReads += 1
+      if (raidReads === 1) {
+        await route.fulfill({ status: 503, json: { error: 'ProjectRaidLogUnavailable', message: 'unavailable' } })
+        return
+      }
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-load-error')).toBeVisible()
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeDisabled()
+    await expect(dialog.getByTestId('project-status-share-create')).toBeDisabled()
+
+    await dialog.getByTestId('project-status-report-retry').click()
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+  })
+
+  test('Issue #349: 予定を読む権限がなくなったら、読み込み済みの予定もレポートから外す', async ({ page }) => {
+    await page.clock.install()
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    let sharedReport: unknown
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        const body: unknown = route.request().postDataJSON()
+        sharedReport = typeof body === 'object' && body !== null && 'report' in body ? body.report : undefined
+        await route.fulfill({ status: 503, json: { code: 'Unavailable', message: 'Unavailable.' } })
+        return
+      }
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-schedule')).toBeVisible()
+
+    // The permission is removed after the first read; SWR keeps the earlier data with the error.
+    let deniedReads = 0
+    await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
+      deniedReads += 1
+      await route.fulfill({ status: 403, json: { code: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.clock.fastForward(15_000)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => deniedReads).toBeGreaterThan(0)
+    await expect(dialog.getByTestId('project-status-report-schedule')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+
+    // The snapshot sent for a share link leaves out the stale schedule too.
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A')
+    await share.getByTestId('project-status-share-create').click()
+    await expect.poll(() => sharedReport).toBeDefined()
+    expect(sharedReport).toMatchObject({ projectName: 'Refero' })
+    expect(sharedReport).not.toHaveProperty('schedule')
+    expect(sharedReport).not.toHaveProperty('health')
+  })
+
+  test('Issue #349: 読む権限のない Work Item は進捗欄を外してレポートを出す', async ({ page }) => {
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/projects\/refero\/issues(\?.*)?$/, async (route) => {
+      await route.fulfill({ status: 403, json: { error: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-progress')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+  })
+
   test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {
     const agentRunRequests: string[] = []
     page.on('request', (request) => {
