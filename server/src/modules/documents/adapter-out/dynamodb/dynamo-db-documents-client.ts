@@ -125,7 +125,7 @@ import {
   DOCUMENT_VERSION_SNAPSHOT_MAX_AGE_MS,
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
-import { findMarkdownHtmlRanges } from '../../application/markdown-html-finder'
+import { markdownInspector } from '../../application/markdown-inspector'
 import {
   DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
   commentKey,
@@ -5042,7 +5042,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       'DocumentExportDenied',
     )
     validateDocumentPayload(row.document)
-    return renderDocumentProjectionExport(projected, input.format, findMarkdownHtmlRanges)
+    return renderDocumentProjectionExport(projected, input.format, markdownInspector)
   }
 
   private async ensureTable(): Promise<void> {

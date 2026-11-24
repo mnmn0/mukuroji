@@ -308,20 +308,20 @@ function countElementLinks(document: DocumentDetail): Map<string, number> {
  *
  * @param document - Canonical document snapshot to render.
  * @param format - Requested export format.
- * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
-  findHtml: MarkdownHtmlFinder,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   validateDocumentPayload(document)
   return renderDocumentArtifact(
     document,
     format,
     document.id,
-    findHtml,
+    markdown,
   )
 }
 
@@ -330,19 +330,19 @@ export function renderDocumentExport(
  *
  * @param document - Public document projection to render.
  * @param format - Requested export format.
- * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderPublicDocumentExport(
   document: PublicDocument,
   format: DocumentExportFormat,
-  findHtml: MarkdownHtmlFinder,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   return renderDocumentArtifact(
     document,
     format,
     'document',
-    findHtml,
+    markdown,
   )
 }
 
@@ -351,15 +351,15 @@ export function renderPublicDocumentExport(
  *
  * @param document - Permission-filtered document projection.
  * @param format - Requested text export format.
- * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Safe rendered artifact.
  */
 export function renderDocumentProjectionExport(
   document: DocumentDetail,
   format: DocumentExportFormat,
-  findHtml: MarkdownHtmlFinder,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
-  return renderDocumentArtifact(document, format, document.id, findHtml)
+  return renderDocumentArtifact(document, format, document.id, markdown)
 }
 
 /**
@@ -368,14 +368,14 @@ export function renderDocumentProjectionExport(
  * @param document - Document projection to render.
  * @param format - Requested export format.
  * @param fallbackFileName - File name to use when the document title is empty.
- * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Rendered export content and metadata.
  */
 function renderDocumentArtifact(
   document: DocumentDetail | PublicDocument,
   format: DocumentExportFormat,
   fallbackFileName: string,
-  findHtml: MarkdownHtmlFinder,
+  markdown: MarkdownInspector,
 ): RenderedDocumentExport {
   const safeBaseName = sanitizeFileName(
     document.title || fallbackFileName,
@@ -411,7 +411,7 @@ function renderDocumentArtifact(
       format,
       contentType: 'text/markdown; charset=utf-8',
       fileName: `${safeBaseName}.md`,
-      content: renderMarkdown(document.title, document.blocks, findHtml),
+      content: renderMarkdown(document.title, document.blocks, markdown),
     }
   }
   throw new DocumentError(400, 'UnsupportedDocumentExport', `Unsupported export format: ${String(format)}.`)
@@ -1194,13 +1194,13 @@ export function validateCanonicalDocumentWorkItemId(
  *
  * @param title - Document title.
  * @param blocks - Blocks to render.
- * @param findHtml - Finds the raw HTML ranges in paragraph Markdown.
+ * @param markdown - Reads paragraph Markdown with the app's Markdown grammar.
  * @returns Markdown document text.
  */
 function renderMarkdown(
   title: string,
   blocks: readonly DocumentBlock[],
-  findHtml: MarkdownHtmlFinder,
+  markdown: MarkdownInspector,
 ): string {
   const parts = [`# ${escapeMarkdownText(title)}`]
   for (const block of blocks) {
@@ -1208,7 +1208,7 @@ function renderMarkdown(
       case 'paragraph':
         // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
         // runnable HTML, and the page imports back with the same rendering.
-        parts.push(escapeMarkdownHtml(block.text, findHtml))
+        parts.push(renderMarkdownParagraph(block.text, markdown))
         break
       case 'heading':
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
@@ -1253,7 +1253,10 @@ function renderMarkdown(
         )
     }
   }
-  return `${parts.join('\n\n')}\n`
+  // Each paragraph was checked on its own; the assembled file is checked again, so a construct
+  // that spans blocks can never leave raw HTML. Only the `<br>` of table cells is expected.
+  return escapeMarkdownHtml(`${parts.join('\n\n')}\n`, (text) =>
+    markdown.findHtml(text).filter(({ start, end }) => text.slice(start, end) !== '<br>'))
 }
 
 /**
@@ -1561,6 +1564,44 @@ export type MarkdownSourceRange = {
  * @returns Non-overlapping source ranges of HTML blocks and inline HTML, in source order.
  */
 export type MarkdownHtmlFinder = (text: string) => readonly MarkdownSourceRange[]
+
+/** How a Markdown text affects the Markdown that follows it after a blank line. */
+export type MarkdownOpenBlock = {
+  /** Fence line that closes a fenced code block left open at the end of the text. */
+  closingFence?: string
+}
+
+/** Reads Markdown with the CommonMark and GFM grammar the app renders paragraphs with. */
+export type MarkdownInspector = {
+  /** Finds the raw HTML ranges in Markdown. */
+  findHtml: MarkdownHtmlFinder
+  /**
+   * Tells whether Markdown would absorb what follows it after a blank line.
+   *
+   * @param text - Markdown text.
+   * @returns `undefined` when the next block stays its own block; otherwise what is left open.
+   */
+  findOpenBlock: (text: string) => MarkdownOpenBlock | undefined
+}
+
+/**
+ * Renders one paragraph block's Markdown so it neither carries raw HTML nor reaches into the
+ * next block: a fenced code block left open is closed, and a paragraph that would still absorb
+ * the next block is written as plain text instead.
+ *
+ * @param text - Paragraph Markdown.
+ * @param markdown - Reads Markdown with the app's Markdown grammar.
+ * @returns Markdown for the paragraph.
+ */
+function renderMarkdownParagraph(text: string, markdown: MarkdownInspector): string {
+  let rendered = escapeMarkdownHtml(text, markdown.findHtml)
+  let open = markdown.findOpenBlock(rendered)
+  if (open?.closingFence !== undefined) {
+    rendered = `${rendered}${rendered.endsWith('\n') ? '' : '\n'}${open.closingFence}`
+    open = markdown.findOpenBlock(rendered)
+  }
+  return open === undefined ? rendered : escapeMarkdownText(text).replaceAll('~', '\\~')
+}
 
 /**
  * Escapes the raw HTML in Markdown, so the exported file never carries runnable HTML.

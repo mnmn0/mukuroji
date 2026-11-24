@@ -5,7 +5,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DocumentError,
-  findMarkdownHtmlRanges,
+  markdownInspector,
   renderDocumentProjectionExport,
   type DocumentAccessContext,
 } from '../../modules/documents'
@@ -201,7 +201,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
           'Only page and template Documents can be read as Markdown.',
         )
       }
-      const rendered = renderDocumentProjectionExport(document, 'markdown', findMarkdownHtmlRanges)
+      const rendered = renderDocumentProjectionExport(document, 'markdown', markdownInspector)
       return {
         schemaVersion: 1,
         id: document.id,

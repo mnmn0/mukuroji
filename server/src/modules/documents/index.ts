@@ -1,7 +1,7 @@
 /** Documents module public application and domain surface. */
 export type { DocumentClient } from './documents'
 export * from './application/document-use-cases'
-export { findMarkdownHtmlRanges } from './application/markdown-html-finder'
+export { markdownInspector } from './application/markdown-inspector'
 export * from './application/ports/document-ports'
 export * from './document-types'
 export {

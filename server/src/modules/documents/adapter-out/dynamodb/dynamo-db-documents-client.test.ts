@@ -25,7 +25,7 @@ import {
   createMemoryCheckpointStore,
 } from '../../../data-migration/test-support/data-migration-fakes'
 import { documentCommentParticipantIndexMigration } from '../../document-comment-participant-index-migration'
-import { findMarkdownHtmlRanges } from '../../application/markdown-html-finder'
+import { markdownInspector } from '../../application/markdown-inspector'
 import { createCommentParticipantItem } from './document-comment-records'
 import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
@@ -5825,6 +5825,11 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       { id: 'block-z', type: 'paragraph', text: '<div>\n\\<i>raw</i>' },
       { id: 'block-l', type: 'paragraph', text: '> - item <img src=x onerror=alert(1)> <!-- note -->' },
       { id: 'block-g', type: 'paragraph', text: '| a |\n| - |\n| <b>x</b> `<c>` |' },
+      { id: 'block-o1', type: 'paragraph', text: '```' },
+      { id: 'block-o2', type: 'paragraph', text: '```\n<img src=x onerror=alert(1)>' },
+      { id: 'block-n1', type: 'paragraph', text: '- ```' },
+      { id: 'block-n2', type: 'paragraph', text: '  ```\n  <img src=x onerror=alert(2)>' },
+      { id: 'block-h', type: 'heading', level: 1, text: 'After' },
       {
         id: 'block-b',
         type: 'table',
@@ -5833,8 +5838,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       },
     ],
   })
-  const markdown = renderDocumentExport(page, 'markdown', findMarkdownHtmlRanges)
-  const json = renderDocumentExport(page, 'json', findMarkdownHtmlRanges)
+  const markdown = renderDocumentExport(page, 'markdown', markdownInspector)
+  const json = renderDocumentExport(page, 'json', markdownInspector)
   expect(markdown.fileName).toBe('Export - document.md')
   expect(markdown.content).toContain('\\<script>alert(1)\\</script>')
   // Only raw HTML is escaped: the blockquote marker, an autolink, and code keep their text.
@@ -5860,6 +5865,12 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   expect(markdown.content).toContain('\n\\<div>\n\\<i>raw\\</i>\n')
   expect(markdown.content).toContain('\n> - item \\<img src=x onerror=alert(1)> \\<!-- note -->\n')
   expect(markdown.content).toContain('\n| \\<b>x\\</b> `<c>` |\n')
+  // A fence left open is closed inside its own paragraph, so it cannot pair with the next one.
+  expect(markdown.content).toContain('\n```\n```\n\n```\n<img src=x onerror=alert(1)>\n```\n')
+  // A list's open fence is closed by the next paragraph's fence only once joined; the check of
+  // the whole file escapes the HTML that the joined text exposes.
+  expect(markdown.content).toContain('\\<img src=x onerror=alert(2)>')
+  expect(markdown.content).toContain('\n## After\n')
   // The exported file has no raw HTML for any Markdown renderer.
   expect(findMarkdownHtml(markdown.content)).toEqual([])
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
@@ -5878,7 +5889,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       }],
     }),
     'markdown',
-    findMarkdownHtmlRanges,
+    markdownInspector,
   )
   expect(fencedCode.content).toContain(
     '````typescript\n',
@@ -5916,7 +5927,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     renderPublicDocumentExport(
       legacyPublicPage,
       'markdown',
-      findMarkdownHtmlRanges,
+      markdownInspector,
     )
   expect(legacyPublicMarkdown.content).toContain(
     '````\nlegacy ``` source\n````',
@@ -5926,7 +5937,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   )
 
   const whiteboard = createWhiteboard()
-  const svg = renderDocumentExport(whiteboard, 'svg', findMarkdownHtmlRanges)
+  const svg = renderDocumentExport(whiteboard, 'svg', markdownInspector)
   expect(svg.content).toContain('&lt;unsafe&gt;')
   expect(svg.content).not.toContain('<unsafe>')
   whiteboard.whiteboard.objects.push({
@@ -5936,7 +5947,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     bounds: { x: 140, y: 20, width: 100, height: 80 },
     zIndex: 2,
   })
-  expect(renderDocumentExport(whiteboard, 'svg', findMarkdownHtmlRanges).content).toContain(
+  expect(renderDocumentExport(whiteboard, 'svg', markdownInspector).content).toContain(
     'Work item: team/team-a/issue/authenticated-work-item-id',
   )
 
