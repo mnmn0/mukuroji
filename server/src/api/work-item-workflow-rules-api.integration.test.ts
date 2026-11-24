@@ -222,3 +222,26 @@ test('applies transition actor roles to the person whose approval decision chang
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'WorkflowTransitionActorDenied' })
 })
+
+test('rejects creating a Work Item in a restricted status even when the creator assigns themselves', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = configureRules({})
+  configuration.workflow.transitions = configuration.workflow.transitions.map((transition) =>
+    transition.toStatusId === 'review' ? { ...transition, allowedActorRoles: ['project-manager', 'assignee'] } : transition)
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Approved without review',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'demo@example.com',
+      schedule: { mode: 'unscheduled', calendarPolicy: { kind: 'all-days' } },
+      priority: 'medium',
+      workflowStatusId: 'review',
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'WorkflowTransitionActorDenied' })
+})

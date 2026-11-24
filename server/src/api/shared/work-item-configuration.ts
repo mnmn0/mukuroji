@@ -347,11 +347,9 @@ export async function prepareConfiguredCreateWorkItem(
       workItemTypeId: workItemType.id,
       fromStatusId: undefined,
       toStatusId: workflowStatus.workflowStatusId,
-      actor: resolveWorkflowRuleActor(
-        rulePrincipal,
-        { assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : undefined },
-        projectId,
-      ),
+      // A new Work Item has no assignee before the change, so a creator naming themselves does not
+      // satisfy `assignee`; only the target Project is managed.
+      actor: resolveWorkflowRuleActor(rulePrincipal, { assignedProjectId: projectId }, projectId),
       state: () => createWorkflowRuleWorkItemState(
         input.schedule,
         // A create body carries no acceptance criteria.

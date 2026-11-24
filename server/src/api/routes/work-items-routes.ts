@@ -5981,14 +5981,18 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         completionTransition,
       ) => {
         // The decider changes the status, so the workflow's transition actor roles apply to them.
-        // A reviewer may only view the Team, so the context is read at the lowest role.
+        // A reviewer may hold no Team role; then only the assignee role can hold, so a failed read
+        // leaves the manager role unmet instead of blocking a decision no rule restricts.
         const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
+          .catch(() => undefined)
         const resolved = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
-          createPersonWorkflowRulePrincipal(principal, deciderContext),
+          deciderContext
+            ? createPersonWorkflowRulePrincipal(principal, deciderContext)
+            : { kind: 'person', userKey: principal.userKey, managesProject: () => principal.isSystemAdmin },
         )
         resolvedCompletionTransition = resolved
         return resolved
