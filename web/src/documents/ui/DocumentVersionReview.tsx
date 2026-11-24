@@ -14,7 +14,7 @@ import type { DocumentRecord } from '../api'
 import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import { createCanonicalWorkItemId, parseCanonicalWorkItemId } from '../model/relations'
 import { resolveApprovalStatusClassName } from '../model/versionApprovals'
-import { diffDocumentVersions, type DocumentBlockDiffEntry } from '../model/versionDiff'
+import { diffDocumentVersions, type DocumentBlockDiffEntry, type WhiteboardDiffSummary } from '../model/versionDiff'
 import { useDocumentVersionDetail } from '../queries/useDocumentVersionReview'
 import { DocumentReadOnlyBlock, DocumentReadOnlyContent } from './DocumentEditor'
 import { DocumentRelationTargetLabel, DocumentRelationTargetPicker } from './DocumentLinkPicker'
@@ -276,7 +276,14 @@ function VersionPreview({
   const detail = useDocumentVersionDetail(accessToken, document.id, version.id)
   if (!detail.data) {
     return detail.error
-      ? <StatusNotice role="alert" text={t('documents.versionReview.loadError')} />
+      ? (
+          <StatusNotice
+            onRetry={() => void detail.mutate()}
+            retryLabel={t('documents.versions.retry')}
+            role="alert"
+            text={t('documents.versionReview.loadError')}
+          />
+        )
       : <StatusNotice text={t('documents.versionReview.loading')} />
   }
   const snapshot = detail.data.document
@@ -375,7 +382,15 @@ function VersionCompare({
         {t('documents.versionReview.compareDirection')}
       </p>
       {diff === undefined && (reviewed.error || target.error) ? (
-        <StatusNotice role="alert" text={t('documents.versionReview.loadError')} />
+        <StatusNotice
+          onRetry={() => {
+            if (reviewed.error) void reviewed.mutate()
+            if (target.error) void target.mutate()
+          }}
+          retryLabel={t('documents.versions.retry')}
+          role="alert"
+          text={t('documents.versionReview.loadError')}
+        />
       ) : diff === undefined ? (
         <StatusNotice text={t('documents.versionReview.loading')} />
       ) : !diff.hasChanges ? (
@@ -388,12 +403,20 @@ function VersionCompare({
             </p>
           ) : null}
           {diff.whiteboard ? (
-            <StatusNotice
-              text={t('documents.versionReview.whiteboardDiff')
-                .replace('{added}', String(diff.whiteboard.added))
-                .replace('{removed}', String(diff.whiteboard.removed))
-                .replace('{changed}', String(diff.whiteboard.changed))}
-            />
+            <ul className="m-0 grid list-none gap-1 p-0 text-sm font-medium text-[var(--workbench-text)]">
+              {whiteboardDiffKinds.map(({ key, label }) => {
+                const counts = diff.whiteboard?.[key]
+                if (!counts || counts.added + counts.removed + counts.changed === 0) return null
+                return (
+                  <li className="rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2" key={key}>
+                    {t(label)
+                      .replace('{added}', String(counts.added))
+                      .replace('{removed}', String(counts.removed))
+                      .replace('{changed}', String(counts.changed))}
+                  </li>
+                )
+              })}
+            </ul>
           ) : null}
           {diff.blocks.map((entry, index) => (
             <BlockDiffEntry entry={entry} key={`${entry.kind}:${entry.block.id}:${index}`} t={t} />
@@ -403,6 +426,13 @@ function VersionCompare({
     </div>
   )
 }
+
+/** Whiteboard element kinds shown in the comparison, with their count messages. */
+const whiteboardDiffKinds = [
+  { key: 'objects', label: 'documents.versionReview.whiteboardDiff' },
+  { key: 'connectors', label: 'documents.versionReview.whiteboardConnectorDiff' },
+  { key: 'frames', label: 'documents.versionReview.whiteboardFrameDiff' },
+] as const satisfies readonly { key: keyof WhiteboardDiffSummary; label: MessageKey }[]
 
 /** Visual treatment of each diff kind. */
 const blockDiffClassNames = {
@@ -919,18 +949,34 @@ function resolveMemberLabel(memberKey: string, members?: readonly MentionableMem
 /**
  * A centered status line.
  *
- * @param props - Text and optional live-region role.
+ * @param props - Text, optional live-region role, and an optional retry action.
  * @returns The notice.
  */
 function StatusNotice({
+  onRetry,
+  retryLabel,
   role,
   text,
 }: {
+  /** Reads the failed data again; shown as a button with `retryLabel`. */
+  onRetry?: () => void
+  /** Label of the retry button. */
+  retryLabel?: string
   /** Live-region role for errors. */
   role?: 'alert'
   /** Text to show. */
   text: string
 }) {
+  if (onRetry && retryLabel) {
+    return (
+      <div className="grid justify-items-center gap-3 px-6 py-10 text-center" role={role}>
+        <p className="m-0 text-sm font-medium text-[var(--workbench-muted)]">{text}</p>
+        <button className="workbench-button-secondary min-h-9 px-3 text-sm" onClick={onRetry} type="button">
+          {retryLabel}
+        </button>
+      </div>
+    )
+  }
   return (
     <p className="m-0 px-6 py-10 text-center text-sm font-medium text-[var(--workbench-muted)]" role={role}>
       {text}

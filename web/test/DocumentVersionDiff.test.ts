@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { DocumentBlock, DocumentDetail } from '@mukuroji/contracts'
 import { diffDocumentBlocks, diffDocumentVersions } from '../src/documents/model/versionDiff'
+import { whiteboardRecordFixture } from '../src/documents/fixtures'
 
 /**
  * Builds a paragraph block for diff fixtures.
@@ -110,5 +111,31 @@ describe('diffDocumentVersions', () => {
       hasChanges: true,
       previousTitle: 'Spec v1',
     })
+  })
+
+  test('reports Whiteboard connector and frame changes even when no object changed', () => {
+    if (whiteboardRecordFixture.kind !== 'whiteboard') throw new Error('Expected a Whiteboard fixture.')
+    const before: DocumentDetail = whiteboardRecordFixture
+    const after: DocumentDetail = {
+      ...whiteboardRecordFixture,
+      whiteboard: {
+        ...whiteboardRecordFixture.whiteboard,
+        connectors: whiteboardRecordFixture.whiteboard.connectors.map((connector) => ({
+          ...connector,
+          label: 'blocks',
+        })),
+        frames: [],
+      },
+    }
+
+    const diff = diffDocumentVersions(before, after)
+
+    expect(diff.hasChanges).toBe(true)
+    expect(diff.whiteboard).toEqual({
+      objects: { added: 0, removed: 0, changed: 0 },
+      connectors: { added: 0, removed: 0, changed: 1 },
+      frames: { added: 0, removed: whiteboardRecordFixture.whiteboard.frames.length, changed: 0 },
+    })
+    expect(diffDocumentVersions(before, before).hasChanges).toBe(false)
   })
 })

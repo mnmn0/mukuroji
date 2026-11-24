@@ -349,6 +349,8 @@ export const documentsMessages = {
   'documents.versionReview.noChanges': 'The two versions are the same.',
   'documents.versionReview.titleChanged': 'The title changed from “{title}”.',
   'documents.versionReview.whiteboardDiff': '{added} objects added, {removed} removed, {changed} changed',
+  'documents.versionReview.whiteboardConnectorDiff': '{added} connectors added, {removed} removed, {changed} changed',
+  'documents.versionReview.whiteboardFrameDiff': '{added} frames added, {removed} removed, {changed} changed',
   'documents.versionReview.diff.unchanged': 'Unchanged',
   'documents.versionReview.diff.added': 'Added',
   'documents.versionReview.diff.removed': 'Removed',

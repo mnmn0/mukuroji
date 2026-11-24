@@ -51,17 +51,23 @@ function renderDialog(props: {
   version?: DocumentVersion
   canEdit?: boolean
   approvalsStatus?: ApprovalsReadStatus
+  detailFailed?: boolean
 }) {
   const version = props.version ?? pinnedVersion
-  const fallback = {
-    [unstable_serialize(['document-version-detail', 'token', documentRecordFixture.id, version.id])]: {
+  const detailKey = unstable_serialize(['document-version-detail', 'token', documentRecordFixture.id, version.id])
+  const fallback = props.detailFailed ? {} : {
+    [detailKey]: {
       version,
       document: createSnapshot(),
     },
   }
+  // A failed read is seeded as the cached SWR state of the version detail.
+  const cache = new Map<string, object>(
+    props.detailFailed ? [[detailKey, { error: new Error('Version read failed.') }]] : [],
+  )
   return renderToStaticMarkup(
     <MemoryRouter>
-      <SWRConfig value={{ fallback, provider: () => new Map() }}>
+      <SWRConfig value={{ fallback, provider: () => cache }}>
         <DocumentVersionReviewDialog
           accessToken="token"
           approvals={props.approvals ?? []}
@@ -127,6 +133,14 @@ describe('DocumentVersionReviewDialog', () => {
     expect(html).toContain('data-testid="document-approval-approval-1"')
     expect(html).toContain('Rina Reviewer')
     expect(html).toContain('Request approval')
+  })
+
+  test('offers a retry when the version detail of the preview or comparison fails to load', () => {
+    for (const initialTab of ['preview', 'compare'] as const) {
+      const html = renderDialog({ initialTab, detailFailed: true })
+      expect(html).toContain('role="alert"')
+      expect(html).toContain('>Retry<')
+    }
   })
 
   test('shows a failed approvals read with a retry instead of an empty list', () => {

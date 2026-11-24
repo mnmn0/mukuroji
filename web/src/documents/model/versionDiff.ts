@@ -42,15 +42,27 @@ export type DocumentBlockDiffEntry =
     }
 
 /**
- * Counts of changed Whiteboard elements between two versions.
+ * Counts of changed Whiteboard elements of one kind between two versions.
+ */
+export type WhiteboardElementDiffCounts = {
+  /** Elements only in the newer version. */
+  added: number
+  /** Elements only in the older version. */
+  removed: number
+  /** Elements whose content changed. */
+  changed: number
+}
+
+/**
+ * Counts of changed Whiteboard objects, connectors, and frames between two versions.
  */
 export type WhiteboardDiffSummary = {
-  /** Objects only in the newer version. */
-  added: number
-  /** Objects only in the older version. */
-  removed: number
-  /** Objects whose content changed. */
-  changed: number
+  /** Changed objects. */
+  objects: WhiteboardElementDiffCounts
+  /** Changed connectors between objects. */
+  connectors: WhiteboardElementDiffCounts
+  /** Changed frames that group objects. */
+  frames: WhiteboardElementDiffCounts
 }
 
 /**
@@ -85,11 +97,11 @@ export function diffDocumentVersions(
   const previousTitle = before.title === after.title ? undefined : before.title
   const blocks = diffDocumentBlocks(readBlocks(before), readBlocks(after))
   const whiteboard = before.kind === 'whiteboard' || after.kind === 'whiteboard'
-    ? diffWhiteboardObjects(before, after)
+    ? diffWhiteboard(before, after)
     : undefined
   const hasChanges = previousTitle !== undefined ||
     blocks.some((entry) => entry.kind !== 'unchanged') ||
-    (whiteboard !== undefined && whiteboard.added + whiteboard.removed + whiteboard.changed > 0)
+    (whiteboard !== undefined && hasWhiteboardChanges(whiteboard))
   return {
     ...(previousTitle === undefined ? {} : { previousTitle }),
     blocks,
@@ -163,26 +175,54 @@ function readBlocks(document: DocumentDetail): readonly DocumentBlock[] {
 }
 
 /**
- * Counts added, removed, and changed Whiteboard objects.
+ * Counts added, removed, and changed Whiteboard objects, connectors, and frames.
  *
  * @param before - Older snapshot.
  * @param after - Newer snapshot.
+ * @returns Counts for each element kind.
+ */
+function diffWhiteboard(before: DocumentDetail, after: DocumentDetail): WhiteboardDiffSummary {
+  const previous = before.kind === 'whiteboard' ? before.whiteboard : undefined
+  const next = after.kind === 'whiteboard' ? after.whiteboard : undefined
+  return {
+    objects: diffWhiteboardElements(previous?.objects ?? [], next?.objects ?? []),
+    connectors: diffWhiteboardElements(previous?.connectors ?? [], next?.connectors ?? []),
+    frames: diffWhiteboardElements(previous?.frames ?? [], next?.frames ?? []),
+  }
+}
+
+/**
+ * Counts added, removed, and changed elements of one Whiteboard element kind by ID.
+ *
+ * @param before - Elements of the older version.
+ * @param after - Elements of the newer version.
  * @returns Element counts.
  */
-function diffWhiteboardObjects(before: DocumentDetail, after: DocumentDetail): WhiteboardDiffSummary {
-  const previous = new Map(
-    (before.kind === 'whiteboard' ? before.whiteboard.objects : []).map((object) => [object.id, object]),
-  )
-  const next = after.kind === 'whiteboard' ? after.whiteboard.objects : []
+function diffWhiteboardElements(
+  before: readonly { id: string }[],
+  after: readonly { id: string }[],
+): WhiteboardElementDiffCounts {
+  const previous = new Map(before.map((element) => [element.id, element]))
   let added = 0
   let changed = 0
-  for (const object of next) {
-    const matched = previous.get(object.id)
+  for (const element of after) {
+    const matched = previous.get(element.id)
     if (matched === undefined) added += 1
-    else if (JSON.stringify(matched) !== JSON.stringify(object)) changed += 1
-    previous.delete(object.id)
+    else if (stableStringify(matched) !== stableStringify(element)) changed += 1
+    previous.delete(element.id)
   }
   return { added, removed: previous.size, changed }
+}
+
+/**
+ * Tells whether any Whiteboard element differs.
+ *
+ * @param summary - Whiteboard counts.
+ * @returns Whether an object, connector, or frame was added, removed, or changed.
+ */
+function hasWhiteboardChanges(summary: WhiteboardDiffSummary) {
+  return [summary.objects, summary.connectors, summary.frames]
+    .some((counts) => counts.added + counts.removed + counts.changed > 0)
 }
 
 /**
