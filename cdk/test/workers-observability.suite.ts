@@ -2034,7 +2034,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 0,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 24);
+  template.resourceCountIs('AWS::SQS::Queue', 26);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -3362,9 +3362,9 @@ test('Email bounces and complaints reach the feedback job through the SES config
   // The feedback job only receives and deletes queue messages and writes suppression rows.
   const statements = Object.values(template.findResources('AWS::IAM::Policy'))
     .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
-    .filter((statement: { Action?: unknown }) => JSON.stringify(statement.Action).includes('sqs:ReceiveMessage'));
+    .filter((statement: { Resource?: unknown }) => JSON.stringify(statement.Resource).includes('NotificationEmailFeedbackQueue'));
   expect(statements).toEqual([expect.objectContaining({
-    Effect: 'Allow', Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+    Effect: 'Allow', Action: ['sqs:DeleteMessage', 'sqs:ReceiveMessage'],
     Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationEmailFeedbackQueue/), 'Arn'] },
   })]);
   // The Email job sends through the configuration set and tags each message for the feedback job.
