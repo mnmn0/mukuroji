@@ -877,4 +877,7 @@ export const workItemsMessages = {
   'workItems.crossProject.column.assignee': 'Owner',
   'workItems.crossProject.column.contributors': 'Contributors',
   'workItems.crossProject.column.dueDate': 'Due',
+  'workItems.externalLinks.calendarEventHint':
+    "Creates an all-day event on the connected account's primary calendar from this Work Item's dates. Work Items without dates cannot be added.",
+  'workItems.externalLinks.resourceType.calendarEvent': 'Calendar event',
 } as const

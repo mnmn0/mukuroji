@@ -2,7 +2,7 @@ import type {
   ExternalResourceType,
   ExternalSyncDirection,
 } from '@mukuroji/contracts'
-import type { Locale } from '../../shared/i18n/i18n'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 
 /**
  * External link panel で表示する locale-aware 文言です。
@@ -92,6 +92,7 @@ export function createWorkItemExternalLinksLabels(
   locale: Locale,
 ): WorkItemExternalLinksLabels {
   const ja = locale === 'ja'
+  const t = createTranslator(locale)
 
   return {
     title: ja ? '外部リンク' : 'External links',
@@ -140,15 +141,13 @@ export function createWorkItemExternalLinksLabels(
     externalIdPlaceholder: ja ? '例: 12345 または commit SHA' : 'e.g. 12345 or commit SHA',
     externalUrlPlaceholder: 'https://github.com/org/repository/issues/123',
     displayKeyPlaceholder: ja ? '例: GH-123' : 'e.g. GH-123',
-    calendarEventHint: ja
-      ? '接続した account の既定カレンダーに、この Work Item の日付で終日の予定を作成します。日付のない Work Item には作成できません。'
-      : 'Creates an all-day event on the connected account\'s primary calendar from this Work Item\'s dates. Work Items without dates cannot be added.',
+    calendarEventHint: t('workItems.externalLinks.calendarEventHint'),
     resourceTypeLabels: {
       issue: 'Issue',
       'merge-request': 'Merge request',
       commit: 'Commit',
       deploy: ja ? 'Deploy' : 'Deployment',
-      'calendar-event': ja ? 'カレンダーの予定' : 'Calendar event',
+      'calendar-event': t('workItems.externalLinks.resourceType.calendarEvent'),
     },
     syncDirectionLabels: {
       inbound: 'Provider → mukuroji',

@@ -38,6 +38,23 @@ export const externalLinkInstallationFixtures = [
 ] satisfies ConnectorInstallation[]
 
 /**
+ * Calendar event 作成 Story で選ぶ Google Calendar の接続済み account です。
+ */
+export const externalLinkCalendarInstallationFixture = {
+  id: 'connector-google-calendar-team',
+  category: 'calendar',
+  provider: 'google-calendar',
+  name: 'Team calendar',
+  status: 'connected',
+  scopes: ['https://www.googleapis.com/auth/calendar.events'],
+  externalAccountId: 'team-calendar',
+  externalAccountName: 'team-calendar',
+  installedByUserId: 'user-minami',
+  installedAt: '2026-11-20T04:00:00.000Z',
+  updatedAt: '2026-11-20T04:00:00.000Z',
+} satisfies ConnectorInstallation
+
+/**
  * External link Story と unit test で表示する source resource です。
  */
 export const externalWorkItemLinkFixtures = [
