@@ -50,24 +50,42 @@ class MemoryDocumentClient {
   /** 実行した scope query の record key prefixes です。 */
   readonly queryPrefixes: Array<string | undefined> = []
 
+  /** BatchGetItem request ごとの key 数です。 */
+  readonly batchGetKeyCounts: number[] = []
+
+  /** 次の BatchGetItem request で末尾から UnprocessedKeys として返す key 数です。 */
+  nextBatchGetUnprocessedCount = 0
+
   async send(command: unknown) {
     if (command instanceof BatchGetCommand) {
       const requestItems = command.input.RequestItems
       if (!requestItems) {
         throw new Error('BatchGetCommand requires request items.')
       }
+      const unprocessedCount = this.nextBatchGetUnprocessedCount
+      this.nextBatchGetUnprocessedCount = 0
+      const unprocessed: Record<string, { Keys: Record<string, unknown>[] }> = {}
       const responses = Object.fromEntries(Object.entries(requestItems).map(
         ([tableName, request]) => {
           if (!request.Keys) {
             throw new Error(`BatchGetCommand requires keys for ${tableName}.`)
           }
-          return [tableName, request.Keys.flatMap((key) => {
+          // DynamoDB rejects a BatchGetItem request with more than 100 keys.
+          if (request.Keys.length > 100) {
+            throw new Error('ValidationException: Too many items requested for the BatchGetItem call.')
+          }
+          this.batchGetKeyCounts.push(request.Keys.length)
+          const served = request.Keys.slice(0, request.Keys.length - unprocessedCount)
+          if (served.length < request.Keys.length) {
+            unprocessed[tableName] = { Keys: request.Keys.slice(served.length) }
+          }
+          return [tableName, served.flatMap((key) => {
             const item = this.items.get(createMemoryKey(key as Record<string, unknown>))
             return item ? [item] : []
           })]
         },
       ))
-      return { Responses: responses }
+      return { Responses: responses, UnprocessedKeys: unprocessed }
     }
     if (command instanceof GetCommand) {
       const input = command.input
@@ -594,6 +612,48 @@ describe('file proofing domain', () => {
       { ...reviewer, guest: true },
     )).toEqual([])
     expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 0, approvedCount: 1 })
+  })
+
+  test('lists more Document version approvals than one BatchGetItem request can read', async () => {
+    const { client, documentClient } = createClient()
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-1:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('document-version-approval-many'),
+    )
+    const stored = [...documentClient.items.values()]
+    const pointer = stored.find((item) =>
+      item.entryType === 'document-approval-index' && item.approvalId === approval.id
+    )
+    const main = stored.find((item) =>
+      item.id === approval.id && pointer !== undefined && item.scopeKey === pointer.sourceScopeKey
+    )
+    if (!pointer || !main) throw new Error('The approval rows were not written.')
+    // Copies the approval under new IDs, so the Document has 150 approvals in all.
+    for (let index = 1; index < 150; index += 1) {
+      const id = `${approval.id}-copy-${index}`
+      for (const row of [
+        { ...main, id, recordKey: String(main.recordKey).replace(approval.id, id) },
+        { ...pointer, approvalId: id, recordKey: String(pointer.recordKey).replace(approval.id, id) },
+      ]) {
+        documentClient.items.set(createMemoryKey(row), row)
+      }
+    }
+    documentClient.batchGetKeyCounts.length = 0
+    documentClient.nextBatchGetUnprocessedCount = 3
+
+    const approvals = await client.listDocumentApprovals(scope.workspaceId, 'doc-1', manager)
+
+    expect(approvals).toHaveLength(150)
+    expect(new Set(approvals.map(({ id }) => id)).size).toBe(150)
+    // The first chunk of 100 keys retries its 3 unprocessed keys before the last 50 are read.
+    expect(documentClient.batchGetKeyCounts).toEqual([100, 3, 50])
   })
 
   test('resolves a visible file through the File ID reverse index', async () => {

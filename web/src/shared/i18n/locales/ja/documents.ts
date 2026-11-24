@@ -364,6 +364,8 @@ export const documentsMessages = {
   'documents.versionReview.noChanges': '2 つの版に違いはありません。',
   'documents.versionReview.titleChanged': 'タイトルが「{title}」から変わりました。',
   'documents.versionReview.whiteboardDiff': '追加 {added} 件、削除 {removed} 件、変更 {changed} 件のオブジェクト',
+  'documents.versionReview.whiteboardConnectorDiff': '追加 {added} 件、削除 {removed} 件、変更 {changed} 件のコネクタ',
+  'documents.versionReview.whiteboardFrameDiff': '追加 {added} 件、削除 {removed} 件、変更 {changed} 件のフレーム',
   'documents.versionReview.diff.unchanged': '変更なし',
   'documents.versionReview.diff.added': '追加',
   'documents.versionReview.diff.removed': '削除',

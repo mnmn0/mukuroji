@@ -80,6 +80,8 @@ export const GUARDDUTY_SCAN_STATUS_TAG = 'GuardDutyMalwareScanStatus'
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
+/** Most keys DynamoDB BatchGetItem accepts in one request. */
+const BATCH_GET_MAX_KEYS = 100
 
 /** DynamoDB reverse index used for direct File ID evidence resolution. */
 const FILE_ID_INDEX_NAME = 'FileIdIndex'
@@ -2717,19 +2719,38 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   /**
    * Reads main approval rows through pointers, keyed by scope key and approval ID.
    *
+   * The keys are read in chunks of at most {@link BATCH_GET_MAX_KEYS}, the BatchGetItem limit,
+   * and each chunk retries its unprocessed keys.
+   *
    * @param items - Pointers to the Work Item scope and approval ID of each row.
    * @returns Approval rows that still exist.
    */
   private async batchGetApprovalItems(items: readonly ApprovalRowPointer[]) {
     const approvals = new Map<string, StoredApprovalItem>()
-    let keys: Record<string, unknown>[] = [...new Map(items.map((item) => [
+    const allKeys: Record<string, unknown>[] = [...new Map(items.map((item) => [
       createReviewerApprovalPointerKey(item),
       {
         scopeKey: item.sourceScopeKey,
         recordKey: createApprovalRecordKey(item.approvalId),
       },
     ])).values()]
+    for (let index = 0; index < allKeys.length; index += BATCH_GET_MAX_KEYS) {
+      await this.batchGetApprovalChunk(allKeys.slice(index, index + BATCH_GET_MAX_KEYS), approvals)
+    }
+    return approvals
+  }
 
+  /**
+   * Reads one BatchGetItem-sized chunk of approval rows, retrying unprocessed keys.
+   *
+   * @param chunk - At most {@link BATCH_GET_MAX_KEYS} approval row keys.
+   * @param approvals - Rows read so far, keyed by scope key and approval ID; filled in place.
+   */
+  private async batchGetApprovalChunk(
+    chunk: Record<string, unknown>[],
+    approvals: Map<string, StoredApprovalItem>,
+  ) {
+    let keys = chunk
     for (let attempt = 0; keys.length > 0 && attempt < 5; attempt += 1) {
       const response = await this.documentClient.send(new BatchGetCommand({
         RequestItems: {
@@ -2753,7 +2774,6 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         'Reviewer approvals could not be read completely.',
       )
     }
-    return approvals
   }
 
   /** Scope partition を prefix query します。 */
