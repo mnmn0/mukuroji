@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { downloadTimeTrackingCsv, getTimeTrackingSummary, saveTimeBudget } from '../src/features/time-tracking/api/timeReport'
+import { deleteTimeBudgetPeriod, downloadTimeTrackingCsv, getTimeTrackingSummary, saveTimeBudget } from '../src/features/time-tracking/api/timeReport'
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
 import {
   compareTimeBudget,
@@ -17,6 +17,7 @@ import {
   timeReportFixtureBudgetSummary,
   timeReportFixtureManagerSummary,
   timeReportFixtureMemberSummary,
+  timeReportFixturePeriodBudgetSummary,
   timeReportFixtureProjects,
   timeReportFixtureRange,
 } from '../src/features/time-tracking/reportFixtures'
@@ -144,6 +145,7 @@ describe('time report model', () => {
         defaultCurrency="USD"
         locale="en"
         onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
         onRetry={noop}
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
@@ -233,6 +235,33 @@ describe('time report API', () => {
     respondWith({ budget: { amountMinor: 1 } })
     await expect(saveTimeBudget('token', 'core-team', { scopeType: 'team' }, { amountMinor: 1, currency: 'USD', expectedRevision: 0 }))
       .rejects.toBeInstanceOf(TimeTrackingApiError)
+  })
+
+  test('reads, saves, and deletes budgets per period', async () => {
+    respondWith(timeReportFixturePeriodBudgetSummary)
+    const summary = await getTimeTrackingSummary('token', 'core-team', { from: '2026-11-01', to: '2026-11-30', timeZone: 'Asia/Tokyo', groupBy: 'project', budgetScope: { scopeType: 'team' } })
+    expect(summary.budget?.periodBudget).toBe(true)
+    expect(summary.budgetPeriods?.map((budget) => budget.periodFrom)).toEqual(['2026-11-01', '2026-12-01'])
+
+    // A budget per period without its period is not accepted.
+    respondWith({ ...timeReportFixturePeriodBudgetSummary, budgetPeriods: [{ ...timeReportFixturePeriodBudgetSummary.budget, periodTo: undefined }] })
+    await expect(getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'project' }))
+      .rejects.toBeInstanceOf(TimeTrackingApiError)
+
+    const periodBudget = timeReportFixturePeriodBudgetSummary.budget
+    let requests = respondWith({ budget: periodBudget })
+    await saveTimeBudget('token', 'core-team', { scopeType: 'team' }, { amountMinor: 300_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', periodBudget: true, expectedRevision: 0 })
+    expect(requests[0]?.body).toEqual({ amountMinor: 300_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', periodBudget: true, expectedRevision: 0 })
+
+    requests = respondWith('')
+    await deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'project', projectId: 'atlas' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 3 })
+    expect(requests[0]?.method).toBe('DELETE')
+    expect(requests[0]?.url.pathname).toBe('/api/teams/core-team/projects/atlas/time-budget/periods/2026-12-01/2026-12-31')
+    expect(requests[0]?.url.searchParams.get('expectedRevision')).toBe('3')
+
+    respondWith({ code: 'TimeBudgetRevisionConflict', message: 'stale' }, 409)
+    await expect(deleteTimeBudgetPeriod('token', 'core-team', { scopeType: 'team' }, { periodFrom: '2026-12-01', periodTo: '2026-12-31', revision: 2 }))
+      .rejects.toMatchObject({ status: 409 })
   })
 })
 
@@ -330,6 +359,7 @@ describe('time report views', () => {
         defaultCurrency="USD"
         locale="en"
         onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
         onRetry={noop}
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
@@ -350,6 +380,7 @@ describe('time report views', () => {
         defaultCurrency="USD"
         locale="en"
         onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
         onRetry={noop}
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
@@ -366,5 +397,50 @@ describe('time report views', () => {
     expect(markup).toContain('2026-11-01 – 2026-11-30')
     expect(markup).toContain('Report this period')
     expect(markup).toContain('Edit budget')
+  })
+
+  test('compares with the budget of exactly the report period and lists the budgets per period', () => {
+    const markup = renderToStaticMarkup(
+      <TimeBudgetPanel
+        defaultCurrency="JPY"
+        locale="en"
+        onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
+        onRetry={noop}
+        onSave={async () => undefined}
+        onUseBudgetPeriod={noop}
+        projects={timeReportFixtureProjects}
+        scope={{ scopeType: 'team' }}
+        summary={timeReportFixturePeriodBudgetSummary}
+        t={t}
+      />,
+    )
+    expect(markup).toContain('¥300,000')
+    expect(markup).toContain('data-testid="time-budget-period-badge"')
+    expect(markup).toContain('Budgets per period')
+    expect(markup.match(/data-testid="time-budget-period-row"/gu)).toHaveLength(2)
+    expect(markup).toContain('2026-12-01 – 2026-12-31')
+    expect(markup).toContain('¥450,000')
+    expect(markup).toContain('Add period budget')
+  })
+
+  test('shows no budget per period list for a scope without one', () => {
+    const markup = renderToStaticMarkup(
+      <TimeBudgetPanel
+        defaultCurrency="JPY"
+        locale="en"
+        onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
+        onRetry={noop}
+        onSave={async () => undefined}
+        onUseBudgetPeriod={noop}
+        projects={timeReportFixtureProjects}
+        scope={{ scopeType: 'team' }}
+        summary={timeReportFixtureBudgetSummary}
+        t={t}
+      />,
+    )
+    expect(markup).not.toContain('time-budget-periods')
+    expect(markup).not.toContain('time-budget-period-badge')
   })
 })

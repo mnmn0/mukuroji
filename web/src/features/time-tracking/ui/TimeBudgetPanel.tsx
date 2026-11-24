@@ -1,4 +1,4 @@
-import { toWorkspaceLocalDate, type TimeTrackingSummary } from '@mukuroji/contracts'
+import { toWorkspaceLocalDate, type TimeBudget, type TimeTrackingSummary } from '@mukuroji/contracts'
 import { useId, useMemo, useState, type FormEvent } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import type { SaveTimeBudgetInput, TimeReportBudgetScope } from '../api/timeReport'
@@ -13,6 +13,7 @@ import {
 } from '../model/timeReport'
 import { formatMinutes } from '../model/timePeriod'
 import { findTimeBudgetFiscalYear, listTimeBudgetFiscalYearOptions } from '../model/budgetFiscalYear'
+import { TimeBudgetPeriodList } from './TimeBudgetPeriodList'
 import { describeTimeTrackingFailure, interpolate, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** Project offered as a budget scope. */
@@ -45,6 +46,8 @@ export type TimeBudgetPanelProps = {
   onChangeScope: (scope: TimeReportBudgetScope) => void
   /** Saves the budget of the scope shown. */
   onSave: (input: SaveTimeBudgetInput) => Promise<unknown>
+  /** Deletes one of the scope's budgets per period. */
+  onDeletePeriod: (budget: TimeBudget) => Promise<unknown>
   /** Shows the report for the budget's own period. */
   onUseBudgetPeriod: (range: TimeReportRange) => void
   /** Reloads the budget. */
@@ -62,6 +65,9 @@ export type TimeBudgetPanelProps = {
 
 const teamScopeValue = ''
 
+/** Budget the editor saves: the one shown for the report period, or a new budget per period. */
+type TimeBudgetEditTarget = 'shown' | 'newPeriod'
+
 /**
  * Budget of the Team or one of its Projects next to the actual cost and hours of the report
  * period, with an editor. Shown only to members the server returns budgets and costs to.
@@ -77,6 +83,7 @@ export function TimeBudgetPanel({
   isLoading = false,
   locale,
   onChangeScope,
+  onDeletePeriod,
   onRetry,
   onSave,
   onRetryFiscalYear,
@@ -87,22 +94,38 @@ export function TimeBudgetPanel({
   t,
 }: TimeBudgetPanelProps) {
   const id = useId()
-  const [isEditing, setIsEditing] = useState(false)
+  const [editTarget, setEditTarget] = useState<TimeBudgetEditTarget>()
+  const isEditing = editTarget !== undefined
   const [isSaving, setIsSaving] = useState(false)
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const projectId = scope.scopeType === 'project' ? scope.projectId : undefined
   const comparison = summary ? compareTimeBudget(summary, projectId) : undefined
   const budget = comparison?.budget
   const currency = budget?.currency ?? defaultCurrency
+  const budgetPeriods = summary?.budgetPeriods ?? []
+  // A budget per period keeps its dates; changing them would save another period's budget.
+  const isPeriodLocked = editTarget === 'shown' && budget?.periodBudget === true
+  const savesPeriodBudget = editTarget === 'newPeriod' || isPeriodLocked
+  /**
+   * Reads the period the editor starts with.
+   *
+   * @param target - Budget being edited.
+   * @returns Start and end dates, empty when unset.
+   */
+  const initialPeriodOf = (target: TimeBudgetEditTarget | undefined) => target === 'newPeriod'
+    // A new budget per period starts with the report period, which is the period it is compared with.
+    ? { from: summary?.from ?? '', to: summary?.to ?? '' }
+    : { from: budget?.periodFrom ?? '', to: budget?.periodTo ?? '' }
   const [periodFrom, setPeriodFrom] = useState('')
   const [periodTo, setPeriodTo] = useState('')
-  const formKey = `${projectId ?? 'team'}:${budget?.revision ?? 0}`
+  const formKey = `${projectId ?? 'team'}:${editTarget ?? 'closed'}:${budget?.revision ?? 0}`
   const [periodFormKey, setPeriodFormKey] = useState(formKey)
   if (periodFormKey !== formKey) {
     // The keyed form resets amount and currency when the saved budget changes; reset the period with them.
+    const initial = initialPeriodOf(editTarget)
     setPeriodFormKey(formKey)
-    setPeriodFrom(budget?.periodFrom ?? '')
-    setPeriodTo(budget?.periodTo ?? '')
+    setPeriodFrom(initial.from)
+    setPeriodTo(initial.to)
   }
   const fiscalYearOptions = useMemo(
     () => fiscalYearStartMonth === undefined
@@ -117,12 +140,33 @@ export function TimeBudgetPanel({
     ? undefined
     : findTimeBudgetFiscalYear(budget.periodFrom, budget.periodTo, fiscalYearStartMonth)
 
-  /** Opens the editor with the saved period of the budget. */
-  const startEditing = () => {
+  /**
+   * Opens the editor with the period of the budget being edited.
+   *
+   * @param target - Budget being edited.
+   */
+  const startEditing = (target: TimeBudgetEditTarget) => {
+    const initial = initialPeriodOf(target)
     setMessage(undefined)
-    setPeriodFrom(budget?.periodFrom ?? '')
-    setPeriodTo(budget?.periodTo ?? '')
-    setIsEditing(true)
+    setPeriodFrom(initial.from)
+    setPeriodTo(initial.to)
+    setEditTarget(target)
+  }
+
+  /**
+   * Deletes a budget per period and reports the outcome.
+   *
+   * @param target - Budget per period to delete.
+   */
+  const deletePeriod = async (target: TimeBudget) => {
+    setMessage(undefined)
+    try {
+      await onDeletePeriod(target)
+      setEditTarget(undefined)
+      setMessage({ tone: 'status', text: t('timeTracking.budget.periodDeleted') })
+    } catch (error) {
+      setMessage({ tone: 'error', text: describeTimeTrackingFailure(t, error) })
+    }
   }
 
   /**
@@ -150,6 +194,10 @@ export function TimeBudgetPanel({
       setMessage({ tone: 'error', text: t('timeTracking.budget.invalidAmount') })
       return
     }
+    if (savesPeriodBudget && (!periodFrom || !periodTo)) {
+      setMessage({ tone: 'error', text: t('timeTracking.budget.periodRequired') })
+      return
+    }
     if (periodFrom && periodTo && !isTimeReportRangeOrdered({ from: periodFrom, to: periodTo })) {
       setMessage({ tone: 'error', text: t('timeTracking.report.invalidRange') })
       return
@@ -162,9 +210,13 @@ export function TimeBudgetPanel({
         currency: nextCurrency,
         ...(periodFrom ? { periodFrom } : {}),
         ...(periodTo ? { periodTo } : {}),
-        expectedRevision: budget?.revision ?? 0,
+        ...(savesPeriodBudget ? { periodBudget: true } : {}),
+        expectedRevision: editTarget === 'newPeriod'
+          // Saving a period that already has a budget replaces it, so its revision is expected.
+          ? budgetPeriods.find((candidate) => candidate.periodFrom === periodFrom && candidate.periodTo === periodTo)?.revision ?? 0
+          : budget?.revision ?? 0,
       })
-      setIsEditing(false)
+      setEditTarget(undefined)
       setMessage({ tone: 'status', text: t('timeTracking.budget.saved') })
     } catch (error) {
       setMessage({ tone: 'error', text: describeTimeTrackingFailure(t, error) })
@@ -182,7 +234,7 @@ export function TimeBudgetPanel({
           <select
             className="workbench-input min-h-9 px-2"
             onChange={(event) => {
-              setIsEditing(false)
+              setEditTarget(undefined)
               setMessage(undefined)
               onChangeScope(event.target.value === teamScopeValue ? { scopeType: 'team' } : { scopeType: 'project', projectId: event.target.value })
             }}
@@ -232,6 +284,11 @@ export function TimeBudgetPanel({
                 {comparison.budget.periodFrom || comparison.budget.periodTo
                   ? `${comparison.budget.periodFrom ?? ''} – ${comparison.budget.periodTo ?? ''}`
                   : t('timeTracking.budget.noPeriod')}
+                {comparison.budget.periodBudget ? (
+                  <span className="rounded border border-[var(--workbench-border)] px-1.5 text-xs font-semibold" data-testid="time-budget-period-badge">
+                    {t('timeTracking.budget.periodBudgetBadge')}
+                  </span>
+                ) : null}
                 {budgetFiscalYear === undefined ? null : (
                   <span className="font-semibold" data-testid="time-budget-fiscal-year">
                     {interpolate(t('timeTracking.budget.fiscalYearLabel'), { year: String(budgetFiscalYear) })}
@@ -269,6 +326,16 @@ export function TimeBudgetPanel({
         )
       ) : null}
 
+      {summary && !isLoading && budgetPeriods.length > 0 ? (
+        <TimeBudgetPeriodList
+          budgets={budgetPeriods}
+          locale={locale}
+          onDelete={deletePeriod}
+          onUsePeriod={onUseBudgetPeriod}
+          t={t}
+        />
+      ) : null}
+
       <div aria-live="polite" role="status">
         {message?.tone === 'status' ? <p className="text-sm font-medium text-[var(--workbench-muted)]">{message.text}</p> : null}
       </div>
@@ -282,7 +349,7 @@ export function TimeBudgetPanel({
                 {t('timeTracking.budget.amount')}
                 <input
                   className="workbench-input min-h-9 w-40 px-2"
-                  defaultValue={budget ? toMajorAmountInput(budget.amountMinor, budget.currency) : ''}
+                  defaultValue={budget && editTarget === 'shown' ? toMajorAmountInput(budget.amountMinor, budget.currency) : ''}
                   inputMode="decimal"
                   name="amount"
                   required
@@ -300,7 +367,7 @@ export function TimeBudgetPanel({
                   required
                 />
               </label>
-              {fiscalYearOptions.length > 0 ? (
+              {fiscalYearOptions.length > 0 && !isPeriodLocked ? (
                 <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('timeTracking.budget.fiscalYear')}
                   <select
@@ -330,15 +397,18 @@ export function TimeBudgetPanel({
                 </label>
               ) : null}
               <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-                {t('timeTracking.budget.periodFrom')}
-                <input className="workbench-input min-h-9 px-2" name="periodFrom" onChange={(event) => setPeriodFrom(event.target.value)} type="date" value={periodFrom} />
+                {t(savesPeriodBudget ? 'timeTracking.budget.periodFromRequired' : 'timeTracking.budget.periodFrom')}
+                <input className="workbench-input min-h-9 px-2" disabled={isPeriodLocked} name="periodFrom" onChange={(event) => setPeriodFrom(event.target.value)} required={savesPeriodBudget} type="date" value={periodFrom} />
               </label>
               <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-                {t('timeTracking.budget.periodTo')}
-                <input className="workbench-input min-h-9 px-2" name="periodTo" onChange={(event) => setPeriodTo(event.target.value)} type="date" value={periodTo} />
+                {t(savesPeriodBudget ? 'timeTracking.budget.periodToRequired' : 'timeTracking.budget.periodTo')}
+                <input className="workbench-input min-h-9 px-2" disabled={isPeriodLocked} name="periodTo" onChange={(event) => setPeriodTo(event.target.value)} required={savesPeriodBudget} type="date" value={periodTo} />
               </label>
             </div>
-            {hasFiscalYearError ? (
+            <p className="text-xs text-[var(--workbench-muted)]">
+              {t(savesPeriodBudget ? 'timeTracking.budget.periodBudgetNote' : 'timeTracking.budget.defaultBudgetNote')}
+            </p>
+            {hasFiscalYearError && !isPeriodLocked ? (
               <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-fg-amber-800" role="alert">
                 <span>{t('timeTracking.budget.fiscalYearError')}</span>
                 {onRetryFiscalYear ? (
@@ -350,13 +420,16 @@ export function TimeBudgetPanel({
             ) : null}
             <div className="flex flex-wrap gap-2">
               <button className="workbench-button-primary min-h-9 px-3" disabled={isSaving} type="submit">{t('timeTracking.budget.save')}</button>
-              <button className="workbench-button-secondary min-h-9 px-3" onClick={() => setIsEditing(false)} type="button">{t('timeTracking.form.cancel')}</button>
+              <button className="workbench-button-secondary min-h-9 px-3" onClick={() => setEditTarget(undefined)} type="button">{t('timeTracking.form.cancel')}</button>
             </div>
           </form>
         ) : (
-          <div>
-            <button className="workbench-button-secondary min-h-9 px-3" onClick={startEditing} type="button">
+          <div className="flex flex-wrap gap-2">
+            <button className="workbench-button-secondary min-h-9 px-3" onClick={() => startEditing('shown')} type="button">
               {budget ? t('timeTracking.budget.edit') : t('timeTracking.budget.create')}
+            </button>
+            <button className="workbench-button-secondary min-h-9 px-3" data-testid="time-budget-add-period" onClick={() => startEditing('newPeriod')} type="button">
+              {t('timeTracking.budget.addPeriod')}
             </button>
           </div>
         )

@@ -7,7 +7,7 @@ import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRange } from '../model/timeReport'
 import { resolveBrowserTimeZone } from '../model/timePeriod'
 import { useSaveTeamTimeEntryPolicy } from '../mutations/useSaveTeamTimeEntryPolicy'
-import { useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
+import { useDeleteTimeBudgetPeriod, useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
 import { useSaveTimeRateCard } from '../mutations/useSaveTimeRateCard'
 import { useTeamTimeEntryPolicy } from '../queries/useTeamTimeEntryPolicy'
 import { useTimeRateCard, useTimeTrackingTeamSettings } from '../queries/useTimeRateCard'
@@ -104,6 +104,7 @@ export function TimeReportContainer({
   )
   const budgetReport = useTimeTrackingSummary(accessToken, teamId, budgetInput, ordered && canSeeCosts)
   const saveBudget = useSaveTimeBudget(accessToken, teamId)
+  const deleteBudgetPeriod = useDeleteTimeBudgetPeriod(accessToken, teamId)
   const entryPolicy = useTeamTimeEntryPolicy(accessToken, teamId)
   const saveEntryPolicy = useSaveTeamTimeEntryPolicy(accessToken, teamId)
   const settings = useTimeTrackingTeamSettings(accessToken, teamId)
@@ -149,6 +150,7 @@ export function TimeReportContainer({
           isLoading={budgetReport.isLoading || (!settings.data && !settings.error)}
           locale={locale}
           onChangeScope={setBudgetScope}
+          onDeletePeriod={(budget) => deleteBudgetPeriod(budgetScope, budget)}
           onRetry={() => {
             void Promise.all([budgetReport.mutate(), settings.mutate()]).catch(() => undefined)
           }}

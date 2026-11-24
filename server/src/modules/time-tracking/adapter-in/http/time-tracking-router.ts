@@ -691,6 +691,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
+        ...(body.periodBudget === true ? { periodBudget: true } : {}),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -717,6 +718,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...await readRequestCurrency(dependencies, principal, body.currency),
         ...(body.periodFrom === undefined ? {} : { periodFrom: readRequiredString(body.periodFrom, 'Budget period start') }),
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
+        ...(body.periodBudget === true ? { periodBudget: true } : {}),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
@@ -725,7 +727,55 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
+  router.delete('/api/teams/:teamId/time-budget/periods/:periodFrom/:periodTo', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
+      await dependencies.getTimeTracking().deleteBudgetPeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        scopeType: 'team',
+        scopeId: teamId,
+        ...readBudgetPeriodParams(context),
+        deletedBy: principal.userKey,
+      })
+      return context.body(null, 204)
+    })
+  })
+
+  router.delete('/api/teams/:teamId/projects/:projectId/time-budget/periods/:periodFrom/:periodTo', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
+      const projectId = readRequiredString(context.req.param('projectId'), 'Project ID')
+      await dependencies.verifyProject(principal, teamId, projectId, 'manager')
+      await dependencies.getTimeTracking().deleteBudgetPeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        scopeType: 'project',
+        scopeId: projectId,
+        ...readBudgetPeriodParams(context),
+        deletedBy: principal.userKey,
+      })
+      return context.body(null, 204)
+    })
+  })
+
   return router
+}
+
+/**
+ * Reads the period and expected revision of a budget per period from a delete request.
+ *
+ * @param context - Request whose path names the period and whose query names `expectedRevision`.
+ * @returns Period dates and revision.
+ */
+function readBudgetPeriodParams(context: Context): { periodFrom: string; periodTo: string; expectedRevision: number } {
+  const revision = Number(context.req.query('expectedRevision'))
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new TimeTrackingError(400, 'InvalidRevision', 'expectedRevision must be a positive integer.')
+  }
+  return {
+    periodFrom: readRequiredString(context.req.param('periodFrom'), 'Budget period start'),
+    periodTo: readRequiredString(context.req.param('periodTo'), 'Budget period end'),
+    expectedRevision: revision,
+  }
 }
 
 /** A week-wide timesheet lifecycle operation over one period. */

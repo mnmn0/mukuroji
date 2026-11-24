@@ -1,3 +1,4 @@
+import type { TimeTrackingSummary } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
@@ -7,6 +8,7 @@ import {
   timeReportFixtureBudgetSummary,
   timeReportFixtureManagerSummary,
   timeReportFixtureMemberSummary,
+  timeReportFixturePeriodBudgetSummary,
   timeReportFixtureProjects,
   timeReportFixtureRange,
 } from '../reportFixtures'
@@ -25,8 +27,10 @@ function TimeReportView(props: TimeReportProps & {
   showBudget: boolean
   /** First month of the Workspace fiscal year offered to the budget editor. */
   fiscalYearStartMonth?: number
+  /** Budget report shown in the panel; the Team budget fixture when absent. */
+  budgetSummary?: TimeTrackingSummary
 }) {
-  const { fiscalYearStartMonth, showBudget, ...reportProps } = props
+  const { budgetSummary, fiscalYearStartMonth, showBudget, ...reportProps } = props
   return (
     <div className="grid min-w-0 gap-6">
       <TimeReport {...reportProps} />
@@ -36,12 +40,13 @@ function TimeReportView(props: TimeReportProps & {
           fiscalYearStartMonth={fiscalYearStartMonth}
           locale={reportProps.locale}
           onChangeScope={fn()}
+          onDeletePeriod={fn(async () => undefined)}
           onRetry={fn()}
           onSave={fn(async () => undefined)}
           onUseBudgetPeriod={fn()}
           projects={timeReportFixtureProjects}
           scope={{ scopeType: 'team' }}
-          summary={timeReportFixtureBudgetSummary}
+          summary={budgetSummary ?? timeReportFixtureBudgetSummary}
           t={reportProps.t}
         />
       ) : null}
@@ -71,6 +76,7 @@ function BudgetRevisionConflictView(props: Pick<TimeReportProps, 'locale' | 't'>
       fiscalYearStartMonth={4}
       locale={props.locale}
       onChangeScope={fn()}
+      onDeletePeriod={fn(async () => undefined)}
       onRetry={fn()}
       onSave={save}
       onUseBudgetPeriod={fn()}
@@ -159,6 +165,35 @@ export const BudgetPeriodAfterRevisionConflict: Story = {
     await userEvent.click(canvas.getByRole('button', { name: '予算を保存' }))
     await expect(await canvas.findByLabelText('期間の開始日（任意）')).toHaveValue('2026-10-01')
     await expect(canvas.getByLabelText('期間の終了日（任意）')).toHaveValue('2027-03-31')
+  },
+}
+
+/**
+ * The report period has its own budget, so the panel compares with it, lists the Team's budgets
+ * per period, and asks once more before deleting one.
+ */
+export const PeriodBudgets: Story = {
+  args: { budgetSummary: timeReportFixturePeriodBudgetSummary },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('time-budget-period-badge')).toBeVisible()
+    await expect(canvas.getAllByTestId('time-budget-period-row')).toHaveLength(2)
+    const [, december] = canvas.getAllByTestId('time-budget-period-row')
+    if (!december) throw new Error('The December budget row is missing.')
+    await userEvent.click(within(december).getByRole('button', { name: '削除' }))
+    await expect(within(december).getByRole('button', { name: 'この期間の予算を削除' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '予算を編集' }))
+    await expect(canvas.getByLabelText('期間の開始日')).toBeDisabled()
+  },
+}
+
+/** A new budget per period starts with the report period and requires both dates. */
+export const AddPeriodBudget: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '期間ごとの予算を追加' }))
+    await expect(canvas.getByLabelText('期間の開始日')).toHaveValue(timeReportFixtureBudgetSummary.from)
+    await expect(canvas.getByLabelText('期間の終了日')).toBeRequired()
   },
 }
 

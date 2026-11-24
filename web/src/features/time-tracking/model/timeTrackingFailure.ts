@@ -10,6 +10,10 @@ export type TimeTrackingFailureKind =
   | 'overlap'
   /** The Team rejects time that takes a day past its daily limit. */
   | 'dailyLimit'
+  /** A budget per period overlaps another budget per period of the same scope. */
+  | 'budgetPeriodOverlap'
+  /** The scope already has as many budgets per period as it may hold. */
+  | 'budgetPeriodLimit'
   /** The member lacks the permission. */
   | 'forbidden'
   /** The API rejected the input. */
@@ -42,6 +46,8 @@ export function classifyTimeTrackingFailure(error: unknown): TimeTrackingFailure
   if (status === 409 && code === 'TimePeriodClosed') return 'closed'
   if (status === 409 && code === 'TimeEntryOverlap') return 'overlap'
   if (status === 409 && code === 'TimeEntryDailyLimitExceeded') return 'dailyLimit'
+  if (status === 409 && code === 'TimeBudgetPeriodOverlap') return 'budgetPeriodOverlap'
+  if (status === 409 && code === 'TimeBudgetPeriodLimit') return 'budgetPeriodLimit'
   if (status === 409 && code !== 'TimeTrackingMutationInProgress') return 'conflict'
   if (status === 401 || status === 403) return 'forbidden'
   if (status === 400 || status === 404 || status === 422) return 'invalid'

@@ -110,6 +110,8 @@ const ENTRY_PREFIX = 'TIME_ENTRY#'
 const HISTORY_PREFIX = 'TIME_HISTORY#'
 const TIMER_PREFIX = 'TIME_TIMER#'
 const BUDGET_PREFIX = 'TIME_BUDGET#'
+/** Budgets per period one Team or Project may have (ADR 0077). */
+const MAX_BUDGET_PERIODS = 40
 const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
 const ENTRY_POLICY_PREFIX = 'TIME_POLICY#'
 const RATE_CARD_PREFIX = 'TIME_RATE_CARD#'
@@ -494,12 +496,45 @@ export type SaveTimeBudgetInput = {
   periodFrom?: string
   /** Inclusive local period end. */
   periodTo?: string
+  /**
+   * Whether this saves the scope's budget for exactly `periodFrom`–`periodTo` (ADR 0077) rather
+   * than its default budget. Both dates are then required.
+   */
+  periodBudget?: boolean
   /** Expected budget revision, or zero for a new budget. */
   expectedRevision: number
   /** Actor changing the budget. */
   updatedBy: string
   /** Optional client key used to make audit writes idempotent across retries. */
   idempotencyKey?: string
+}
+
+/** A request to delete one of a scope's budgets per period. */
+export type DeleteTimeBudgetPeriodInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team that owns the scope. */
+  teamId: string
+  /** Budget scope. */
+  scopeType: 'team' | 'project'
+  /** Team or Project identifier. */
+  scopeId: string
+  /** Inclusive local period start of the budget. */
+  periodFrom: string
+  /** Inclusive local period end of the budget. */
+  periodTo: string
+  /** Revision of the budget the caller read. */
+  expectedRevision: number
+  /** Actor deleting the budget. */
+  deletedBy: string
+}
+
+/** Inclusive local dates of one budget period. */
+export type TimeBudgetPeriod = {
+  /** Inclusive local period start. */
+  from: string
+  /** Inclusive local period end. */
+  to: string
 }
 
 /** One month whose close state an entry write relied on. */
@@ -793,9 +828,22 @@ export interface TimeTrackingRepository {
    * Project IDs are unique only within their Team, so a Project budget is read by the Team and
    * Project pair.
    */
-  getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
-  /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
+  getBudget(
+    workspaceId: string,
+    teamId: string,
+    scopeType: 'team' | 'project',
+    scopeId: string,
+    period?: TimeBudgetPeriod,
+  ): Promise<TimeBudget | undefined>
+  /** Lists a scope's budgets per period in period order (ADR 0077). */
+  listBudgetPeriods(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget[]>
+  /**
+   * Saves a Team or Project budget with optimistic concurrency and optional audit. A budget with
+   * `periodBudget` is stored as the scope's budget for its period.
+   */
   saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  /** Deletes one of a scope's budgets per period while it is still at the read revision. */
+  deleteBudgetPeriod(budget: TimeBudget, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team's rate card. */
   getRateCard(workspaceId: string, teamId: string): Promise<TimeRateCard | undefined>
   /** Saves a Team's rate card with optimistic concurrency and optional audit. */
@@ -1568,7 +1616,20 @@ export class TimeTrackingService {
     if (input.periodFrom && input.periodTo && input.periodFrom > input.periodTo) {
       throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
     }
-    const current = await this.repository.getBudget(workspaceId, resolvedTeamId, input.scopeType, scopeId)
+    const period = input.periodBudget ? readBudgetPeriod(input.periodFrom, input.periodTo) : undefined
+    if (period) {
+      // Overlap is checked against the periods read now; two concurrent saves of overlapping
+      // periods can both pass, which only adds a row the editor shows and the owner can delete.
+      const others = (await this.repository.listBudgetPeriods(workspaceId, resolvedTeamId, input.scopeType, scopeId))
+        .filter((budget) => budget.periodFrom !== period.from || budget.periodTo !== period.to)
+      if (others.some((budget) => (budget.periodFrom ?? '') <= period.to && period.from <= (budget.periodTo ?? ''))) {
+        throw new TimeTrackingError(409, 'TimeBudgetPeriodOverlap', 'The budget period overlaps another budget period of the same scope.')
+      }
+      if (expectedRevision === 0 && others.length >= MAX_BUDGET_PERIODS) {
+        throw new TimeTrackingError(409, 'TimeBudgetPeriodLimit', `A scope can have at most ${MAX_BUDGET_PERIODS} budget periods.`)
+      }
+    }
+    const current = await this.repository.getBudget(workspaceId, resolvedTeamId, input.scopeType, scopeId, period)
     if (current && current.revision !== expectedRevision) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
@@ -1585,6 +1646,7 @@ export class TimeTrackingService {
       currency,
       ...(input.periodFrom ? { periodFrom: input.periodFrom } : {}),
       ...(input.periodTo ? { periodTo: input.periodTo } : {}),
+      ...(period ? { periodBudget: true } : {}),
       revision: expectedRevision + 1,
       updatedAt: readNow(this.now).toISOString(),
     }
@@ -1594,18 +1656,19 @@ export class TimeTrackingService {
       actorUserId: input.updatedBy,
       eventType: 'time-budget.updated',
       entityType: 'time-budget',
-      entityId: `${input.scopeType}:${scopeId}`,
+      entityId: budgetAuditEntityId(budget),
       action: 'updated',
       idempotencyKey: input.idempotencyKey ?? this.createId(),
       requestBody: {
         action: 'budget.updated',
         scopeType: input.scopeType,
         scopeId,
+        ...(period ? { periodFrom: period.from, periodTo: period.to } : {}),
         revision: budget.revision,
       },
       before: current ? toAuditBudgetSnapshot(current) : undefined,
       after: toAuditBudgetSnapshot(budget),
-      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'revision'],
+      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'revision'],
       redactFields: ['amountMinor'],
       metadata: {
         scopeType: input.scopeType,
@@ -1625,6 +1688,58 @@ export class TimeTrackingService {
       idempotencyPut,
     )
     return budget
+  }
+
+  /**
+   * Deletes one of a scope's budgets per period, at the revision the caller read.
+   *
+   * @param input - Scope, period, revision, and deleting manager.
+   * @throws TimeTrackingError 404 when the scope has no budget for the period, 409 on a stale revision.
+   */
+  async deleteBudgetPeriod(input: DeleteTimeBudgetPeriodInput): Promise<void> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const scopeId = readIdentifier(input.scopeId, 'Budget scope ID')
+    const period = readBudgetPeriod(input.periodFrom, input.periodTo)
+    const expectedRevision = requireInteger(input.expectedRevision, 'Budget revision', 1, Number.MAX_SAFE_INTEGER)
+    const current = await this.repository.getBudget(workspaceId, teamId, input.scopeType, scopeId, period)
+    if (!current) throw new TimeTrackingError(404, 'TimeBudgetNotFound', 'The scope has no budget for that period.')
+    if (current.revision !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
+    }
+    const deletedAt = readNow(this.now).toISOString()
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId: input.deletedBy,
+      eventType: 'time-budget.deleted',
+      entityType: 'time-budget',
+      entityId: budgetAuditEntityId(current),
+      action: 'deleted',
+      idempotencyKey: this.createId(),
+      requestBody: {
+        action: 'budget.deleted',
+        scopeType: input.scopeType,
+        scopeId,
+        periodFrom: period.from,
+        periodTo: period.to,
+        revision: current.revision,
+      },
+      before: toAuditBudgetSnapshot(current),
+      after: undefined,
+      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'periodBudget', 'revision'],
+      redactFields: ['amountMinor'],
+      metadata: {
+        scopeType: input.scopeType,
+        scopeId,
+        ...(input.scopeType === 'team' ? { teamId: scopeId } : { projectId: scopeId }),
+      },
+      path: input.scopeType === 'team'
+        ? `/api/teams/${scopeId}/time-budget/periods/${period.from}/${period.to}`
+        : `/api/teams/${teamId}/projects/${scopeId}/time-budget/periods/${period.from}/${period.to}`,
+      occurredAt: deletedAt,
+    })
+    await this.repository.deleteBudgetPeriod(current, auditPut)
   }
 
   /**
@@ -2168,11 +2283,17 @@ export class TimeTrackingService {
       input.managedProjectIds === undefined ||
       (input.budgetScopeId !== undefined && input.managedProjectIds.has(input.budgetScopeId))
     )
+    const budgetScope: { scopeType: 'team' | 'project'; scopeId: string } = input.budgetScope === 'project' && input.budgetScopeId
+      ? { scopeType: 'project', scopeId: input.budgetScopeId }
+      : { scopeType: 'team', scopeId: input.teamId }
+    const budgetPeriods = includeBudget
+      ? await this.repository.listBudgetPeriods(input.workspaceId, input.teamId, budgetScope.scopeType, budgetScope.scopeId)
+      : undefined
+    // A budget for exactly the report period is the one to compare; otherwise the default budget.
+    const periodBudget = budgetPeriods?.find((candidate) => candidate.periodFrom === input.from && candidate.periodTo === input.to)
     const budget = !includeBudget
       ? undefined
-      : input.budgetScope === 'project' && input.budgetScopeId
-        ? await this.repository.getBudget(input.workspaceId, input.teamId, 'project', input.budgetScopeId)
-        : await this.repository.getBudget(input.workspaceId, input.teamId, 'team', input.teamId)
+      : periodBudget ?? await this.repository.getBudget(input.workspaceId, input.teamId, budgetScope.scopeType, budgetScope.scopeId)
     const totalEstimateMinutes = [...new Set(entries.flatMap((entry) => entry.workItemId === undefined ? [] : [entry.workItemId]))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
@@ -2192,6 +2313,7 @@ export class TimeTrackingService {
         ? { totalActualCostMinor: Object.values(totalActualCostByCurrency)[0] }
         : {}),
       ...(budget ? { budget } : {}),
+      ...(budgetPeriods && budgetPeriods.length > 0 ? { budgetPeriods } : {}),
       costsRedacted: !input.includeCosts,
       canManageTeam: input.viewer?.canManage ?? true,
     }
@@ -2737,9 +2859,27 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Reads a budget. */
-  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
-    const budget = this.budgets.get(budgetKey(workspaceId, teamId, scopeType, scopeId))
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string, period?: TimeBudgetPeriod) {
+    const budget = this.budgets.get(budgetKey(workspaceId, teamId, scopeType, scopeId, period))
     return budget ? clone(budget) : undefined
+  }
+
+  /** Lists a scope's budgets per period in period order. */
+  async listBudgetPeriods(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
+    const prefix = budgetPeriodKeyPrefix(budgetKey(workspaceId, teamId, scopeType, scopeId))
+    return [...this.budgets.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([, budget]) => clone(budget))
+  }
+
+  /** Deletes a budget per period at its read revision. */
+  async deleteBudgetPeriod(budget: TimeBudget, _auditPut?: AuditTransactWriteItem) {
+    const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget))
+    if (this.budgets.get(key)?.revision !== budget.revision) {
+      throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
+    }
+    this.budgets.delete(key)
   }
 
   /** Saves a budget. */
@@ -2749,7 +2889,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
   ) {
-    const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId)
+    const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget))
     const current = this.budgets.get(key)
     if ((current?.revision ?? 0) !== expectedRevision) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     this.budgets.set(key, clone(budget))
@@ -3106,14 +3246,66 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     }
   }
 
-  /** Reads a Team or Project budget. */
-  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
+  /** Reads a Team or Project budget, or its budget for one period. */
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string, period?: TimeBudgetPeriod) {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
-      Key: { workspaceId, recordKey: budgetRecordKey(teamId, scopeType, scopeId) },
+      Key: { workspaceId, recordKey: budgetRecordKey(teamId, scopeType, scopeId, period) },
       ConsistentRead: true,
     }))
     return response.Item ? readStoredBudget(response.Item) : undefined
+  }
+
+  /** Lists a scope's budgets per period with one prefix query, in period order. */
+  async listBudgetPeriods(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
+    const budgets: TimeBudget[] = []
+    let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey']
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': budgetPeriodKeyPrefix(budgetRecordKey(teamId, scopeType, scopeId)),
+        },
+        ConsistentRead: true,
+        ScanIndexForward: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const budget = readStoredBudget(item)
+        // An ID that contains `#` could share the prefix of another scope, so the row must name this one.
+        if (budget.periodBudget && budget.teamId === teamId && budget.scopeType === scopeType && budget.scopeId === scopeId) {
+          budgets.push(budget)
+        }
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return budgets
+  }
+
+  /** Deletes a budget per period while it is at the read revision, with its audit event. */
+  async deleteBudgetPeriod(budget: TimeBudget, auditPut?: AuditTransactWriteItem) {
+    const deletion = {
+      Delete: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: budget.workspaceId,
+          recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget)),
+        },
+        ConditionExpression: 'revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': budget.revision },
+      },
+    }
+    try {
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [deletion, auditPut] }))
+      } else {
+        await this.documentClient.send(new DeleteCommand(deletion.Delete))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
+    }
   }
 
   /** Saves a budget with optimistic concurrency. */
@@ -3127,7 +3319,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       const put = {
         Put: {
           TableName: this.tableName,
-          Item: { ...budget, recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId) },
+          Item: { ...budget, recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget)) },
           ...(expectedRevision === 0
             ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
             : {
@@ -3951,6 +4143,33 @@ function toAuditTimerSnapshot(timer: RunningTimer): Record<string, unknown> {
   }
 }
 
+/**
+ * Builds the audit entity ID of a budget; a budget per period adds its dates.
+ *
+ * @param budget - Audited budget.
+ * @returns The entity ID.
+ */
+function budgetAuditEntityId(budget: TimeBudget): string {
+  const period = budgetStoragePeriod(budget)
+  return period ? `${budget.scopeType}:${budget.scopeId}:${period.from}:${period.to}` : `${budget.scopeType}:${budget.scopeId}`
+}
+
+/**
+ * Reads the dates of a budget per period, which must both be set and ordered.
+ *
+ * @param from - Inclusive local period start.
+ * @param to - Inclusive local period end.
+ * @returns The period.
+ * @throws TimeTrackingError 400 when a date is missing, malformed, or after the other.
+ */
+function readBudgetPeriod(from: string | undefined, to: string | undefined): TimeBudgetPeriod {
+  if (!from || !to) throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'A budget per period needs both period dates.')
+  validateOptionalDate(from, 'Budget period start')
+  validateOptionalDate(to, 'Budget period end')
+  if (from > to) throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
+  return { from, to }
+}
+
 /** Creates a budget snapshot with the amount available for field-level redaction. */
 function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
   return {
@@ -3960,6 +4179,7 @@ function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
     currency: budget.currency,
     ...(budget.periodFrom ? { periodFrom: budget.periodFrom } : {}),
     ...(budget.periodTo ? { periodTo: budget.periodTo } : {}),
+    ...(budget.periodBudget ? { periodBudget: true } : {}),
     revision: budget.revision,
   }
 }
@@ -4554,6 +4774,7 @@ function readStoredBudget(value: unknown): TimeBudget {
     currency: readString(record.currency, 'Stored budget currency'),
     ...(readOptionalString(record.periodFrom) ? { periodFrom: readOptionalString(record.periodFrom) } : {}),
     ...(readOptionalString(record.periodTo) ? { periodTo: readOptionalString(record.periodTo) } : {}),
+    ...(record.periodBudget === true ? { periodBudget: true } : {}),
     revision: readNumber(record.revision, 'Stored budget revision'),
     updatedAt: readString(record.updatedAt, 'Stored budget timestamp'),
   }
@@ -4772,8 +4993,14 @@ function timerKey(workspaceId: string, userId: string): string {
 }
 
 /** Builds the in-memory key of a budget from its Team-qualified scope. */
-function budgetKey(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
-  return `${workspaceId}\0${budgetRecordKey(teamId, scopeType, scopeId)}`
+function budgetKey(
+  workspaceId: string,
+  teamId: string,
+  scopeType: 'team' | 'project',
+  scopeId: string,
+  period?: TimeBudgetPeriod,
+): string {
+  return `${workspaceId}\0${budgetRecordKey(teamId, scopeType, scopeId, period)}`
 }
 
 /**
@@ -4782,15 +5009,42 @@ function budgetKey(workspaceId: string, teamId: string, scopeType: 'team' | 'pro
  * A Team budget is keyed by its Team. A Project budget is keyed by the Team and the Project,
  * because Project IDs are unique only within their Team.
  *
+ * A budget per period adds `#PERIOD#<from>#<to>` to the scope's key (ADR 0077), so the scope's
+ * periods are read with one prefix query.
+ *
  * @param teamId - Team that owns the scope.
  * @param scopeType - Budget scope.
  * @param scopeId - Team or Project identifier.
+ * @param period - Period of a budget per period; absent for the scope's default budget.
  * @returns The sort key.
  */
-function budgetRecordKey(teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
-  return scopeType === 'team'
+function budgetRecordKey(teamId: string, scopeType: 'team' | 'project', scopeId: string, period?: TimeBudgetPeriod): string {
+  const scopeKey = scopeType === 'team'
     ? `${BUDGET_PREFIX}team#${scopeId}`
     : `${BUDGET_PREFIX}project#${teamId}#${scopeId}`
+  return period ? `${budgetPeriodKeyPrefix(scopeKey)}${period.from}#${period.to}` : scopeKey
+}
+
+/**
+ * Builds the key prefix of a scope's budgets per period.
+ *
+ * @param scopeKey - Sort key of the scope's default budget.
+ * @returns The prefix every budget per period of the scope starts with.
+ */
+function budgetPeriodKeyPrefix(scopeKey: string): string {
+  return `${scopeKey}#PERIOD#`
+}
+
+/**
+ * Returns the period a budget per period is stored under.
+ *
+ * @param budget - Budget to key.
+ * @returns The period, or undefined for a default budget.
+ */
+function budgetStoragePeriod(budget: TimeBudget): TimeBudgetPeriod | undefined {
+  return budget.periodBudget && budget.periodFrom && budget.periodTo
+    ? { from: budget.periodFrom, to: budget.periodTo }
+    : undefined
 }
 
 /** Builds the DynamoDB sort key of a month close. */

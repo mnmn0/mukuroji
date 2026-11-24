@@ -50,6 +50,7 @@ describe('budget periods by fiscal year', () => {
         fiscalYearStartMonth={fiscalYearStartMonth}
         locale="ja"
         onChangeScope={noop}
+        onDeletePeriod={async () => undefined}
         onRetry={noop}
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
