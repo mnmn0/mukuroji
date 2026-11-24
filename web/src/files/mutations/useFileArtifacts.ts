@@ -106,6 +106,10 @@ export type FileUploadOptions = {
    * 認証済み guest にも file read を許可するかどうかです。
    */
   guestAccess?: boolean
+  /**
+   * Called once per file after its upload is completed, with the stored file and version.
+   */
+  onUploaded?: (file: FileAttachment, version: FileVersion) => void
 }
 
 /**
@@ -116,6 +120,11 @@ export type FileArtifactsController = {
    * 現在の resource scope です。
    */
   scope?: FileArtifactScope
+  /**
+   * Identifies the signed-in session the controller reads as. Caches of per-viewer results,
+   * such as short-lived file URLs, include it so a different account never reuses them.
+   */
+  viewerCacheKey?: string
   /**
    * scope に添付された file 一覧です。
    */
@@ -328,7 +337,7 @@ export function useFileArtifacts({
         hasCreatedUploadSession = true
 
         await putPresignedFile(session.upload, selectedFile)
-        await runMutation(
+        const completed = await runMutation(
           operationToken,
           `file:upload-complete:${scopeKey}:${session.file.id}:${session.version.id}`,
           JSON.stringify([session.file.id, session.version.id]),
@@ -350,6 +359,7 @@ export function useFileArtifacts({
                 context,
               ),
         )
+        options.onUploaded?.(completed.file, completed.version)
       }
 
       return true
@@ -612,7 +622,9 @@ export function useFileArtifacts({
     sessionErrors: [error, currentMutationError],
     scope,
     uploadFiles,
+    viewerCacheKey: accessToken,
   }), [
+    accessToken,
     addAnnotation,
     approvals,
     cancelApproval,

@@ -57,7 +57,13 @@ export function ProjectOverviewPage() {
   const project = team?.projects.find((candidate) => candidate.id === projectId)
   const canRead = workspace.canLoadWorkspaceData && Boolean(team && project)
   const workItems = useProjectIssues(workspace.accessToken, projectId, canRead)
-  const planning = usePlanningSnapshot(workspace.accessToken, canRead)
+  // The overview reads the Project's Team, not the whole Workspace graph: the blocked count needs
+  // the status of blockers in the Team's other Projects too.
+  const planningScope = useMemo(
+    () => team ? { type: 'team' as const, teamId: team.id } : undefined,
+    [team],
+  )
+  const planning = usePlanningSnapshot(workspace.accessToken, canRead, planningScope)
   const members = useProjectMembers(workspace.accessToken, projectId, canRead, team?.id)
   const raidLog = useProjectRaidLog(workspace.accessToken, team?.id, projectId ?? '', canRead && Boolean(projectId))
   const documentBacklinks = useDocumentBacklinks(

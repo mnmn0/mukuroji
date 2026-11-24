@@ -43,6 +43,16 @@ export type CapacityPlanningVisibility = {
   canViewConfidential: boolean
 }
 
+/** A Team the principal may view, with the permission checked for it. */
+export type CapacityPlanningViewableTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** Viewer permission already checked for the Team. */
+  permission: CapacityPlanningTeamPermission
+}
+
 /** Dependencies injected into the capacity planning HTTP adapter. */
 export type CapacityPlanningRouterDependencies<Principal extends CapacityPlanningPrincipal> = {
   /** Reads the bearer token from a request. */
@@ -51,6 +61,11 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
   authenticate(accessToken: string, context: Context): Promise<Principal>
   /** Verifies Team access for the requested operation. */
   requireTeamPermission(principal: Principal, teamId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<CapacityPlanningTeamPermission>
+  /**
+   * Lists the Teams whose workload the principal may view, with each Team's checked permission,
+   * for the Workspace-wide workload read. Teams the principal cannot view are left out.
+   */
+  listWorkloadTeams(principal: Principal): Promise<CapacityPlanningViewableTeam[]>
   /** Resolves all workload visibility from the permission already checked by `withTeam`. */
   getWorkloadVisibility(principal: Principal, teamId: string, permission: CapacityPlanningTeamPermission): Promise<CapacityPlanningVisibility>
   /** Verifies that a member belongs to the authorized Team scope. */
@@ -68,6 +83,11 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
    * is used when omitted.
    */
   readWorkspaceCalendar?(principal: Principal): Promise<WorkItemScheduleCalendarPolicy>
+  /**
+   * Lists the Workspace Teams that are not archived, whatever the caller may view, so archived
+   * Teams' records stay out of Workspace-wide totals; every stored Team counts when omitted.
+   */
+  listActiveTeamIds?(principal: Principal): Promise<ReadonlySet<string>>
   /** Reads the day the Workspace week starts on; weekly buckets start on Monday when omitted. */
   readWeekStartDay?(principal: Principal): Promise<WorkspaceWeekStartDay>
   /** Safely parses a JSON request body. */
@@ -99,6 +119,38 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
+        ...await readWeekStartDayInput(principal, dependencies),
+      })
+      return context.json(snapshot)
+    })
+  })
+
+  router.get('/api/workload', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      const fromDate = readRequiredQuery(context, 'from')
+      const toDate = readRequiredQuery(context, 'to')
+      const granularity = readGranularity(context.req.query('granularity'))
+      const teams = await dependencies.listWorkloadTeams(principal)
+      const visibilities = await Promise.all(teams.map(async (team) => {
+        const visibility = await dependencies.getWorkloadVisibility(principal, team.teamId, team.permission)
+        return {
+          teamId: team.teamId,
+          name: team.name,
+          ...(visibility.visibleMemberIds ? { visibleMemberIds: visibility.visibleMemberIds } : {}),
+          ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
+          canViewConfidential: visibility.canViewConfidential,
+        }
+      }))
+      const snapshot = await dependencies.getCapacityPlanning().getWorkspaceSnapshot({
+        workspaceId: principal.directoryId,
+        fromDate,
+        toDate,
+        granularity,
+        viewerMemberId: principal.userKey,
+        teams: visibilities,
+        ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
         ...await readWeekStartDayInput(principal, dependencies),
       })
       return context.json(snapshot)
@@ -316,6 +368,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
         canViewConfidential: visibility.canViewConfidential,
         ...await readWorkspaceCalendarInput(principal, dependencies),
+        ...await readActiveTeamIdsInput(principal, dependencies),
         ...await readWeekStartDayInput(principal, dependencies),
       })
       return context.json(result)
@@ -323,6 +376,20 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   return router
+}
+
+/**
+ * Reads the Teams that are not archived as optional snapshot input.
+ *
+ * @param principal - Authenticated caller.
+ * @param dependencies - Router dependencies.
+ * @returns `activeTeamIds` when the dependency is configured, otherwise nothing.
+ */
+async function readActiveTeamIdsInput<Principal extends CapacityPlanningPrincipal>(
+  principal: Principal,
+  dependencies: CapacityPlanningRouterDependencies<Principal>,
+): Promise<{ activeTeamIds?: ReadonlySet<string> }> {
+  return dependencies.listActiveTeamIds ? { activeTeamIds: await dependencies.listActiveTeamIds(principal) } : {}
 }
 
 /**
