@@ -100,9 +100,9 @@ Requester 向けの read / reply は、保存された `requesterUserId` と認�
 submission だけを返し、他人の submission は存在しないものと同じ `404` にする。Response は
 form title、状況、受付番号、requester thread（staff message と requester reply だけ）に限り、
 回答、routing、triage owner、event summary（却下理由など）、重複先を含めない。Reply は
-thread link と同じ rate limit と冪等 receipt を共有する。
+thread link と同じ rate limit と冪等 receipt を共有し、Enterprise の権限は自分の設定と同じ self-service（`workspace.read`）として扱う。
 
-Work Item は requester が現在 viewer として読める場合だけ key・title・status category を返し、
+Work Item は requester が現在その Team / Project の viewer で、かつ `work-items.read` を持つ場合だけ key・title・status category を返し、
 読めない場合は `restricted` として完了したかどうかだけを返す。
 
 追加情報の依頼、見送り、重複、受付（Work Item 作成または既存 Work Item への link）、作成した

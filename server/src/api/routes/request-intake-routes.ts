@@ -49,7 +49,12 @@ import {
   type TriageRouterBulkActionRequest,
   type TriageRouterActionRequest,
 } from '../../modules/triage'
-import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import {
+  ambientAutomationActionExecutorDependencies,
+  workItemDependencies,
+  workspaceDependencies,
+} from '../shared/app-dependencies'
+import { canMemberViewWorkItemScope } from '../shared/member-work-item-visibility'
 import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from '../shared/constants'
 import { requireTriageTeamAccess } from '../shared/customer-access'
 import { projectWorkItemSearchDocumentBestEffort } from '../shared/document-access'
@@ -173,6 +178,11 @@ async function readMyRequestWorkItem(
       'viewer',
       { consistentIssueRead: false, includeEvents: false },
     )
+    // "My requests" is authorized as a Workspace read, so Work Item read is checked here at the
+    // Work Item's current Team and Project, as the Work Item routes require it.
+    if (!await canRequesterReadWorkItem(principal, detail.issue.teamId, detail.issue.assignedProjectId)) {
+      return { visibility: 'restricted', completed }
+    }
     return {
       visibility: 'visible',
       teamId: detail.issue.teamId,
@@ -191,6 +201,34 @@ async function readMyRequestWorkItem(
     }
     throw error
   }
+}
+
+/**
+ * Reports whether the requester holds Work Item read at a Work Item's Team and Project.
+ *
+ * @param principal - Authenticated requester.
+ * @param teamId - Team that owns the Work Item.
+ * @param assignedProjectId - Project the Work Item is assigned to, if any.
+ * @returns Whether the requester may read the Work Item's content.
+ */
+async function canRequesterReadWorkItem(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  assignedProjectId: string | undefined,
+): Promise<boolean> {
+  const dependencies = ambientAutomationActionExecutorDependencies
+  const member = await dependencies.workspaceAccess.getActiveMember(principal.directoryId, principal.userKey)
+  if (!member) return false
+  return await canMemberViewWorkItemScope(
+    member,
+    {
+      workspaceId: principal.directoryId,
+      teamId,
+      ...(assignedProjectId ? { assignedProjectId } : {}),
+      permissions: ['work-items.read'],
+    },
+    dependencies,
+  )
 }
 
 function createRequestExternalContext(c: Context): RequestExternalContext {

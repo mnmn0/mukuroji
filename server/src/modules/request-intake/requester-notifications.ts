@@ -129,11 +129,13 @@ export function createMyRequestDeepLink(submissionId: string): string {
  * Normalizes the stored requester member key.
  *
  * @param value - Stored requester value, which may be absent for anonymous requests.
- * @returns The lower-case member key, or undefined when it is absent or unsafe.
+ * @returns The lower-case member key, or undefined when it is absent or holds whitespace or
+ *   control characters.
  */
 function readRequesterMemberKey(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase()
-  return normalized && normalized.length <= 320 && /^[a-z0-9][a-z0-9._:@+-]*$/u.test(normalized)
+  // Member keys are stored as normalized emails, which may hold any printable character.
+  return normalized && normalized.length <= 320 && /^[^\s\p{Cc}]+$/u.test(normalized)
     ? normalized
     : undefined
 }
