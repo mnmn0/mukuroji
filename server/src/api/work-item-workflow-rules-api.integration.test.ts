@@ -9,6 +9,7 @@ import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicWorkItemService } from './api-router'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 import { WorkflowRuleError } from '../modules/work-items'
+import { toPublicWorkflowRuleError } from './routes/public-api-routes'
 
 const {
   app,
@@ -244,4 +245,26 @@ test('rejects creating a Work Item in a restricted status even when the creator 
 
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'WorkflowTransitionActorDenied' })
+})
+
+test('maps workflow rule rejections to Public API problems with one pointer per unmet rule', () => {
+  const denied = toPublicWorkflowRuleError(new WorkflowRuleError([
+    { rule: 'transition-actor', allowedActorRoles: ['project-manager'], message: 'Only a manager may move it.' },
+    { rule: 'required-field', field: 'due-date', message: 'Set a due date.' },
+  ]))
+  expect(denied).toMatchObject({ status: 403, code: 'forbidden', retryable: false })
+  expect(denied.violations?.map(({ pointer, code }) => ({ pointer, code }))).toEqual([
+    { pointer: '/workflowStatusId', code: 'transition_actor_denied' },
+    { pointer: '/schedule', code: 'status_field_required' },
+  ])
+
+  const missing = toPublicWorkflowRuleError(new WorkflowRuleError([
+    { rule: 'required-field', field: 'acceptance-criteria', message: 'Add acceptance criteria.' },
+    { rule: 'required-custom-field', customFieldId: 'review-note', message: 'Fill Review note.' },
+  ]))
+  expect(missing).toMatchObject({ status: 409, code: 'conflict', retryable: false })
+  expect(missing.violations?.map(({ pointer, code }) => ({ pointer, code }))).toEqual([
+    { pointer: '/acceptanceCriteria', code: 'status_field_required' },
+    { pointer: '/customFieldValues/review-note', code: 'status_field_required' },
+  ])
 })
