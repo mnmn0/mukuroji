@@ -118,6 +118,7 @@ import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken, readJson, toTenantLifecycleBoundaryError } from '../shared/http'
 import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
 import {
+  createPlanningDependencyAuditTransaction,
   createPlanningEntityAuditTransaction,
   PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
   readPlanningEntityAuditScopes,
@@ -4577,7 +4578,16 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           'manager',
         ),
       ])
-      const response = await workItemDependencies.planning.createDependency(principal.directoryId, input, workItemState)
+      const response = await workItemDependencies.planning.createDependency(
+        principal.directoryId,
+        input,
+        workItemState,
+        createPlanningDependencyAuditTransaction(
+          principal.directoryId,
+          createApiMutationContext(c, principal, input),
+          principal.userKey,
+        ),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
@@ -4622,6 +4632,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         dependencyId,
         input,
         workItemState,
+        createPlanningDependencyAuditTransaction(
+          principal.directoryId,
+          createApiMutationContext(c, principal, { dependencyId, ...input }),
+          principal.userKey,
+        ),
       )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
