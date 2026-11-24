@@ -42,6 +42,7 @@ import { IssueActivityTab } from './IssueActivityTab'
 import { IssueConversationTab } from './IssueConversationTab'
 import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
+import type { ProjectRiskPromotion } from '../../projects/mutations/usePromoteProjectRisk'
 
 /**
  * Feature-owned Brief slot for an optional Work Item collaboration tab.
@@ -94,6 +95,8 @@ type AiSummaryOperationPendingController = {
 export type IssueCollaborationPanelProps = {
   /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
   aiAssistance?: IssueSummaryAiAssistance
+  /** Adds a curated risk to the Work Item's Project log; absent when the Work Item has no Project. */
+  riskPromotion?: ProjectRiskPromotion
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -160,6 +163,7 @@ export function IssueCollaborationPanel({
   onCommentDraftDirtyChange,
   readOnlyMessage,
   renderCommentDetails,
+  riskPromotion,
   route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -608,6 +612,7 @@ export function IssueCollaborationPanel({
               setPromotedContextDraft(undefined)
               onContextDraftConsumed?.()
             }}
+            {...(riskPromotion ? { riskPromotion } : {})}
             onOpenSource={(item, source) => {
               const target = {
                 contextItemId: item.id,

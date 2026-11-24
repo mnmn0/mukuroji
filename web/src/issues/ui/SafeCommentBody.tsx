@@ -10,6 +10,7 @@ import {
 } from '../../files/ui/MarkdownAttachment'
 import { useMarkdownAttachmentContext } from '../../files/ui/markdownAttachmentContext'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
 /**
  * SafeCommentBody の props です。
@@ -46,11 +47,12 @@ const commentSanitizeSchema = {
 
 /**
  * raw HTML を無効にし、GFM と sanitize を通した comment 本文を描画します。
- * 本文中の Work Item key（`PT-12`）は key のページへの link にします。
+ * 本文中の Work Item key（`PT-12`）は、Workspace に存在する prefix のものだけ key のページへの link にします。
  * `attachment:<fileId>` の画像と link は、閲覧者が読める scan 済みの添付だけを表示します。
  * 外部 URL の画像は読み込みません。
  */
 export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: SafeCommentBodyProps) {
+  const prefixes = useWorkItemKeyPrefixes()
   const inheritedAttachments = useMarkdownAttachmentContext()
   const attachmentController = (attachments ?? inheritedAttachments)?.controller
   const attachmentTranslator = (attachments ?? inheritedAttachments)?.t
@@ -99,7 +101,7 @@ export function SafeCommentBody({ attachments, bodyMarkdown, className = '' }: S
       <Markdown
         components={components}
         rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
-        remarkPlugins={[remarkGfm, remarkWorkItemKeyLinks]}
+        remarkPlugins={[remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
         skipHtml
         urlTransform={sanitizeCommentUrl}
       >

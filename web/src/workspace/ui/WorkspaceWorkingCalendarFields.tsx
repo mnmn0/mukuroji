@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   WORKSPACE_CALENDAR_WEEKDAYS,
+  isWorkspaceTimeZone,
   type WorkspaceCalendarSettings,
   type WorkspaceCalendarWeekday,
 } from '@mukuroji/contracts'
@@ -36,8 +37,8 @@ export type WorkspaceWorkingCalendarFieldsProps = {
 }
 
 /**
- * Edits the weekdays the whole Workspace works on, whether national holidays are days off, and its
- * company holidays.
+ * Edits the Workspace time zone, the weekdays the whole Workspace works on, whether national
+ * holidays are days off, and its company holidays.
  *
  * New Work Items count working days with these settings, so at least one weekday always stays
  * checked and holidays stay sorted without duplicates.
@@ -52,6 +53,15 @@ export function WorkspaceWorkingCalendarFields({
   t,
 }: WorkspaceWorkingCalendarFieldsProps) {
   const [holidayDraft, setHolidayDraft] = useState('')
+  const [timeZoneDraft, setTimeZoneDraft] = useState(calendar.timeZone)
+  const [appliedTimeZone, setAppliedTimeZone] = useState(calendar.timeZone)
+  const [timeZoneOptions] = useState(listTimeZoneOptions)
+  // A calendar replaced from outside, such as after a reload, brings its own time zone.
+  if (appliedTimeZone !== calendar.timeZone) {
+    setAppliedTimeZone(calendar.timeZone)
+    setTimeZoneDraft(calendar.timeZone)
+  }
+  const timeZoneDraftValid = isWorkspaceTimeZone(timeZoneDraft.trim())
   const canAddHoliday = !disabled && canAddWorkspaceHoliday(calendar, holidayDraft)
 
   /**
@@ -74,8 +84,51 @@ export function WorkspaceWorkingCalendarFields({
     setHolidayDraft('')
   }
 
+  /**
+   * Keeps the typed time zone and applies it once it names a real time zone.
+   *
+   * @param value - Text in the time zone field.
+   */
+  function changeTimeZone(value: string) {
+    setTimeZoneDraft(value)
+    const timeZone = value.trim()
+    if (!isWorkspaceTimeZone(timeZone) || timeZone === calendar.timeZone) return
+    setAppliedTimeZone(timeZone)
+    onChange({ ...calendar, timeZone })
+  }
+
   return (
     <div className="mt-5 grid gap-5" data-testid="tenant-working-calendar">
+      <div className="grid gap-1.5">
+        <label className="text-sm font-semibold text-[var(--workbench-text)]" htmlFor="tenant-time-zone">
+          {t('workspace.tenantAdministration.timeZone')}
+        </label>
+        <input
+          aria-describedby="tenant-time-zone-hint"
+          aria-invalid={!timeZoneDraftValid}
+          autoComplete="off"
+          className="workbench-input h-10 max-w-xs px-3"
+          data-testid="tenant-time-zone"
+          disabled={disabled}
+          id="tenant-time-zone"
+          list="tenant-time-zone-options"
+          onChange={(event) => changeTimeZone(event.target.value)}
+          spellCheck={false}
+          type="text"
+          value={timeZoneDraft}
+        />
+        <datalist id="tenant-time-zone-options">
+          {timeZoneOptions.map((timeZone) => <option key={timeZone} value={timeZone} />)}
+        </datalist>
+        <p className="text-xs text-[var(--workbench-muted)]" id="tenant-time-zone-hint">
+          {t('workspace.tenantAdministration.timeZoneHint')}
+        </p>
+        {timeZoneDraftValid ? null : (
+          <p className="text-xs font-semibold text-[var(--workbench-danger)]" data-testid="tenant-time-zone-invalid" role="alert">
+            {t('workspace.tenantAdministration.timeZoneInvalid')}
+          </p>
+        )}
+      </div>
       <fieldset className="grid gap-2">
         <legend className="text-sm font-semibold text-[var(--workbench-text)]">
           {t('workspace.tenantAdministration.workingWeekdays')}
@@ -173,4 +226,20 @@ export function WorkspaceWorkingCalendarFields({
       </div>
     </div>
   )
+}
+
+/**
+ * Lists the time zone names the browser knows, for the time zone field's suggestions.
+ *
+ * @returns IANA names, or a few common ones when the browser cannot list them.
+ */
+function listTimeZoneOptions(): string[] {
+  const supportedValuesOf: unknown = Reflect.get(Intl, 'supportedValuesOf')
+  if (typeof supportedValuesOf === 'function') {
+    const values: unknown = supportedValuesOf.call(Intl, 'timeZone')
+    if (Array.isArray(values) && values.every((value) => typeof value === 'string')) {
+      return values.includes('UTC') ? values : ['UTC', ...values]
+    }
+  }
+  return ['Asia/Tokyo', 'UTC', 'America/New_York', 'Europe/London', 'Asia/Singapore']
 }

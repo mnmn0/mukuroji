@@ -1,5 +1,5 @@
 import {
-  TIME_ENTRY_CATEGORIES,
+  readTimeEntryCategoryKey,
   type RunningTimer,
   type TimeEntry,
   type TimeEntryCategory,
@@ -51,13 +51,14 @@ function isOptionalNumber(value: unknown): value is number | undefined {
 }
 
 /**
- * Checks whether a value is a known work category.
+ * Checks whether a value has the shape of a work category key. Whether the Workspace still lists
+ * it does not matter for reading an entry.
  *
  * @param value - Unknown JSON value.
- * @returns Whether the value is one of the contract's categories.
+ * @returns Whether the value is a category key.
  */
 function isTimeEntryCategory(value: unknown): value is TimeEntryCategory {
-  return TIME_ENTRY_CATEGORIES.some((category) => category === value)
+  return readTimeEntryCategoryKey(value) !== undefined
 }
 
 /**

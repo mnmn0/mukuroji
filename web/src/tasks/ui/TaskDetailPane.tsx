@@ -101,6 +101,7 @@ import {
   createDefaultUnscheduledTaskSchedule,
   resolveTaskScheduleEndDate,
   resolveTaskScheduleStartDate,
+  cloneTaskScheduleCalendarPolicy,
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
@@ -110,6 +111,7 @@ import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
 import { MarkdownDescriptionField } from '../../issues/ui/MarkdownDescriptionField'
+import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -353,6 +355,12 @@ export function TaskDetailPane({
   task,
   workspaceMembers,
 }: TaskDetailPaneProps) {
+  const riskPromotion = usePromoteProjectRisk({
+    accessToken,
+    teamId: task?.teamId,
+    projectId: task?.assignedProjectId,
+    workItemId: task?.id ?? '',
+  })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [isIssueSaving, setIsIssueSaving] = useState(false)
   const isIssueSavingRef = useRef(false)
@@ -1477,6 +1485,7 @@ export function TaskDetailPane({
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
               readOnlyMessage={collaborationReadOnlyMessage}
               renderCommentDetails={agentRunReports.renderCommentDetails}
+              {...(riskPromotion && !collaborationReadOnlyMessage ? { riskPromotion } : {})}
             />
           </fieldset>
         ) : null
@@ -1902,11 +1911,7 @@ function readDetailPlannedEffort(value: FormDataEntryValue | null): number | und
 function cloneScheduleCalendarPolicy(
   policy: WorkItemScheduleCalendarPolicy,
 ): WorkItemScheduleCalendarPolicy {
-  return {
-    holidays: [...policy.holidays],
-    timeZone: policy.timeZone,
-    workingWeekdays: [...policy.workingWeekdays],
-  }
+  return cloneTaskScheduleCalendarPolicy(policy)
 }
 
 /** Formats a project member for an assignee select option. */

@@ -4,6 +4,7 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkItemConfiguration,
   WorkItemSchedule,
+  WorkItemScheduleCalendarPolicy,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
@@ -19,6 +20,7 @@ import {
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
 import {
+  countTaskSchedulePolicyWorkingDays,
   createDefaultDateRangeTaskSchedule,
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -119,6 +121,11 @@ export type TaskCalendarViewProps = {
   /** Moves the calendar to another month. Shown as period navigation together with `month`. */
   onMonthChange?: (month: string) => void
   /**
+   * Workspace working calendar. Dates on its non-working weekdays and holidays are shaded and
+   * labeled; without it no date is shaded.
+   */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
+  /**
    * Note under the month navigation: `loaded-period` when the screen loads only the shown
    * period, `shown-month` when it loads every Work Item. `loaded-period` when omitted.
    */
@@ -175,8 +182,17 @@ export function TaskCalendarView({
   projectId,
   t,
   tasks,
+  workingCalendar,
 }: TaskCalendarViewProps) {
   const calendar = useMemo(() => createCanonicalCalendarModel(tasks, month), [month, tasks])
+  const nonWorkingDates = useMemo(
+    () => new Set(workingCalendar
+      ? calendar.days
+        .map((day) => day.date)
+        .filter((date) => countTaskSchedulePolicyWorkingDays(date, date, workingCalendar) === 0)
+      : []),
+    [calendar.days, workingCalendar],
+  )
   const weekStartDay = calendarPeriods.weekStartDay
   const calendarWeeks = useMemo(
     () => groupTaskCalendarDaysByWeek(calendar.days, weekStartDay),
@@ -436,7 +452,8 @@ export function TaskCalendarView({
             {week.days.map((day) => (
               <div
                 // A month shows every date, so empty dates stay short and the month stays scannable.
-                className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors`}
+                className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors${nonWorkingDates.has(day.date) ? ' bg-[var(--workbench-surface-muted)]' : ''}`}
+                data-non-working={nonWorkingDates.has(day.date) ? '' : undefined}
                 data-testid={`task-calendar-day-${day.date}`}
                 key={day.date}
                 onDragOver={(event) => {
@@ -451,12 +468,17 @@ export function TaskCalendarView({
                 }}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <time className="text-sm font-semibold text-fg-1c1d1f" dateTime={day.date}>
-                    {day.date}
-                    <span className="ml-1 text-xs font-medium text-fg-667085">
-                      {t(resolveTaskCalendarWeekdayKey(day.date))}
-                    </span>
-                  </time>
+                  <span className="flex min-w-0 items-center gap-2">
+                    <time className="text-sm font-semibold text-fg-1c1d1f" dateTime={day.date}>
+                      {day.date}
+                      <span className="ml-1 text-xs font-medium text-fg-667085">
+                        {t(resolveTaskCalendarWeekdayKey(day.date))}
+                      </span>
+                    </time>
+                    {nonWorkingDates.has(day.date) ? (
+                      <span className="text-[11px] font-semibold text-fg-667085">{t('tasks.calendar.nonWorking')}</span>
+                    ) : null}
+                  </span>
                   {onCreateTaskOpen ? (
                     <span className="flex items-center gap-1">
                       <button

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { isValidElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
+import { RouteErrorBoundary } from '../src/app/RouteErrorBoundary'
 import { appRoutes } from '../src/app/router'
 import { RouteErrorPage } from '../src/pages/public/RouteErrorPage'
 
@@ -21,7 +22,7 @@ describe('RouteErrorPage', () => {
   test('handles errors from every route, including pages that fail to load', () => {
     expect(appRoutes).toHaveLength(1)
     const root = appRoutes[0]
-    expect(isValidElement(root?.errorElement) && root.errorElement.type).toBe(RouteErrorPage)
+    expect(isValidElement(root?.errorElement) && root.errorElement.type).toBe(RouteErrorBoundary)
     expect(root?.hydrateFallbackElement).toBeDefined()
   })
 })

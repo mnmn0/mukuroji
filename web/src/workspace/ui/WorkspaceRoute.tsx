@@ -31,6 +31,7 @@ import {
 } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
 import { AiActivityProvider } from '../../features/ai-assistance/ui/AiActivityProvider'
+import { WorkItemKeyPrefixesProvider } from '../../issues/queries/WorkItemKeyPrefixesProvider'
 import { AiActivityLauncher } from '../../features/ai-assistance/ui/AiActivityLauncher'
 
 /** Header and sidebar metadata owned by one authenticated workspace route. */
@@ -296,6 +297,7 @@ export function WorkspaceRoute() {
 
   return (
     <AiActivityProvider fallbackFocusRef={activityFallbackFocusRef} key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
+    <WorkItemKeyPrefixesProvider accessToken={workspace.accessToken}>
     <WorkspaceSidebarProvider controller={sidebarController}>
       <WorkspaceRouteShell
         activityFallbackFocusRef={activityFallbackFocusRef}
@@ -304,6 +306,7 @@ export function WorkspaceRoute() {
         openMobileSidebar={openMobileSidebar}
       />
     </WorkspaceSidebarProvider>
+    </WorkItemKeyPrefixesProvider>
     </AiActivityProvider>
   )
 }
