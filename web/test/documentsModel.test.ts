@@ -413,14 +413,14 @@ describe('Document operation chunk saving', () => {
   test('reports each saved chunk while later chunks are still to be sent', async () => {
     const reported: Array<{ ids: string[]; revision: number }> = []
     let calls = 0
+    let reportedBeforeSecondChunk: number[] = []
     await saveDocumentOperationChunks(
       operations,
       7,
       async (revision) => {
         calls += 1
         if (calls === 2) {
-          // The first chunk is reported before the second one is sent.
-          expect(reported.map((entry) => entry.revision)).toEqual([8])
+          reportedBeforeSecondChunk = reported.map((entry) => entry.revision)
           throw new Error('session ended')
         }
         return { committedRevision: revision + 1, document: { ...documentRecordFixture, revision: revision + 1 } }
@@ -428,6 +428,8 @@ describe('Document operation chunk saving', () => {
       (chunk, result) => reported.push({ ids: chunk.map((operation) => operation.operationId), revision: result.committedRevision }),
     ).catch(() => undefined)
 
+    // The first chunk is reported before the second one is sent, and the failed one never is.
+    expect(reportedBeforeSecondChunk).toEqual([8])
     expect(reported).toEqual([{ ids: ['operation-0', 'operation-1', 'operation-2', 'operation-3'], revision: 8 }])
   })
 
