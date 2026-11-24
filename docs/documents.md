@@ -207,6 +207,11 @@ Editor 右上の「プレビュー」で編集中のページを表示どおり�
 Diagram block の `text` 形式は `A → B` の流れとして描画します。Mermaid の描画 library は同梱して
 いないため、新しい diagram では Mermaid を選べず、取り込み済みの Mermaid は source として表示します。
 
+まだないもの: 画像・file の block と Document への file 添付（file の保存・malware scan・認可は
+Team の Work Item / Project 単位の scope で作られており、Workspace 直下の Document を添付先に
+するには scope・保存 key・整合性検査の設計が別に要るため）、Work Item 一覧を埋め込む block、
+Document の watch。
+
 「共有とアクセス」のメンバー追加は、Workspace の active member を名前で選べます（member key や
 メールの直接入力もできます）。共有済みの一覧とコメントの作成者は表示名で表示します。
 
