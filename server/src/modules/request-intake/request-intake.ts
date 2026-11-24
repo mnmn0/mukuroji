@@ -197,6 +197,11 @@ export type RequestConversionProjection = {
   expectedRevision: number
   /** 作成済み canonical Work Item 参照です。 */
   workItem: RequestWorkItemReference
+  /**
+   * What the requester is told: `accepted` (the default) or `duplicate` when the request was
+   * merged into an existing Work Item as a duplicate.
+   */
+  requesterOutcome?: 'accepted' | 'duplicate'
 }
 
 /** Request attachment の internal clean-file access です。 */
@@ -2554,7 +2559,11 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       event,
       [
         ...additionalTransactionItems,
-        ...this.createRequesterNotificationItems(next, 'accepted', event),
+        ...this.createRequesterNotificationItems(
+          next,
+          input.requesterOutcome === 'duplicate' ? 'duplicate' : 'accepted',
+          event,
+        ),
       ],
     )
     return toRequestSubmissionView(

@@ -845,6 +845,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
               ? { projectId: detail.issue.assignedProjectId }
               : {}),
           },
+          requesterOutcome: action.action === 'duplicate' ? 'duplicate' : 'accepted',
         },
         [
           ...authorizationConditionChecks,

@@ -3051,6 +3051,15 @@ test('notifies the requester about questions, rejection, and conversion without 
   })
   expect(auditEvents()).toEqual([expect.objectContaining({ eventType: 'request.requester.accepted' })])
 
+  // A duplicate merge through Triage also completes the conversion, but tells the requester so.
+  stored = createStoredSubmission({ requesterUserId: 'member@example.com' })
+  await client.completeConversion('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    expectedRevision: 1,
+    workItem: { teamId: 'team-core', workItemId: 'wi-1' },
+    requesterOutcome: 'duplicate',
+  })
+  expect(auditEvents()).toEqual([expect.objectContaining({ eventType: 'request.requester.duplicate' })])
+
   stored = createStoredSubmission()
   await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {
     action: 'reject', expectedRevision: 1, reason: 'Anonymous request',
