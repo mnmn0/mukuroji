@@ -30,6 +30,21 @@ test('renders all-day events with an exclusive end date and CRLF lines', () => {
   expect(body).toContain('X-WR-TIMEZONE:Asia/Tokyo')
 })
 
+test('ends an event on the last representable day with a duration', () => {
+  const body = renderCalendarFeed({
+    name: 'Mukuroji',
+    refreshIntervalMinutes: 60,
+    generatedAt: new Date('2026-11-24T00:00:00.000Z'),
+    events: [
+      { uid: 'last@mukuroji', startDate: '9999-12-31', endDate: '9999-12-31', summary: 'Last day' },
+      { uid: 'span@mukuroji', startDate: '9999-12-29', endDate: '9999-12-31', summary: 'Last days' },
+    ],
+  })
+  expect(body).toContain('DTSTART;VALUE=DATE:99991231\r\nDURATION:P1D')
+  expect(body).toContain('DTSTART;VALUE=DATE:99991229\r\nDURATION:P3D')
+  expect(body).not.toContain('DTEND')
+})
+
 test('escapes text values and drops control characters', () => {
   expect(escapeText('a,b;c\\d\r\ne\u0007')).toBe(String.raw`a\,b\;c\\d\ne`)
 })

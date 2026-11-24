@@ -1,14 +1,13 @@
 import type { CalendarFeed, IssueCalendarFeedRequest } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
-import useSWR from 'swr'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import {
   CalendarFeedsApiError,
   issueCalendarFeed,
-  listCalendarFeeds,
   revokeCalendarFeed,
   toCalendarFeedUrl,
 } from '../api/calendarFeeds'
+import { useCalendarFeedsQuery } from '../queries/useCalendarFeedsQuery'
 
 /** A feed URL shown once after it is issued. */
 export type IssuedCalendarFeed = {
@@ -35,11 +34,7 @@ function isRetryable(error: unknown): boolean {
  * @returns The feeds, their load state, the operation state, and the actions.
  */
 export function useCalendarFeeds(accessToken: string) {
-  const { data, error, isLoading, mutate } = useSWR(
-    ['calendar-feeds', accessToken] as const,
-    ([, token]) => listCalendarFeeds(token),
-    { shouldRetryOnError: false },
-  )
+  const { data, error, isLoading, mutate } = useCalendarFeedsQuery(accessToken)
   const requestRunner = useMemo(() => createMutationRequestRunner(), [])
   const [busyOperation, setBusyOperation] = useState<string>()
   const [hasOperationError, setHasOperationError] = useState(false)

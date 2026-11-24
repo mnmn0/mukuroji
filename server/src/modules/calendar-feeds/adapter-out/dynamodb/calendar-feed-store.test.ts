@@ -42,6 +42,9 @@ const feedRow = {
   createdAt: record.createdAt,
 }
 
+/** Workspace Audit pseudonym key of the tests. */
+const pseudonymKey = 'a'.repeat(64)
+
 /** Audit context of the writes. */
 const auditContext = createMutationAuditContext({
   workspaceId: 'w',
@@ -82,7 +85,7 @@ function fakeClient(rows: Record<string, Record<string, unknown>>, sent: SentCom
 
 test('replaces a token by deleting the old lookup row in the same transaction', async () => {
   const sent: SentCommand[] = []
-  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit')
+  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit', pseudonymKey)
   await store.save({ workspaceId: 'w', record, previousTokenHash: 'old-hash', auditContext, now: record.issuedAt })
   const items = sent[0]?.input.TransactItems
   if (!Array.isArray(items)) throw new Error('Expected a transaction.')
@@ -93,11 +96,22 @@ test('replaces a token by deleting the old lookup row in the same transaction', 
     { Put: { TableName: 'Audit' } },
   ])
   expect(JSON.stringify(items?.at(-1))).not.toContain('new-hash')
+  // The owner is a member pseudonym, never the member key, which may be an email.
+  expect(JSON.stringify(items?.at(-1))).not.toContain('demo@example.com')
+  expect(JSON.stringify(items?.at(-1))).not.toContain('demo%40example.com')
+})
+
+test('refuses an audited write without the pseudonym key', async () => {
+  const sent: SentCommand[] = []
+  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit')
+  await expect(store.remove({ workspaceId: 'w', record, auditContext, now: record.issuedAt }))
+    .rejects.toMatchObject({ category: 'unavailable', code: 'CalendarFeedAuditUnavailable' })
+  expect(sent).toHaveLength(0)
 })
 
 test('commits the idempotency receipt in the feed transaction', async () => {
   const sent: SentCommand[] = []
-  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit')
+  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit', pseudonymKey)
   const receiptCompletion = { Put: { TableName: 'DeveloperPlatform', Item: { recordKey: 'IDEMPOTENCY#x' } } }
   await store.save({ workspaceId: 'w', record, auditContext, receiptCompletion, now: record.issuedAt })
   const items = sent[0]?.input.TransactItems
@@ -126,4 +140,45 @@ test('finds a feed by its current token only', async () => {
   expect(await store.findByTokenHash('w', 'stale-hash')).toBeNull()
   expect(await store.findByTokenHash('w', 'missing')).toBeNull()
   expect(await store.list({ workspaceId: 'w', memberKey: 'demo@example.com' })).toEqual([record])
+})
+
+test('lists feeds across query pages', async () => {
+  const secondRow = {
+    ...feedRow,
+    recordKey: 'CALENDAR_FEED#demo%40example.com#MEMBER',
+    feedId: 'feed-2',
+    kind: 'member',
+    teamId: undefined,
+    projectId: undefined,
+    tokenHash: 'member-hash',
+  }
+  const sent: SentCommand[] = []
+  const pages = [
+    { Items: [feedRow], LastEvaluatedKey: { workspaceId: 'w', recordKey: feedRow.recordKey } },
+    { Items: [secondRow] },
+  ]
+  /** Fake `send` that answers queries page by page. */
+  const send = async (command: { constructor: { name: string }, input: Record<string, unknown> }) => {
+    sent.push({ name: command.constructor.name, input: command.input })
+    return pages[sent.length - 1] ?? { Items: [] }
+  }
+  const client: Pick<DynamoDBDocumentClient, 'send'> = { send: send as DynamoDBDocumentClient['send'] }
+  const store = new DynamoDbCalendarFeedStore('Planning', client as DynamoDBDocumentClient)
+  const feeds = await store.list({ workspaceId: 'w', memberKey: 'demo@example.com' })
+  expect(feeds.map((feed) => feed.id)).toEqual(['feed-1', 'feed-2'])
+  expect(sent[1]?.input.ExclusiveStartKey).toEqual({ workspaceId: 'w', recordKey: feedRow.recordKey })
+})
+
+test('fails when a later query page holds a malformed row', async () => {
+  let calls = 0
+  /** Fake `send` whose second page is malformed. */
+  const send = async () => {
+    calls += 1
+    return calls === 1
+      ? { Items: [feedRow], LastEvaluatedKey: { workspaceId: 'w', recordKey: feedRow.recordKey } }
+      : { Items: [{ ...feedRow, feedId: 7 }] }
+  }
+  const client: Pick<DynamoDBDocumentClient, 'send'> = { send: send as DynamoDBDocumentClient['send'] }
+  const store = new DynamoDbCalendarFeedStore('Planning', client as DynamoDBDocumentClient)
+  await expect(store.list({ workspaceId: 'w', memberKey: 'demo@example.com' })).rejects.toMatchObject({ category: 'unavailable' })
 })
