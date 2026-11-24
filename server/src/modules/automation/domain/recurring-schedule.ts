@@ -193,6 +193,68 @@ export function getDueDateForOccurrence(
 }
 
 /**
+ * Returns the first time a newly saved schedule should be looked at.
+ *
+ * A `business-day` schedule depends on a work calendar the domain does not have, so it wakes at the
+ * next local time slot of any day and the scheduler decides there; other schedules return their
+ * next occurrence.
+ *
+ * @param schedule - Validated schedule.
+ * @param after - Exclusive lower UTC bound.
+ * @returns The first wake-up, or `undefined` when the horizon is exhausted.
+ */
+export function getFirstRecurringWakeUp(schedule: RecurringSchedule, after: Date): Date | undefined {
+  return schedule.monthlyDay === 'business-day'
+    ? getNextDailySlot(schedule, after)
+    : getNextRecurringOccurrence(schedule, after)
+}
+
+/**
+ * Returns when a business-day schedule whose run has not come yet should be looked at again.
+ *
+ * While the run is in the current local month, the schedule wakes every day at its local time,
+ * so a calendar change that moves the run earlier still takes effect on time. Otherwise it wakes
+ * on the earliest day the run can fall on (calendar day n).
+ *
+ * @param schedule - Validated `business-day` schedule.
+ * @param now - Current time.
+ * @param nextBusinessDayRun - Next run counted on today's calendar.
+ * @returns The next wake-up, never later than `nextBusinessDayRun`.
+ */
+export function getBusinessDayWakeUp(
+  schedule: RecurringSchedule,
+  now: Date,
+  nextBusinessDayRun: Date,
+): Date {
+  const candidates = [nextBusinessDayRun]
+  const lowerBound = getNextRecurringOccurrence(schedule, now)
+  if (lowerBound) candidates.push(lowerBound)
+  if (zonedDate(nextBusinessDayRun, schedule.timeZone).slice(0, 7) === zonedDate(now, schedule.timeZone).slice(0, 7)) {
+    const daily = getNextDailySlot(schedule, now)
+    if (daily) candidates.push(daily)
+  }
+  return new Date(Math.min(...candidates.map((candidate) => candidate.getTime())))
+}
+
+/**
+ * Returns the next local time slot of a schedule on any day.
+ *
+ * @param schedule - Validated schedule.
+ * @param after - Exclusive lower UTC bound.
+ * @returns The next daily slot, or `undefined` when the horizon is exhausted.
+ */
+function getNextDailySlot(schedule: RecurringSchedule, after: Date): Date | undefined {
+  return getNextRecurringOccurrence({
+    frequency: 'daily',
+    interval: 1,
+    timeZone: schedule.timeZone,
+    localTime: schedule.localTime,
+    startDate: schedule.startDate,
+    catchUpPolicy: schedule.catchUpPolicy,
+  }, after)
+}
+
+/**
  * Returns the start of the local calendar month that contains an instant.
  *
  * @param instant - Instant inside the month.

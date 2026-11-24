@@ -50,7 +50,7 @@ Rule を作った member は `createdByMemberKey` に記録する（fingerprint 
 
 ### 期限前の schedule rule
 
-`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
+`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていたり、完了・archive されていたりすれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。`catchUpPolicy: "skip"` でも、途中で止まった実行時刻は、すでに 1 件でも動いていれば遅れて再開したときに残りの Work Item を実行する。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
 
 Notify action の `notifyAssignee: true` は、rule が対象にしている Work Item の担当者にも通知する。`recipientMemberKeys` は空でもよいが、どちらか一方は必要。「期限 3 日前に担当者へ通知」は、毎日 9:00 の schedule に `dueWorkItems: { daysBefore: 3 }` と `{ "type": "notify", "recipientMemberKeys": [], "notifyAssignee": true, "title": "期限まで3日" }` で作る。
 
@@ -162,7 +162,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 Recurring definition は Work Item template、Team、IANA timezone、local wall-clock time、日次/週次/月次 cadence、catch-up policy を保持する。`nextRunAt` は UTC instant として保存し、`ScheduleDueIndex` で期限到来分だけを取得する。
 
-月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を実際の営業日へ後ろへずらす。休日の変更は次の実行時に反映される（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
+月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
 
 DST の扱いは次で固定する。
 

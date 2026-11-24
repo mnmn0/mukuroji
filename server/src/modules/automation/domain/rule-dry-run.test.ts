@@ -36,3 +36,14 @@ test('flags conditions that read the trigger event and runs no action when they 
     actions: [],
   })
 })
+
+test('includes the assignee of the tested Work Item in an assignee notification', () => {
+  const result = dryRunAutomationRule({
+    name: 'Due soon',
+    enabled: false,
+    trigger: { type: 'status' },
+    actions: [{ type: 'notify', recipientMemberKeys: ['member-1'], notifyAssignee: true, title: 'Due' }],
+  }, 'workspace-1', { id: 'item-1', assigneeUserId: 'member-2' })
+
+  expect(result.actions).toEqual([{ index: 0, type: 'notify', recipientMemberKeys: ['member-1', 'member-2'] }])
+})

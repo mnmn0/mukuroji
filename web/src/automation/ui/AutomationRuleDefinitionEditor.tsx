@@ -552,6 +552,7 @@ function ValuePicker({ kind, label, onChange, options, t, testId, value }: Value
           className={inputClassName}
           data-testid={testId}
           inputMode={kind === 'number' ? 'decimal' : undefined}
+          step={kind === 'number' ? 'any' : undefined}
           type={kind === 'number' ? 'number' : 'text'}
           value={value}
           onChange={(event) => onChange(event.target.value)}

@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import type { RecurringSchedule } from '@mukuroji/contracts'
 import {
+  getBusinessDayWakeUp,
+  getFirstRecurringWakeUp,
   getNextRecurringOccurrence,
   getRecurringOccurrences,
   selectCatchUpOccurrences,
@@ -119,5 +122,40 @@ describe('monthly day rules', () => {
     })).toThrow('Only monthly recurring schedules can define monthlyDay.')
     expect(validateRecurringSchedule({ ...monthly, monthlyDay: 'day-of-month', dayOfMonth: 5 }))
       .not.toHaveProperty('monthlyDay')
+  })
+})
+
+describe('business-day wake-ups', () => {
+  const schedule: RecurringSchedule = {
+    frequency: 'monthly',
+    interval: 1,
+    timeZone: 'Asia/Tokyo',
+    localTime: '09:00',
+    startDate: '2026-01-01',
+    dayOfMonth: 3,
+    monthlyDay: 'business-day',
+    catchUpPolicy: 'skip',
+  }
+
+  test('wakes the next day for a business-day schedule created between day n and business day n', () => {
+    expect(getFirstRecurringWakeUp(schedule, new Date('2026-08-03T01:00:00.000Z'))?.toISOString())
+      .toBe('2026-08-04T00:00:00.000Z')
+    expect(getFirstRecurringWakeUp(
+      { ...schedule, monthlyDay: 'day-of-month' },
+      new Date('2026-08-03T01:00:00.000Z'),
+    )?.toISOString()).toBe('2026-09-03T00:00:00.000Z')
+  })
+
+  test('wakes daily while the business-day run is in the current month, and on day n otherwise', () => {
+    expect(getBusinessDayWakeUp(
+      schedule,
+      new Date('2026-08-03T01:00:00.000Z'),
+      new Date('2026-08-05T00:00:00.000Z'),
+    ).toISOString()).toBe('2026-08-04T00:00:00.000Z')
+    expect(getBusinessDayWakeUp(
+      schedule,
+      new Date('2026-08-20T01:00:00.000Z'),
+      new Date('2026-09-03T00:00:00.000Z'),
+    ).toISOString()).toBe('2026-09-03T00:00:00.000Z')
   })
 })

@@ -90,7 +90,7 @@ function planAutomationAction(
     case 'update':
       return { index, type: action.type, changes: listChanges(action.patch, workItem) }
     case 'notify':
-      return { index, type: action.type, recipientMemberKeys: [...action.recipientMemberKeys] }
+      return { index, type: action.type, recipientMemberKeys: listNotificationRecipients(action, workItem) }
     case 'approval':
       return { index, type: action.type, recipientMemberKeys: [...action.reviewerMemberKeys] }
     case 'webhook':
@@ -99,6 +99,25 @@ function planAutomationAction(
     case 'comment':
       return { index, type: action.type }
   }
+}
+
+/**
+ * Lists who a notify action reaches, with the same rule as execution: its listed keys plus the
+ * Work Item's assignee when the action asks for it.
+ *
+ * @param action - Notify action.
+ * @param workItem - Work Item the action would run for.
+ * @returns Distinct recipient member keys.
+ */
+function listNotificationRecipients(
+  action: Extract<AutomationAction, { type: 'notify' }>,
+  workItem: Record<string, AutomationValue>,
+): string[] {
+  const assignee = action.notifyAssignee === true ? workItem.assigneeUserId : undefined
+  return [...new Set([
+    ...action.recipientMemberKeys,
+    ...(typeof assignee === 'string' && assignee.trim() ? [assignee.trim()] : []),
+  ])]
 }
 
 /**

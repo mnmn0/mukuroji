@@ -67,6 +67,7 @@ import {
   type AutomationEvent,
 } from '../../domain/rule-evaluation'
 import {
+  getFirstRecurringWakeUp,
   getNextRecurringOccurrence,
 } from '../../domain/recurring-schedule'
 import { validateCreateAutomationRuleInput } from '../../domain/rule-validation'
@@ -1848,7 +1849,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       normalized.templateId,
     )
     const now = new Date().toISOString()
-    const nextRunAt = getNextRecurringOccurrence(normalized.schedule, new Date(now))
+    const nextRunAt = getFirstRecurringWakeUp(normalized.schedule, new Date(now))
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
     const recurring: RecurringWork = {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -1914,7 +1915,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       (activeSlotExecution?.status === 'failed' && activeSlotExecution.retryable)
     const nextRunAt = !scheduleChanged || mustFinishCurrentSlot
       ? new Date(current.nextRunAt)
-      : getNextRecurringOccurrence(normalized.schedule, now)
+      : getFirstRecurringWakeUp(normalized.schedule, now)
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
     const template = input.templateId === undefined
       ? undefined

@@ -1400,6 +1400,7 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
             { teamId: 'core', workItemId: 'item-2', dueDate },
             { teamId: 'core', workItemId: 'item-1', dueDate },
             { teamId: 'core', workItemId: 'moved', dueDate },
+            { teamId: 'core', workItemId: 'done', dueDate },
           ]
         },
       },
@@ -1410,6 +1411,7 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
               id: workItemId,
               assigneeUserId: `member-${workItemId}`,
               dueDate: workItemId === 'moved' ? '2026-08-01' : '2026-07-19',
+              statusCategory: workItemId === 'done' ? 'completed' : 'unstarted',
             },
           }
         },
@@ -1424,6 +1426,120 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
     expect(notified).toEqual(['item-1:member-item-1', 'item-2:member-item-2'])
     expect(first.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
     expect(second).toEqual(first)
+  })
+
+  test('resumes the rest of a late skip-policy due-soon occurrence after a partial fan-out', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'skip',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    let crashOnSecondItem = true
+    const notified: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (crashOnSecondItem && execution.triggerEventId.endsWith(':item-2')) {
+          crashOnSecondItem = false
+          throw new Error('worker stopped')
+        }
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          notified.push(String(context.event.metadata?.issueId))
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(_workspaceId, dueDate) {
+          return [
+            { teamId: 'core', workItemId: 'item-1', dueDate },
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: '2026-07-19',
+              statusCategory: 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    await expect(processScheduledAutomationRule(
+      rule,
+      new Date('2026-07-16T00:00:30.000Z'),
+      dependencies,
+    )).rejects.toThrow('worker stopped')
+    const resumed = await processScheduledAutomationRule(
+      currentRule,
+      new Date('2026-07-16T00:10:00.000Z'),
+      dependencies,
+    )
+
+    expect(notified).toEqual(['item-1', 'item-2'])
+    expect(resumed.lastRunAt).toBe('2026-07-16T00:00:00.000Z')
+    expect(resumed.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
   })
 
   test('rejects a due-soon rule when the schedule has no due Work Item source', async () => {
@@ -1510,8 +1626,8 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
     })
 
     expect(occurrences).toEqual([])
-    // 2026-08-01 is a Saturday, so the first business day is Monday the 3rd.
-    expect(deferred.nextRunAt).toBe('2026-08-03T00:00:00.000Z')
+    // 2026-08-01 is a Saturday, so the first business day is Monday the 3rd; it wakes daily until then.
+    expect(deferred.nextRunAt).toBe('2026-08-02T00:00:00.000Z')
   })
 
   test('defers a business-day Recurring Work to its working day and runs it there', async () => {
@@ -1568,12 +1684,16 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
       },
     } satisfies AutomationScheduleDependencies
 
-    const deferred = await processRecurringWorkDefinition(
-      definition,
-      new Date('2026-08-01T00:00:00.000Z'),
-      dependencies,
-    )
-    expect(deferred.nextRunAt).toBe('2026-08-04T00:00:00.000Z')
+    // Until the business day comes, the definition wakes every day at its local time.
+    let deferred = definition
+    for (const [now, next] of [
+      ['2026-08-01T00:00:00.000Z', '2026-08-02T00:00:00.000Z'],
+      ['2026-08-02T00:00:00.000Z', '2026-08-03T00:00:00.000Z'],
+      ['2026-08-03T00:00:00.000Z', '2026-08-04T00:00:00.000Z'],
+    ] as const) {
+      deferred = await processRecurringWorkDefinition(deferred, new Date(now), dependencies)
+      expect(deferred.nextRunAt).toBe(next)
+    }
     expect(created).toBe(0)
 
     const completed = await processRecurringWorkDefinition(
