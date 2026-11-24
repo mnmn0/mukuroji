@@ -5522,6 +5522,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       { id: 'block-q', type: 'paragraph', text: '> quoted <b>tag</b> and `a<b>c` and <https://example.com>' },
       { id: 'block-f', type: 'paragraph', text: '```html\n<div>kept</div>\n```' },
       { id: 'block-e', type: 'paragraph', text: 'already \\<div> and \\\\<span>' },
+      { id: 'block-t', type: 'paragraph', text: '\\`<img src=x onerror=alert(1)>`' },
+      { id: 'block-u', type: 'paragraph', text: 'run \\``<b>`' },
       {
         id: 'block-b',
         type: 'table',
@@ -5539,6 +5541,10 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   expect(markdown.content).toContain('\n```html\n<div>kept</div>\n```\n')
   // An escaped `<` stays as written; after an escaped backslash, `<` still starts HTML.
   expect(markdown.content).toContain('\nalready \\<div> and \\\\\\<span>\n')
+  // A backslash-escaped backtick opens no code span, so the HTML after it is still escaped; the
+  // rest of an escaped run can open one.
+  expect(markdown.content).toContain('\n\\`\\<img src=x onerror=alert(1)>`\n')
+  expect(markdown.content).toContain('\nrun \\``<b>`\n')
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
   expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')

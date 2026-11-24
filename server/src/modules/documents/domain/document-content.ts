@@ -1563,6 +1563,15 @@ function escapeRawHtmlOutsideCodeSpans(line: string): string {
   while (index < line.length) {
     const open = line.indexOf('`', index)
     if (open === -1) break
+    let backslashes = 0
+    while (line[open - 1 - backslashes] === '\\') backslashes += 1
+    if (backslashes % 2 === 1) {
+      // A backslash-escaped backtick is literal text and does not open a code span; the rest of
+      // its run may still open one.
+      result += escapeRawHtmlStarts(line.slice(index, open + 1))
+      index = open + 1
+      continue
+    }
     let runEnd = open
     while (line[runEnd] === '`') runEnd += 1
     const run = line.slice(open, runEnd)
