@@ -116,7 +116,7 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 | `document.archived` / `document.restored` | archive と archive からの復元 | `document` | `archivedAt` |
 | `document.version.restored` | 過去の版への復元 | `document`、target は `document-version` | `metadata.versionId` |
 | `document.public-link.created` / `document.public-link.revoked` | 公開 link の作成と失効 | `document`、target は `document-public-link` | `metadata.shareId`、作成時は `expiresAt`・`allowExport`。token は含まない |
-| `document.exported` | Document の export | `document` | `metadata.format`。読み取りだけの操作なので event だけを書き、書けないときは export を返さない |
+| `document.exported` | Document の export | `document` | `metadata.format`。読み取りだけの操作なので event だけを書き、書けないときは export を返さない。同じ Idempotency-Key の再送は同じ形式・同じ revision なら1件にまとめ、Document が変わった後の再送は別の export として記録する |
 | `oauth-app.created` / `oauth-app.rotated` / `oauth-app.revoked` | OAuth app の登録・client secret の差し替え・失効 | `oauth-app` | `metadata` は `ownerUserId`、`name`、`clientId`、`grantTypes`、`scopes`、`expiresAt` |
 | `webhook-subscription.created` / `webhook-subscription.rotated` / `webhook-subscription.updated` / `webhook-subscription.deleted` | Webhook の送信先の作成・署名 secret の差し替え・変更・削除（無効化） | `webhook-subscription` | 変更は `name`・`status`・`eventTypes`・`scopes` の前後。URL は受信側の token を含みうるので記録せず、変わったときだけ `metadata.urlChanged: true` |
 | `workload.profile.created` / `workload.profile.updated` | 稼働プロフィール（勤務予定・スキル・休日・カレンダー）の登録と変更 | `team-workload`（Team ID）、target は `workload-profile`（member ID） | `displayName`・`role`・`skills`・`calendarSource`・`timeZone`・`schedule`・`holidays`。休暇は下の `workload.time-off.*` に別に残す。`metadata` は `teamId`、`memberId` |

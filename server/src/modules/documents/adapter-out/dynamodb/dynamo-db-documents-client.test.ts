@@ -4454,6 +4454,65 @@ test('records Document lifecycle, permission, public link, and export audit even
   expect(serialized).not.toContain('notificationCandidates')
 })
 
+test('records a retried export after the Document changed as another export', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(
+    memory,
+    () => new Date('2026-07-18T00:00:00.000Z'),
+    'audit-events-table',
+  )
+  /** Creates the audit context of one request key, as each retry of that request does. */
+  const auditContext = (idempotencyKey: string) => createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: ownerShareAccess.memberKey, kind: 'user', displayName: 'Owner' },
+    idempotencyKey,
+    request: { method: 'GET', path: '/api/documents/export', body: {} },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Exported page',
+    blocks: [],
+    auditContext: auditContext('create'),
+  })
+  /** Exports the Document under one fixed request key. */
+  const exportUnderSameKey = () => client.exportDocument({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    format: 'markdown',
+    auditContext: auditContext('export'),
+  })
+  /** Lists the stored export events. */
+  const exportEvents = () => memory.items().filter(({ eventType }) => eventType === 'document.exported')
+
+  await exportUnderSameKey()
+  await exportUnderSameKey()
+  expect(exportEvents()).toHaveLength(1)
+
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: document.revision,
+    title: 'Edited page',
+    auditContext: auditContext('update'),
+  })
+  const rendered = await exportUnderSameKey()
+
+  expect(rendered.content).toContain('Edited page')
+  expect(exportEvents()).toHaveLength(2)
+  expect(exportEvents().map(({ summary }) => summary).sort()).toEqual([
+    'Exported page: Edited page',
+    'Exported page: Exported page',
+  ])
+})
+
 test('advances the Document comment-window revision with each insertion', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

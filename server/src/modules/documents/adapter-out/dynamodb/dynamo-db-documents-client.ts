@@ -131,6 +131,7 @@ import {
 import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
+  deriveMutationAuditPartContext,
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../../../audit'
@@ -4600,7 +4601,12 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     )
     validateDocumentPayload(row.document)
     const rendered = renderDocumentProjectionExport(projected, input.format)
-    const auditPut = this.createDocumentAuditPut(input.workspaceId, input.access, input.auditContext, {
+    // The export returns the current content, so a retry after the Document changed is a new
+    // export of another revision and gets its own event instead of reusing the first one.
+    const auditContext = input.auditContext === undefined
+      ? undefined
+      : deriveMutationAuditPartContext(input.auditContext, `revision:${row.revision}`)
+    const auditPut = this.createDocumentAuditPut(input.workspaceId, input.access, auditContext, {
       eventType: 'document.exported',
       action: 'exported',
       document: row.document,

@@ -19,6 +19,7 @@ export {
   createAuditTransactPut,
   createMutationAuditContext,
   createMutationAuditEventPut,
+  deriveMutationAuditPartContext,
   createRequestFingerprint,
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
