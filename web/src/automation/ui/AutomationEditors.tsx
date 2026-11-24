@@ -90,6 +90,9 @@ const automationActionTypes = [
   'webhook',
 ] as const
 
+/** Triggers that use Workspace endpoints and secrets, which Team rules cannot use (ADR 0087). */
+const teamExcludedTriggerTypes: ReadonlySet<AutomationTriggerType> = new Set(['form', 'webhook'])
+
 const conditionOperators = [
   'equals',
   'not-equals',
@@ -256,6 +259,11 @@ export type AutomationRuleEditorProps = {
   teams?: RecurringTeamOption[]
   /** Rule 作成 callback です。 */
   onCreate: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
+  /**
+   * Whether the rule is owned by a Team, which hides the form and webhook triggers and the
+   * outbound webhook action that the server rejects for Team rules (ADR 0087).
+   */
+  teamScoped?: boolean
 }
 
 /** Props of the baseline-slip day field. */
@@ -318,10 +326,17 @@ export function AutomationRuleEditor({
   isSaving = false,
   locale,
   onCreate,
+  teamScoped = false,
   teams = [],
   webhookEndpoints = [],
 }: AutomationRuleEditorProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const triggerTypes = teamScoped
+    ? automationTriggerTypes.filter((type) => !teamExcludedTriggerTypes.has(type))
+    : automationTriggerTypes
+  const actionTypes = teamScoped
+    ? automationActionTypes.filter((type) => type !== 'webhook')
+    : automationActionTypes
   const activeWebhookEndpoints = useMemo(
     () => webhookEndpoints.filter((endpoint) => endpoint.status === 'active'),
     [webhookEndpoints],
@@ -483,7 +498,7 @@ export function AutomationRuleEditor({
       <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
         <SelectField
           label={t('automation.rule.trigger')}
-          options={automationTriggerTypes.map((value) => ({ label: t(triggerLabelKeys[value]), value }))}
+          options={triggerTypes.map((value) => ({ label: t(triggerLabelKeys[value]), value }))}
           testId="automation-rule-trigger"
           value={triggerType}
           onChange={(value) => {
@@ -499,7 +514,7 @@ export function AutomationRuleEditor({
         />
         <SelectField
           label={t('automation.rule.action')}
-          options={automationActionTypes.map((value) => ({ label: t(actionLabelKeys[value]), value }))}
+          options={actionTypes.map((value) => ({ label: t(actionLabelKeys[value]), value }))}
           testId="automation-rule-action"
           value={actionType}
           onChange={(value) => {

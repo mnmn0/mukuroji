@@ -90,6 +90,17 @@ describe('Automation editors', () => {
     expect(html).toContain('value="both"')
   })
 
+  test('hides the form and webhook options from a Team rule', () => {
+    const render = (teamScoped: boolean) => renderToStaticMarkup(
+      <AutomationRuleEditor locale="en" teamScoped={teamScoped} onCreate={async () => undefined} />,
+    )
+
+    expect(render(false)).toContain('value="form"')
+    expect(render(false)).toContain('value="webhook"')
+    expect(render(true)).not.toContain('value="form"')
+    expect(render(true)).not.toContain('value="webhook"')
+  })
+
   test('serializes a relation trigger for one or every relation change', () => {
     expect(createAutomationTrigger('relation', '')).toEqual({ type: 'relation' })
     expect(createAutomationTrigger('relation', 'work-item.blocker-removed')).toEqual({

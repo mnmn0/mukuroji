@@ -141,6 +141,7 @@ export function AutomationManagementPanelContainer({
       teams={teams.map((team) => ({ id: team.id, name: team.name }))}
       templates={data?.templates ?? []}
       templateOptions={templateOptions}
+      teamScoped={isTeamScope}
       webhooks={data?.webhooks ?? []}
       workflowTargets={data?.workflowTargets ?? []}
       onRefresh={async () => {

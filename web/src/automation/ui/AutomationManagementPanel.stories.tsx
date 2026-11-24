@@ -151,6 +151,7 @@ export const Loading: Story = {
 export const TeamOwnedDefinitions: Story = {
   args: {
     canViewWebhooks: false,
+    teamScoped: true,
     rules: [{ ...activeAutomationRuleFixture, ownerTeamId: 'core-team' }],
     templates: [{ ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],
     templateOptions: [workItemAutomationTemplateFixture, { ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],

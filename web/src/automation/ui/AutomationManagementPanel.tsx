@@ -112,6 +112,8 @@ export type AutomationManagementPanelProps = {
   templates: AutomationTemplate[]
   /** Recurring Work の編集で選べる template。省略時は `templates` を使います。 */
   templateOptions?: AutomationTemplate[]
+  /** Team の設定で、所有 Team の定義を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
   /** Recurring Work 一覧です。 */
   recurringWork: RecurringWork[]
   /** Execution history です。 */
@@ -221,6 +223,7 @@ export function AutomationManagementPanel({
   teams,
   templates,
   templateOptions,
+  teamScoped = false,
   webhooks = [],
   workflowTargets = [],
 }: AutomationManagementPanelProps) {
@@ -320,6 +323,7 @@ export function AutomationManagementPanel({
             locale={locale}
             readOnly={readOnly}
             rules={rules}
+            teamScoped={teamScoped}
             teams={teams}
             webhookEndpoints={webhooks.filter((endpoint) => endpoint.purpose !== 'triage')}
             onCreate={onCreateRule}
@@ -402,6 +406,8 @@ type RulesTabProps = {
   onCreate?: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
   /** Rule 状態切替 callback です。 */
   onToggle?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Team が所有する rule を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
 }
 
 function RulesTab({
@@ -411,6 +417,7 @@ function RulesTab({
   onToggle,
   readOnly,
   rules,
+  teamScoped,
   teams,
   webhookEndpoints,
 }: RulesTabProps) {
@@ -422,6 +429,7 @@ function RulesTab({
         <AutomationRuleEditor
           isSaving={busyOperation === 'rule:create'}
           locale={locale}
+          teamScoped={teamScoped}
           teams={teams}
           webhookEndpoints={webhookEndpoints}
           onCreate={onCreate}
