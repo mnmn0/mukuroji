@@ -111,6 +111,11 @@ export function registerCalendarFeedRoutes(routeApp: Hono): void {
         new Date(),
       )
       if (result.kind === 'not-found') return feedNotFound(c)
+      if (result.kind === 'too-large') {
+        // A partial calendar would silently drop tasks, so the feed fails until it fits again.
+        c.header('Cache-Control', 'no-store')
+        return c.text('Calendar feed is too large', 413)
+      }
       if (result.kind === 'rate-limited') {
         c.header('Retry-After', String(result.retryAfterSeconds ?? CALENDAR_FEED_RATE_WINDOW_SECONDS))
         c.header('Cache-Control', 'no-store')

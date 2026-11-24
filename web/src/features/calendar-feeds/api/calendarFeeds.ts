@@ -129,7 +129,13 @@ async function requestJson(path: string, accessToken: string, init: RequestInit 
   } catch {
     throw new CalendarFeedsApiError(0, 'Calendar feed request failed.')
   }
-  const text = await response.text()
+  let text: string
+  try {
+    text = await response.text()
+  } catch {
+    // The body was lost in transit, so the request may have committed: keep it retryable.
+    throw new CalendarFeedsApiError(0, 'Calendar feed response was interrupted.')
+  }
   let body: unknown
   try {
     body = text ? JSON.parse(text) : undefined
