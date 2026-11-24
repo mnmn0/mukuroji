@@ -1,6 +1,7 @@
 import {
   GetCommand,
   PutCommand,
+  TransactWriteCommand,
   QueryCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
@@ -8,6 +9,7 @@ import type {
   CapacityPlanningGranularity,
   ResourceAssignment,
   ResourceRequest,
+  ReviewWorkloadTimeOffInput,
   SaveWorkloadMemberProfileInput,
   SaveWorkloadTimeOffInput,
   CreateResourceAssignmentInput,
@@ -21,6 +23,7 @@ import type {
   WorkloadMemberProfile,
   WorkloadMemberSummary,
   WorkloadSnapshot,
+  WorkloadSnapshotViewer,
   WorkloadTimeOff,
   WorkingSchedule,
   WorkItemScheduleCalendarPolicy,
@@ -39,6 +42,12 @@ import {
   isWorkloadCalendarSource,
   workspaceWeekContaining,
 } from '@mukuroji/contracts'
+import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  type MutationAuditContext,
+  type MutationAuditEventInput,
+} from '../audit'
 
 const TEAM_RECORD_PREFIX = 'CAPACITY#TEAM#'
 const MAX_RANGE_DAYS = 366
@@ -48,6 +57,22 @@ const MAX_ASSIGNMENTS = 20_000
 const MAX_SKILLS = 64
 const MAX_STATE_BYTES = 350_000
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
+/** Days after their end date that canceled, rejected, and empty request rows are kept. */
+const CLOSED_ROW_RETENTION_DAYS = 30
+/**
+ * Most audit events one Team write may carry: DynamoDB transactions hold at most 100 items and
+ * the Team state Put is one of them.
+ */
+const MAX_AUDIT_EVENTS_PER_WRITE = 99
+/**
+ * Most assignments one request cancellation can cancel with it. Each gets its own audit event,
+ * so with the request's event they stay within `MAX_AUDIT_EVENTS_PER_WRITE`.
+ */
+const MAX_CASCADE_ASSIGNMENTS = MAX_AUDIT_EVENTS_PER_WRITE - 1
+/** Days after their end date that any row is kept; longer than the widest snapshot range. */
+const PAST_ROW_RETENTION_DAYS = 400
+/** Audit entity type for Team workload changes. */
+const WORKLOAD_AUDIT_ENTITY_TYPE = 'team-workload'
 
 /** A time entry projection used by capacity calculations. */
 export type WorkloadTimeEntry = {
@@ -123,13 +148,32 @@ export interface CapacityPlanningRepository {
   getState(workspaceId: string, teamId: string): Promise<CapacityPlanningState>
   /** Reads every Team state saved in the Workspace, for Workspace-wide totals. */
   listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]>
-  /** Saves the state using the previous Team revision as a CAS condition. */
+  /**
+   * Saves the state using the previous Team revision as a CAS condition.
+   *
+   * @param audit - Audit events written atomically with the state, when the caller records them.
+   */
   saveState(
     workspaceId: string,
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void>
+}
+
+/** Audit events for one workload mutation and the request context that produced them. */
+export type CapacityPlanningAudit = {
+  /** Request-scoped actor, source, and idempotency context. */
+  context: MutationAuditContext
+  /** Events to write in the same transaction as the Team state. */
+  events: MutationAuditEventInput[]
+}
+
+/** Options shared by workload mutations. */
+export type CapacityPlanningMutationOptions = {
+  /** Request audit context; when absent the mutation is saved without audit events. */
+  auditContext?: MutationAuditContext
 }
 
 /** Storage shape kept private to the capacity-planning module. */
@@ -213,6 +257,8 @@ export type WorkloadSnapshotInput = {
   visibleProjectIds?: ReadonlySet<string>
   /** Whether confidential assignments and requests may be returned. */
   canViewConfidential: boolean
+  /** The viewer and their review rights, echoed on the snapshot for the client. */
+  viewer?: WorkloadSnapshotViewer
   /**
    * Workspace calendar that profiles inheriting it follow: its time zone, working weekdays, and
    * every day off. The default Workspace calendar is used when omitted.
@@ -371,6 +417,7 @@ export function buildWorkloadSnapshot(
       toDate,
       input.granularity,
       remainingEffortByAssignmentId,
+      input.canViewConfidential || profile.memberId === input.viewerMemberId,
       input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     )
   )
@@ -400,6 +447,7 @@ export function buildWorkloadSnapshot(
     redactedRequestCount,
     revision: state.revision,
     generatedAt,
+    ...(input.viewer ? { viewer: { ...input.viewer } } : {}),
   }
 }
 
@@ -579,6 +627,14 @@ function getTimeEntryQueryRange(
   }
 }
 
+/** Active assignments of one request, read for authorization of a cascading cancel. */
+export interface ActiveRequestAssignments {
+  /** Team plan revision the assignments were read at. */
+  teamRevision: number
+  /** Assignments of the request that are not canceled. */
+  assignments: ResourceAssignment[]
+}
+
 /** Application service for availability, allocation, and workload planning. */
 export class CapacityPlanningService {
   /** Durable capacity planning state. */
@@ -665,7 +721,7 @@ export class CapacityPlanningService {
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
-  async saveMemberProfile(input: SaveWorkloadMemberProfileInput): Promise<WorkloadMemberProfile> {
+  async saveMemberProfile(input: SaveWorkloadMemberProfileInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadMemberProfile> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.memberId, 'Member ID')
@@ -702,13 +758,23 @@ export class CapacityPlanningService {
       }
       replaceById(state.profiles, profile, 'memberId')
       return profile
-    })
+    }, options)
   }
 
-  /** Saves or replaces one member's planned absence. */
-  async saveTimeOff(input: SaveWorkloadTimeOffInput): Promise<WorkloadTimeOff> {
+  /**
+   * Saves or replaces one member's absence.
+   *
+   * Changing an absence's dates or minutes returns it to whatever status the caller sends, so a
+   * member who edits an approved absence must have it approved again.
+   *
+   * @param input - Absence fields, status, and expected revisions.
+   * @param options - Request audit context.
+   * @returns The saved absence.
+   */
+  async saveTimeOff(input: SaveWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
     validateIdentifier(input.memberId, 'Member ID')
     validateDateRange(input.fromDate, input.toDate)
+    requireWithinRetention(input.toDate, this.now())
     if (input.minutesPerDay !== undefined) validateNonNegativeInteger(input.minutesPerDay, 'Time-off minutes')
     const reason = input.reason?.trim()
     const nextTimeOff: WorkloadTimeOff = {
@@ -720,24 +786,77 @@ export class CapacityPlanningService {
       status: input.status,
       revision: 1,
     }
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const profile = requireProfile(state, input.memberId)
       if (profile.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'WorkloadProfileRevisionConflict', 'The workload profile was changed by another request.')
       }
+      const timestamp = this.now().toISOString()
       const previous = profile.timeOff.find((timeOff) => timeOff.id === nextTimeOff.id)
-      const saved: WorkloadTimeOff = { ...nextTimeOff, revision: (previous?.revision ?? 0) + 1 }
+      const saved: WorkloadTimeOff = {
+        ...nextTimeOff,
+        ...reviewFields(nextTimeOff.status, input.actorMemberId, timestamp),
+        revision: (previous?.revision ?? 0) + 1,
+      }
       profile.timeOff = [...profile.timeOff.filter((timeOff) => timeOff.id !== saved.id), saved]
       profile.revision += 1
-      profile.updatedAt = this.now().toISOString()
+      profile.updatedAt = timestamp
+      events.push(createTimeOffAuditEvent(input, profile.memberId, previous, saved))
       return saved
-    })
+    }, options)
   }
 
-  /** Creates a resource request. */
-  async createRequest(input: CreateResourceRequestInput): Promise<ResourceRequest> {
+  /**
+   * Approves, rejects, reopens, or cancels one absence without changing its dates.
+   *
+   * The transport adapter decides who may set each status; this method checks only the
+   * absence's own revision so a review never overwrites a newer edit.
+   *
+   * @param input - Absence, new status, and expected revisions.
+   * @param options - Request audit context.
+   * @returns The reviewed absence.
+   */
+  async reviewTimeOff(input: ReviewWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
+    validateIdentifier(input.memberId, 'Member ID')
+    validateIdentifier(input.timeOffId, 'Time-off ID')
+    const replayed = findReplayedReview(await this.repository.getState(input.workspaceId, input.teamId), input)
+    if (replayed) return replayed
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
+      const profile = requireProfile(state, input.memberId)
+      const current = profile.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
+      if (!current) throw new CapacityPlanningError(404, 'WorkloadTimeOffNotFound', 'The time off was not found.')
+      if (current.revision !== input.expectedRevision) {
+        throw new CapacityPlanningError(409, 'WorkloadTimeOffRevisionConflict', 'The time off was changed by another request.')
+      }
+      if (current.status === 'canceled') {
+        throw new CapacityPlanningError(409, 'WorkloadTimeOffCanceled', 'A canceled time off cannot be reviewed.')
+      }
+      // A rejection of an absence that ended past the closed-row retention would be pruned by the
+      // same write, leaving neither the decision for the member nor a row a retry could find.
+      if (input.status === 'rejected' && current.toDate < addCalendarDays(this.now().toISOString().slice(0, 10), -CLOSED_ROW_RETENTION_DAYS)) {
+        throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `Time off that ended more than ${CLOSED_ROW_RETENTION_DAYS} days ago cannot be rejected.`)
+      }
+      const timestamp = this.now().toISOString()
+      const { reviewedAt: _reviewedAt, reviewedBy: _reviewedBy, submittedAt: _submittedAt, ...unreviewed } = current
+      const saved: WorkloadTimeOff = {
+        ...unreviewed,
+        status: input.status,
+        ...reviewFields(input.status, input.actorMemberId, timestamp),
+        revision: current.revision + 1,
+      }
+      profile.timeOff = profile.timeOff.map((timeOff) => timeOff.id === saved.id ? saved : timeOff)
+      profile.revision += 1
+      profile.updatedAt = timestamp
+      events.push(createTimeOffAuditEvent(input, profile.memberId, current, saved))
+      return saved
+    }, options)
+  }
+
+  /** Creates a resource request and records it in the audit log. */
+  async createRequest(input: CreateResourceRequestInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceRequest> {
     validateRequestFields(input)
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    requireWithinRetention(input.toDate, this.now())
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.requests.length >= MAX_REQUESTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource request limit.')
       }
@@ -760,8 +879,9 @@ export class CapacityPlanningService {
         updatedAt: timestamp,
       }
       state.requests.push(request)
+      events.push(createRequestAuditEvent(input, undefined, request))
       return request
-    })
+    }, options)
   }
 
   /** Reads one Team resource request for transport-layer authorization. */
@@ -777,10 +897,13 @@ export class CapacityPlanningService {
    * Changes or cancels a resource request using optimistic concurrency.
    *
    * A request can be canceled only after every assignment that fills it is canceled, so a
-   * canceled request never keeps reserving capacity. Canceled requests are read-only.
+   * canceled request never keeps reserving capacity. With `cancelAssignments` the remaining
+   * assignments are canceled in the same write. Canceled requests are read-only.
    *
    * @param input - Changed request fields, an optional cancel status, and expected revisions.
-   * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
+   * @param access - Whether the actor may see confidential requests, where hidden requests are
+   *   reported as missing, and which assignments the caller authorized for a cascading cancel.
+   * @param options - Request audit context.
    * @returns The saved request.
    */
   async updateRequest(
@@ -788,12 +911,18 @@ export class CapacityPlanningService {
     access: {
       /** Whether the actor may read and change confidential requests. */
       canViewConfidential: boolean
+      /**
+       * Assignments whose Project and member the caller verified for this actor. A cascading
+       * cancel is refused when any active assignment of the request is missing from it.
+       */
+      authorizedAssignmentIds?: ReadonlySet<string>
     },
+    options: CapacityPlanningMutationOptions = {},
   ): Promise<ResourceRequest> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.requestId, 'Request ID')
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const current = requireRequest(state, input.requestId)
       if (current.confidential && !access.canViewConfidential) {
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
@@ -809,11 +938,48 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const requestedMinutes = input.requestedMinutes ?? current.requestedMinutes
       validateNonNegativeInteger(requestedMinutes, 'Requested minutes')
-      if (input.status === 'canceled' && state.assignments.some((assignment) =>
+      const timestamp = this.now().toISOString()
+      const activeAssignments = state.assignments.filter((assignment) =>
         assignment.requestId === current.id && assignment.status !== 'canceled'
-      )) {
+      )
+      if (input.status === 'canceled' && input.cancelAssignments === true) {
+        if (!access.canViewConfidential && activeAssignments.some((assignment) => assignment.confidential)) {
+          throw new CapacityPlanningError(
+            409,
+            'ResourceRequestHasActiveAssignments',
+            'Some assignments that fill this resource request are confidential. Ask a manager who can see them to cancel it.',
+          )
+        }
+        if (activeAssignments.some((assignment) => access.authorizedAssignmentIds?.has(assignment.id) !== true)) {
+          throw new CapacityPlanningError(
+            409,
+            'ResourceRequestAssignmentsChanged',
+            'The assignments that fill this resource request changed. Reload and try again.',
+          )
+        }
+        if (activeAssignments.length > MAX_CASCADE_ASSIGNMENTS) {
+          throw new CapacityPlanningError(
+            413,
+            'ResourceRequestCascadeTooLarge',
+            `Cancel some assignments of this resource request first; at most ${MAX_CASCADE_ASSIGNMENTS} can be canceled with it.`,
+          )
+        }
+        const canceledAssignments = activeAssignments.map((assignment): ResourceAssignment => ({
+          ...assignment,
+          status: 'canceled',
+          revision: assignment.revision + 1,
+          updatedAt: timestamp,
+        }))
+        activeAssignments.forEach((assignment, index) => {
+          const canceled = canceledAssignments[index]
+          if (!canceled) return
+          replaceById(state.assignments, canceled, 'id')
+          events.push(createAssignmentAuditEvent(input, assignment, canceled))
+        })
+      } else if (input.status === 'canceled' && activeAssignments.length > 0) {
         throw new CapacityPlanningError(
           409,
           'ResourceRequestHasActiveAssignments',
@@ -821,7 +987,6 @@ export class CapacityPlanningService {
         )
       }
       const role = input.role === undefined ? current.role : input.role.trim() || undefined
-      const timestamp = this.now().toISOString()
       const next: ResourceRequest = {
         ...current,
         title,
@@ -840,14 +1005,17 @@ export class CapacityPlanningService {
       else delete next.role
       replaceById(state.requests, next, 'id')
       refreshRequestStatuses(state, timestamp)
-      return clone(requireRequest(state, next.id))
-    })
+      const saved = clone(requireRequest(state, next.id))
+      events.push(createRequestAuditEvent(input, current, saved))
+      return saved
+    }, options)
   }
 
-  /** Creates an assignment for a profile and optionally fulfills a request. */
-  async createAssignment(input: CreateResourceAssignmentInput): Promise<ResourceAssignment> {
+  /** Creates an assignment for a profile, optionally fulfills a request, and notifies the member. */
+  async createAssignment(input: CreateResourceAssignmentInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    requireWithinRetention(input.toDate, this.now())
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.assignments.length >= MAX_ASSIGNMENTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource assignment limit.')
       }
@@ -885,8 +1053,30 @@ export class CapacityPlanningService {
       }
       state.assignments.push(assignment)
       refreshRequestStatuses(state, timestamp)
+      events.push(createAssignmentAuditEvent(input, undefined, assignment))
       return assignment
-    })
+    }, options)
+  }
+
+  /**
+   * Lists the active assignments that fill a request, for transport-layer authorization of a
+   * cascading cancel.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param requestId - Request identifier.
+   * @returns Assignments of the request that are not canceled, with the Team revision they were
+   * read at so the caller can tie its checks to the revision the cascade commits against.
+   */
+  async listActiveRequestAssignments(workspaceId: string, teamId: string, requestId: string): Promise<ActiveRequestAssignments> {
+    validateIdentifier(workspaceId, 'Workspace ID')
+    validateIdentifier(teamId, 'Team ID')
+    validateIdentifier(requestId, 'Request ID')
+    const state = await this.repository.getState(workspaceId, teamId)
+    return {
+      teamRevision: state.revision,
+      assignments: clone(state.assignments.filter((assignment) => assignment.requestId === requestId && assignment.status !== 'canceled')),
+    }
   }
 
   /** Reads one Team assignment for transport-layer authorization. */
@@ -900,9 +1090,9 @@ export class CapacityPlanningService {
     return clone(assignment)
   }
 
-  /** Moves, reassigns, or resizes an assignment using optimistic concurrency. */
-  async updateAssignment(input: UpdateResourceAssignmentInput): Promise<ResourceAssignment> {
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+  /** Moves, reassigns, resizes, confirms, or cancels an assignment using optimistic concurrency. */
+  async updateAssignment(input: UpdateResourceAssignmentInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceAssignment> {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const current = state.assignments.find((assignment) => assignment.id === input.assignmentId)
       if (!current) throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
       if (current.revision !== input.expectedRevision) {
@@ -921,6 +1111,7 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const allocationMinutes = input.allocationMinutes ?? current.allocationMinutes
       const plannedEffortMinutes = input.plannedEffortMinutes ?? current.plannedEffortMinutes
       validateNonNegativeInteger(allocationMinutes, 'Allocation minutes')
@@ -939,8 +1130,9 @@ export class CapacityPlanningService {
       }
       replaceById(state.assignments, next, 'id')
       refreshRequestStatuses(state, timestamp)
+      events.push(createAssignmentAuditEvent(input, current, next))
       return next
-    })
+    }, options)
   }
 
   /** Calculates a proposed reschedule or reassignment without persisting it. */
@@ -1065,25 +1257,61 @@ export class CapacityPlanningService {
     }))
   }
 
-  /** Applies one state mutation with a Team-wide optimistic concurrency check. */
+  /**
+   * Applies one state mutation with a Team-wide optimistic concurrency check.
+   *
+   * Before saving, rows that ended long ago or were closed a while ago are pruned so the single
+   * Team record stays small. Audit events pushed by the mutation are saved in the same write.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param expectedRevision - Team revision the caller read.
+   * @param mutate - Changes the state and pushes audit events.
+   * @param options - Request audit context.
+   * @returns The mutation result.
+   */
   private async mutateState<T>(
     workspaceId: string,
     teamId: string,
     expectedRevision: number,
-    mutate: (state: CapacityPlanningState) => T,
+    mutate: (state: CapacityPlanningState, events: MutationAuditEventInput[]) => T,
+    options: CapacityPlanningMutationOptions = {},
   ): Promise<T> {
     const current = await this.repository.getState(workspaceId, teamId)
     if (current.revision !== expectedRevision) {
       throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
     }
     const next = clone(current)
-    const result = mutate(next)
+    const now = this.now()
+    const today = now.toISOString().slice(0, 10)
+    // Prune first so the mutation, its result, and its audit events see the request fulfillment
+    // that is saved: pruning can drop an old assignment of a kept request. Readers never saw the
+    // pruned rows' effect as a change, so the derived status moves without a new request revision
+    // and the revision the caller read still matches.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
+    const events: MutationAuditEventInput[] = []
+    const result = mutate(next, events)
+    if (events.length > MAX_AUDIT_EVENTS_PER_WRITE) {
+      throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'This workload change touches too many rows to save at once.')
+    }
+    // Rows the mutation itself closed or moved may already be past retention. Canceled rows no
+    // longer count toward fulfillment, so this normally leaves request statuses unchanged; the
+    // stored state stays consistent even when it does not.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
     next.revision = current.revision + 1
-    next.updatedAt = this.now().toISOString()
+    next.updatedAt = now.toISOString()
     if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
       throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team workload plan is too large to save.')
     }
-    await this.repository.saveState(workspaceId, teamId, next, current.revision)
+    await this.repository.saveState(
+      workspaceId,
+      teamId,
+      next,
+      current.revision,
+      options.auditContext && events.length > 0 ? { context: options.auditContext, events } : undefined,
+    )
     return result
   }
 }
@@ -1092,6 +1320,8 @@ export class CapacityPlanningService {
 export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepository {
   /** Stored Team states. */
   private readonly states = new Map<string, CapacityPlanningState>()
+  /** Audit batches saved with each state, oldest first, for tests. */
+  readonly auditLog: CapacityPlanningAudit[] = []
 
   /** Reads an isolated clone of the Team state. */
   async getState(workspaceId: string, teamId: string): Promise<CapacityPlanningState> {
@@ -1112,6 +1342,7 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void> {
     const key = stateKey(workspaceId, teamId)
     const current = this.states.get(key)
@@ -1119,6 +1350,7 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
       throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
     }
     this.states.set(key, clone(state))
+    if (audit) this.auditLog.push(clone(audit))
   }
 }
 
@@ -1128,11 +1360,20 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
   private readonly tableName: string
   /** Configured DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
+  /** Audit event table written with each state change, when audit is configured. */
+  private readonly auditTableName: string | undefined
 
-  /** Creates a DynamoDB-backed capacity planning repository. */
-  constructor(tableName: string, documentClient: DynamoDBDocumentClient) {
+  /**
+   * Creates a DynamoDB-backed capacity planning repository.
+   *
+   * @param tableName - Capacity planning table.
+   * @param documentClient - Configured DocumentClient.
+   * @param auditTableName - Audit event table written in the same transaction, when configured.
+   */
+  constructor(tableName: string, documentClient: DynamoDBDocumentClient, auditTableName?: string) {
     this.tableName = validateIdentifier(tableName, 'Capacity planning table name')
     this.documentClient = documentClient
+    this.auditTableName = auditTableName
   }
 
   /** Reads a Team state from the shared Workspace partition. */
@@ -1169,31 +1410,47 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
     return states
   }
 
-  /** Writes a Team state using a revision condition. */
+  /** Writes a Team state using a revision condition, with its audit events in one transaction. */
   async saveState(
     workspaceId: string,
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void> {
+    const put = {
+      TableName: this.tableName,
+      Item: {
+        workspaceId,
+        recordKey: stateRecordKey(teamId),
+        ...state,
+      },
+      ...(expectedRevision === 0
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+          }),
+    }
+    const auditTableName = this.auditTableName
+    const auditPuts = audit && auditTableName
+      ? audit.events.flatMap((event, sequence) =>
+          createMutationAuditEventPut(auditTableName, audit.context, { ...event, sequence }) ?? [])
+      : []
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          workspaceId,
-          recordKey: stateRecordKey(teamId),
-          ...state,
-        },
-        ...(expectedRevision === 0
-          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-          : {
-              ConditionExpression: 'revision = :expectedRevision',
-              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-            }),
+      if (auditPuts.length === 0) {
+        await this.documentClient.send(new PutCommand(put))
+        return
+      }
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{ Put: put }, ...auditPuts],
       }))
     } catch (error) {
-      if (isConditionalFailure(error)) {
+      if (isConditionalFailure(error) || isStateConditionCanceled(error)) {
         throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
+      }
+      if (isAuditConditionCanceled(error)) {
+        throw new CapacityPlanningError(409, 'CapacityPlanningDuplicateRequest', 'This workload change was already recorded. Reload and try again.')
       }
       throw error
     }
@@ -1261,14 +1518,18 @@ function calculateMemberSummary(
   toDate: string,
   granularity: CapacityPlanningGranularity,
   remainingEffortByAssignmentId: ReadonlyMap<string, number>,
+  canViewTimeOffReason: boolean,
   weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadMemberSummary {
   const dates = listCalendarDates(fromDate, toDate)
   const daily = new Map<string, DailyWorkload>()
   for (const date of dates) {
+    const capacityMinutes = calculateAvailableMinutes(profile, date)
     daily.set(date, {
-      capacityMinutes: calculateAvailableMinutes(profile, date),
+      capacityMinutes,
+      pendingTimeOffMinutes: calculatePendingTimeOffMinutes(profile, date, capacityMinutes),
       allocatedMinutes: 0,
+      tentativeAllocatedMinutes: 0,
       plannedEffortMinutes: 0,
       actualMinutes: actual.byDate.get(date) ?? 0,
       remainingEffortMinutes: 0,
@@ -1279,6 +1540,9 @@ function calculateMemberSummary(
     if (!assignmentDates.some((date) => daily.has(date))) continue
     const distributionDates = chooseDistributionDates(profile, assignmentDates)
     distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'allocatedMinutes')
+    if (assignment.status === 'tentative') {
+      distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'tentativeAllocatedMinutes')
+    }
     distributeMinutes(daily, distributionDates, assignment.plannedEffortMinutes, 'plannedEffortMinutes')
     const remaining = assignment.workItemId
       ? remainingEffortByAssignmentId.get(assignment.id) ?? 0
@@ -1297,6 +1561,10 @@ function calculateMemberSummary(
     schedule: clone(stored.schedule),
     holidays: stored.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
     profileRevision: profile.revision,
+    timeOff: profile.timeOff
+      .filter((timeOff) => timeOff.status !== 'canceled' && timeOff.toDate >= fromDate)
+      .sort((left, right) => left.fromDate.localeCompare(right.fromDate) || left.id.localeCompare(right.id))
+      .map(({ reason, ...timeOff }) => ({ ...timeOff, ...(reason && canViewTimeOffReason ? { reason } : {}) })),
     cells,
     capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
     allocatedMinutes: sum(cells, (cell) => cell.allocatedMinutes),
@@ -1323,7 +1591,9 @@ function aggregateCells(
     }
     current.toDate = bucket.toDate
     current.value.capacityMinutes += value.capacityMinutes
+    current.value.pendingTimeOffMinutes += value.pendingTimeOffMinutes
     current.value.allocatedMinutes += value.allocatedMinutes
+    current.value.tentativeAllocatedMinutes += value.tentativeAllocatedMinutes
     current.value.plannedEffortMinutes += value.plannedEffortMinutes
     current.value.actualMinutes += value.actualMinutes
     current.value.remainingEffortMinutes += value.remainingEffortMinutes
@@ -1336,7 +1606,9 @@ function aggregateCells(
       toDate: group.toDate,
       label: group.fromDate,
       capacityMinutes: group.value.capacityMinutes,
+      pendingTimeOffMinutes: group.value.pendingTimeOffMinutes,
       allocatedMinutes: group.value.allocatedMinutes,
+      tentativeAllocatedMinutes: group.value.tentativeAllocatedMinutes,
       plannedEffortMinutes: group.value.plannedEffortMinutes,
       actualMinutes: group.value.actualMinutes,
       remainingEffortMinutes: group.value.remainingEffortMinutes,
@@ -1727,15 +1999,34 @@ function aggregateWorkspaceCells(
   })
 }
 
-/** Computes the member's available minutes for one local date. */
+/** Computes the member's available minutes for one local date; only approved time off counts. */
 function calculateAvailableMinutes(profile: WorkloadMemberProfile, date: string): number {
   const schedule = profile.schedule[weekdayKey(date)]
   if (!schedule.enabled || schedule.minutes === 0) return 0
   if (readHolidayDates(profile).has(date)) return 0
-  const absence = profile.timeOff
-    .filter((timeOff) => timeOff.status !== 'canceled' && timeOff.fromDate <= date && timeOff.toDate >= date)
-    .reduce((total, timeOff) => total + (timeOff.minutesPerDay ?? schedule.minutes), 0)
-  return Math.max(0, schedule.minutes - absence)
+  return Math.max(0, schedule.minutes - sumTimeOffMinutes(profile, date, 'approved', schedule.minutes))
+}
+
+/**
+ * Computes the time off still waiting for approval on one date, capped at the minutes that
+ * approved time off leaves available.
+ */
+function calculatePendingTimeOffMinutes(profile: WorkloadMemberProfile, date: string, availableMinutes: number): number {
+  if (availableMinutes === 0) return 0
+  const scheduled = profile.schedule[weekdayKey(date)].minutes
+  return Math.min(availableMinutes, sumTimeOffMinutes(profile, date, 'planned', scheduled))
+}
+
+/** Sums one status of time off covering a date, using the scheduled minutes for full days. */
+function sumTimeOffMinutes(
+  profile: WorkloadMemberProfile,
+  date: string,
+  status: WorkloadTimeOff['status'],
+  scheduledMinutes: number,
+): number {
+  return profile.timeOff
+    .filter((timeOff) => timeOff.status === status && timeOff.fromDate <= date && timeOff.toDate >= date)
+    .reduce((total, timeOff) => total + (timeOff.minutesPerDay ?? scheduledMinutes), 0)
 }
 
 /**
@@ -1769,7 +2060,7 @@ function distributeMinutes(
   daily: Map<string, DailyWorkload>,
   dates: readonly string[],
   minutes: number,
-  field: keyof Pick<DailyWorkload, 'allocatedMinutes' | 'plannedEffortMinutes' | 'remainingEffortMinutes'>,
+  field: keyof Pick<DailyWorkload, 'allocatedMinutes' | 'tentativeAllocatedMinutes' | 'plannedEffortMinutes' | 'remainingEffortMinutes'>,
 ): void {
   if (dates.length === 0 || minutes === 0) return
   const base = Math.floor(minutes / dates.length)
@@ -2010,6 +2301,20 @@ function validateAssignmentFields(input: CreateResourceAssignmentInput | (Worklo
   validateNonNegativeInteger(input.plannedEffortMinutes, 'Planned effort minutes')
 }
 
+/**
+ * Refuses a row that would end before every row is pruned, so a write never reports success for
+ * a row the same write removes. Closing a recent row past `CLOSED_ROW_RETENTION_DAYS` is still
+ * allowed: removing it is what closing an old row means.
+ *
+ * @param toDate - End date the row is saved with.
+ * @param now - Current time.
+ */
+function requireWithinRetention(toDate: string, now: Date): void {
+  if (toDate < addCalendarDays(now.toISOString().slice(0, 10), -PAST_ROW_RETENTION_DAYS)) {
+    throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `The end date must be within the last ${PAST_ROW_RETENTION_DAYS} days.`)
+  }
+}
+
 /** Validates a complete date range and returns normalized values. */
 function validateDateRange(fromDate: string, toDate: string): { fromDate: string; toDate: string } {
   validateDate(fromDate, 'Start date')
@@ -2093,8 +2398,21 @@ function requireRequest(state: CapacityPlanningState, requestId: string): Resour
   return request
 }
 
-/** Refreshes request status from the allocation committed against it. */
-function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string): void {
+/**
+ * Refreshes request status from the allocation committed against it.
+ *
+ * @param state - State to update in place.
+ * @param timestamp - Time recorded on a changed request.
+ * @param options - Whether a changed request gets a new revision; retention pruning keeps it.
+ */
+function refreshRequestStatuses(
+  state: CapacityPlanningState,
+  timestamp: string,
+  options: {
+    /** Whether to increment the revision of a request whose status changes. */
+    bumpRevision: boolean
+  } = { bumpRevision: true },
+): void {
   for (const request of state.requests) {
     if (request.status === 'canceled') continue
     const assigned = state.assignments
@@ -2104,7 +2422,7 @@ function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string)
     if (status !== request.status) {
       request.status = status
       request.updatedAt = timestamp
-      request.revision += 1
+      if (options.bumpRevision) request.revision += 1
     }
   }
 }
@@ -2145,14 +2463,260 @@ function sum<T>(values: readonly T[], selector: (value: T) => number): number {
 type DailyWorkload = {
   /** Available minutes. */
   capacityMinutes: number
+  /** Time off waiting for approval. */
+  pendingTimeOffMinutes: number
   /** Allocated minutes. */
   allocatedMinutes: number
+  /** Allocated minutes from tentative assignments. */
+  tentativeAllocatedMinutes: number
   /** Planned effort minutes. */
   plannedEffortMinutes: number
   /** Actual minutes. */
   actualMinutes: number
   /** Remaining effort minutes. */
   remainingEffortMinutes: number
+}
+
+/**
+ * Removes rows the heatmap and lists no longer need, so the single Team record stays small.
+ *
+ * Canceled and rejected rows, and canceled requests, go once they ended more than
+ * `CLOSED_ROW_RETENTION_DAYS` ago; any row goes once it ended more than `PAST_ROW_RETENTION_DAYS`
+ * ago. A request stays while a kept assignment still refers to it.
+ *
+ * @param state - State to prune in place.
+ * @param today - Current UTC calendar date.
+ */
+export function pruneCapacityPlanningState(state: CapacityPlanningState, today: string): void {
+  const closedBefore = addCalendarDays(today, -CLOSED_ROW_RETENTION_DAYS)
+  const pastBefore = addCalendarDays(today, -PAST_ROW_RETENTION_DAYS)
+  const keep = (row: { toDate: string; status: string }) =>
+    row.toDate >= pastBefore && !((row.status === 'canceled' || row.status === 'rejected') && row.toDate < closedBefore)
+  for (const profile of state.profiles) {
+    if (profile.timeOff.every(keep)) continue
+    profile.timeOff = profile.timeOff.filter(keep)
+  }
+  state.assignments = state.assignments.filter(keep)
+  const referencedRequestIds = new Set(state.assignments.flatMap((assignment) => assignment.requestId ? [assignment.requestId] : []))
+  state.requests = state.requests.filter((request) => referencedRequestIds.has(request.id) || keep(request))
+}
+
+/**
+ * Finds the saved result of an approval or rejection that is being sent again after its response
+ * was lost: the absence is one revision past the one the request expected, with the requested
+ * decision by the same reviewer. The revisions would otherwise refuse the retry with a conflict.
+ *
+ * @param state - Current Team state.
+ * @param input - Review request.
+ * @returns The saved absence when the request already succeeded, otherwise `undefined`.
+ */
+function findReplayedReview(state: CapacityPlanningState, input: ReviewWorkloadTimeOffInput): WorkloadTimeOff | undefined {
+  if (input.status !== 'approved' && input.status !== 'rejected') return undefined
+  // The original write moved the Team past the revision the request expected.
+  if (state.revision <= input.expectedTeamRevision) return undefined
+  const current = state.profiles
+    .find((profile) => profile.memberId === input.memberId)
+    ?.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
+  if (
+    !current ||
+    current.revision !== input.expectedRevision + 1 ||
+    current.status !== input.status ||
+    current.reviewedBy !== input.actorMemberId
+  ) return undefined
+  return clone(current)
+}
+
+/**
+ * Returns the submission or reviewer fields for a status set by an actor: a `planned` absence
+ * records when it was submitted, and an approval or rejection records who decided it.
+ */
+function reviewFields(
+  status: WorkloadTimeOff['status'],
+  actorMemberId: string,
+  timestamp: string,
+): Pick<WorkloadTimeOff, 'reviewedAt' | 'reviewedBy' | 'submittedAt'> {
+  if (status === 'planned') return { submittedAt: timestamp }
+  return status === 'approved' || status === 'rejected' ? { reviewedBy: actorMemberId, reviewedAt: timestamp } : {}
+}
+
+/**
+ * Reads a stored absence saved before time-off approval existed as approved.
+ *
+ * Such rows are `planned` without `submittedAt`, and they used to reduce capacity. Reading them
+ * as approved keeps capacity unchanged on deploy; the next write of the Team stores them that way.
+ *
+ * @param timeOff - Stored absence.
+ * @returns The absence, upgraded when it predates approval.
+ */
+export function upgradeLegacyTimeOff(timeOff: WorkloadTimeOff): WorkloadTimeOff {
+  return timeOff.status === 'planned' && timeOff.submittedAt === undefined ? { ...timeOff, status: 'approved' } : timeOff
+}
+
+/** Workspace, Team, and actor shared by every workload mutation input. */
+type WorkloadAuditScope = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Member performing the mutation. */
+  actorMemberId: string
+}
+
+/** Time-off fields recorded in audit changes; the free-text reason is redacted. */
+const TIME_OFF_AUDIT_FIELDS = ['fromDate', 'toDate', 'minutesPerDay', 'status', 'reason'] as const
+/** Request fields recorded in audit changes. */
+const REQUEST_AUDIT_FIELDS = ['title', 'projectId', 'role', 'skillIds', 'fromDate', 'toDate', 'requestedMinutes', 'confidential', 'status'] as const
+/** Assignment fields recorded in audit changes. */
+const ASSIGNMENT_AUDIT_FIELDS = ['memberId', 'requestId', 'projectId', 'workItemId', 'fromDate', 'toDate', 'allocationMinutes', 'plannedEffortMinutes', 'confidential', 'status'] as const
+
+/**
+ * Builds the audit event for a time-off change and notifies the member when someone else made it.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param memberId - Member whose absence changed.
+ * @param previous - Absence before the change, or undefined when it was created.
+ * @param next - Absence after the change.
+ * @returns The audit event input.
+ */
+function createTimeOffAuditEvent(
+  scope: WorkloadAuditScope,
+  memberId: string,
+  previous: WorkloadTimeOff | undefined,
+  next: WorkloadTimeOff,
+): MutationAuditEventInput {
+  const action = !previous
+    ? next.status === 'planned' ? 'requested' : 'created'
+    : previous.status === next.status
+      ? 'updated'
+      : next.status === 'planned' ? 'reopened' : next.status
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.time-off.${action}`,
+    action: `time_off_${action}`,
+    target: { type: 'workload-time-off', id: next.id },
+    changes: createAuditFieldChanges(
+      previous ? { ...previous } : undefined,
+      { ...next },
+      TIME_OFF_AUDIT_FIELDS,
+      ['reason'],
+    ),
+    summary: `Time off ${next.fromDate} – ${next.toDate} ${action}`,
+    recipients: [{ memberKey: memberId, reason: 'time-off-review' }],
+    metadata: { memberId, timeOffId: next.id, status: next.status },
+  })
+}
+
+/**
+ * Builds the audit event for a resource request change.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param previous - Request before the change, or undefined when it was created.
+ * @param next - Request after the change.
+ * @returns The audit event input.
+ */
+function createRequestAuditEvent(
+  scope: WorkloadAuditScope,
+  previous: ResourceRequest | undefined,
+  next: ResourceRequest,
+): MutationAuditEventInput {
+  const action = !previous ? 'created' : next.status === 'canceled' && previous.status !== 'canceled' ? 'canceled' : 'updated'
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.request.${action}`,
+    action: `resource_request_${action}`,
+    target: { type: 'resource-request', id: next.id },
+    changes: createAuditFieldChanges(
+      previous ? { ...previous } : undefined,
+      { ...next },
+      REQUEST_AUDIT_FIELDS,
+      next.confidential || previous?.confidential ? ['title'] : [],
+    ),
+    summary: next.confidential ? `Confidential resource request ${action}` : `Resource request "${next.title}" ${action}`,
+    recipients: [],
+    metadata: { requestId: next.id, status: next.status, ...(next.projectId ? { projectId: next.projectId } : {}) },
+  })
+}
+
+/**
+ * Builds the audit event for an assignment change and notifies the assigned members.
+ *
+ * Both the previous and the new member are notified of a reassignment.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param previous - Assignment before the change, or undefined when it was created.
+ * @param next - Assignment after the change.
+ * @returns The audit event input.
+ */
+function createAssignmentAuditEvent(
+  scope: WorkloadAuditScope,
+  previous: ResourceAssignment | undefined,
+  next: ResourceAssignment,
+): MutationAuditEventInput {
+  const action = !previous
+    ? 'created'
+    : previous.status !== next.status
+      ? next.status === 'confirmed' ? 'confirmed' : next.status === 'canceled' ? 'canceled' : 'unconfirmed'
+      : previous.memberId !== next.memberId ? 'reassigned' : 'updated'
+  const memberIds = [...new Set([previous?.memberId, next.memberId].filter((memberId): memberId is string => Boolean(memberId)))]
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.assignment.${action}`,
+    action: `resource_assignment_${action}`,
+    target: { type: 'resource-assignment', id: next.id },
+    changes: createAuditFieldChanges(previous ? { ...previous } : undefined, { ...next }, ASSIGNMENT_AUDIT_FIELDS),
+    summary: `Assignment ${next.fromDate} – ${next.toDate} ${action}`,
+    recipients: memberIds.map((memberKey) => ({ memberKey, reason: 'workload-assignment' })),
+    metadata: {
+      assignmentId: next.id,
+      status: next.status,
+      ...(next.projectId ? { projectId: next.projectId } : {}),
+      ...(next.workItemId ? { workItemId: next.workItemId } : {}),
+    },
+  })
+}
+
+/**
+ * Builds a Team workload audit event whose recipients, other than the actor, get a notification.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param event - Event type, target, changes, summary, recipients, and extra metadata.
+ * @returns The audit event input.
+ */
+function createWorkloadAuditEvent(
+  scope: WorkloadAuditScope,
+  event: {
+    /** Event type, such as `workload.time-off.approved`. */
+    eventType: string
+    /** Short action identifier. */
+    action: string
+    /** Changed row. */
+    target: { type: string; id: string }
+    /** Field changes. */
+    changes: MutationAuditEventInput['changes']
+    /** Short summary shown in activity and notifications. */
+    summary: string
+    /** Members to notify, before the actor is removed. */
+    recipients: Array<{ memberKey: string; reason: string }>
+    /** Extra metadata. */
+    metadata: Record<string, unknown>
+  },
+): MutationAuditEventInput {
+  const notificationCandidates = event.recipients.filter((recipient) => recipient.memberKey !== scope.actorMemberId)
+  return {
+    directoryId: scope.workspaceId,
+    eventType: event.eventType,
+    entityType: WORKLOAD_AUDIT_ENTITY_TYPE,
+    entityId: scope.teamId,
+    target: event.target,
+    action: event.action,
+    ...(event.changes ? { changes: event.changes } : {}),
+    summary: event.summary,
+    metadata: {
+      ...event.metadata,
+      teamId: scope.teamId,
+      actorMemberKey: scope.actorMemberId,
+      deepLink: `/teams/${encodeURIComponent(scope.teamId)}/members`,
+      notificationTitle: 'Team workload',
+      ...(notificationCandidates.length > 0 ? { notificationCandidates } : {}),
+    },
+  }
 }
 
 /** Creates an empty state. */
@@ -2195,7 +2759,7 @@ function readState(item: Record<string, unknown>, workspaceId: string, teamId: s
   }
   return {
     revision,
-    profiles,
+    profiles: profiles.map((profile) => ({ ...profile, timeOff: profile.timeOff.map(upgradeLegacyTimeOff) })),
     requests,
     assignments,
     ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
@@ -2295,6 +2859,9 @@ function isStoredTimeOff(value: unknown): value is WorkloadTimeOff {
     (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
     isOptionalString(value.reason) &&
     isTimeOffStatus(value.status) &&
+    isOptionalString(value.submittedAt) &&
+    isOptionalString(value.reviewedBy) &&
+    isOptionalString(value.reviewedAt) &&
     isPositiveSafeInteger(value.revision)
 }
 
@@ -2376,7 +2943,7 @@ function isValidTimeZone(value: unknown): value is string {
 
 /** Checks a stored time-off lifecycle state. */
 function isTimeOffStatus(value: unknown): value is WorkloadTimeOff['status'] {
-  return value === 'planned' || value === 'approved' || value === 'canceled'
+  return value === 'planned' || value === 'approved' || value === 'rejected' || value === 'canceled'
 }
 
 /** Checks a stored resource request lifecycle state. */
@@ -2392,6 +2959,32 @@ function isResourceAssignmentStatus(value: unknown): value is ResourceAssignment
 /** Detects a DynamoDB conditional failure without importing service-specific exceptions. */
 function isConditionalFailure(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'ConditionalCheckFailedException'
+}
+
+/** Checks whether a transaction was canceled. */
+function isTransactionCanceled(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'TransactionCanceledException'
+}
+
+/** Checks whether a canceled transaction failed on the Team state revision (its first item). */
+function isStateConditionCanceled(error: unknown): boolean {
+  if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const [stateReason] = error.CancellationReasons
+  return isRecord(stateReason) && stateReason.Code === 'ConditionalCheckFailed'
+}
+
+/**
+ * Checks whether a canceled transaction failed only because an audit event already exists, which
+ * means the same idempotency key was replayed. Throttling, transaction conflicts, and other
+ * cancellations stay infrastructure errors so they are logged and can be retried.
+ */
+function isAuditConditionCanceled(error: unknown): boolean {
+  if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const [, ...auditReasons] = error.CancellationReasons
+  const failedAudit = auditReasons.some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
+  const onlyConditionsFailed = error.CancellationReasons.every((reason) =>
+    isRecord(reason) && (reason.Code === undefined || reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed'))
+  return failedAudit && onlyConditionsFailed
 }
 
 /** Clones a value at the repository boundary. */

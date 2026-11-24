@@ -14,8 +14,8 @@ const snapshot: WorkloadSnapshot = {
   granularity: 'day',
   members: [
     createMember('hana', 'Hanako Sato', [
-      createCell('2026-08-03', 480, 360, 'under'),
-      createCell('2026-08-04', 480, 480, 'balanced'),
+      createCell('2026-08-03', 480, 360, 'under', { tentativeAllocatedMinutes: 120 }),
+      createCell('2026-08-04', 480, 480, 'balanced', { pendingTimeOffMinutes: 240 }),
       createCell('2026-08-05', 480, 600, 'over'),
       createCell('2026-08-06', 0, 0, 'unavailable'),
     ]),
@@ -27,11 +27,15 @@ const snapshot: WorkloadSnapshot = {
     ]),
   ],
   requests: [],
-  assignments: [],
+  assignments: [
+    createAssignment('assignment-1', 'hana', 'WI-12', 'tentative'),
+    createAssignment('assignment-2', 'hana', 'WI-18', 'confirmed'),
+  ],
   redactedAssignmentCount: 2,
   redactedRequestCount: 0,
   revision: 4,
   generatedAt: '2026-08-02T00:00:00.000Z',
+  viewer: { memberId: 'mike', canManage: true },
 }
 
 const meta = {
@@ -54,6 +58,16 @@ export const DayHeatmap: Story = {
     onRetry: () => undefined,
     snapshot,
     t: createTranslator('en'),
+  },
+}
+
+/** Shows tentative and confirmed assignments with the manager's confirm and cancel actions. */
+export const AssignmentReview: Story = {
+  ...DayHeatmap,
+  args: {
+    ...DayHeatmap.args,
+    onChangeAssignmentStatus: () => undefined,
+    onMoveAssignment: () => undefined,
   },
 }
 
@@ -143,6 +157,7 @@ function createMember(memberId: string, displayName: string, cells: WorkloadSnap
     },
     holidays: [],
     profileRevision: 1,
+    timeOff: [],
     cells,
     capacityMinutes: cells.reduce((sum, cell) => sum + cell.capacityMinutes, 0),
     allocatedMinutes: cells.reduce((sum, cell) => sum + cell.allocatedMinutes, 0),
@@ -159,18 +174,47 @@ function createCell(
   capacityMinutes: number,
   allocatedMinutes: number,
   status: 'under' | 'balanced' | 'over' | 'unavailable',
+  extra: { pendingTimeOffMinutes?: number; tentativeAllocatedMinutes?: number } = {},
 ) {
   return {
     fromDate: date,
     toDate: date,
     label: date,
     capacityMinutes,
+    pendingTimeOffMinutes: extra.pendingTimeOffMinutes ?? 0,
     allocatedMinutes,
+    tentativeAllocatedMinutes: extra.tentativeAllocatedMinutes ?? 0,
     plannedEffortMinutes: allocatedMinutes,
     actualMinutes: 120,
     remainingEffortMinutes: Math.max(0, allocatedMinutes - 120),
     utilizationPercent: capacityMinutes === 0 ? 0 : Math.round((allocatedMinutes / capacityMinutes) * 100),
     varianceMinutes: capacityMinutes - allocatedMinutes,
     status,
+  }
+}
+
+/** Creates a deterministic sample assignment on the first sample day. */
+function createAssignment(
+  id: string,
+  memberId: string,
+  workItemId: string,
+  status: 'tentative' | 'confirmed',
+): WorkloadSnapshot['assignments'][number] {
+  return {
+    id,
+    workspaceId: 'workspace-1',
+    teamId: 'team-1',
+    memberId,
+    workItemId,
+    skillIds: [],
+    fromDate: '2026-08-03',
+    toDate: '2026-08-03',
+    allocationMinutes: 120,
+    plannedEffortMinutes: 120,
+    confidential: false,
+    status,
+    revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
   }
 }
