@@ -71,6 +71,11 @@ reviewer は Work Item を閲覧できる active member に限ります（guest 
 Document 側の表示用に、file proofing table の `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>`
 partition へ `APPROVAL#<createdAt>#<approvalId>` の pointer row を書き、承認一覧はそこから main
 approval row を読み、閲覧者が Work Item を見られる承認だけを返します。
+Work Item 側の認可は Document の route の scope ではなく、その Work Item の route
+（依頼は `POST /api/teams/{teamId}/issues/{issueId}/approvals`、一覧は Work Item ごとに
+`GET /api/teams/{teamId}/issues/{issueId}/files`）として Enterprise permission を評価します。
+そのため Document の権限を Project A、Work Item の権限を Project B で持つ member も依頼でき、
+B の承認も一覧に出ます。
 
 ### Link の上限
 

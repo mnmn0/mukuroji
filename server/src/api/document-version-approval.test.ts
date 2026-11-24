@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
-import type { ApprovalRequest, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
+import type {
+  ApprovalRequest,
+  DocumentDetail,
+  DocumentVersion,
+  EnterprisePermissionId,
+  EnterpriseRoleAssignment,
+} from '@mukuroji/contracts'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import type { CreateDocumentVersionApprovalInput, FileProofingScope } from '../modules/files/file-proofing'
 
@@ -193,4 +200,110 @@ test('lists Document version approvals only for Work Items the viewer can read',
   expect(response.status).toBe(200)
   const body = await response.json()
   expect(body.approvals.map((approval: ApprovalRequest) => approval.issueId)).toEqual(['issue-1'])
+})
+
+/**
+ * Creates an Enterprise identity that grants the test member one custom role per Project.
+ *
+ * @param grants - Permissions and the Project each role is assigned at.
+ * @returns Enterprise Identity fake with only those Project-scoped assignments.
+ */
+async function createProjectRoleIdentity(
+  grants: ReadonlyArray<{ roleId: `custom:${string}`; permissions: EnterprisePermissionId[]; projectId: string }>,
+) {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-11-01T00:00:00.000Z'
+  for (const grant of grants) {
+    await identity.putCustomRole({
+      workspaceId: 'workspace-documents',
+      roleId: grant.roleId,
+      name: grant.roleId,
+      permissions: grant.permissions,
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+  return new Proxy(identity, {
+    get(target, property) {
+      if (property === 'getSnapshot') {
+        return async (workspaceId: string) => ({
+          ...await target.getSnapshot(workspaceId),
+          roleAssignments: grants.map((grant): EnterpriseRoleAssignment => ({
+            workspaceId,
+            assignmentId: `${grant.roleId}-assignment`,
+            principalKind: 'member',
+            principalId: 'demo@example.com',
+            roleId: grant.roleId,
+            scope: { workspaceId, kind: 'project', targetId: grant.projectId },
+            source: 'direct',
+          })),
+        })
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+test('authorizes the Work Item in another Project than the Document access', async () => {
+  // Document access comes from the Docs Project; Work Item and approval access from Refero.
+  configureFakeProjectClients(false, {
+    directoryId: 'workspace-documents',
+    workspaceRole: 'admin',
+    projectAccesses: [],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'docs', name: 'Docs', tone: 'green' },
+    ],
+  })
+  const created: string[] = []
+  setTestAppDependencies({
+    enterpriseIdentity: await createProjectRoleIdentity([
+      { roleId: 'custom:docs-editor', permissions: ['documents.read', 'documents.write'], projectId: 'docs' },
+      {
+        roleId: 'custom:work-item-approver',
+        permissions: ['work-items.read', 'work-items.write', 'files.read', 'files.write', 'files.approve'],
+        projectId: 'refero',
+      },
+    ]),
+    documents: createDocumentFake({
+      async get() {
+        return document
+      },
+      async getVersion() {
+        return { version: pinnedVersion, document }
+      },
+    }),
+    fileProofing: createFileProofingStub({
+      async createDocumentVersionApproval(scope) {
+        created.push(scope.issueId ?? '')
+        return createDocumentApproval(scope.issueId ?? '')
+      },
+      async listDocumentApprovals() {
+        return [createDocumentApproval('onboarding-friction')]
+      },
+    }),
+  })
+
+  const requested = await app.request('/api/documents/document-1/versions/2/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      reviewerMemberKeys: ['demo@example.com'],
+      dueAt: '2099-07-20T00:00:00.000Z',
+    }),
+  })
+  const listed = await app.request('/api/documents/document-1/approvals', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(requested.status).toBe(201)
+  expect(created).toEqual(['onboarding-friction'])
+  expect(listed.status).toBe(200)
+  expect((await listed.json()).approvals.map((approval: ApprovalRequest) => approval.issueId))
+    .toEqual(['onboarding-friction'])
 })
