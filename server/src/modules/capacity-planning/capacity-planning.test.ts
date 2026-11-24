@@ -987,6 +987,56 @@ describe('Workspace-wide workload', () => {
     }
   })
 
+  test('counts contributor shares of every Team in Workspace-wide totals', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')], [
+      // This assignment already plans the member's part of work-item-planned, so its share is not counted again.
+      inTeam({ ...createAssignment('assignment-2', false, '2026-08-03', '2026-08-03', 60), workItemId: 'work-item-planned' }, 'team-2'),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [
+            {
+              workItemId: 'work-item-shared',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+            },
+            {
+              workItemId: 'work-item-planned',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-2', memberId: 'member-1', plannedEffortMinutes: 120 }],
+            },
+          ]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 660,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 660,
+      status: 'over',
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 360,
+    })
+  })
+
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
     const service = await createWorkspaceService(twoTeams())
 

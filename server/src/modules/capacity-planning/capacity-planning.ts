@@ -324,7 +324,7 @@ export function buildWorkloadSnapshot(
   const contributorShares = listWorkloadContributorShares(
     estimates,
     state.assignments,
-    profileByMemberId,
+    (memberId) => profileByMemberId.has(memberId),
     isProjectVisible,
   )
   // Contributor shares count like assignments in the member rows, but stay out of `assignments`
@@ -385,21 +385,20 @@ export function buildWorkloadSnapshot(
 /**
  * Lists the Work Item contributor shares counted in the visible members' workload.
  *
- * A share is counted for a member with a workload profile on a scheduled, visible Work Item. It
- * is left out when that member has any resource assignment for the same Work Item that is not
+ * A share is counted for a counted member on a scheduled, visible Work Item. It is left out when that member has any resource assignment for the same Work Item that is not
  * canceled, confidential ones included, because the assignment already plans that member's part
  * and counting both would double the same work.
  *
  * @param estimates - Canonical Work Item estimates with their contributor shares.
  * @param assignments - Every stored resource assignment of the Team.
- * @param profileByMemberId - Visible member profiles.
+ * @param isMemberCounted - Whether a member's shares count, such as a visible member with a profile.
  * @param isProjectVisible - Project visibility of the reader.
  * @returns The counted shares, ordered by Work Item and assignment ID.
  */
 function listWorkloadContributorShares(
   estimates: readonly WorkloadEstimate[],
   assignments: readonly ResourceAssignment[],
-  profileByMemberId: ReadonlyMap<string, WorkloadMemberProfile>,
+  isMemberCounted: (memberId: string) => boolean,
   isProjectVisible: (projectId: string | undefined) => boolean,
 ): WorkloadContributorShare[] {
   const plannedMembers = new Set(assignments.flatMap((assignment) =>
@@ -410,7 +409,7 @@ function listWorkloadContributorShares(
     const window = estimate.window
     if (!window || !isProjectVisible(estimate.projectId)) return []
     return (estimate.contributors ?? []).flatMap((contributor) =>
-      !profileByMemberId.has(contributor.memberId) ||
+      !isMemberCounted(contributor.memberId) ||
         plannedMembers.has(`${estimate.workItemId}\0${contributor.memberId}`)
         ? []
         : [{
@@ -462,6 +461,46 @@ function toContributorWorkloadAssignment(
   }
 }
 
+/**
+ * Adds each Team's contributor shares to its state as read-only assignments for Workspace-wide totals.
+ *
+ * Workspace-wide totals count every member's work in every Team, so every scheduled share counts,
+ * whatever the reader may see, unless the member has a resource assignment for the same Work Item.
+ * The added assignments only feed the totals and the aggregated breakdowns and are never stored.
+ *
+ * @param teamStates - Team states the totals are built from.
+ * @param estimatesByTeamId - Canonical Work Item estimates of each Team.
+ * @param workspaceId - Workspace that owns the states.
+ * @param generatedAt - Snapshot time used for the timestamps.
+ * @returns The Team states with the contributor shares added to their assignments.
+ */
+function withContributorReservations(
+  teamStates: readonly TeamCapacityPlanningState[],
+  estimatesByTeamId: ReadonlyMap<string, readonly WorkloadEstimate[]>,
+  workspaceId: string,
+  generatedAt: string,
+): TeamCapacityPlanningState[] {
+  return teamStates.map(({ teamId, state }) => {
+    const shares = listWorkloadContributorShares(
+      estimatesByTeamId.get(teamId) ?? [],
+      state.assignments,
+      () => true,
+      () => true,
+    )
+    if (shares.length === 0) return { teamId, state }
+    return {
+      teamId,
+      state: {
+        ...state,
+        assignments: [
+          ...state.assignments,
+          ...shares.map((share) => toContributorWorkloadAssignment(share, { workspaceId, teamId }, generatedAt)),
+        ],
+      },
+    }
+  })
+}
+
 /** Applies the member, Project, lifecycle, and confidential visibility rules to one assignment. */
 function isAssignmentVisible(
   assignment: ResourceAssignment,
@@ -503,7 +542,7 @@ function getTimeEntryQueryRange(
     ...state.assignments.filter((assignment) =>
       assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
     ),
-    ...listWorkloadContributorShares(estimates, state.assignments, profileByMemberId, isProjectVisible),
+    ...listWorkloadContributorShares(estimates, state.assignments, (memberId) => profileByMemberId.has(memberId), isProjectVisible),
   ]
   const fromDate = relevantAssignments.reduce(
     (earliest, assignment) => assignment.fromDate < earliest ? assignment.fromDate : earliest,
@@ -550,19 +589,26 @@ export class CapacityPlanningService {
       this.repository.listStates(input.workspaceId),
     ])
     const { entries, estimates } = await this.readWorkloadSources(state, input, range)
+    const generatedAt = this.now().toISOString()
+    const teamStates = replaceTeamState(
+      filterActiveTeamStates(workspaceTeamStates, input.activeTeamIds),
+      input.teamId,
+      state,
+    )
     return buildWorkloadSnapshot(
       state,
       entries,
       estimates,
       {
         ...input,
-        workspaceTeamStates: replaceTeamState(
-          filterActiveTeamStates(workspaceTeamStates, input.activeTeamIds),
-          input.teamId,
-          state,
+        workspaceTeamStates: withContributorReservations(
+          teamStates,
+          await this.readTeamEstimates(input.workspaceId, teamStates, { teamId: input.teamId, estimates }),
+          input.workspaceId,
+          generatedAt,
         ),
       },
-      this.now().toISOString(),
+      generatedAt,
     )
   }
 
@@ -575,7 +621,17 @@ export class CapacityPlanningService {
   async getWorkspaceSnapshot(input: WorkspaceWorkloadSnapshotInput): Promise<WorkspaceWorkloadSnapshot> {
     validateDateRange(input.fromDate, input.toDate)
     const teamStates = filterActiveTeamStates(await this.repository.listStates(input.workspaceId), input.activeTeamIds)
-    return buildWorkspaceWorkloadSnapshot(teamStates, input, this.now().toISOString())
+    const generatedAt = this.now().toISOString()
+    return buildWorkspaceWorkloadSnapshot(
+      withContributorReservations(
+        teamStates,
+        await this.readTeamEstimates(input.workspaceId, teamStates),
+        input.workspaceId,
+        generatedAt,
+      ),
+      input,
+      generatedAt,
+    )
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
@@ -946,6 +1002,25 @@ export class CapacityPlanningService {
       to: timeEntryRange.to,
     })
     return { entries, estimates }
+  }
+
+  /**
+   * Reads the canonical Work Item estimates of every Team whose contributor shares count in
+   * Workspace-wide totals.
+   *
+   * @param workspaceId - Workspace that owns the Teams.
+   * @param teamStates - Teams to read.
+   * @param known - Estimates already read for one Team, reused instead of read again.
+   * @returns The estimates of each Team.
+   */
+  private async readTeamEstimates(
+    workspaceId: string,
+    teamStates: readonly TeamCapacityPlanningState[],
+    known?: { teamId: string; estimates: readonly WorkloadEstimate[] },
+  ): Promise<Map<string, readonly WorkloadEstimate[]>> {
+    const estimates = await Promise.all(teamStates.map(({ teamId }) =>
+      known?.teamId === teamId ? known.estimates : this.dataSource.listEstimates(workspaceId, teamId)))
+    return new Map(teamStates.map(({ teamId }, index) => [teamId, estimates[index] ?? []]))
   }
 
   /** Applies one state mutation with a Team-wide optimistic concurrency check. */
