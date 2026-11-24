@@ -80,6 +80,10 @@ export type WorkspaceMember = {
    * 利用停止日時の ISO 8601 timestamp です。
    */
   deactivatedAt?: string
+  /**
+   * When the member's access ends (ISO 8601); absent when it does not end.
+   */
+  accessExpiresAt?: string
 }
 
 /**

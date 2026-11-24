@@ -1,5 +1,8 @@
 import type {
+  PlanningEntityType,
   WorkspaceMemberMfaStatus,
+  WorkspaceMemberOffboarding,
+  WorkspaceMemberOffboardingCredential,
   WorkspaceMemberPasswordResetAvailability,
   WorkspaceMemberSignInSecurity,
 } from '@mukuroji/contracts'
@@ -36,13 +39,29 @@ type WorkspaceMemberResponse = {
   member: WorkspaceMember
 }
 
-export type { WorkspaceMemberMfaStatus, WorkspaceMemberPasswordResetAvailability, WorkspaceMemberSignInSecurity }
+export type {
+  WorkspaceMemberMfaStatus,
+  WorkspaceMemberOffboarding,
+  WorkspaceMemberOffboardingCredential,
+  WorkspaceMemberPasswordResetAvailability,
+  WorkspaceMemberSignInSecurity,
+}
 
 /** Sign-in action an admin takes for a member who cannot sign in. */
 export type WorkspaceMemberCredentialAction = 'password-reset' | 'mfa-reset'
 
 const workspaceApiBaseUrl = resolveApiBaseUrl('workspace')
 const memberMfaStatuses = new Set<string>(['enrolled', 'not-enrolled', 'sso', 'unknown'])
+const planningEntityTypes = new Set<string>([
+  'cycle',
+  'milestone',
+  'release',
+  'phase',
+  'goal',
+  'initiative',
+  'roadmap',
+  'portfolio',
+] satisfies PlanningEntityType[])
 const passwordResetAvailabilities = new Set<string>([
   'available',
   'invitation-pending',
@@ -152,6 +171,166 @@ export async function resetWorkspaceMemberCredential(
       method: 'POST',
     },
   )
+}
+
+/**
+ * Reads what a member manages, owns, or created, so it can be handed over before deactivation.
+ *
+ * Only owners and admins can call it.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member who is leaving.
+ * @returns The handover summary.
+ * @throws WorkspaceAccessApiError when the request fails or the response cannot be read.
+ */
+export async function getWorkspaceMemberOffboarding(
+  accessToken: string,
+  memberKey: string,
+): Promise<WorkspaceMemberOffboarding> {
+  const data = await sendWorkspaceAccessRequest<unknown>(
+    `/workspace/members/${encodeURIComponent(memberKey)}/offboarding`,
+    accessToken,
+  )
+  const offboarding = parseMemberOffboarding(data)
+  if (!offboarding) {
+    throw new WorkspaceAccessApiError(502, 'workspace.access.error.operation')
+  }
+  return offboarding
+}
+
+/**
+ * Sets or clears the time a member's access ends.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member whose access is limited.
+ * @param input - New expiry as an ISO 8601 timestamp, or null to clear it, and the member version it was read at.
+ * @param mutationContext - Idempotency and correlation headers.
+ * @returns The updated member.
+ */
+export async function updateWorkspaceMemberAccessExpiry(
+  accessToken: string,
+  memberKey: string,
+  input: { accessExpiresAt: string | null; expectedVersion: number },
+  mutationContext: MutationRequestContext,
+) {
+  const response = await sendWorkspaceAccessRequest<WorkspaceMemberResponse>(
+    `/workspace/members/${encodeURIComponent(memberKey)}/access-expiry`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  )
+  return response.member
+}
+
+/**
+ * Revokes every API key and OAuth application a member created.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member whose credentials stop working.
+ * @param mutationContext - Idempotency and correlation headers.
+ */
+export async function revokeWorkspaceMemberCredentials(
+  accessToken: string,
+  memberKey: string,
+  mutationContext: MutationRequestContext,
+): Promise<void> {
+  await sendWorkspaceAccessRequest<unknown>(
+    `/workspace/members/${encodeURIComponent(memberKey)}/credentials/revoke`,
+    accessToken,
+    {
+      body: '{}',
+      headers: createMutationHeaders(mutationContext),
+      method: 'POST',
+    },
+  )
+}
+
+/**
+ * Validates the offboarding summary the API returned.
+ *
+ * @param value - Response body.
+ * @returns The summary, or undefined when it is malformed.
+ */
+function parseMemberOffboarding(value: unknown): WorkspaceMemberOffboarding | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.memberKey !== 'string' ||
+    (value.accessExpiresAt !== undefined && typeof value.accessExpiresAt !== 'string') ||
+    typeof value.accessExpired !== 'boolean' ||
+    typeof value.planningRevision !== 'number' ||
+    typeof value.managesPrivateDocuments !== 'boolean' ||
+    typeof value.canDeactivate !== 'boolean' ||
+    !Array.isArray(value.managedProjects) ||
+    !Array.isArray(value.ownedPlanningEntities) ||
+    !Array.isArray(value.credentials) ||
+    !Array.isArray(value.webhooks)
+  ) {
+    return undefined
+  }
+  const managedProjects = value.managedProjects.flatMap((project: unknown) =>
+    isRecord(project) && typeof project.projectId === 'string'
+      ? [{
+          projectId: project.projectId,
+          ...(typeof project.teamId === 'string' ? { teamId: project.teamId } : {}),
+          ...(typeof project.name === 'string' ? { name: project.name } : {}),
+        }]
+      : []
+  )
+  const ownedPlanningEntities = value.ownedPlanningEntities.flatMap((entity: unknown) =>
+    isRecord(entity) &&
+    typeof entity.id === 'string' &&
+    typeof entity.title === 'string' &&
+    isPlanningEntityType(entity.type)
+      ? [{ id: entity.id, type: entity.type, title: entity.title }]
+      : []
+  )
+  const credentials = value.credentials.flatMap((credential: unknown): WorkspaceMemberOffboardingCredential[] => {
+    if (!isRecord(credential) || typeof credential.id !== 'string' || typeof credential.name !== 'string') {
+      return []
+    }
+    const kind = credential.kind === 'api-key' || credential.kind === 'oauth-app' ? credential.kind : undefined
+    return kind ? [{ id: credential.id, kind, name: credential.name }] : []
+  })
+  const webhooks = value.webhooks.flatMap((webhook: unknown) =>
+    isRecord(webhook) && typeof webhook.id === 'string' && typeof webhook.name === 'string'
+      ? [{ id: webhook.id, name: webhook.name }]
+      : []
+  )
+  return {
+    memberKey: value.memberKey,
+    ...(typeof value.accessExpiresAt === 'string' ? { accessExpiresAt: value.accessExpiresAt } : {}),
+    accessExpired: value.accessExpired,
+    managedProjects,
+    ownedPlanningEntities,
+    planningRevision: value.planningRevision,
+    managesPrivateDocuments: value.managesPrivateDocuments,
+    credentials,
+    webhooks,
+    canDeactivate: value.canDeactivate,
+  }
+}
+
+/**
+ * Narrows a value to a plain object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a non-null object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+/**
+ * Narrows a value to a Planning entity type.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a known type.
+ */
+function isPlanningEntityType(value: unknown): value is PlanningEntityType {
+  return typeof value === 'string' && planningEntityTypes.has(value)
 }
 
 /**

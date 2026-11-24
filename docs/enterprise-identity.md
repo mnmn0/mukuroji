@@ -335,9 +335,11 @@ enablement、external session lifetime 上限、許可 guest domain を version 
   再評価します。
 - IP allowlist は直接の transport source を使います。`X-Forwarded-For` は immediate source が
   明示した trusted proxy の場合だけ評価し、先頭値を無条件に信頼しません。
-- Guest/external restriction は role grant より優先する permission ceiling です。現行 model に
-  guest membership expiry と自動 deactivation scheduler はなく、guest の時間制限は
-  `maximumSessionLifetimeMinutes` による session 上限です。
+- Guest/external restriction は role grant より優先する permission ceiling です。session の時間制限は
+  `maximumSessionLifetimeMinutes` です。membership の期限は Workspace member row の任意の
+  `accessExpiresAt` で持ちます（ADR 0095）。期限を過ぎた member は membership の確認（sign-in、API、
+  Public API の credential 作成者確認、Webhook 配信）で active として扱わず、scheduled-jobs の
+  `member-access-expiry` job が毎時、手動の利用停止と同じ確認を通して deactivation を書き込みます。
 
 ### Session refresh と sign-out
 

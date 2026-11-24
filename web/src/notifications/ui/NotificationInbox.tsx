@@ -714,6 +714,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   if (normalizedReason === 'weekly-report-escalation') {
     return t('workspace.inbox.reason.weeklyReportEscalation')
   }
+  if (normalizedReason === 'member-access-expiry') {
+    return t('workspace.inbox.reason.memberAccessExpiry')
+  }
   if (normalizedReason.includes('reply')) {
     return t('workspace.inbox.reason.reply')
   }
