@@ -2473,11 +2473,17 @@ test('edits and deletes a comment through the author-only comment routes', async
   }
   const app = createTestApp(createDocumentClient({
     async updateComment(input) {
-      calls.push({ kind: 'update', commentId: input.commentId, body: input.body, mentions: input.mentions })
+      calls.push({
+        kind: 'update',
+        commentId: input.commentId,
+        body: input.body,
+        mentions: input.mentions,
+        idempotencyKey: input.idempotencyKey,
+      })
       return comment
     },
     async deleteComment(input) {
-      calls.push({ kind: 'delete', commentId: input.commentId })
+      calls.push({ kind: 'delete', commentId: input.commentId, idempotencyKey: input.idempotencyKey })
       return { ...comment, body: '', deletedAt: '2026-07-18T00:02:00.000Z' }
     },
   }))
@@ -2490,12 +2496,12 @@ test('edits and deletes a comment through the author-only comment routes', async
   })
   const edited = await app.request('/api/documents/document-1/comments/comment-1', {
     method: 'PATCH',
-    headers,
+    headers: { ...headers, 'Idempotency-Key': 'edit-key' },
     body: JSON.stringify({ body: 'Edited', mentions: [] }),
   })
   const deleted = await app.request('/api/documents/document-1/comments/comment-1', {
     method: 'DELETE',
-    headers,
+    headers: { ...headers, 'Idempotency-Key': 'delete-key' },
   })
 
   expect(invalid.status).toBe(400)
@@ -2504,8 +2510,8 @@ test('edits and deletes a comment through the author-only comment routes', async
   expect(deleted.status).toBe(200)
   expect(await deleted.json()).toMatchObject({ comment: { body: '', deletedAt: '2026-07-18T00:02:00.000Z' } })
   expect(calls).toEqual([
-    { kind: 'update', commentId: 'comment-1', body: 'Edited', mentions: [] },
-    { kind: 'delete', commentId: 'comment-1' },
+    { kind: 'update', commentId: 'comment-1', body: 'Edited', mentions: [], idempotencyKey: 'edit-key' },
+    { kind: 'delete', commentId: 'comment-1', idempotencyKey: 'delete-key' },
   ])
 })
 

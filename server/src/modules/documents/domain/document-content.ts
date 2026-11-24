@@ -1191,7 +1191,9 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
   for (const block of blocks) {
     switch (block.type) {
       case 'paragraph':
-        parts.push(escapeMarkdownText(block.text))
+        // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
+        // runnable HTML, and the page imports back with the same rendering.
+        parts.push(escapeMarkdownHtml(block.text))
         break
       case 'heading':
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
@@ -1517,6 +1519,16 @@ function safeSvgColor(value: string | undefined, fallback: string): string {
  */
 function escapeMarkdownText(value: string): string {
   return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
+}
+
+/**
+ * Escapes the angle brackets of raw HTML in Markdown, leaving other Markdown syntax as written.
+ *
+ * @param value - Markdown text.
+ * @returns Markdown whose HTML tags are shown as text.
+ */
+function escapeMarkdownHtml(value: string): string {
+  return value.replace(/([<>])/gu, '\\$1')
 }
 
 /**

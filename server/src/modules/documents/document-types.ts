@@ -477,6 +477,11 @@ export type UpdateDocumentCommentRequest = {
   body: string
   /** User mention ranges in the new body. */
   mentions: DocumentMention[]
+  /**
+   * Client `Idempotency-Key`. A retry with the same key returns the first result without
+   * rewriting the comment; the same key with another input is a conflict.
+   */
+  idempotencyKey?: string
   /** Audit context that records the edit and notifies newly mentioned members. */
   auditContext?: MutationAuditContext
 }
@@ -493,6 +498,11 @@ export type DeleteDocumentCommentRequest = {
   commentId: string
   /** Authorization snapshot of the comment author. */
   access: DocumentAccessContext
+  /**
+   * Client `Idempotency-Key`. A retry with the same key returns the first result without
+   * rewriting the comment; the same key for another comment is a conflict.
+   */
+  idempotencyKey?: string
   /** Audit context that records the deletion. */
   auditContext?: MutationAuditContext
 }

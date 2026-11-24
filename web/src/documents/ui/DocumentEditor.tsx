@@ -12,7 +12,7 @@ import type {
   DocumentTableBlock,
 } from '@mukuroji/contracts'
 import { DocumentLinkedText } from './DocumentLinkedText'
-import { SafeCommentBody } from '../../issues/ui/SafeCommentBody'
+import { SafeMarkdown } from '../../shared/ui/SafeMarkdown'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { DocumentRecord } from '../api'
 import {
@@ -1333,7 +1333,7 @@ function ReadOnlyBlock({
   }
 
   return (
-    <SafeCommentBody
+    <SafeMarkdown
       bodyMarkdown={block.text}
       className="text-[1rem] leading-8 [&_p]:m-0 [&_p]:whitespace-pre-wrap"
       rawHtml="escape"

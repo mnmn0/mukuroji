@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { DocumentComment } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
+import { replaceLoadedDocumentComment } from '../src/documents/model/comments'
+import { convertMarkdownToDocument } from '../src/documents/model/markdownImport'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { DocumentEditor, DocumentReadOnlyContent } from '../src/documents/ui/DocumentEditor'
 import { DocumentShareDialog } from '../src/documents/ui/DocumentShareDialog'
@@ -67,6 +69,36 @@ describe('Document editing and comments (#422)', () => {
     expect(html).toContain('&lt;div&gt;')
     expect(html).not.toContain('<div>\n')
     expect(html).toContain('line one\nline two')
+  })
+
+  test('keeps Markdown escapes of an imported paragraph so escaped text renders literally', () => {
+    let next = 0
+    const imported = convertMarkdownToDocument('\\*literal\\* and **bold**', {
+      createId: (prefix) => `${prefix}-${(next += 1)}`,
+      fallbackTitle: 'Imported',
+    })
+    if (!imported.ok) throw new Error('The Markdown should import.')
+    expect(imported.blocks).toMatchObject([{ type: 'paragraph', text: '\\*literal\\* and **bold**' }])
+
+    const html = renderToStaticMarkup(
+      <DocumentReadOnlyContent document={createPage(imported.blocks)} t={t} />,
+    )
+    expect(html).toContain('*literal* and <strong>bold</strong>')
+    expect(html).not.toContain('<em>literal</em>')
+  })
+
+  test('replaces an edited or deleted comment in the focused thread cache', () => {
+    const root = createComment({ id: 'root' })
+    const reply = createComment({ id: 'reply', parentCommentId: 'root', body: 'Before' })
+    const thread = [root, reply]
+    const edited = { ...reply, body: 'After', editedAt: '2026-11-02T00:00:00.000Z' }
+    const deleted = { ...reply, body: '', deletedAt: '2026-11-03T00:00:00.000Z' }
+
+    expect(replaceLoadedDocumentComment(thread, edited)).toEqual([root, edited])
+    expect(replaceLoadedDocumentComment(thread, deleted)).toEqual([root, deleted])
+    // A thread without the comment, or one not read yet, is left as it is.
+    expect(replaceLoadedDocumentComment([root], edited)).toEqual([root])
+    expect(replaceLoadedDocumentComment(undefined, edited)).toBeUndefined()
   })
 
   test('shows Mermaid source as source and no longer offers Mermaid for a text diagram', () => {

@@ -900,6 +900,7 @@ export function registerDocumentApiRoutes(
       const input = parseEditDocumentCommentInput(await readJson<unknown>(c))
       const commentId = readRequiredCommentId(c)
       const documentId = readRequiredDocumentId(c)
+      const idempotencyKey = readOptionalIdempotencyKey(c)
       await validateMentionMembers(dependencies, principal.workspaceId, input)
       const comment = await dependencies.getClient().updateComment({
         workspaceId: principal.workspaceId,
@@ -908,7 +909,8 @@ export function registerDocumentApiRoutes(
         access,
         body: input.body,
         mentions: input.mentions,
-        auditContext: createDocumentCommentAuditContext(c, principal, input),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        auditContext: createDocumentCommentAuditContext(c, principal, input, idempotencyKey),
       })
       await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
         documentId,
@@ -922,12 +924,14 @@ export function registerDocumentApiRoutes(
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const commentId = readRequiredCommentId(c)
       const documentId = readRequiredDocumentId(c)
+      const idempotencyKey = readOptionalIdempotencyKey(c)
       const comment = await dependencies.getClient().deleteComment({
         workspaceId: principal.workspaceId,
         documentId,
         commentId,
         access,
-        auditContext: createDocumentCommentAuditContext(c, principal, { commentId }),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        auditContext: createDocumentCommentAuditContext(c, principal, { commentId }, idempotencyKey),
       })
       await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
         documentId,
@@ -1365,6 +1369,16 @@ export function registerDocumentApiRoutes(
       return toDocumentApiErrorResponse(c, error)
     }
   })
+}
+
+/**
+ * Reads the optional `Idempotency-Key` header of a comment edit or delete.
+ *
+ * @param c - Request context.
+ * @returns The trimmed key, or undefined when the header is absent or blank.
+ */
+function readOptionalIdempotencyKey(c: Context): string | undefined {
+  return c.req.header('Idempotency-Key')?.trim() || undefined
 }
 
 function createDocumentCommentAuditContext(

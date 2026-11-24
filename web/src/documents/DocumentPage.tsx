@@ -131,6 +131,7 @@ import type {
   BuiltInDocumentTemplateKey,
   BuiltInTemplateCreateOptions,
 } from './model/builtInTemplates'
+import { replaceLoadedDocumentComment } from './model/comments'
 import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
 import { useMarkdownDocumentImport } from './mutations/useMarkdownDocumentImport'
 import type {
@@ -729,6 +730,7 @@ export function DocumentPage() {
   const {
     data: focusedThreadComments = emptyComments,
     isLoading: isFocusedThreadLoading,
+    mutate: mutateFocusedThread,
   } = useDocumentCommentThread(
     accessToken,
     selectedDocument?.id,
@@ -1357,15 +1359,17 @@ export function DocumentPage() {
   }
 
   /**
-   * Replaces one loaded comment with the server's copy and reloads the first page.
+   * Replaces one loaded comment with the server's copy in older pages and the focused thread,
+   * then reloads the first page and the focused thread.
    *
    * @param changed - Comment returned by an edit or delete.
    */
   const replaceLoadedComment = async (changed: DocumentComment) => {
-    setOlderComments((current) =>
-      current.map((comment) => comment.id === changed.id ? changed : comment),
-    )
-    await mutateComments()
+    setOlderComments((current) => replaceLoadedDocumentComment(current, changed))
+    await Promise.all([
+      mutateComments(),
+      mutateFocusedThread((current) => replaceLoadedDocumentComment(current, changed)),
+    ])
   }
 
   const handleEditComment = async (

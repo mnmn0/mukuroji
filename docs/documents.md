@@ -113,7 +113,12 @@ Mention は active Workspace member を検証し、comment と同じ transaction
 読んで集め、それを超える古い返信者は通知から漏れることがあります。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
 し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
-thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
+thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の
+`Idempotency-Key` は Workspace・member・key の hash を sort key にした
+`COMMENT_MUTATION#<documentId>#<hash>` の receipt（operation・comment・入力の fingerprint と
+結果の comment を持ち、30 日の TTL）に、変更と同じ transaction で記録します。同じ key の
+再送は comment を書き換えずに最初の結果を返し（その後の新しい編集を巻き戻さない）、同じ key で
+別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
 化・archive された Document は表示されません。
 
 Favorite と最終 open 時刻は、preference revision の条件付き transaction を競合時に再試行して
@@ -201,8 +206,10 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
 
 Paragraph block は Markdown として表示します（GFM の箇条書き・番号付きリスト・link・強調・
-引用・表・inline code。単独の改行もそのまま改行として表示）。描画は Work Item のコメントと同じ
-sanitize 済み renderer で、raw HTML は実行せず文字として表示し、外部 URL の画像は読み込みません。
+引用・表・inline code。単独の改行もそのまま改行として表示）。描画は Work Item のコメントと共通の
+sanitize 済み renderer（`web/src/shared/ui/SafeMarkdown.tsx`）で、raw HTML は実行せず文字として
+表示し、外部 URL の画像は読み込みません。Work Item key の link と `attachment:` 添付はコメント
+だけの機能で、paragraph では文字のまま表示します。
 Editor 右上の「プレビュー」で編集中のページを表示どおりに確認できます。Block は各 block の
 「+」から直下に挿入でき、table は行と列を個別に削除できます（列は 1 つ以上残します）。
 Diagram block の `text` 形式は `A → B` の流れとして描画します。Mermaid の描画 library は同梱して
@@ -236,9 +243,12 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - ページの Markdown export は表の各行の間に空行を入れるので、その形の表も table block に戻します。
 - フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
   `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
-- 段落・リスト・引用・リンク・画像・HTML は、Markdown の backslash escape だけを外して paragraph
+- 段落・リスト・引用・リンク・画像・HTML は、backslash escape も含めて Markdown のまま paragraph
   block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
-  描画され、HTML は文字のまま表示されます。画像は描画しません。
+  描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
+  描画しません。Markdown 書き出しも paragraph の text をそのまま書くため、書き出したページを
+  取り込み直しても段落は変わりません。この変更より前に取り込んだ段落は escape を外して保存
+  しているため、`*` などを含むと強調として表示されることがあります。
 - folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
 
 ### 同梱テンプレートと宿題の Work Item 化

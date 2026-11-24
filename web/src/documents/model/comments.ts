@@ -1,4 +1,4 @@
-import type { DocumentMention } from '@mukuroji/contracts'
+import type { DocumentComment, DocumentMention } from '@mukuroji/contracts'
 import {
   findMemberMentionRanges,
   overlapsMentionRanges,
@@ -66,3 +66,18 @@ export function resolveDocumentMentions(
 
 const documentMentionPattern =
   /(^|[\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】])@([^\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】]+)/gu
+
+/**
+ * Replaces one comment in a loaded list with the server's copy after an edit or delete.
+ *
+ * @param comments - Loaded comments, or undefined before the first read.
+ * @param changed - Comment returned by the server.
+ * @returns The list with the comment replaced, or the same value when the comment is not in it.
+ */
+export function replaceLoadedDocumentComment<T extends readonly DocumentComment[] | undefined>(
+  comments: T,
+  changed: DocumentComment,
+): T | DocumentComment[] {
+  if (!comments?.some((comment) => comment.id === changed.id)) return comments
+  return comments.map((comment) => comment.id === changed.id ? changed : comment)
+}

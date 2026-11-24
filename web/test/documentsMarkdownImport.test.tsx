@@ -93,7 +93,8 @@ describe('Markdown import', () => {
       'diagram',
     ])
     expect(result.blocks[0]).toMatchObject({ level: 1, text: '背景' })
-    expect(result.blocks[1]).toMatchObject({ text: '本文の 1 行目\n2 行目は *強調ではない*' })
+    // Paragraphs are shown as Markdown, so the escapes stay and the text renders literally.
+    expect(result.blocks[1]).toMatchObject({ text: '本文の 1 行目\n2 行目は \\*強調ではない\\*' })
     expect(result.blocks[2]).toMatchObject({ level: 2, text: '詳細' })
     expect(result.blocks[3]).toMatchObject({
       columns: ['項目', '値'],

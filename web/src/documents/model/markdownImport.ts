@@ -139,8 +139,8 @@ const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
  * Converts Markdown into the title and blocks of one Document page.
  *
  * Headings, fenced code, Mermaid diagrams, task lists, and pipe tables become
- * their matching blocks; everything else stays as plain paragraph text, since
- * paragraphs store text rather than rendered Markdown. When the source starts
+ * their matching blocks; everything else stays as paragraph Markdown, escapes
+ * included, since paragraphs are shown as Markdown. When the source starts
  * with the only `#` heading, as Markdown exported from a page does, that
  * heading becomes the title and `##` becomes level 1, so exported pages keep
  * their heading levels. Otherwise levels are shifted so the shallowest heading
@@ -262,7 +262,8 @@ function scanBlocks(
     blocks.push({
       id: createId('block'),
       type: 'paragraph',
-      text: unescapeMarkdown(rewrite(raw)),
+      // Paragraphs are shown as Markdown, so escapes such as `\*` stay to keep text literal.
+      text: rewrite(raw),
     })
   }
 

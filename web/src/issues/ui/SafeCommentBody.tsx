@@ -1,7 +1,5 @@
 import { useMemo, type ReactNode } from 'react'
-import Markdown, { type Components } from 'react-markdown'
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
-import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
 import { markdownAttachmentScheme, readMarkdownAttachmentFileId } from '../../files/model/markdownAttachments'
 import {
   MarkdownAttachmentImage,
@@ -12,7 +10,7 @@ import {
   MarkdownAttachmentReactContext,
   useMarkdownAttachmentContext,
 } from '../../files/ui/markdownAttachmentContext'
-import { remarkHtmlAsText } from '../model/markdownHtmlAsText'
+import { SafeMarkdown } from '../../shared/ui/SafeMarkdown'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
@@ -42,17 +40,10 @@ export type SafeCommentBodyProps = {
 }
 
 /**
- * The default GitHub-style sanitize schema, plus the `attachment:` scheme for links and images.
- * Attachment URLs never reach the DOM as-is: the `a` and `img` components below replace them.
+ * URL schemes kept for links and images besides the defaults. Attachment URLs never reach the
+ * DOM as-is: the `a` and `img` components below replace them.
  */
-const commentSanitizeSchema = {
-  ...defaultSchema,
-  protocols: {
-    ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), markdownAttachmentScheme],
-    src: [...(defaultSchema.protocols?.src ?? []), markdownAttachmentScheme],
-  },
-}
+const attachmentUrlSchemes = [markdownAttachmentScheme]
 
 /**
  * Draws a Markdown link: an `attachment:` link becomes a download button resolved from the
@@ -120,62 +111,26 @@ export function SafeCommentBody({
   )
 
   return (
-    <div
-      className={`min-w-0 break-words text-sm font-medium leading-6 text-[var(--workbench-text)]
-        [&_a]:font-semibold [&_a]:text-fg-16766f [&_a]:underline [&_a]:decoration-fg-99d7cf [&_a]:underline-offset-2
-        [&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-tone-99d7cf [&_blockquote]:pl-3 [&_blockquote]:text-[var(--workbench-muted)]
-        [&_code]:rounded [&_code]:bg-tone-eef2f5 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.82rem] [&_code]:text-fg-26333f
-        [&_input[type=checkbox]]:mr-2 [&_input[type=checkbox]]:accent-[var(--workbench-primary)]
-        [&_li]:my-1 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p+p]:mt-2
-        [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-[var(--workbench-border)] [&_pre]:bg-tone-f7f9fa [&_pre]:p-3
-        [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5
-        [&_ul.contains-task-list]:list-none [&_ul.contains-task-list]:pl-0
-        [&_h1]:mb-1 [&_h1]:mt-3 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-3 [&_h2]:text-base [&_h2]:font-semibold
-        [&_h3]:mb-1 [&_h3]:mt-2 [&_h3]:font-semibold [&_h4]:mt-2 [&_h4]:font-semibold [&_hr]:my-3 [&_hr]:border-[var(--workbench-border)]
-        [&_table]:my-2 [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_table]:border-collapse
-        [&_td]:border [&_td]:border-[var(--workbench-border)] [&_td]:px-2 [&_td]:py-1
-        [&_th]:border [&_th]:border-[var(--workbench-border)] [&_th]:bg-[var(--workbench-surface-muted)] [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-semibold
-        [&>*:first-child]:mt-0 ${className}`}
-    >
-      <MarkdownAttachmentReactContext.Provider value={resolvedAttachments}>
-        <Markdown
-          components={commentMarkdownComponents}
-          rehypePlugins={[[rehypeSanitize, commentSanitizeSchema]]}
-          remarkPlugins={rawHtml === 'escape'
-            ? [remarkGfm, remarkHtmlAsText, [remarkWorkItemKeyLinks, { prefixes }]]
-            : [remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
-          skipHtml={rawHtml === 'skip'}
-          urlTransform={sanitizeCommentUrl}
-        >
-          {bodyMarkdown}
-        </Markdown>
-      </MarkdownAttachmentReactContext.Provider>
-    </div>
+    <MarkdownAttachmentReactContext.Provider value={resolvedAttachments}>
+      <SafeMarkdown
+        acceptExtraUrl={isMarkdownAttachmentUrl}
+        bodyMarkdown={bodyMarkdown}
+        className={className}
+        components={commentMarkdownComponents}
+        extraUrlSchemes={attachmentUrlSchemes}
+        rawHtml={rawHtml}
+        remarkPlugins={[[remarkWorkItemKeyLinks, { prefixes }]]}
+      />
+    </MarkdownAttachmentReactContext.Provider>
   )
 }
 
 /**
- * Keeps same-site paths, fragments, web and mail links, and well-formed attachment references.
+ * Accepts a well-formed `attachment:` reference as a link or image URL.
  *
  * @param value - URL written in the Markdown body.
- * @returns The URL, or an empty string when it is dropped.
+ * @returns Whether the URL names an attachment.
  */
-function sanitizeCommentUrl(value: string) {
-  if (readMarkdownAttachmentFileId(value)) {
-    return value
-  }
-
-  if ((value.startsWith('/') && !value.startsWith('//')) || value.startsWith('#')) {
-    return value
-  }
-
-  try {
-    const url = new URL(value)
-
-    return url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'mailto:'
-      ? value
-      : ''
-  } catch {
-    return ''
-  }
+function isMarkdownAttachmentUrl(value: string) {
+  return readMarkdownAttachmentFileId(value) !== undefined
 }

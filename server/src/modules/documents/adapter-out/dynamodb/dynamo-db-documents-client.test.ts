@@ -4570,6 +4570,69 @@ test('notifies thread participants of replies and lets authors edit and delete o
   expect(listed.comments.find(({ id }) => id === 'reply-2')).toMatchObject({ body: '', deletedAt: expect.any(String) })
 })
 
+test('replays an idempotent comment edit or delete without rewriting a newer change', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Idempotent edits',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'comment-1',
+  })
+  const edit = (body: string, idempotencyKey: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body,
+    mentions: [],
+    idempotencyKey,
+  })
+
+  const first = await edit('First edit', 'edit-key-1')
+  const second = await edit('Second edit', 'edit-key-2')
+  // The lost-response retry of the first edit returns its own result and keeps the newer edit.
+  expect(await edit('First edit', 'edit-key-1')).toEqual(first)
+  const listed = await client.listComments({ workspaceId: 'workspace-1', documentId: document.id, access: ownerAccess })
+  expect(listed.comments.find(({ id }) => id === 'comment-1')).toEqual(second)
+
+  await expect(edit('Different body', 'edit-key-1'))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  const deleteWithKey = (idempotencyKey: string) => client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    idempotencyKey,
+  })
+  await expect(deleteWithKey('edit-key-2'))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  const deleted = await deleteWithKey('delete-key-1')
+  expect(deleted).toMatchObject({ body: '', deletedAt: expect.any(String) })
+  expect(await deleteWithKey('delete-key-1')).toEqual(deleted)
+  // A key is bound to its actor: another member's identical key is not a replay of this one.
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: { ...ownerAccess, memberKey: 'mina@example.com' },
+    body: 'First edit',
+    mentions: [],
+    idempotencyKey: 'edit-key-1',
+  })).rejects.toMatchObject({ status: 403, code: 'DocumentCommentAuthorRequired' })
+})
+
 test('advances the Document comment-window revision with each insertion', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -5295,6 +5358,7 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     title: 'Export / document',
     blocks: [
       { id: 'block-a', type: 'paragraph', text: '<script>alert(1)</script>' },
+      { id: 'block-m', type: 'paragraph', text: '**bold** and \\*literal\\*' },
       {
         id: 'block-b',
         type: 'table',
@@ -5307,6 +5371,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   const json = renderDocumentExport(page, 'json')
   expect(markdown.fileName).toBe('Export - document.md')
   expect(markdown.content).toContain('\\<script\\>alert(1)\\</script\\>')
+  // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
+  expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')
   expect(JSON.parse(json.content)).toMatchObject({ id: page.id, revision: 1 })
 

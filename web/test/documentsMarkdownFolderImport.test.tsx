@@ -136,7 +136,7 @@ describe('folder Markdown import', () => {
       { type: 'embed', url: '/documents/id%3Adocs%2FREADME.md', title: 'Back' },
     ])
     expect(resolvedBlocks(planned, 'docs/guide/usage.md')).toMatchObject([
-      { type: 'paragraph', text: '`[code](setup.md)` and [not](setup.md)' },
+      { type: 'paragraph', text: '`[code](setup.md)` and \\[not](setup.md)' },
     ])
   })
 
@@ -230,7 +230,7 @@ describe('single-page Markdown links', () => {
       { type: 'embed', url: 'https://example.com/spec', title: 'Spec' },
       { type: 'embed', url: '/documents/doc-1', title: 'Page' },
       { type: 'paragraph', text: '[Plain](http://example.com)' },
-      { type: 'paragraph', text: '[Escaped](https://example.com)' },
+      { type: 'paragraph', text: '\\[Escaped\\](https://example.com)' },
       { type: 'paragraph', text: '[Relative](other.md)' },
     ])
   })

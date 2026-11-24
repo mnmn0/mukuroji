@@ -576,6 +576,43 @@ type StoredDocumentCommentReceiptItem = {
 }
 
 /**
+ * Receipt of one idempotent comment edit or delete, written in the same transaction as the
+ * change so a retry with the same `Idempotency-Key` returns the first result without rewriting.
+ */
+type StoredDocumentCommentMutationReceiptItem = {
+  /** Canonical Workspace partition key. */
+  workspaceId: string
+  /** Sort key derived from the Document and the hashed actor-scoped idempotency key. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-comment-mutation'
+  /** Document that owns the comment. */
+  documentId: string
+  /** Comment that was changed. */
+  commentId: string
+  /** Change that was applied. */
+  action: 'updated' | 'deleted'
+  /** Fingerprint of the operation, the comment, and the request input. */
+  fingerprint: string
+  /** Comment as returned by the first request. */
+  comment: Record<string, unknown>
+  /** Receipt creation time. */
+  createdAt: string
+  /** DynamoDB TTL epoch seconds. */
+  expiresAtEpoch: number
+}
+
+/**
+ * Identity of one idempotent comment edit or delete.
+ */
+type CommentMutationIdempotency = {
+  /** Sort key of the receipt row. */
+  recordKey: string
+  /** Fingerprint of the operation, the comment, and the request input. */
+  fingerprint: string
+}
+
+/**
  * DynamoDB に保存する Document presence lease です。
  */
 type StoredDocumentPresenceItem = StoredDocumentPresence & {
@@ -3462,7 +3499,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     assertText(input.body, 'body', DOCUMENT_COMMENT_MAX_LENGTH, false)
     const mentions = structuredClone(input.mentions)
     validateMentions(input.body, mentions)
-    return this.writeOwnComment(input, 'updated', (stored, now) => ({
+    return this.writeOwnComment(input, 'updated', { body: input.body, mentions }, (stored, now) => ({
       ...stored,
       body: input.body,
       mentions,
@@ -3487,7 +3524,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   async deleteComment(
     input: DeleteDocumentCommentRequest,
   ): Promise<StoredDocumentComment> {
-    return this.writeOwnComment(input, 'deleted', (stored, now) => ({
+    return this.writeOwnComment(input, 'deleted', {}, (stored, now) => ({
       ...stored,
       body: '',
       mentions: [],
@@ -3499,8 +3536,13 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   /**
    * Rewrites one comment of the actor under the Document authorization fence.
    *
-   * @param input - Comment identity, actor access, and audit context.
+   * With an idempotency key, the result is recorded in a receipt in the same transaction, and a
+   * retry with the same key returns that result without rewriting the comment, even after a
+   * newer change; the same key with another operation, comment, or input is a conflict.
+   *
+   * @param input - Comment identity, actor access, idempotency key, and audit context.
    * @param action - Audited action name.
+   * @param payload - Request input bound to the idempotency key.
    * @param change - Builds the next stored comment from the current one.
    * @param notify - Builds notification candidates from the current comment.
    * @returns Updated comment without storage fields.
@@ -3508,6 +3550,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   private async writeOwnComment(
     input: DeleteDocumentCommentRequest,
     action: 'updated' | 'deleted',
+    payload: Record<string, unknown>,
     change: (stored: StoredDocumentCommentItem, now: string) => StoredDocumentCommentItem,
     notify: (stored: StoredDocumentCommentItem) => Array<{ memberKey: string; reason: string }>,
   ): Promise<StoredDocumentComment> {
@@ -3522,6 +3565,22 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         'DocumentCommentDenied',
         true,
       )
+    const idempotency: CommentMutationIdempotency | undefined = input.idempotencyKey === undefined
+      ? undefined
+      : {
+          recordKey: commentMutationReceiptKey(
+            input.documentId,
+            sha256(
+              `document-comment-mutation-v1\0${input.workspaceId}\0` +
+              `${normalizeCommentMemberKey(input.access.memberKey)}\0${input.idempotencyKey}`,
+            ),
+          ),
+          fingerprint: fingerprint({ action, commentId: input.commentId, payload }),
+        }
+    if (idempotency !== undefined) {
+      const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+      if (replay !== undefined) return replay
+    }
     const stored = await this.findStoredComment(
       input.workspaceId,
       input.documentId,
@@ -3602,6 +3661,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           },
         },
       },
+      ...(idempotency === undefined
+        ? []
+        : [commentMutationReceiptPut(this.tableName, input, action, idempotency, next, this.now())]),
       ...(auditPut === undefined ? [] : [auditPut]),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
@@ -3625,11 +3687,48 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             'Document authorization changed while changing the comment.',
           )
         }
+        // A concurrent retry with the same key may have committed first.
+        if (idempotency !== undefined) {
+          const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+          if (replay !== undefined) return replay
+        }
         throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
       }
       throw normalizeDynamoError(error)
     }
     return stripCommentStorageFields(next)
+  }
+
+  /**
+   * Reads the recorded result of an idempotent comment edit or delete.
+   *
+   * @param workspaceId - Workspace that owns the Document.
+   * @param documentId - Document that owns the comment.
+   * @param idempotency - Receipt key and request fingerprint.
+   * @returns The first result, or undefined when no live receipt exists.
+   * @throws DocumentError 409 when the key was used for another operation, comment, or input.
+   */
+  private async readCommentMutationReplay(
+    workspaceId: string,
+    documentId: string,
+    idempotency: CommentMutationIdempotency,
+  ): Promise<StoredDocumentComment | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: idempotency.recordKey },
+      ConsistentRead: true,
+    }))
+    if (result.Item === undefined) return undefined
+    const receipt = readStoredCommentMutationReceipt(result.Item, workspaceId, documentId, idempotency.recordKey)
+    if (receipt.expiresAtEpoch <= Math.floor(this.now().getTime() / 1_000)) return undefined
+    if (receipt.fingerprint !== idempotency.fingerprint) {
+      throw new DocumentError(
+        409,
+        'DocumentCommentIdempotencyConflict',
+        'The idempotency key has already been used with different input.',
+      )
+    }
+    return stripCommentStorageFields(receipt.comment)
   }
 
   /**
@@ -6701,6 +6800,107 @@ function commentKey(documentId: string, createdAt: string, commentId: string): s
 /** Builds the deterministic sort key for one Document comment-window fence row. */
 function commentWindowKey(documentId: string): string {
   return `COMMENT_WINDOW#${encodeKeyPart(documentId)}`
+}
+
+/**
+ * Builds the sort key of an idempotent comment edit or delete receipt.
+ *
+ * @param documentId - Document that owns the comment.
+ * @param keyHash - Hash of the Workspace, actor, and idempotency key.
+ * @returns The receipt sort key.
+ */
+function commentMutationReceiptKey(documentId: string, keyHash: string): string {
+  return `COMMENT_MUTATION#${encodeKeyPart(documentId)}#${keyHash}`
+}
+
+/**
+ * Builds the conditional Put of an idempotent comment edit or delete receipt. An expired
+ * receipt with the same key may be replaced.
+ *
+ * @param tableName - Documents table.
+ * @param input - Comment identity.
+ * @param action - Change that was applied.
+ * @param idempotency - Receipt key and request fingerprint.
+ * @param comment - Stored comment after the change.
+ * @param now - Current time.
+ * @returns The transaction item.
+ */
+function commentMutationReceiptPut(
+  tableName: string,
+  input: DeleteDocumentCommentRequest,
+  action: 'updated' | 'deleted',
+  idempotency: CommentMutationIdempotency,
+  comment: StoredDocumentCommentItem,
+  now: Date,
+) {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: idempotency.recordKey,
+        entryType: 'document-comment-mutation',
+        documentId: input.documentId,
+        commentId: input.commentId,
+        action,
+        fingerprint: idempotency.fingerprint,
+        comment: stripCommentStorageFields(comment),
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      } satisfies StoredDocumentCommentMutationReceiptItem,
+      ConditionExpression: 'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+      ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+    },
+  }
+}
+
+/**
+ * Validates one stored comment edit or delete receipt.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document owner.
+ * @param recordKey - Expected receipt sort key.
+ * @returns The validated receipt.
+ * @throws DocumentError when the stored row is malformed or crosses a boundary.
+ */
+function readStoredCommentMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  recordKey: string,
+): StoredDocumentCommentMutationReceiptItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !== recordKey ||
+    value.entryType !== 'document-comment-mutation' ||
+    value.documentId !== documentId ||
+    typeof value.commentId !== 'string' ||
+    (value.action !== 'updated' && value.action !== 'deleted') ||
+    typeof value.fingerprint !== 'string' ||
+    !isRecord(value.comment) ||
+    value.comment.id !== value.commentId ||
+    value.comment.documentId !== documentId ||
+    !isCanonicalIsoTimestamp(value.createdAt) ||
+    typeof value.expiresAtEpoch !== 'number' ||
+    !Number.isSafeInteger(value.expiresAtEpoch)
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey,
+    entryType: 'document-comment-mutation',
+    documentId,
+    commentId: value.commentId,
+    action: value.action,
+    fingerprint: value.fingerprint,
+    comment: value.comment,
+    createdAt: value.createdAt,
+    expiresAtEpoch: value.expiresAtEpoch,
+  }
 }
 
 function commentReceiptKey(documentId: string, commentId: string): string {
