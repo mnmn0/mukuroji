@@ -2752,7 +2752,9 @@ function DocumentWorkspace({
       hasDirtyTitle: titleDirty,
       incomingRevision: selectedDocument.revision,
       localRevision: revisionRef.current,
-      pendingOperationCount: pendingOperationsRef.current.length,
+      // Operations still being sent are unsaved too, so the incoming Document must not hide them.
+      pendingOperationCount:
+        pendingOperationsRef.current.length + inFlightOperationsRef.current.length,
       saveStatus,
     })) {
       setLocalDocument(selectedDocument)
@@ -3129,12 +3131,9 @@ function DocumentWorkspace({
         setSaveStatus('conflict')
         return
       }
-      saveStatusRef.current = 'saving'
-      setSaveStatus('saving')
-      saveTimerRef.current = window.setTimeout(() => {
-        saveTimerRef.current = undefined
-        void (titleDirtyRef.current ? commitTitle() : flushRef.current())
-      }, documentAutosaveDelay)
+      // Saved at once rather than on the autosave timer, which an unmount would cancel for good:
+      // the draft is restored only once.
+      void (titleDirtyRef.current ? commitTitle() : flushRef.current())
     },
   })
 
@@ -3207,7 +3206,7 @@ function DocumentWorkspace({
             }}
             value={localDocument.title}
           />
-          {isSessionDraftRestored && hasUnsavedChanges ? (
+          {isSessionDraftRestored ? (
             <p className="m-0 mt-1 text-xs font-semibold text-fg-amber-900" role="status">
               {t('documents.editor.sessionDraftRestored')}
             </p>
