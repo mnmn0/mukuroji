@@ -89,6 +89,9 @@ test('requests approval of a pinned Document version on the deliverable Work Ite
   const created: Array<{ scope: FileProofingScope; input: CreateDocumentVersionApprovalInput }> = []
   setTestAppDependencies({
     documents: createDocumentFake({
+      async get() {
+        return document
+      },
       async getVersion() {
         return { version: pinnedVersion, document }
       },
@@ -137,6 +140,9 @@ test('rejects a Document version approval without Work Item write access', async
   let createCalls = 0
   setTestAppDependencies({
     documents: createDocumentFake({
+      async get() {
+        return document
+      },
       async getVersion() {
         return { version: pinnedVersion, document }
       },

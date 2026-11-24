@@ -65,7 +65,8 @@ metadata row の `expiresAtEpoch` を外し、その revision の full snapshot 
 固定した version は承認の対象（`ApprovalRequest.subjectType: 'document-version'`）にできます。
 承認依頼は成果物として link する Work Item に作り、file version の承認と同じ approval row、
 reviewer の Inbox、判断と取消、Work Item の承認集計（完了 Gate を含む）を使います。
-依頼には Document の閲覧権限、その version が固定済みであること、Work Item の編集権限が要り、
+依頼には Document の編集権限（固定と同じ。Enterprise role では `documents.write` 以上）、その
+version が固定済みであること、Work Item の編集権限と Enterprise role の `files.approve` が要り、
 reviewer は Work Item を閲覧できる active member に限ります（guest は reviewer にできません）。
 Document 側の表示用に、file proofing table の `WORKSPACE#<workspaceId>#DOCUMENT#<documentId>`
 partition へ `APPROVAL#<createdAt>#<approvalId>` の pointer row を書き、承認一覧はそこから main

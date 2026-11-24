@@ -49,13 +49,17 @@ export function useDocumentVersionReviewMutations(
   }
 
   /**
-   * Refreshes every cached version history and approval list of the Document.
+   * Refreshes every cached version history, version detail, and approval list of the Document.
    */
   const refresh = async () => {
     await mutate(
       (key) =>
         Array.isArray(key) &&
-        (key[0] === 'document-versions' || key[0] === 'document-approvals') &&
+        (
+          key[0] === 'document-versions' ||
+          key[0] === 'document-version-detail' ||
+          key[0] === 'document-approvals'
+        ) &&
         key[2] === documentId,
     )
   }

@@ -37,6 +37,8 @@ export type DocumentBlockDiffEntry =
       before: DocumentBlock
       /** Block in the newer version, shown at its new position. */
       block: DocumentBlock
+      /** Whether the content also changed, so the older content must be shown too. */
+      contentChanged: boolean
     }
 
 /**
@@ -136,7 +138,7 @@ export function diffDocumentBlocks(
     if (matched === undefined) {
       entries.push({ kind: 'added', block: next })
     } else if (!stable.has(next.id)) {
-      entries.push({ kind: 'moved', before: matched, block: next })
+      entries.push({ kind: 'moved', before: matched, block: next, contentChanged: !isSameBlock(matched, next) })
     } else {
       entries.push(
         isSameBlock(matched, next)
