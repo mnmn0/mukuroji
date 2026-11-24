@@ -437,6 +437,7 @@ function RulesTab({
             <ResourceCard
               key={id}
               description={[
+                formatOwnerTeam(rule.ownerTeamId, teams, t),
                 trigger
                   ? `${t('automation.rule.trigger')}: ${formatType(trigger, t, 'trigger')}`
                   : '',
@@ -555,7 +556,10 @@ function TemplatesTab({
           return (
             <div className="grid gap-3" key={id}>
               <ResourceCard
-                description={`${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`}
+                description={[
+                  formatOwnerTeam(template.ownerTeamId, teams, t),
+                  `${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`,
+                ].filter(Boolean).join(' · ')}
                 locale={locale}
                 name={readResourceName(template, t('automation.common.unnamed'))}
                 status={status}
@@ -1283,6 +1287,7 @@ function RecurringTab({
             <ResourceCard
               key={id}
               description={[
+                formatOwnerTeam(definition.ownerTeamId, teams, t),
                 timeZone,
                 nextRunAt
                   ? `${t('automation.recurring.nextRun')}: ${formatDateTime(nextRunAt, locale, timeZone)}`
@@ -1577,4 +1582,22 @@ function formatDateTime(value: string, locale: Locale, timeZone?: string) {
   } catch {
     return format()
   }
+}
+
+/**
+ * Formats the owner Team of a Team definition for its card.
+ *
+ * @param ownerTeamId - Owner Team, or undefined for a Workspace definition.
+ * @param teams - Teams the panel knows by name.
+ * @param t - Translator.
+ * @returns The label, or an empty string for a Workspace definition.
+ */
+function formatOwnerTeam(
+  ownerTeamId: string | undefined,
+  teams: readonly RecurringTeamOption[],
+  t: ReturnType<typeof createTranslator>,
+): string {
+  if (ownerTeamId === undefined) return ''
+  const name = teams.find((team) => team.id === ownerTeamId)?.name ?? ownerTeamId
+  return t('automation.ownerTeam').replace('{team}', name)
 }

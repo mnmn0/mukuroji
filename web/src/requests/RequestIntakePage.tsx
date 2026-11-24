@@ -4,6 +4,8 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import useSWR from 'swr'
+import { getAutomationManagementScopes } from '../automation/api'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
@@ -49,7 +51,7 @@ import {
 import { getRequestFormEditorInstanceKey } from './model/editorState'
 import { RequestFormBuilder } from './ui/RequestFormBuilder'
 import {
-  createEmptyRequestFormDraft,
+  createEmptyRequestFormDraftForScope,
   createRequestFormInput,
   normalizeRequestForm,
   normalizeRequestSubmission,
@@ -113,7 +115,23 @@ export function RequestIntakePage() {
     ])),
     [teams],
   )
-  const canManageForms = canManageWorkspaceStructure(user)
+  const isWorkspaceStructureManager = canManageWorkspaceStructure(user)
+  // A Team manager manages the forms scoped to their own Teams (ADR 0087).
+  const { data: managementScopes } = useSWR(
+    accessToken && user && !currentUserError && !isWorkspaceStructureManager
+      ? ['request-form-management-scopes', accessToken]
+      : null,
+    () => getAutomationManagementScopes(accessToken ?? ''),
+    apiSWRConfig,
+  )
+  const canManageWorkspaceForms = isWorkspaceStructureManager || managementScopes?.workspace === true
+  const formTeams = useMemo(
+    () => canManageWorkspaceForms
+      ? teams
+      : teams.filter((team) => managementScopes?.teamIds.includes(team.id) === true),
+    [canManageWorkspaceForms, managementScopes, teams],
+  )
+  const canManageForms = canManageWorkspaceForms || formTeams.length > 0
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -407,7 +425,8 @@ export function RequestIntakePage() {
                     )}
                     locale={locale}
                     onAuthenticatedApiError={handleAuthenticatedApiError}
-                    teams={teams}
+                    allowWorkspaceScope={canManageWorkspaceForms}
+                    teams={formTeams}
                     onCreated={(form) => {
                       void mutateForms()
                       selectForm(form.id)
@@ -432,6 +451,7 @@ export function RequestIntakePage() {
 
 function RequestFormEditorContainer({
   accessToken,
+  allowWorkspaceScope,
   initialForm,
   locale,
   onAuthenticatedApiError,
@@ -440,6 +460,8 @@ function RequestFormEditorContainer({
   teams,
 }: {
   accessToken: string
+  /** Whether the editor offers the Workspace scope; a Team manager only sees their Teams. */
+  allowWorkspaceScope: boolean
   initialForm?: RequestForm
   locale: Locale
   onAuthenticatedApiError: (error: unknown) => void
@@ -450,7 +472,9 @@ function RequestFormEditorContainer({
   const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [model, setModel] = useState<RequestFormDraftModel>(() =>
-    initialForm ? normalizeRequestForm(initialForm) : createEmptyRequestFormDraft(),
+    initialForm
+      ? normalizeRequestForm(initialForm)
+      : createEmptyRequestFormDraftForScope(allowWorkspaceScope ? undefined : teams[0]?.id),
   )
   const [isSaving, setIsSaving] = useState(false)
   const [isPublishing, setIsPublishing] = useState(false)
@@ -565,6 +589,7 @@ function RequestFormEditorContainer({
       isPublishing={isPublishing}
       isSaving={isSaving}
       locale={locale}
+      allowWorkspaceScope={allowWorkspaceScope}
       model={model}
       teams={teams}
       workItemConfigurationsByTeam={workItemConfigurationsByTeam}

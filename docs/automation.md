@@ -25,7 +25,7 @@ Trigger は次を扱う。
 - webhook
 - schedule
 
-Relation trigger は `eventTypes`（1〜10 件、[relation の event](./event-audit.md#work-item-relation-の-event) の `work-item.parent-changed` などから選ぶ）で対象を絞り、省略するとすべての relation 変更で動く。relation の event は両端の Work Item に 1 件ずつ記録されるので、1 つの変更で両端の event type がそれぞれ一致すればルールは両端で 1 回ずつ動き、`workItem.` の condition と action は event を記録した側の Work Item を対象にする。相手の Work Item は `event.metadata.relatedWorkItemId`（親の変更では `parentWorkItemId` / `previousParentWorkItemId`）で condition に使える。Rule を編集できるのは Workspace 管理者だけなので、相手が管理者の見られない Project にあっても問題にならない。
+Relation trigger は `eventTypes`（1〜10 件、[relation の event](./event-audit.md#work-item-relation-の-event) の `work-item.parent-changed` などから選ぶ）で対象を絞り、省略するとすべての relation 変更で動く。relation の event は両端の Work Item に 1 件ずつ記録されるので、1 つの変更で両端の event type がそれぞれ一致すればルールは両端で 1 回ずつ動き、`workItem.` の condition と action は event を記録した側の Work Item を対象にする。相手の Work Item は `event.metadata.relatedWorkItemId`（親の変更では `parentWorkItemId` / `previousParentWorkItemId`）で condition に使える。Relation の相手側は event を記録した側と別の Team にあることがあるが、rule は相手側を condition で読むだけで、action は event を記録した側の Work Item にしか働かない。
 
 Action は assign、move、update、create、comment、notify、approval、webhook を扱う。Webhook の secret 本文は rule response や実行履歴へ返さず、`[A-Za-z0-9._-]{1,128}` の secret alias だけを保存する。実体は Workspace ID の SHA-256 hash と alias から `mukuroji/automation-webhooks/{workspaceHash}/{alias}` を導出し、Secrets Manager から実行時に取得する。
 
@@ -161,9 +161,10 @@ Archive は hard delete ではなく reversible archive metadata を Work Item �
 
 ## API
 
-Rule/template/recurring の作成・更新と execution retry は Workspace administration 権限を要求する。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
+Rule/template/recurring の作成・更新と execution retry は、Workspace 全体の定義（`ownerTeamId` なし）では Workspace administration 権限を要求する。Team が所有する定義（`ownerTeamId` あり）は、Workspace 管理者に加えてその Team の Team manager（Workspace の業務データを書けて、Team の全 active Project の manager である member）も扱える（下の「Team が所有する定義」）。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
 
 ```text
+GET       /api/automation/management-scopes
 GET|POST  /api/automation/rules
 PATCH     /api/automation/rules/{ruleId}
 GET|POST  /api/automation/templates
@@ -189,6 +190,17 @@ POST      /api/bulk-operations/{operationId}/undo
 ```
 
 Create/duplicate mutation と inbound endpoint の create/rotate は `Idempotency-Key` と `X-Correlation-Id` を受け取り、同じ論理 mutation の client retry で再利用する。同じ create key を異なる payload に再利用した場合は conflict とする。Update と inbound lifecycle は `expectedRevision`、bulk apply は preview 由来の operation token で stale mutation を拒否する。
+
+## Team が所有する定義
+
+Rule、template、recurring Work は任意の `ownerTeamId` を持てる（[ADR 0087](adr/0087-team-owned-automation-definitions.md)）。省略は Workspace 全体の定義で、保存済みの定義はすべて省略として読む。`ownerTeamId` は作成時にだけ指定でき、更新の body で別の値を送ると `400 InvalidAutomationInput`。
+
+- 管理: Workspace 管理者と、所有 Team の Team manager。Enterprise の role を持つ member は、今までどおり Workspace の `automation.manage` が要る。`GET /api/automation/management-scopes` は `{ workspace, teamIds }` で呼び出し元が管理できる範囲を返す（Workspace 管理者は全 Team）。参照 API は今までどおり Workspace の全定義を返す。
+- Team rule が保存時に拒否するもの（`403 AutomationTeamScopeViolation`）: `form` と `webhook` の trigger、`webhook` action、別の Team の `work-item-type` trigger、`values.teamId` が別の Team の create action、別の Team の Project への move / create、別の Team が所有する template や別の Team に作る template を使う create action。Workspace の rule は Team template を使えない。
+- Team template: Work Item template の `payload.teamId` は所有 Team か空。Project / Workflow template は所有 Team を対象にした適用・preview だけを受け付ける（適用は今までどおり Workspace 管理者）。複製は元の所有 Team を引き継ぎ、元の Team を管理できる人だけが行える。
+- Team recurring Work: `ownerTeamId` は `teamId` と同じでなければならず、Team を変える更新はできない。使う template は Workspace のものか同じ Team のもの。
+- 実行: rule と recurring Work の execution は開始時の `ownerTeamId` を固定する。Team rule は event の `metadata.teamId` が所有 Team の event でだけ動く（schedule trigger は Team を持たないので対象外）。action の実行時にも、event の Work Item が別の Team の assign / move / update / comment / approval、作り先が別の Team の create、webhook を `403 AutomationTeamScopeViolation` で失敗させ、自動 retry しない。Team manager は自 Team の execution を再試行できる。
+- Web: **設定 → Team → Team のオートメーション** で Team を選ぶと、その Team が所有する rule・template・繰り返し作業・実行履歴だけを表示し、作成した定義はその Team の所有になる。Webhook と template の適用は Workspace の設定だけに出す。Workspace の設定の一覧は全 Team の定義を表示し、Team の定義に所有 Team を出す。
 
 ## 運用
 

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
+import { TeamAutomationPanelContainer } from '../../automation/ui/TeamAutomationPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
@@ -202,6 +203,11 @@ export function SettingsPage() {
               teams={workspace.teams}
             />
             <WorkItemKeyPrefixPanelContainer
+              accessToken={workspace.accessToken}
+              locale={workspace.locale}
+              teams={workspace.teams}
+            />
+            <TeamAutomationPanelContainer
               accessToken={workspace.accessToken}
               locale={workspace.locale}
               teams={workspace.teams}

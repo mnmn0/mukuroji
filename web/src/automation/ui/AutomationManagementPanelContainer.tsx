@@ -30,6 +30,7 @@ import {
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
 import { useAutomationManagement } from '../queries/useAutomationManagement'
+import { selectOwnedAutomationData } from '../model/ownedDefinitions'
 import { useAutomationPlanningParents } from '../queries/useAutomationPlanningParents'
 
 /** Automation management panel container の props です。 */
@@ -42,6 +43,11 @@ export type AutomationManagementPanelContainerProps = {
   canManage: boolean
   /** Recurring Work selector に表示する Team 一覧です。 */
   teams: ProjectDirectoryTeam[]
+  /**
+   * Team の設定から開いたときの Team ID です。指定すると、その Team が所有する rule・template・
+   * recurring Work・実行履歴だけを表示し、作成する定義をその Team の所有にします。
+   */
+  ownerTeamId?: string
 }
 
 /** Automation API と Settings panel を接続する container です。 */
@@ -49,17 +55,27 @@ export function AutomationManagementPanelContainer({
   accessToken,
   canManage,
   locale,
+  ownerTeamId,
   teams,
 }: AutomationManagementPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [busyOperation, setBusyOperation] = useState<string>()
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
-  const { data, error, isLoading, mutate } = useAutomationManagement(
+  const isTeamScope = ownerTeamId !== undefined
+  const { data: loadedData, error, isLoading, mutate } = useAutomationManagement(
     accessToken,
     teams,
-    canManage,
+    canManage && !isTeamScope,
   )
+  const data = useMemo(
+    () => loadedData && isTeamScope ? selectOwnedAutomationData(loadedData, ownerTeamId) : loadedData,
+    [isTeamScope, loadedData, ownerTeamId],
+  )
+  const canManageWorkspace = canManage && !isTeamScope
+  /** Adds the owner Team of the Team settings view to a new definition. */
+  const withOwner = <TInput extends object>(input: TInput): TInput & { ownerTeamId?: string } =>
+    ownerTeamId === undefined ? input : { ...input, ownerTeamId }
 
   async function runMutation<TResult>(
     operationKey: string,
@@ -92,7 +108,7 @@ export function AutomationManagementPanelContainer({
   const initialTab = readInitialTab()
   const planningParentsQuery = useAutomationPlanningParents(
     accessToken,
-    canManage && (data?.templates ?? []).some(hasPlanningEntities),
+    canManageWorkspace && (data?.templates ?? []).some(hasPlanningEntities),
   )
 
   return (
@@ -105,7 +121,7 @@ export function AutomationManagementPanelContainer({
       initialTab={initialTab}
       isLoading={isLoading}
       locale={locale}
-      canViewWebhooks={canManage}
+      canViewWebhooks={canManageWorkspace}
       readOnly={!canManage}
       recurringWork={data?.recurringWork ?? []}
       rules={data?.rules ?? []}
@@ -118,8 +134,8 @@ export function AutomationManagementPanelContainer({
       }}
       onCreateRule={canManage ? (input) => runMutation(
         'rule:create',
-        input,
-        (context) => createAutomationRule(accessToken, input, context),
+        withOwner(input),
+        (context) => createAutomationRule(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleRule={canManage ? (rule) => {
         const input = {
@@ -133,12 +149,12 @@ export function AutomationManagementPanelContainer({
           (context) => updateAutomationRule(accessToken, rule.id, input, context),
         )
       } : undefined}
-      onCreateWebhook={canManage ? (input) => runMutation(
+      onCreateWebhook={canManageWorkspace ? (input) => runMutation(
         'webhook:create',
         input,
         (context) => createAutomationInboundWebhookEndpoint(accessToken, input, context),
       ) : undefined}
-      onPauseWebhook={canManage ? (endpoint) => {
+      onPauseWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:pause:${endpoint.id}`,
@@ -151,7 +167,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onResumeWebhook={canManage ? (endpoint) => {
+      onResumeWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:resume:${endpoint.id}`,
@@ -164,7 +180,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onRotateWebhook={canManage ? (endpoint) => {
+      onRotateWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:rotate:${endpoint.id}`,
@@ -177,7 +193,7 @@ export function AutomationManagementPanelContainer({
           ),
         )
       } : undefined}
-      onRevokeWebhook={canManage ? (endpoint) => {
+      onRevokeWebhook={canManageWorkspace ? (endpoint) => {
         const input = { expectedRevision: endpoint.revision }
         return runMutation(
           `webhook:revoke:${endpoint.id}`,
@@ -192,8 +208,8 @@ export function AutomationManagementPanelContainer({
       } : undefined}
       onCreateTemplate={canManage ? (input) => runMutation(
         'template:create',
-        input,
-        (context) => createAutomationTemplate(accessToken, input, context),
+        withOwner(input),
+        (context) => createAutomationTemplate(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleTemplate={canManage ? (template) => {
         const input = {
@@ -217,18 +233,18 @@ export function AutomationManagementPanelContainer({
         input,
         (context) => updateAutomationTemplate(accessToken, template.id, input, context),
       ) : undefined}
-      onApplyTemplate={canManage ? (template, input): Promise<AutomationTemplateApplication> => runMutation(
+      onApplyTemplate={canManageWorkspace ? (template, input): Promise<AutomationTemplateApplication> => runMutation(
         `template:apply:${template.id}`,
         input,
         (context) => applyAutomationTemplate(accessToken, template.id, input, context),
       ) : undefined}
-      onRefreshTemplateApplication={canManage
+      onRefreshTemplateApplication={canManageWorkspace
         ? (applicationId) => getAutomationTemplateApplication(accessToken, applicationId)
         : undefined}
-      onPreviewTemplateApplication={canManage
+      onPreviewTemplateApplication={canManageWorkspace
         ? (template, input) => previewAutomationTemplateApplication(accessToken, template.id, input)
         : undefined}
-      planningParents={canManage
+      planningParents={canManageWorkspace
         ? {
             parents: planningParentsQuery.data,
             isLoading: planningParentsQuery.isLoading,
@@ -240,8 +256,8 @@ export function AutomationManagementPanelContainer({
         : undefined}
       onCreateRecurringWork={canManage ? (input) => runMutation(
         'recurring:create',
-        input,
-        (context) => createRecurringWork(accessToken, input, context),
+        withOwner(input),
+        (context) => createRecurringWork(accessToken, withOwner(input), context),
       ) : undefined}
       onToggleRecurringWork={canManage ? (definition) => {
         const input = {

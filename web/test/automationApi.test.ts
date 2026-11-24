@@ -17,6 +17,7 @@ import {
   getAutomationExecutions,
   getAutomationInboundWebhookEndpoint,
   getAutomationInboundWebhookEndpoints,
+  getAutomationManagementScopes,
   getAutomationRules,
   previewAutomationTemplateApplication,
   getAutomationTemplateApplication,
@@ -485,5 +486,21 @@ describe('inbound webhook endpoint compatibility', () => {
     installFetchRecorder({ endpoints: [legacy] })
     const listed = await getAutomationInboundWebhookEndpoints('access-token')
     expect(listed).toEqual([{ ...legacy, purpose: 'automation' }])
+  })
+})
+
+describe('automation management scopes', () => {
+  test('reads the Workspace flag and the managed Teams, and rejects another shape', async () => {
+    const requests: string[] = []
+    let body: unknown = { workspace: false, teamIds: ['core-team'] }
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify(body), { status: 200 })
+    }) as typeof fetch
+
+    expect(await getAutomationManagementScopes('token')).toEqual({ workspace: false, teamIds: ['core-team'] })
+    expect(requests[0]).toEndWith('/automation/management-scopes')
+    body = { workspace: 'yes', teamIds: [] }
+    await expect(getAutomationManagementScopes('token')).rejects.toMatchObject({ code: 'InvalidAutomationResponse' })
   })
 })

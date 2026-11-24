@@ -263,6 +263,7 @@ function isAutomationTemplate(value: unknown): value is AutomationTemplate {
     typeof value.id === 'string' &&
     typeof value.workspaceId === 'string' &&
     automationTemplateKinds.some((kind) => kind === value.kind) &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.name === 'string' &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&

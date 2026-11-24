@@ -1,5 +1,6 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
+  type AutomationManagementScopes,
   type AutomationRule,
   type CreateAutomationRuleInput,
   type UpdateAutomationRuleInput,
@@ -30,6 +31,35 @@ export function getAutomationRules(accessToken: string) {
     'rules',
     isAutomationRule,
   )
+}
+
+/**
+ * Reads which Automation scopes the signed-in member manages.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @returns Whether Workspace definitions are manageable and which Teams' definitions are.
+ * @throws AutomationApiError when the response is not a scope list.
+ */
+export async function getAutomationManagementScopes(
+  accessToken: string,
+): Promise<AutomationManagementScopes> {
+  const response = await requestJson<unknown>(
+    `${automationApiBaseUrl}/automation/management-scopes`,
+    accessToken,
+  )
+  if (
+    !isRecord(response) ||
+    typeof response.workspace !== 'boolean' ||
+    !Array.isArray(response.teamIds) ||
+    !response.teamIds.every((teamId): teamId is string => typeof teamId === 'string')
+  ) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
+  return { workspace: response.workspace, teamIds: [...response.teamIds] }
 }
 
 /**
@@ -120,6 +150,7 @@ function isAutomationRule(value: unknown): value is AutomationRule {
     typeof value.id === 'string' &&
     typeof value.workspaceId === 'string' &&
     typeof value.name === 'string' &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&
     isNonnegativeSafeInteger(value.revision) &&

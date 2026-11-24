@@ -323,4 +323,10 @@ export const automationMessages = {
   'automation.runs.actionResults': 'Action results',
   'automation.error.load': 'Could not load automation settings.',
   'automation.error.mutation': 'Could not update automation settings.',
+  'automation.team.title': 'Team automation',
+  'automation.team.description':
+    'Rules, templates, recurring work, and runs owned by the Team. A manager of every Project in the Team can create and change them, and they act only on the Team\'s Work Items. Webhooks and Workspace-wide definitions are managed in Workspace settings.',
+  'automation.team.select': 'Team',
+  'automation.team.loadScopes': 'Could not load what you can manage.',
+  'automation.ownerTeam': 'Team: {team}',
 } as const

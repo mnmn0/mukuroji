@@ -337,6 +337,22 @@ export type PublicRequestFormModel = {
 }
 
 /**
+ * Creates an empty form draft, scoped to a Team when one is given.
+ *
+ * @param teamId - Team that owns the new form, or undefined for a Workspace form.
+ * @returns An empty draft whose scope and routing Team match.
+ */
+export function createEmptyRequestFormDraftForScope(teamId: string | undefined): RequestFormDraftModel {
+  const draft = createEmptyRequestFormDraft()
+  if (teamId === undefined) return draft
+  return {
+    ...draft,
+    routing: { ...draft.routing, teamId },
+    scope: { type: 'team', teamId },
+  }
+}
+
+/**
  * 空の request form builder model を生成します。
  */
 export function createEmptyRequestFormDraft(): RequestFormDraftModel {
