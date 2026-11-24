@@ -313,7 +313,7 @@ link された Document は読むたびに credential 所有者のその時点�
 `work-on-next-task` promptと `mukuroji://agent/workflow` resourceにも同じ運用ガイドを公開します。
 `mukuroji://project/{projectId}/brief` resourceは、`get_configuration` の `brief` と同じくTeam briefとそのProjectのbriefを連結したMarkdownを返します。`MUKUROJI_MCP_PROJECT_ID` を設定した場合は、そのProjectだけを一覧に出し、別Projectの読み取りは `out_of_scope` で拒否します。resourcesに対応しないclientは `get_configuration` で同じ内容を得られます。
 
-`MUKUROJI_MCP_PROJECT_ID` を設定した場合、`get_configuration` の `projectCharter` にそのProjectのcharter（ライフサイクル状態、コード、説明、目的、責任者・スポンサーのmember IDと表示名、計画期間、タグ、関連リポジトリURL）が入ります。Public APIの `GET /api/v1/projects/{projectId}/charter` と同じ値です。Projectを設定していないとき、serverがcharterのendpointより古いときは `null` です。credential所有者が設定したProjectを閲覧できないときは、catalogと同じく `get_configuration` 全体がエラーになります。charterの本文もユーザーデータとして扱います。
+`MUKUROJI_MCP_PROJECT_ID` を設定した場合、`get_configuration` の `projectCharter` にそのProjectのcharter（ライフサイクル状態、コード、説明、目的、責任者・スポンサーのmember IDと表示名、計画期間、タグ、関連リポジトリURL）が入ります。Public APIの `GET /api/v1/projects/{projectId}/charter` と同じ値です。Projectを設定していないとき、serverがcharterのendpointより古いとき、charterの読み取りだけが拒否されたときは `null` です。credential所有者が設定したProjectを閲覧できないときは、catalogと同じく `get_configuration` 全体がエラーになります。charterの本文もユーザーデータとして扱います。
 Webのタスク一覧・詳細から状態とコメントを確認できます。表示の更新タイミングは既存画面の再取得に従います。
 
 ## 競合・再送・制約
