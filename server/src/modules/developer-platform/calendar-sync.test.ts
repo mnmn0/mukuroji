@@ -48,6 +48,7 @@ function createFakeGoogle(clock: () => Date) {
     return `"etag-${revision}"`
   }
   const requests: Array<{ method: string, url: URL, authorization: string | null, body?: Record<string, unknown> }> = []
+  const hooks: { afterListRead?: () => Promise<void> } = {}
   const fetcher = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     const method = init?.method ?? 'GET'
@@ -89,9 +90,14 @@ function createFakeGoogle(clock: () => Date) {
         privateProperties !== null &&
         'mukurojiManaged' in privateProperties
     })
-    return Response.json({ items })
+    const snapshot = Response.json({ items })
+    // Lets a test run other work after the list is read and before the poll processes it.
+    const hook = hooks.afterListRead
+    hooks.afterListRead = undefined
+    if (hook) await hook()
+    return snapshot
   }) as typeof fetch
-  return { fetcher, events, requests }
+  return { fetcher, events, requests, hooks }
 }
 
 /**
@@ -550,6 +556,34 @@ describe('calendar connectors (ADR 0089)', () => {
     })
     expect(polled.results).toMatchObject([{ kind: 'synced' }])
     expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-11', endDate: '2026-12-11' })
+  })
+
+  test('skips an event read before an outbound write committed', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    // The poll reads the event, then the Work Item moves and its outbound write commits.
+    fixture.google.hooks.afterListRead = async () => {
+      fixture.setWorkItem({
+        ...fixture.getWorkItem(),
+        revision: 9,
+        schedule: { startDate: '2026-12-10', endDate: '2026-12-10', timeZone: 'Asia/Tokyo' },
+      })
+      const pushed = await fixture.engine.processOutbound({ workspaceId: 'workspace-1', link, operationId: 'push-during-poll' })
+      expect(pushed.kind).toBe('synced')
+    }
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(polled.results).toMatchObject([{ kind: 'skipped', reason: 'stale' }])
+    expect(fixture.patches).toEqual([])
+    expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-10' })
   })
 
   test('refreshes a conflict whose event moved again before it was resolved', async () => {

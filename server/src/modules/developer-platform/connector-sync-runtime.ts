@@ -328,6 +328,12 @@ export type ProcessConnectorInboundInput = {
   record: ConnectorExternalRecord
   /** Pending link を安全に acknowledge できる poll inventory generation です。 */
   pollGeneration?: string
+  /**
+   * Sync state revision read before the provider snapshot was fetched (0 when the link had no
+   * state). When the state has changed since, an outbound write may be newer than the record, so
+   * the record is skipped as stale and the next poll reads the resource again.
+   */
+  expectedStateRevision?: number
 }
 
 /** Outbound sync worker input です。 */
@@ -542,6 +548,12 @@ export class ConnectorSyncEngine {
       input.workspaceId,
       link.id,
     )
+    if (
+      input.expectedStateRevision !== undefined &&
+      (persisted?.storageRevision ?? 0) !== input.expectedStateRevision
+    ) {
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
     const state = persisted ?? createInitialSyncState(link, workItem.revision)
     const operationId = createSyncOperationId(
       'inbound',
@@ -867,6 +879,14 @@ export class ConnectorSyncEngine {
       )
     }
     if (linkByExternalId.size === 0) return { results: [] }
+    // Calendar versions are ETags with no order, so a record fetched before an outbound write
+    // would look new. Fence each record with the state revision read before fetching.
+    const stateRevisions = input.resourceType === 'calendar-event'
+      ? new Map(await Promise.all([...linkByExternalId.values()].map(async (link) => [
+          link.id,
+          (await this.persistence.getLinkState(input.workspaceId, link.id))?.storageRevision ?? 0,
+        ] as const)))
+      : undefined
     let cursor = input.cursor
     const results: ConnectorSyncResult[] = []
     for (let pageNumber = 0; pageNumber < maximumPages; pageNumber += 1) {
@@ -886,6 +906,9 @@ export class ConnectorSyncEngine {
           record,
           ...(link.syncStatus === 'pending'
             ? { pollGeneration: link.updatedAt }
+            : {}),
+          ...(stateRevisions?.has(link.id)
+            ? { expectedStateRevision: stateRevisions.get(link.id) }
             : {}),
           eventId: createSyncOperationId(
             'poll',
