@@ -1913,9 +1913,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const mustFinishCurrentSlot = activeSlotExecution?.status === 'pending' ||
       activeSlotExecution?.status === 'running' ||
       (activeSlotExecution?.status === 'failed' && activeSlotExecution.retryable)
-    const nextRunAt = !scheduleChanged || mustFinishCurrentSlot
-      ? new Date(current.nextRunAt)
-      : getFirstRecurringWakeUp(normalized.schedule, now)
+    const rescheduled = scheduleChanged && !mustFinishCurrentSlot
+    const nextRunAt = rescheduled
+      ? getFirstRecurringWakeUp(normalized.schedule, now)
+      : new Date(current.nextRunAt)
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
     const template = input.templateId === undefined
       ? undefined
@@ -1928,6 +1929,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       version: current.version + 1,
       revision: current.revision + 1,
       nextRunAt: nextRunAt.toISOString(),
+      ...(rescheduled ? { scheduleChangedAt: now.toISOString() } : {}),
       updatedAt: now.toISOString(),
     }
     await this.putVersionedUpdate(

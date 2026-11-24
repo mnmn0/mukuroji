@@ -618,6 +618,7 @@ describe('automation management create idempotency', () => {
       schedule: { ...recurringV1.schedule, localTime: '10:00' },
     })
     expect(scheduleEdited.nextRunAt).toBe(recurringV1.nextRunAt)
+    expect(scheduleEdited.scheduleChangedAt).toBeUndefined()
     const templateV3 = await client.updateTemplate('workspace-1', templateV1.id, {
       expectedRevision: templateV2.revision,
       payload: {

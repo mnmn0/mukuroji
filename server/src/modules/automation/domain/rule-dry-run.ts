@@ -63,7 +63,7 @@ function planAutomationActions(
 ): AutomationRuleDryRunActionPlan[] {
   let current = { ...workItem }
   return actions.map((action, index) => {
-    const plan = planAutomationAction(action, index, current)
+    const plan = planAutomationAction(action, index, current, workItem)
     for (const change of plan.changes ?? []) current = { ...current, [change.field]: change.after }
     return plan
   })
@@ -75,12 +75,15 @@ function planAutomationActions(
  * @param action - Action to describe.
  * @param index - Position of the action in the rule.
  * @param workItem - Current Work Item snapshot.
+ * @param triggeredWorkItem - Work Item snapshot when the rule fired, which execution reads the
+ * notified assignee from.
  * @returns The action plan.
  */
 function planAutomationAction(
   action: AutomationAction,
   index: number,
   workItem: Record<string, AutomationValue>,
+  triggeredWorkItem: Record<string, AutomationValue>,
 ): AutomationRuleDryRunActionPlan {
   switch (action.type) {
     case 'assign':
@@ -90,7 +93,7 @@ function planAutomationAction(
     case 'update':
       return { index, type: action.type, changes: listChanges(action.patch, workItem) }
     case 'notify':
-      return { index, type: action.type, recipientMemberKeys: listNotificationRecipients(action, workItem) }
+      return { index, type: action.type, recipientMemberKeys: listNotificationRecipients(action, triggeredWorkItem) }
     case 'approval':
       return { index, type: action.type, recipientMemberKeys: [...action.reviewerMemberKeys] }
     case 'webhook':
@@ -103,7 +106,8 @@ function planAutomationAction(
 
 /**
  * Lists who a notify action reaches, with the same rule as execution: its listed keys plus the
- * Work Item's assignee when the action asks for it.
+ * assignee the Work Item had when the rule fired, when the action asks for it. An earlier assign
+ * action in the same rule does not change who is notified.
  *
  * @param action - Notify action.
  * @param workItem - Work Item the action would run for.

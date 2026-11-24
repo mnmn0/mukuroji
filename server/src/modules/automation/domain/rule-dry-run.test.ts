@@ -47,3 +47,17 @@ test('includes the assignee of the tested Work Item in an assignee notification'
 
   expect(result.actions).toEqual([{ index: 0, type: 'notify', recipientMemberKeys: ['member-1', 'member-2'] }])
 })
+
+test('notifies the assignee the Work Item had when the rule fired, like execution', () => {
+  const result = dryRunAutomationRule({
+    name: 'Reassign and notify',
+    enabled: false,
+    trigger: { type: 'status' },
+    actions: [
+      { type: 'assign', assigneeMemberKey: 'member-3' },
+      { type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Assigned' },
+    ],
+  }, 'workspace-1', { id: 'item-1', assigneeUserId: 'member-2' })
+
+  expect(result.actions[1]).toEqual({ index: 1, type: 'notify', recipientMemberKeys: ['member-2'] })
+})

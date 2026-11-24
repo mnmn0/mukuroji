@@ -546,7 +546,8 @@ async function readRecurringWorkCalendar(
  * The stored next run is calendar day n, which is in the same month as the nth business day, so
  * the window starts at that month's beginning: a holiday removed after a deferral still runs the
  * earlier day, and months missed while the definition was paused are not caught up. It never
- * starts before the last completed run, nor before the definition was created.
+ * starts before the last completed run, before the definition was created, nor before its schedule
+ * was last changed, so a new schedule does not run a time that passed before the change.
  *
  * @param definition - Business-day recurring definition.
  * @returns The exclusive window start.
@@ -554,7 +555,10 @@ async function readRecurringWorkCalendar(
 function readBusinessDayWindowStart(definition: RecurringWork): Date {
   const monthStart = getLocalMonthStart(new Date(definition.nextRunAt), definition.schedule.timeZone)
   const floor = Date.parse(definition.lastRunAt ?? definition.createdAt)
-  return new Date(Math.max(monthStart.getTime() - 1, floor))
+  const scheduleChangedAt = definition.scheduleChangedAt === undefined
+    ? Number.NEGATIVE_INFINITY
+    : Date.parse(definition.scheduleChangedAt)
+  return new Date(Math.max(monthStart.getTime() - 1, floor, scheduleChangedAt))
 }
 
 /**

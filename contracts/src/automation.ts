@@ -1101,6 +1101,11 @@ export type RecurringWork = {
   nextRunAt: string
   /** 最後に materialize した occurrence timestamp です。 */
   lastRunAt?: string
+  /**
+   * schedule を最後に変えて次回実行を計算し直した UTC ISO 8601 timestamp です。
+   * 第 n 営業日の schedule は、これより前の実行時刻を実行しません。
+   */
+  scheduleChangedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終更新日時の ISO 8601 timestamp です。 */
