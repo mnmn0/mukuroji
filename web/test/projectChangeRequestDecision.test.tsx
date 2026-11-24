@@ -93,14 +93,19 @@ type FakeCalls = {
  * @param decisionStatuses - Status codes answered to successive decision requests.
  * @param storedEntries - Entries as stored; a hold on any other revision, or on a closed entry,
  * is refused as a conflict.
+ * @param refuseRenewal - Refuses every hold after the first, as if another manager had taken
+ * the request over once the first hold expired.
  * @returns The calls seen.
  */
 function installFakeApi(
   items: Record<string, FakeWorkItem>,
   decisionStatuses: number[],
   storedEntries?: ProjectRaidEntry[],
+  refuseRenewal = false,
 ): FakeCalls {
   const calls: FakeCalls = { confirms: [], captures: 0, decisions: [], holds: [] }
+  // The change request as the fake server holds it once the first hold is taken.
+  let heldEntry: ProjectRaidEntry | undefined
   globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost')
     const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
@@ -174,20 +179,17 @@ function installFakeApi(
     if (url.pathname.endsWith('/approval-hold')) {
       const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
       calls.holds.push(expectedRevision)
-      const stored = storedEntries?.find((candidate) => candidate.id === 'cr-1') ??
+      const stored = heldEntry ?? storedEntries?.find((candidate) => candidate.id === 'cr-1') ??
         changeRequest(Object.keys(items).map((workItemId) => ({ workItemId, operation: { type: 'move', targetDate: '2026-11-25' } })))
-      if (stored.status !== 'open' || stored.revision !== expectedRevision) {
+      if ((refuseRenewal && heldEntry !== undefined) || stored.status !== 'open' || stored.revision !== expectedRevision) {
         return Response.json({ code: 'ProjectRaidEntryConflict', message: 'changed' }, { status: 409 })
       }
-      return Response.json({
-        teamId: 'core-team',
-        projectId: 'refero',
-        entry: {
-          ...stored,
-          revision: stored.revision + 1,
-          approvalHold: { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' },
-        },
-      })
+      heldEntry = {
+        ...stored,
+        revision: stored.revision + 1,
+        approvalHold: { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' },
+      }
+      return Response.json({ teamId: 'core-team', projectId: 'refero', entry: heldEntry })
     }
     if (url.pathname.endsWith('/decision')) {
       calls.decisions.push({ key: new Headers(init?.headers).get('Idempotency-Key') ?? '', body })
@@ -268,10 +270,31 @@ describe('approving a change request', () => {
     await captureDecide()(entry, 'approved', { replaceBaseline: false, baselineName: '' })
 
     expect(calls.confirms).toEqual(['a:2026-11-25', 'b:2026-12-05'])
-    // The request is held before any date moves, and the decision expects the held revision.
-    expect(calls.holds).toEqual([1])
+    // The request is held before any date moves and renewed before the second round, and the
+    // decision expects the last held revision.
+    expect(calls.holds).toEqual([1, 2])
     expect(calls.decisions).toHaveLength(1)
-    expect(calls.decisions[0]?.body).toMatchObject({ expectedRevision: 2, outcome: 'approved' })
+    expect(calls.decisions[0]?.body).toMatchObject({ expectedRevision: 3, outcome: 'approved' })
+  })
+
+  test('stops before the next round when the hold cannot be renewed', async () => {
+    const items = {
+      a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
+      b: { assignedProjectId: 'refero', schedule: due('2026-12-11'), revision: 1 },
+    }
+    const calls = installFakeApi(items, [], undefined, true)
+    const entry = changeRequest([
+      { workItemId: 'b', operation: { type: 'move', targetDate: '2026-12-05' } },
+      { workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } },
+    ])
+
+    await expect(captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: 'x' }))
+      .rejects.toMatchObject({ status: 409 })
+    // Only the first round ran; the second, the capture, and the decision did not.
+    expect(calls.confirms).toEqual(['a:2026-11-25'])
+    expect(calls.holds).toEqual([1, 2])
+    expect(calls.captures).toBe(0)
+    expect(calls.decisions).toEqual([])
   })
 
   test('refuses to change the dates of a Work Item that moved to another Project', async () => {

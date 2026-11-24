@@ -126,6 +126,8 @@ async function applyScheduleChange(
  * @param projectId - Project of the change request.
  * @param changes - Requested changes.
  * @param affected - Collects the Teams and Projects the cascade reaches.
+ * @param beforeRound - Runs before every round after the first, such as renewing the approval
+ * hold; an error stops the approval before any more dates move.
  * @throws ProjectChangeRequestScheduleConflictError when the requested dates cannot all hold.
  * @throws ProjectChangeRequestWorkItemMovedError when a Work Item left the Project.
  */
@@ -135,8 +137,10 @@ export async function applyScheduleChanges(
   projectId: string,
   changes: readonly ProjectRaidScheduleChange[],
   affected: AffectedScopes,
+  beforeRound: () => Promise<void> = async () => undefined,
 ) {
   for (let round = 0; round <= changes.length; round += 1) {
+    if (round > 0) await beforeRound()
     for (const change of changes) {
       await applyScheduleChange(accessToken, teamId, projectId, change, affected)
     }
@@ -265,12 +269,21 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
           // The hold refuses a request someone else has since edited, decided, or closed, and keeps
           // others from rejecting or editing it until the decision, so no rejection can land
           // after its dates have moved.
-          const held = await holdProjectRaidChangeRequest(
-            accessToken, teamId, projectId, entry.id, { expectedRevision: entry.revision }, createMutationRequestContext(),
-          )
-          expectedRevision = held.entry.revision
-          await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [], affected)
+          /**
+           * Takes or renews the hold at the revision last seen. Renewing before each further round
+           * and before the capture keeps the hold from expiring mid-approval, and a refused renewal
+           * stops the approval before anything else moves.
+           */
+          const renewHold = async () => {
+            const held = await holdProjectRaidChangeRequest(
+              accessToken, teamId, projectId, entry.id, { expectedRevision }, createMutationRequestContext(),
+            )
+            expectedRevision = held.entry.revision
+          }
+          await renewHold()
+          await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [], affected, renewHold)
           if (options.replaceBaseline) {
+            await renewHold()
             const captured = await captureProjectScheduleBaseline(
               teamId,
               projectId,
