@@ -23,6 +23,8 @@ export type WorkspaceSettingsViewProps = {
   accountSections?: ReactNode
   /** Composed app installation section rendered after display preferences. */
   appInstallSection?: ReactNode
+  /** Composed calendar subscription section rendered after notifications. */
+  calendarFeedsSection?: ReactNode
   /** Currently selected font-size preference. */
   fontSizePreference: FontSizePreference
   /** Whether display preferences failed to save to the account. */
@@ -80,7 +82,7 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
 
 /**
  * Renders the personal settings area: display preferences, app install, notifications,
- * account sections, the agent connection link, and the signed-in account.
+ * calendar subscriptions, account sections, the agent connection link, and the signed-in account.
  *
  * @param props - Preference data, actions, and composed section content.
  * @returns The personal settings view.
@@ -88,6 +90,7 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
 export function WorkspaceSettingsView({
   accountSections,
   appInstallSection,
+  calendarFeedsSection,
   fontSizePreference,
   isPreferencesSaveFailed = false,
   locale,
@@ -254,6 +257,8 @@ export function WorkspaceSettingsView({
       {appInstallSection}
 
       {notificationSettingsSection}
+
+      {calendarFeedsSection}
 
       {accountSections}
 

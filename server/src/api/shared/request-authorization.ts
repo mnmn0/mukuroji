@@ -771,6 +771,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/me/preferences',
     permission: 'workspace.read',
   },
+  // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.
+  {
+    method: '*',
+    pathPattern: '/api/me/calendar-feeds*',
+    permission: 'workspace.read',
+  },
   // Push availability and the caller's own device registration change no shared Workspace data.
   {
     method: 'GET',

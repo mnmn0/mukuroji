@@ -241,6 +241,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `GET /api/audit/events`, `GET /api/audit/events/export`
 - `/api/documents`, `/api/documents/{documentId}/operations`, `/comments`, `/presence`, `/versions`, `/shares`, `/export`
 - `/api/public/documents/{token}`, `/api/document-backlinks`
+- `/api/me/calendar-feeds`（自分のカレンダーフィードの一覧・発行・失効）, `GET /api/public/calendar-feeds/{token}.ics`
 
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:

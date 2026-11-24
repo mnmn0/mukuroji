@@ -13,6 +13,10 @@ import {
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
 import {
+  DynamoDbCalendarFeedStore,
+  InMemoryCalendarFeedStore,
+} from '../../modules/calendar-feeds'
+import {
   DynamoDbWeeklyReportStore,
   InMemoryWeeklyReportStore,
 } from '../../modules/weekly-reports'
@@ -660,6 +664,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
     ),
     projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    calendarFeeds: new DynamoDbCalendarFeedStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -1955,6 +1964,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      calendarFeeds: new InMemoryCalendarFeedStore(),
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       cycleScheduleBaselines: new InMemoryCycleScheduleBaselineStore(),
@@ -2089,6 +2099,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.calendarFeeds ? { calendarFeeds: overrides.calendarFeeds } : {}),
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.cycleScheduleBaselines ? { cycleScheduleBaselines: overrides.cycleScheduleBaselines } : {}),
