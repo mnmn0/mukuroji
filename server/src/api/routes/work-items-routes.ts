@@ -128,6 +128,7 @@ import {
   RequestIntakeError,
   createRequestWorkItemInput,
 } from '../../modules/request-intake/request-intake'
+import { resolveRequestFormTitle } from '../../modules/request-intake/my-requests'
 import { CustomerError, projectCustomerImpactSignal } from '../../modules/customers'
 import {
   createTriageAcceptanceTransactionItems,
@@ -3946,6 +3947,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           actorId: principal.userKey,
           submissionId,
           events: submission.events,
+          ...(submission.requesterUserId
+            ? {
+                requester: {
+                  memberKey: submission.requesterUserId,
+                  formTitle: resolveRequestFormTitle(submission),
+                },
+              }
+            : {}),
         },
         {
           entryId: triageAcceptance.entry.id,

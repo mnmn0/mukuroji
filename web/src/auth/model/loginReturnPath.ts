@@ -50,6 +50,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
         '/work-items',
         '/inbox',
         '/requests',
+        '/my-requests',
         '/search',
         '/planning',
         '/reports',

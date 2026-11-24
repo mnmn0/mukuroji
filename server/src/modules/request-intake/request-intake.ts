@@ -84,6 +84,11 @@ import {
   type TriageAuditOutboxConfiguration,
 } from '../triage'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
+import { resolveRequestFormTitle } from './my-requests'
+import {
+  createRequestRequesterNotificationTransactItems,
+  type RequestRequesterNotificationKind,
+} from './requester-notifications'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Request intake queue GSI の既定名です。 */
@@ -165,6 +170,22 @@ export type RequestSubmissionListOptions = {
   cursor?: string
 }
 
+/** Page option for listing the requests one member sent. */
+export type RequesterSubmissionListOptions = {
+  /** Largest number of requests on one page. */
+  limit?: number
+  /** Opaque cursor from the previous page. */
+  cursor?: string
+}
+
+/** A page of the requests one member sent, newest first. */
+export type RequesterSubmissionPage = {
+  /** Requests on this page. */
+  submissions: RequestSubmission[]
+  /** Opaque cursor for the next page, when there is one. */
+  nextCursor?: string
+}
+
 /** Transaction items supplied by a caller that owns a cross-domain publish guard. */
 export type RequestIntakeTransactionItems = NonNullable<
   TransactWriteCommandInput['TransactItems']
@@ -231,12 +252,61 @@ export interface RequestIntakeClient {
     input: RequestAttachmentUploadInput,
     context: RequestExternalContext,
   ): Promise<RequestAttachmentUploadSession>
-  /** One-time session を consume して submission を保存します。 */
+  /**
+   * Consumes a one-time session and stores the submission.
+   *
+   * @param requester - Signed-in member who sent the request through an authenticated link;
+   *   absent for anonymous public links.
+   */
   submit(
     resolution: RequestLinkResolution,
     input: SubmitRequestInput,
     context: RequestExternalContext,
+    requester?: RequestIntakeActor,
   ): Promise<RequestSubmissionReceipt>
+  /**
+   * Lists the requests one member sent, newest first.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param options - Page size and cursor.
+   * @returns The member's own requests.
+   */
+  listRequesterSubmissions(
+    workspaceId: string,
+    requesterUserId: string,
+    options?: RequesterSubmissionListOptions,
+  ): Promise<RequesterSubmissionPage>
+  /**
+   * Reads one request that the member sent; any other request is reported as not found.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param submissionId - Request submission ID.
+   * @returns The request.
+   */
+  getRequesterSubmission(
+    workspaceId: string,
+    requesterUserId: string,
+    submissionId: string,
+  ): Promise<RequestSubmission>
+  /**
+   * Saves the member's reply to a question about their own request.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param submissionId - Request submission ID.
+   * @param input - Plain text reply.
+   * @param context - Rate-limit and idempotency context.
+   * @returns The reply receipt.
+   */
+  replyAsRequester(
+    workspaceId: string,
+    requesterUserId: string,
+    submissionId: string,
+    input: RequestRequesterReplyInput,
+    context: RequestExternalContext,
+  ): Promise<RequestRequesterReplyReceipt>
   /** Workspace intake queue を cursor pagination します。 */
   listSubmissions(
     workspaceId: string,
@@ -1899,8 +1969,15 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     resolution: RequestLinkResolution,
     input: SubmitRequestInput,
     context: RequestExternalContext,
+    requester?: RequestIntakeActor,
   ) {
     await this.requireTenantActive(resolution.workspaceId)
+    if (requester && resolution.accessMode === 'public') {
+      throw invalidInput('A public request link does not record the requester.')
+    }
+    const requesterUserId = requester
+      ? requireText(requester.id, 'Requester', 320).toLowerCase()
+      : undefined
     if (typeof input.honeypot === 'string' && input.honeypot.trim()) {
       throw invalidInput('Request submission is invalid.')
     }
@@ -2046,6 +2123,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       updatedAt: now,
       capabilities: activeSubmissionCapabilities,
       ...(requesterEmail ? { requesterEmail } : {}),
+      ...(requesterUserId ? { requesterUserId } : {}),
       threadDigest,
       duplicateFingerprint,
       attachmentObjectKeys: Object.fromEntries(uploads.map(({ stored }) => [stored.attachmentId, stored.objectKey])),
@@ -2149,6 +2227,23 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         submissionId,
         event,
       ),
+      ...(requesterUserId
+        ? [{
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                entryType: 'requester-submission',
+                scopeKey: submission.scopeKey,
+                recordKey: createRequesterSubmissionRecordKey(requesterUserId, submissionId),
+                workspaceId: session.workspaceId,
+                requesterUserId,
+                submissionId,
+                createdAt: now,
+              },
+              ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          }]
+        : []),
     ]
     let commitError: unknown
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2391,11 +2486,19 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         ? terminalSubmissionCapabilities
         : activeSubmissionCapabilities,
     } satisfies StoredRequestSubmission
+    const notificationKind: RequestRequesterNotificationKind | undefined =
+      eventType === 'more-info-requested' ? 'more-info-requested'
+        : eventType === 'rejected' ? 'rejected'
+          : eventType === 'duplicate-marked' ? 'duplicate'
+            : undefined
     await this.putSubmissionWithRevision(
       next,
       current.revision,
       event,
-      additionalTransactionItems,
+      [
+        ...additionalTransactionItems,
+        ...(notificationKind ? this.createRequesterNotificationItems(next, notificationKind, event) : []),
+      ],
     )
     return toRequestSubmissionView(
       next,
@@ -2449,12 +2552,175 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       next,
       current.revision,
       event,
-      additionalTransactionItems,
+      [
+        ...additionalTransactionItems,
+        ...this.createRequesterNotificationItems(next, 'accepted', event),
+      ],
     )
     return toRequestSubmissionView(
       next,
       appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
     )
+  }
+
+  /**
+   * Lists the requests one member sent, newest first.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param options - Page size and cursor.
+   * @returns The member's own requests.
+   */
+  async listRequesterSubmissions(
+    workspaceId: string,
+    requesterUserId: string,
+    options: RequesterSubmissionListOptions = {},
+  ): Promise<RequesterSubmissionPage> {
+    await this.ensureReady()
+    const requester = requireText(requesterUserId, 'Requester', 320).toLowerCase()
+    const limit = options.limit === undefined
+      ? 20
+      : requireInteger(options.limit, 'Request list limit', 1, 50)
+    const scopeKey = createWorkspaceScopeKey(workspaceId)
+    const prefix = createRequesterSubmissionRecordKeyPrefix(requester)
+    const startKey = options.cursor === undefined
+      ? undefined
+      : decodeRequesterCursor(options.cursor, scopeKey, prefix)
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+      ExpressionAttributeValues: { ':scopeKey': scopeKey, ':prefix': prefix },
+      ScanIndexForward: false,
+      Limit: limit,
+      ...(startKey ? { ExclusiveStartKey: startKey } : {}),
+    }))
+    const submissionIds = (response.Items ?? []).flatMap((item) =>
+      item.entryType === 'requester-submission' &&
+        item.requesterUserId === requester &&
+        typeof item.submissionId === 'string'
+        ? [item.submissionId]
+        : []
+    )
+    const submissions = (await Promise.all(submissionIds.map(async (submissionId) => {
+      try {
+        const stored = await this.getStoredSubmission(workspaceId, submissionId)
+        return stored.requesterUserId === requester ? toRequestSubmissionView(stored) : undefined
+      } catch (error) {
+        if (error instanceof RequestIntakeError && error.status === 404) return undefined
+        throw error
+      }
+    }))).filter((submission): submission is RequestSubmission => submission !== undefined)
+    const lastKey = response.LastEvaluatedKey
+    return {
+      submissions,
+      ...(lastKey && typeof lastKey.recordKey === 'string'
+        ? { nextCursor: encodeRequesterCursor(lastKey.recordKey) }
+        : {}),
+    }
+  }
+
+  /**
+   * Reads one request that the member sent; any other request is reported as not found.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param submissionId - Request submission ID.
+   * @returns The request.
+   */
+  async getRequesterSubmission(
+    workspaceId: string,
+    requesterUserId: string,
+    submissionId: string,
+  ): Promise<RequestSubmission> {
+    const stored = await this.getOwnedSubmission(workspaceId, requesterUserId, submissionId)
+    return toRequestSubmissionView(stored)
+  }
+
+  /**
+   * Saves the member's reply to a question about their own request. It shares the reply
+   * rate limit and idempotency receipts of the request's thread link.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param submissionId - Request submission ID.
+   * @param input - Plain text reply.
+   * @param context - Rate-limit and idempotency context.
+   * @returns The reply receipt.
+   */
+  async replyAsRequester(
+    workspaceId: string,
+    requesterUserId: string,
+    submissionId: string,
+    input: RequestRequesterReplyInput,
+    context: RequestExternalContext,
+  ): Promise<RequestRequesterReplyReceipt> {
+    const stored = await this.getOwnedSubmission(workspaceId, requesterUserId, submissionId)
+    await this.requireTenantActive(workspaceId)
+    return this.replyWithThreadDigest(
+      {
+        entryType: 'thread-lookup',
+        scopeKey: createLookupScopeKey('THREAD', stored.threadDigest),
+        recordKey: 'LOOKUP',
+        workspaceId,
+        submissionId: stored.id,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
+      stored.threadDigest,
+      input,
+      context,
+    )
+  }
+
+  /**
+   * Reads a submission and proves it was sent by the given member.
+   *
+   * @param workspaceId - Workspace the member belongs to.
+   * @param requesterUserId - Member key of the requester.
+   * @param submissionId - Request submission ID.
+   * @returns The stored submission.
+   * @throws RequestIntakeError 404 when the request does not exist or was sent by someone else.
+   */
+  private async getOwnedSubmission(
+    workspaceId: string,
+    requesterUserId: string,
+    submissionId: string,
+  ) {
+    const requester = requireText(requesterUserId, 'Requester', 320).toLowerCase()
+    const stored = await this.getStoredSubmission(
+      workspaceId,
+      requireIdentifier(submissionId, 'Request submission ID'),
+    )
+    if (stored.requesterUserId !== requester) {
+      throw new RequestIntakeError(404, 'RequestSubmissionNotFound', 'Request submission was not found.')
+    }
+    return stored
+  }
+
+  /**
+   * Builds the requester notification written with a request change.
+   *
+   * @param submission - Request after the change.
+   * @param kind - What changed.
+   * @param event - Submission event recorded for the change.
+   * @returns Audit outbox items, or none for anonymous requests.
+   */
+  private createRequesterNotificationItems(
+    submission: StoredRequestSubmission,
+    kind: RequestRequesterNotificationKind,
+    event: RequestSubmissionEvent,
+  ) {
+    return createRequestRequesterNotificationTransactItems({
+      auditTableName: this.audit.tableName,
+      auditRetentionDays: this.audit.retentionDays,
+      workspaceId: readWorkspaceIdFromScopeKey(submission.scopeKey),
+      submissionId: submission.id,
+      requesterUserId: submission.requesterUserId,
+      formTitle: resolveRequestFormTitle(submission),
+      kind,
+      actorId: event.actorId,
+      occurredAt: event.createdAt,
+      occurrenceId: event.id,
+    })
   }
 
   /** External capability thread の allowlist 済み message view を返します。 */
@@ -2493,6 +2759,24 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const threadDigest = this.hashToken('thread', requireCapabilityToken(threadToken, 'Request thread token'))
     const lookup = await this.getThreadLookup(threadDigest)
     await this.requireTenantActive(lookup.workspaceId)
+    return this.replyWithThreadDigest(lookup, threadDigest, input, context)
+  }
+
+  /**
+   * Saves a requester reply to the thread identified by its digest, once per idempotency key.
+   *
+   * @param lookup - Workspace and submission of the thread.
+   * @param threadDigest - Keyed digest of the thread capability.
+   * @param input - Plain text reply.
+   * @param context - Rate-limit and idempotency context.
+   * @returns The reply receipt, replayed for a repeated idempotency key.
+   */
+  private async replyWithThreadDigest(
+    lookup: StoredThreadLookup,
+    threadDigest: string,
+    input: RequestRequesterReplyInput,
+    context: RequestExternalContext,
+  ) {
     const body = requireText(input.body, 'Requester reply', 20_000)
     const inputFingerprint = stableHash({ body, threadDigest })
     const idempotencyKey = context.idempotencyKey === undefined
@@ -3488,7 +3772,8 @@ function readStoredSubmission(value: unknown): StoredRequestSubmission {
     typeof record.createdAt !== 'string' ||
     typeof record.updatedAt !== 'string' ||
     typeof record.threadDigest !== 'string' ||
-    typeof record.duplicateFingerprint !== 'string'
+    typeof record.duplicateFingerprint !== 'string' ||
+    (record.requesterUserId !== undefined && typeof record.requesterUserId !== 'string')
   ) throw new RequestIntakeError(503, 'InvalidRequestSubmission', 'Stored request submission is invalid.')
   return {
     ...(record as unknown as StoredRequestSubmission),
@@ -3955,6 +4240,73 @@ function createFormVersionRecordKey(formId: string, version: number) {
 
 function createSubmissionRecordKey(submissionId: string) {
   return `SUBMISSION#${requireIdentifier(submissionId, 'Request submission ID')}`
+}
+
+/**
+ * Builds the sort-key prefix of the rows that index one member's requests.
+ *
+ * @param requesterUserId - Normalized member key of the requester.
+ * @returns The prefix shared by that member's index rows.
+ */
+function createRequesterSubmissionRecordKeyPrefix(requesterUserId: string) {
+  return `REQUESTER#${requireText(requesterUserId, 'Requester', 320)}#SUBMISSION#`
+}
+
+/**
+ * Builds the sort key of the row that lists one request under the member who sent it.
+ * Submission IDs start with their creation time, so the rows sort by time.
+ *
+ * @param requesterUserId - Normalized member key of the requester.
+ * @param submissionId - Request submission ID.
+ * @returns The index row sort key.
+ */
+function createRequesterSubmissionRecordKey(requesterUserId: string, submissionId: string) {
+  return `${createRequesterSubmissionRecordKeyPrefix(requesterUserId)}${requireIdentifier(submissionId, 'Request submission ID')}`
+}
+
+/**
+ * Encodes the last index row of a page as an opaque cursor.
+ *
+ * @param recordKey - Sort key of the last row read.
+ * @returns The cursor.
+ */
+function encodeRequesterCursor(recordKey: string) {
+  return Buffer.from(JSON.stringify({ version: 1, recordKey }), 'utf8').toString('base64url')
+}
+
+/**
+ * Decodes a cursor and rejects one made for another member or Workspace.
+ *
+ * @param cursor - Cursor from the previous page.
+ * @param scopeKey - Workspace partition key of the current member.
+ * @param prefix - Sort-key prefix of the current member's rows.
+ * @returns The DynamoDB start key.
+ */
+function decodeRequesterCursor(cursor: string, scopeKey: string, prefix: string) {
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    const record = requireRecord(decoded, 'Request list cursor')
+    if (record.version !== 1 || typeof record.recordKey !== 'string' || !record.recordKey.startsWith(prefix)) {
+      throw new Error('scope mismatch')
+    }
+    return { scopeKey, recordKey: record.recordKey }
+  } catch {
+    throw invalidInput('Request list cursor is invalid.')
+  }
+}
+
+/**
+ * Reads the Workspace ID from a submission partition key.
+ *
+ * @param scopeKey - Submission partition key such as `WORKSPACE#ws_1`.
+ * @returns The Workspace ID.
+ */
+function readWorkspaceIdFromScopeKey(scopeKey: string) {
+  const prefix = 'WORKSPACE#'
+  if (!scopeKey.startsWith(prefix) || scopeKey.length === prefix.length) {
+    throw new RequestIntakeError(503, 'InvalidRequestSubmission', 'Stored request submission is invalid.')
+  }
+  return scopeKey.slice(prefix.length)
 }
 
 function createSubmissionEventRecordKeyPrefix(submissionId: string) {

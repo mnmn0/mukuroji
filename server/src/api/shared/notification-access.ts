@@ -11,6 +11,11 @@ import {
 import { NotificationError, type NotificationItem } from '../../modules/notifications/notifications'
 import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
+import {
+  REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
+  REQUEST_REQUESTER_NOTIFICATION_REASON,
+  RequestIntakeError,
+} from '../../modules/request-intake'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
 import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../../modules/analytics'
@@ -648,7 +653,34 @@ export async function createNotificationVisibilityFilter(
     return visibility
   }
 
+  const ownRequestVisibilities = new Map<string, Promise<boolean>>()
+  /**
+   * Reports whether the principal is still the requester of a request, so a requester
+   * notification is shown only to the member who sent the request.
+   */
+  const isOwnRequest = (submissionId: string) => {
+    let visibility = ownRequestVisibilities.get(submissionId)
+    if (!visibility) {
+      visibility = workItemDependencies.requestIntake.getRequesterSubmission(
+        principal.directoryId,
+        principal.userKey,
+        submissionId,
+      ).then(() => true).catch((error: unknown) => {
+        if (error instanceof RequestIntakeError && (error.status === 404 || error.status === 400)) return false
+        throw error
+      })
+      ownRequestVisibilities.set(submissionId, visibility)
+    }
+    return visibility
+  }
+
   return async (notification: NotificationItem) => {
+    if (notification.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)) {
+      // The event carries no Team or Project, so only the request's own requester may see it.
+      return notification.entityId !== undefined &&
+        notification.reasons.includes(REQUEST_REQUESTER_NOTIFICATION_REASON) &&
+        await isOwnRequest(notification.entityId)
+    }
     if (notification.eventType === ANALYTICS_REPORT_DELIVERED_EVENT_TYPE) {
       if (!notification.entityId) return false
       const visibility = await readAnalyticsReportVisibility(notification.entityId)

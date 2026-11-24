@@ -2938,3 +2938,185 @@ test('gates request attachment access on the current malware scan result', async
   expect(markedCompleted).toBe(3)
   expect(accessCalls).toBe(1)
 })
+
+test('records the signed-in requester and their index row only for an authenticated link', async () => {
+  const sessionDigest = createHmac('sha256', tokenHashSecret)
+    .update(`session\0${sessionToken}`)
+    .digest('hex')
+  const session: Record<string, unknown> = {
+    entryType: 'submission-session',
+    scopeKey: `SESSION#${sessionDigest}`,
+    recordKey: 'LOOKUP',
+    workspaceId: 'workspace-1',
+    formId: 'form-1',
+    formVersion: 1,
+    linkDigest: resolution.tokenDigest,
+    minimumSubmitAt: '2026-07-16T08:59:00.000Z',
+    expiresAtIso: '2026-07-16T09:15:00.000Z',
+    expiresAt: Math.floor(Date.parse('2026-07-16T09:15:00.000Z') / 1_000),
+  }
+  const version = createStoredVersion()
+  let transactItems: Array<{ Put?: { Item?: Record<string, unknown> } }> = []
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
+    if (key?.scopeKey === session.scopeKey) return { Item: session }
+    if (key?.recordKey?.includes('#VERSION#')) return { Item: version }
+    if (key?.scopeKey?.startsWith('DUPLICATE#')) return {}
+    if (key?.recordKey?.startsWith('SUBMISSION#')) return {}
+    if (command.input.TransactItems) {
+      transactItems = command.input.TransactItems as typeof transactItems
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+  const input = {
+    sessionToken,
+    locale: 'ja',
+    answers: { category: 'general', title: 'Alpha request', email: 'requester@example.com' },
+    consentAccepted: true,
+  } satisfies SubmitRequestInput
+
+  await expect(client.submit(resolution, input, { clientKey: 'client-1' }, { id: 'member@example.com' }))
+    .rejects.toMatchObject({ status: 400 })
+
+  await client.submit(
+    { ...resolution, accessMode: 'auth-required' },
+    input,
+    { clientKey: 'client-1' },
+    { id: 'Member@Example.com' },
+  )
+  const submission = transactItems.find(({ Put }) => Put?.Item?.entryType === 'submission')?.Put?.Item
+  expect(submission).toMatchObject({ requesterUserId: 'member@example.com' })
+  const indexRow = transactItems.find(({ Put }) => Put?.Item?.entryType === 'requester-submission')?.Put?.Item
+  expect(indexRow).toMatchObject({
+    scopeKey: 'WORKSPACE#workspace-1',
+    workspaceId: 'workspace-1',
+    requesterUserId: 'member@example.com',
+    submissionId: submission?.id,
+  })
+  expect(String(indexRow?.recordKey)).toBe(`REQUESTER#member@example.com#SUBMISSION#${String(submission?.id)}`)
+})
+
+test('notifies the requester about questions, rejection, and conversion without internal text', async () => {
+  let stored: Record<string, unknown> = createStoredSubmission({ requesterUserId: 'member@example.com' })
+  const transactions: Array<Array<{ Put?: { TableName?: string; Item?: Record<string, unknown> } }>> = []
+  const client = createClient(createDocumentClient((command) => {
+    if (command.input.Key) return { Item: stored }
+    if (command.input.KeyConditionExpression) return { Items: [] }
+    const items = command.input.TransactItems as typeof transactions[number] | undefined
+    if (items) {
+      stored = items[0]!.Put!.Item!
+      transactions.push(items)
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+  const auditEvents = () => transactions.at(-1)!
+    .map(({ Put }) => Put?.Item)
+    .filter((item) => typeof item?.eventType === 'string' && String(item.eventType).startsWith('request.requester.'))
+
+  await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    action: 'assign', expectedRevision: 1, assigneeUserId: 'triager@example.com',
+  })
+  expect(auditEvents()).toHaveLength(0)
+
+  await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    action: 'request-more-info', expectedRevision: 2, message: 'Secret internal question',
+  })
+  const [question] = auditEvents()
+  expect(question).toMatchObject({
+    eventType: 'request.requester.more-info-requested',
+    entity: { type: 'request-submission', id: 'req-1' },
+    metadata: {
+      actorMemberKey: 'manager@example.com',
+      notificationTitle: 'お問い合わせ',
+      deepLink: '/my-requests?requestId=req-1',
+      notificationCandidates: [{ memberKey: 'member@example.com', reason: 'requester' }],
+    },
+  })
+  expect(question?.metadata).not.toHaveProperty('teamId')
+  expect(JSON.stringify(question)).not.toContain('Secret internal question')
+
+  await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    action: 'reject', expectedRevision: 3, reason: 'Private reason',
+  })
+  const [rejected] = auditEvents()
+  expect(rejected).toMatchObject({ eventType: 'request.requester.rejected' })
+  expect(JSON.stringify(rejected)).not.toContain('Private reason')
+
+  stored = createStoredSubmission({ requesterUserId: 'member@example.com' })
+  await client.completeConversion('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    expectedRevision: 1,
+    workItem: { teamId: 'team-core', workItemId: 'wi-1' },
+  })
+  expect(auditEvents()).toEqual([expect.objectContaining({ eventType: 'request.requester.accepted' })])
+
+  stored = createStoredSubmission()
+  await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+    action: 'reject', expectedRevision: 1, reason: 'Anonymous request',
+  })
+  expect(auditEvents()).toHaveLength(0)
+})
+
+test('lists, reads, and answers only the requests the member sent', async () => {
+  const own = createStoredSubmission({ requesterUserId: 'member@example.com', status: 'needs-more-info' })
+  const other = createStoredSubmission({
+    id: 'req-2',
+    recordKey: 'SUBMISSION#req-2',
+    requesterUserId: 'someone@example.com',
+  })
+  const queries: Record<string, unknown>[] = []
+  const transactions: unknown[] = []
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
+    if (key?.recordKey === 'SUBMISSION#req-1') return { Item: own }
+    if (key?.recordKey === 'SUBMISSION#req-2') return { Item: other }
+    if (key?.recordKey === 'TRIAGE_ENTRY#team-core#triage-form-req-1' || key?.recordKey?.startsWith('TRIAGE')) {
+      return { Item: createStoredFormTriageEntryRow('needs-information') }
+    }
+    if (key) return {}
+    if (command.input.KeyConditionExpression) {
+      queries.push(command.input)
+      return {
+        Items: [
+          { entryType: 'requester-submission', requesterUserId: 'member@example.com', submissionId: 'req-1' },
+          // A row that names another member is ignored even under this member's prefix.
+          { entryType: 'requester-submission', requesterUserId: 'someone@example.com', submissionId: 'req-2' },
+        ],
+        LastEvaluatedKey: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'REQUESTER#member@example.com#SUBMISSION#req-1' },
+      }
+    }
+    if (command.input.TransactItems) {
+      transactions.push(command.input.TransactItems)
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  const page = await client.listRequesterSubmissions('workspace-1', 'Member@example.com', { limit: 5 })
+  expect(page.submissions.map(({ id }) => id)).toEqual(['req-1'])
+  expect(queries[0]).toMatchObject({
+    ExpressionAttributeValues: {
+      ':scopeKey': 'WORKSPACE#workspace-1',
+      ':prefix': 'REQUESTER#member@example.com#SUBMISSION#',
+    },
+    ScanIndexForward: false,
+    Limit: 5,
+  })
+  expect(page.nextCursor).toBeString()
+  await client.listRequesterSubmissions('workspace-1', 'member@example.com', { cursor: page.nextCursor })
+  expect(queries[1]).toMatchObject({
+    ExclusiveStartKey: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'REQUESTER#member@example.com#SUBMISSION#req-1' },
+  })
+  await expect(client.listRequesterSubmissions('workspace-1', 'someone@example.com', { cursor: page.nextCursor }))
+    .rejects.toMatchObject({ status: 400 })
+
+  await expect(client.getRequesterSubmission('workspace-1', 'member@example.com', 'req-1'))
+    .resolves.toMatchObject({ id: 'req-1' })
+  await expect(client.getRequesterSubmission('workspace-1', 'member@example.com', 'req-2'))
+    .rejects.toMatchObject({ status: 404, code: 'RequestSubmissionNotFound' })
+  await expect(client.replyAsRequester(
+    'workspace-1', 'member@example.com', 'req-2', { body: 'Hi' }, { clientKey: 'client-1' },
+  )).rejects.toMatchObject({ status: 404 })
+  expect(transactions).toHaveLength(0)
+})

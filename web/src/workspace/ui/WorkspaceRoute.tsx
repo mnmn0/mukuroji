@@ -174,6 +174,12 @@ const requestRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'requests.title',
   descriptionKey: 'requests.description',
 }
+const myRequestsRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'requests',
+  eyebrowKey: 'requests.mine.eyebrow',
+  titleKey: 'requests.mine.title',
+  descriptionKey: 'requests.mine.description',
+}
 const customerRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'customers',
   customHeader: true,
@@ -774,6 +780,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/requests', pathname)) {
     return requestRouteMetadata
+  }
+
+  if (matchPath('/my-requests', pathname)) {
+    return myRequestsRouteMetadata
   }
 
   if (

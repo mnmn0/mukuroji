@@ -27,6 +27,10 @@ import {
 } from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
+import {
+  REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
+  REQUEST_REQUESTER_NOTIFICATION_REASON,
+} from '../../../request-intake'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -2551,9 +2555,18 @@ async function isEligibleRecipient(
   let permissionCeiling: EnterprisePermissionId[] | undefined
   const readOnlyRecipient = event.notificationCandidates.length > 0 &&
     event.notificationCandidates.every((candidate) => candidate.reason === 'watcher')
-  const selectedWorkspaceRecipient = event.eventType === 'automation.notification.requested' &&
+  const selectedWorkspaceRecipient = (
+    event.eventType === 'automation.notification.requested' ||
+    // A requester is told about their own request with only the form title, so Workspace read
+    // is enough, as for an Automation notification sent to chosen members.
+    event.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
+  ) &&
     !event.teamId && !event.projectId && !event.issueId && !event.planningTargetId &&
-    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && candidate.reason === 'automation')
+    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && (
+      event.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
+        ? candidate.reason === REQUEST_REQUESTER_NOTIFICATION_REASON
+        : candidate.reason === 'automation'
+    ))
   const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
     : event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read'
   if (enforceContentAuthorization) {

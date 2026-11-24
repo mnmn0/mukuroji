@@ -235,6 +235,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `GET /api/teams/{teamId}/agent-settings`, `PUT /api/teams/{teamId}/agent-settings`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
+- `GET /api/my-requests`, `GET /api/my-requests/{submissionId}`, `POST /api/my-requests/{submissionId}/replies`
 - `GET /api/enterprise/security` と `/api/enterprise/security/*` の管理 mutation
 - `/api/scim/v2/{workspaceId}/ServiceProviderConfig`,
   `/api/scim/v2/{workspaceId}/Users`, `/api/scim/v2/{workspaceId}/Groups`
