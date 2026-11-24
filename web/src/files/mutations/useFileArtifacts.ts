@@ -7,6 +7,7 @@ import type {
   FileVersion,
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { uploadFilesInOrder } from './fileUploadBatch'
 import {
   cancelApprovalRequest,
   completeFileVersionUpload,
@@ -113,7 +114,8 @@ export type FileUploadOptions = {
   onUploaded?: (file: FileAttachment, version: FileVersion) => void
   /**
    * Called when the server refuses a file because of its type, with the reason and the types the
-   * Workspace accepts.
+   * Workspace accepts. When given, the refused file is skipped and the remaining files still
+   * upload; without it, the first refusal stops the batch.
    */
   onFileTypeRejected?: (rejection: FileTypeRejection) => void
 }
@@ -301,7 +303,7 @@ export function useFileArtifacts({
     let hasCreatedUploadSession = false
 
     try {
-      for (const selectedFile of selectedFiles) {
+      await uploadFilesInOrder(selectedFiles, async (selectedFile) => {
         const input = {
           contentType: selectedFile.type || 'application/octet-stream',
           fileName: selectedFile.name,
@@ -376,14 +378,11 @@ export function useFileArtifacts({
               ),
         )
         options.onUploaded?.(completed.file, completed.version)
-      }
+      }, options.onFileTypeRejected)
 
       return true
     } catch (uploadError) {
       console.error('File upload failed:', uploadError)
-      if (uploadError instanceof FilesApiError && uploadError.fileTypeRejection) {
-        options.onFileTypeRejected?.(uploadError.fileTypeRejection)
-      }
       if (currentOperationTokenRef.current === operationToken) {
         setMutationError(uploadError instanceof FilesApiError
           ? {

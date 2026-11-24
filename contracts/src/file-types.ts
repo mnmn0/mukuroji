@@ -327,6 +327,23 @@ export function getFileTypeDefinition(id: FileTypeId): FileTypeDefinition {
 }
 
 /**
+ * Drops trailing dots and whitespace with a single backward scan, so long untrusted names cost
+ * linear time.
+ *
+ * @param value - Text to trim.
+ * @returns The text without trailing dots and whitespace.
+ */
+function trimTrailingDotsAndSpaces(value: string): string {
+  let end = value.length
+  while (end > 0) {
+    const character = value[end - 1] ?? ''
+    if (character !== '.' && character.trim() !== '') break
+    end -= 1
+  }
+  return value.slice(0, end)
+}
+
+/**
  * Reads the lowercase extensions of a file name, longest first (`report.tar.gz` gives `tar.gz`
  * then `gz`). Trailing dots and spaces are dropped first, because Windows drops them when it saves
  * the file (`setup.exe.` is saved as `setup.exe`).
@@ -335,7 +352,8 @@ export function getFileTypeDefinition(id: FileTypeId): FileTypeDefinition {
  * @returns Candidate extensions, or an empty list when the name has none.
  */
 function readFileExtensions(fileName: string): string[] {
-  const baseName = (fileName.split(/[\\/]/u).at(-1) ?? '').toLowerCase().replace(/[.\s]+$/u, '')
+  const lastSeparator = Math.max(fileName.lastIndexOf('/'), fileName.lastIndexOf('\\'))
+  const baseName = trimTrailingDotsAndSpaces(fileName.slice(lastSeparator + 1).toLowerCase())
   const parts = baseName.split('.').slice(1)
   return parts.map((_, index) => parts.slice(index).join('.'))
 }

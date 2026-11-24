@@ -70,6 +70,12 @@ describe('File type catalog', () => {
     }
     expect(resolveId('notes.md', 'text/html')).toBe('dangerous')
     expect(resolveId('payload', 'application/x-msdownload')).toBe('dangerous')
+    expect(resolveId('setup.exe\t \t.', 'application/pdf')).toBe('dangerous')
+    // Trailing whitespace is trimmed in linear time, even for a very long untrusted name.
+    const startedAt = performance.now()
+    expect(resolveId(`notes${'\t'.repeat(100_000)}x`, '')).toBe('unrecognized')
+    expect(resolveId(`notes.md${'\t'.repeat(100_000)}`, '')).toBe('markdown')
+    expect(performance.now() - startedAt).toBeLessThan(1_000)
     // A program name in the middle of a longer name is not the type of the file.
     expect(resolveId('app.config.json', 'application/json')).toBe('json')
   })
