@@ -4349,7 +4349,14 @@ test.describe('authenticated task page', () => {
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
       await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
     })
+    let sharedReport: unknown
     await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      if (route.request().method() === 'POST') {
+        const body: unknown = route.request().postDataJSON()
+        sharedReport = typeof body === 'object' && body !== null && 'report' in body ? body.report : undefined
+        await route.fulfill({ status: 503, json: { code: 'Unavailable', message: 'Unavailable.' } })
+        return
+      }
       await route.fulfill({ json: { shares: [] } })
     })
     await page.goto('/projects/refero/overview?teamId=core-team')
@@ -4370,6 +4377,15 @@ test.describe('authenticated task page', () => {
     await expect(dialog.getByTestId('project-status-report-schedule')).toHaveCount(0)
     await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
     await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+
+    // The snapshot sent for a share link leaves out the stale schedule too.
+    const share = dialog.getByTestId('project-status-share')
+    await share.getByTestId('project-status-share-label').fill('顧客A')
+    await share.getByTestId('project-status-share-create').click()
+    await expect.poll(() => sharedReport).toBeDefined()
+    expect(sharedReport).toMatchObject({ projectName: 'Refero' })
+    expect(sharedReport).not.toHaveProperty('schedule')
+    expect(sharedReport).not.toHaveProperty('health')
   })
 
   test('Issue #349: 読む権限のない Work Item は進捗欄を外してレポートを出す', async ({ page }) => {
