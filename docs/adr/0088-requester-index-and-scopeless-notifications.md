@@ -36,7 +36,7 @@ Submission は `RequestIntakeTable` に Workspace 単位で保存されている
   処理から Request Intake table を読まない。
 - Work Item の中身は、依頼者が現在 viewer として読める場合だけ表示し、読めない場合は完了したか
   どうかだけを返す。
-- Email は送らない。
+- 依頼者への通知は受信箱だけに届け、member の channel 設定にかかわらず Email・Slack・Push には送らない。
 
 ## 検討した選択肢
 

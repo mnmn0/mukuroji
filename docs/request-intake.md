@@ -112,7 +112,7 @@ Event は Team / Project / Work Item scope を持たず、form title と定型�
 projection は scope のない requester event を reason `requester` の候補だけに配り、Inbox は
 読み取り時に submission がまだその member のものかを確かめる。完了通知のため、Form から作った
 Work Item は API に返さない `sourceRequester`（member key と form title）を持ち、完了遷移の
-transaction の最後に notification を追加する。Email は送らない。判断は ADR 0088 を参照する。
+transaction の最後に notification を追加する。通知は受信箱だけに届け、member の channel 設定にかかわらず Email・Slack・Push には送らない。判断は ADR 0088 を参照する。
 
 ## API
 

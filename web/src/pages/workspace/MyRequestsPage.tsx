@@ -62,6 +62,8 @@ export function MyRequestsPage() {
           isLoading={list.isLoading}
           locale={workspace.locale}
           onLoadMore={() => void list.setSize(list.size + 1)}
+          onRetryDetail={() => void mutateDetail()}
+          onRetryList={() => void mutateList()}
           onReply={reply}
           onSelectRequest={selectRequest}
           requests={requests}

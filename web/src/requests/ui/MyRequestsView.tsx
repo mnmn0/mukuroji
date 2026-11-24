@@ -17,6 +17,8 @@ export type MyRequestsViewProps = {
   canLoadMore: boolean
   /** Loads the next page. */
   onLoadMore: () => void
+  /** Loads the list again after it failed. */
+  onRetryList: () => void
   /** ID of the selected request. */
   selectedRequestId?: string
   /** Selects a request, or clears the selection. */
@@ -25,6 +27,8 @@ export type MyRequestsViewProps = {
   selectedRequest?: MyRequestDetail
   /** Whether the selected request failed to load. */
   hasDetailError: boolean
+  /** Loads the selected request again after it failed. */
+  onRetryDetail: () => void
   /** Sends a reply to the selected request. */
   onReply: (requestId: string, body: string) => Promise<void>
   /** Reader's locale, used for dates. */
@@ -49,7 +53,7 @@ export function MyRequestsView(props: MyRequestsViewProps) {
         className={`workbench-panel grid content-start gap-2 p-4 ${selectedRequestId ? 'hidden lg:grid' : ''}`}
       >
         {props.hasLoadError ? (
-          <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('requests.mine.loadError')}</p>
+          <LoadErrorNotice onRetry={props.onRetryList} t={t} />
         ) : null}
         {!props.isLoading && !props.hasLoadError && requests.length === 0 ? (
           <p className="text-sm text-[var(--workbench-muted)]">{t('requests.mine.empty')}</p>
@@ -98,7 +102,7 @@ export function MyRequestsView(props: MyRequestsViewProps) {
               {t('requests.mine.back')}
             </button>
             {props.hasDetailError ? (
-              <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('requests.mine.loadError')}</p>
+              <LoadErrorNotice onRetry={props.onRetryDetail} t={t} />
             ) : props.selectedRequest ? (
               <MyRequestDetailPanel
                 key={props.selectedRequest.id}
@@ -113,6 +117,23 @@ export function MyRequestsView(props: MyRequestsViewProps) {
           <p className="text-sm text-[var(--workbench-muted)]">{t('requests.mine.selectPrompt')}</p>
         )}
       </section>
+    </div>
+  )
+}
+
+/**
+ * Shows a load failure with a button that loads the data again.
+ *
+ * @param props - Retry callback and translator.
+ * @returns The error message and retry button.
+ */
+function LoadErrorNotice({ onRetry, t }: { onRetry: () => void; t: (key: MessageKey) => string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3" role="alert">
+      <p className="text-sm font-semibold text-fg-red-700">{t('requests.mine.loadError')}</p>
+      <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
+        {t('requests.mine.retry')}
+      </button>
     </div>
   )
 }

@@ -103,6 +103,8 @@ describe('my requests view', () => {
           isLoading={false}
           locale="en"
           onLoadMore={() => undefined}
+          onRetryDetail={() => undefined}
+          onRetryList={() => undefined}
           onReply={async () => undefined}
           onSelectRequest={() => undefined}
           requests={[detail]}

@@ -176,7 +176,9 @@ async function readMyRequestWorkItem(
       reference.teamId,
       reference.workItemId,
       'viewer',
-      { consistentIssueRead: false, includeEvents: false },
+      // Authorize on the committed scope, so a Work Item just moved to another Project is not
+      // shown through its previous one.
+      { consistentIssueRead: true, includeEvents: false },
     )
     // "My requests" is authorized as a Workspace read, so Work Item read is checked here at the
     // Work Item's current Team and Project, as the Work Item routes require it.

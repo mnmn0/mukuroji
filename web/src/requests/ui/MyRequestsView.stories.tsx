@@ -32,6 +32,8 @@ const meta = {
     hasLoadError: false,
     canLoadMore: false,
     onLoadMore: fn(),
+    onRetryList: fn(),
+    onRetryDetail: fn(),
     onSelectRequest: fn(),
     hasDetailError: false,
     onReply: fn(async () => undefined),
@@ -80,7 +82,11 @@ export const RestrictedWorkItem: Story = {
   },
 }
 
-/** 一覧の読み込みに失敗した状態です。 */
+/** 一覧の読み込みに失敗し、再読み込みできる状態です。 */
 export const LoadError: Story = {
   args: { requests: [], hasLoadError: true },
+  play: async ({ args, canvasElement }) => {
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '再読み込み' }))
+    await expect(args.onRetryList).toHaveBeenCalled()
+  },
 }

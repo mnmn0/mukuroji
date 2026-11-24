@@ -224,6 +224,7 @@ export const requestsMessages = {
   'requests.mine.description': 'See the status of requests you sent from internal forms, questions from the team, and the resulting Work Item.',
   'requests.mine.empty': 'No requests yet. Requests you send from internal forms while signed in appear here.',
   'requests.mine.loadError': 'Your requests could not be loaded. Try again later.',
+  'requests.mine.retry': 'Try again',
   'requests.mine.loadMore': 'Show more',
   'requests.mine.listLabel': 'My requests',
   'requests.mine.submittedAt': 'Sent {date}',

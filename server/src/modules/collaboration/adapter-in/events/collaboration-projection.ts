@@ -1636,8 +1636,11 @@ export function createNotificationProjectionDeliveryState(
   subject: NotificationRoutingSubject,
 ): NotificationProjectionDeliveryState {
   const deliveryPlan = createNotificationDeliveryPlan(preferences, occurredAt)
+  // A requester notification belongs to the Inbox only: it is never sent by Email, Slack, or
+  // Push, whatever the member's channel preferences (ADR 0088).
+  const inboxOnly = subject.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
   const routed = (channel: keyof NotificationPreferences['channels']) =>
-    isNotificationRoutedToChannel(preferences, subject, channel)
+    (!inboxOnly || channel === 'inApp') && isNotificationRoutedToChannel(preferences, subject, channel)
   const inboxState = routed('inApp') ? 'unread' : 'archived'
 
   return {
