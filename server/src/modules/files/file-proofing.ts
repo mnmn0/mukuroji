@@ -4046,9 +4046,11 @@ function createApprovalAuditMetadata(
     issueId: scope.issueId,
     projectId: scope.projectId,
     ...(fileSubject ? { fileId: fileSubject.fileId, versionId: fileSubject.versionId } : {}),
+    // A Project approval opens the Project screen, which hosts the files tab; the Web has no
+    // dedicated Project file route.
     deepLink: scope.kind === 'work-item'
       ? `/teams/${encodeURIComponent(scope.teamId)}/issues/${encodeURIComponent(scope.issueId ?? '')}`
-      : `/teams/${encodeURIComponent(scope.teamId)}/projects/${encodeURIComponent(scope.projectId ?? '')}/files`,
+      : `/projects/${encodeURIComponent(scope.projectId ?? '')}/issues`,
   }
 }
 

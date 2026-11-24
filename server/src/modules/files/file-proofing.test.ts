@@ -523,8 +523,9 @@ function createAuditContext(
 async function createAvailableFile(
   upload: { contentType: string; fileName: string } = { contentType: 'image/png', fileName: 'review.png' },
   fileScope: FileProofingScope = scope,
+  auditTableName?: string,
 ) {
-  const state = createClient()
+  const state = createClient(undefined, auditTableName)
   const session = await state.client.createUpload(
     fileScope,
     manager,
@@ -2584,7 +2585,7 @@ describe('annotation resolution and project file approval', () => {
   })
 
   test('requests, decides, and lists approval of a Project file without a Work Item', async () => {
-    const { client, documentClient, session } = await createAvailableFile(undefined, projectScope)
+    const { client, documentClient, session } = await createAvailableFile(undefined, projectScope, 'audit')
     const listed = await client.list(projectScope, manager)
     expect(listed.capabilities.canRequestApproval).toBeTrue()
     expect(listed.files[0]?.capabilities.canRequestApproval).toBeTrue()
@@ -2641,6 +2642,13 @@ describe('annotation resolution and project file approval', () => {
     )
     expect(storedApproval?.scopeKey).toBe(createFileProofingScopeKey(projectScope))
     expect(storedApproval?.issueId).toBeUndefined()
+    const requestedEvent = [...documentClient.items.values()].find((item) =>
+      item.eventType === 'approval.requested'
+    )
+    expect(requestedEvent).toMatchObject({
+      entityType: 'project',
+      metadata: { deepLink: '/projects/refero/issues' },
+    })
   })
 
   test('reads no approval or annotation rows for a scope without visible files', async () => {
