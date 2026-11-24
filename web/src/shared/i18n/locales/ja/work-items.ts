@@ -338,6 +338,8 @@ export const workItemsMessages = {
   'approval.requester.automation': 'Automation',
   'approval.subject.workItem': 'Work Item 本体',
   'approval.subject.fileUnavailable': 'File version',
+  'approval.subject.documentVersion': 'Document の版',
+  'approval.subject.openDocumentVersion': 'Document の版を開く',
   'approval.completionTransition': '全員承認後の状態',
   'approval.completionTransition.none': '状態を変更しない',
   'approval.comment': '判断コメント（任意）',

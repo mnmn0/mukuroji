@@ -29,7 +29,9 @@ export function createApprovalNotificationReader(client: ApprovalNotificationCli
     if (approval.scopeKey !== scopeKey || approval.recordKey !== approvalKey || approval.entryType !== 'approval' ||
       approval.workspaceId !== source.workspaceId || approval.teamId !== source.teamId || approval.issueId !== source.issueId ||
       approval.id !== source.approvalId) throw invalidSource()
-    if (approval.subjectType === 'work-item') return source.fileId === undefined && !source.guest
+    if (approval.subjectType === 'work-item' || approval.subjectType === 'document-version') {
+      return source.fileId === undefined && !source.guest
+    }
     if (approval.subjectType !== undefined && approval.subjectType !== 'file-version' ||
       typeof approval.fileId !== 'string' || !approval.fileId.trim() ||
       typeof approval.versionId !== 'string' || !approval.versionId.trim()) throw invalidSource()

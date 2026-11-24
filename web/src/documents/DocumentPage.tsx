@@ -245,6 +245,10 @@ export type DocumentScreenData = {
    */
   focusedCommentId?: string
   /**
+   * Work Item の承認 link から確認する version ID です。
+   */
+  focusedVersionId?: string
+  /**
    * さらに古い comments を取得できるかどうかです。
    */
   hasMoreComments?: boolean
@@ -564,7 +568,14 @@ export function DocumentPage() {
   const documentId = params.documentId
   const routeContext = searchParams.get('context')
   const initialContextTab: DocumentContextTab | undefined =
-    routeContext === 'comments' ? 'comments' : undefined
+    routeContext === 'comments'
+      ? 'comments'
+      : routeContext === 'versions'
+        ? 'versions'
+        : undefined
+  const focusedVersionId = routeContext === 'versions'
+    ? searchParams.get('versionId')?.trim() || undefined
+    : undefined
   const focusedCommentId =
     routeContext === 'comments'
       ? readOptionalDocumentCommentId(
@@ -576,7 +587,7 @@ export function DocumentPage() {
       searchParams.get('rootCommentId'),
     ) ?? focusedCommentId
   const contextInstanceKey =
-    `${documentId ?? 'home'}:${routeContext ?? ''}:${focusedCommentId ?? ''}`
+    `${documentId ?? 'home'}:${routeContext ?? ''}:${focusedCommentId ?? ''}:${focusedVersionId ?? ''}`
   const [
     contextPanelSelection,
     setContextPanelSelection,
@@ -1574,6 +1585,7 @@ export function DocumentPage() {
         isImportingMarkdown: markdownImport.isImporting,
         documents,
         focusedCommentId,
+        focusedVersionId,
         hasMoreActiveDocuments:
           collection?.activeCursor !== undefined,
         hasMoreArchivedDocuments:
@@ -2339,6 +2351,7 @@ export function DocumentScreen({
                   defaultAnchorId={defaultCommentAnchorId}
                   document={selectedDocument}
                   focusedCommentId={data.focusedCommentId}
+                  focusedVersionId={data.focusedVersionId}
                   hasMoreBacklinks={
                     data.hasMoreBacklinks
                   }

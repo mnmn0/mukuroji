@@ -17,6 +17,10 @@ import {
   RealtimeTicketError,
 } from '../../modules/realtime'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import {
+  createAuthorizedDocumentVersionApproval,
+  listAuthorizedDocumentApprovals,
+} from '../shared/document-approval-access'
 import { readDocumentAuthorizationSnapshot } from '../shared/document-access'
 import { createDocumentEnterpriseScopeBoundary } from '../shared/project-access'
 import { readRealtimeAuthenticationContext } from '../shared/realtime-authentication'
@@ -303,6 +307,17 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
         throw error
       }
     },
+    requestVersionApproval: async (principal, request, context) =>
+      createAuthorizedDocumentVersionApproval(
+        context,
+        await reauthenticateDocumentPrincipal(principal, context),
+        request,
+      ),
+    listVersionApprovals: async (principal, documentId, context) =>
+      listAuthorizedDocumentApprovals(
+        await reauthenticateDocumentPrincipal(principal, context),
+        documentId,
+      ),
     publishChange: async (workspaceId, change) => {
       await publishRealtimeScopeSignal(
         createDocumentRealtimeScopeKey(workspaceId, change.documentId),
@@ -316,6 +331,33 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
       )
     },
   })
+}
+
+/**
+ * Resolves the Workspace principal behind an authenticated Document principal, so Work Item
+ * authorization runs against the same source of truth as the Work Item routes.
+ *
+ * @param documentPrincipal - Principal the Document route already authenticated.
+ * @param context - Hono request context that carries the bearer token.
+ * @returns The Workspace principal of the same member.
+ * @throws DocumentError when the token is missing or resolves to another Workspace member.
+ */
+async function reauthenticateDocumentPrincipal(
+  documentPrincipal: DocumentApiPrincipal,
+  context: Context,
+) {
+  const accessToken = readBearerToken(context)
+  if (!accessToken) {
+    throw new DocumentError(401, 'DocumentAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (
+    principal.directoryId !== documentPrincipal.workspaceId ||
+    principal.userKey !== documentPrincipal.memberKey
+  ) {
+    throw new DocumentError(403, 'DocumentPrincipalMismatch', 'The request principal changed.')
+  }
+  return principal
 }
 
 /**

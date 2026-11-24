@@ -38,6 +38,7 @@ import {
   type DocumentScope,
   type DocumentTreeResponse,
   type DocumentVersion,
+  type DocumentVersionDetail,
   type DocumentVersionsResponse,
   type WhiteboardContent,
 } from '@mukuroji/contracts'
@@ -67,6 +68,7 @@ import type {
   ExportDocumentRequest,
   GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
+  GetDocumentVersionRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
   ListDocumentBacklinksRequest,
@@ -74,6 +76,7 @@ import type {
   ListDocumentVersionsRequest,
   ListDocumentsRequest,
   ListRecentDocumentsRequest,
+  PinDocumentVersionRequest,
   PrepareDocumentOperationsResponse,
   PrepareDocumentWorkItemDeletionFenceRequest,
   RenderedDocumentExport,
@@ -393,8 +396,8 @@ type StoredDocumentVersionItem = {
   entryType: 'document-version'
   /** Version metadata です。 */
   version: DocumentVersion
-  /** DynamoDB TTL epoch seconds です。 */
-  expiresAtEpoch: number
+  /** DynamoDB TTL epoch seconds です。名前を付けて固定した version にはありません。 */
+  expiresAtEpoch?: number
 }
 
 /**
@@ -413,8 +416,11 @@ type StoredDocumentVersionSnapshotItem = {
   document: DocumentDetail
   /** Snapshot 時点の element revision map です。 */
   elementRevisions: Record<string, number>
-  /** Delta retention より長く base snapshot を残す DynamoDB TTL epoch seconds です。 */
-  expiresAtEpoch: number
+  /**
+   * Delta retention より長く base snapshot を残す DynamoDB TTL epoch seconds です。
+   * 名前を付けて固定した version の snapshot にはありません。
+   */
+  expiresAtEpoch?: number
 }
 
 /**
@@ -2191,6 +2197,139 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       mutationAuthorizationGuards,
     )
     return this.projectDocument(input.workspaceId, next, input.access)
+  }
+
+  /**
+   * Returns one retained version with a read-only snapshot of its content.
+   *
+   * The snapshot keeps its content fields, while access-controlled fields such as
+   * scope, permission, and capabilities come from the current projection so a
+   * historical snapshot never widens what the viewer can see or do.
+   *
+   * @param input - Version to read and the viewer's authorization snapshot.
+   * @returns Version metadata and the read-only Document snapshot.
+   */
+  async getVersion(input: GetDocumentVersionRequest): Promise<DocumentVersionDetail> {
+    await this.ensureTable()
+    const current = await this.get({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      access: input.access,
+      includeArchived: true,
+    })
+    const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
+    const snapshot: DocumentDetail = {
+      ...structuredClone(versionItem.document),
+      id: current.id,
+      scope: structuredClone(current.scope),
+      position: current.position,
+      permission: structuredClone(current.permission),
+      createdByUserId: current.createdByUserId,
+      createdAt: current.createdAt,
+      favorite: current.favorite,
+      capabilities: EMPTY_DOCUMENT_CAPABILITIES,
+    }
+    delete snapshot.lastOpenedAt
+    if (current.parentId === undefined) delete snapshot.parentId
+    else snapshot.parentId = current.parentId
+    if (current.archivedAt === undefined) delete snapshot.archivedAt
+    else snapshot.archivedAt = current.archivedAt
+    return {
+      version: versionItem.version,
+      document: snapshot,
+    }
+  }
+
+  /**
+   * Names a retained version and keeps it beyond the version retention period.
+   *
+   * The version metadata loses its TTL and an exact full snapshot without a TTL
+   * is written, so the version can be read without the delta chain that later
+   * expires. Pinning an already pinned version renames it.
+   *
+   * @param input - Version to pin, its validated name, and the editor's authorization snapshot.
+   * @returns Pinned version metadata.
+   */
+  async pinVersion(input: PinDocumentVersionRequest): Promise<DocumentVersion> {
+    await this.ensureTable()
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+        true,
+      )
+    const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
+    const now = this.now()
+    const version: DocumentVersion = {
+      ...versionItem.version,
+      name: input.name,
+      pinnedAt: now.toISOString(),
+      pinnedByUserId: input.access.memberKey,
+    }
+    const metadata: StoredDocumentVersionItem = {
+      workspaceId: input.workspaceId,
+      recordKey: versionKey(input.documentId, version.revision),
+      entryType: 'document-version',
+      version,
+    }
+    const snapshot: StoredDocumentVersionSnapshotItem = {
+      workspaceId: input.workspaceId,
+      recordKey: versionSnapshotKey(input.documentId, version.revision),
+      entryType: 'document-version-snapshot',
+      version,
+      document: structuredClone(versionItem.document),
+      elementRevisions: { ...versionItem.elementRevisions },
+    }
+    assertDynamoItemSize(metadata)
+    assertDynamoItemSize(snapshot)
+    const guards = mergeAuthorizationGuards(
+      input.workspaceId,
+      input.access.authorizationSnapshots,
+      documentAuthorizationSnapshotGuards(
+        this.tableName,
+        input.workspaceId,
+        [authorization],
+      ),
+    )
+    try {
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: metadata,
+              ConditionExpression:
+                'attribute_exists(workspaceId) AND (attribute_not_exists(expiresAtEpoch) OR expiresAtEpoch > :nowEpoch)',
+              ExpressionAttributeValues: {
+                ':nowEpoch': Math.floor(now.getTime() / 1_000),
+              },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: snapshot,
+            },
+          },
+          ...authorizationGuardConditionChecks(guards),
+        ],
+      }))
+    } catch (error) {
+      if (isOnlyTransactionConditionalFailureAt(error, 0)) {
+        throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
+      }
+      if (isConditionalFailure(error)) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Authorization changed while pinning the Document version.',
+        )
+      }
+      throw normalizeDynamoError(error)
+    }
+    return version
   }
 
   /** Favorite または recent preference を保存します。 */

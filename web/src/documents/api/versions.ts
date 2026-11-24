@@ -1,4 +1,11 @@
-import type { DocumentDetail, DocumentVersionsResponse } from '@mukuroji/contracts'
+import type {
+  ApprovalRequest,
+  CreateDocumentVersionApprovalInput,
+  DocumentDetail,
+  DocumentVersion,
+  DocumentVersionDetail,
+  DocumentVersionsResponse,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
@@ -40,6 +47,163 @@ export async function restoreDocumentVersion(
     createJsonMutationInit('POST', { expectedRevision }, context),
   )
   return readDocumentRecord(value)
+}
+
+/**
+ * Reads one retained version with a read-only snapshot of its content.
+ *
+ * @param accessToken - Documents API access token.
+ * @param documentId - Document that owns the version.
+ * @param versionId - Version to read.
+ * @param signal - Abort signal for the request.
+ * @returns The version metadata and its snapshot.
+ */
+export async function getDocumentVersion(
+  accessToken: string,
+  documentId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<DocumentVersionDetail> {
+  const value = await requestJson(
+    `${createVersionPath(documentId, versionId)}`,
+    accessToken,
+    { signal },
+  )
+  const detail = readRecord(readRecord(value).version)
+  const version = detail.version
+  if (!isDocumentVersion(version)) throw invalidVersionResponse()
+  return { version, document: readDocumentRecord({ document: detail.document }) }
+}
+
+/**
+ * Names a version and keeps it beyond the version retention period.
+ *
+ * @param accessToken - Documents API access token.
+ * @param documentId - Document that owns the version.
+ * @param versionId - Version to pin.
+ * @param name - Name shown for the pinned version.
+ * @param context - Mutation idempotency context.
+ * @returns The pinned version metadata.
+ */
+export async function pinDocumentVersion(
+  accessToken: string,
+  documentId: string,
+  versionId: string,
+  name: string,
+  context: MutationRequestContext,
+): Promise<DocumentVersion> {
+  const value = await requestJson(
+    `${createVersionPath(documentId, versionId)}/pin`,
+    accessToken,
+    createJsonMutationInit('POST', { name }, context),
+  )
+  const version = readRecord(value).version
+  if (!isDocumentVersion(version)) throw invalidVersionResponse()
+  return version
+}
+
+/**
+ * Requests approval of a pinned version on the Work Item that links it as a deliverable.
+ *
+ * @param accessToken - Documents API access token.
+ * @param documentId - Document that owns the version.
+ * @param versionId - Pinned version to approve.
+ * @param input - Work Item, reviewers, and due date.
+ * @param context - Mutation idempotency context.
+ * @returns The created approval request.
+ */
+export async function requestDocumentVersionApproval(
+  accessToken: string,
+  documentId: string,
+  versionId: string,
+  input: CreateDocumentVersionApprovalInput,
+  context: MutationRequestContext,
+): Promise<ApprovalRequest> {
+  const value = await requestJson(
+    `${createVersionPath(documentId, versionId)}/approvals`,
+    accessToken,
+    createJsonMutationInit('POST', input, context),
+  )
+  const approval = readRecord(value).approval
+  if (!isDocumentApproval(approval)) throw invalidVersionResponse()
+  return approval
+}
+
+/**
+ * Lists approvals of the Document's versions whose Work Item the viewer can see.
+ *
+ * @param accessToken - Documents API access token.
+ * @param documentId - Document whose version approvals are listed.
+ * @param signal - Abort signal for the request.
+ * @returns Approvals newest first.
+ */
+export async function getDocumentApprovals(
+  accessToken: string,
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalRequest[]> {
+  const value = await requestJson(
+    `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/approvals`,
+    accessToken,
+    { signal },
+  )
+  const approvals = readRecord(value).approvals
+  if (!Array.isArray(approvals)) throw invalidVersionResponse()
+  return approvals.filter(isDocumentApproval)
+}
+
+/**
+ * Builds the API path of one Document version.
+ *
+ * @param documentId - Document that owns the version.
+ * @param versionId - Version ID.
+ * @returns The version resource URL.
+ */
+function createVersionPath(documentId: string, versionId: string) {
+  return `${documentsApiBaseUrl}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}`
+}
+
+/**
+ * Checks the fields the version history relies on.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the value is Document version metadata.
+ */
+function isDocumentVersion(value: unknown): value is DocumentVersion {
+  const record = readRecord(value)
+  return typeof record.id === 'string' &&
+    typeof record.documentId === 'string' &&
+    typeof record.revision === 'number' &&
+    typeof record.createdAt === 'string' &&
+    (record.name === undefined || typeof record.name === 'string')
+}
+
+/**
+ * Checks the fields a Document version approval is shown with.
+ *
+ * @param value - Parsed response value.
+ * @returns Whether the value is an approval request for a Document version.
+ */
+function isDocumentApproval(value: unknown): value is ApprovalRequest {
+  const record = readRecord(value)
+  return typeof record.id === 'string' &&
+    record.subjectType === 'document-version' &&
+    typeof record.versionId === 'string' &&
+    typeof record.status === 'string' &&
+    Array.isArray(record.reviewers)
+}
+
+/**
+ * Creates the error for a malformed version response.
+ *
+ * @returns The Documents API error.
+ */
+function invalidVersionResponse() {
+  return new DocumentsApiError(
+    502,
+    'Document version response was invalid.',
+    'InvalidDocumentVersionResponse',
+  )
 }
 
 function createJsonMutationInit(

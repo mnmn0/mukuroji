@@ -282,6 +282,36 @@ export type ListDocumentVersionsRequest = {
 }
 
 /**
+ * 一つの Document version の内容を取得する store input です。
+ */
+export type GetDocumentVersionRequest = {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Version を取得する Document ID です。 */
+  documentId: string
+  /** 取得する version ID または decimal revision です。 */
+  versionId: string
+  /** 現在 viewer の認可 snapshot です。 */
+  access: DocumentAccessContext
+}
+
+/**
+ * Version に名前を付けて保持期間の対象外にする store input です。
+ */
+export type PinDocumentVersionRequest = {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** 固定する version の Document ID です。 */
+  documentId: string
+  /** 固定する version ID または decimal revision です。 */
+  versionId: string
+  /** 検証済みの version 名です。 */
+  name: string
+  /** Mutation actor の認可 snapshot です。 */
+  access: DocumentAccessContext
+}
+
+/**
  * 過去 version を新しい revision として復元する store input です。
  */
 export type RestoreDocumentVersionRequest = {

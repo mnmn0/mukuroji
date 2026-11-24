@@ -273,6 +273,26 @@ export function DocumentReadOnlyContent({
   )
 }
 
+/**
+ * Props of {@link DocumentReadOnlyBlock}.
+ */
+export type DocumentReadOnlyBlockProps = {
+  /** Block to render. */
+  block: DocumentBlock
+  /** Translator. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders one block with the safe read-only renderer, for version comparisons.
+ *
+ * @param props - Block and translator.
+ * @returns The read-only block.
+ */
+export function DocumentReadOnlyBlock({ block, t }: DocumentReadOnlyBlockProps) {
+  return <ReadOnlyBlock block={block} t={t} />
+}
+
 function EditableBlock({
   block,
   checklistWorkItems,

@@ -525,6 +525,77 @@ async function createAvailableFile(
 }
 
 describe('file proofing domain', () => {
+  test('requests approval of a pinned Document version on the deliverable Work Item', async () => {
+    const { client, documentClient } = createClient()
+    await expect(client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-2:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+    )).rejects.toMatchObject({ status: 400, code: 'InvalidApprovalSubject' })
+
+    const approval = await client.createDocumentVersionApproval(
+      scope,
+      manager,
+      {
+        documentId: 'doc-1',
+        versionId: 'doc-1:3',
+        reviewerMemberKeys: ['reviewer@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('document-version-approval'),
+    )
+    expect(approval).toMatchObject({
+      subjectType: 'document-version',
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+      teamId: scope.teamId,
+      issueId: scope.issueId,
+      status: 'pending',
+    })
+    expect(approval).not.toHaveProperty('fileId')
+    expect([...documentClient.items.values()].filter((item) =>
+      item.entryType === 'document-approval-index' && item.approvalId === approval.id
+    )).toEqual([expect.objectContaining({
+      scopeKey: 'WORKSPACE#workspace-1#DOCUMENT#doc-1',
+      documentId: 'doc-1',
+      versionId: 'doc-1:3',
+    })])
+
+    const reviewer: FileProofingActor = {
+      memberKey: 'reviewer@example.com',
+      guest: false,
+      canWrite: false,
+      canManage: false,
+    }
+    expect((await client.list(scope, manager)).approvals.map(({ id }) => id)).toContain(approval.id)
+    expect((await client.listReviewerApprovals(scope.workspaceId, reviewer)).approvals)
+      .toEqual([expect.objectContaining({ id: approval.id, capabilities: { canDecide: true, canCancel: false } })])
+    expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 1 })
+
+    await client.decideApproval(
+      scope,
+      reviewer,
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision },
+      createAuditContext('approve-document-version'),
+    )
+    expect(await client.listDocumentApprovals(scope.workspaceId, 'doc-1', manager)).toEqual([
+      expect.objectContaining({ id: approval.id, status: 'approved', subjectType: 'document-version' }),
+    ])
+    expect(await client.listDocumentApprovals(scope.workspaceId, 'doc-other', manager)).toEqual([])
+    expect(await client.listDocumentApprovals(
+      scope.workspaceId,
+      'doc-1',
+      { ...reviewer, guest: true },
+    )).toEqual([])
+    expect(await client.getApprovalSummary(scope)).toMatchObject({ pendingCount: 0, approvedCount: 1 })
+  })
+
   test('resolves a visible file through the File ID reverse index', async () => {
     const { client, session } = await createAvailableFile()
 

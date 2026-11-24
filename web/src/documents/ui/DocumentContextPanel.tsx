@@ -38,6 +38,10 @@ import {
   focusFirstModalElement,
   trapModalFocus,
 } from './modalFocus'
+import { useDocumentApprovals } from '../queries/useDocumentVersionReview'
+import { useDocumentVersionReviewMutations } from '../mutations/useDocumentVersionReviewMutations'
+import { DocumentVersionReviewDialog } from './DocumentVersionReview'
+import { resolveApprovalStatusClassName } from '../model/versionApprovals'
 import { createDocumentOperationId } from '../model/document'
 import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import {
@@ -176,6 +180,8 @@ export type DocumentContextPanelProps = {
   mentionMembers?: readonly MentionableMember[]
   /** Set when the mention candidates failed to load. */
   mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Version whose review dialog opens first, from a deep link. */
+  focusedVersionId?: string
 }
 
 /**
@@ -190,6 +196,7 @@ export function DocumentContextPanel({
   defaultAnchorId,
   document,
   focusedCommentId,
+  focusedVersionId,
   hasMoreBacklinks = false,
   hasMoreComments = false,
   hasMoreVersions = false,
@@ -431,6 +438,12 @@ export function DocumentContextPanel({
         ) : null}
         {!isLoading && resolvedActiveTab === 'versions' ? (
           <VersionsPanel
+            document={document}
+            focusedVersionId={focusedVersionId}
+            locale={locale}
+            members={mentionMembers}
+            onNavigate={onNavigate}
+            reviewAccessToken={linkAccessToken}
             currentRevision={document.revision}
             hasMore={hasMoreVersions}
             onLoadMore={onLoadMoreVersions}
@@ -1098,22 +1111,45 @@ function BacklinksPanel({
 
 function VersionsPanel({
   currentRevision,
+  document,
+  focusedVersionId,
   hasMore,
+  locale,
+  members,
   onLoadMore,
+  onNavigate,
   onRestoreVersion,
+  reviewAccessToken,
   t,
   versions,
 }: {
   currentRevision: number
+  /** Current Document whose versions are listed. */
+  document: DocumentRecord
+  /** Version whose review dialog opens first, from a deep link. */
+  focusedVersionId?: string
   hasMore: boolean
+  /** Locale used by the version review. */
+  locale: Locale
+  /** Members offered as approval reviewers. */
+  members?: readonly MentionableMember[]
   onLoadMore?: () => Promise<void>
+  /** Opens an application path. */
+  onNavigate?: (path: string) => void
   onRestoreVersion?: (versionId: string) => Promise<void>
+  /** Documents API token; omission hides preview, comparison, pinning, and approvals. */
+  reviewAccessToken?: string
   t: (key: MessageKey) => string
   versions: DocumentVersion[]
 }) {
   const [confirmVersionId, setConfirmVersionId] = useState<string>()
   const [restoringVersionId, setRestoringVersionId] = useState<string>()
   const [restoreErrorMessage, setRestoreErrorMessage] = useState<string>()
+  const [reviewingVersionId, setReviewingVersionId] = useState<string | undefined>(focusedVersionId)
+  const { data: approvals = [] } = useDocumentApprovals(reviewAccessToken, document.id)
+  const reviewMutations = useDocumentVersionReviewMutations(reviewAccessToken, document.id)
+  const reviewingVersion = versions.find((version) => version.id === reviewingVersionId)
+  const canEdit = document.capabilities.canEdit
 
   return (
     <div className="grid gap-3 p-4">
@@ -1138,18 +1174,42 @@ function VersionsPanel({
             >
               <span className="absolute -left-[6px] top-4 h-2.5 w-2.5 rounded-full border-2 border-surface bg-[var(--workbench-primary)]" />
               <div className="flex items-center justify-between gap-3">
-                <strong className="text-sm text-[var(--workbench-text)]">
-                  {t('documents.versions.revision').replace(
+                <strong className="min-w-0 truncate text-sm text-[var(--workbench-text)]">
+                  {version.name ?? t('documents.versions.revision').replace(
                     '{revision}',
                     String(version.revision),
                   )}
                 </strong>
-                {current ? (
-                  <span className="workbench-badge-primary">
-                    {t('documents.versions.current')}
-                  </span>
-                ) : null}
+                <span className="flex flex-none gap-1">
+                  {version.name !== undefined ? (
+                    <span className="workbench-badge" title={t('documents.versions.pinnedDescription')}>
+                      {t('documents.versions.pinned')}
+                    </span>
+                  ) : null}
+                  {current ? (
+                    <span className="workbench-badge-primary">
+                      {t('documents.versions.current')}
+                    </span>
+                  ) : null}
+                </span>
               </div>
+              {version.name !== undefined ? (
+                <p className="m-0 mt-1 text-xs font-medium text-[var(--workbench-muted)]">
+                  {t('documents.versions.revision').replace('{revision}', String(version.revision))}
+                </p>
+              ) : null}
+              {approvals.some((approval) => approval.versionId === version.id) ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {approvals
+                    .filter((approval) => approval.versionId === version.id)
+                    .map((approval) => (
+                      <span className={resolveApprovalStatusClassName(approval.status)} key={approval.id}>
+                        {t('documents.versions.approvalStatus')
+                          .replace('{status}', t(`approval.status.${approval.status}`))}
+                      </span>
+                    ))}
+                </div>
+              ) : null}
               <time className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">
                 {formatTimestamp(version.createdAt)}
               </time>
@@ -1162,6 +1222,15 @@ function VersionsPanel({
                 <p className="m-0 mt-2 text-sm font-medium leading-5 text-[var(--workbench-text)]">
                   {version.summary}
                 </p>
+              ) : null}
+              {reviewAccessToken ? (
+                <button
+                  className="mr-3 mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+                  onClick={() => setReviewingVersionId(version.id)}
+                  type="button"
+                >
+                  {t('documents.versions.review')}
+                </button>
               ) : null}
               {!current && onRestoreVersion ? (
                 confirmVersionId === version.id ? (
@@ -1226,6 +1295,27 @@ function VersionsPanel({
         <LoadMoreButton
           onLoadMore={onLoadMore}
           t={t}
+        />
+      ) : null}
+      {reviewAccessToken && reviewingVersion ? (
+        <DocumentVersionReviewDialog
+          accessToken={reviewAccessToken}
+          approvals={approvals.filter((approval) => approval.versionId === reviewingVersion.id)}
+          document={document}
+          initialTab={reviewingVersion.id === focusedVersionId ? 'approval' : 'preview'}
+          locale={locale}
+          members={members}
+          onClose={() => setReviewingVersionId(undefined)}
+          onNavigate={onNavigate}
+          onPin={canEdit
+            ? (name) => reviewMutations.pinVersion(reviewingVersion.id, name)
+            : undefined}
+          onRequestApproval={canEdit
+            ? (input) => reviewMutations.requestApproval(reviewingVersion.id, input)
+            : undefined}
+          t={t}
+          version={reviewingVersion}
+          versions={versions}
         />
       ) : null}
     </div>

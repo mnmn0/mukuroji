@@ -1414,6 +1414,129 @@ test('stores operation deltas with retention and periodically compacts them into
   })
 })
 
+test('pins a named version beyond retention and returns its read-only snapshot', async () => {
+  const memory = createMemoryDocumentClient()
+  let currentTime = new Date('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => currentTime)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Design spec',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'v1 body' }],
+  })
+  currentTime = new Date('2026-07-18T00:10:00.000Z')
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'v1.0 approved body' },
+      }],
+    },
+  })
+  currentTime = new Date('2026-07-18T00:20:00.000Z')
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 2,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-2',
+        blockId: 'block-a',
+        block: { id: 'block-a', type: 'paragraph', text: 'draft after approval' },
+      }],
+    },
+  })
+
+  await expect(client.pinVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId: `${created.id}:2`,
+    name: 'v1.0',
+    access: { memberKey: 'viewer@example.com', workspaceRole: 'guest' },
+  })).rejects.toMatchObject({ status: 403 })
+
+  const pinned = await client.pinVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId: `${created.id}:2`,
+    name: 'v1.0 承認版',
+    access: ownerAccess,
+  })
+  expect(pinned).toMatchObject({
+    id: `${created.id}:2`,
+    revision: 2,
+    name: 'v1.0 承認版',
+    pinnedAt: '2026-07-18T00:20:00.000Z',
+    pinnedByUserId: 'owner@example.com',
+  })
+  const pinnedRows = memory.items().filter((item) =>
+    typeof item.recordKey === 'string' &&
+    item.recordKey.endsWith('#000000000002') &&
+    (item.entryType === 'document-version' || item.entryType === 'document-version-snapshot')
+  )
+  expect(pinnedRows).toHaveLength(2)
+  for (const row of pinnedRows) expect(row.expiresAtEpoch).toBeUndefined()
+
+  // Simulate DynamoDB TTL deleting every other version row after the retention period.
+  currentTime = new Date('2027-03-01T00:00:00.000Z')
+  for (const item of memory.items()) {
+    if (
+      typeof item.entryType === 'string' &&
+      item.entryType.startsWith('document-version') &&
+      item.expiresAtEpoch !== undefined
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+
+  const versions = await client.listVersions({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+  })
+  expect(versions.versions.map(({ revision, name }) => ({ revision, name }))).toEqual([
+    { revision: 2, name: 'v1.0 承認版' },
+  ])
+  const detail = await client.getVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId: `${created.id}:2`,
+    access: ownerAccess,
+  })
+  expect(detail.version.name).toBe('v1.0 承認版')
+  expect(detail.document).toMatchObject({
+    id: created.id,
+    revision: 2,
+    blocks: [{ id: 'block-a', text: 'v1.0 approved body' }],
+    capabilities: { canView: false, canEdit: false },
+  })
+  await expect(client.getVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId: `${created.id}:1`,
+    access: ownerAccess,
+  })).rejects.toMatchObject({ status: 404, code: 'DocumentVersionNotFound' })
+  await expect(client.pinVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    versionId: `${created.id}:1`,
+    name: 'too late',
+    access: ownerAccess,
+  })).rejects.toMatchObject({ status: 404, code: 'DocumentVersionNotFound' })
+})
+
 test('reconstructs retained version deltas across paginated Query results', async () => {
   const memory =
     createMemoryDocumentClient()
@@ -7026,6 +7149,16 @@ function matchesCondition(
       current === undefined ||
       Number(current.expiresAtEpoch) <=
         Number(values[':operationReceiptNowEpoch'])
+    )
+  }
+  if (
+    condition ===
+    'attribute_exists(workspaceId) AND (attribute_not_exists(expiresAtEpoch) OR expiresAtEpoch > :nowEpoch)'
+  ) {
+    const values = operation.ExpressionAttributeValues as Record<string, unknown>
+    return current !== undefined && (
+      current.expiresAtEpoch === undefined ||
+      Number(current.expiresAtEpoch) > Number(values[':nowEpoch'])
     )
   }
   if (condition === 'attribute_not_exists(preferenceRevision)') {
