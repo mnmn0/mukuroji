@@ -161,7 +161,8 @@ test('lets the Inbox digest job find due members through its sparse index only',
   expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
     .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
   expect(statements).toContainEqual(expect.objectContaining({
-    Action: ['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem'],
+    // The shared role merges this with the Email feedback job's UpdateItem on the same table.
+    Action: expect.arrayContaining(['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem']),
     Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationsTable/u), 'Arn'] },
   }));
   template.hasResourceProperties('AWS::Lambda::Function', {
