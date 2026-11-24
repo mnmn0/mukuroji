@@ -801,6 +801,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/me/preferences',
     permission: 'workspace.read',
   },
+  // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.
+  {
+    method: '*',
+    pathPattern: '/api/me/calendar-feeds*',
+    permission: 'workspace.read',
+  },
   // Members read and rename themselves; the service refuses directory-managed names.
   {
     method: '*',

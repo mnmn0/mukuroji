@@ -37,6 +37,7 @@ import { registerTaskViewsRoutes } from './routes/task-views-routes'
 import { registerRealtimeRoutes } from './routes/realtime-routes'
 import { registerFilesRoutes } from './routes/files-routes'
 import { registerPublicApiRoutes } from './routes/public-api-routes'
+import { registerCalendarFeedRoutes } from './routes/calendar-feed-routes'
 
 export type {
   AppDependencies,
@@ -199,3 +200,4 @@ registerTaskViewsRoutes(routeApp)
 registerRealtimeRoutes(routeApp)
 registerFilesRoutes(routeApp)
 registerPublicApiRoutes(routeApp)
+registerCalendarFeedRoutes(routeApp)
