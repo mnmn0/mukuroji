@@ -5,7 +5,7 @@ import {
   type ProjectStatusReportSection,
   type ProjectStatusShare,
 } from '@mukuroji/contracts'
-import { useId, useState } from 'react'
+import { useDeferredValue, useId, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/locales/ja'
 import { CustomerApiError } from '../../customers/api'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
@@ -211,8 +211,15 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
   const [showPeopleNames, setShowPeopleNames] = useState(false)
   const [expiresInDays, setExpiresInDays] = useState<number>(14)
   const [customerId, setCustomerId] = useState('')
+  const [customerName, setCustomerName] = useState('')
   const [contactId, setContactId] = useState('')
-  const recipients = useProjectStatusShareRecipients(accessToken, !forbidden && !list.error, customerId || undefined)
+  const [customerSearch, setCustomerSearch] = useState('')
+  const recipients = useProjectStatusShareRecipients(
+    accessToken,
+    !forbidden && !list.error,
+    customerId || undefined,
+    useDeferredValue(customerSearch),
+  )
   const [creating, setCreating] = useState(false)
   const [createdUrl, setCreatedUrl] = useState<string>()
   const [copied, setCopied] = useState(false)
@@ -313,19 +320,39 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
             ))}
           </select>
         </label>
-        {customers.length > 0 ? (
+        {customers.length > 0 || customerSearch.trim() || customerId ? (
           <>
+            <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('projects.statusReport.share.customerSearch')}
+              <input
+                className="workbench-input min-h-10"
+                data-testid="project-status-share-customer-search"
+                maxLength={100}
+                onChange={(event) => setCustomerSearch(event.target.value)}
+                type="search"
+                value={customerSearch}
+              />
+            </label>
+            {recipients.customers.data?.nextCursor ? (
+              <p className="text-xs text-[var(--workbench-muted)]">{t('projects.statusReport.share.customerMore')}</p>
+            ) : null}
             <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
               {t('projects.statusReport.share.customer')}
               <select
                 className="workbench-input min-h-10"
+                data-testid="project-status-share-customer"
                 onChange={(event) => {
                   setCustomerId(event.target.value)
+                  setCustomerName(event.target.selectedOptions[0]?.text ?? '')
                   setContactId('')
                 }}
                 value={customerId}
               >
                 <option value="">{t('projects.statusReport.share.none')}</option>
+                {/* The chosen customer stays selectable when a later search no longer lists it. */}
+                {customerId && !customers.some((customer) => customer.id === customerId)
+                  ? <option value={customerId}>{customerName}</option>
+                  : null}
                 {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}
               </select>
             </label>

@@ -184,6 +184,11 @@ export function ProjectOverviewPage() {
     if (!isReportOpen || !team || !project || !projectId || reportReadFailed) return undefined
     if (planning.data === undefined && !isPlanningDenied) return undefined
     if (workItems.isLoading || raidLog.isLoading || projectDocuments.isLoading || actionItemsQuery.isLoading) return undefined
+    // SWR keeps the last data after a failed revalidation, so a source whose latest read failed
+    // (for example a permission removed since the page opened) is left out even when data remains.
+    const planningData = planning.error ? undefined : planning.data
+    const raidData = raidLog.error ? undefined : raidLog.data
+    const actionItemsData = actionItemsQuery.error || projectDocuments.error ? undefined : actionItemsQuery.data
     const today = toLocalDate(new Date())
     const activeMembers = (members.data ?? []).filter(isActiveProjectAssignmentCandidate)
     return buildProjectStatusReport({
@@ -191,21 +196,21 @@ export function ProjectOverviewPage() {
       projectName: project.name,
       teamName: team.name,
       asOf: new Date(),
-      updateTarget: planning.data ? findProjectOverviewUpdateTarget(planning.data.updateTargets, team.id, projectId) : undefined,
-      schedule: planning.data
-        ? selectProjectOverviewSchedule(planning.data.entities, team.id, projectId, PROJECT_STATUS_REPORT_ROW_LIMIT)
+      updateTarget: planningData ? findProjectOverviewUpdateTarget(planningData.updateTargets, team.id, projectId) : undefined,
+      schedule: planningData
+        ? selectProjectOverviewSchedule(planningData.entities, team.id, projectId, PROJECT_STATUS_REPORT_ROW_LIMIT)
         : undefined,
-      workItemSummary,
-      raid: raidLog.data
-        ? summarizeProjectOverviewRaid(raidLog.data.entries, today, PROJECT_STATUS_REPORT_ROW_LIMIT)
+      workItemSummary: workItems.error ? undefined : workItemSummary,
+      raid: raidData
+        ? summarizeProjectOverviewRaid(raidData.entries, today, PROJECT_STATUS_REPORT_ROW_LIMIT)
         : undefined,
-      actionItems: actionItemsQuery.data
+      actionItems: actionItemsData
         ? summarizeProjectOverviewActionItems(
-            actionItemsQuery.data.items,
+            actionItemsData.items,
             {
-              failedDocumentCount: actionItemsQuery.data.failedCount,
+              failedDocumentCount: actionItemsData.failedCount,
               hasMoreDocuments: projectDocuments.hasMore,
-              skippedDocumentCount: actionItemsQuery.data.skippedCount,
+              skippedDocumentCount: actionItemsData.skippedCount,
             },
             activeMembers,
             today,
@@ -216,20 +221,25 @@ export function ProjectOverviewPage() {
     })
   }, [
     actionItemsQuery.data,
+    actionItemsQuery.error,
     actionItemsQuery.isLoading,
     isPlanningDenied,
     isReportOpen,
     members.data,
     planning.data,
+    planning.error,
     project,
+    projectDocuments.error,
     projectDocuments.hasMore,
     projectDocuments.isLoading,
     projectId,
     raidLog.data,
+    raidLog.error,
     raidLog.isLoading,
     reportReadFailed,
     team,
     workItemSummary,
+    workItems.error,
     workItems.isLoading,
     workspace.locale,
   ])

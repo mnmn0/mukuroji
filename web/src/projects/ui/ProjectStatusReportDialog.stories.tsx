@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { SWRConfig } from 'swr'
 import { expect, userEvent, within } from 'storybook/test'
+import { customerFixture } from '../../customers/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { projectStatusReportFixture, projectStatusShareFixtures } from '../fixtures'
 import { ProjectStatusReportDialog } from './ProjectStatusReportDialog'
@@ -99,6 +100,20 @@ export const RecipientsFailed: Story = {
     : Response.json({ code: 'Unavailable', message: 'Unavailable.' }, { status: 503 })),
   play: async ({ canvasElement }) => {
     await expect(await within(canvasElement).findByTestId('project-status-share-recipients-retry')).toBeEnabled()
+  },
+}
+
+/** More customers than one page: the form offers a name filter and says only the first page is listed. */
+export const ManyCustomers: Story = {
+  beforeEach: () => installStoryFetch((path) => {
+    if (path.endsWith('/status-shares')) return Response.json({ shares: projectStatusShareFixtures })
+    if (path.endsWith('/customers')) return Response.json({ customers: [customerFixture], nextCursor: 'next-page' })
+    return Response.json({ code: 'Forbidden', message: 'Forbidden.' }, { status: 403 })
+  }),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findByTestId('project-status-share-customer-search')).toBeVisible()
+    await expect(canvas.getByTestId('project-status-share-customer')).toHaveTextContent(customerFixture.name)
   },
 }
 

@@ -43,21 +43,31 @@ const CUSTOMER_OPTION_LIMIT = 100
  * Reads the customers a share link can be sent to, and the contacts of the chosen one.
  *
  * A caller without customer read access gets an error, and the form then offers no customer.
+ * At most {@link CUSTOMER_OPTION_LIMIT} customers are read per search, so a Workspace with more
+ * customers narrows the list by name.
  *
  * @param accessToken - Session access token; nothing is read without it.
  * @param enabled - Whether the customers should be read.
  * @param customerId - Chosen customer whose contacts are read.
+ * @param customerSearch - Text the customer names are filtered by.
  * @returns SWR states of the customers and of the chosen customer's detail.
  */
 export function useProjectStatusShareRecipients(
   accessToken: string | undefined,
   enabled: boolean,
   customerId: string | undefined,
+  customerSearch = '',
 ) {
+  const search = customerSearch.trim()
   const customers = useSWR(
-    accessToken && enabled ? ['project-status-share-customers', accessToken] as const : null,
-    ([, token]) => getCustomers(token, { limit: CUSTOMER_OPTION_LIMIT, sortBy: 'name', sortDirection: 'ascending' }),
-    { shouldRetryOnError: false },
+    accessToken && enabled ? ['project-status-share-customers', accessToken, search] as const : null,
+    ([, token, text]) => getCustomers(token, {
+      limit: CUSTOMER_OPTION_LIMIT,
+      sortBy: 'name',
+      sortDirection: 'ascending',
+      ...(text ? { search: text } : {}),
+    }),
+    { shouldRetryOnError: false, keepPreviousData: true },
   )
   const customer = useSWR(
     accessToken && enabled && customerId ? ['project-status-share-customer', accessToken, customerId] as const : null,

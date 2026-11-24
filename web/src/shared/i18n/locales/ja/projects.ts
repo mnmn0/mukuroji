@@ -315,6 +315,8 @@ export const projectsMessages = {
   'projects.statusReport.share.list': '発行済みのリンク',
   'projects.statusReport.share.empty': 'まだリンクはありません。',
   'projects.statusReport.share.retry': '再読み込み',
+  'projects.statusReport.share.customerSearch': '顧客を名前で絞り込む',
+  'projects.statusReport.share.customerMore': '先頭の 100 件だけを表示しています。名前で絞り込んでください。',
   'projects.statusReport.share.recipientsError': '宛先の顧客・担当者を読み込めませんでした。宛先なしでも発行できます。',
   'projects.statusReport.share.status.open': '有効',
   'projects.statusReport.share.status.revoked': '失効',
