@@ -317,7 +317,7 @@ export const projectsMessages = {
   'projects.statusReport.share.list': 'Links',
   'projects.statusReport.share.retry': 'Retry',
   'projects.statusReport.share.customerSearch': 'Filter customers by name',
-  'projects.statusReport.share.customerMore': 'Only the first 100 customers are shown. Filter by name to find others.',
+  'projects.statusReport.share.customerMore': 'Show more customers',
   'projects.statusReport.share.recipientsError': 'The customers and contacts could not be loaded. You can still create a link without a recipient.',
   'projects.statusReport.share.empty': 'No links yet.',
   'projects.statusReport.share.status.open': 'Open',

@@ -214,11 +214,17 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
   const [customerName, setCustomerName] = useState('')
   const [contactId, setContactId] = useState('')
   const [customerSearch, setCustomerSearch] = useState('')
+  // Searching by name needs Customer management access; without it the full list is paged instead.
+  const [searchRestricted, setSearchRestricted] = useState(false)
+  const deferredSearch = useDeferredValue(customerSearch)
   const recipients = useProjectStatusShareRecipients(
     accessToken,
     !forbidden && !list.error,
     customerId || undefined,
-    useDeferredValue(customerSearch),
+    searchRestricted ? '' : deferredSearch,
+    (failure) => {
+      if (failure instanceof CustomerApiError && failure.code === 'CustomerSearchRestricted') setSearchRestricted(true)
+    },
   )
   const [creating, setCreating] = useState(false)
   const [createdUrl, setCreatedUrl] = useState<string>()
@@ -260,7 +266,7 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
     }
   }
 
-  const customers = recipients.customers.data?.customers ?? []
+  const customers = recipients.customers.items
   // A 403 only means the caller may not pick a customer; any other failure is shown with a retry,
   // so a failed read never looks like an empty customer list.
   const customersFailed = isRetryableRecipientError(recipients.customers.error)
@@ -322,19 +328,29 @@ function ShareLinks({ accessToken, teamId, projectId, report, t }: ShareLinksPro
         </label>
         {customers.length > 0 || customerSearch.trim() || customerId ? (
           <>
-            <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('projects.statusReport.share.customerSearch')}
-              <input
-                className="workbench-input min-h-10"
-                data-testid="project-status-share-customer-search"
-                maxLength={100}
-                onChange={(event) => setCustomerSearch(event.target.value)}
-                type="search"
-                value={customerSearch}
-              />
-            </label>
-            {recipients.customers.data?.nextCursor ? (
-              <p className="text-xs text-[var(--workbench-muted)]">{t('projects.statusReport.share.customerMore')}</p>
+            {searchRestricted ? null : (
+              <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('projects.statusReport.share.customerSearch')}
+                <input
+                  className="workbench-input min-h-10"
+                  data-testid="project-status-share-customer-search"
+                  maxLength={100}
+                  onChange={(event) => setCustomerSearch(event.target.value)}
+                  type="search"
+                  value={customerSearch}
+                />
+              </label>
+            )}
+            {recipients.customers.hasMore ? (
+              <button
+                className="workbench-button-secondary min-h-10 justify-self-start px-3 text-sm"
+                data-testid="project-status-share-customer-more"
+                disabled={recipients.customers.isValidating}
+                onClick={() => void recipients.customers.loadMore()}
+                type="button"
+              >
+                {t('projects.statusReport.share.customerMore')}
+              </button>
             ) : null}
             <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
               {t('projects.statusReport.share.customer')}

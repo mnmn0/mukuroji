@@ -200,7 +200,10 @@ export function ProjectOverviewPage() {
       schedule: planningData
         ? selectProjectOverviewSchedule(planningData.entities, team.id, projectId, PROJECT_STATUS_REPORT_ROW_LIMIT)
         : undefined,
-      workItemSummary: workItems.error ? undefined : workItemSummary,
+      // The Work Item summary reads blockers from Planning, so stale Planning data is left out of it too.
+      workItemSummary: workItems.error || !workItems.data
+        ? undefined
+        : summarizeProjectOverviewWorkItems(workItems.data, team.id, new Date(), planningData?.workItems),
       raid: raidData
         ? summarizeProjectOverviewRaid(raidData.entries, today, PROJECT_STATUS_REPORT_ROW_LIMIT)
         : undefined,
@@ -238,7 +241,7 @@ export function ProjectOverviewPage() {
     raidLog.isLoading,
     reportReadFailed,
     team,
-    workItemSummary,
+    workItems.data,
     workItems.error,
     workItems.isLoading,
     workspace.locale,

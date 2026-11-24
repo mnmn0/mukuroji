@@ -1,4 +1,6 @@
 import useSWR from 'swr'
+import useSWRInfinite from 'swr/infinite'
+import type { CustomerPage } from '@mukuroji/contracts'
 import { getCustomer, getCustomers } from '../../customers/api'
 import { listProjectStatusShares } from '../api/statusReports'
 
@@ -36,43 +38,62 @@ export function useProjectStatusShares(
   )
 }
 
-/** Most customers offered as share recipients. */
-const CUSTOMER_OPTION_LIMIT = 100
+/** Customers read per page of share recipients. */
+const CUSTOMER_PAGE_SIZE = 100
 
 /**
- * Reads the customers a share link can be sent to, and the contacts of the chosen one.
+ * Reads the customers a share link can be sent to, a page at a time, and the contacts of the
+ * chosen one.
  *
  * A caller without customer read access gets an error, and the form then offers no customer.
- * At most {@link CUSTOMER_OPTION_LIMIT} customers are read per search, so a Workspace with more
- * customers narrows the list by name.
+ * Customers come in pages of {@link CUSTOMER_PAGE_SIZE} sorted by name; `loadMore` reads the next
+ * page, so every customer can be chosen even by a member who may not search by name.
  *
  * @param accessToken - Session access token; nothing is read without it.
  * @param enabled - Whether the customers should be read.
  * @param customerId - Chosen customer whose contacts are read.
- * @param customerSearch - Text the customer names are filtered by.
- * @returns SWR states of the customers and of the chosen customer's detail.
+ * @param customerSearch - Text the customer names are filtered by; empty lists every customer.
+ * @param onCustomerError - Called with a failed customer read, such as a search the caller may not run.
+ * @returns The customers read so far, paging and retry controls, and the chosen customer's detail.
  */
 export function useProjectStatusShareRecipients(
   accessToken: string | undefined,
   enabled: boolean,
   customerId: string | undefined,
   customerSearch = '',
+  onCustomerError?: (error: unknown) => void,
 ) {
   const search = customerSearch.trim()
-  const customers = useSWR(
-    accessToken && enabled ? ['project-status-share-customers', accessToken, search] as const : null,
-    ([, token, text]) => getCustomers(token, {
-      limit: CUSTOMER_OPTION_LIMIT,
+  const pages = useSWRInfinite(
+    (index: number, previous: CustomerPage | null) => {
+      if (!accessToken || !enabled) return null
+      if (index > 0 && !previous?.nextCursor) return null
+      return ['project-status-share-customers', accessToken, search, index > 0 ? previous?.nextCursor ?? '' : ''] as const
+    },
+    ([, token, text, cursor]: readonly [string, string, string, string]) => getCustomers(token, {
+      limit: CUSTOMER_PAGE_SIZE,
       sortBy: 'name',
       sortDirection: 'ascending',
       ...(text ? { search: text } : {}),
+      ...(cursor ? { cursor } : {}),
     }),
-    { shouldRetryOnError: false, keepPreviousData: true },
+    { shouldRetryOnError: false, keepPreviousData: true, revalidateFirstPage: false, onError: onCustomerError },
   )
   const customer = useSWR(
     accessToken && enabled && customerId ? ['project-status-share-customer', accessToken, customerId] as const : null,
     ([, token, id]) => getCustomer(token, id),
     { shouldRetryOnError: false },
   )
-  return { customers, customer }
+  const lastPage = pages.data?.at(-1)
+  return {
+    customers: {
+      items: pages.data?.flatMap((page) => page.customers) ?? [],
+      hasMore: Boolean(lastPage?.nextCursor),
+      loadMore: () => pages.setSize((size) => size + 1),
+      error: pages.error,
+      isValidating: pages.isValidating,
+      mutate: pages.mutate,
+    },
+    customer,
+  }
 }

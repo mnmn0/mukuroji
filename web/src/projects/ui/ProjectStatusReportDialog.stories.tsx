@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { SWRConfig } from 'swr'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { customerFixture } from '../../customers/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { projectStatusReportFixture, projectStatusShareFixtures } from '../fixtures'
@@ -9,14 +9,14 @@ import { ProjectStatusReportDialog } from './ProjectStatusReportDialog'
 /**
  * Replaces `fetch` for one story with answers to the share list, the customers, and the PDF.
  *
- * @param answer - Builds the response of each request from its path.
+ * @param answer - Builds the response of each request from its path and query.
  * @returns A function that restores the original `fetch`.
  */
-function installStoryFetch(answer: (path: string) => Response) {
+function installStoryFetch(answer: (path: string, query: URLSearchParams) => Response) {
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (input: RequestInfo | URL) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    return answer(new URL(url, window.location.origin).pathname)
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin)
+    return answer(url.pathname, url.searchParams)
   }
   return () => {
     globalThis.fetch = originalFetch
@@ -103,17 +103,34 @@ export const RecipientsFailed: Story = {
   },
 }
 
-/** More customers than one page: the form offers a name filter and says only the first page is listed. */
+/** Customer shown on the second page of share recipients. */
+const secondPageCustomer = { ...customerFixture, id: 'customer-second-page', name: '後半の顧客' }
+
+/**
+ * More customers than one page, for a member who may not search by name: the search is refused,
+ * so the form hides it and reads the next page on request.
+ */
 export const ManyCustomers: Story = {
-  beforeEach: () => installStoryFetch((path) => {
+  beforeEach: () => installStoryFetch((path, query) => {
     if (path.endsWith('/status-shares')) return Response.json({ shares: projectStatusShareFixtures })
-    if (path.endsWith('/customers')) return Response.json({ customers: [customerFixture], nextCursor: 'next-page' })
+    if (path.endsWith('/customers')) {
+      if (query.has('search')) {
+        return Response.json({ code: 'CustomerSearchRestricted', message: 'Restricted.' }, { status: 403 })
+      }
+      return query.get('cursor') === 'next-page'
+        ? Response.json({ customers: [secondPageCustomer] })
+        : Response.json({ customers: [customerFixture], nextCursor: 'next-page' })
+    }
     return Response.json({ code: 'Forbidden', message: 'Forbidden.' }, { status: 403 })
   }),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(await canvas.findByTestId('project-status-share-customer-search')).toBeVisible()
+    await userEvent.type(await canvas.findByTestId('project-status-share-customer-search'), 'x')
+    await waitFor(() => expect(canvas.queryByTestId('project-status-share-customer-search')).toBeNull())
+    await userEvent.click(await canvas.findByTestId('project-status-share-customer-more'))
+    await waitFor(() => expect(canvas.getByTestId('project-status-share-customer')).toHaveTextContent(secondPageCustomer.name))
     await expect(canvas.getByTestId('project-status-share-customer')).toHaveTextContent(customerFixture.name)
+    await waitFor(() => expect(canvas.queryByTestId('project-status-share-customer-more')).toBeNull())
   },
 }
 
