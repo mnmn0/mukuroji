@@ -12,7 +12,7 @@ import { loadFileProofingRequestContext } from '../shared/collaboration-access'
 import {
   normalizeApprovalReviewerMemberKeys,
   readFileProofingJson,
-  requireApprovalReviewers,
+  requireProjectFileApprovalReviewers,
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import { readBearerAccessToken } from '../shared/http'
@@ -328,10 +328,10 @@ export function registerFilesRoutes(routeApp: Hono): void {
           'Approval must target the current file version.',
         )
       }
-      const reviewerMembers = await requireApprovalReviewers(
+      const reviewerMembers = await requireProjectFileApprovalReviewers(
         principal.directoryId,
         scope.teamId,
-        scope.projectId,
+        readRequiredRouteId(c.req.param('projectId'), 'Project ID'),
         reviewerMemberKeys,
       )
       if (reviewerMembers.some((member) => member.role === 'guest') && !targetFile.guestAccess) {

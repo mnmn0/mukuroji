@@ -60,6 +60,7 @@ import { readJson } from './http'
 import {
   canMemberViewWorkItemScope,
   createMemberWorkItemVisibilityReads,
+  type MemberWorkItemVisibilityScope,
 } from './member-work-item-visibility'
 import { loadProjectFileProofingContext } from './collaboration-access'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
@@ -92,10 +93,63 @@ export async function requireApprovalReviewers(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  const visibilityReads = createMemberWorkItemVisibilityReads(workspaceId, dependencies)
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, ...(assignedProjectId ? { assignedProjectId } : {}), permissions: ['work-items.read', 'files.read'] },
+    reviewerMemberKeys,
+    (memberKey) => assignedProjectId
+      ? `Reviewer "${memberKey}" cannot view the assigned project.`
+      : `Reviewer "${memberKey}" cannot view the Work Item team.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer of a Project file approval to be active and able to read the Project's
+ * files. The approval shows no Work Item, so `work-items.read` is not required.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project that holds the file.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ */
+export async function requireProjectFileApprovalReviewers(
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  reviewerMemberKeys: readonly string[],
+  dependencies: AutomationActionExecutorDependencies =
+    ambientAutomationActionExecutorDependencies,
+) {
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, assignedProjectId: projectId, permissions: ['files.read'] },
+    reviewerMemberKeys,
+    (memberKey) => `Reviewer "${memberKey}" cannot view the Project files.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer to be an active member holding the given permissions on the scope.
+ *
+ * @param scope - Team or Project scope and the permissions each reviewer needs on it.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param deniedMessage - Builds the message of a reviewer who lacks access.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ * @throws FileProofingError `409` for an inactive reviewer or one without access.
+ */
+async function requireReviewersWithScopeAccess(
+  scope: MemberWorkItemVisibilityScope,
+  reviewerMemberKeys: readonly string[],
+  deniedMessage: (memberKey: string) => string,
+  dependencies: AutomationActionExecutorDependencies,
+) {
+  const visibilityReads = createMemberWorkItemVisibilityReads(scope.workspaceId, dependencies)
   return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
     const member = await dependencies.workspaceAccess.getActiveMember(
-      workspaceId,
+      scope.workspaceId,
       memberKey,
     )
     if (!member) {
@@ -105,25 +159,8 @@ export async function requireApprovalReviewers(
         `Reviewer "${memberKey}" is not an active Workspace member.`,
       )
     }
-    const canView = await canMemberViewWorkItemScope(
-      member,
-      {
-        workspaceId,
-        teamId,
-        ...(assignedProjectId ? { assignedProjectId } : {}),
-        permissions: ['work-items.read', 'files.read'],
-      },
-      dependencies,
-      visibilityReads,
-    )
-    if (!canView) {
-      throw new FileProofingError(
-        409,
-        'ApprovalReviewerAccessDenied',
-        assignedProjectId
-          ? `Reviewer "${memberKey}" cannot view the assigned project.`
-          : `Reviewer "${memberKey}" cannot view the Work Item team.`,
-      )
+    if (!await canMemberViewWorkItemScope(member, scope, dependencies, visibilityReads)) {
+      throw new FileProofingError(409, 'ApprovalReviewerAccessDenied', deniedMessage(memberKey))
     }
     return member
   }))
