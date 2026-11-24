@@ -68,7 +68,7 @@ Notify action の `notifyAssignee: true` は、rule が対象にしている Wor
 
 実行 ID は Workspace、論理 rule ID、元 event ID から決定的に作り、最初に予約した immutable rule version を execution に固定する。Rule 編集後に同じ event が再配信されても新 version の action は重複実行せず、途中の execution は固定済み version で再開する。実行開始は status と attempt の条件付き更新、および期限付き runner lease で一つの worker だけが取得する。同じ event が並行再配信された場合、後続 worker は保存済み execution を返して action を開始しない。
 
-各 action receipt は execution ID と action index を一意 key にし、成功した action だけを記録する。途中失敗後の retry は receipt がある action を skip し、未完了 action から再開する。Retryable failure と期限切れ runner lease は `ScheduleDueIndex` に sparse 登録し、minute worker が保存済み rule version と trigger event だけを使って回収する。
+各 action receipt は execution ID と action index を一意 key にし、成功した action だけを記録する。途中失敗後の retry は receipt がある action を skip し、未完了 action から再開する。Retryable failure と期限切れ runner lease、および予約から 5 分たっても claim されていない `pending` execution は `ScheduleDueIndex` に sparse 登録し、minute worker が保存済み rule version と trigger event だけを使って回収する。予約直後に worker が止まり、その間に rule が削除・停止されても、予約済み execution はこの経路で終わる。
 
 Approval ID と request fingerprint は action の deterministic idempotency key に固定する。期限はまだ永続化されていない action attempt 時刻ではなく、保存済み immutable `execution.startedAt + dueInHours` から計算する。Approval transaction の commit 後、receipt 保存前に応答が失われても retry は同じ ID・期限・payload を照合して既存 request を返し、reviewer projection、summary、audit event を重複させない。
 
@@ -162,7 +162,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 Recurring definition は Work Item template、Team、IANA timezone、local wall-clock time、日次/週次/月次 cadence、catch-up policy を保持する。`nextRunAt` は UTC instant として保存し、`ScheduleDueIndex` で期限到来分だけを取得する。
 
-月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（schedule を変えた時刻より前の実行時刻は実行しない）（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
+月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（schedule を変えた時刻より前の実行時刻は実行しない）。すでに始まった営業日の実行が再試行待ちの間にカレンダーが変わっても、再試行は同じ日の実行（同じ Work Item）を続ける（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
 
 DST の扱いは次で固定する。
 

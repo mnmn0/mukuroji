@@ -62,6 +62,7 @@ import {
 import {
   DEFAULT_AUTOMATION_RATE_LIMIT,
   DEFAULT_AUTOMATION_RETRY_POLICY,
+  getPendingExecutionRecoveryAt,
 } from '../../domain/execution-policy'
 import {
   type AutomationEvent,
@@ -2098,6 +2099,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
                 triggerEvent: event,
                 ruleExecutionKey: `${execution.workspaceId}#rule#${execution.ruleId}`,
                 startedAtExecutionId: `${execution.startedAt}#${execution.id}`,
+                ...executionDueIndexAttributes(execution),
               },
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
@@ -3359,13 +3361,25 @@ function scheduledRuleIndexAttributes(value: AutomationRule) {
     : {}
 }
 
+/**
+ * Builds the ScheduleDueIndex attributes of a rule execution the schedule worker must pick up:
+ * an expired runner lease, a retryable failure, or a reservation nobody claimed (so deleting or
+ * disabling the rule cannot strand it).
+ *
+ * @param value - Rule or Recurring Work execution.
+ * @returns Index attributes, or none when the execution needs no recovery.
+ */
 function executionDueIndexAttributes(value: AutomationExecution) {
-  return (value.status === 'running' || (value.status === 'failed' && value.retryable)) &&
-      value.nextRetryAt &&
-      !value.ruleId.startsWith('recurring:')
+  if (value.ruleId.startsWith('recurring:')) return {}
+  const dueAt = value.status === 'pending'
+    ? getPendingExecutionRecoveryAt(value)
+    : (value.status === 'running' || (value.status === 'failed' && value.retryable))
+      ? value.nextRetryAt
+      : undefined
+  return dueAt
     ? {
         scheduleShard: createAutomationScheduleShard(value.workspaceId, `execution:${value.id}`),
-        nextRunAtRecordKey: `${normalizeTimestamp(value.nextRetryAt)}#execution#${value.id}`,
+        nextRunAtRecordKey: `${normalizeTimestamp(dueAt)}#execution#${value.id}`,
       }
     : {}
 }

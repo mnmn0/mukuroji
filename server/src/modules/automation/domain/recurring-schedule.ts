@@ -243,6 +243,19 @@ export function getBusinessDayWakeUp(
 }
 
 /**
+ * Lists the local time slots of a schedule on every day of a window, where a business-day run
+ * may have started before a calendar change moved it.
+ *
+ * @param schedule - Validated schedule.
+ * @param fromExclusive - Exclusive lower UTC bound.
+ * @param toInclusive - Inclusive upper UTC bound.
+ * @returns Daily slots in chronological order.
+ */
+export function getDailySlots(schedule: RecurringSchedule, fromExclusive: Date, toInclusive: Date): Date[] {
+  return getRecurringOccurrences(toDailySchedule(schedule), fromExclusive, toInclusive)
+}
+
+/**
  * Tests whether two instants fall in the same local calendar month.
  *
  * @param instant - Instant to test.
@@ -262,14 +275,24 @@ function isInLocalMonthOf(instant: Date, reference: Date, timeZone: string): boo
  * @returns The next daily slot, or `undefined` when the horizon is exhausted.
  */
 function getNextDailySlot(schedule: RecurringSchedule, after: Date): Date | undefined {
-  return getNextRecurringOccurrence({
+  return getNextRecurringOccurrence(toDailySchedule(schedule), after)
+}
+
+/**
+ * Builds a daily schedule at the same local time, start date, and time zone.
+ *
+ * @param schedule - Validated schedule.
+ * @returns The daily schedule.
+ */
+function toDailySchedule(schedule: RecurringSchedule): RecurringSchedule {
+  return {
     frequency: 'daily',
     interval: 1,
     timeZone: schedule.timeZone,
     localTime: schedule.localTime,
     startDate: schedule.startDate,
     catchUpPolicy: schedule.catchUpPolicy,
-  }, after)
+  }
 }
 
 /**

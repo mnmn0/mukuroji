@@ -130,8 +130,8 @@ export type AutomationRuleDraft = {
   actions: AutomationRuleActionDraft[]
 }
 
-/** Most condition rows and actions the editor offers. */
-export const AUTOMATION_RULE_DRAFT_LIMIT = 20
+/** Most condition rows and actions the editor offers, the same as the server accepts. */
+export const AUTOMATION_RULE_DRAFT_LIMIT = 32
 
 /** Action types an administrator can add from the editor. */
 export const AUTOMATION_RULE_DRAFT_ACTION_TYPES = [
@@ -233,6 +233,10 @@ export function isAutomationRuleConditionDraftValid(condition: AutomationRuleCon
  * @returns The value, or undefined when it is empty or not of the row's type.
  */
 function readConditionValue(condition: AutomationRuleConditionDraft): AutomationValue | undefined {
+  // The server compares strings verbatim, so a string keeps its spaces; only parsing trims.
+  if (condition.valueType === undefined) {
+    return condition.value.length > 0 ? condition.value : undefined
+  }
   const value = condition.value.trim()
   if (!value) return undefined
   if (condition.valueType === 'number') {

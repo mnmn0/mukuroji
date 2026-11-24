@@ -16,9 +16,13 @@ import {
   createAutomationExecutionId,
   createRecurringExecutionId,
 } from '../../application/execution-identifiers'
-import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../../domain/execution-policy'
+import {
+  DEFAULT_AUTOMATION_RETRY_POLICY,
+  getPendingExecutionRecoveryAt,
+} from '../../domain/execution-policy'
 import {
   getBusinessDayWakeUp,
+  getDailySlots,
   getDueDateForOccurrence,
   getLocalMonthStart,
   getNextRecurringOccurrence,
@@ -196,13 +200,19 @@ export async function processInboundWebhookSecretCleanup(
   )
 }
 
-/** Due execution を保存済み immutable rule version/event だけで retry します。 */
+/**
+ * Due execution を保存済み immutable rule version/event だけで retry します。誰も claim しなかった
+ * `pending` の予約も、予約から一定時間たったらここで再開します。
+ */
 export async function processDueAutomationExecution(
   execution: AutomationExecution,
   now: Date,
   dependencies: AutomationScheduleDependencies,
 ) {
-  if (!execution.nextRetryAt || execution.nextRetryAt > now.toISOString()) {
+  const dueAt = execution.status === 'pending' && !execution.ruleId.startsWith('recurring:')
+    ? getPendingExecutionRecoveryAt(execution)
+    : execution.nextRetryAt
+  if (!dueAt || dueAt > now.toISOString()) {
     return execution
   }
   if (!await dependencies.entitlement.isAutomationEnabled(execution.workspaceId)) {
@@ -229,7 +239,8 @@ export async function processDueAutomationExecution(
     if (execution.status === 'failed' && execution.retryable) {
       return await engine.retryExecution(execution.workspaceId, execution.id, undefined, now)
     }
-    if (execution.status !== 'running') return execution
+    // A reservation nobody claimed resumes like an expired runner, from the saved rule version.
+    if (execution.status !== 'running' && execution.status !== 'pending') return execution
     const rule = await dependencies.client.getRuleVersion(
       execution.workspaceId,
       execution.ruleId,
@@ -454,12 +465,15 @@ export async function processRecurringWorkDefinition(
   let occurrences: Date[]
   let fallbackOccurrence: Date
   if (calendar) {
-    const businessDayOccurrences = getRecurringOccurrences(
-      definition.schedule,
-      readBusinessDayWindowStart(definition),
-      now,
-      calendar,
-    )
+    const windowStart = readBusinessDayWindowStart(definition)
+    const startedOccurrence = await findStartedBusinessDayOccurrence(definition, windowStart, now, dependencies)
+    const businessDayOccurrences = startedOccurrence
+      ? [
+          startedOccurrence,
+          ...getRecurringOccurrences(definition.schedule, windowStart, now, calendar).filter((occurrence) =>
+            !isInSameLocalMonth(occurrence, startedOccurrence, definition.schedule.timeZone)),
+        ]
+      : getRecurringOccurrences(definition.schedule, windowStart, now, calendar)
     const firstBusinessDayOccurrence = businessDayOccurrences[0]
     if (!firstBusinessDayOccurrence) {
       return await deferRecurringWorkToBusinessDay(definition, calendar, now, dependencies)
@@ -511,6 +525,47 @@ export async function processRecurringWorkDefinition(
     if (current?.lastRunAt && current.lastRunAt >= lastCompleted.toISOString()) return current
     throw error
   }
+}
+
+/**
+ * Finds a business-day run that already started in the window, so a retry resumes the same
+ * occurrence (and Work Item) even when a calendar change since then would pick another day.
+ *
+ * Successful runs advance the definition past their month, so an execution found in the window
+ * belongs to a run that has not completed.
+ *
+ * @param definition - Business-day recurring definition.
+ * @param windowStart - Exclusive start of the window.
+ * @param now - Processing time.
+ * @param dependencies - Schedule dependencies.
+ * @returns The earliest started occurrence, or `undefined` when none started.
+ */
+async function findStartedBusinessDayOccurrence(
+  definition: RecurringWork,
+  windowStart: Date,
+  now: Date,
+  dependencies: AutomationScheduleDependencies,
+): Promise<Date | undefined> {
+  for (const slot of getDailySlots(definition.schedule, windowStart, now)) {
+    const execution = await dependencies.client.getExecution(
+      definition.workspaceId,
+      createRecurringExecutionId(definition.workspaceId, definition.id, slot.toISOString()),
+    )
+    if (execution) return slot
+  }
+  return undefined
+}
+
+/**
+ * Tests whether two instants fall in the same local calendar month.
+ *
+ * @param first - First instant.
+ * @param second - Second instant.
+ * @param timeZone - IANA time zone the months are counted in.
+ * @returns Whether both are in the same local month.
+ */
+function isInSameLocalMonth(first: Date, second: Date, timeZone: string): boolean {
+  return getLocalMonthStart(first, timeZone).getTime() === getLocalMonthStart(second, timeZone).getTime()
 }
 
 /**

@@ -1958,7 +1958,12 @@ describe('automation execution safety', () => {
         } },
         { Put: {
           ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-          Item: { entryType: 'execution', ruleId: rule.id },
+          Item: {
+            entryType: 'execution',
+            ruleId: rule.id,
+            // An unclaimed reservation is recovered by the schedule worker five minutes later.
+            nextRunAtRecordKey: expect.stringMatching(/^2026-07-16T00:05:30\.000Z#execution#/),
+          },
         } },
         { Update: {
           ConditionExpression: 'attribute_not_exists(#executionCount) OR #executionCount < :maximumExecutions',

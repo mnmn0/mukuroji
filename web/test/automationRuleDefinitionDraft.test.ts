@@ -48,6 +48,22 @@ describe('automation rule definition draft', () => {
     }).actions).toEqual([{ type: 'create', templateId: 'template-2' }])
   })
 
+  test('keeps spaces in saved text values and allows as many entries as the server', () => {
+    const saved: AutomationRule = {
+      ...rule,
+      conditions: [{ field: 'workItem.title', operator: 'contains', value: 'Urgent ' }],
+      actions: Array.from({ length: 25 }, (_value, index) => ({ type: 'comment' as const, body: `Step ${index}` })),
+    }
+    const draft = { ...createAutomationRuleDraft(saved), name: 'Renamed' }
+
+    expect(isAutomationRuleDraftValid(draft)).toBe(true)
+    expect(createAutomationRuleDraftUpdate(saved, draft)).toEqual({
+      expectedRevision: saved.revision,
+      name: 'Renamed',
+      conditions: saved.conditions,
+    })
+  })
+
   test('saves rows matched by any condition as one any group', () => {
     const draft = {
       ...createAutomationRuleDraft(rule),
