@@ -89,7 +89,7 @@ export function renderCalendarFeed(document: CalendarFeedDocument): string {
       `UID:${escapeText(event.uid)}`,
       `DTSTAMP:${stamp}`,
       `DTSTART;VALUE=DATE:${compactDate(event.startDate)}`,
-      `DTEND;VALUE=DATE:${compactDate(nextDate(event.endDate))}`,
+      renderEventEnd(event.startDate, event.endDate),
       `SUMMARY:${escapeText(event.summary)}`,
       ...(event.description ? [`DESCRIPTION:${escapeText(event.description)}`] : []),
       ...(event.sequence !== undefined && Number.isSafeInteger(event.sequence) && event.sequence >= 0
@@ -174,6 +174,21 @@ function compactDate(value: string): string {
  * @param value - Valid `YYYY-MM-DD` date.
  * @returns The next date in the same form.
  */
+/**
+ * Renders the exclusive end of an all-day event. An event that ends on 9999-12-31 has no
+ * next day in the DATE format, so it gets a `DURATION` in days instead.
+ *
+ * @param startDate - First day, inclusive.
+ * @param endDate - Last day, inclusive.
+ * @returns The `DTEND` or `DURATION` line.
+ */
+function renderEventEnd(startDate: string, endDate: string): string {
+  const end = nextDate(endDate)
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(end)) return `DTEND;VALUE=DATE:${compactDate(end)}`
+  const days = Math.round((Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86_400_000) + 1
+  return `DURATION:P${days}D`
+}
+
 function nextDate(value: string): string {
   const [year, month, day] = value.split('-').map(Number)
   const date = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) + 1))

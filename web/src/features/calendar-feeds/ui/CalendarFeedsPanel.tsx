@@ -86,7 +86,8 @@ export function CalendarFeedsPanel({
   onCopy,
 }: CalendarFeedsPanelProps) {
   const [selectedProject, setSelectedProject] = useState('')
-  const [copyState, setCopyState] = useState<'copied' | 'failed'>()
+  // The result keeps the URL it belongs to, so a late result never shows under a newer URL.
+  const [copyState, setCopyState] = useState<{ url: string, result: 'copied' | 'failed' }>()
   const busy = busyOperation !== undefined
   const memberFeed = feeds?.find((feed) => feed.kind === 'member')
   const projectFeeds = feeds?.filter((feed) => feed.kind === 'project') ?? []
@@ -110,7 +111,8 @@ export function CalendarFeedsPanel({
   /** Copies the issued URL and reports the result. */
   const copyIssued = () => {
     if (!issued) return
-    void onCopy(issued.url).then((copied) => setCopyState(copied ? 'copied' : 'failed'))
+    const url = issued.url
+    void onCopy(url).then((copied) => setCopyState({ url, result: copied ? 'copied' : 'failed' }))
   }
 
   /** Issues the selected Project feed. */
@@ -163,9 +165,9 @@ export function CalendarFeedsPanel({
               >
                 {t('calendarFeeds.dismiss')}
               </button>
-              {copyState ? (
+              {copyState?.url === issued.url ? (
                 <span className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
-                  {t(copyState === 'copied' ? 'calendarFeeds.copied' : 'calendarFeeds.copyFailed')}
+                  {t(copyState.result === 'copied' ? 'calendarFeeds.copied' : 'calendarFeeds.copyFailed')}
                 </span>
               ) : null}
             </div>

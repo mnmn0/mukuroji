@@ -8,6 +8,7 @@ import {
 import { CALENDAR_FEED_KINDS, type CalendarFeedKind } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
+  createWorkspaceMemberAuditEntityId,
   type MutationAuditContext,
 } from '../../../audit'
 import {
@@ -75,6 +76,8 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
   private readonly client: DynamoDBDocumentClient
   /** Audit event table, when audit is configured. */
   private readonly auditTableName: string | undefined
+  /** Workspace Audit pseudonym key, which keeps member keys out of Audit entity IDs. */
+  private readonly auditPseudonymKey: string | undefined
 
   /**
    * Creates the store.
@@ -82,11 +85,42 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
    * @param tableName - Existing Planning table.
    * @param client - Configured document client.
    * @param auditTableName - Audit event table written in the same transaction, when configured.
+   * @param auditPseudonymKey - Workspace Audit pseudonym key; required while audit is on.
    */
-  constructor(tableName: string, client: DynamoDBDocumentClient, auditTableName?: string) {
+  constructor(
+    tableName: string,
+    client: DynamoDBDocumentClient,
+    auditTableName?: string,
+    auditPseudonymKey?: string,
+  ) {
     this.tableName = tableName
     this.client = client
     this.auditTableName = auditTableName
+    this.auditPseudonymKey = auditPseudonymKey
+  }
+
+  /**
+   * Builds the Audit entity ID of a feed's owner without the member key, which may be an email.
+   *
+   * @param workspaceId - Workspace of the feed.
+   * @param memberKey - Owner member key.
+   * @returns The Workspace-scoped member pseudonym, or a placeholder while audit is off.
+   * @throws CalendarFeedError `unavailable` when audit is on and the pseudonym key is missing or
+   * invalid.
+   */
+  private auditEntityId(workspaceId: string, memberKey: string): string {
+    if (!this.auditTableName) return 'audit-disabled'
+    try {
+      if (!this.auditPseudonymKey) throw new TypeError('missing')
+      return createWorkspaceMemberAuditEntityId(workspaceId, memberKey, this.auditPseudonymKey)
+    } catch (error) {
+      throw new CalendarFeedError(
+        'unavailable',
+        'CalendarFeedAuditUnavailable',
+        'Calendar feed audit is not configured.',
+        { cause: error },
+      )
+    }
   }
 
   /**
@@ -149,7 +183,7 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
       directoryId: input.workspaceId,
       eventType: input.previousTokenHash ? 'member.calendar_feed_rotated' : 'member.calendar_feed_issued',
       entityType: 'member',
-      entityId: record.memberKey,
+      entityId: this.auditEntityId(input.workspaceId, record.memberKey),
       target: { type: FEED_TYPE, id: record.id },
       action: input.previousTokenHash ? 'calendar_feed_rotated' : 'calendar_feed_issued',
       occurredAt: input.now,
@@ -223,7 +257,7 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
       directoryId: input.workspaceId,
       eventType: 'member.calendar_feed_revoked',
       entityType: 'member',
-      entityId: record.memberKey,
+      entityId: this.auditEntityId(input.workspaceId, record.memberKey),
       target: { type: FEED_TYPE, id: record.id },
       action: 'calendar_feed_revoked',
       occurredAt: input.now,

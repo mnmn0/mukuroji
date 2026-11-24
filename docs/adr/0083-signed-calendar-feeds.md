@@ -23,6 +23,8 @@
 - 発行・再発行・停止はフィード行・token 行・監査 event を 1 つの TransactWrite で書く。再発行は
   フィード行の hash を条件に置き換え、古い token 行を消す。停止は両方を消す。監査は
   `member.calendar_feed_issued` / `_rotated` / `_revoked` で、token と hash は記録しない。
+  持ち主は member key（メールアドレスのことがある）ではなく、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` による
+  Workspace ごとの member pseudonym で記録する。監査が有効で key がなければ発行・停止は 503 で失敗する。
 - 発行の request に `Idempotency-Key` があるときは、既存の idempotency 行（Developer Platform table、
   response は暗号化）を予約し、response の receipt を同じ TransactWrite に入れる。応答を受け取れずに
   同じ key で再送すると、token を作り直さずに最初の URL を返す。同じ key で別の内容を送ると 409。
@@ -33,6 +35,7 @@
   `planning.read` の判定で絞る。Project のフィードで Project を読めなくなったとき、持ち主が active な
   メンバーでなくなったとき、Workspace を閉じたときは、未知の token と同じ 404 を返す。
 - 応答は終日の `VALUE=DATE` event だけにする（Work Item・マイルストーン・Cycle はすべて日付だけで持つ）。
+  終了は翌日の `DTEND` で書き、翌日が DATE 形式で書けない 9999-12-31 で終わる予定だけ `DURATION`（日数）で書く。
   Workspace の time zone は `X-WR-TIMEZONE` に書く。未完了で日付のある Work Item を最大 1,000 件、
   マイルストーンと Cycle を最大 300 件、Work Item の読み取りは最大 10 page までにする。
   10 page で読み切れないときや件数の上限を超えるときは、予定の欠けたカレンダーを返さずに `413` を返す。
