@@ -102,6 +102,18 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
   }
 
   /** @inheritdoc */
+  async getRevision(workspaceId: string, target: ChannelDestinationTarget): Promise<number> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#tableName, Key: destinationKey(workspaceId, target), ConsistentRead: true,
+    }))
+    if (!response.Item) return 0
+    parseDestinationRow(response.Item, workspaceId, target)
+    const revision: unknown = response.Item.revision
+    if (typeof revision !== 'number') throw new Error('Invalid notification channel destination row.')
+    return revision
+  }
+
+  /** @inheritdoc */
   async save(input: SaveChannelDestinationInput): Promise<ChannelDestinationRecord> {
     const record: ChannelDestinationRecord = {
       target: input.target,
@@ -147,9 +159,20 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
     const checks = input.authorizationConditionChecks ?? []
     await this.#transact([
       {
-        Delete: {
+        // A removed destination keeps its revision, so a request read before the removal can
+        // never change a destination registered again later.
+        Put: {
           TableName: this.#tableName,
-          Key: destinationKey(input.workspaceId, input.target),
+          Item: {
+            ...destinationKey(input.workspaceId, input.target),
+            itemType: destinationItemType,
+            workspaceId: input.workspaceId,
+            scope: input.target.scope,
+            teamId: input.target.teamId,
+            ...(input.target.scope === 'project' ? { projectId: input.target.projectId } : {}),
+            removed: true,
+            revision: input.expectedRevision + 1,
+          },
           ...revisionCondition(input.expectedRevision),
         },
       },
@@ -183,6 +206,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
             teamId: post.source.teamId,
             ...(post.source.projectId ? { projectId: post.source.projectId } : {}),
             ...(post.source.issueId ? { issueId: post.source.issueId } : {}),
+            ...(post.source.dueDate ? { dueDate: post.source.dueDate } : {}),
             ...(post.source.entityId ? { entityId: post.source.entityId } : {}),
             ...(post.source.planningTargetRecordKey ? { planningTargetRecordKey: post.source.planningTargetRecordKey } : {}),
           },
@@ -370,6 +394,13 @@ function parseDestinationRow(
   target: ChannelDestinationTarget,
 ): ChannelDestinationRecord | undefined {
   if (!row) return undefined
+  if (row.removed === true) {
+    if (
+      row.itemType !== destinationItemType || row.workspaceId !== workspaceId ||
+      typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1
+    ) throw new Error('Invalid notification channel destination row.')
+    return undefined
+  }
   const locale = readLocale(row.locale)
   if (
     row.itemType !== destinationItemType || row.workspaceId !== workspaceId || row.provider !== 'slack' ||
@@ -453,7 +484,7 @@ function parsePostRow(row: Record<string, unknown> | undefined, shard: string, n
 
 /** Optional fields of a post's source identity. */
 const postSourceOptionalFields: ReadonlyArray<Exclude<keyof ChannelPostSource, 'teamId'>> = [
-  'projectId', 'issueId', 'entityId', 'planningTargetRecordKey',
+  'projectId', 'issueId', 'dueDate', 'entityId', 'planningTargetRecordKey',
 ]
 
 /**

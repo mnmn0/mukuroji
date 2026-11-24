@@ -3455,6 +3455,8 @@ export type ChannelPostSourceScope = {
   projectId?: string
   /** Work Item of a due or overdue event. */
   issueId?: string
+  /** Due date a due or overdue event was scheduled for. */
+  dueDate?: string
   /** Planning entity of a Milestone event. */
   entityId?: string
   /** Planning update target record of a health update event. */
@@ -3464,7 +3466,9 @@ export type ChannelPostSourceScope = {
 /**
  * Rechecks, before a channel post is sent, that its source still exists, is not archived, and
  * still sits in the Team and Project it was queued for. A Work Item moved to another Project, an
- * archived Project update target, or a moved Milestone is no longer posted to the old channel.
+ * archived Project update target, or a moved Milestone is no longer posted to the old channel. A
+ * due or overdue reminder also needs the Work Item to be open, on the same due date, and still in
+ * that stage, as the scheduled reminder itself does.
  * Event types this check does not know fail closed.
  *
  * @param source - Source saved on the queued post.
@@ -3485,13 +3489,19 @@ export async function isCurrentChannelPostSource(
     teamId: source.teamId,
     ...(source.projectId ? { projectId: source.projectId } : {}),
     ...(source.issueId ? { issueId: source.issueId } : {}),
+    ...(source.dueDate ? { dueDate: source.dueDate } : {}),
     ...(source.entityId ? { entityId: source.entityId } : {}),
     ...(source.planningTargetRecordKey ? { planningTargetRecordKey: source.planningTargetRecordKey } : {}),
   }
-  if (scheduledWorkItemNotificationReasons.has(source.eventType)) {
-    if (!source.issueId) return false
+  const reminderReason = scheduledWorkItemNotificationReasons.get(source.eventType)
+  if (reminderReason) {
+    if (!source.issueId || !source.dueDate) return false
     const scope = await readCurrentWorkItemScope(event)
-    return scope.checked && scope.exists && !scope.archived && scope.projectId === source.projectId
+    return scope.checked && scope.exists && scope.archived !== true &&
+      scope.statusCategory !== 'completed' && scope.statusCategory !== 'canceled' &&
+      scope.projectId === source.projectId &&
+      scope.dueDate === source.dueDate &&
+      isScheduledStageStillCurrent(reminderReason, event, scope.localDate)
   }
   if (planningUpdatePublishEventTypes.has(source.eventType)) {
     if (!source.planningTargetRecordKey) return false

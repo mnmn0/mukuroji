@@ -102,12 +102,14 @@ export function readPersonalSlackWebhookUrl(value: unknown): string {
  * @param target - Team or Project.
  * @param record - Saved settings, or undefined.
  * @param canManage - Whether the caller may change it.
+ * @param removedRevision - Revision of a removed destination, which the next save must name.
  * @returns The public view, without the webhook URL.
  */
 export function toPublicChannelDestination(
   target: ChannelDestinationTarget,
   record: ChannelDestinationRecord | undefined,
   canManage: boolean,
+  removedRevision = 0,
 ): NotificationChannelDestination {
   return {
     scope: target.scope,
@@ -117,7 +119,7 @@ export function toPublicChannelDestination(
     ...(record ? { provider: record.provider, updatedAt: record.updatedAt } : {}),
     ...(record?.label ? { label: record.label } : {}),
     locale: record?.locale ?? 'ja',
-    revision: record?.revision ?? 0,
+    revision: record?.revision ?? removedRevision,
     canManage,
   }
 }
@@ -161,7 +163,8 @@ export async function saveChannelDestination(
   command: SaveChannelDestinationCommand,
 ): Promise<ChannelDestinationRecord> {
   const current = await store.get(command.workspaceId, command.target)
-  if ((current?.revision ?? 0) !== command.body.expectedRevision) {
+  const revision = current?.revision ?? await store.getRevision(command.workspaceId, command.target)
+  if (revision !== command.body.expectedRevision) {
     throw new NotificationError(409, 'NotificationDestinationConflict', 'The destination changed before this change was saved. Reload and try again.')
   }
   if (!current && !command.body.webhookUrl) {
@@ -188,8 +191,11 @@ export async function saveChannelDestination(
       ...(command.auditPut ? { auditPut: command.auditPut } : {}),
     })
   } catch (error) {
-    // The settings still point at the previous version; drop the unused candidate.
-    if (replacesWebhook) await deleteQuietly(secrets, command.secretIdOf(secretVersion))
+    // Only a definite rejection leaves the settings on the previous version. When the outcome is
+    // unknown (a lost response), the save may have committed, so the candidate is kept.
+    if (replacesWebhook && error instanceof NotificationError && error.status === 409) {
+      await deleteQuietly(secrets, command.secretIdOf(secretVersion))
+    }
     throw error
   }
   if (replacesWebhook && current && current.secretVersion !== secretVersion) {

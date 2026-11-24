@@ -25,6 +25,7 @@ function installStores() {
   const secrets = new Map<string, string>()
   const channelDestinations: ChannelDestinationStore = {
     async get(_workspaceId, target) { return records.get(JSON.stringify(target)) },
+    async getRevision(_workspaceId, target) { return records.get(JSON.stringify(target))?.revision ?? 0 },
     async save(input: SaveChannelDestinationInput) {
       const record: ChannelDestinationRecord = {
         target: input.target, provider: 'slack', ...(input.label ? { label: input.label } : {}), locale: input.locale,

@@ -50,6 +50,13 @@ export type ChannelDestinationStore = {
    */
   get(workspaceId: string, target: ChannelDestinationTarget): Promise<ChannelDestinationRecord | undefined>
   /**
+   * Strongly reads the revision a save must name, including that of a removed destination.
+   * @param workspaceId - Canonical Workspace ID.
+   * @param target - Team or Project.
+   * @returns The stored revision, or 0 when the destination was never saved.
+   */
+  getRevision(workspaceId: string, target: ChannelDestinationTarget): Promise<number>
+  /**
    * Saves the settings when the stored revision still matches.
    * @param input - Settings, expected revision, and transactional checks.
    * @returns The saved settings.
@@ -57,7 +64,8 @@ export type ChannelDestinationStore = {
    */
   save(input: SaveChannelDestinationInput): Promise<ChannelDestinationRecord>
   /**
-   * Deletes the settings when the stored revision still matches.
+   * Removes the settings when the stored revision still matches, keeping the next revision so a
+   * later registration never reuses an earlier one.
    * @param input - Target, expected revision, and transactional checks.
    * @throws NotificationError (409) when the revision changed.
    */
@@ -98,6 +106,8 @@ export type ChannelPostSource = {
   projectId?: string
   /** Work Item of a due or overdue event. */
   issueId?: string
+  /** Due date a due or overdue event was scheduled for. */
+  dueDate?: string
   /** Planning entity of a Milestone event. */
   entityId?: string
   /** Planning update target record of a health update event. */

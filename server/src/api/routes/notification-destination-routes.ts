@@ -85,8 +85,10 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
 
   for (const path of [TEAM_PATH, PROJECT_PATH]) {
     routeApp.get(path, async (c) => await withTarget(c, 'read', async (principal, target, canManage) => {
-      const record = await workItemDependencies.channelDestinations.get(principal.directoryId, target)
-      return c.json(toPublicChannelDestination(target, record, canManage) satisfies NotificationChannelDestination)
+      const store = workItemDependencies.channelDestinations
+      const record = await store.get(principal.directoryId, target)
+      const removedRevision = record ? 0 : await store.getRevision(principal.directoryId, target)
+      return c.json(toPublicChannelDestination(target, record, canManage, removedRevision) satisfies NotificationChannelDestination)
     }))
 
     routeApp.put(path, async (c) => await withTarget(c, 'manage', async (principal, target) => {
@@ -129,7 +131,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
           auditPut: createChannelAuditPut(c, principal, target, 'deleted', { beforeRevision: expectedRevision }),
         },
       )
-      return c.json(toPublicChannelDestination(target, undefined, true) satisfies NotificationChannelDestination)
+      return c.json(toPublicChannelDestination(target, undefined, true, expectedRevision + 1) satisfies NotificationChannelDestination)
     }))
 
     routeApp.post(`${path}/test`, async (c) => await withTarget(c, 'manage', async (principal, target) => {

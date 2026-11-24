@@ -26,7 +26,8 @@ Slack 配信は個人あての通知だけで、送信先の Incoming Webhook �
   `/api/teams/:teamId/projects/:projectId/notification-channel`）は、Webhook URL を同じ Workspace namespace の
   `slack-channel/<sha256(team#… / project#…)>/<version>` に置き、名前・言語・revision・使う URL の version だけを
   Notifications table の `<workspaceId>#!channel-destinations` partition に置く。新しい URL は新しい version に書き、
-  fence 付きの設定保存が commit されたときだけ切り替える。拒否された保存は投稿先を変えない。Team は Team マネージャー、Project は Project か Team の
+  fence 付きの設定保存が commit されたときだけ切り替える。拒否された保存は投稿先を変えない。削除は revision を残した
+  tombstone にし、登録し直しても revision が戻らないようにする。Team は Team マネージャー、Project は Project か Team の
   マネージャーが変更でき、変更は revision 条件・呼び出し元の権限 fence・audit event と同じ transaction で保存する。
   audit と request digest には URL を入れない。
 - channel に投稿するのは health update の公開（悪化を含む）、Milestone の完了・日程変更、Work Item の期限当日と期限超過。
@@ -37,7 +38,8 @@ Slack 配信は個人あての通知だけで、送信先の Incoming Webhook �
   `slack#<n>` しか読まないので混ざらない。毎分の Slack job が個人あてと channel を独立に処理し、channel は lease・
   version 条件・最大 5 回の backoff 再試行（`Retry-After` を尊重）・失敗 partition `slack-channel-failed#<n>` を持つ。
   送信時に送信先が削除済みなら投稿しない。送信直前に Workspace が有効なことと、投稿元（Work Item・health update の
-  対象・Milestone）が今も同じ Team・Project にあることを読み直し、その後に lease を更新してから送る。
+  対象・Milestone）が今も同じ Team・Project にあること（期限の投稿は未完了・同じ期限・同じ段階であること）を読み直し、
+  その後に lease を更新してから送る。
 - Enterprise の route 権限は Team の送信先が `teams.read` / `teams.manage`、Project の送信先が `projects.read` /
   `projects.manage`、本人の送信先が `workspace.read`。
 - 本文の理由と channel 投稿の見出しは contracts の ja / en の文言で書く。個人あては受信者の表示言語、channel は

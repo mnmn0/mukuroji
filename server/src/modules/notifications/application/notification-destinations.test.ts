@@ -39,9 +39,11 @@ function saved(revision: number, secretVersion = v1): ChannelDestinationRecord {
  */
 function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
   let record = initial
+  let removedRevision = 0
   const calls: string[] = []
   const store: ChannelDestinationStore = {
     async get() { return record },
+    async getRevision() { return record?.revision ?? removedRevision },
     async save(input: SaveChannelDestinationInput) {
       calls.push('save')
       if (rejectSave) throw rejectSave
@@ -53,7 +55,7 @@ function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
       record = next
       return next
     },
-    async delete() { calls.push('delete'); record = undefined },
+    async delete(input) { calls.push('delete'); record = undefined; removedRevision = input.expectedRevision + 1 },
   }
   return { store, calls, current: () => record }
 }
@@ -174,6 +176,38 @@ describe('channel destination save and delete', () => {
     })).rejects.toMatchObject({ status: 409 })
     expect(existing.current()?.secretVersion).toBe(v1)
     expect([...secrets.values.entries()]).toEqual([[`secret/${v1}`, url]])
+  })
+
+  test('keeps the candidate webhook when the save outcome is unknown', async () => {
+    const existing = memoryStore(saved(1), new Error('socket hang up'))
+    const secrets = memorySecrets()
+    await expect(saveChannelDestination(existing.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v2, memberKey: 'm@example.test', now,
+      body: { webhookUrl: url, locale: 'ja', expectedRevision: 1 }, authorizationConditionChecks: [],
+    })).rejects.toThrow('socket hang up')
+    // The save may have committed and pointed at the candidate, so it is not deleted.
+    expect(secrets.values.has(`secret/${v2}`)).toBe(true)
+  })
+
+  test('continues the revision after a removal, so a request from before cannot touch the new one', async () => {
+    const existing = memoryStore(saved(1))
+    const secrets = memorySecrets()
+    await deleteChannelDestination(existing.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+    })
+    await expect(saveChannelDestination(existing.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v2, memberKey: 'm@example.test', now,
+      body: { webhookUrl: url, locale: 'ja', expectedRevision: 0 }, authorizationConditionChecks: [],
+    })).rejects.toMatchObject({ status: 409 })
+    const again = await saveChannelDestination(existing.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v2, memberKey: 'm@example.test', now,
+      body: { webhookUrl: url, locale: 'ja', expectedRevision: 2 }, authorizationConditionChecks: [],
+    })
+    expect(again.revision).toBe(3)
+    await expect(deleteChannelDestination(existing.store, secrets.secrets, {
+      workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
+    })).rejects.toMatchObject({ status: 409 })
+    expect(existing.current()?.revision).toBe(3)
   })
 
   test('refuses a save based on a stale revision', async () => {

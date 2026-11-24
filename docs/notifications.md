@@ -230,7 +230,9 @@ Team の送信先は Team の **メンバー** 画面、Project の送信先は 
   "project#<teamId>#<projectId>")>/<version>` に置き、channel 名（表示用）・投稿の言語（ja / en）・revision・使う URL の
   version は Notifications table の `<workspaceId>#!channel-destinations` partition に置きます。新しい URL は新しい
   version に書き、設定の保存が commit されたときだけそちらに切り替えるので、権限や revision の確認で拒否された保存は
-  投稿先を変えません（拒否された候補と置き換えた古い version は消します）。最初の保存には URL が必要で、以降は URL を
+  投稿先を変えません（拒否された候補と置き換えた古い version は消します。応答が失われて結果が分からないときは候補を
+残します）。削除しても row は revision を残した削除済みの印として残るので、削除前に読んだ画面からの操作が、後で
+登録し直した送信先を変えることはありません。最初の保存には URL が必要で、以降は URL を
   空にすると名前と言語だけを変えます。
 - Enterprise の role では、Team の送信先は `teams.read`（閲覧）と `teams.manage`（変更）、Project の送信先は
   `projects.read` と `projects.manage` を使います。本人の送信先は `workspace.read` で登録できます。

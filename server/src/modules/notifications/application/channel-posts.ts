@@ -32,6 +32,8 @@ export type ChannelPostSourceEvent = {
   occurredAt: string
   /** Work Item of a Work Item event. */
   issueId?: string
+  /** Due date a due or overdue event was scheduled for. */
+  dueDate?: string
   /** Planning entity of a Milestone event. */
   entityId?: string
   /** Planning update target record of a health update event. */
@@ -79,6 +81,7 @@ export async function enqueueChannelPost(
         teamId: event.teamId,
         ...(event.projectId ? { projectId: event.projectId } : {}),
         ...(event.issueId ? { issueId: event.issueId } : {}),
+        ...(event.dueDate ? { dueDate: event.dueDate } : {}),
         ...(event.entityId ? { entityId: event.entityId } : {}),
         ...(event.planningTargetRecordKey ? { planningTargetRecordKey: event.planningTargetRecordKey } : {}),
       },
