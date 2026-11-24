@@ -9,7 +9,7 @@ import {
   createPlanningUpdatePublicTargetKey,
 } from '../../modules/collaboration/collaboration'
 import { NotificationError, type NotificationItem } from '../../modules/notifications/notifications'
-import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
+import { requiresCurrentWorkItemAssignee, requiresCurrentWorkItemContributor } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
@@ -533,6 +533,7 @@ export async function createNotificationVisibilityFilter(
     : fullyAccessibleTeamIds
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
+    contributorMemberKeys?: string[]
     exists: boolean
     projectId?: string
   }>>()
@@ -881,6 +882,8 @@ export async function createNotificationVisibilityFilter(
         ).then((detail) => {
           return {
             assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
+            contributorMemberKeys: (detail.issue.contributorAssignments ?? []).flatMap((assignment) =>
+              assignment.memberUserId === undefined ? [] : [assignment.memberUserId.trim().toLowerCase()]),
             exists: true,
             ...(detail.issue.assignedProjectId
               ? { projectId: detail.issue.assignedProjectId }
@@ -901,6 +904,12 @@ export async function createNotificationVisibilityFilter(
       if (
         requiresCurrentWorkItemAssignee(notification) &&
         currentScope.assigneeMemberKey !== principal.userKey
+      ) {
+        return false
+      }
+      if (
+        requiresCurrentWorkItemContributor(notification) &&
+        !currentScope.contributorMemberKeys?.includes(principal.userKey)
       ) {
         return false
       }

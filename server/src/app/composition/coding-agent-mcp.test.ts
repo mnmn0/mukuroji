@@ -67,6 +67,9 @@ function startFakeApi() {
         { id: 'done', name: 'Done', category: 'completed', sortOrder: 2 },
       ] },
     }] })
+    if (url.pathname === '/api/v1/work-item-templates') return Response.json({ teamId: 'team', templates: [{
+      id: 'release-check', version: 2, name: 'Release check', title: 'Release', priority: 'high', acceptanceCriteria: ['Tests pass'],
+    }] })
     if (url.pathname === '/api/v1/agent-settings') {
       return Response.json({ schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false })
     }
@@ -339,6 +342,31 @@ test('create_task leaves the schedule to the server so the Workspace working cal
     expect(fake.createBodies[0]).toMatchObject({ dueDate: '2026-12-01', assigneeUserId: 'agent', teamId: 'team' })
     for (const body of fake.createBodies) expect(body).not.toHaveProperty('schedule')
     expect(fake.createBodies[1]).not.toHaveProperty('dueDate')
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+  }
+}, 30_000)
+
+test('create_task sends a template and leaves its priority to the server unless one is given', async () => {
+  const fake = startFakeApi()
+  let client: Client | undefined
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { catalog: { templates: [
+      { id: 'release-check', name: 'Release check', acceptanceCriteria: ['Tests pass'] },
+    ] } } })
+    for (const input of [{ templateId: 'release-check' }, { templateId: 'release-check', priority: 'low' }, {}]) {
+      const created = await call(client, 'create_task', { title: 'Release', idempotencyKey: crypto.randomUUID(), ...input })
+      expect(created.isError).toBe(false)
+    }
+
+    expect(fake.createBodies).toHaveLength(3)
+    expect(fake.createBodies[0]).toMatchObject({ templateId: 'release-check' })
+    expect(fake.createBodies[0]).not.toHaveProperty('priority')
+    expect(fake.createBodies[1]).toMatchObject({ templateId: 'release-check', priority: 'low' })
+    expect(fake.createBodies[2]).toMatchObject({ priority: 'medium' })
+    expect(fake.createBodies[2]).not.toHaveProperty('templateId')
   } finally {
     await client?.close()
     await fake.api.stop(true)

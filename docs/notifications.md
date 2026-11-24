@@ -11,6 +11,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 現在の producer は次の理由を metadata の `notificationCandidates` として渡します。
 
 - Work Item 作成・担当変更: `assignment`
+- Work Item の作成・更新で新しく Contributor になった member: `contributor`（責任者、最初から `done` の分担、ロールだけの分担は除く。種類は `assignment`。受信者が今も Contributor のときだけ Inbox に出て配信される）
 - Work Item status 変更: `status-change`
 - Work Item schedule 変更: `schedule-change`
 - Work Item archive / restore: `archive-change`

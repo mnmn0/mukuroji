@@ -33,6 +33,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
+import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
@@ -59,6 +60,59 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Replaces the tenant profile with an in-memory one, since test Workspaces have no tenant table.
+ *
+ * @param saved - Whether the Workspace already has a profile.
+ * @returns The `workspaceId:ownerMemberKey` pairs tenant initialization ran for.
+ */
+function useTenantProfileStub(saved: boolean): string[] {
+  const initialized: string[] = []
+  let profileSaved = saved
+  const workspace = getTestAppDependencies().workspace
+  const snapshot = (workspaceId: string, ownerMemberKey: string) =>
+    createDefaultTenantAdministrationSnapshot(workspaceId, ownerMemberKey, '2026-11-01T00:00:00.000Z')
+  setTestAppDependencies({
+    tenantLifecycleEnforcement: workspace.tenantLifecycleEnforcement,
+    tenantAdministration: new Proxy(workspace.tenantAdministration, {
+      get(target, property, receiver) {
+        if (property === 'getProfile') {
+          return async (workspaceId: string) => profileSaved ? snapshot(workspaceId, 'owner').profile : undefined
+        }
+        if (property === 'ensureSnapshot') {
+          return async (workspaceId: string, ownerMemberKey: string) => {
+            initialized.push(`${workspaceId}:${ownerMemberKey}`)
+            profileSaved = true
+            return snapshot(workspaceId, ownerMemberKey)
+          }
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+  })
+  return initialized
+}
+
+test('opting into Inbox digests creates a missing tenant profile once, from the Workspace owner', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: true, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 1, preferences: { ...preferences, enabled: false } })).status).toBe(200)
+  expect(initialized).toHaveLength(1)
+  expect(initialized[0]).toEndWith(':demo@example.com')
+})
+
+test('withdrawing Inbox consent never initializes the tenant profile', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect(initialized).toEqual([])
+})
+
 test('manual digest preferences and preview use authenticated identity and reject guests', async () => {
   configureFakeProjectClients(true)
   const path = '/api/planning/update-feed/digest'
@@ -81,6 +135,7 @@ test('manual digest preferences and preview use authenticated identity and rejec
 
 test('both digest settings bind owned custom definitions and reject deleted selections without reflecting IDs', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const savedPath = '/api/planning/update-feed/saved'
   const feed: SavedUpdateFeed = { id: 'private-custom-id', name: 'Personal filter', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
   expect((await planningApiRequest(savedPath, 'PUT', { expectedRevision: 0, feeds: [feed] })).status).toBe(200)
@@ -101,6 +156,7 @@ test('both digest settings bind owned custom definitions and reject deleted sele
 
 test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const path = '/api/planning/update-feed/digest/inbox'
   expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
   const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, workspaceId: 'attacker', memberKey: 'attacker' }
@@ -115,6 +171,7 @@ test('Inbox consent defaults off, stays separate from previews, ignores client i
 
 test('Inbox metadata HTTP boundary preserves stable storage failure categories without private details', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
   let failure: unknown
   let item: Record<string, unknown> | undefined

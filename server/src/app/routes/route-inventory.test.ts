@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(593)
-  expect(new Set(inventory).size).toBe(589)
+  expect(inventory).toHaveLength(598)
+  expect(new Set(inventory).size).toBe(594)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
@@ -36,6 +36,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/work-items/key-prefixes')
   expect(inventory).toContain('PUT /api/teams/:teamId/work-item-key-prefix')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
+  expect(inventory).toContain('GET /api/v1/work-item-templates')
   expect(inventory).toContain('GET /api/teams/:teamId/work-item-hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
@@ -143,6 +144,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/workspace/members/:memberKey/name')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('GET /api/developer/work-item-exports')
+  expect(inventory).toContain('GET /api/developer/imports/:jobId/progress')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
   expect(inventory).toContain('GET /api/teams/:teamId/time-periods')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/close')
@@ -176,6 +178,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '4bfbf4263a6f5b277fa698ea5e3b97e66a98353c03d2c1652969a815a8f59e57',
+    'eb3dddcae6b48280dd7909f91f914efc6731ff6394315fdf466474625d9edcf4',
   )
 })

@@ -70,6 +70,17 @@ export function createEmptyAcceptanceCriterionDraftRow(key: string): AcceptanceC
 }
 
 /**
+ * Creates the rows a new Work Item's draft starts with, such as criteria copied from a duplicate
+ * or a template. Every row is a new, unmet criterion.
+ *
+ * @param texts - Criterion texts in order.
+ * @returns Rows keyed `new-1`, `new-2`, and so on.
+ */
+export function createNewAcceptanceCriterionDraftRows(texts: readonly string[]): AcceptanceCriterionDraftRow[] {
+  return texts.map((text, index) => ({ ...createEmptyAcceptanceCriterionDraftRow(`new-${index + 1}`), text }))
+}
+
+/**
  * Converts draft rows into a complete replacement list for the API.
  *
  * @param rows - Rows being edited.

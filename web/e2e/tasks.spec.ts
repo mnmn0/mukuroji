@@ -13523,6 +13523,65 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('workspace-member-mfa-sato-example-com')).toContainText('MFA未登録')
   })
 
+  test('Issue #239: 利用停止や異動の前にメンバーの担当を別のメンバーへ引き継ぐ', async ({ page }) => {
+    let previewBody: unknown
+    let appliedItems = 0
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      previewBody = route.request().postDataJSON()
+      const body = previewBody as { action: unknown, items: Array<{ teamId: string, workItemId: string, expectedRevision: number }> }
+      await route.fulfill({
+        json: {
+          action: body.action,
+          canApply: true,
+          items: body.items.map((item) => ({ ...item, retryable: false, status: 'ready', undoable: false })),
+          operationToken: 'handover-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const body = route.request().postDataJSON() as { action: unknown, items: Array<{ teamId: string, workItemId: string, expectedRevision: number }> }
+      appliedItems = body.items.length
+      await route.fulfill({
+        status: 201,
+        json: {
+          schemaVersion: 1,
+          id: 'bulk-handover',
+          workspaceId: 'workspace-demo',
+          actorMemberKey: 'demo@example.com',
+          revision: 2,
+          status: 'succeeded',
+          action: body.action,
+          items: body.items.map((item) => ({
+            ...item,
+            resultingRevision: item.expectedRevision + 1,
+            retryable: false,
+            status: 'succeeded',
+            undoable: true,
+          })),
+          createdAt: '2026-07-11T00:00:00.000Z',
+          updatedAt: '2026-07-11T00:00:01.000Z',
+        },
+      })
+    })
+
+    await page.goto('/settings/workspace')
+    await page.getByTestId('workspace-member-handover-sato-example-com').click()
+    const dialog = page.getByTestId('member-work-handover-dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByTestId('member-work-handover-summary')).toContainText('責任者')
+    await expect(dialog.getByTestId('member-work-handover-preview')).toBeDisabled()
+    await dialog.getByTestId('member-work-handover-successor').selectOption('demo@example.com')
+    await dialog.getByTestId('member-work-handover-preview').click()
+    await expect(dialog.getByTestId('bulk-operation-review')).toBeVisible()
+    expect(previewBody).toMatchObject({
+      workspaceId: 'workspace-demo',
+      action: { type: 'reassign-member', fromMemberUserId: 'sato@example.com', toMemberUserId: 'demo@example.com' },
+    })
+    await dialog.getByRole('button', { name: '適用' }).click()
+    await expect.poll(() => appliedItems).toBeGreaterThan(0)
+    await expect(dialog.getByTestId('bulk-operation-review')).toContainText('bulk-handover')
+  })
+
   test('Issue #432: 一括招待で読込中のファイルより後に選んだ大きすぎるファイルの結果を残す', async ({ page }) => {
     // Holds the read of slow.csv until the test releases it, so a second file can be chosen first.
     await page.addInitScript(() => {

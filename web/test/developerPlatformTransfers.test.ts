@@ -8,11 +8,17 @@ import {
   type TeamWorkItemHierarchyNode,
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
+import {
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
+  WORK_ITEM_IMPORT_MAX_BYTES,
+} from '@mukuroji/contracts'
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
 import { createMsProjectXml, readMsProjectXml } from '../src/developer-platform/model/msProjectXml'
-import { createSpreadsheetWorkbook, findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/developer-platform/model/spreadsheet'
+import { createSpreadsheetWorkbook, findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/shared/lib/files/spreadsheet'
 import { createDeveloperExportFile, createDeveloperExportRows, type DeveloperExportContext } from '../src/developer-platform/model/transfers'
-import { parseXmlDocument } from '../src/developer-platform/model/xmlDocument'
+import { parseXmlDocument } from '../src/shared/lib/files/xmlDocument'
 import { createZipArchive, readZipArchive } from '../src/shared/lib/zipArchive'
 
 /** Workbook saved by openpyxl: a title row above the header, shared strings, and date cells. */
@@ -374,6 +380,36 @@ describe('Developer Platform Work Item export', () => {
     const text = (await file.blob.text()).replace(/^\ufeff/u, '')
 
     expect(text).toContain(`"${JSON.stringify([{ key: 'a', type: 'finish-to-start', lagDays: 1, constraint }]).replaceAll('"', '""')}"`)
+  })
+
+  test('counts the import source after the request and event escaping', () => {
+    expect(measureWorkItemImportContentBytes('a')).toBe(1)
+    expect(measureWorkItemImportContentBytes('"')).toBe(4)
+    expect(measureWorkItemImportContentBytes('\n')).toBe(3)
+    expect(measureWorkItemImportContentBytes('\\')).toBe(4)
+    expect(measureWorkItemImportContentBytes('あ')).toBe(3)
+  })
+
+  test('does not suggest a column whose name is longer than a mapping field accepts', () => {
+    const long = `customFieldValues.${'x'.repeat(WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH)}`
+
+    expect(suggestDeveloperImportMapping(['title', long]).map((entry) => entry.sourceField)).toEqual(['title'])
+  })
+
+  test('suggests at most as many mapping fields as an import accepts', () => {
+    const headers = Array.from({ length: WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES + 50 }, (_, index) => `customFieldValues.f${index}`)
+
+    expect(suggestDeveloperImportMapping(headers)).toHaveLength(WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES)
+  })
+
+  test('refuses a source whose escaped text exceeds the import limit', async () => {
+    const quotes = '"'.repeat(WORK_ITEM_IMPORT_MAX_BYTES / 4 + 1)
+    const fitting = 'a'.repeat(WORK_ITEM_IMPORT_MAX_BYTES - 1)
+
+    await expect(readDeveloperImportSource('csv', fileFrom('quotes.csv', new TextEncoder().encode(`title\n${quotes}`))))
+      .rejects.toThrow('The file is too large to import.')
+    expect((await readDeveloperImportSource('csv', fileFrom('plain.csv', new TextEncoder().encode(`t\n${fitting.slice(3)}`)))).headers)
+      .toEqual(['t'])
   })
 
   test('suggests a mapping for each custom field of a JSON export', async () => {

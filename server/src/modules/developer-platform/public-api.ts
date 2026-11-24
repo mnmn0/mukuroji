@@ -1,6 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   isWorkItemProgressPercent,
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
+  WORK_ITEM_IMPORT_MAX_BYTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -50,7 +54,9 @@ import {
   type ImportFieldMapping,
   type ImportDryRunReport,
   type ImportJob,
+  type ImportJobProgress,
   type ImportSource,
+  type PublicWorkItemTemplateList,
   type PublicWorkItemTypeCatalog,
   type PublicWorkItemTypeChangePreview,
   type PreviewPublicWorkItemTypeChangeRequest,
@@ -337,6 +343,17 @@ export interface PublicWorkItemService {
     assignedProjectId?: string,
   ): Promise<PublicWorkItemTypeCatalog>
   /**
+   * Lists the Work Item templates a Team can create from after current RBAC checks.
+   *
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team the templates are listed for.
+   * @returns Enabled templates for the Team; empty for a principal that cannot read them.
+   */
+  listWorkItemTemplates(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+  ): Promise<PublicWorkItemTemplateList>
+  /**
    * Calculates the impact of a Work Item Type change after current authorization and revision checks.
    *
    * @param credential - Authenticated developer credential that owns the request.
@@ -434,6 +451,17 @@ export interface PublicWorkItemService {
     job: ImportJob,
     write: boolean,
   ): Promise<void>
+  /**
+   * Reads how many rows and links an authorized import job has processed.
+   *
+   * @param principal - Caller that already passed the job's authorization.
+   * @param job - Import job.
+   * @returns The job's progress.
+   */
+  getImportProgress(
+    principal: DeveloperManagementPrincipal,
+    job: ImportJob,
+  ): Promise<ImportJobProgress>
   /** Worker と協調して未完了 import を cancel し、cancelled retry は成功扱いにします。 */
   cancelImport(
     principal: DeveloperManagementPrincipal,
@@ -447,6 +475,7 @@ export interface PublicWorkItemService {
     continuation: string | undefined,
     limit: number,
     includeStructure?: boolean,
+    filters?: PublicWorkItemExportFilters,
   ): Promise<{
     /** Export page に含まれる Work Items です。 */
     items: CanonicalWorkItem[]
@@ -455,6 +484,22 @@ export interface PublicWorkItemService {
     /** 次 page の store-bound opaque continuation です。 */
     nextContinuation?: string
   }>
+}
+
+/** Optional filters that narrow a Work Item export to one Team, Project, or field value. */
+export type PublicWorkItemExportFilters = {
+  /** Only Work Items owned by this Team. */
+  teamId?: string
+  /** Only Work Items assigned to this Project. */
+  assignedProjectId?: string
+  /** Only Work Items with this assignee. */
+  assigneeUserId?: string
+  /** Only Work Items in this workflow status. */
+  workflowStatusId?: string
+  /** Only Work Items of this Work Item Type. */
+  workItemTypeId?: string
+  /** Only Work Items updated after this timestamp. */
+  updatedAfter?: string
 }
 
 /** Filters for listing a Team's Agent Runs. */
@@ -1225,6 +1270,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId'),
+    ))
+  })
+
+  router.get('/v1/work-item-templates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.listWorkItemTemplates(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
     ))
   })
 
@@ -2824,6 +2877,18 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
   })
 
+  router.get('/developer/imports/:jobId/progress', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canImport')
+    const job = await requireAuthorizedImportJob(
+      dependencies.imports,
+      dependencies.workItems,
+      principal,
+      readRouteId(c.req.param('jobId'), 'Import job ID'),
+      false,
+    )
+    return c.json(await dependencies.workItems.getImportProgress(principal, job))
+  })
+
   router.get('/developer/imports/:jobId/report', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     const job = await requireAuthorizedImportJob(
@@ -2852,12 +2917,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/exports', { format }),
+      managementCursorScope(principal, '/developer/exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit),
+        dependencies.workItems.export(principal, format, continuation, limit, false, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -2867,12 +2933,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/work-item-exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/work-item-exports', { format }),
+      managementCursorScope(principal, '/developer/work-item-exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit, true),
+        dependencies.workItems.export(principal, format, continuation, limit, true, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -3653,8 +3720,10 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'dueDate',
     'priority',
     'workItemTypeId',
+    'templateId',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
+  const templateId = body.templateId === undefined ? undefined : readIdentifier(body.templateId, 'templateId')
   if (body.schedule !== undefined && body.dueDate !== undefined) {
     throw new PublicApiServiceError(400, 'validation_failed', 'Send schedule or dueDate, not both.')
   }
@@ -3665,7 +3734,9 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     // Without a schedule the server uses the Workspace working calendar.
     ...(body.schedule === undefined ? {} : { schedule: readPublicWorkItemSchedule(body.schedule) }),
     ...(body.dueDate === undefined ? {} : { dueDate: readIsoDate(body.dueDate, 'dueDate') }),
-    priority: readPriority(body.priority),
+    // Left out, the template priority is used, else medium.
+    ...(body.priority === undefined ? {} : { priority: readPriority(body.priority) }),
+    ...(templateId === undefined ? {} : { templateId }),
     ...(description !== undefined ? { description } : {}),
     ...(body.assignedProjectId !== undefined
       ? { assignedProjectId: readIdentifier(body.assignedProjectId, 'assignedProjectId') }
@@ -4250,11 +4321,11 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
       `Import source mediaType must be ${expectedMediaType} for ${format}.`,
     )
   }
-  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > 200) {
+  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import mapping must contain between 1 and 200 fields.',
+      `Import mapping must contain between 1 and ${WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES} fields.`,
     )
   }
   const sourceFields = new Set<string>()
@@ -4268,6 +4339,14 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
     )
     const sourceField = readRequiredString(field.sourceField, 'Import sourceField')
     const targetField = readRequiredString(field.targetField, 'Import targetField')
+    // Bounds the mapping, which travels beside the source in the same Lambda payload.
+    if (sourceField.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH || targetField.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        `Import mapping ${index + 1} fields must be at most ${WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH} characters.`,
+      )
+    }
     if (sourceFields.has(sourceField) || targetFields.has(targetField)) {
       throw new PublicApiServiceError(
         400,
@@ -4345,17 +4424,28 @@ function readImportFileName(value: unknown) {
   return fileName
 }
 
+/**
+ * Reads the import source text from a request body.
+ *
+ * The size is counted with `measureWorkItemImportContentBytes`, after the escaping the request
+ * body and the Lambda event add, so that the request stays within the 6 MB synchronous Lambda
+ * payload.
+ *
+ * @param value - `source.content` from the request body.
+ * @returns The source text.
+ * @throws PublicApiServiceError when the text is empty, too large, or contains NUL.
+ */
 function readImportContent(value: unknown) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > 2 * 1024 * 1024 ||
+    measureWorkItemImportContentBytes(value) > WORK_ITEM_IMPORT_MAX_BYTES ||
     value.includes('\u0000')
   ) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import content must contain between 1 byte and 2 MiB of UTF-8 text.',
+      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text, counted after JSON string escaping in the request and the event.`,
     )
   }
   return value
@@ -4816,14 +4906,25 @@ function readPageLimit(value: string | undefined) {
 }
 
 function readWorkItemFilters(c: Context) {
-  const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+  return {
+    teamId: readRequiredQuery(c.req.query('teamId'), 'teamId'),
+    ...readWorkItemFieldFilters(c),
+  }
+}
+
+/**
+ * Reads the Project, assignee, status, type, and update-time filters of a Work Item list.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemFieldFilters(c: Context) {
   const assignedProjectId = c.req.query('assignedProjectId')
   const assigneeUserId = c.req.query('assigneeUserId')
   const workflowStatusId = c.req.query('workflowStatusId')
   const workItemTypeId = c.req.query('workItemTypeId')
   const updatedAfter = c.req.query('updatedAfter')
   return {
-    teamId,
     ...(assignedProjectId
       ? { assignedProjectId: readIdentifier(assignedProjectId, 'assignedProjectId') }
       : {}),
@@ -4839,6 +4940,20 @@ function readWorkItemFilters(c: Context) {
     ...(updatedAfter
       ? { updatedAfter: readIsoTimestamp(updatedAfter, 'updatedAfter') }
       : {}),
+  }
+}
+
+/**
+ * Reads the optional Team, Project, and field filters of a Work Item export.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemExportFilters(c: Context): PublicWorkItemExportFilters {
+  const teamId = c.req.query('teamId')
+  return {
+    ...(teamId !== undefined ? { teamId: readIdentifier(teamId, 'teamId') } : {}),
+    ...readWorkItemFieldFilters(c),
   }
 }
 

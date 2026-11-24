@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
-import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryHistory, TimePeriodClose } from '@mukuroji/contracts'
 import {
   DynamoDbTimeTrackingRepository,
   TimeTrackingService,
@@ -284,6 +284,48 @@ describe('DynamoDbTimeTrackingRepository', () => {
     // A changed entry still reports a revision conflict even if the membership also moved.
     await expect(remove(['None', 'ConditionalCheckFailed', 'ConditionalCheckFailed']))
       .rejects.toMatchObject({ status: 409, code: 'TimeEntryRevisionConflict' })
+  })
+
+  test('fences a month close and reopen with the administrator membership check', async () => {
+    const close: TimePeriodClose = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      timeZone: 'Asia/Tokyo',
+      closedBy: 'member-1',
+      closedAt: '2026-08-02T03:00:00.000Z',
+    }
+    const commands: CommandWithInput[] = []
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}], commands))
+    await repository.createPeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    await repository.deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    for (const command of commands) {
+      const items = command.input.TransactItems
+      expect(Array.isArray(items) ? items[1] : undefined).toEqual(ownerMembershipCheck)
+    }
+
+    /** Builds a repository whose transactions fail with the given cancellation reasons. */
+    const createFailingRepository = (reasons: readonly string[]) => {
+      const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+      Object.defineProperty(client, 'send', {
+        configurable: true,
+        value: async (): Promise<unknown> => {
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: reasons.map((Code) => ({ Code })),
+          })
+        },
+      })
+      return new DynamoDbTimeTrackingRepository('analytics-table', client)
+    }
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    // A month someone else already closed still reports the close conflict.
+    await expect(createFailingRepository(['ConditionalCheckFailed', 'None']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ code: 'TimePeriodAlreadyClosed' })
   })
 
   test('refuses a stored entry with neither a Work Item nor a category', async () => {

@@ -1187,6 +1187,64 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
   expect(calls.issueReads).toEqual([])
 })
 
+test('narrows the developer export to one Team, Project, and status', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [
+        { id: 'other-project', name: 'Other Project', tone: 'blue' as const },
+        { id: 'secret-project', name: 'Secret Project', tone: 'blue' as const },
+      ],
+    }],
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      { projectId: 'other-project', role: 'manager' },
+    ],
+  })
+  setTestAppDependencies({
+    rateLimits: {
+      async consumeRateLimit() {
+        return { allowed: true, limit: 120, remaining: 119, resetAt: '2026-07-18T00:01:00.000Z' }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/developer/work-item-exports?format=csv&teamId=other-team&assignedProjectId=other-project&workflowStatusId=todo',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(calls.publicIssuePageReads.map(({ teamId, assignedProjectId, workflowStatusId }) => ({
+    teamId,
+    assignedProjectId,
+    workflowStatusId,
+  }))).toEqual([{ teamId: 'other-team', assignedProjectId: 'other-project', workflowStatusId: 'todo' }])
+
+  // A Team the caller cannot view gives an empty export instead of revealing whether it exists.
+  calls.publicIssuePageReads.length = 0
+  const hidden = await app.request('/api/developer/exports?teamId=unknown-team', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hidden.status).toBe(200)
+  expect(await hidden.json()).toEqual({ items: [], hasMore: false })
+  expect(calls.publicIssuePageReads).toEqual([])
+
+  // A Project the caller cannot view, in a Team they can, also gives an empty export.
+  const hiddenProject = await app.request('/api/developer/exports?assignedProjectId=secret-project', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(hiddenProject.status).toBe(200)
+  expect(await hiddenProject.json()).toEqual({ items: [], hasMore: false })
+  expect(calls.publicIssuePageReads).toEqual([])
+
+  const invalid = await app.request('/api/developer/exports?teamId=bad%24team', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(invalid.status).toBe(400)
+})
+
 test('keeps contributors and acceptance criteria only in the structured developer export', async () => {
   configureFakeProjectClients(true, {
     issueContributorAssignments: [{
@@ -1388,6 +1446,29 @@ test('narrows Work Items to the caller as owner or contributor', async () => {
     'onboarding-friction',
   ])
   expect(body.nextCursor).toBeUndefined()
+})
+
+test('narrows Work Items to a named member as owner or contributor for a handover', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 3,
+    issueContributorAssignments: [{
+      assignmentId: 'assignment-1',
+      memberUserId: 'leaver@example.com',
+      status: 'planned',
+    }],
+  })
+
+  const response = await app.request('/api/work-items?member=Leaver@Example.com&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.workItems.map((workItem: { id: string }) => workItem.id)).toEqual(['onboarding-friction'])
+
+  const combined = await app.request('/api/work-items?member=leaver@example.com&involvement=mine&limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(combined.status).toBe(400)
 })
 
 test('summarizes accessible Work Items per Team and Project', async () => {

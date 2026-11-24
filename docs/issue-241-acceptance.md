@@ -1,5 +1,7 @@
 # Issue 241 implementation and release acceptance
 
+> **2026-11-23 update (ADR 0066):** the stack now provisions `InboxDigestDueIndex`, runs the worker as the `inbox-digest` job of the shared scheduled-jobs Lambda every fifteen minutes, and enables it through the `InboxDigestDeliveryEnabled` parameter (default `true`). This supersedes the dedicated-Lambda / disabled-target plan in the approval list below. A Floci run with the job's exact environment delivered one Inbox row and did not repeat it. Live AWS checks moved to the #636 post-deploy checklist (`docs/post-deploy-verification.md`).
+
 This matrix covers the Update Feed scope implemented in the Issue 241 PR stack. “Implemented” means local source and automated coverage exist; it does not mean merged, deployed, or verified in AWS. The parent review owns reconciliation with the GitHub Issue and exact-head CI/Codex/CodeRabbit evidence. Issue 241 must remain open until that integration and release acceptance is complete.
 
 | Acceptance area | Implementation / evidence | Status |
@@ -20,14 +22,14 @@ This matrix covers the Update Feed scope implemented in the Issue 241 PR stack. 
 | Generation concurrency and privacy | CAS, expiring lease, bounded attempts, at most twenty bodyless history receipts; previews held only briefly in component state | Implemented |
 | Successful POST / failed metadata read | Distinct refresh failure, discarded body, explicit GET recovery, no automatic POST replay; completed receipts do not consume another attempt | Implemented; PR268 correction propagated downstream |
 | Separate Inbox consent | Default off, distinct persisted collection and explicit save; saving does not activate delivery; withdrawal does not depend on changed/unavailable saved definitions | Implemented |
-| Truthful activation wording | Requires operator activation; no claim that saved opt-in proves a running scheduler, and no hardcoded future deployment status | Implemented in final selection slice |
+| Truthful delivery wording | States when digests arrive (daily / Monday after 00:00 UTC); delivery is on by default and stopped by `InboxDigestDeliveryEnabled=false` or runtime control | Implemented (ADR 0066) |
 | Existing Inbox delivery format | Generic `/updates` link; no report bodies, target IDs, names or external channels; deterministic interval identity; first claim time retained across attempts for Inbox sorting and 365-day TTL | Implemented; live delivery pending |
 | Atomic Inbox insertion | Receipt, metadata revision, current member/Enterprise/Planning/tenant/preference/saved-definition guards and unique Inbox key in one transaction | Implemented; SDK condition model, live DynamoDB verification pending |
 | Current background recipient authorization | Reuses current member/Cognito/Enterprise/SCIM and Feed permission source; guest/revoked/closed tenant fail closed | Implemented; deployment read policy and live verification pending |
-| Bounded durable worker | Sixteen shards, page persisted before delivery, revision/token lease fencing, continuation, restart and lost-ack recovery | Implemented; default disabled |
+| Bounded durable worker | Sixteen shards, page persisted before delivery, revision/token lease fencing, continuation, restart and lost-ack recovery | Implemented; scheduled every 15 minutes (ADR 0066) |
 | Retry and recovery | Sixty-second backoff; three transient failures or the first classified permanent failure atomically retain failure evidence and acknowledge queue item; quarantine through current UTC day | Implemented; retention/alarms pending provisioning |
 | Draft PR stack acceptance | Local tests and trusted-base reviews recorded outside the repository; parent owns all current PR heads/checks/review responses | Pending parent integration/review |
-| Live release acceptance | Infrastructure, IAM, schedule, runtime control, live transactions, observability and rollback checks | Pending separate authorization and verification |
+| Live release acceptance | Infrastructure, IAM, schedule, runtime control, live transactions, observability and rollback checks | Provisioned in CDK; live checks on the #636 post-deploy checklist |
 
 ## Required deployment approvals and concrete scope
 

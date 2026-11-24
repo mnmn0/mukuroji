@@ -20,6 +20,8 @@ export const capacityPlanningMessages = {
   'workload.legend.balanced': 'At capacity',
   'workload.legend.over': 'Over capacity',
   'workload.legend.unavailable': 'Unavailable',
+  'workload.contributorShares': 'Includes Work Item contributor shares: {count}',
+  'workload.workspaceTotalsUnavailable': 'Workload across Teams is not shown: another Team has too many Work Items to read.',
   'workload.redacted': 'Confidential allocations hidden: {count}',
   'workload.table.label': 'Team workload heatmap',
   'workload.table.member': 'Member',

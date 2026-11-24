@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
+  UpdateTableCommand,
   DynamoDBClient,
   waitUntilTableExists,
+  type AttributeDefinition,
+  type GlobalSecondaryIndex,
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -4756,6 +4759,43 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
 
 const localTableInitializers = new Map<string, Promise<void>>()
 
+/** Key attributes of the CDK Planning table's `InboxDigestDueIndex`. */
+const LOCAL_INBOX_DIGEST_ATTRIBUTES: AttributeDefinition[] = [
+  { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+  { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
+]
+
+/** Matches the CDK Planning table; the Inbox digest worker finds due members here. */
+const LOCAL_INBOX_DIGEST_INDEX: GlobalSecondaryIndex = {
+  IndexName: 'InboxDigestDueIndex',
+  KeySchema: [
+    { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+    { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
+  ],
+  Projection: { ProjectionType: 'KEYS_ONLY' },
+}
+
+/**
+ * Waits until the local Planning table's Inbox digest index can be queried; a GSI added by
+ * `UpdateTable` stays `CREATING` for a while and rejects Queries until it is `ACTIVE`.
+ *
+ * @param tableName - Local Planning table name.
+ * @param client - DynamoDB client for the local endpoint.
+ */
+async function waitUntilLocalInboxDigestIndexActive(tableName: string, client: DynamoDBClient): Promise<void> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
+    const status = response.Table?.GlobalSecondaryIndexes
+      ?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)?.IndexStatus
+    if (status === 'ACTIVE') return
+    if (Date.now() >= deadline) {
+      throw new Error(`Local DynamoDB index "${LOCAL_INBOX_DIGEST_INDEX.IndexName}" on "${tableName}" did not become ACTIVE.`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
 /** Local DynamoDB に CDK 互換の Planning table を作成します。 */
 export async function ensureLocalPlanningTable(tableName: string, client: DynamoDBClient) {
   const current = localTableInitializers.get(tableName)
@@ -4766,6 +4806,16 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
       if (!isPlanningTableDescription(response.Table)) {
         throw new Error(`Local DynamoDB table "${tableName}" has an incompatible schema.`)
       }
+      const digestIndex = response.Table?.GlobalSecondaryIndexes?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)
+      if (!digestIndex) {
+        // Tables created before the Inbox digest job lack its index; add it like the CDK table.
+        await client.send(new UpdateTableCommand({
+          TableName: tableName,
+          AttributeDefinitions: LOCAL_INBOX_DIGEST_ATTRIBUTES,
+          GlobalSecondaryIndexUpdates: [{ Create: LOCAL_INBOX_DIGEST_INDEX }],
+        }))
+      }
+      if (digestIndex?.IndexStatus !== 'ACTIVE') await waitUntilLocalInboxDigestIndexActive(tableName, client)
       return
     } catch (error) {
       if (!isNamedError(error, 'ResourceNotFoundException')) throw error
@@ -4777,6 +4827,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
+        ...LOCAL_INBOX_DIGEST_ATTRIBUTES,
       ],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
@@ -4789,7 +4840,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
-      }],
+      }, LOCAL_INBOX_DIGEST_INDEX],
       BillingMode: 'PAY_PER_REQUEST',
     }))
     await waitUntilTableExists({ client, maxWaitTime: 30 }, { TableName: tableName })
