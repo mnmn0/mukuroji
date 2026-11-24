@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { MemoryRouter } from 'react-router'
 import type { WorkloadSnapshot } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TeamWorkloadView } from './TeamWorkloadView'
@@ -77,6 +78,33 @@ export const InheritedWorkspaceTimeZone: Story = {
       members: snapshot.members.map((member, index) => index === 0
         ? { ...member, calendarSource: 'workspace', effectiveTimeZone: 'America/New_York' }
         : { ...member, calendarSource: 'custom', effectiveTimeZone: member.timeZone }),
+    },
+  },
+}
+
+/**
+ * A member under capacity in this Team but over it once another Team's work is added: the cell is
+ * marked over, the row carries the cross-Team badge, and the header links to the cross-Team view.
+ */
+export const OverAcrossTeams: Story = {
+  render: (args) => <MemoryRouter><TeamWorkloadView {...args} /></MemoryRouter>,
+  args: {
+    ...DayHeatmap.args,
+    crossTeamPath: '/workload',
+    snapshot: {
+      ...snapshot,
+      members: snapshot.members.map((member, index) => index === 1
+        ? {
+          ...member,
+          workspaceOverloaded: true,
+          cells: member.cells.map((cell, cellIndex) => ({
+            ...cell,
+            workspaceCapacityMinutes: cell.capacityMinutes,
+            workspaceAllocatedMinutes: cellIndex === 1 ? cell.allocatedMinutes + 300 : cell.allocatedMinutes,
+            workspaceStatus: cellIndex === 1 ? 'over' : cell.status,
+          })),
+        }
+        : member),
     },
   },
 }
