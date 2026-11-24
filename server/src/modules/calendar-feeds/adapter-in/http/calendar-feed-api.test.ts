@@ -101,6 +101,12 @@ async function seedPlanning(): Promise<void> {
 
 test('serves the member feed with the caller\'s scheduled Work Items and their Project dates', async () => {
   configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
     teamIssueCount: 3,
     issueContributorAssignments: [{
       assignmentId: 'assignment-1',
@@ -126,7 +132,7 @@ test('serves the member feed with the caller\'s scheduled Work Items and their P
   expect(body).toContain('DTSTART;VALUE=DATE:20260618')
   expect(body).toMatch(/SUMMARY:期限: /)
   expect(body).toContain('SUMMARY:◆ マイルストーン: Beta release')
-  // The member has no Work Item in the other Project, so its Milestone stays out.
+  // The member owns the other Project's Milestone but cannot read that Project, so it stays out.
   expect(body).not.toContain('Private launch')
   expect(body).toContain('DTSTART;VALUE=DATE:20260814')
   expect(body).toContain('DTEND;VALUE=DATE:20260815')
