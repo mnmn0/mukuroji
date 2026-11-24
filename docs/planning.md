@@ -296,7 +296,7 @@ A Floci run with exactly the job's environment delivered one generic `/updates` 
 
 After a successful manual preview POST, a failed metadata/permission GET has a distinct refresh-failure state. Both body and editable metadata stay hidden until fresh metadata succeeds, and recovery never automatically repeats the POST or restores its discarded body. A later explicit preview recomputes current authorization; a completed calendar receipt does not consume another generation attempt.
 
-Health update の target は Project と Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
+Health update の target は Project、Team、Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Team は `{teamId}`、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
 
 報告された health (`unknown` / `on-track` / `at-risk` / `off-track`) と提出状況 (`not-configured` / `missing` / `current` / `stale` / `overdue`) は別の値です。Cadence 未設定は `not-configured`、初回提出前かつ期限前は `missing`、reminder window 前に提出済みなら `current`、提出済みでも次の reminder window に入れば `stale`、次回期限に達すれば `overdue` とします。List、Timeline、Portfolio、Dashboard、詳細 pane は両者を別の badge / column で表示します。
 
