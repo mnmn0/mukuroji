@@ -65,10 +65,14 @@ export function resolveDocumentMentions(
 }
 
 /**
- * Resolves the mention ranges of an edited comment. A stored mention whose exact token is still
- * in the body keeps its member, so a member renamed since the comment was written stays
- * mentioned and an unrelated edit is not rejected. The n-th remaining occurrence of a token takes
- * the n-th stored mention with that token; the rest of the body is resolved like a new comment.
+ * Resolves the mention ranges of an edited comment.
+ *
+ * Tokens picked in the composer come first, the longest one winning, so picking `@Ann Smith`
+ * where `@Ann` was mentioned mentions the newly picked member. A stored mention whose exact token
+ * is still in the body, outside every picked token, keeps its member, so a member renamed since
+ * the comment was written stays mentioned and an unrelated edit is not rejected. The n-th
+ * remaining occurrence of a token takes the n-th stored mention with that token; typed
+ * `@member-key` tokens in the rest of the body are read like in a new comment.
  *
  * @param original - Stored body and mentions of the comment.
  * @param body - Edited plain text body.
@@ -87,18 +91,23 @@ export function resolveEditedDocumentMentions(
     const token = original.body.slice(mention.offset, mention.offset + mention.length)
     storedByToken.set(token, [...(storedByToken.get(token) ?? []), mention])
   }
+  const picked: DocumentMention[] = findMemberMentionRanges(body, selectedMemberKeys, members)
+    .map((range) => ({ length: range.length, offset: range.offset, userId: range.memberKey }))
   const kept: DocumentMention[] = []
   for (const [token, stored] of storedByToken) {
     const occurrences = findTokenOccurrences(body, token)
-      .filter((offset) => !overlapsMentionRanges({ offset, length: token.length }, kept))
+      .filter((offset) => {
+        const range = { offset, length: token.length }
+        return !overlapsMentionRanges(range, picked) && !overlapsMentionRanges(range, kept)
+      })
     occurrences.slice(0, stored.length).forEach((offset, index) => {
       const mention = stored[index]
       if (mention) kept.push({ userId: mention.userId, offset, length: token.length })
     })
   }
-  const resolved = resolveDocumentMentions(body, selectedMemberKeys, members)
-    .filter((mention) => !overlapsMentionRanges(mention, kept))
-  return [...kept, ...resolved].sort((left, right) => left.offset - right.offset)
+  const typed = extractDocumentMentions(body)
+    .filter((mention) => !overlapsMentionRanges(mention, picked) && !overlapsMentionRanges(mention, kept))
+  return [...picked, ...kept, ...typed].sort((left, right) => left.offset - right.offset)
 }
 
 /**

@@ -131,6 +131,28 @@ describe('Document editing and comments (#422)', () => {
     expect(resolveEditedDocumentMentions(original, 'Ask Mina about it', [], renamed)).toEqual([])
   })
 
+  test('prefers a newly picked longer mention over the stored shorter token it starts with', () => {
+    const people = [
+      { memberKey: 'ann@example.com', name: 'Ann', email: 'ann@example.com', status: 'active' },
+      { memberKey: 'ann.smith@example.com', name: 'Ann Smith', email: 'ann.smith@example.com', status: 'active' },
+    ]
+    const original = { body: 'Ask @Ann today', mentions: [{ userId: 'ann@example.com', offset: 4, length: 4 }] }
+
+    // Picking `@Ann Smith` replaces the stored `@Ann`, which only matches its first word.
+    expect(resolveEditedDocumentMentions(original, 'Ask @Ann Smith today', ['ann.smith@example.com'], people))
+      .toEqual([{ userId: 'ann.smith@example.com', offset: 4, length: 10 }])
+    // The stored mention still stands where it does not overlap a picked one.
+    expect(resolveEditedDocumentMentions(
+      original,
+      'Ask @Ann and @Ann Smith today',
+      ['ann.smith@example.com'],
+      people,
+    )).toEqual([
+      { userId: 'ann@example.com', offset: 4, length: 4 },
+      { userId: 'ann.smith@example.com', offset: 13, length: 10 },
+    ])
+  })
+
   test('puts an edited comment into the cached thread opened by a deep link', async () => {
     const root = createComment({ id: 'root' })
     const reply = createComment({ id: 'reply', parentCommentId: 'root', body: 'Before' })
