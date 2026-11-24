@@ -268,6 +268,7 @@ export const securityMessages = {
   'security.scope.workspace': 'Workspace',
   'security.scope.team': 'Team',
   'security.scope.project': 'Project',
+  'security.scope.org-unit': '部門',
   'security.access.column.group': 'Directory group',
   'security.access.column.scope': '適用範囲',
   'security.access.column.role': 'ロール',
@@ -322,6 +323,8 @@ export const securityMessages = {
   'security.role.name.projectManager': 'Project管理者',
   'security.role.name.projectMember': 'Projectメンバー',
   'security.role.name.projectViewer': 'Project閲覧者',
+  'security.role.name.orgUnitManager': '部門管理者',
+  'security.role.name.orgUnitViewer': '部門閲覧者',
   'security.permission.localizedName': '{resource}：{action}',
   'security.permission.localizedDescription':
     '「{permission}」の権限を付与します。',

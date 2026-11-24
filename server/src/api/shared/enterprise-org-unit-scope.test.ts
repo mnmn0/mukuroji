@@ -35,7 +35,7 @@ const directory: EnterpriseScopeDirectory = {
   },
 }
 
-const salesManager = {
+const salesManager: EnterpriseRoleAssignment = {
   workspaceId,
   assignmentId: 'sales-manager',
   principalKind: 'member',
@@ -43,7 +43,7 @@ const salesManager = {
   roleId: 'org-unit:manager',
   scope: { workspaceId, kind: 'org-unit', targetId: 'sales' },
   source: 'direct',
-} satisfies EnterpriseRoleAssignment
+}
 
 /**
  * Evaluates one permission for the Sales manager on a resource.

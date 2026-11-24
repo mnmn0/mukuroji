@@ -113,6 +113,7 @@ export const auditLogMessages = {
   'auditLog.resource.import': 'Import',
   'auditLog.resource.invitation': 'Invitation',
   'auditLog.resource.member': 'Member',
+  'auditLog.resource.org-structure': 'OrgUnits',
   'auditLog.resource.work-item-key-prefix': 'Work item key prefix',
   'auditLog.resource.notification-reminders': 'Notification reminders',
   'auditLog.resource.planning-entity': 'Planning item',

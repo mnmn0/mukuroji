@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useOrgStructure } from '../../projects/queries/useOrgStructure'
 import { createWorkspaceSecurityScopeOptions } from '../../security/model/workspaceSecurityScopes'
 import { EnterpriseSecurityPanelContainer } from '../../security/ui/EnterpriseSecurityPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -13,12 +14,15 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 export function EnterpriseSecurityPage() {
   const workspace = useWorkspaceRouteContext()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const orgStructure = useOrgStructure(workspace.accessToken)
+  const orgUnits = orgStructure.data?.orgUnits
   const scopeOptions = useMemo(
     () => createWorkspaceSecurityScopeOptions(
       workspace.teams,
       t('security.scope.workspace'),
+      orgUnits,
     ),
-    [t, workspace.teams],
+    [orgUnits, t, workspace.teams],
   )
 
   return (

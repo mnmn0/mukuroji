@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   PROJECT_LIFECYCLE_STATES,
+  type OrgStructure,
   type PlanningHealth,
   type PortfolioProjectBudget,
   type ProjectLifecycleState,
@@ -25,6 +26,11 @@ import {
   type PortfolioDashboardSortKey,
   type PortfolioDashboardThresholds,
 } from '../model/portfolioDashboard'
+import {
+  createPortfolioOrgUnitRollup,
+  resolvePortfolioOrgUnitTeamIds,
+  type PortfolioOrgUnitRollupRow,
+} from '../model/orgUnitRollup'
 
 /** Props of the Workspace portfolio dashboard view. */
 export type PortfolioDashboardViewProps = {
@@ -32,6 +38,8 @@ export type PortfolioDashboardViewProps = {
   model: PortfolioDashboardModel
   /** Directory Teams, for the Team filter. */
   teams: readonly ProjectDirectoryTeam[]
+  /** OrgUnit tree and Team memberships; without OrgUnits the dashboard shows no OrgUnit roll-up. */
+  orgStructure?: Pick<OrgStructure, 'orgUnits' | 'teamAssignments'>
   /** Display locale. */
   locale: Locale
   /** Translator. */
@@ -193,11 +201,24 @@ export function PortfolioDashboardView({
   onOpenProject,
   onRetry,
   onSaveSnapshot,
+  orgStructure = emptyOrgStructure,
   showAgentRuns,
   snapshotMessage,
   t,
   teams,
 }: PortfolioDashboardViewProps) {
+  const [orgUnitId, setOrgUnitId] = useState('all')
+  const orgUnitTeamIds = useMemo(() => resolvePortfolioOrgUnitTeamIds(orgStructure, orgUnitId), [orgStructure, orgUnitId])
+  // Narrowing to an OrgUnit keeps only its Teams' rows, for the cards and the table alike.
+  const scopedRows = useMemo(
+    () => orgUnitTeamIds ? model.rows.filter((row) => orgUnitTeamIds.has(row.teamId)) : model.rows,
+    [model.rows, orgUnitTeamIds],
+  )
+  const rollup = useMemo(
+    () => createPortfolioOrgUnitRollup(model.rows, teams.map((team) => team.id), orgStructure),
+    [model.rows, orgStructure, teams],
+  )
+  const orgUnitOptions = rollup.rows.map((row) => ({ value: row.orgUnitId, label: `${'　'.repeat(row.depth)}${row.name}` }))
   const [filters, setFilters] = useState<PortfolioDashboardFilters>({
     teamId: 'all',
     lifecycle: 'all',
@@ -218,24 +239,24 @@ export function PortfolioDashboardView({
     [filters, isPlanningUnavailable],
   )
   const visibleRows = useMemo(
-    () => arrangePortfolioDashboardRows(model.rows, effectiveFilters, thresholds, sort),
-    [effectiveFilters, model.rows, sort, thresholds],
+    () => arrangePortfolioDashboardRows(scopedRows, effectiveFilters, thresholds, sort),
+    [effectiveFilters, scopedRows, sort, thresholds],
   )
   const portfolios = useMemo(() => listPortfolioDashboardPortfolios(model.rows), [model.rows])
   const attentionCounts = useMemo(() => {
     let budget = 0
     let delay = 0
     let utilization = 0
-    for (const row of model.rows) {
+    for (const row of scopedRows) {
       const attention = evaluatePortfolioDashboardAttention(row, thresholds)
       if (attention.budget) budget += 1
       if (attention.delay) delay += 1
       if (attention.utilization) utilization += 1
     }
     return { budget, delay, utilization }
-  }, [model.rows, thresholds])
-  const offTrackCount = model.rows.filter((row) => row.health === 'off-track').length
-  const openRisks = model.rows.reduce((sum, row) => sum + openRiskCount(row.metrics), 0)
+  }, [scopedRows, thresholds])
+  const offTrackCount = scopedRows.filter((row) => row.health === 'off-track').length
+  const openRisks = scopedRows.reduce((sum, row) => sum + openRiskCount(row.metrics), 0)
 
   /**
    * Sorts by a column, flipping the direction when it is already the sort column.
@@ -294,7 +315,7 @@ export function PortfolioDashboardView({
   return (
     <div className="grid gap-6" data-print-root="portfolio-dashboard" ref={setRootElement}>
       <div className="grid grid-cols-2 gap-3 min-[901px]:grid-cols-6">
-        <MetricCard label={t('portfolioDashboard.metric.projects')} tone="teal" value={model.rows.length} />
+        <MetricCard label={t('portfolioDashboard.metric.projects')} tone="teal" value={scopedRows.length} />
         <MetricCard label={t('portfolioDashboard.metric.offTrack')} tone={offTrackCount > 0 ? 'red' : 'emerald'} value={isPlanningUnavailable ? '—' : offTrackCount} />
         <MetricCard label={t('portfolioDashboard.metric.overBudget')} testId="portfolio-over-budget" tone={attentionCounts.budget > 0 ? 'red' : 'emerald'} value={attentionCounts.budget} />
         <MetricCard label={t('portfolioDashboard.metric.delayed')} testId="portfolio-delayed" tone={attentionCounts.delay > 0 ? 'amber' : 'emerald'} value={attentionCounts.delay} />
@@ -318,12 +339,69 @@ export function PortfolioDashboardView({
         </div>
       ) : null}
 
+      {rollup.rows.length > 0 ? (
+        <section className="workbench-table overflow-hidden" data-testid="portfolio-org-units">
+          <SectionHeader meta={t('portfolioDashboard.orgUnit.meta')} title={t('portfolioDashboard.orgUnit.title')} />
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+              <thead>
+                <tr className="workbench-table-head text-left">
+                  <th className="px-4 py-3" scope="col">{t('portfolioDashboard.orgUnit.column.name')}</th>
+                  {orgUnitRollupColumns.map((column) => (
+                    <th className="px-4 py-3 text-right" key={column} scope="col">{t(column)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rollup.rows.map((row) => (
+                  <tr
+                    aria-current={row.orgUnitId === orgUnitId ? 'true' : undefined}
+                    className="border-t border-[var(--workbench-border)] aria-[current=true]:bg-teal-50"
+                    data-testid="portfolio-org-unit-row"
+                    key={row.orgUnitId}
+                  >
+                    <th className="px-4 py-2 font-semibold" scope="row" style={{ paddingInlineStart: `${16 + row.depth * 16}px` }}>
+                      <button
+                        aria-label={format(t('portfolioDashboard.orgUnit.show'), { name: row.name })}
+                        className="rounded text-left font-semibold underline-offset-2 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
+                        type="button"
+                        onClick={() => setOrgUnitId(row.orgUnitId)}
+                      >
+                        {row.name}
+                      </button>
+                    </th>
+                    <OrgUnitRollupCells row={row} />
+                  </tr>
+                ))}
+                {rollup.unassigned ? (
+                  <tr className="border-t border-[var(--workbench-border)]" data-testid="portfolio-org-unit-unassigned">
+                    <th className="px-4 py-2 font-semibold text-[var(--workbench-muted)]" scope="row">
+                      {t('portfolioDashboard.orgUnit.unassigned')}
+                    </th>
+                    <OrgUnitRollupCells row={rollup.unassigned} />
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
       <section className="workbench-table overflow-hidden">
         <SectionHeader
-          meta={format(t('portfolioDashboard.table.meta'), { shown: visibleRows.length, total: model.rows.length })}
+          meta={format(t('portfolioDashboard.table.meta'), { shown: visibleRows.length, total: scopedRows.length })}
           title={t('portfolioDashboard.table.title')}
         />
         <div className="flex flex-wrap items-end gap-3 px-5 pb-4 print:hidden">
+          {orgUnitOptions.length > 0 ? (
+            <FilterSelect
+              label={t('portfolioDashboard.filter.orgUnit')}
+              options={[{ value: 'all', label: t('portfolioDashboard.filter.all') }, ...orgUnitOptions]}
+              testId="portfolio-filter-org-unit"
+              value={orgUnitTeamIds ? orgUnitId : 'all'}
+              onChange={setOrgUnitId}
+            />
+          ) : null}
           <FilterSelect
             label={t('portfolioDashboard.filter.team')}
             options={[
@@ -488,6 +566,51 @@ export function PortfolioDashboardView({
         </div>
       </section>
     </div>
+  )
+}
+
+/** Count columns of the OrgUnit roll-up, after the name. */
+const orgUnitRollupColumns: readonly MessageKey[] = [
+  'portfolioDashboard.orgUnit.column.teams',
+  'portfolioDashboard.orgUnit.column.projects',
+  'portfolioDashboard.orgUnit.column.offTrack',
+  'portfolioDashboard.orgUnit.column.workItems',
+  'portfolioDashboard.orgUnit.column.open',
+  'portfolioDashboard.orgUnit.column.completed',
+  'portfolioDashboard.orgUnit.column.overdue',
+]
+
+/** Structure of a Workspace without OrgUnits. */
+const emptyOrgStructure: Pick<OrgStructure, 'orgUnits' | 'teamAssignments'> = { orgUnits: [], teamAssignments: [] }
+
+/** Props of the count cells of one OrgUnit roll-up row. */
+type OrgUnitRollupCellsProps = {
+  /** Totals to show. */
+  row: Pick<PortfolioOrgUnitRollupRow, 'teamCount' | 'projectCount' | 'offTrackCount' | 'workItems'>
+}
+
+/**
+ * Renders the count cells of one OrgUnit roll-up row, in the order of `orgUnitRollupColumns`.
+ *
+ * @param props - Totals.
+ * @returns Table cells.
+ */
+function OrgUnitRollupCells({ row }: OrgUnitRollupCellsProps) {
+  const values = [
+    row.teamCount,
+    row.projectCount,
+    row.offTrackCount,
+    row.workItems.total,
+    row.workItems.open,
+    row.workItems.completed,
+    row.workItems.overdueOpen,
+  ]
+  return (
+    <>
+      {values.map((value, index) => (
+        <td className="px-4 py-2 text-right tabular-nums" key={orgUnitRollupColumns[index]}>{value}</td>
+      ))}
+    </>
   )
 }
 

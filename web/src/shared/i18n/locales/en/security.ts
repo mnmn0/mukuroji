@@ -271,6 +271,7 @@ export const securityMessages = {
   'security.scope.workspace': 'Workspace',
   'security.scope.team': 'Team',
   'security.scope.project': 'Project',
+  'security.scope.org-unit': 'OrgUnit',
   'security.access.column.group': 'Directory group',
   'security.access.column.scope': 'Scope',
   'security.access.column.role': 'Role',
@@ -325,6 +326,8 @@ export const securityMessages = {
   'security.role.name.projectManager': 'Project manager',
   'security.role.name.projectMember': 'Project member',
   'security.role.name.projectViewer': 'Project viewer',
+  'security.role.name.orgUnitManager': 'OrgUnit manager',
+  'security.role.name.orgUnitViewer': 'OrgUnit viewer',
   'security.permission.localizedName': '{action} {resource}',
   'security.permission.localizedDescription':
     'Grants the “{permission}” permission.',

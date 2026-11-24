@@ -280,6 +280,25 @@ export const projectsMessages = {
   'projects.administration.error.action': 'The change could not be saved. Try again later.',
   'projects.administration.error.conflict': 'Another change got there first. The list was reloaded; try again.',
   'projects.administration.error.cleanupPending': 'The archive is still being cleaned up. Try restoring again in a few minutes.',
+  'projects.orgUnits.title': 'OrgUnits',
+  'projects.orgUnits.description': 'Group teams into departments or business units. Dashboards roll up by OrgUnit, and OrgUnit roles apply to the teams under it.',
+  'projects.orgUnits.loading': 'Loading OrgUnits…',
+  'projects.orgUnits.loadError': 'OrgUnits could not be loaded.',
+  'projects.orgUnits.name': 'Name',
+  'projects.orgUnits.parent': 'Parent',
+  'projects.orgUnits.topLevel': 'Top level',
+  'projects.orgUnits.add': 'Add OrgUnit',
+  'projects.orgUnits.empty': 'There are no OrgUnits. Teams are shown as before until you add one.',
+  'projects.orgUnits.remove': 'Remove {name}',
+  'projects.orgUnits.removeShort': 'Remove',
+  'projects.orgUnits.teams': 'Team membership',
+  'projects.orgUnits.noOrgUnit': 'No OrgUnit',
+  'projects.orgUnits.saving': 'Saving',
+  'projects.orgUnits.saved': 'OrgUnits were saved.',
+  'projects.orgUnits.accessNote': 'Removing an OrgUnit moves its teams and child OrgUnits to its parent. OrgUnit roles stop applying to teams that leave it.',
+  'projects.orgUnits.error.conflict': 'Another change got there first. The latest OrgUnits were loaded; edit them again.',
+  'projects.orgUnits.error.invalid': 'The OrgUnits could not be saved. Check for empty names and deep nesting.',
+  'projects.orgUnits.error.denied': 'Only Workspace administrators can change OrgUnits.',
   'projects.statusReport.open': 'Status report',
   'projects.statusReport.title': 'Status report',
   'projects.statusReport.close': 'Close',
@@ -375,6 +394,7 @@ export const projectsMessages = {
     | `projects.raidLog.${string}`
     | `projects.overview.${string}`
     | `projects.administration.${string}`
+    | `projects.orgUnits.${string}`
     | `projects.statusReport.${string}`
     | `projects.teamProfile.${string}`
   >,

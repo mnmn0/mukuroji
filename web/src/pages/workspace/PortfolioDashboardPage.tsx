@@ -13,6 +13,7 @@ import {
 } from '../../features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../../features/portfolio-dashboard/ui/PortfolioDashboardView'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useOrgStructure } from '../../projects/queries/useOrgStructure'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createProjectOverviewPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -102,6 +103,8 @@ export function PortfolioDashboardPage() {
   const snapshots = usePortfolioSnapshots(accessToken, teamIds, compareMonth)
   const planning = usePlanningSnapshot(workspace.accessToken, workspace.canLoadWorkspaceData)
   const workload = usePortfolioWorkload(accessToken, calendar.month)
+  // A reader who may not see the structure, or a Workspace without OrgUnits, gets no OrgUnit roll-up.
+  const orgStructure = useOrgStructure(accessToken)
   const model = useMemo(
     () => createPortfolioDashboardModel({
       teams: workspace.teams,
@@ -177,6 +180,7 @@ export function PortfolioDashboardPage() {
           onOpenProject={(teamId, projectId) => navigate(createProjectOverviewPath(projectId, teamId))}
           onRetry={retry}
           onSaveSnapshot={() => void snapshotSave.save(capturableTeamIds)}
+          {...(orgStructure.data ? { orgStructure: orgStructure.data } : {})}
           {...(compareMonth ? { compareMonth } : {})}
           {...(snapshotMessage ? { snapshotMessage } : {})}
         />
