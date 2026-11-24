@@ -238,7 +238,7 @@ Workflow の transition は任意の `allowedActorRoles`（`project-manager`、`
 | `allowedActorRoles` | 人が Web から操作し、次のどれかに当たる。`project-manager`: Work Item の Project（Project を移す更新では移す前と後の両方）の manager。Project のない Work Item では Team の manager（いずれかの Project の manager か `teams.manage`）。system admin は満たす。`assignee`: 変更前の担当者。同じ更新で自分を担当者にしても満たさない。 |
 | `requiredFields` / `requiredCustomFieldIds` | 同じ更新で送る値を反映した後に、期限（schedule の期限か終了日）がある・受け入れ条件が 1 件以上ある・custom field に空でない値がある。 |
 
-判定は status が変わるときだけ行う。同じ status のままの編集は止めない。遷移の分からない変更（初期状態以外での作成、別 workflow の Type への変更）は、その status に入る transition のうち最も制限の弱いものを使う。制限のない transition が 1 本でもあれば誰でも入れ、どの transition も入らない status は制限しない。初期状態での作成は status の変更ではないので、必須項目も判定しない。
+判定は status が変わるときだけ行う。同じ status のままの編集は止めない。遷移の分からない変更（初期状態以外での作成、別 workflow の Type への変更）は、その status に入る transition のうち最も制限の弱いものを使う。制限のない transition が 1 本でもあれば誰でも入れ、どの transition も入らない status は制限しない。作成には変更前の担当者がいないので `assignee` は満たさず、`project-manager` は作成先の Project（なければ Team）で判定する。初期状態での作成は status の変更ではないので、必須項目も判定しない。
 
 自動化（Automation の action、Project template の展開）と developer credential（Public API、MCP、agent）は、credential の持ち主が manager でも `allowedActorRoles` を満たさない。人が判断する工程を表すための設定だからである。Web の一括操作とその取り消しは操作した人として判定し、承認の決定で status が変わるときは決定した人として判定する（承認の依頼は status を変えないので判定しない）。
 
