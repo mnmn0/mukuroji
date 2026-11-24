@@ -1,5 +1,10 @@
-import { type EnterpriseIdentitySnapshot, type EnterprisePermissionId } from '@mukuroji/contracts'
 import {
+  type EnterpriseIdentitySnapshot,
+  type EnterprisePermissionId,
+  type OrgStructure,
+} from '@mukuroji/contracts'
+import {
+  type ProjectDirectoryClient,
   type ProjectDirectoryResponse,
   type ProjectDirectoryTeamResponse,
 } from '../../modules/directory'
@@ -13,8 +18,8 @@ import { resolveNotificationRecipientBoundary } from '../../modules/notification
 import { type WorkspaceMember } from '../../modules/workspace-access/workspace-access'
 import { type AutomationActionExecutorDependencies } from './app-dependencies'
 import {
-  hasUnqualifiedEnterpriseProjectScope,
-  qualifyEnterpriseProjectScopes,
+  hasDirectoryDependentEnterpriseScope,
+  resolveEnterpriseDirectoryScopes,
 } from './enterprise-access'
 import { resolveProjectAccessTeamId } from './project-access'
 import { projectAccessAllows } from './workspace-access'
@@ -29,7 +34,7 @@ export type MemberWorkItemVisibilityDependencies = {
   projectDirectory: Pick<
     AutomationActionExecutorDependencies['projectDirectory'],
     'getProjectAccessList' | 'getProjectDirectory'
-  >
+  > & Partial<Pick<ProjectDirectoryClient, 'getOrgStructure'>>
 }
 
 /** Work Item scope whose visibility is checked for another Workspace member. */
@@ -50,6 +55,11 @@ export type MemberWorkItemVisibilityReads = {
   directory: () => Promise<ProjectDirectoryResponse>
   /** Reads the current Enterprise Identity snapshot. */
   snapshot: () => Promise<EnterpriseIdentitySnapshot>
+  /**
+   * Reads the current OrgUnit structure. Undefined when the port cannot read it, so OrgUnit
+   * scopes grant nothing.
+   */
+  orgStructure: () => Promise<OrgStructure | undefined>
 }
 
 /**
@@ -65,6 +75,7 @@ export function createMemberWorkItemVisibilityReads(
   dependencies: Pick<MemberWorkItemVisibilityDependencies, 'enterpriseIdentity' | 'projectDirectory'>,
   directory?: ProjectDirectoryResponse,
 ): MemberWorkItemVisibilityReads {
+  let orgStructureRead: Promise<OrgStructure | undefined> | undefined
   let directoryRead: Promise<ProjectDirectoryResponse> | undefined = directory
     ? Promise.resolve(directory)
     : undefined
@@ -72,6 +83,9 @@ export function createMemberWorkItemVisibilityReads(
   return {
     directory: () => directoryRead ??= dependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true),
     snapshot: () => snapshotRead ??= dependencies.enterpriseIdentity.getSnapshot(workspaceId),
+    orgStructure: () => orgStructureRead ??= dependencies.projectDirectory.getOrgStructure
+      ? dependencies.projectDirectory.getOrgStructure(workspaceId, true)
+      : Promise.resolve(undefined),
   }
 }
 
@@ -143,19 +157,24 @@ async function hasWorkItemScopeAccess(
     return false
   }
 
+  const orgStructure = [...snapshot.roleAssignments, ...snapshot.groupMappings]
+    .some((entry) => entry.scope.kind === 'org-unit')
+    ? await reads.orgStructure()
+    : undefined
+  const scopeDirectory = orgStructure ? { ...activeDirectory, orgStructure } : activeDirectory
   const evaluateEnterprise = (cognitoGroupIds: readonly string[]) => {
     const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, cognitoGroupIds)
     if (directoryPrincipal.deprovisioned) {
       return { deprovisioned: true, authoritative: true, allowed: false }
     }
     const needsProjectScopeQualification =
-      hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
-      hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
+      hasDirectoryDependentEnterpriseScope(directoryPrincipal.compatibleRoleAssignments) ||
+      hasDirectoryDependentEnterpriseScope(directoryPrincipal.compatibleGroupMappings)
     const assignments = needsProjectScopeQualification
-      ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleRoleAssignments, activeDirectory)
+      ? resolveEnterpriseDirectoryScopes(directoryPrincipal.compatibleRoleAssignments, scopeDirectory)
       : directoryPrincipal.compatibleRoleAssignments
     const groupMappings = needsProjectScopeQualification
-      ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleGroupMappings, activeDirectory)
+      ? resolveEnterpriseDirectoryScopes(directoryPrincipal.compatibleGroupMappings, scopeDirectory)
       : directoryPrincipal.compatibleGroupMappings
     const authoritative = directoryPrincipal.directoryManaged ||
       assignments.some((assignment) =>

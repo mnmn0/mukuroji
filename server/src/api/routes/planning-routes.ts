@@ -111,8 +111,9 @@ import {
 import { WORK_ITEMS_AGGREGATE_TEAM_LIMIT } from '../shared/constants'
 import { resolveDeveloperManagementPrincipal } from '../shared/developer-platform-access'
 import {
-  hasUnqualifiedEnterpriseProjectScope,
-  qualifyEnterpriseProjectScopes,
+  hasDirectoryDependentEnterpriseScope,
+  readEnterpriseScopeDirectory,
+  resolveEnterpriseDirectoryScopes,
 } from '../shared/enterprise-access'
 import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken, readJson, toTenantLifecycleBoundaryError } from '../shared/http'
@@ -579,23 +580,22 @@ async function requirePlanningCadenceRecipientTargetPermission(
     candidateGroups,
   )
   const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
+    hasDirectoryDependentEnterpriseScope(directoryPrincipal.compatibleRoleAssignments) ||
+    hasDirectoryDependentEnterpriseScope(directoryPrincipal.compatibleGroupMappings)
   const enterpriseDirectory = needsProjectScopeQualification
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? await readEnterpriseScopeDirectory(
+        workspaceDependencies.projectDirectory,
         principal.directoryId,
-        'ja',
-        true,
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(
+    ? resolveEnterpriseDirectoryScopes(
         directoryPrincipal.compatibleRoleAssignments,
         enterpriseDirectory,
       )
     : directoryPrincipal.compatibleRoleAssignments
   const qualifiedGroupMappings = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(
+    ? resolveEnterpriseDirectoryScopes(
         directoryPrincipal.compatibleGroupMappings,
         enterpriseDirectory,
       )

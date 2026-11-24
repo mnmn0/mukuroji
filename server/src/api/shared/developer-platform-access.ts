@@ -17,9 +17,10 @@ import { authenticationDependencies, workspaceDependencies } from './app-depende
 import {
   type EnterpriseAuthorizationEvaluationSnapshot,
   type EnterpriseRequestAccess,
-  hasUnqualifiedEnterpriseProjectScope,
+  hasDirectoryDependentEnterpriseScope,
   normalizeEnterpriseEmailDomain,
-  qualifyEnterpriseProjectScopes,
+  readEnterpriseScopeDirectory,
+  resolveEnterpriseDirectoryScopes,
   requireEnterpriseExternalAccessAllowed,
 } from './enterprise-access'
 import { type WorkspacePrincipal } from './project-access'
@@ -130,20 +131,19 @@ export async function resolveDeveloperCredentialPrincipal(
     directoryGroupMemberships,
   } = directoryPrincipal
   const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+    hasDirectoryDependentEnterpriseScope(compatibleRoleAssignments) ||
+    hasDirectoryDependentEnterpriseScope(compatibleGroupMappings)
   const enterpriseDirectory = needsProjectScopeQualification
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? await readEnterpriseScopeDirectory(
+        workspaceDependencies.projectDirectory,
         credential.workspaceId,
-        'ja',
-        true,
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleRoleAssignments, enterpriseDirectory)
     : compatibleRoleAssignments
   const qualifiedGroupMappings = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleGroupMappings, enterpriseDirectory)
     : compatibleGroupMappings
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
     qualifiedRoleAssignments.some((assignment) =>

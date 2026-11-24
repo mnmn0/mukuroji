@@ -29,6 +29,7 @@ import {
   type ProjectCharter,
   type ProjectCharterState,
   type ProjectLifecycleState,
+  type OrgStructure,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -56,6 +57,7 @@ import {
 import {
   DynamoDbProjectDirectoryClient,
   ProjectDataError,
+  readReplaceOrgStructureCommand,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
@@ -1654,6 +1656,8 @@ function configureFakeProjectClients(
     canonicalProjectIssueSchedules?: Readonly<Record<string, WorkItemSchedule>>
     /** Project quick access fake が最初に返す viewer preference です。 */
     projectQuickAccessPreference?: ProjectQuickAccessPreferences
+    /** OrgUnit structure the fake directory returns first. */
+    orgStructure?: OrgStructure
     /** Team Issue fake が返す canonical Work Item 数です。 */
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
@@ -1675,6 +1679,8 @@ function configureFakeProjectClients(
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
   let memberPreferences: MemberPreferences = { revision: 0 }
+  let orgStructure: OrgStructure = options.orgStructure ??
+    { orgUnits: [], teamAssignments: [], revision: 0 }
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
@@ -1870,6 +1876,11 @@ function configureFakeProjectClients(
       directoryId: string
       input: UpdateMemberPreferencesInput
       memberKey: string
+    }>,
+    orgStructureReplacements: [] as Array<{
+      directoryId: string
+      input: unknown
+      authorizationConditionCheckCount: number
     }>,
     userLists: [] as Array<{
       directoryId?: string
@@ -2393,6 +2404,27 @@ function configureFakeProjectClients(
       },
       async getMemberPreferences() {
         return { ...memberPreferences }
+      },
+      async getOrgStructure() {
+        return orgStructure
+      },
+      async replaceOrgStructure(directoryId, input, _auditContext, authorizationConditionChecks = []) {
+        calls.orgStructureReplacements.push({
+          directoryId,
+          input,
+          authorizationConditionCheckCount: authorizationConditionChecks.length,
+        })
+        const command = readReplaceOrgStructureCommand(input)
+        if (command.expectedRevision !== orgStructure.revision) {
+          throw new ProjectDataError(409, 'OrgStructureConflict', 'The OrgUnit structure changed.')
+        }
+        orgStructure = {
+          orgUnits: command.orgUnits,
+          teamAssignments: command.teamAssignments,
+          revision: command.expectedRevision + 1,
+          updatedAt: '2026-11-24T00:00:00.000Z',
+        }
+        return orgStructure
       },
       async replaceMemberPreferences(directoryId, memberKey, input) {
         calls.memberPreferencesReplacements.push({ directoryId, input: { ...input }, memberKey })

@@ -70,6 +70,7 @@ import {
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type DirectoryAdministrationResponse,
   type MemberPreferences,
+  type OrgStructure,
   type MemberPreferenceValues,
   type ProjectCharter,
   type ProjectCharterState,
@@ -92,6 +93,18 @@ import {
   PLANNING_STORAGE_SCHEMA_VERSION,
 } from '../../../planning'
 import { createDirectoryResourceId } from '../../domain/resource-id'
+import {
+  EMPTY_ORG_STRUCTURE,
+  listUnknownOrgStructureTeamIds,
+  readReplaceOrgStructureCommand,
+  readStoredOrgStructure,
+} from '../../domain/org-structure'
+import {
+  createOrgStructureItem,
+  createOrgStructureKey,
+  isOrgStructureItem,
+  ORG_STRUCTURE_ENTRY_TYPE,
+} from './org-structure-item'
 import {
   createEmptyProjectCharter,
   isStoredProjectCharter,
@@ -1222,6 +1235,29 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<ProjectCharterState>
+  /**
+   * Reads the OrgUnit tree and Team memberships of a Workspace.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param consistentRead - Whether to read the row strongly consistently.
+   * @returns The structure, empty with revision 0 before the first save.
+   */
+  getOrgStructure(directoryId: string, consistentRead?: boolean): Promise<OrgStructure>
+  /**
+   * Replaces the OrgUnit tree and Team memberships of a Workspace with compare-and-swap.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized at commit.
+   * @returns The committed structure.
+   */
+  replaceOrgStructure(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<OrgStructure>
 }
 
 /**
@@ -1504,6 +1540,118 @@ export class DynamoDbProjectDirectoryClient {
         },
       },
     }
+  }
+
+  /**
+   * Reads the OrgUnit tree and Team memberships of a Workspace from its sidecar row.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param consistentRead - Whether to read the row strongly consistently.
+   * @returns The structure, empty with revision 0 before the first save.
+   */
+  async getOrgStructure(directoryId: string, consistentRead = false): Promise<OrgStructure> {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: consistentRead,
+        Key: createOrgStructureKey(directoryId),
+      }))
+      if (response.Item === undefined) return EMPTY_ORG_STRUCTURE
+      if (!isOrgStructureItem(response.Item, directoryId)) {
+        throw new ProjectDataError(503, 'OrgStructureUnavailable', 'The stored OrgUnit structure is invalid.')
+      }
+      return readStoredOrgStructure(response.Item)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces the OrgUnit tree and Team memberships of a Workspace.
+   *
+   * Every Team named must exist in the Workspace, archived Teams included. The row is written
+   * only when its stored revision still equals the expected one, together with the audit event
+   * and the caller's authorization guards.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized at commit.
+   * @returns The committed structure.
+   */
+  async replaceOrgStructure(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<OrgStructure> {
+    const command = readReplaceOrgStructureCommand(input)
+    await this.ensureLocalAuditTable()
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const teamIds = new Set(items.flatMap((item) => item.entryType === 'team' ? [item.teamId] : []))
+    if (listUnknownOrgStructureTeamIds(command.teamAssignments, teamIds).length > 0) {
+      throw new ProjectDataError(409, 'OrgStructureTeamNotFound', 'A Team in the OrgUnit structure does not exist.')
+    }
+    const current = await this.getOrgStructure(directoryId, true)
+    if (current.revision !== command.expectedRevision) {
+      throw createOrgStructureConflictError()
+    }
+    const next: OrgStructure = {
+      orgUnits: command.orgUnits,
+      teamAssignments: command.teamAssignments,
+      revision: command.expectedRevision + 1,
+      updatedAt: new Date().toISOString(),
+    }
+    const isFirstSave = command.expectedRevision === 0
+    try {
+      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: createOrgStructureItem(directoryId, next),
+            ConditionExpression: isFirstSave
+              ? 'attribute_not_exists(entryKey)'
+              : '#revision = :expectedRevision AND #entryType = :entryType',
+            ...(isFirstSave
+              ? {}
+              : {
+                  ExpressionAttributeNames: { '#revision': 'revision', '#entryType': 'entryType' },
+                  ExpressionAttributeValues: {
+                    ':expectedRevision': command.expectedRevision,
+                    ':entryType': ORG_STRUCTURE_ENTRY_TYPE,
+                  },
+                }),
+          },
+        },
+        ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+          directoryId,
+          eventType: 'org-structure.updated',
+          entityType: 'org-structure',
+          entityId: 'org-structure',
+          action: 'updated',
+          // Counts keep the event small; a full structure can exceed the audit row size.
+          changes: createAuditFieldChanges(
+            {
+              orgUnitCount: current.orgUnits.length,
+              teamAssignmentCount: current.teamAssignments.length,
+            },
+            {
+              orgUnitCount: next.orgUnits.length,
+              teamAssignmentCount: next.teamAssignments.length,
+            },
+            ['orgUnitCount', 'teamAssignmentCount'],
+          ),
+          metadata: { revision: next.revision },
+        }),
+      ])
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'ConditionalCheckFailedException') {
+        throw createOrgStructureConflictError()
+      }
+      throw error
+    }
+    return next
   }
 
   /**
@@ -5404,6 +5552,15 @@ function createProjectCharterRevisionConflictError() {
     'ProjectCharterRevisionConflict',
     'The Project charter changed. Reload and try again.',
   )
+}
+
+/**
+ * Creates the conflict answered when the OrgUnit structure changed since the caller read it.
+ *
+ * @returns The 409 error with code `OrgStructureConflict`.
+ */
+function createOrgStructureConflictError() {
+  return new ProjectDataError(409, 'OrgStructureConflict', 'The OrgUnit structure changed. Reload and try again.')
 }
 
 function createProjectDataConflictError() {

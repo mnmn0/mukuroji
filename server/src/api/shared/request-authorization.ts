@@ -50,11 +50,12 @@ import {
   type EnterpriseRequestAccessInput,
   type EnterpriseTeamAccess,
   getVerifiedEnterpriseAuthenticationMethods,
-  hasUnqualifiedEnterpriseProjectScope,
+  hasDirectoryDependentEnterpriseScope,
   isEnterpriseSsoConfigured,
   isEnterpriseExternalMember,
   normalizeEnterpriseEmailDomain,
-  qualifyEnterpriseProjectScopes,
+  readEnterpriseScopeDirectory,
+  resolveEnterpriseDirectoryScopes,
   readCognitoAuthenticationMethods,
   readStableEnterpriseServiceAccountSnapshot,
   requireEnterpriseCognitoSsoAppClientConfiguration,
@@ -751,6 +752,10 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/projects/quick-access',
     permission: 'projects.read',
   },
+  // Replacing the OrgUnit structure decides which Teams an OrgUnit role reaches, so it is
+  // Workspace administration and never reachable through an OrgUnit or Team scoped role.
+  { method: 'PUT', pathPattern: '/api/org-structure', permission: 'workspace.manage' },
+  { method: 'GET', pathPattern: '/api/org-structure', permission: 'workspace.read' },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
   // Workload and personal time across Teams: each Team is then checked like its Team route, so a
@@ -1031,20 +1036,19 @@ export async function authenticateWorkspacePrincipal(
     directoryGroupMemberships,
   } = directoryPrincipal
   const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+    hasDirectoryDependentEnterpriseScope(compatibleRoleAssignments) ||
+    hasDirectoryDependentEnterpriseScope(compatibleGroupMappings)
   const enterpriseDirectory = needsProjectScopeQualification
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? await readEnterpriseScopeDirectory(
+        workspaceDependencies.projectDirectory,
         principal.directoryId,
-        'ja',
-        true,
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleRoleAssignments, enterpriseDirectory)
     : compatibleRoleAssignments
   const qualifiedGroupMappings = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleGroupMappings, enterpriseDirectory)
     : compatibleGroupMappings
   const requiredPermissions = context
     ? resolveRoutePermissions(
@@ -1322,20 +1326,19 @@ async function authenticateEnterpriseServiceAccount(
         },
       ]
       const needsProjectScopeQualification =
-        hasUnqualifiedEnterpriseProjectScope(serviceAccountAssignments) ||
-        hasUnqualifiedEnterpriseProjectScope(snapshot.groupMappings)
+        hasDirectoryDependentEnterpriseScope(serviceAccountAssignments) ||
+        hasDirectoryDependentEnterpriseScope(snapshot.groupMappings)
       const enterpriseDirectory = needsProjectScopeQualification
-        ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        ? await readEnterpriseScopeDirectory(
+            workspaceDependencies.projectDirectory,
             workspaceId,
-            'ja',
-            true,
           )
         : undefined
       const qualifiedServiceAccountAssignments = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(serviceAccountAssignments, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(serviceAccountAssignments, enterpriseDirectory)
         : serviceAccountAssignments
       const qualifiedGroupMappings = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(snapshot.groupMappings, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(snapshot.groupMappings, enterpriseDirectory)
         : snapshot.groupMappings
       const enterpriseAuthorizationEvaluation = {
         principal: serviceAccountPrincipal,

@@ -4,6 +4,8 @@ import {
   type EnterpriseIdentitySnapshot,
   type EnterprisePermissionId,
   type EnterpriseRoleScope,
+  listOrgUnitTeamIds,
+  type OrgStructure,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import { type AppDependencies } from '../../app/composition/app-dependencies'
@@ -14,6 +16,7 @@ import {
 } from '../../modules/authentication'
 import {
   type ProjectAccessEntry,
+  type ProjectDirectoryClient,
   type ProjectDirectoryResponse,
   type ProjectRole,
 } from '../../modules/directory'
@@ -556,6 +559,76 @@ export function hasUnqualifiedEnterpriseProjectScope(
   return entries.some((entry) =>
     entry.scope.kind === 'project' && entry.scope.parentTeamId === undefined,
   )
+}
+
+/** Directory state that resolves Enterprise scopes naming a Project or an OrgUnit. */
+export type EnterpriseScopeDirectory = ProjectDirectoryResponse & {
+  /** OrgUnit tree and Team memberships. Without it, OrgUnit scopes grant nothing. */
+  orgStructure?: Pick<OrgStructure, 'orgUnits' | 'teamAssignments'>
+}
+
+/**
+ * Returns whether any Enterprise scope can only be evaluated with the current directory: a
+ * Project scope without its owner Team, or an OrgUnit scope.
+ *
+ * @param entries - Assignment or group-mapping records carrying an Enterprise scope.
+ * @returns Whether the caller must read {@link readEnterpriseScopeDirectory} first.
+ */
+export function hasDirectoryDependentEnterpriseScope(
+  entries: readonly { scope: EnterpriseRoleScope }[],
+) {
+  return hasUnqualifiedEnterpriseProjectScope(entries) ||
+    entries.some((entry) => entry.scope.kind === 'org-unit')
+}
+
+/**
+ * Reads the active Project Directory and the OrgUnit structure strongly consistently, for
+ * resolving Enterprise scopes.
+ *
+ * @param projectDirectory - Project Directory port.
+ * @param workspaceId - Workspace whose directory is read.
+ * @returns The directory with its OrgUnit structure.
+ */
+export async function readEnterpriseScopeDirectory(
+  projectDirectory: Pick<ProjectDirectoryClient, 'getProjectDirectory' | 'getOrgStructure'>,
+  workspaceId: string,
+): Promise<EnterpriseScopeDirectory> {
+  const [directory, orgStructure] = await Promise.all([
+    projectDirectory.getProjectDirectory(workspaceId, 'ja', true),
+    projectDirectory.getOrgStructure(workspaceId, true),
+  ])
+  return { ...directory, orgStructure }
+}
+
+/**
+ * Resolves the Enterprise scopes that depend on the current directory.
+ *
+ * Project scopes are qualified by their unique owner Team, as in
+ * {@link qualifyEnterpriseProjectScopes}. Each OrgUnit scope is replaced by one Team scope for
+ * every active Team that belongs to the OrgUnit or to an OrgUnit below it (ADR 0097). An OrgUnit
+ * scope without a structure, for an unknown OrgUnit, or with no active Team is dropped, so it
+ * grants nothing.
+ *
+ * @param entries - Assignment or group-mapping records carrying an Enterprise scope.
+ * @param directory - Current active directory with its OrgUnit structure.
+ * @returns Entries whose scopes the authorization evaluator can match.
+ */
+export function resolveEnterpriseDirectoryScopes<T extends { scope: EnterpriseRoleScope }>(
+  entries: readonly T[],
+  directory: EnterpriseScopeDirectory,
+): T[] {
+  const activeTeamIds = new Set(directory.teams.map((team) => team.id))
+  return qualifyEnterpriseProjectScopes(entries, directory).flatMap((entry) => {
+    if (entry.scope.kind !== 'org-unit') return [entry]
+    const orgUnitId = entry.scope.targetId
+    if (!directory.orgStructure || orgUnitId === undefined) return []
+    return listOrgUnitTeamIds(directory.orgStructure, orgUnitId)
+      .filter((teamId) => activeTeamIds.has(teamId))
+      .map((teamId) => ({
+        ...entry,
+        scope: { workspaceId: entry.scope.workspaceId, kind: 'team' as const, targetId: teamId },
+      }))
+  })
 }
 
 function readAuthenticationMethods(claims: CognitoAccessTokenClaims | undefined) {
