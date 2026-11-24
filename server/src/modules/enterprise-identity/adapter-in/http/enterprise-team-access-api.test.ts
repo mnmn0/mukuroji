@@ -4,6 +4,7 @@ import {
 import {
   InMemoryEnterpriseIdentityClient,
 } from '../../enterprise-identity'
+import { InMemoryPlanningClient } from '../../../planning/planning'
 import type {
   EnterprisePermissionId,
 } from '@mukuroji/contracts'
@@ -525,5 +526,35 @@ test('does not offer or allow a Work Item key prefix change without Team teams.m
       body: JSON.stringify({ keyPrefix: 'CORE', expectedKeyPrefix: null }),
     })
     expect(response.status).toBe(403)
+  })
+})
+
+test('does not move the Project update owner for a charter editor without planning.write', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const planning = new InMemoryPlanningClient()
+    await planning.configureUpdateCadence('user#demo@example.com', {
+      target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'Asia/Tokyo',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 0,
+    }, { workItems: [] })
+
+    const charterEditor = await configureEnterpriseTeamAccess(
+      ['teams.read', 'projects.read', 'projects.manage', 'planning.read'],
+    )
+    setTestAppDependencies({ planning })
+    const saved = await app.request('/api/teams/core-team/projects/refero/charter', {
+      method: 'PUT',
+      headers: { Authorization: charterEditor, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 0, charter: { ownerUserId: 'sato@example.com' } }),
+    })
+
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ updateOwnerSync: 'not-permitted' })
   })
 })

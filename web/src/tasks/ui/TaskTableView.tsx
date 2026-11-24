@@ -22,6 +22,8 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import { TaskViewPrintButtons } from './TaskViewPrintButtons'
+import { TaskViewExportButtons } from './TaskViewExportButtons'
+import { createTaskTableExportTable } from '../model/taskTableExport'
 import { useTaskViewTablePrint } from '../../shared/ui/viewPrint'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
@@ -131,6 +133,8 @@ export type TaskTableViewProps = {
   bulkTaskActionRequest?: BulkOperationTaskActionRequest
   /** Stable key epoch retained after the current canonical action request is consumed. */
   bulkTaskActionEpoch?: number
+  /** File name of an export of the table, without the date and extension; defaults to the Project ID. */
+  exportFileBaseName?: string
   /** Fallback configuration used for a single-team project view. */
   configuration?: WorkItemConfiguration
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
@@ -287,6 +291,7 @@ export function TaskTableView({
   canMutateTask,
   configurationsByTeam,
   dependencySummaries = {},
+  exportFileBaseName,
   locale,
   personOptions = [],
   personLabels,
@@ -784,7 +789,35 @@ export function TaskTableView({
           ) : <span />}
           <div className="flex flex-wrap items-center justify-end gap-2">
             {hasTaskRows ? (
-              <TaskViewPrintButtons onPrint={printTable} t={t} testId="task-table-print" />
+              <>
+                <TaskViewExportButtons
+                  createTable={() => createTaskTableExportTable(
+                    displayOrderedTasks,
+                    tableColumnPlacements.map((placement) => placement.column.field),
+                    {
+                      columnLabel: (field) => resolveTaskTableColumnLabel(
+                        field,
+                        configurationsByTeam,
+                        configuration,
+                        t,
+                      ),
+                      configurationFor: (task) => resolveProjectTaskConfiguration(
+                        task,
+                        configurationsByTeam,
+                        configuration,
+                      ),
+                      ...(scheduleBaselineFor ? { scheduleBaselineFor } : {}),
+                      locale,
+                      personLabels,
+                      t,
+                    },
+                  )}
+                  fileBaseName={exportFileBaseName ?? projectId}
+                  t={t}
+                  testId="task-table-export"
+                />
+                <TaskViewPrintButtons onPrint={printTable} t={t} testId="task-table-print" />
+              </>
             ) : null}
             <span className="text-fg-5f6874" data-testid="tasks-count">
               {t('tasks.count').replace('{count}', String(tasks.length))}

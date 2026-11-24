@@ -51,3 +51,28 @@ export const Conflict: Story = { args: { mutationFailed: true } }
 export const Denied: Story = { args: { response: undefined, failed: true, denied: true } }
 /** Guests can read authorized content without mutation controls. */
 export const Guest: Story = { args: { canMarkRead: false } }
+
+/** A long reviewer identifier used to check that the acknowledgement badge wraps at phone width. */
+const longReviewerMemberKey = 'engineering-department-section-manager.long-name@example-corporation.co.jp'
+
+/** Latest reports acknowledged by the reviewer, one with a long reviewer identifier, in Japanese at phone width. */
+export const AcknowledgedReports: Story = {
+  args: {
+    locale: 'ja',
+    t: createTranslator('ja'),
+    response: {
+      ...updateFeedFixture,
+      entries: updateFeedFixture.entries.map((entry, index) => index === 0
+        ? { ...entry, acknowledgement: { memberKey: longReviewerMemberKey, acknowledgedAt: '2026-07-17T00:00:00.000Z' } }
+        : index === 1
+        ? { ...entry, acknowledgement: { memberKey: 'manager@example.com', acknowledgedAt: '2026-07-16T00:00:00.000Z' } }
+        : entry),
+    },
+  },
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const badges = within(canvasElement).getAllByTestId('update-feed-acknowledged')
+    await expect(badges[0]).toHaveTextContent(`${longReviewerMemberKey} が確認済み`)
+    await expect(canvasElement.scrollWidth).toBeLessThanOrEqual(canvasElement.clientWidth + 1)
+  },
+}

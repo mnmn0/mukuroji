@@ -33,6 +33,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
+import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
@@ -59,6 +60,59 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Replaces the tenant profile with an in-memory one, since test Workspaces have no tenant table.
+ *
+ * @param saved - Whether the Workspace already has a profile.
+ * @returns The `workspaceId:ownerMemberKey` pairs tenant initialization ran for.
+ */
+function useTenantProfileStub(saved: boolean): string[] {
+  const initialized: string[] = []
+  let profileSaved = saved
+  const workspace = getTestAppDependencies().workspace
+  const snapshot = (workspaceId: string, ownerMemberKey: string) =>
+    createDefaultTenantAdministrationSnapshot(workspaceId, ownerMemberKey, '2026-11-01T00:00:00.000Z')
+  setTestAppDependencies({
+    tenantLifecycleEnforcement: workspace.tenantLifecycleEnforcement,
+    tenantAdministration: new Proxy(workspace.tenantAdministration, {
+      get(target, property, receiver) {
+        if (property === 'getProfile') {
+          return async (workspaceId: string) => profileSaved ? snapshot(workspaceId, 'owner').profile : undefined
+        }
+        if (property === 'ensureSnapshot') {
+          return async (workspaceId: string, ownerMemberKey: string) => {
+            initialized.push(`${workspaceId}:${ownerMemberKey}`)
+            profileSaved = true
+            return snapshot(workspaceId, ownerMemberKey)
+          }
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+  })
+  return initialized
+}
+
+test('opting into Inbox digests creates a missing tenant profile once, from the Workspace owner', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: true, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 1, preferences: { ...preferences, enabled: false } })).status).toBe(200)
+  expect(initialized).toHaveLength(1)
+  expect(initialized[0]).toEndWith(':demo@example.com')
+})
+
+test('withdrawing Inbox consent never initializes the tenant profile', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect(initialized).toEqual([])
+})
+
 test('manual digest preferences and preview use authenticated identity and reject guests', async () => {
   configureFakeProjectClients(true)
   const path = '/api/planning/update-feed/digest'
@@ -81,6 +135,7 @@ test('manual digest preferences and preview use authenticated identity and rejec
 
 test('both digest settings bind owned custom definitions and reject deleted selections without reflecting IDs', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const savedPath = '/api/planning/update-feed/saved'
   const feed: SavedUpdateFeed = { id: 'private-custom-id', name: 'Personal filter', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
   expect((await planningApiRequest(savedPath, 'PUT', { expectedRevision: 0, feeds: [feed] })).status).toBe(200)
@@ -101,6 +156,7 @@ test('both digest settings bind owned custom definitions and reject deleted sele
 
 test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const path = '/api/planning/update-feed/digest/inbox'
   expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
   const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, workspaceId: 'attacker', memberKey: 'attacker' }
@@ -115,6 +171,7 @@ test('Inbox consent defaults off, stays separate from previews, ignores client i
 
 test('Inbox metadata HTTP boundary preserves stable storage failure categories without private details', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
   let failure: unknown
   let item: Record<string, unknown> | undefined
@@ -997,6 +1054,84 @@ test('reports a changed authorization fence on a Milestone watch as a conflict',
   }
 })
 
+test('reads one Project, one Team, or one Portfolio of Planning', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'refero', role: 'viewer' },
+      { teamId: 'core-team', projectId: 'private-project', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const project = await planningApiRequest('/api/planning?teamId=core-team&projectId=refero')
+  expect(project.status).toBe(200)
+  const projectBody: PlanningSnapshot = await project.json()
+  expect(projectBody.readScope).toEqual({ type: 'project', teamId: 'core-team', projectId: 'refero' })
+  expect(projectBody.entities.map((entity) => entity.id)).toEqual([
+    'refero-milestone',
+    'refero-phase',
+    'team-roadmap',
+    'ws-portfolio',
+    'ws-roadmap',
+  ])
+  // Dependencies to the other Project's entities belong to the Team and Workspace reads.
+  expect(projectBody.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+  expect(projectBody.capacity.liveRowCount).toBeGreaterThan(0)
+
+  const team = await planningApiRequest('/api/planning?teamId=core-team')
+  expect(team.status).toBe(200)
+  const teamBody: PlanningSnapshot = await team.json()
+  expect(teamBody.entities.map((entity) => entity.id)).toContain('private-milestone')
+  expect(teamBody.dependencies.map((dependency) => dependency.id)).toContain('private-phase-to-refero')
+
+  const portfolio = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+  expect(portfolio.status).toBe(200)
+  expect((await portfolio.json() as PlanningSnapshot).readScope)
+    .toEqual({ type: 'portfolio', portfolioId: 'ws-portfolio' })
+
+  for (const path of [
+    '/api/planning?projectId=refero',
+    '/api/planning?teamId=core-team&teamId=other',
+    '/api/planning?portfolioId=ws-portfolio&teamId=core-team',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'PlanningReadScopeInvalid' })
+  }
+  for (const path of [
+    '/api/planning?portfolioId=ws-roadmap',
+    '/api/planning?portfolioId=missing',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+  }
+})
+
+test('answers an unreadable Portfolio like a missing one', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+})
+
 test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',
@@ -1310,6 +1445,97 @@ test('records Planning entity changes in audit and returns them as entity activi
     expect(isRecord(teamBody) && Array.isArray(teamBody.events)
       ? teamBody.events.map((event) => isRecord(event) ? event.eventType : undefined)
       : undefined).toEqual(['planning-entity.restored', 'planning-entity.archived'])
+  })
+})
+
+test('records a dependency change on both Planning entities in the same transaction', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const events: AuditEventV1[] = []
+    /** Stores both audit writes a route-supplied dependency transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown>; rebaseSafe?: boolean } | undefined) => {
+      expect(transaction?.rebaseSafe).toBe(true)
+      return transaction && {
+        rebaseSafe: transaction.rebaseSafe,
+        /**
+         * Prepares the wrapped transaction and captures its audit events.
+         *
+         * @param result - Committed Planning mutation result.
+         * @returns The wrapped transaction's contribution.
+         */
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          const items = isRecord(contribution)
+            ? [contribution.transactWriteItem, ...(Array.isArray(contribution.additionalTransactWriteItems)
+                ? contribution.additionalTransactWriteItems
+                : [])]
+            : []
+          for (const item of items) {
+            if (isRecord(item) && isRecord(item.Put)) {
+              expect(item.Put.TableName).toBe('AuditEventsTable')
+              events.push(normalizeAuditEvent(item.Put.Item))
+            }
+          }
+          return contribution
+        },
+      }
+    }
+    const createDependency = planning.createDependency.bind(planning)
+    planning.createDependency = (workspaceId, input, state, transaction) =>
+      createDependency(workspaceId, input, state, record(transaction))
+    const deleteDependency = planning.deleteDependency.bind(planning)
+    planning.deleteDependency = (workspaceId, dependencyId, input, state, transaction) =>
+      deleteDependency(workspaceId, dependencyId, input, state, record(transaction))
+    setTestAppDependencies({ planning })
+
+    for (const [index, id] of ['audited-a', 'audited-b'].entries()) {
+      expect((await planningApiRequest('/api/planning/entities', 'POST', {
+        ...createServerAssignedPortfolioInput(index, id),
+        id,
+      })).status).toBe(201)
+    }
+    expect((await planningApiRequest('/api/planning/dependencies', 'POST', {
+      id: 'audited-dependency',
+      predecessorId: 'audited-a',
+      successorId: 'audited-b',
+      type: 'finish-to-start',
+      lagDays: 2,
+      expectedRevision: 2,
+    })).status).toBe(201)
+    expect((await planningApiRequest('/api/planning/dependencies/audited-dependency', 'DELETE', {
+      expectedRevision: 3,
+    })).status).toBe(200)
+
+    expect(events.map((event) => [event.eventType, event.entity.id])).toEqual([
+      ['planning-entity.dependency-added', 'audited-a'],
+      ['planning-entity.dependency-added', 'audited-b'],
+      ['planning-entity.dependency-removed', 'audited-a'],
+      ['planning-entity.dependency-removed', 'audited-b'],
+    ])
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(4)
+    expect(events[0]).toMatchObject({
+      action: 'dependency-added',
+      target: { type: 'planning-dependency', id: 'audited-dependency' },
+      summary: 'Added a successor dependency on portfolio: audited-a',
+      changes: [
+        { field: 'lagDays', after: 2 },
+        { field: 'type', after: 'finish-to-start' },
+      ],
+      metadata: {
+        actorMemberKey: 'demo@example.com',
+        dependencyRole: 'predecessor',
+        relatedEntityId: 'audited-b',
+        planningRevision: 3,
+      },
+    })
+    expect(events[3]).toMatchObject({
+      changes: [
+        { field: 'lagDays', before: 2 },
+        { field: 'type', before: 'finish-to-start' },
+      ],
+      metadata: { dependencyRole: 'successor', relatedEntityId: 'audited-a', planningRevision: 4 },
+    })
   })
 })
 
@@ -2262,6 +2488,94 @@ test('does not fall back to legacy ACLs for an Enterprise-managed recipient', as
   expect(await response.json()).toMatchObject({
     code: 'PlanningUpdateRecipientAccessDenied',
   })
+})
+
+test('requires the reviewer, including the fallback escalation recipient, to be able to acknowledge', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }],
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const scope: EnterpriseRoleAssignment['scope'] = {
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    targetId: 'refero',
+  }
+  const assignments: EnterpriseRoleAssignment[] = [
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'owner-project-member',
+      principalKind: 'member',
+      principalId: 'owner@example.com',
+      roleId: 'project:member',
+      scope,
+      source: 'direct',
+    },
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'lead-project-manager',
+      principalKind: 'member',
+      principalId: 'lead@example.com',
+      roleId: 'project:manager',
+      scope,
+      source: 'direct',
+    },
+    {
+      workspaceId: 'user#demo@example.com',
+      assignmentId: 'escalation-project-viewer',
+      principalKind: 'member',
+      principalId: 'escalation@example.com',
+      roleId: 'project:viewer',
+      scope,
+      source: 'direct',
+    },
+  ]
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => ({
+    ...(await readSnapshot(workspaceId)),
+    roleAssignments: assignments,
+  })
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+  })
+  const cadence = {
+    updateOwnerMemberKey: 'owner@example.com',
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'UTC',
+    nextDueAt: '2026-08-10T00:00:00.000Z',
+    reminderHoursBefore: 24,
+    escalationHoursAfter: 4,
+    escalationMemberKey: 'escalation@example.com',
+  }
+  const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+
+  const fallbackDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence,
+    expectedRevision: 0,
+  })
+  expect(fallbackDenied.status).toBe(409)
+  expect(await fallbackDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+
+  // Acknowledging posts an update comment, which needs Planning write; `project:member` lacks it.
+  const workItemOnlyReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, reviewerMemberKey: 'owner@example.com' },
+    expectedRevision: 0,
+  })
+  expect(workItemOnlyReviewer.status).toBe(409)
+
+  // A viewer may still receive escalations once a Planning writer reviews the updates.
+  const explicitReviewer = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, reviewerMemberKey: 'lead@example.com' },
+    expectedRevision: 0,
+  })
+  expect(explicitReviewer.status).toBe(200)
 })
 
 test('rejects guest recipients for Workspace-scoped Initiative cadence', async () => {
@@ -3988,4 +4302,250 @@ test('rejects a Work Item link when the Work Item changed after authorization', 
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'PlanningWorkItemChanged' })
   expect(putCalls).toBe(0)
+})
+
+test('publishes a Team update and lets only the cadence reviewer acknowledge it once', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    const { planning } = configurePlanningAnnotationIdempotency(
+      new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+    )
+    const contributions: unknown[] = []
+    /** Records the contribution a route-supplied transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown> } | undefined) =>
+      transaction && {
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          contributions.push(contribution)
+          return contribution
+        },
+      }
+    const publish = planning.publishUpdate.bind(planning)
+    planning.publishUpdate = (workspaceId, input, author, state, checks, transaction) =>
+      publish(workspaceId, input, author, state, checks, record(transaction))
+    const comment = planning.createUpdateComment.bind(planning)
+    planning.createUpdateComment = (workspaceId, input, author, transaction, checks) =>
+      comment(workspaceId, input, author, record(transaction), checks)
+    const target = { type: 'team', teamId: 'core-team' }
+    /** Configures the Team cadence with the given reviewer at one Planning revision. */
+    const configure = async (reviewerMemberKey: string, expectedRevision: number) =>
+      planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+        target,
+        cadence: {
+          updateOwnerMemberKey: 'demo@example.com',
+          cadence: { unit: 'week', count: 1 },
+          timeZone: 'Asia/Tokyo',
+          nextDueAt: '2026-08-10T00:00:00.000Z',
+          reminderHoursBefore: 24,
+          reviewerMemberKey,
+        },
+        expectedRevision,
+      })
+    const configured = await configure('lead@example.com', 0)
+    expect(configured.status).toBe(200)
+    expect(await configured.json()).toMatchObject({
+      updateTarget: {
+        target,
+        cadence: { reviewerMemberKey: 'lead@example.com' },
+        updateState: 'missing',
+      },
+    })
+
+    const published = await planningApiRequest('/api/planning/updates', 'POST', {
+      target,
+      id: 'team-update-1',
+      health: 'on-track',
+      risk: 'low',
+      summary: 'Shipped the weekly plan.',
+      riskSummary: '',
+      decisionSummary: '',
+      helpNeeded: '',
+      nextAction: 'Plan next week.',
+      evidence: [],
+      expectedRevision: 1,
+    })
+    expect(published.status).toBe(201)
+    expect(await published.json()).toMatchObject({
+      update: { target, version: 1, contextSnapshot: { scope: { teamId: 'core-team' } } },
+    })
+    expect(contributions[0]).toMatchObject({
+      transactWriteItem: {
+        Put: {
+          Item: {
+            eventType: 'planning-update.published',
+            metadata: {
+              planningTargetType: 'team',
+              planningTargetId: 'core-team',
+              planningTargetRecordKey: 'UPDATE_TARGET#TEAM#core-team',
+              teamId: 'core-team',
+              deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+              notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'update-reviewer' }],
+            },
+          },
+        },
+      },
+    })
+
+    const query = '?targetType=team&teamId=core-team'
+    const notReviewer = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-1', body: '確認しました', acknowledgement: true },
+      'team-ack-request-1',
+    )
+    expect(notReviewer.status).toBe(403)
+    expect(await notReviewer.json()).toMatchObject({ code: 'PlanningUpdateAcknowledgementForbidden' })
+    const invalidFlag = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-1', body: '確認しました', acknowledgement: false },
+      'team-ack-request-2',
+    )
+    expect(invalidFlag.status).toBe(400)
+
+    expect((await configure('demo@example.com', 2)).status).toBe(200)
+    const acknowledged = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(acknowledged.status).toBe(201)
+    expect(await acknowledged.json()).toMatchObject({
+      comment: { id: 'team-ack-2', acknowledgement: true, authorMemberKey: 'demo@example.com' },
+    })
+    expect(contributions.at(-1)).toMatchObject({
+      additionalTransactWriteItems: [{
+        Put: {
+          Item: {
+            eventType: 'planning-update.commented',
+            action: 'acknowledged',
+            metadata: {
+              planningTargetType: 'team',
+              notificationTitle: 'Acknowledged: 確認しました',
+              notificationCandidates: [{ memberKey: 'demo@example.com', reason: 'update-author' }],
+            },
+          },
+        },
+      }],
+    })
+    const replay = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(replay.status).toBe(201)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    const duplicate = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-3', body: 'もう一度', acknowledgement: true },
+      'team-ack-request-4',
+    )
+    expect(duplicate.status).toBe(409)
+    expect(await duplicate.json()).toMatchObject({ code: 'PlanningUpdateAlreadyAcknowledged' })
+
+    // A lost response still replays after the reviewer changes; only new acknowledgements are refused.
+    expect((await configure('lead@example.com', 3)).status).toBe(200)
+    const replayAfterReviewerChange = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(replayAfterReviewerChange.status).toBe(201)
+    expect(replayAfterReviewerChange.headers.get('Idempotency-Replayed')).toBe('true')
+    const formerReviewer = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-4', body: 'もう一度', acknowledgement: true },
+      'team-ack-request-5',
+    )
+    expect(formerReviewer.status).toBe(403)
+    expect(await formerReviewer.json()).toMatchObject({ code: 'PlanningUpdateAcknowledgementForbidden' })
+
+    const history = await planningApiRequest(`/api/planning/updates${query}`)
+    expect(history.status).toBe(200)
+    expect(await history.json()).toMatchObject({
+      updates: [{
+        version: 1,
+        acknowledgement: {
+          memberKey: 'demo@example.com',
+          commentId: 'team-ack-2',
+          acknowledgedAt: '2026-08-07T00:00:00.000Z',
+        },
+      }],
+    })
+  })
+})
+
+test('returns the Workspace update template and rejects a publish that leaves a required field empty', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  const profile = {
+    ...createDefaultTenantAdministrationSnapshot(
+      'user#demo@example.com',
+      'demo@example.com',
+      '2026-08-01T00:00:00.000Z',
+    ).profile,
+    planningUpdateTemplate: {
+      requiredFields: ['riskSummary' as const, 'evidence' as const],
+      template: { summary: '## This week\n' },
+    },
+  }
+  setTestAppDependencies({
+    planning,
+    tenantAdministration: new Proxy(getTestAppDependencies().workspace.tenantAdministration, {
+      get(target, property, receiver) {
+        if (property === 'getProfile') return async () => profile
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    tenantLifecycleEnforcement: { async assertActive() {} },
+  })
+  const template = await planningApiRequest('/api/planning/updates/template')
+  expect(template.status).toBe(200)
+  expect(await template.json()).toEqual({ settings: profile.planningUpdateTemplate })
+
+  const target = { type: 'team', teamId: 'core-team' }
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  expect(configured.status).toBe(200)
+  const update = {
+    target,
+    id: 'team-update-1',
+    health: 'on-track',
+    risk: 'low',
+    summary: 'Shipped the weekly plan.',
+    riskSummary: '  ',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 1,
+  }
+  const missing = await planningApiRequest('/api/planning/updates', 'POST', update)
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toMatchObject({
+    code: 'PlanningUpdateRequiredFieldsMissing',
+    message: 'This Workspace requires these update fields: riskSummary, evidence.',
+  })
+  expect((await planning.listUpdates('user#demo@example.com', { target: { type: 'team', teamId: 'core-team' } })).updates).toEqual([])
+
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    ...update,
+    riskSummary: 'Vendor may slip.',
+    evidence: [{ type: 'link', url: 'https://example.com/plan', title: 'Plan' }],
+  })
+  expect(published.status).toBe(201)
 })

@@ -144,6 +144,11 @@ export interface StackParameters {
    * schedule and the API both read; blank keeps the built-in days.
    */
   readonly notificationReminderDefaultDays: cdk.CfnParameter;
+  /**
+   * `true` lets the scheduled-jobs Lambda deliver the daily / weekly Update digests that members
+   * opted into; `false` keeps saved consent but delivers nothing.
+   */
+  readonly inboxDigestDeliveryEnabled: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
   readonly webPushVapidPublicKey: cdk.CfnParameter;
   /** Verified SES sender address for notification Email; empty disables Email delivery. */
@@ -595,6 +600,14 @@ export function buildStackParameters(
       'Default notification reminder days as a JSON object, e.g. {"dueSoonDays":5,"timesheetReminderDays":14}; '
       + 'blank keeps 3 / 7 / 7 / 7 / 7 days. Teams and members override it.',
   });
+  const inboxDigestDeliveryEnabled = new cdk.CfnParameter(stack, 'InboxDigestDeliveryEnabled', {
+    type: 'String',
+    default: 'true',
+    allowedValues: ['true', 'false'],
+    description:
+      'Delivers the daily / weekly Update digests members opted into to their Inbox; '
+      + 'false keeps their settings and delivers nothing.',
+  });
   const webPushVapidPublicKey = new cdk.CfnParameter(stack, 'WebPushVapidPublicKey', {
     type: 'String',
     default: '',
@@ -899,6 +912,7 @@ export function buildStackParameters(
     aiAssistanceAnyProviderConfigured,
     requestRateLimitPerHour,
     notificationReminderDefaultDays,
+    inboxDigestDeliveryEnabled,
     webPushVapidPublicKey,
     notificationEmailSender,
     monthlyCostBudgetUsd,

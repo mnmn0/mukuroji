@@ -69,6 +69,8 @@ function createFixture(canManageRates = false, idempotency?: TimeTrackingIdempot
     listTimeTrackingTeams: async () => [{ teamId: 'team-1', name: 'Team 1' }],
     canManageRates: async () => canManageRates,
     canManageWholeTeam: async () => canManageRates,
+    canManageWorkspacePeriods: async () => false,
+    listWorkspaceTeams: async () => [],
     getAccessibleProjectIds: async () => undefined,
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
@@ -706,6 +708,8 @@ function createProjectFixture() {
         : [{ teamId: 'team-1', name: 'Team 1' }, { teamId: 'team-2', name: 'Team 2' }],
     canManageRates: async (principal) => projectsWith(principal.userKey, 'manager').size > 0,
     canManageWholeTeam: async () => false,
+    canManageWorkspacePeriods: async () => false,
+    listWorkspaceTeams: async () => [],
     getAccessibleProjectIds: async (principal) => projectsWith(principal.userKey, 'viewer'),
     getManagedProjectIds: async (principal) => projectsWith(principal.userKey, 'manager'),
     verifyProject: async (principal, _teamId, projectId, minimum) => {

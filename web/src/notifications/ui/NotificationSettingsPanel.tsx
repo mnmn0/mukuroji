@@ -8,6 +8,7 @@ import type {
 } from '../api'
 import type { NotificationPreferencesController } from '../mutations/useNotifications'
 import { createReminderDaysDraft, readReminderDaysDraft } from '../model/reminderDays'
+import { resolveQuietHoursTimeZone } from '../model/quietHoursTimeZone'
 import { NotificationRoutingFields, type NotificationMuteTeam } from './NotificationRoutingFields'
 import { ReminderDaysFields } from './ReminderDaysFields'
 
@@ -28,6 +29,11 @@ export type NotificationSettingsPanelProps = {
   controller: NotificationPreferencesController
   /** Teams and Projects the member can mute; omitted while unknown. */
   muteTargets?: readonly NotificationMuteTeam[]
+  /**
+   * Member's display time zone, filled into quiet hours when they are turned on before the member
+   * has saved any notification settings, instead of the UTC default.
+   */
+  memberTimeZone?: string
 }
 
 /**
@@ -36,6 +42,7 @@ export type NotificationSettingsPanelProps = {
 export function NotificationSettingsPanel({
   controller,
   locale,
+  memberTimeZone,
   muteTargets,
 }: NotificationSettingsPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -215,6 +222,12 @@ export function NotificationSettingsPanel({
                 quietHours: {
                   ...current.quietHours,
                   enabled: event.target.checked,
+                  timeZone: resolveQuietHoursTimeZone(
+                    current.quietHours.timeZone,
+                    event.target.checked,
+                    memberTimeZone,
+                    controller.preferences?.version === 0,
+                  ),
                 },
               } : current)}
             />

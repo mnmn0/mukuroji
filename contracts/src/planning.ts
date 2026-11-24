@@ -59,7 +59,7 @@ export type PlanningCadence = {
 /** Structured Planning update content の現行 version です。 */
 export const PLANNING_UPDATE_CONTENT_VERSION = 1 as const
 
-/** Project または Initiative の定期 update target です。 */
+/** Project、Team、または Initiative の定期 update target です。 */
 export type PlanningUpdateTarget =
   | {
       /** Directory project を target にする discriminator です。 */
@@ -74,6 +74,12 @@ export type PlanningUpdateTarget =
       type: 'initiative'
       /** Initiative の Planning entity ID です。 */
       entityId: string
+    }
+  | {
+      /** Team（課・グループ）単位の update を target にする discriminator です。 */
+      type: 'team'
+      /** Update を提出する Team ID です。 */
+      teamId: string
     }
 
 /** Project / Initiative update の提出 cadence と通知先です。 */
@@ -92,6 +98,37 @@ export type PlanningUpdateCadence = {
   escalationHoursAfter?: number
   /** Escalation 通知を受け取る Workspace member key です。 */
   escalationMemberKey?: string
+  /**
+   * 提出された update を確認する上長などの Workspace member key です。
+   * 省略時は `escalationMemberKey` が確認者を兼ねます。確認者だけが「確認済み」を記録できます。
+   */
+  reviewerMemberKey?: string
+}
+
+/**
+ * Resolves the member who acknowledges the updates of one cadence.
+ *
+ * An explicit reviewer wins. Without one, the escalation member reviews the updates, which keeps
+ * cadences saved before the reviewer field working as they did.
+ *
+ * @param cadence - Saved update cadence, if the target has one.
+ * @returns Lower-case reviewer member key, or undefined when nobody reviews the updates.
+ */
+export function resolvePlanningUpdateReviewerMemberKey(
+  cadence: Pick<PlanningUpdateCadence, 'reviewerMemberKey' | 'escalationMemberKey'> | undefined,
+): string | undefined {
+  const reviewer = (cadence?.reviewerMemberKey ?? cadence?.escalationMemberKey)?.trim().toLowerCase()
+  return reviewer ? reviewer : undefined
+}
+
+/** 確認者が immutable update に記録した「確認済み」です。 */
+export type PlanningUpdateAcknowledgement = {
+  /** 確認した Workspace member key です。 */
+  memberKey: string
+  /** 確認と同時に記録した update comment の ID です。 */
+  commentId: string
+  /** 確認日時の ISO 8601 timestamp です。 */
+  acknowledgedAt: string
 }
 
 /** Health とは独立して算出する update の鮮度状態です。 */
@@ -313,6 +350,11 @@ export type PlanningUpdate = {
   coveredDueAt: string
   /** Publish 日時の ISO 8601 timestamp です。 */
   createdAt: string
+  /**
+   * 確認者が記録した「確認済み」です。History の読み取り時に付与し、immutable row には
+   * 保存しません。
+   */
+  acknowledgement?: PlanningUpdateAcknowledgement
 }
 
 /** Planning graph snapshot に埋め込む latest update の bounded summary です。 */
@@ -520,6 +562,35 @@ export type PlanningCapacity = {
   warningByteCount: number
 }
 
+/**
+ * Planning snapshot を Workspace 全体ではなく一部の単位に絞って読むときの範囲です。
+ *
+ * - `team`: Workspace scope と、その Team と Team の Project の entity、Team の Work Item
+ * - `project`: Workspace scope、Team scope、その Project の entity と、Project の Work Item
+ * - `portfolio`: Portfolio とその子孫の entity と、Portfolio の scope の Work Item
+ */
+export type PlanningReadScope =
+  | {
+      /** Team 単位の読み取りです。 */
+      type: 'team'
+      /** 読み取る Team ID です。 */
+      teamId: string
+    }
+  | {
+      /** Project 単位の読み取りです。 */
+      type: 'project'
+      /** Project を所有する Team ID です。 */
+      teamId: string
+      /** 読み取る Project ID です。 */
+      projectId: string
+    }
+  | {
+      /** Portfolio 単位の読み取りです。 */
+      type: 'portfolio'
+      /** 読み取る Portfolio entity ID です。 */
+      portfolioId: string
+    }
+
 /** Planning API が返す Workspace 単位の整合した snapshot です。 */
 export type PlanningSnapshot = {
   /** Snapshot schema version です。 */
@@ -546,6 +617,11 @@ export type PlanningSnapshot = {
   capacity: PlanningCapacity
   /** 永続化済み graph の最終更新日時です。 */
   updatedAt?: string
+  /**
+   * 一部の単位だけを読んだ snapshot の範囲です。省略時は Workspace 全体の snapshot です。
+   * 範囲外の entity、link、dependency は含まず、critical path と roll-up も範囲内で算出します。
+   */
+  readScope?: PlanningReadScope
 }
 
 /**
@@ -816,6 +892,8 @@ export type PlanningUpdateComment = {
   authorMemberKey: string
   /** Comment 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
+  /** 確認者が「確認済み」として記録した comment のとき true です。 */
+  acknowledgement?: true
 }
 
 /** Immutable update comment を作成する入力です。 */
@@ -833,6 +911,11 @@ export type CreatePlanningUpdateCommentInput = {
    * Inbox 通知が届きます。
    */
   mentionMemberKeys?: string[]
+  /**
+   * true のとき、cadence の確認者がこの comment で update の「確認済み」を記録します。
+   * 1 version に記録できる確認は 1 件です。
+   */
+  acknowledgement?: true
 }
 
 /** Update comment history を cursor pagination で取得する入力です。 */

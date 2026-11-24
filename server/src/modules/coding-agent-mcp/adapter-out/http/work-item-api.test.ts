@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { createAgentWorkItemApi } from './work-item-api'
 import { createAgentTasks } from '../../application/agent-tasks'
 import type { AgentDocument } from '../../application/work-item-api'
+import type { PublicProjectCharter } from '@mukuroji/contracts'
 
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
@@ -80,10 +81,29 @@ test('carries configured Project and assignee fences on comment requests', async
 
 test('requests the catalog with the configured Project fence', async () => {
   const api = createAgentWorkItemApi(config, async (url) => {
+    // A server older than template support has no template endpoint.
+    if (url.pathname === '/api/v1/work-item-templates') {
+      return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
     expect(url.searchParams.get('assignedProjectId')).toBe('project')
     return Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [] })
   })
-  await api.catalog('project')
+  expect((await api.catalog('project')).templates).toEqual([])
+})
+
+test('adds the Team templates to the catalog and rejects a list for another Team', async () => {
+  const template = { id: 'release-check', version: 1, name: 'Release check', title: 'Release', acceptanceCriteria: [] }
+  const cases: { templateTeamId: string, accepted: boolean }[] = [
+    { templateTeamId: 'team', accepted: true },
+    { templateTeamId: 'other', accepted: false },
+  ]
+  for (const { templateTeamId, accepted } of cases) {
+    const api = createAgentWorkItemApi(config, async (url) => url.pathname === '/api/v1/work-item-templates'
+      ? Response.json({ teamId: templateTeamId, templates: [template] })
+      : Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [] }))
+    if (accepted) expect((await api.catalog()).templates).toEqual([template])
+    else await expect(api.catalog()).rejects.toMatchObject({ code: 'invalid_response' })
+  }
 })
 
 test('restarts oversized queue scans with smaller cursor-bound pages and preserves complete status and selection', async () => {
@@ -204,6 +224,34 @@ test('reads actual dates from their endpoint and treats an older server as havin
   expect(await api.actualDates('legacy')).toBeUndefined()
   await expect(api.actualDates('other')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.actualDates('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads a Project charter from its endpoint and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const charter: PublicProjectCharter = {
+    schemaVersion: 1, teamId: 'team', projectId: 'web', lifecycleState: 'on-hold', revision: 4,
+    updatedAt: '2026-09-01T00:00:00.000Z', code: 'WEB',
+    owner: { memberId: 'member-1', displayName: 'Owner' }, plannedStartDate: '2026-09-01',
+    tags: ['frontend'], repositoryUrls: ['https://example.com/web'],
+  }
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    switch (url.pathname) {
+      case '/api/v1/projects/web/charter':
+        return Response.json(charter)
+      case '/api/v1/projects/other/charter':
+        return Response.json({ ...charter, projectId: 'web' })
+      case '/api/v1/projects/invalid/charter':
+        return Response.json({ ...charter, projectId: 'invalid', lifecycleState: 'paused' })
+      default:
+        return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.projectCharter('web')).toEqual(charter)
+  expect(paths[0]).toBe('/api/v1/projects/web/charter?teamId=team')
+  expect(await api.projectCharter('legacy')).toBeUndefined()
+  await expect(api.projectCharter('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.projectCharter('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 test('reads linked Documents from their endpoints and treats an older server as having none', async () => {

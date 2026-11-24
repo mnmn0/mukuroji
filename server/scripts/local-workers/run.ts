@@ -27,6 +27,7 @@ process.env.PLANNING_TABLE_NAME ??= 'mukuroji-planning-local'
 process.env.PLANNING_UPDATE_SCHEDULE_INDEX_NAME ??= 'UpdateScheduleDueIndex'
 process.env.REQUEST_INTAKE_TABLE_NAME ??= 'mukuroji-request-intake-local'
 process.env.ENTERPRISE_IDENTITY_TABLE_NAME ??= 'mukuroji-enterprise-identity-local'
+process.env.INBOX_DIGEST_WORKER_ENABLED ??= 'true'
 
 const queueUrls = ['WORK_ITEM_IMPORT_QUEUE_URL', 'WEBHOOK_DELIVERY_QUEUE_URL', 'CONNECTOR_SYNC_QUEUE_URL'].map((key) => {
   const value = process.env[key]
@@ -64,6 +65,7 @@ const emailNotifications = await import('../../src/handlers/email-notifications-
 const pushNotifications = await import('../../src/handlers/push-notifications-handler')
 const emailFeedback = await import('../../src/handlers/email-feedback-handler')
 const triage = await import('../../src/handlers/triage-schedule-handler')
+const inboxDigest = await import('../../src/handlers/inbox-digest-worker-handler')
 const connectors = await import('../../src/handlers/connector-handler')
 const imports = await import('../../src/handlers/work-item-import.handler')
 const webhook = await import('../../src/handlers/webhook-handler')
@@ -76,6 +78,7 @@ const schedules = [
   { name: 'analytics', interval: 300_000, run: () => analytics.handler({}) },
   { name: 'notifications', interval: 3_600_000, run: () => notifications.handler({}) },
   { name: 'cycles', interval: 3_600_000, run: () => cycles.handler({}) },
+  { name: 'inbox-digest', interval: 900_000, run: () => inboxDigest.handler() },
   { name: 'slack-notifications', interval: 60_000, run: () => slackNotifications.handler() },
   { name: 'email-notifications', interval: 60_000, run: () => emailNotifications.handler() },
   { name: 'push-notifications', interval: 60_000, run: () => pushNotifications.handler() },
