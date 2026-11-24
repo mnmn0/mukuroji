@@ -36,6 +36,7 @@ import {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
   createWorkItemAuthorizationChangedError,
+  isTeamIssueNotFoundError,
   normalizeWorkItemSchedule,
   readAssignedProjectId,
   readTeamIssueAssigneeUserId,
@@ -988,6 +989,75 @@ async function createCanonicalPublicWorkItem(
 }
 
 /**
+ * Drops the template reference from a Public API create request and applies the default priority.
+ *
+ * @param input - Create request without its Team.
+ * @returns Create input that ignores the template.
+ */
+function withoutPublicWorkItemTemplate(
+  input: Omit<CreatePublicWorkItemRequest, 'teamId'>,
+): PublicCreateWorkItemInput {
+  const { templateId: _templateId, priority, ...fields } = input
+  return { ...fields, priority: priority ?? 'medium' }
+}
+
+/**
+ * Tells whether the Work Item with a deterministic create ID already exists.
+ *
+ * @param workspaceId - Workspace that owns the Team.
+ * @param teamId - Team that would own the Work Item.
+ * @param workItemId - Deterministic Work Item ID of the create request.
+ * @returns Whether an earlier attempt already committed the Work Item.
+ */
+async function publicWorkItemExists(workspaceId: string, teamId: string, workItemId: string): Promise<boolean> {
+  try {
+    await workItemDependencies.teamIssues.getTeamIssueDetail(workspaceId, teamId, workItemId, {
+      consistentIssueRead: true,
+      includeEvents: false,
+    })
+    return true
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) return false
+    throw error
+  }
+}
+
+/**
+ * Applies the named template to a Public API create, unless an earlier attempt already committed it.
+ *
+ * A retry whose idempotency receipt was lost must still reach the storage adapter, which returns the
+ * stored Work Item. When the template was disabled or deleted since then, the retry goes on without it;
+ * the Work Item ID and request digest come from the request as sent, so the stored Work Item still matches.
+ *
+ * @param workspaceId - Workspace that owns the template.
+ * @param teamId - Team that would own the Work Item.
+ * @param input - Create request without its Team.
+ * @param workItemId - Deterministic Work Item ID of the create request.
+ * @returns Create input with the template's values filled in where it still applies.
+ * @throws PublicApiServiceError (404) when a new create names an unusable template.
+ */
+async function applyPublicWorkItemTemplateForCreate(
+  workspaceId: string,
+  teamId: string,
+  input: Omit<CreatePublicWorkItemRequest, 'teamId'>,
+  workItemId: string,
+): Promise<PublicCreateWorkItemInput> {
+  if (input.templateId === undefined) return withoutPublicWorkItemTemplate(input)
+  try {
+    return await applyPublicWorkItemTemplate(workspaceId, teamId, input)
+  } catch (error) {
+    if (
+      error instanceof PublicApiServiceError &&
+      error.status === 404 &&
+      await publicWorkItemExists(workspaceId, teamId, workItemId)
+    ) {
+      return withoutPublicWorkItemTemplate(input)
+    }
+    throw error
+  }
+}
+
+/**
  * Fills a Public API create body from the Work Item template it names.
  *
  * Values sent in the body win. The template fills an omitted description, Work Item Type, workflow
@@ -1008,7 +1078,7 @@ async function applyPublicWorkItemTemplate(
   input: Omit<CreatePublicWorkItemRequest, 'teamId'>,
 ): Promise<PublicCreateWorkItemInput> {
   const { templateId, priority, ...fields } = input
-  if (templateId === undefined) return { ...fields, priority: priority ?? 'medium' }
+  if (templateId === undefined) return withoutPublicWorkItemTemplate(input)
   const template = await automationDependencies.ruleTemplates.getTemplate(workspaceId, templateId)
   if (!template || !isPublicWorkItemTemplateFor(template, teamId)) {
     throw new PublicApiServiceError(404, 'not_found', 'The Work Item template was not found for this Team.')
@@ -1839,8 +1909,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     async authorizeCreate(credential, input) {
       // A replay returns the stored Work Item, so it checks the request as sent: a template that was
       // disabled or changed since the first create does not change the answer.
-      const { teamId, templateId: _templateId, priority, ...requestInput } = input
-      const workItemInput: PublicCreateWorkItemInput = { ...requestInput, priority: priority ?? 'medium' }
+      const { teamId, ...requestInput } = input
+      const workItemInput = withoutPublicWorkItemTemplate(requestInput)
       rejectInternalPublicCreateWorkItemFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
@@ -1863,6 +1933,14 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async create(credential, input, context) {
       const { teamId, ...requestInput } = input
+      // The request as sent, not the template it names, identifies a retry.
+      const createIdentity = createPublicApiWorkItemCreateIdentity(
+        credential.workspaceId,
+        readCredentialPrincipalKey(credential),
+        context,
+        teamId,
+        requestInput,
+      )
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
         // A template never sets the Project, so the credential is checked before the template is read.
@@ -1877,7 +1955,12 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         async (principal) => {
           requireWorkspaceBusinessWrite(principal)
           const permission = await requireTeamPermission(principal, teamId, 'member')
-          const templatedInput = await applyPublicWorkItemTemplate(principal.directoryId, teamId, requestInput)
+          const templatedInput = await applyPublicWorkItemTemplateForCreate(
+            principal.directoryId,
+            teamId,
+            requestInput,
+            createIdentity.issueId,
+          )
           rejectInternalPublicCreateWorkItemFields(templatedInput)
           const body = normalizeTeamIssueInput(templatedInput, permission.team)
           requireAssignedProjectPermission(
@@ -1896,14 +1979,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemInput,
         context,
         '/api/v1/work-items',
-        // The request as sent, not the template it names, identifies a retry.
-        createPublicApiWorkItemCreateIdentity(
-          credential.workspaceId,
-          readCredentialPrincipalKey(credential),
-          context,
-          teamId,
-          requestInput,
-        ),
+        createIdentity,
         authorization.authorizationSnapshot,
       ))
     },

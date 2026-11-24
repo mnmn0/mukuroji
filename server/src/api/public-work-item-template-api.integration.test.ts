@@ -84,7 +84,31 @@ function configureTemplates(
       creates.push({ ...input })
     },
   })
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const stored = new Map<string, Awaited<ReturnType<typeof teamIssues.createTeamIssue>>>()
   setTestAppDependencies({
+    // Like the storage adapter, a deterministic Work Item ID is created once and then returned again.
+    teamIssues: {
+      ...teamIssues,
+      async getTeamIssueDetail(workspaceId, teamId, issueId, readOptions) {
+        if (issueId.startsWith('api-') && !stored.has(issueId)) {
+          throw { status: 404, code: 'TeamIssueNotFound', message: 'Issue was not found.' }
+        }
+        return await teamIssues.getTeamIssueDetail(workspaceId, teamId, issueId, readOptions)
+      },
+      async createTeamIssue(workspaceId, teamId, input, actorUserId, auditContext) {
+        const issueId = input.idempotentIssueId
+        const existing = issueId === undefined ? undefined : stored.get(issueId)
+        if (existing) {
+          creates.push({ ...input })
+          return existing
+        }
+        const response = await teamIssues.createTeamIssue(workspaceId, teamId, input, actorUserId, auditContext)
+        const created = issueId === undefined ? response : { ...response, issue: { ...response.issue, id: issueId } }
+        if (issueId !== undefined) stored.set(issueId, created)
+        return created
+      },
+    },
     ruleTemplates: new Proxy(getTestAppDependencies().automation.ruleTemplates, {
       get(target, property, receiver) {
         if (property === 'listTemplates') return async () => templates
@@ -187,4 +211,22 @@ test('authorizes a replay from the request as sent, even after its template is g
     credential,
     { teamId: 'core-team', title: 'Ship 1.2', assigneeUserId: 'demo@example.com', templateId: 'release-check' },
   ))).resolves.toBeUndefined()
+})
+
+test('returns an already-created Work Item on retry after its template is disabled', async () => {
+  const templates = [workItemTemplate()]
+  const creates = configureTemplates(templates)
+
+  const first = await createWorkItem({ templateId: 'release-check' }, 'template-retry')
+  templates[0] = workItemTemplate({ enabled: false })
+  const retry = await createWorkItem({ templateId: 'release-check' }, 'template-retry')
+
+  expect(retry.id).toBe(first.id)
+  expect(retry.acceptanceCriteria).toEqual(first.acceptanceCriteria)
+  expect(creates).toHaveLength(2)
+  expect(creates[1]?.idempotentRequestDigest).toBe(creates[0]?.idempotentRequestDigest)
+  await expect(createWorkItem({ templateId: 'release-check' }, 'template-retry-new')).rejects.toMatchObject({
+    status: 404,
+    code: 'not_found',
+  })
 })

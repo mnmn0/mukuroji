@@ -95,7 +95,8 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 新しい条件として付けます。`priority` を省略すると template の優先度、それもなければ `medium` です。
 template が無い・停止中・別 Team 用・Work Item template ではない場合は `404 not_found` で、何も作りません。
 同じ `Idempotency-Key` の再送は、送った body（`templateId` を含む）で同じ request と判断するので、途中で template を
-変えても二重に作られません。
+変えても二重に作られません。最初の作成が済んでいれば、その後に template を停止・削除しても再送は `404` にならず、
+作成済みの Work Item を返します。
 
 ## Cursor pagination
 
