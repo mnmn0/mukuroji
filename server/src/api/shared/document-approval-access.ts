@@ -105,24 +105,37 @@ export async function listAuthorizedDocumentApprovals(
       canManage: false,
     },
   )
+  const visibility = new Map<string, Promise<boolean>>()
   const authorized = await Promise.all(approvals.map(async (approval) => {
-    if (!approval.teamId || !approval.issueId) return undefined
-    try {
-      const { detail } = await loadAuthorizedTeamIssue(principal, approval.teamId, approval.issueId, 'viewer')
-      return hasEnterpriseApprovalPermission(
-        principal,
-        'files.read',
-        approval.teamId,
-        detail.issue.assignedProjectId,
-      )
-        ? approval
-        : undefined
-    } catch (error) {
-      if (isWorkItemAuthorizationMiss(error)) return undefined
-      throw error
+    const { teamId, issueId } = approval
+    if (!teamId || !issueId) return undefined
+    const key = JSON.stringify([teamId, issueId])
+    let visible = visibility.get(key)
+    if (!visible) {
+      visible = canViewWorkItemApprovals(principal, teamId, issueId)
+      visibility.set(key, visible)
     }
+    return await visible ? approval : undefined
   }))
   return authorized.filter((approval) => approval !== undefined)
+}
+
+/**
+ * Checks whether the principal may see the approvals of one Work Item, reading it once per list.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item that owns the approvals.
+ * @returns Whether the Work Item and its approvals are visible to the principal.
+ */
+async function canViewWorkItemApprovals(principal: WorkspacePrincipal, teamId: string, issueId: string) {
+  try {
+    const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    return hasEnterpriseApprovalPermission(principal, 'files.read', teamId, detail.issue.assignedProjectId)
+  } catch (error) {
+    if (isWorkItemAuthorizationMiss(error)) return false
+    throw error
+  }
 }
 
 /**

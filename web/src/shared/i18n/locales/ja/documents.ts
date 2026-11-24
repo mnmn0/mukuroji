@@ -331,6 +331,7 @@ export const documentsMessages = {
   'documents.versions.review': '確認・比較・承認',
   'documents.versionReview.eyebrow': '版の確認',
   'documents.versionReview.close': '閉じる',
+  'documents.versionReview.tabs': '版の確認の表示',
   'documents.versionReview.tab.preview': 'プレビュー',
   'documents.versionReview.tab.compare': '差分',
   'documents.versionReview.tab.approval': '固定と承認',

@@ -29,6 +29,9 @@ const DEFAULT_APPROVAL_DUE_DAYS = 7
 /** A view of the version review dialog. */
 type DocumentVersionReviewTab = 'preview' | 'compare' | 'approval'
 
+/** Views of the version review dialog in tab order. */
+const REVIEW_TABS: readonly DocumentVersionReviewTab[] = ['preview', 'compare', 'approval']
+
 /**
  * Props of {@link DocumentVersionReviewDialog}.
  */
@@ -85,6 +88,7 @@ export function DocumentVersionReviewDialog({
 }: DocumentVersionReviewDialogProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const titleId = useId()
+  const tabIdPrefix = useId()
   const [tab, setTab] = useState<DocumentVersionReviewTab>(initialTab)
 
   useEffect(() => {
@@ -107,6 +111,29 @@ export function DocumentVersionReviewDialog({
       return
     }
     trapModalFocus(event, dialogRef.current)
+  }
+
+  /**
+   * Moves between tabs with the arrow, Home, and End keys.
+   *
+   * @param event - Keyboard event on a tab.
+   * @param current - Tab that has focus.
+   */
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, current: DocumentVersionReviewTab) => {
+    const index = REVIEW_TABS.indexOf(current)
+    const target = event.key === 'ArrowRight'
+      ? REVIEW_TABS[(index + 1) % REVIEW_TABS.length]
+      : event.key === 'ArrowLeft'
+        ? REVIEW_TABS[(index - 1 + REVIEW_TABS.length) % REVIEW_TABS.length]
+        : event.key === 'Home'
+          ? REVIEW_TABS[0]
+          : event.key === 'End'
+            ? REVIEW_TABS[REVIEW_TABS.length - 1]
+            : undefined
+    if (!target) return
+    event.preventDefault()
+    setTab(target)
+    globalThis.document.getElementById(`${tabIdPrefix}-tab-${target}`)?.focus()
   }
 
   return (
@@ -144,21 +171,34 @@ export function DocumentVersionReviewDialog({
             {t('documents.versionReview.close')}
           </button>
         </header>
-        <div className="flex flex-none gap-1 border-b border-[var(--workbench-border)] px-4" role="tablist">
-          {(['preview', 'compare', 'approval'] as const).map((candidate) => (
+        <div
+          aria-label={t('documents.versionReview.tabs')}
+          className="flex flex-none gap-1 border-b border-[var(--workbench-border)] px-4"
+          role="tablist"
+        >
+          {REVIEW_TABS.map((candidate) => (
             <button
+              aria-controls={`${tabIdPrefix}-panel`}
               aria-selected={tab === candidate}
               className={`h-10 border-b-2 px-3 text-sm font-semibold ${tab === candidate ? 'border-[var(--workbench-accent)] text-[var(--workbench-text)]' : 'border-transparent text-[var(--workbench-muted)]'}`}
+              id={`${tabIdPrefix}-tab-${candidate}`}
               key={candidate}
               onClick={() => setTab(candidate)}
+              onKeyDown={(event) => handleTabKeyDown(event, candidate)}
               role="tab"
+              tabIndex={tab === candidate ? 0 : -1}
               type="button"
             >
               {t(`documents.versionReview.tab.${candidate}`)}
             </button>
           ))}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto" role="tabpanel">
+        <div
+          aria-labelledby={`${tabIdPrefix}-tab-${tab}`}
+          className="min-h-0 flex-1 overflow-y-auto"
+          id={`${tabIdPrefix}-panel`}
+          role="tabpanel"
+        >
           {tab === 'preview' ? (
             <VersionPreview accessToken={accessToken} document={document} t={t} version={version} />
           ) : null}

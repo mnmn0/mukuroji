@@ -331,6 +331,7 @@ export const documentsMessages = {
   'documents.versions.review': 'Review, compare, approve',
   'documents.versionReview.eyebrow': 'Version review',
   'documents.versionReview.close': 'Close',
+  'documents.versionReview.tabs': 'Version review views',
   'documents.versionReview.tab.preview': 'Preview',
   'documents.versionReview.tab.compare': 'Changes',
   'documents.versionReview.tab.approval': 'Pin and approve',
