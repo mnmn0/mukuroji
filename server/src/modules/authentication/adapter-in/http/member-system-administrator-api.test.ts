@@ -83,9 +83,10 @@ function installSystemAdministratorGroup(initial: string[] = []) {
 /**
  * Records the actions written to the store, answering as the real store does on success.
  *
+ * @param log - Optional log shared with the Cognito fake, to check the order of the steps.
  * @returns The recorded actions.
  */
-function recordActions() {
+function recordActions(log?: string[]) {
   const recorded: Array<{
     actor: string
     target: string
@@ -93,10 +94,11 @@ function recordActions() {
     auditContext?: MutationAuditContext
   }> = []
   overrideWorkspaceAccess({
-    async recordMemberCredentialAction(_workspaceId, actor, target, action, auditContext) {
+    async recordMemberCredentialAction(_workspaceId, actor, target, action, auditContext, options) {
       recorded.push({ actor, target, action, auditContext })
+      log?.push(`record:${action}`)
       const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
-      return { member, alreadyRecorded: false, completed: false }
+      return { member, alreadyRecorded: false, completed: options?.completed === true }
     },
   })
   return recorded
@@ -124,7 +126,7 @@ function sendChange(memberKey: string, body: unknown) {
 test('lets an owner grant and revoke system administrator access with an audit record first', async () => {
   configureFakeProjectClients(true)
   const { group, calls } = installSystemAdministratorGroup()
-  const recorded = recordActions()
+  const recorded = recordActions(calls)
 
   const granted = await sendChange('sato@example.com', { systemAdministrator: true })
 
@@ -136,7 +138,13 @@ test('lets an owner grant and revoke system administrator access with an audit r
 
   expect(revoked.status).toBe(200)
   expect(group.has('sato@example.com')).toBe(false)
-  expect(calls).toEqual(['add:sato@example.com', 'remove:sato@example.com'])
+  // Each change is recorded in the audit log before Cognito changes.
+  expect(calls).toEqual([
+    'record:system-administrator-granted',
+    'add:sato@example.com',
+    'record:system-administrator-revoked',
+    'remove:sato@example.com',
+  ])
   expect(recorded.map(({ actor, target, action }) => ({ actor, target, action }))).toEqual([
     { actor: 'demo@example.com', target: 'sato@example.com', action: 'system-administrator-granted' },
     { actor: 'demo@example.com', target: 'sato@example.com', action: 'system-administrator-revoked' },

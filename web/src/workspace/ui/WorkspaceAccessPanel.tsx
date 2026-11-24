@@ -19,7 +19,6 @@ import {
   reinviteWorkspaceInvitation,
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
-  setWorkspaceMemberSystemAdministrator,
   updateWorkspaceMember,
   WorkspaceAccessApiError,
   type CreateWorkspaceInvitationInput,
@@ -40,10 +39,10 @@ import type { MemberRoleAssignmentLabel } from '../model/memberRoleAssignments'
 import { EnterpriseSecurityApiError } from '../../security/api'
 import {
   shouldCloseCredentialResetDialog,
-  shouldRetainCredentialResetContext,
   useWorkspaceMemberCredentialReset,
 } from '../mutations/useWorkspaceMemberCredentialReset'
 import { useWorkspaceMemberRename } from '../mutations/useWorkspaceMemberRename'
+import { useWorkspaceMemberSystemAdministratorChange } from '../mutations/useWorkspaceMemberSystemAdministratorChange'
 import {
   createWorkspaceAccessMutationSession,
   getBulkInvitationRunner,
@@ -420,6 +419,11 @@ export function WorkspaceAccessPanelContainer({
     requestRunner: credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
   })
+  const changeSystemAdministrator = useWorkspaceMemberSystemAdministratorChange({
+    accessToken: mutationSession.accessToken,
+    requestRunner: credentialResetRunner,
+    revalidateSignInSecurity: mutateSignInSecurity,
+  })
 
   const refresh = async ({ keepRetainedContexts = false }: { keepRetainedContexts?: boolean } = {}) => {
     if (!accessKey) {
@@ -560,23 +564,7 @@ export function WorkspaceAccessPanelContainer({
       memberRoleAssignmentsLoadFailed={isMemberRoleAssignmentsLoadFailure(memberRoleAssignmentsError)}
       onRetryMemberRoleAssignments={() => void mutateMemberRoleAssignments()}
       onChangeSystemAdministrator={access?.currentMember.role === 'owner'
-        ? async (memberKey, systemAdministrator) => {
-          try {
-            await credentialResetRunner.run(
-              `workspace-member:system-administrator:${memberKey}`,
-              JSON.stringify({ memberKey, systemAdministrator }),
-              (context) => setWorkspaceMemberSystemAdministrator(
-                accessToken,
-                memberKey,
-                systemAdministrator,
-                context,
-              ),
-              shouldRetainCredentialResetContext,
-            )
-          } finally {
-            void mutateSignInSecurity()
-          }
-        }
+        ? changeSystemAdministrator
         : undefined}
       {...(workspaceId ? { memberHandover: { accessToken, workspaceId } } : {})}
     />

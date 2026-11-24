@@ -159,6 +159,15 @@ export type WorkspaceMemberSystemAdministratorAction =
  */
 export type WorkspaceMemberCredentialProgress = 'none' | 'recorded' | 'completed'
 
+/** Options of recording an administrator credential action. */
+export type WorkspaceMemberCredentialRecordOptions = {
+  /**
+   * Records the action as already finished, for a request whose requested state is already in
+   * place, so that a retry with the same key returns it instead of resuming a change.
+   */
+  completed?: boolean
+}
+
 /** Result of recording a credential action for a member. */
 export type WorkspaceMemberCredentialRecord = {
   /** Member the action targets. */
@@ -415,6 +424,8 @@ export interface WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` records the action as already finished, for a request that
+   *   needs no change in Cognito, so that no retry can resume it.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease.
@@ -425,6 +436,7 @@ export interface WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options?: WorkspaceMemberCredentialRecordOptions,
   ): Promise<WorkspaceMemberCredentialRecord>
   /**
    * Reads how far an administrator credential action under the same idempotency key got.
@@ -1843,6 +1855,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param targetMemberKey - Member key of the target member.
    * @param action - Action to record.
    * @param auditContext - Audit context of the request.
+   * @param options - `completed` writes the progress record as finished, with no lease, for a
+   *   request that needs no change in Cognito.
    * @returns The checked target member, and whether the action was already recorded or completed.
    * @throws WorkspaceAccessError 409 `WorkspaceCredentialActionInProgress` while another attempt
    *   holds the lease, and 503 `AccountSecurityUnavailable` when no audit table is configured,
@@ -1854,6 +1868,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     targetMemberKey: string,
     action: WorkspaceMemberCredentialAction,
     auditContext?: MutationAuditContext,
+    options: WorkspaceMemberCredentialRecordOptions = {},
   ) {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const actor = await this.requireActiveActor(normalizedWorkspaceId, actorMemberKey)
@@ -1919,9 +1934,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
                 memberKey: target.memberKey,
                 actorKey: auditItem.actorKey,
                 action,
-                status: 'recorded',
+                ...(options.completed
+                  ? { status: 'completed' }
+                  : { status: 'recorded', leaseUntil: now.getTime() + credentialActionLeaseMs }),
                 recordedAt: now.toISOString(),
-                leaseUntil: now.getTime() + credentialActionLeaseMs,
                 // The record answers retries for as long as the audit event keeps the key taken.
                 ...(typeof auditItem.expiresAt === 'number' ? { expiresAt: auditItem.expiresAt } : {}),
               },
@@ -1930,7 +1946,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           },
         ],
       }))
-      return { member: target, alreadyRecorded: false, completed: false }
+      return { member: target, alreadyRecorded: false, completed: options.completed === true }
     } catch (error) {
       const replayed = !isTransactionConditionalFailureAt(error, 0) &&
         !isTransactionConditionalFailureAt(error, 1) &&

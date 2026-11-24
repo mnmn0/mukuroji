@@ -3,6 +3,7 @@ import {
   WorkspaceAccessError,
   type WorkspaceMember,
   type WorkspaceMemberCredentialProgress,
+  type WorkspaceMemberCredentialRecordOptions,
   type WorkspaceMemberSystemAdministratorAction,
 } from '../workspace-access'
 
@@ -26,7 +27,8 @@ export type MemberSystemAdministratorPorts = {
   ): Promise<WorkspaceMemberCredentialProgress>
   /**
    * Checks that the actor is an owner and the target may take the change, records the action in
-   * the audit log, and claims it so that only one attempt changes the group at a time.
+   * the audit log, and claims it so that only one attempt changes the group at a time. With
+   * `completed`, the action is recorded as already finished in the same write.
    */
   recordAction(
     workspaceId: string,
@@ -34,6 +36,7 @@ export type MemberSystemAdministratorPorts = {
     memberKey: string,
     action: WorkspaceMemberSystemAdministratorAction,
     auditContext: MutationAuditContext | undefined,
+    options?: WorkspaceMemberCredentialRecordOptions,
   ): Promise<{ completed: boolean }>
   /** Marks that this attempt is about to change the group. */
   markActionApplying(
@@ -87,8 +90,10 @@ const completionAttempts = 3
  * recorded in the audit log before the group changes and marked completed after it, with the
  * same progress record the administrator credential resets use, so a retry with the same
  * idempotency key does not repeat a change that finished or may have started. A request for
- * the state the member already has is recorded and completed too, without changing the group,
- * so that a late retry of it cannot undo a change another owner made in between.
+ * the state the member already has is recorded as completed in the same write, without changing
+ * the group, so that no retry of it can resume and undo a change another owner made in between.
+ * The member's sign-in account must belong to this Workspace on every attempt that may change
+ * the group, including a retry that resumes a recorded change.
  *
  * @param ports - Member, identity, and audit ports.
  * @param input - Actor, member, requested state, and audit context.
@@ -118,17 +123,17 @@ export async function changeMemberSystemAdministrator(
   if (progress === 'completed') {
     return result
   }
-  let alreadyApplied = false
-  if (progress === 'none') {
-    if (!await ports.isAccountInWorkspace(input.workspaceId, member.memberKey)) {
-      throw new WorkspaceAccessError(
-        409,
-        'MemberSystemAdministratorUnavailable',
-        'This member\'s sign-in account belongs to another Workspace.',
-      )
-    }
-    alreadyApplied = await ports.isSystemAdministrator(member.memberKey) === input.systemAdministrator
+  if (!await ports.isAccountInWorkspace(input.workspaceId, member.memberKey)) {
+    throw new WorkspaceAccessError(
+      409,
+      'MemberSystemAdministratorUnavailable',
+      'This member\'s sign-in account belongs to another Workspace.',
+    )
   }
+  // Only a first attempt reads the group: a resumed change was decided by the attempt that
+  // recorded it, and a request that needed no change is never left resumable.
+  const alreadyApplied = progress === 'none' &&
+    await ports.isSystemAdministrator(member.memberKey) === input.systemAdministrator
 
   const claim = await ports.recordAction(
     input.workspaceId,
@@ -136,21 +141,17 @@ export async function changeMemberSystemAdministrator(
     member.memberKey,
     action,
     input.auditContext,
+    alreadyApplied ? { completed: true } : undefined,
   )
   if (claim.completed) {
     return result
   }
 
-  // The applying mark comes first even when the group already has the requested state, so that
-  // a retry after a failed completion mark is refused instead of resuming, which could undo a
-  // change another owner made in between.
   await ports.markActionApplying(input.workspaceId, member.memberKey, action, input.auditContext)
-  if (!alreadyApplied) {
-    if (input.systemAdministrator) {
-      await ports.addSystemAdministrator(member.memberKey)
-    } else {
-      await ports.removeSystemAdministrator(member.memberKey)
-    }
+  if (input.systemAdministrator) {
+    await ports.addSystemAdministrator(member.memberKey)
+  } else {
+    await ports.removeSystemAdministrator(member.memberKey)
   }
 
   let lastError: unknown

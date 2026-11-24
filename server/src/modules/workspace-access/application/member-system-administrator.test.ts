@@ -42,9 +42,9 @@ function createPorts(
       return false
     },
     readActionProgress: async () => progress,
-    recordAction: async () => {
-      steps.push('record')
-      return { completed: false }
+    recordAction: async (_workspaceId, _actor, _memberKey, _action, _auditContext, options) => {
+      steps.push(options?.completed ? 'record-completed' : 'record')
+      return { completed: options?.completed === true }
     },
     markActionApplying: async () => {
       steps.push('applying')
@@ -82,34 +82,18 @@ test('records, marks, changes, and completes a grant in that order', async () =>
   expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'add', 'complete'])
 })
 
-test('records a request for the current state without changing the group, so a late retry is a no-op', async () => {
+test('records a request for the current state as completed in one write, so no retry can resume it', async () => {
   const { ports, steps } = createPorts('none', {
     isSystemAdministrator: async () => {
       steps.push('read-group')
       return true
-    },
-  })
-
-  await changeMemberSystemAdministrator(ports, input)
-
-  expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'complete'])
-})
-
-test('marks a request for the current state as applying, so a retry after a failed completion is not resumed', async () => {
-  const { ports, steps } = createPorts('none', {
-    isSystemAdministrator: async () => {
-      steps.push('read-group')
-      return true
-    },
-    completeAction: async () => {
-      throw new Error('store unavailable')
     },
   })
 
   const result = await changeMemberSystemAdministrator(ports, input)
 
-  expect(result.systemAdministrator).toBe(true)
-  expect(steps).toEqual(['directory', 'read-group', 'record', 'applying', 'report'])
+  expect(result).toEqual({ systemAdministrator: true })
+  expect(steps).toEqual(['directory', 'read-group', 'record-completed'])
 })
 
 test('does not change the group again for a replay of a completed change', async () => {
@@ -126,7 +110,22 @@ test('resumes a recorded change without re-reading the group, so a replay finish
 
   await changeMemberSystemAdministrator(ports, { ...input, systemAdministrator: false })
 
-  expect(steps).toEqual(['record', 'applying', 'remove', 'complete'])
+  expect(steps).toEqual(['directory', 'record', 'applying', 'remove', 'complete'])
+})
+
+test('checks the sign-in account again before resuming a recorded change', async () => {
+  const { ports, steps } = createPorts('recorded', {
+    isAccountInWorkspace: async () => {
+      steps.push('directory')
+      return false
+    },
+  })
+
+  await expect(changeMemberSystemAdministrator(ports, input)).rejects.toMatchObject({
+    status: 409,
+    code: 'MemberSystemAdministratorUnavailable',
+  })
+  expect(steps).toEqual(['directory'])
 })
 
 test('reports a failed completion mark without failing the finished change', async () => {
