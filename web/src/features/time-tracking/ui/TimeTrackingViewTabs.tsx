@@ -1,7 +1,7 @@
 import type { TimeTrackingTranslator } from './timeTrackingText'
 
 /** View of the Team time tracking page. */
-export type TimeTrackingView = 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'monthly-summary' | 'approvals' | 'report'
+export type TimeTrackingView = 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'monthly-summary' | 'approvals' | 'report' | 'periods'
 
 /** Props of the time tracking view switcher. */
 export type TimeTrackingViewTabsProps = {
@@ -17,7 +17,8 @@ export type TimeTrackingViewTabsProps = {
 
 /**
  * Switches between the member's timesheet and weekly report, the managers' weekly report status,
- * the Team and Project weekly and monthly summaries, the approval queue, and the Team report.
+ * the Team and Project weekly and monthly summaries, the approval queue, the Team report, and the
+ * month close.
  *
  * @param props - Selected view and navigation.
  * @returns View links.
@@ -31,6 +32,7 @@ export function TimeTrackingViewTabs({ getHref, onSelect, t, view }: TimeTrackin
     { id: 'monthly-summary', label: t('timeTracking.view.monthlySummary') },
     { id: 'approvals', label: t('timeTracking.view.approvals') },
     { id: 'report', label: t('timeTracking.view.report') },
+    { id: 'periods', label: t('timeTracking.view.periods') },
   ]
   return (
     <nav aria-label={t('timeTracking.view.navigation')} className="flex min-w-0 gap-1 overflow-x-auto border-b border-[var(--workbench-border)]">
