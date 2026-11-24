@@ -312,11 +312,11 @@ async function resolveCharterPerson(
     'ProjectCharterPersonInactive',
     'The Project manager and sponsor must be active Workspace members.',
   )
-  const person = createProjectCharterPerson(profile.id, profile.name, profile.email)
-  if (!workspaceAccess.createActiveMemberConditionCheck) {
-    if (!await workspaceAccess.getActiveMember(workspaceId, profile.id)) throw inactive()
-    return { person }
-  }
+  const member = await workspaceAccess.getActiveMember(workspaceId, profile.id)
+  if (!member) throw inactive()
+  // The member row holds the display name members set (ADR 0074); Cognito keeps the sign-up name.
+  const person = createProjectCharterPerson(profile.id, member.name?.trim() || undefined, profile.email)
+  if (!workspaceAccess.createActiveMemberConditionCheck) return { person }
   const fence = await workspaceAccess.createActiveMemberConditionCheck.call(
     workspaceAccess,
     workspaceId,

@@ -20,6 +20,12 @@ import {
   type CreateRecurringWorkInput,
   type ScheduleDependencyType,
   type UpdateAutomationInboundWebhookEndpointInput,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
+  WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
+  type WorkItemContributionStatus,
+  type WorkItemContributorAssignmentCreateInput,
+  WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_TITLE_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import {
@@ -54,8 +60,10 @@ export function validateCreateAutomationTemplateInput(
   switch (input.kind) {
     case 'work-item': {
       assertOnlyKeys(payload, [
+        'acceptanceCriteria',
         'assignedProjectId',
         'assigneeUserId',
+        'contributorAssignments',
         'customFieldValues',
         'description',
         'priority',
@@ -82,6 +90,9 @@ export function validateCreateAutomationTemplateInput(
         payload.assigneeUserId,
         'Work Item template assignee user ID',
       )
+      const contributorAssignments = payload.contributorAssignments === undefined
+        ? undefined
+        : validateTemplateContributorAssignments(payload.contributorAssignments)
       const description = readOptionalTemplateString(
         payload.description,
         'Work Item template description',
@@ -108,6 +119,9 @@ export function validateCreateAutomationTemplateInput(
           payload.customFieldValues,
           'Work Item template custom field values',
         )
+      const acceptanceCriteria = payload.acceptanceCriteria === undefined
+        ? undefined
+        : validateWorkItemTemplateAcceptanceCriteria(payload.acceptanceCriteria)
       if (
         payload.priority !== undefined &&
         payload.priority !== 'low' &&
@@ -122,8 +136,12 @@ export function validateCreateAutomationTemplateInput(
         enabled,
         payload: {
           title,
+          ...(acceptanceCriteria === undefined || acceptanceCriteria.length === 0 ? {} : { acceptanceCriteria }),
           ...(assignedProjectId === undefined ? {} : { assignedProjectId }),
           ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+          ...(contributorAssignments === undefined || contributorAssignments.length === 0
+            ? {}
+            : { contributorAssignments }),
           ...(customFieldValues === undefined ? {} : { customFieldValues }),
           ...(description === undefined ? {} : { description }),
           ...(payload.priority === undefined ? {} : { priority: payload.priority }),
@@ -219,6 +237,35 @@ export function validateCreateAutomationTemplateInput(
       }
     }
   }
+}
+
+/**
+ * Validates the acceptance criteria texts of a Work Item template.
+ *
+ * Each text follows the Work Item acceptance criterion rule, so a valid template always creates a
+ * valid Work Item.
+ *
+ * @param value - Untrusted `acceptanceCriteria` payload value.
+ * @returns Trimmed criterion texts in order.
+ */
+function validateWorkItemTemplateAcceptanceCriteria(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw invalidInput('Work Item template acceptance criteria must be an array of text.')
+  }
+  if (value.length > WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT) {
+    throw invalidInput(
+      `Work Item template can have at most ${WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT} acceptance criteria.`,
+    )
+  }
+  return value.map((candidate) => {
+    const text = typeof candidate === 'string' ? candidate.trim() : ''
+    if (!text || text.length > WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH) {
+      throw invalidInput(
+        `Each Work Item template acceptance criterion needs text of 1 to ${WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH} characters.`,
+      )
+    }
+    return text
+  })
 }
 
 /**
@@ -727,6 +774,65 @@ function invalidInput(message: string) {
 }
 
 /** Narrows an unknown value to a record or throws a validation error. */
+/**
+ * Validates the contributors a Work Item template starts its Work Items with.
+ *
+ * Only the shape is checked here. Job roles and members are checked against the Team's current
+ * configuration and membership when a Work Item is created from the template, as for any create.
+ *
+ * @param value - Untrusted contributor list.
+ * @returns The normalized contributor list.
+ * @throws AutomationError when the list or an entry is malformed.
+ */
+function validateTemplateContributorAssignments(value: unknown): WorkItemContributorAssignmentCreateInput[] {
+  if (!Array.isArray(value) || value.length > WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT) {
+    throw invalidInput(
+      `Work Item template contributors must be a list of at most ${WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT} entries.`,
+    )
+  }
+  return value.map((entry) => {
+    const record = requireRecord(entry, 'Work Item template contributor')
+    assertOnlyKeys(record, ['jobRoleId', 'memberUserId', 'plannedEffortMinutes', 'status'], 'Work Item template contributor')
+    const memberUserId = record.memberUserId === undefined
+      ? undefined
+      : requireBoundedText(record.memberUserId, 'Work Item template contributor member', 256).toLowerCase()
+    const jobRoleId = record.jobRoleId === undefined
+      ? undefined
+      : requireBoundedText(record.jobRoleId, 'Work Item template contributor job role', 128)
+    if (memberUserId === undefined && jobRoleId === undefined) {
+      throw invalidInput('Work Item template contributor needs a member or a job role.')
+    }
+    const plannedEffortMinutes = record.plannedEffortMinutes
+    if (
+      plannedEffortMinutes !== undefined &&
+      (typeof plannedEffortMinutes !== 'number' || !Number.isSafeInteger(plannedEffortMinutes) ||
+        plannedEffortMinutes < 0 || plannedEffortMinutes > WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)
+    ) {
+      throw invalidInput('Work Item template contributor planned effort is invalid.')
+    }
+    const status = record.status
+    if (status !== undefined && !isContributionStatus(status)) {
+      throw invalidInput('Work Item template contributor status is invalid.')
+    }
+    return {
+      ...(memberUserId === undefined ? {} : { memberUserId }),
+      ...(jobRoleId === undefined ? {} : { jobRoleId }),
+      ...(plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }),
+      ...(status === undefined ? {} : { status }),
+    }
+  })
+}
+
+/**
+ * Narrows a value to a contributor progress state.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value is `planned`, `in-progress`, or `done`.
+ */
+function isContributionStatus(value: unknown): value is WorkItemContributionStatus {
+  return value === 'planned' || value === 'in-progress' || value === 'done'
+}
+
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw invalidInput(`${label} must be an object.`)
   return value

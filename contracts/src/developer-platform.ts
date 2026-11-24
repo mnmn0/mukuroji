@@ -3,6 +3,7 @@ import {
   type CanonicalWorkItem,
   type CreateWorkItemInput,
   type WorkItemPatch,
+  type WorkItemPriority,
   type WorkItemSchedule,
 } from './work-items'
 import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
@@ -1482,6 +1483,72 @@ export type ImportJob = {
 }
 
 /**
+ * Largest source, in UTF-8 bytes, that one Work Item import accepts. The size is counted with
+ * {@link measureWorkItemImportContentBytes}, so that the request, with its mapping and the event
+ * envelope, stays within the 6 MB synchronous Lambda payload.
+ */
+export const WORK_ITEM_IMPORT_MAX_BYTES = 4 * 1024 * 1024
+
+/**
+ * Measures an import source the way the import limit counts it.
+ *
+ * The source travels as a JSON string inside the request body, and API Gateway puts that body as
+ * a JSON string inside the Lambda event, so quotes, backslashes, line breaks, and control
+ * characters are escaped twice. The size is the UTF-8 length of the source after both escapes,
+ * without the surrounding quotes.
+ *
+ * @param content - Source text.
+ * @returns Size in bytes that counts toward {@link WORK_ITEM_IMPORT_MAX_BYTES}.
+ */
+export function measureWorkItemImportContentBytes(content: string): number {
+  const inRequest = JSON.stringify(content).slice(1, -1)
+  return new TextEncoder().encode(JSON.stringify(inRequest)).byteLength - 2
+}
+
+/**
+ * Longest `sourceField` or `targetField`, in UTF-16 code units, that one import mapping entry
+ * accepts. It bounds the mapping, which travels beside the source in the same Lambda payload.
+ */
+export const WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH = 256
+
+/** Most entries one import mapping accepts. With the field length, it bounds the mapping's size. */
+export const WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES = 200
+
+/** Most source rows that one Work Item import accepts. */
+export const WORK_ITEM_IMPORT_MAX_ROWS = 10_000
+
+/**
+ * Progress of a Work Item import job. The worker creates every row first and then applies the
+ * links between them (parents, dependencies, relations, and acceptance criteria).
+ */
+export type ImportJobProgress = {
+  /**
+   * Import job ID.
+   */
+  jobId: string
+  /**
+   * Current status of the job.
+   */
+  status: ImportJobStatus
+  /**
+   * Rows the import creates. Absent until the worker has validated the source.
+   */
+  totalRows?: number
+  /**
+   * Rows already created.
+   */
+  processedRows: number
+  /**
+   * Links the import applies after every row. Absent until the worker has validated the source.
+   */
+  totalLinks?: number
+  /**
+   * Links already applied.
+   */
+  processedLinks: number
+}
+
+/**
  * Work Item export の file format です。
  */
 export type ExportFormat = 'csv' | 'json'
@@ -1527,11 +1594,23 @@ export type ListPublicWorkItemsRequest = {
  *
  * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments' | 'schedule'> & {
+export type CreatePublicWorkItemRequest = Omit<
+  CreateWorkItemInput,
+  'contributorAssignments' | 'acceptanceCriteria' | 'schedule' | 'priority'
+> & {
   /**
    * Work Item を所有する Team ID です。
    */
   teamId: string
+  /**
+   * Work Item template to start from, listed by `GET /api/v1/work-item-templates`. Fields sent in
+   * the body win; the template fills an omitted description, Work Item Type, workflow status, and
+   * priority, adds its custom field values under the sent ones, and gives the Work Item its
+   * acceptance criteria as new unmet criteria.
+   */
+  templateId?: string
+  /** Priority of the Work Item; the template priority, else `medium`, when it is left out. */
+  priority?: WorkItemPriority
   /**
    * Complete schedule with its calendar policy. When it is left out, the Work Item uses the
    * Workspace working calendar (working weekdays, company holidays, and national holidays) and is
@@ -1614,6 +1693,41 @@ export type PublicWorkItemTypeCatalog = {
   configurationRevision: number
   /** Active Work Item Types available for creation. */
   workItemTypes: PublicWorkItemTypeSchema[]
+}
+
+/** Work Item templates a Team can create from, returned by `GET /api/v1/work-item-templates`. */
+export type PublicWorkItemTemplateList = {
+  /** Team the list is for. */
+  teamId: string
+  /** Enabled Work Item templates that can create a Work Item in this Team, by name. */
+  templates: PublicWorkItemTemplate[]
+}
+
+/**
+ * Work Item template offered for creation by the Public API.
+ *
+ * Only the values a template fills on create are listed; its assignee, Project, and schedule are
+ * left out because the create body sets them.
+ */
+export type PublicWorkItemTemplate = {
+  /** Template ID to send as `templateId`. */
+  id: string
+  /** Current template version. */
+  version: number
+  /** Template display name. */
+  name: string
+  /** Title the template suggests. */
+  title: string
+  /** Description the template fills when the body has none. */
+  description?: string
+  /** Work Item Type the template fills when the body has none. */
+  workItemTypeId?: string
+  /** Workflow status the template fills when the body has none. */
+  workflowStatusId?: string
+  /** Priority the template fills when the body has none. */
+  priority?: WorkItemPriority
+  /** Acceptance criteria texts the new Work Item starts with; empty when none. */
+  acceptanceCriteria: string[]
 }
 
 /**

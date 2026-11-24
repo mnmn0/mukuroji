@@ -81,10 +81,29 @@ test('carries configured Project and assignee fences on comment requests', async
 
 test('requests the catalog with the configured Project fence', async () => {
   const api = createAgentWorkItemApi(config, async (url) => {
+    // A server older than template support has no template endpoint.
+    if (url.pathname === '/api/v1/work-item-templates') {
+      return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
     expect(url.searchParams.get('assignedProjectId')).toBe('project')
     return Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [] })
   })
-  await api.catalog('project')
+  expect((await api.catalog('project')).templates).toEqual([])
+})
+
+test('adds the Team templates to the catalog and rejects a list for another Team', async () => {
+  const template = { id: 'release-check', version: 1, name: 'Release check', title: 'Release', acceptanceCriteria: [] }
+  const cases: { templateTeamId: string, accepted: boolean }[] = [
+    { templateTeamId: 'team', accepted: true },
+    { templateTeamId: 'other', accepted: false },
+  ]
+  for (const { templateTeamId, accepted } of cases) {
+    const api = createAgentWorkItemApi(config, async (url) => url.pathname === '/api/v1/work-item-templates'
+      ? Response.json({ teamId: templateTeamId, templates: [template] })
+      : Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [] }))
+    if (accepted) expect((await api.catalog()).templates).toEqual([template])
+    else await expect(api.catalog()).rejects.toMatchObject({ code: 'invalid_response' })
+  }
 })
 
 test('restarts oversized queue scans with smaller cursor-bound pages and preserves complete status and selection', async () => {

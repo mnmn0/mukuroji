@@ -1,4 +1,4 @@
-import { createWorkItemKeyPath } from '../../shared/routing/paths'
+import { createDocumentPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
 
 /** The Markdown syntax tree shape this module reads and writes. */
@@ -23,7 +23,14 @@ export type WorkItemKeyLinkOptions = {
 }
 
 /**
- * Remark plugin that turns Work Item keys in Markdown text into links to the key's page.
+ * A Document path written as plain text, such as `/documents/doc_123`. It must stand on its own,
+ * so a path inside a longer URL or word is left as text.
+ */
+const documentPathPattern = /(?<![\w/:.-])\/documents\/([A-Za-z0-9_-]{1,128})(?![\w/-])/g
+
+/**
+ * Remark plugin that turns Work Item keys and Document paths in Markdown text into links to
+ * their pages.
  *
  * @param options - Known key prefixes, so words such as `UTF-8` stay text.
  * @returns A transformer that rewrites the Markdown syntax tree in place.
@@ -47,8 +54,29 @@ function linkWorkItemKeys(node: MarkdownNode, prefixes: ReadonlySet<string> | un
       linkWorkItemKeys(child, prefixes)
       return [child]
     }
-    return splitTextAtWorkItemKeys(child.value, prefixes)
+    return splitTextAtDocumentPaths(child.value, prefixes)
   })
+}
+
+/**
+ * Splits one text value into text and Document link nodes, then links keys in the remaining text.
+ *
+ * @param value - Text node value.
+ * @param prefixes - Known key prefixes, or undefined to link every key-shaped word.
+ * @returns The same text as nodes, with each Document path and key as a link.
+ */
+function splitTextAtDocumentPaths(value: string, prefixes: ReadonlySet<string> | undefined): MarkdownNode[] {
+  const nodes: MarkdownNode[] = []
+  let offset = 0
+  for (const match of value.matchAll(documentPathPattern)) {
+    const [path, documentId] = match
+    if (!documentId) continue
+    if (match.index > offset) nodes.push(...splitTextAtWorkItemKeys(value.slice(offset, match.index), prefixes))
+    nodes.push({ type: 'link', url: createDocumentPath(documentId), children: [{ type: 'text', value: path }] })
+    offset = match.index + path.length
+  }
+  if (offset < value.length) nodes.push(...splitTextAtWorkItemKeys(value.slice(offset), prefixes))
+  return nodes
 }
 
 /**

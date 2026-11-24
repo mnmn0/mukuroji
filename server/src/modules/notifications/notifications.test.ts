@@ -10,6 +10,7 @@ import {
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
+  requiresCurrentWorkItemContributor,
   toNotificationItem,
   type NotificationAction,
   type NotificationState,
@@ -32,6 +33,14 @@ test('sends baseline slip notifications only while the recipient is still the as
   expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip'] })).toBe(true)
   expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip', 'schedule-change'] })).toBe(true)
   expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip', 'creator'] })).toBe(false)
+})
+
+test('keeps a contributor notification only while the recipient still contributes', () => {
+  expect(requiresCurrentWorkItemContributor({ reasons: ['contributor'] })).toBe(true)
+  expect(requiresCurrentWorkItemContributor({ reasons: ['contributor', 'watcher'] })).toBe(false)
+  expect(requiresCurrentWorkItemContributor({ reasons: [] })).toBe(false)
+  // A contributor notification is not an owner notification, so it does not follow the owner.
+  expect(requiresCurrentWorkItemAssignee({ reasons: ['contributor'] })).toBe(false)
 })
 
 test('rejects stored preferences without a version or a Slack activation time', () => {

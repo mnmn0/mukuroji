@@ -43,6 +43,7 @@ import {
 } from './domain/customer'
 import { CustomerError } from './domain/customer'
 import type { TriageAuthorizationConditionChecks } from '../triage'
+import type { MutationAuditContext } from '../audit'
 
 /** Maximum number of canonical Work Item reads issued concurrently for Project impact. */
 const CUSTOMER_PROJECT_IMPACT_RESOLUTION_CONCURRENCY = 8
@@ -193,6 +194,14 @@ export interface CustomerRetentionClient {
 
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {
+  /**
+   * Returns a client whose writes also record audit events for one request, when supported.
+   *
+   * @param context - Request audit context.
+   * @returns The request-bound client.
+   */
+  withAuditContext?(context: MutationAuditContext): CustomerClient
+
   /** Lists customers within one Workspace boundary.
    *
    * @param workspaceId Workspace containing the customers.

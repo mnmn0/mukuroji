@@ -178,6 +178,37 @@ export type TimePeriodClose = {
   closedAt: string
 }
 
+/** One Team's close state for a month, read by a Workspace administrator. */
+export type WorkspaceTimePeriodTeamState = {
+  /** Team identifier. */
+  teamId: string
+  /** Team name from the Workspace directory, when the server knows it. */
+  name?: string
+  /** The Team's close of the month; absent while the month is open for the Team. */
+  close?: TimePeriodClose
+}
+
+/** Outcome of a Workspace-wide close or reopen for one Team. */
+export type WorkspaceTimePeriodTeamResult = {
+  /** Team identifier. */
+  teamId: string
+  /**
+   * `closed` or `reopened` when this request changed the Team, `already-closed` or `not-closed`
+   * when the Team was already in the requested state, and `failed` when the Team needs a retry.
+   */
+  status: 'closed' | 'already-closed' | 'reopened' | 'not-closed' | 'failed'
+}
+
+/** Result of closing or reopening one month for every Team of a Workspace. */
+export type WorkspaceTimePeriodResult = {
+  /** Month as `YYYY-MM`. */
+  month: string
+  /** Outcome for each Team, in Team order. */
+  results: WorkspaceTimePeriodTeamResult[]
+  /** Whether any Team failed and needs a retry. */
+  partialFailure: boolean
+}
+
 /** A budget for a Team or Project and optional local-date period. */
 export type TimeBudget = {
   /** Contract schema version. */

@@ -16,6 +16,7 @@ import { workItemDependencies, workspaceDependencies } from '../shared/app-depen
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
+  createApiMutationContext,
   hasEnterprisePermissionAtResource,
   requireAssignedProjectPermission,
   requireProjectPermission,
@@ -171,6 +172,7 @@ function requireCustomerManagement(
 export function registerCustomersRoutes(routeApp: Hono): void {
   routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>({
     getCustomers: () => workspaceDependencies.customers,
+    createAuditContext: (context, principal) => createApiMutationContext(context, principal, undefined),
     requireWorkspaceAccess: requireCustomerWorkspaceAccess,
     verifyTriageAccess: async (principal, teamId, minimum) => {
       await requireTeamPermission(principal, teamId, minimum)

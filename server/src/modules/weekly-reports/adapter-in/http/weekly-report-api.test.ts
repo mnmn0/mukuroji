@@ -268,7 +268,8 @@ test('shows a manager the submitted report of a member without the saved notes o
   expect(await status.json() as TeamWeeklyReportStatusResponse).toEqual({
     teamId: 'core-team',
     weekStart: WEEK,
-    members: [{ memberKey: 'demo@example.com', submissionCount: 0 }],
+    // The name comes from the Workspace member row, which a rename changes (ADR 0074).
+    members: [{ memberKey: 'demo@example.com', displayName: 'Demo User', submissionCount: 0 }],
   })
 
   const history = await request('/api/teams/core-team/weekly-reports/sato@example.com')

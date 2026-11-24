@@ -104,15 +104,18 @@ export function createCodingAgentMcpServer(
   if (readOnly) return server
 
   server.registerTool('create_task', {
-    description: 'Create a task assigned to the configured Workspace member. Read get_configuration first for required fields. Omitted dueDate creates an unscheduled task.',
+    description: 'Create a task assigned to the configured Workspace member. Read get_configuration first for required fields and catalog.templates. With templateId, the template fills an omitted description, type, status, and priority, adds its custom field values, and gives the task its acceptance criteria. Omitted dueDate creates an unscheduled task.',
     inputSchema: z.object({
       title: z.string().trim().min(1).max(256), description: z.string().max(100000).optional(),
       ...selectionFields, workflowStatusId: id.optional(),
-      priority: z.enum(['high', 'medium', 'low']).default('medium'),
+      templateId: id.optional().describe('Work Item template ID from get_configuration catalog.templates.'),
+      priority: z.enum(['high', 'medium', 'low']).optional().describe('Defaults to the template priority, else medium.'),
       dueDate: z.iso.date().optional(), customFieldValues: customValues.optional(), idempotencyKey: key,
     }), annotations: writeAnnotations,
-  }, ({ idempotencyKey, dueDate, ...input }) => result(() => tasks.create({
+  }, ({ idempotencyKey, dueDate, priority, ...input }) => result(() => tasks.create({
     ...input, assigneeUserId: scope.assigneeUserId,
+    // The server takes the template priority when none is sent.
+    ...(priority !== undefined ? { priority } : input.templateId === undefined ? { priority: 'medium' } : {}),
     // Without a schedule the server uses the Workspace working calendar, as the Web does.
     ...(dueDate ? { dueDate } : {}),
   }, idempotencyKey)))

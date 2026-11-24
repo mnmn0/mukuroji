@@ -578,6 +578,8 @@ export type DirectoryAuthorizationConditionChecks = NonNullable<
 export type ProjectSearchSource = {
   /** Whether the Project row is archived, so its search document must be absent. */
   archived: boolean
+  /** Whether the owning Team row is archived, read in the same snapshot as the Project. */
+  teamArchived: boolean
   /** Charter state of the Project. */
   state: ProjectCharterState
   /** Project directory row with the Japanese name. */
@@ -3901,6 +3903,7 @@ export class DynamoDbProjectDirectoryClient {
     const state = toProjectCharterState(project)
     return {
       archived: !isActiveDirectoryItem(project),
+      teamArchived: !isActiveDirectoryItem(team),
       state,
       project: toProjectDirectoryProjectResponse(project, 'ja'),
       englishName: localizedName(project, 'en'),
