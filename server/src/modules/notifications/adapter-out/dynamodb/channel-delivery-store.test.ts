@@ -56,11 +56,48 @@ describe('Email DynamoDB delivery queue', () => {
     await f.store.claim(delivery, 'lease-1', new Date(now.getTime() + 60_000), now)
     const claim = f.commands.find((command) => command instanceof UpdateCommand)
     expect(claim?.input.ConditionExpression).toContain('(attribute_not_exists(slackLeaseToken) OR slackNextAttemptAt <= :now)')
-    expect(claim?.input.ConditionExpression).not.toContain('emailLeaseToken) OR')
+    // Its own unexpired lease also blocks the claim, so a digest never takes a row another worker leased.
+    expect(claim?.input.ConditionExpression).toContain('(attribute_not_exists(emailLeaseToken) OR emailNextAttemptAt <= :now)')
     expect(claim?.input.ExpressionAttributeValues?.[':now']).toBe(now.toISOString())
   })
   test('rejects Email queue rows that no longer plan Email delivery', async () => {
     const f = fixture({ ...row, deliveryChannels: ['inApp'] })
     await expect(Promise.resolve(f.store.listDue(shard, now, 2))).resolves.toEqual({ deliveries: [], invalidCount: 1 })
+  })
+  test('lists the recipient\'s other digest rows, including unattempted ones that are not due yet', async () => {
+    const digestRow = (key: string, fields: Record<string, unknown> = {}) => ({
+      ...row, notificationKey: `2026-09-26T11:00:00.000Z#${key}`, eventId: key, deliveryFrequency: 'daily', ...fields,
+    })
+    const rows: Record<string, Record<string, unknown>> = {
+      opener: digestRow('opener'),
+      due: digestRow('due', { emailNextAttemptAt: '2026-09-26T11:30:00.000Z' }),
+      later: digestRow('later', { emailNextAttemptAt: '2026-09-27T09:00:00.000Z' }),
+      retried: digestRow('retried', { emailNextAttemptAt: '2026-09-26T12:10:00.000Z', emailAttempts: 1 }),
+      leased: digestRow('leased', { emailNextAttemptAt: '2026-09-26T12:01:00.000Z', emailDeliveryStatus: 'sending', emailAttempts: 1 }),
+      instant: digestRow('instant', { deliveryFrequency: 'instant' }),
+    }
+    const commands: Array<GetCommand | QueryCommand | UpdateCommand> = []
+    const store = new DynamoDbChannelDeliveryStore({
+      async send(command) {
+        commands.push(command)
+        if (command instanceof QueryCommand) {
+          return { Items: [...Object.values(rows), { recipientKey: 'workspace-1#other@example.test', notificationKey: 'x' }]
+            .map((item) => ({ recipientKey: item.recipientKey, notificationKey: item.notificationKey })) }
+        }
+        if (command instanceof GetCommand) return { Item: rows[String(command.input.Key?.notificationKey).split('#')[1] ?? ''] }
+        return {}
+      },
+    }, 'notifications', 'email')
+    const opener = (await store.listDue(shard, now, 1)).deliveries[0]!
+    expect(opener).toMatchObject({ notificationKey: '2026-09-26T11:00:00.000Z#opener', deliveryFrequency: 'daily' })
+    const companions = await store.listCompanions(opener, now, 49)
+    expect(companions.map((companion) => companion.notificationKey.split('#')[1])).toEqual(['due', 'later'])
+    const query = commands.filter((command) => command instanceof QueryCommand).at(-1)
+    expect(query?.input).toMatchObject({
+      IndexName: 'EmailDeliveryIndex', KeyConditionExpression: 'emailQueueShard = :shard AND emailNextAttemptAt <= :horizon',
+      FilterExpression: 'recipientKey = :recipientKey',
+      ExpressionAttributeValues: { ':shard': shard, ':recipientKey': recipientKey, ':horizon': '2026-10-04T12:00:00.000Z' },
+    })
+    expect(await store.listCompanions(opener, now, 1)).toHaveLength(1)
   })
 })

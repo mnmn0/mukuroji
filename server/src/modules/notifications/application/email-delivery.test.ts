@@ -82,3 +82,69 @@ describe('Email opt-in boundary', () => {
     expect(isEmailNotificationEligible({ ...legacy, updatedAt: undefined }, '2026-09-26T12:00:00.000Z')).toBe(false)
   })
 })
+
+describe('Email digest delivery', () => {
+  /** Creates a queue whose first due row opens a digest with the given companions. */
+  function digestFixture(companionCount: number, options: { lostRenewal?: string, suppressedKey?: string, result?: ChannelSendResult } = {}) {
+    const f = fixture({ succeeded: true, retryable: false }, emailOn)
+    const base: ChannelDelivery = {
+      workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
+      notificationKey: '2026-09-26T11:00:00.000Z#event-1', attempts: 0, version: 1, deliveryFrequency: 'daily',
+      nextAttemptAt: '2026-09-26T12:00:00.000Z', expiresAt: Date.parse('2026-09-26T12:00:00.000Z') / 1_000 + 3_600,
+      notification: { id: 'notification-1', eventId: 'event-1', eventType: 'comment.created',
+        reasons: ['mention'], title: 'Review', occurredAt: '2026-09-26T11:00:00.000Z', state: 'unread' },
+    }
+    const companions = Array.from({ length: companionCount }, (_, index): ChannelDelivery => ({
+      ...base, notificationKey: `2026-09-26T11:0${index + 1}:00.000Z#event-${index + 2}`,
+      nextAttemptAt: '2026-09-27T11:00:00.000Z',
+      notification: { ...base.notification, id: `notification-${index + 2}`, eventId: `event-${index + 2}`,
+        occurredAt: `2026-09-26T11:0${index + 1}:00.000Z` },
+    }))
+    const finishes: Array<{ key: string, status: string, code?: string }> = []
+    const digests: string[][] = []
+    let pending = true
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      send: async () => { throw new Error('A digest row must not be sent on its own.') },
+      store: {
+        ...f.dependencies.store,
+        listDue: async (shard) => ({ deliveries: shard === 'email#0' && pending ? [base] : [], invalidCount: 0 }),
+        renew: async (delivery) => delivery.notificationKey !== options.lostRenewal,
+        finish: async (delivery, _token, status, _next, code) => { finishes.push({ key: delivery.notificationKey, status, code }); pending = false },
+      },
+      isAuthorized: async (delivery) => delivery.notificationKey !== options.suppressedKey,
+      digest: {
+        listCompanions: async () => companions,
+        send: async (deliveries) => { digests.push(deliveries.map((delivery) => delivery.notificationKey)); return options.result ?? { succeeded: true, retryable: false } },
+      },
+    }
+    return { dependencies, finishes, digests, companions }
+  }
+
+  test('sends one digest for every row of the recipient and marks each row sent', async () => {
+    const f = digestFixture(2)
+    expect(await deliverDueEmailNotifications(f.dependencies)).toBe(3)
+    expect(f.digests).toHaveLength(1)
+    expect(f.digests[0]).toHaveLength(3)
+    expect(f.finishes.map((finish) => finish.status)).toEqual(['sent', 'sent', 'sent'])
+  })
+  test('leaves out a row that fails its own checks or loses its lease (released, not finished), and records the shared outcome on the rest', async () => {
+    const f = digestFixture(2, { suppressedKey: '2026-09-26T11:01:00.000Z#event-2', lostRenewal: '2026-09-26T11:02:00.000Z#event-3',
+      result: { succeeded: false, retryable: true, code: 'EmailRateLimited' } })
+    expect(await deliverDueEmailNotifications(f.dependencies)).toBe(0)
+    expect(f.digests).toEqual([['2026-09-26T11:00:00.000Z#event-1']])
+    expect(f.finishes).toEqual([
+      { key: '2026-09-26T11:01:00.000Z#event-2', status: 'suppressed', code: undefined },
+      { key: '2026-09-26T11:00:00.000Z#event-1', status: 'pending', code: 'EmailRateLimited' },
+    ])
+  })
+  test('sends instant rows on their own even with a digest sender', async () => {
+    const f = fixture({ succeeded: true, retryable: false }, emailOn)
+    let digests = 0
+    const result = await deliverDueEmailNotifications({ ...f.dependencies, digest: {
+      listCompanions: async () => { throw new Error('unexpected') }, send: async () => { digests += 1; return { succeeded: true, retryable: false } },
+    } })
+    expect(result).toBe(1)
+    expect(digests).toBe(0)
+  })
+})

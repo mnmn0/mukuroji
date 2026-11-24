@@ -1,5 +1,5 @@
 import type { NotificationMessageLocale } from '@mukuroji/contracts'
-import type { NotificationItem, NotificationPreferences } from '../notifications'
+import type { NotificationFrequency, NotificationItem, NotificationPreferences } from '../notifications'
 import { createNotificationDeliveryPlan, isNotificationRoutedToChannel } from '../notifications'
 import { CHANNEL_DELIVERY_SHARDS, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../domain/channel-delivery'
 
@@ -21,6 +21,8 @@ export type ChannelDelivery = {
   nextAttemptAt: string
   /** Original planned delivery time, unaffected by lease or transport retries. */
   scheduledAt?: string
+  /** Frequency the recipient chose when the notification was queued; digests group non-instant rows. */
+  deliveryFrequency?: NotificationFrequency
   /** Retention deadline in Unix seconds. */
   expiresAt: number
   /** Original scheduled due date, when this is a due/overdue notification. */
@@ -133,7 +135,26 @@ export type ChannelDeliveryDependencies = {
   createToken(): string
   /** Clock used for due times, quiet hours, and retry delay. */
   now(): Date
+  /**
+   * Groups a recipient's due non-instant notifications into one message. Without it, every
+   * notification is sent on its own.
+   */
+  digest?: ChannelDigestDependencies
 }
+
+/** Ports that send several due notifications of one recipient as one digest message. */
+export type ChannelDigestDependencies = {
+  /**
+   * Lists the recipient's other due, non-instant deliveries in the same queue shard, excluding
+   * `delivery` itself, at most `limit`.
+   */
+  listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDelivery[]>
+  /** Sends one digest for every delivery, which all share one recipient. */
+  send(deliveries: ChannelDelivery[]): Promise<ChannelSendResult>
+}
+
+/** Most notifications one digest message carries; any more are sent in the next run. */
+export const MAX_DIGEST_NOTIFICATIONS = 50
 
 /** Channel identity and opt-in rule that parameterize the shared delivery loop. */
 export type ChannelDeliveryPolicy = {
@@ -152,96 +173,265 @@ export type ChannelDeliveryPolicy = {
  * @returns Number of messages the transport acknowledged during this invocation.
  */
 export async function deliverDueChannelNotifications(policy: ChannelDeliveryPolicy, dependencies: ChannelDeliveryDependencies): Promise<number> {
-  let sent = 0
-  let failed = false
+  const run: DeliveryRun = { policy, dependencies, sent: 0, failed: false, deadline: dependencies.now().getTime() + 180_000 }
   let oldestDueAgeSeconds = 0
   let invalidCandidates = 0
-  const deadline = dependencies.now().getTime() + 180_000
   const firstShard = Math.floor(dependencies.now().getTime() / 60_000) % CHANNEL_DELIVERY_SHARDS
   for (let offset = 0; offset < CHANNEL_DELIVERY_SHARDS; offset += 1) {
-    if (dependencies.now().getTime() >= deadline) break
+    if (dependencies.now().getTime() >= run.deadline) break
     const shard = (firstShard + offset) % CHANNEL_DELIVERY_SHARDS
     let deliveries: ChannelDelivery[]
     try {
       const batch = await dependencies.store.listDue(`${policy.channel}#${shard}`, dependencies.now(), 2)
       deliveries = batch.deliveries
       invalidCandidates += batch.invalidCount
-      if (batch.invalidCount > 0) failed = true
+      if (batch.invalidCount > 0) run.failed = true
     } catch {
-      failed = true
+      run.failed = true
       continue
     }
+    const handled = new Set<string>()
     for (const delivery of deliveries) {
       oldestDueAgeSeconds = Math.max(oldestDueAgeSeconds,
         Math.max(0, (dependencies.now().getTime() - Date.parse(delivery.scheduledAt ?? delivery.nextAttemptAt)) / 1_000))
-      if (dependencies.now().getTime() >= deadline) break
-      const token = dependencies.createToken()
-      try {
-        if (!await dependencies.store.claim(delivery, token, new Date(dependencies.now().getTime() + 60_000), dependencies.now())) continue
-      } catch {
-        // A lost claim response may already own a lease; leave it for expiry and continue other recipients.
-        failed = true
-        continue
-      }
-      try {
-        if (delivery.attempts >= 5) {
-          await dependencies.store.finish(delivery, token, 'failed', undefined, `${policy.label}AttemptsExhausted`)
-          reportFailure(policy, dependencies, delivery, token, `${policy.label}AttemptsExhausted`)
-          failed = true
-          continue
-        }
-        const initialPreferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, initialPreferences, delivery) || !await dependencies.isAuthorized(delivery)) {
-          await dependencies.store.finish(delivery, token, 'suppressed')
-          continue
-        }
-        // Recheck preferences after potentially slow authorization, before the final lease fence and send.
-        const preferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, preferences, delivery)) {
-          await dependencies.store.finish(delivery, token, 'suppressed')
-          continue
-        }
-        const now = dependencies.now()
-        const quietUntil = createNotificationDeliveryPlan({ ...preferences, frequency: 'instant' }, now.toISOString()).deliveryAfter
-        const snoozedUntil = delivery.notification.snoozedUntil ?? now.toISOString()
-        const eligibleAt = new Date(quietUntil > snoozedUntil ? quietUntil : snoozedUntil)
-        if (eligibleAt > now) {
-          await dependencies.store.finish(delivery, token, 'pending', eligibleAt)
-          continue
-        }
-        if (!await dependencies.store.renew(delivery, token, dependencies.now())) {
-          await dependencies.store.release(delivery, token, dependencies.now())
-          continue
-        }
-        const result = await dependencies.send(delivery)
-        if (result.succeeded) {
-          await dependencies.store.finish(delivery, token, 'sent')
-          sent += 1
-        } else if (result.suppressed) {
-          await dependencies.store.finish(delivery, token, 'suppressed', undefined, result.code)
-        } else if (result.retryable && delivery.attempts < 4) {
-          const delay = Math.max(30_000 * 2 ** delivery.attempts, result.retryAfterMs ?? 0)
-          await dependencies.store.finish(delivery, token, 'pending', new Date(dependencies.now().getTime() + delay), result.code)
-        } else {
-          await dependencies.store.finish(delivery, token, 'failed', undefined, result.code)
-          reportFailure(policy, dependencies, delivery, token, result.code ?? `${policy.label}DeliveryRejected`)
-          failed = true
-        }
-      } catch {
-        // Failed authorization/storage reads never permit sending. Preserve a bounded retry path.
-        try {
-          await dependencies.store.finish(delivery, token, delivery.attempts < 4 ? 'pending' : 'failed',
-            delivery.attempts < 4 ? new Date(dependencies.now().getTime() + 60_000) : undefined,
-            `${policy.label}DeliveryUnavailable`)
-          if (delivery.attempts >= 4) reportFailure(policy, dependencies, delivery, token, `${policy.label}DeliveryUnavailable`)
-        } catch { /* A lost lease cannot mutate a newer claim; its canonical row remains authoritative. */ }
-        failed = true
+      if (dependencies.now().getTime() >= run.deadline) break
+      if (handled.has(deliveryIdentity(delivery))) continue
+      if (dependencies.digest && isDigestDelivery(delivery)) {
+        for (const identity of await deliverDigest(run, dependencies.digest, delivery)) handled.add(identity)
+      } else {
+        await deliverOne(run, delivery)
       }
     }
   }
   dependencies.telemetry.reportQueueHealth(oldestDueAgeSeconds, invalidCandidates)
-  if (failed) throw new Error(`${policy.label} notification delivery requires attention.`)
-  return sent
+  if (run.failed) throw new Error(`${policy.label} notification delivery requires attention.`)
+  return run.sent
+}
+
+/** Mutable state of one scheduled invocation. */
+type DeliveryRun = {
+  /** Channel identity and opt-in rule. */
+  policy: ChannelDeliveryPolicy
+  /** Persistence, authorization, transport, token, and clock ports. */
+  dependencies: ChannelDeliveryDependencies
+  /** Notifications the transport acknowledged so far. */
+  sent: number
+  /** Whether any failure needs operator attention. */
+  failed: boolean
+  /** Epoch milliseconds after which no new claim starts. */
+  deadline: number
+}
+
+/** One claimed delivery and its lease token. */
+type ClaimedDelivery = {
+  /** Claimed delivery. */
+  delivery: ChannelDelivery
+  /** Lease token owned by this invocation. */
+  token: string
+}
+
+/**
+ * Builds the identity of one queued notification row.
+ * @param delivery - Queued delivery.
+ * @returns Recipient and notification key.
+ */
+function deliveryIdentity(delivery: Pick<ChannelDelivery, 'recipientKey' | 'notificationKey'>): string {
+  return `${delivery.recipientKey}\n${delivery.notificationKey}`
+}
+
+/**
+ * Reports whether a delivery belongs in a digest: the recipient chose hourly, daily, or weekly.
+ * @param delivery - Queued delivery.
+ * @returns `true` for a non-instant frequency.
+ */
+function isDigestDelivery(delivery: ChannelDelivery): boolean {
+  return delivery.deliveryFrequency !== undefined && delivery.deliveryFrequency !== 'instant'
+}
+
+/**
+ * Claims one delivery, failing closed on a lost response.
+ * @param run - Invocation state.
+ * @param delivery - Delivery to claim.
+ * @param leaseMs - Lease length from now.
+ * @returns The claim, or undefined when another worker owns it or the claim failed.
+ */
+async function claimDelivery(run: DeliveryRun, delivery: ChannelDelivery, leaseMs: number): Promise<ClaimedDelivery | undefined> {
+  const token = run.dependencies.createToken()
+  try {
+    const now = run.dependencies.now()
+    return await run.dependencies.store.claim(delivery, token, new Date(now.getTime() + leaseMs), now) ? { delivery, token } : undefined
+  } catch {
+    // A lost claim response may already own a lease; leave it for expiry and continue other recipients.
+    run.failed = true
+    return undefined
+  }
+}
+
+/**
+ * Applies every check that must pass before a claimed delivery may be sent: attempt limit,
+ * retention, current opt-in and routing, current authorization, quiet hours, and snooze. A
+ * delivery that fails a check is finished here.
+ * @param run - Invocation state.
+ * @param claimed - Claimed delivery.
+ * @returns Whether the delivery is still ready to send; the lease still needs a final renewal.
+ */
+async function checkClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise<boolean> {
+  const { policy, dependencies } = run
+  const { delivery, token } = claimed
+  try {
+    if (delivery.attempts >= 5) {
+      await dependencies.store.finish(delivery, token, 'failed', undefined, `${policy.label}AttemptsExhausted`)
+      reportFailure(policy, dependencies, delivery, token, `${policy.label}AttemptsExhausted`)
+      run.failed = true
+      return false
+    }
+    const initialPreferences = await dependencies.store.getPreferences(delivery)
+    if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, initialPreferences, delivery) || !await dependencies.isAuthorized(delivery)) {
+      await dependencies.store.finish(delivery, token, 'suppressed')
+      return false
+    }
+    // Recheck preferences after potentially slow authorization, before the final lease fence and send.
+    const preferences = await dependencies.store.getPreferences(delivery)
+    if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isChannelEligible(policy, preferences, delivery)) {
+      await dependencies.store.finish(delivery, token, 'suppressed')
+      return false
+    }
+    const now = dependencies.now()
+    const quietUntil = createNotificationDeliveryPlan({ ...preferences, frequency: 'instant' }, now.toISOString()).deliveryAfter
+    const snoozedUntil = delivery.notification.snoozedUntil ?? now.toISOString()
+    const eligibleAt = new Date(quietUntil > snoozedUntil ? quietUntil : snoozedUntil)
+    if (eligibleAt > now) {
+      await dependencies.store.finish(delivery, token, 'pending', eligibleAt)
+      return false
+    }
+    return true
+  } catch {
+    await finishUnavailable(run, claimed)
+    return false
+  }
+}
+
+/**
+ * Renews a checked claim immediately before the external side effect, releasing it when lost.
+ * @param run - Invocation state.
+ * @param claimed - Checked claim.
+ * @returns Whether this invocation still owns the delivery.
+ */
+async function renewClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise<boolean> {
+  try {
+    if (await run.dependencies.store.renew(claimed.delivery, claimed.token, run.dependencies.now())) return true
+    await run.dependencies.store.release(claimed.delivery, claimed.token, run.dependencies.now())
+    return false
+  } catch {
+    await finishUnavailable(run, claimed)
+    return false
+  }
+}
+
+/**
+ * Records one transport outcome on a claimed delivery.
+ * @param run - Invocation state.
+ * @param claimed - Delivery that was handed to the transport.
+ * @param result - Transport outcome.
+ */
+async function completeClaimed(run: DeliveryRun, claimed: ClaimedDelivery, result: ChannelSendResult): Promise<void> {
+  const { policy, dependencies } = run
+  const { delivery, token } = claimed
+  try {
+    if (result.succeeded) {
+      await dependencies.store.finish(delivery, token, 'sent')
+      run.sent += 1
+    } else if (result.suppressed) {
+      await dependencies.store.finish(delivery, token, 'suppressed', undefined, result.code)
+    } else if (result.retryable && delivery.attempts < 4) {
+      const delay = Math.max(30_000 * 2 ** delivery.attempts, result.retryAfterMs ?? 0)
+      await dependencies.store.finish(delivery, token, 'pending', new Date(dependencies.now().getTime() + delay), result.code)
+    } else {
+      await dependencies.store.finish(delivery, token, 'failed', undefined, result.code)
+      reportFailure(policy, dependencies, delivery, token, result.code ?? `${policy.label}DeliveryRejected`)
+      run.failed = true
+    }
+  } catch {
+    await finishUnavailable(run, claimed)
+  }
+}
+
+/**
+ * Keeps a bounded retry path after a failed storage or authorization read, which never permits sending.
+ * @param run - Invocation state.
+ * @param claimed - Claimed delivery.
+ */
+async function finishUnavailable(run: DeliveryRun, claimed: ClaimedDelivery): Promise<void> {
+  const { policy, dependencies } = run
+  const { delivery, token } = claimed
+  try {
+    await dependencies.store.finish(delivery, token, delivery.attempts < 4 ? 'pending' : 'failed',
+      delivery.attempts < 4 ? new Date(dependencies.now().getTime() + 60_000) : undefined,
+      `${policy.label}DeliveryUnavailable`)
+    if (delivery.attempts >= 4) reportFailure(policy, dependencies, delivery, token, `${policy.label}DeliveryUnavailable`)
+  } catch { /* A lost lease cannot mutate a newer claim; its canonical row remains authoritative. */ }
+  run.failed = true
+}
+
+/**
+ * Sends one notification on its own.
+ * @param run - Invocation state.
+ * @param delivery - Due delivery.
+ */
+async function deliverOne(run: DeliveryRun, delivery: ChannelDelivery): Promise<void> {
+  const claimed = await claimDelivery(run, delivery, 60_000)
+  if (!claimed || !await checkClaimed(run, claimed) || !await renewClaimed(run, claimed)) return
+  let result: ChannelSendResult
+  try {
+    result = await run.dependencies.send(delivery)
+  } catch {
+    await finishUnavailable(run, claimed)
+    return
+  }
+  await completeClaimed(run, claimed, result)
+}
+
+/**
+ * Sends a recipient's due non-instant notifications as one digest. Every row is claimed and
+ * checked on its own exactly as a single send is; only the rows that pass and still hold their
+ * lease right before sending are included, and all of them share the one transport outcome.
+ * @param run - Invocation state.
+ * @param digest - Digest listing and transport ports.
+ * @param delivery - Due delivery that started the digest.
+ * @returns Identities of every row this digest looked at, so the shard loop skips them.
+ */
+async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies, delivery: ChannelDelivery): Promise<string[]> {
+  let companions: ChannelDelivery[] = []
+  try {
+    companions = (await digest.listCompanions(delivery, run.dependencies.now(), MAX_DIGEST_NOTIFICATIONS - 1))
+      .filter((companion) => companion.recipientKey === delivery.recipientKey && isDigestDelivery(companion) &&
+        deliveryIdentity(companion) !== deliveryIdentity(delivery))
+  } catch {
+    // Without the companions the row is still sent, as a digest of one.
+    run.failed = true
+  }
+  const candidates = [delivery, ...companions].slice(0, MAX_DIGEST_NOTIFICATIONS)
+  const checked: ClaimedDelivery[] = []
+  for (const candidate of candidates) {
+    if (run.dependencies.now().getTime() >= run.deadline) break
+    // A longer lease covers checking every row; each is renewed again right before the send.
+    const claimed = await claimDelivery(run, candidate, 120_000)
+    if (claimed && await checkClaimed(run, claimed)) checked.push(claimed)
+  }
+  const ready: ClaimedDelivery[] = []
+  for (const claimed of checked) {
+    if (await renewClaimed(run, claimed)) ready.push(claimed)
+  }
+  if (ready.length > 0) {
+    let result: ChannelSendResult | undefined
+    try {
+      result = await digest.send(ready.map((claimed) => claimed.delivery))
+    } catch {
+      for (const claimed of ready) await finishUnavailable(run, claimed)
+    }
+    if (result) for (const claimed of ready) await completeClaimed(run, claimed, result)
+  }
+  return candidates.map(deliveryIdentity)
 }
 
 /**

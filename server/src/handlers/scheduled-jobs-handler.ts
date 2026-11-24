@@ -7,6 +7,7 @@ import { handler as agentRunTriageHandler } from './agent-run-triage-handler'
 import { handler as analyticsScheduleHandler } from './analytics-schedule-handler'
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
 import { handler as cycleScheduleHandler } from './cycle-schedule-handler'
+import { handler as emailFeedbackHandler } from './email-feedback-handler'
 import { handler as emailNotificationHandler } from './email-notifications-handler'
 import { handler as japanesePublicHolidaySyncHandler } from './japanese-public-holiday-sync-handler'
 import { handler as notificationScheduleHandler } from './notification-schedule-handler'
@@ -27,6 +28,7 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'slack-notifications', everyMinutes: 1, attempts: 1, run: () => slackNotificationHandler() },
   { name: 'email-notifications', everyMinutes: 1, attempts: 1, run: () => emailNotificationHandler() },
   { name: 'push-notifications', everyMinutes: 1, attempts: 1, run: () => pushNotificationHandler() },
+  { name: 'email-feedback', everyMinutes: 1, attempts: 1, run: () => emailFeedbackHandler() },
   { name: 'analytics-schedule', everyMinutes: 5, attempts: 3, run: analyticsScheduleHandler },
   { name: 'notification-schedule', everyMinutes: 60, attempts: 3, run: notificationScheduleHandler },
   { name: 'cycle-schedule', everyMinutes: 60, attempts: 3, run: cycleScheduleHandler },

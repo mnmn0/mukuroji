@@ -31,7 +31,7 @@
 | [0002](0002-shared-authentication-attempt-limits.md) | 認証の試行制限を DynamoDB の共有 counter で数え、信頼できる送信元を key にする | 提案 |
 | [0003](0003-agent-run-latest-record.md) | Work Item ごとの最新 Run を `agent-run-latest` row で強整合に持つ | 採用 |
 | [0004](0004-public-api-caller-identity.md) | Public API の rate limit・冪等性の呼び出し元を OAuth app 単位にする | 提案 |
-| [0005](0005-notification-email-ses-transport.md) | 通知の Email を SES で送り、Slack と同じ配信 queue を channel ごとの sparse index で持つ | 提案 |
+| [0005](0005-notification-email-ses-transport.md) | 通知の Email を SES で送り、Slack と同じ配信 queue を channel ごとの sparse index で持つ | 一部を置き換え済み（0082） |
 | [0006](0006-finished-run-index.md) | 終了済み Run を Team と終了時刻で引く sparse index を追加する | 提案 |
 | [0007](0007-member-display-preferences-storage.md) | メンバーの表示設定を project directory table の sidecar row に保存する | 提案 |
 | [0008](0008-audit-stream-two-readers-and-worker-secrets.md) | AuditEvents stream の reader を 2 つに保ち、worker の secret を Secrets Manager から読む | 提案 |
@@ -88,3 +88,4 @@
 | [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |
 | [0080](0080-team-grant-request-receipt.md) | Team の管理操作の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける | 提案 |
 | [0081](0081-notification-web-push-transport.md) | 通知の Web Push を自前の RFC 8291 暗号化と VAPID で送り、Email と同じ配信 queue に push channel を足す | 提案 |
+| [0082](0082-notification-email-digest-and-feedback.md) | 通知 Email の digest を配信時にまとめ、SES の bounce・complaint を EventBridge と SQS で受けて宛先を止める | 提案 |

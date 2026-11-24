@@ -3331,3 +3331,51 @@ test('Web Push notifications drain their own queue and read only the VAPID priva
     Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
   });
 });
+
+test('Email bounces and complaints reach the feedback job through the SES configuration set, EventBridge, and SQS', () => {
+  const template = synthesizedTemplate;
+  template.resourceCountIs('AWS::SES::ConfigurationSet', 1);
+  template.hasResourceProperties('AWS::SES::ConfigurationSet', {
+    SuppressionOptions: { SuppressedReasons: ['BOUNCE', 'COMPLAINT'] },
+  });
+  template.hasResourceProperties('AWS::SES::ConfigurationSetEventDestination', {
+    EventDestination: Match.objectLike({
+      Enabled: true,
+      MatchingEventTypes: ['bounce', 'complaint'],
+      EventBridgeDestination: Match.objectLike({ EventBusArn: Match.anyValue() }),
+    }),
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    EventPattern: {
+      source: ['aws.ses'], 'detail-type': ['Email Bounced', 'Email Complaint Received'],
+      detail: { mail: { tags: { 'ses:configuration-set': [{ Ref: Match.stringLikeRegexp('^NotificationEmailConfigurationSet') }] } } },
+    },
+    Targets: [Match.objectLike({ Arn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^NotificationEmailFeedbackQueue'), 'Arn'] } })],
+  });
+  template.hasResourceProperties('AWS::SQS::Queue', {
+    SqsManagedSseEnabled: true,
+    RedrivePolicy: { deadLetterTargetArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^NotificationEmailFeedbackDlq'), 'Arn'] }, maxReceiveCount: 5 },
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription: Match.stringLikeRegexp('SES bounce or complaint event could not be read'),
+  });
+  // The feedback job only receives and deletes queue messages and writes suppression rows.
+  const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+    .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
+    .filter((statement: { Action?: unknown }) => JSON.stringify(statement.Action).includes('sqs:ReceiveMessage'));
+  expect(statements).toEqual([expect.objectContaining({
+    Effect: 'Allow', Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NotificationEmailFeedbackQueue/), 'Arn'] },
+  })]);
+  // The Email job sends through the configuration set and tags each message for the feedback job.
+  const { statements: emailStatements } = findScheduledJobPolicy(template, 'EmailNotification');
+  const send = emailStatements.find((statement) => JSON.stringify(statement.Action) === '"ses:SendEmail"');
+  expect(JSON.stringify(send?.Resource)).toContain(':configuration-set/');
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
+    Environment: { Variables: Match.objectLike({
+      NOTIFICATION_EMAIL_CONFIGURATION_SET: { Ref: Match.stringLikeRegexp('^NotificationEmailConfigurationSet') },
+      NOTIFICATION_EMAIL_FEEDBACK_QUEUE_URL: { Ref: Match.stringLikeRegexp('^NotificationEmailFeedbackQueue') },
+    }) },
+  });
+});

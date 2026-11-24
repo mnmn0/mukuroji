@@ -20,6 +20,7 @@ import {
   type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
+import { EMAIL_SUPPRESSION_ITEM_TYPE, EMAIL_SUPPRESSION_KEY } from './domain/email-suppression'
 import {
   categoryChannelsEqual,
   hasNotificationMutes,
@@ -1152,6 +1153,11 @@ export function toNotificationItem(
     if (value.notificationKey === NOTIFICATION_PREFERENCES_KEY) {
       return undefined
     }
+    throw invalidNotificationData()
+  }
+  // The recipient's Email suppression row shares the partition but is never a notification.
+  if (value.itemType === EMAIL_SUPPRESSION_ITEM_TYPE) {
+    if (value.notificationKey === EMAIL_SUPPRESSION_KEY) return undefined
     throw invalidNotificationData()
   }
   const recipientStatusKey = readText(value.recipientStatusKey)

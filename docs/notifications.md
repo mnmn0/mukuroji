@@ -217,17 +217,17 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 
 ## Email 配信
 
-通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ 1 通ずつ送ります。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)）。
+通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ送ります。frequency が instant なら 1 通ずつ、hourly / daily / weekly なら digest にまとめます。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)、[ADR 0082](adr/0082-notification-email-digest-and-feedback.md)）。
 
 ### 有効にする
 
-送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも、設定が保存されるだけです（設定画面の「無効」表示は後続で入れます）。
+送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも設定が保存されるだけで、設定画面には「無効」と表示します。
 
 運用者は有効にする前に次を行います。
 
 - SES でこのアドレスか、そのドメインを verified identity にする。本番では sandbox を解除する。
 - 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
-- SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
+- bounce と complaint はアプリが受け取って宛先を止めます（下の [bounce と complaint](#bounce-と-complaint)）。stack の configuration set でも SES の suppression list を有効にしています。
 
 Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `cdk/cdk.json` の `mukuroji:webDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
 
@@ -241,15 +241,24 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 配信 queue は [Slack 配信](#slack-配信) と同じ実装を使い、属性と index だけが分かれています。通知と同じ transaction で `emailQueueShard`（`email#<番号>`）・`emailNextAttemptAt`・`emailDeliveryStatus`・`emailAttempts` を保存し、16 shard の sparse GSI `EmailDeliveryIndex` から毎分最大32件を処理します。Slack と Email を両方有効にした通知は、それぞれ独立に送ります。どちらの channel の更新も通知 row の `version` を進めるため、一方が期限内の lease を持っている間は他方は claim せず、次の実行で取り直します（互いの送信直前の version 確認を取り消し合わないため）。
 
-再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
+再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency が instant 以外の通知は、delivery plan の遅延（1時間・1日・1週間）が過ぎた最初の 1 件を起点に、同じ受信者のほかの instant 以外の Email 通知（期限前でも、一度も試行していない `pending` のもの）を同じ shard から集め、最大50件を 1 通の digest にします。各通知は 1 件ずつ claim して上の確認をすべて通し、送信直前に lease を延長できたものだけを本文に入れ、SES の結果を全件に同じく記録します。再試行の待ち中の通知と、ほかの worker が lease 中の通知は含めません。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
 
-本文は ja / en 併記のプレーンテキストです。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+本文は ja / en 併記のプレーンテキストです。digest の件名は `[mukuroji] 通知のまとめ（N 件） / Notification digest (N)` で、本文は発生の古い順に番号・タイトル・概要・deep link を並べます。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+
+### bounce と complaint
+
+Email job は stack の SES configuration set を指定して送り、message tag `mukuroji-recipient` に recipient key（`<workspaceId>#<memberKey>`）の base64url を付けます。configuration set は bounce と complaint を EventBridge の default bus に出し、rule が SQS queue `NotificationEmailFeedbackQueue` に入れます。毎分の scheduled job `email-feedback` がこれを読みます。
+
+- permanent bounce と complaint（`complaintFeedbackType: not-spam` を除く）は、Notifications table の `<recipientKey>` / `!EMAIL_SUPPRESSION` row（`itemType: email-suppression`）に、アドレスの SHA-256・理由（`bounce` / `complaint`）・時刻を記録します。アドレスそのものは保存しません。古い event が新しい記録を上書きすることはありません。
+- transient・undetermined の bounce、tag のない mail は何もしません。読めない event は queue に残り、5 回で DLQ `NotificationEmailFeedbackDlq` に移って `NotificationEmailFeedbackDlqAlarm` を出します。
+- 送信時は宛先を読んだ後に suppression を確かめ、記録したハッシュが今のアドレスと一致すれば送らずに抑止します（`emailLastCode: EmailRecipientSuppressed`、alarm なし）。メンバーが Cognito のアドレスを変えた場合、または記録の後に通知設定で Email を無効にしてから有効にし直した場合は、また送ります。suppression を読めない場合は送らずに再試行します（`EmailSuppressionUnavailable`）。
+- 運用者は CloudWatch Logs の `EmailRecipientSuppressed`（理由だけを含む）と `Mukuroji/Notifications` の `EmailSuppressions` metric（`Reason` dimension）で件数を、該当通知 row の `emailLastCode` で対象を確認できます。
 
 ### 失敗の調査
 
 永続的失敗は notification row の `emailDeliveryStatus: failed` と秘密情報を含まない `emailLastCode` に残り、row を `EmailDeliveryIndex` の `email-failed#<番号>` partition へ移して `emailFailureReference` を記録します。CloudWatch の `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で対象を特定できます。ログにはメールアドレスと本文を含めません。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Email`）が15分以上の状態で3回続くと `EmailNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
 
-ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。
+ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。configuration set は `NOTIFICATION_EMAIL_CONFIGURATION_SET`、feedback queue は `NOTIFICATION_EMAIL_FEEDBACK_QUEUE_URL` で指定し、空なら tag を付けずに送り、feedback job は何もしません。
 
 ## Web Push 配信
 
