@@ -462,6 +462,7 @@ export function createCapacityPlanningService(
     new DynamoDbCapacityPlanningRepository(
       tableName ?? 'mukuroji-capacity-planning-local',
       createDynamoDbDocumentClient(dynamoDbClient),
+      getConfiguredAuditTableName(),
     ),
     createCapacityPlanningDataSource(timeTrackingService),
   )

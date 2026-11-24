@@ -221,4 +221,12 @@ export const auditLogMessages = {
   'auditLog.action.upload-completed': 'upload completed',
   'auditLog.action.version-created': 'version created',
   'auditLog.action.viewed': 'viewed',
+  'auditLog.resource.workload.assignment': 'Resource assignment',
+  'auditLog.resource.workload.request': 'Resource request',
+  'auditLog.resource.workload.time-off': 'Time off',
+  'auditLog.action.approved': 'approved',
+  'auditLog.action.canceled': 'canceled',
+  'auditLog.action.confirmed': 'confirmed',
+  'auditLog.action.reassigned': 'reassigned',
+  'auditLog.action.unconfirmed': 'marked tentative',
 } as const

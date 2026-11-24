@@ -1,4 +1,4 @@
-import type { CapacityPlanningGranularity, ResourceAssignment, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
+import type { CapacityPlanningGranularity, ResourceAssignment, ResourceAssignmentStatus, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
 import { Link } from 'react-router'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
@@ -22,6 +22,8 @@ export type TeamWorkloadViewProps = {
   onMoveAssignment?: (assignmentId: string, memberId: string, targetDate: string) => void
   /** Whether an assignment mutation is currently in flight. */
   isAssignmentMutationPending?: boolean
+  /** Confirms, returns to tentative, or cancels an assignment; shown only to Team managers. */
+  onChangeAssignmentStatus?: (assignmentId: string, status: ResourceAssignmentStatus) => void
   /** Path of the workload view across Teams, linked from the heading when given. */
   crossTeamPath?: string
 }
@@ -34,11 +36,15 @@ export function TeamWorkloadView({
   onGranularityChange,
   onRetry,
   onMoveAssignment,
+  onChangeAssignmentStatus,
   isAssignmentMutationPending = false,
   crossTeamPath,
   snapshot,
   t,
 }: TeamWorkloadViewProps) {
+  const canChangeStatus = Boolean(onChangeAssignmentStatus) && snapshot?.viewer?.canManage !== false
+  // Assignment rows carry both the move form and the status buttons, so either callback shows them.
+  const showsAssignments = Boolean(onMoveAssignment) || canChangeStatus
   const members = snapshot?.members ?? []
   const totalCapacity = members.reduce((sum, member) => sum + member.capacityMinutes, 0)
   const totalAllocated = members.reduce((sum, member) => sum + member.allocatedMinutes, 0)
@@ -121,6 +127,8 @@ export function TeamWorkloadView({
               <Legend color="bg-tone-f8e2ab" label={t('workload.legend.balanced')} />
               <Legend color="bg-tone-f3c5c5" label={t('workload.legend.over')} />
               <Legend color="bg-slate-100" label={t('workload.legend.unavailable')} />
+              <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm border border-dashed border-fg-526381" aria-hidden="true" />{t('workload.legend.tentative')}</span>
+              <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm bg-tone-c9d8f0" aria-hidden="true" />{t('workload.legend.pendingTimeOff')}</span>
             </div>
             {snapshot && snapshot.redactedAssignmentCount > 0 ? (
               <span className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -168,49 +176,79 @@ export function TeamWorkloadView({
                           <span className="mt-1 block text-[11px] font-semibold text-fg-526381">
                             {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                           </span>
+                          {cell.tentativeAllocatedMinutes > 0 ? (
+                            <span className="mt-1 block text-[10px] font-semibold text-fg-526381" data-testid="workload-cell-tentative">
+                              {t('workload.cell.tentative').replace('{minutes}', formatMinutes(cell.tentativeAllocatedMinutes))}
+                            </span>
+                          ) : null}
+                          {cell.pendingTimeOffMinutes > 0 ? (
+                            <span className="mt-1 block rounded bg-tone-f5f8ff px-1 text-[10px] font-semibold text-fg-526381" data-testid="workload-cell-pending-time-off">
+                              {t('workload.cell.pendingTimeOff').replace('{minutes}', formatMinutes(cell.pendingTimeOffMinutes))}
+                            </span>
+                          ) : null}
                           {isOverOnlyWithOtherTeams(cell) ? (
                             <span className="mt-1 block text-[10px] font-bold text-fg-9f3f3f" data-testid="workload-cross-team-over">
                               {t('workload.crossTeam.over')}
                             </span>
                           ) : null}
-                          {onMoveAssignment ? snapshot?.assignments
+                          {showsAssignments ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
                               <details className="mt-2 max-w-full text-[10px] font-bold text-fg-526381" key={assignment.id}>
                                 <summary
-                                  className="max-w-full cursor-grab truncate rounded bg-surface/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
-                                  draggable={!isAssignmentMutationPending}
-                                  title={assignment.workItemId ?? assignment.id}
-                                  onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
+                                  className={`max-w-full ${onMoveAssignment ? 'cursor-grab' : 'cursor-pointer'} truncate rounded px-1.5 py-1 shadow-sm disabled:opacity-50 ${assignment.status === 'tentative' ? 'border border-dashed border-fg-526381 bg-surface/60' : 'bg-surface/80'}`}
+                                  data-status={assignment.status}
+                                  draggable={Boolean(onMoveAssignment) && !isAssignmentMutationPending}
+                                  title={`${assignment.workItemId ?? assignment.id} · ${t(`workload.assignment.status.${assignment.status}`)}`}
+                                  onDragStart={onMoveAssignment ? (event) => event.dataTransfer.setData('text/workload-assignment', assignment.id) : undefined}
                                 >
+                                  {assignment.status === 'tentative' ? `${t('workload.assignment.status.tentative')} · ` : ''}
                                   {assignment.workItemId ?? assignment.id}
                                 </summary>
-                                <form
-                                  className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
-                                  onSubmit={(event) => {
-                                    event.preventDefault()
-                                    const formData = new FormData(event.currentTarget)
-                                    const targetMemberId = formData.get('memberId')
-                                    const targetDate = formData.get('targetDate')
-                                    if (typeof targetMemberId === 'string' && typeof targetDate === 'string' && targetMemberId && targetDate) {
-                                      onMoveAssignment?.(assignment.id, targetMemberId, targetDate)
-                                    }
-                                  }}
-                                >
-                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
-                                    {t('workload.assignment.member')}
-                                    <select className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
-                                      {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
-                                    </select>
-                                  </label>
-                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
-                                    {t('workload.assignment.date')}
-                                    <input className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
-                                  </label>
-                                  <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
-                                    {t('workload.assignment.move')}
-                                  </button>
-                                </form>
+                                {canChangeStatus ? (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {assignment.status === 'tentative' ? (
+                                      <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'confirmed')}>
+                                        {t('workload.assignment.confirm')}
+                                      </button>
+                                    ) : (
+                                      <button className="rounded border border-slate-200 bg-surface px-2 py-1 text-[10px] font-bold disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'tentative')}>
+                                        {t('workload.assignment.unconfirm')}
+                                      </button>
+                                    )}
+                                    <button className="rounded border border-tone-d99696 bg-surface px-2 py-1 text-[10px] font-bold text-fg-9f3f3f disabled:opacity-50" disabled={isAssignmentMutationPending} type="button" onClick={() => onChangeAssignmentStatus?.(assignment.id, 'canceled')}>
+                                      {t('workload.assignment.cancel')}
+                                    </button>
+                                  </div>
+                                ) : null}
+                                {onMoveAssignment ? (
+                                  <form
+                                    className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
+                                    onSubmit={(event) => {
+                                      event.preventDefault()
+                                      const formData = new FormData(event.currentTarget)
+                                      const targetMemberId = formData.get('memberId')
+                                      const targetDate = formData.get('targetDate')
+                                      if (typeof targetMemberId === 'string' && typeof targetDate === 'string' && targetMemberId && targetDate) {
+                                        onMoveAssignment?.(assignment.id, targetMemberId, targetDate)
+                                      }
+                                    }}
+                                  >
+                                    <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
+                                      {t('workload.assignment.member')}
+                                      <select className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
+                                        {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
+                                      </select>
+                                    </label>
+                                    <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
+                                      {t('workload.assignment.date')}
+                                      <input className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
+                                    </label>
+                                    <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
+                                      {t('workload.assignment.move')}
+                                    </button>
+                                  </form>
+                                ) : null}
                               </details>
                             )) : null}
                         </div>
@@ -289,12 +327,19 @@ function formatMinutes(minutes: number): string {
 
 /** Creates an accessible cell summary. */
 function formatCellTitle(cell: WorkloadCell, t: (key: MessageKey) => string): string {
-  const team = `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')} · ${cell.utilizationPercent}%`
-  if (cell.workspaceAllocatedMinutes === undefined || cell.workspaceCapacityMinutes === undefined) return team
-  const workspace = t('workload.crossTeam.title')
-    .replace('{allocated}', formatMinutes(cell.workspaceAllocatedMinutes))
-    .replace('{capacity}', formatMinutes(cell.workspaceCapacityMinutes))
-  return `${team} · ${workspace}`
+  const parts = [
+    `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')}`,
+    `${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')}`,
+    `${cell.utilizationPercent}%`,
+    ...(cell.tentativeAllocatedMinutes > 0 ? [t('workload.cell.tentative').replace('{minutes}', formatMinutes(cell.tentativeAllocatedMinutes))] : []),
+    ...(cell.pendingTimeOffMinutes > 0 ? [t('workload.cell.pendingTimeOff').replace('{minutes}', formatMinutes(cell.pendingTimeOffMinutes))] : []),
+  ]
+  if (cell.workspaceAllocatedMinutes !== undefined && cell.workspaceCapacityMinutes !== undefined) {
+    parts.push(t('workload.crossTeam.title')
+      .replace('{allocated}', formatMinutes(cell.workspaceAllocatedMinutes))
+      .replace('{capacity}', formatMinutes(cell.workspaceCapacityMinutes)))
+  }
+  return parts.join(' · ')
 }
 
 /** Checks whether an assignment intersects a displayed member and date bucket. */

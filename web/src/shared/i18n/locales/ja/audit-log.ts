@@ -221,4 +221,12 @@ export const auditLogMessages = {
   'auditLog.action.upload-completed': 'アップロードの完了',
   'auditLog.action.version-created': '新しい版の作成',
   'auditLog.action.viewed': '閲覧',
+  'auditLog.resource.workload.assignment': '要員の割り当て',
+  'auditLog.resource.workload.request': 'リソース要求',
+  'auditLog.resource.workload.time-off': '休暇',
+  'auditLog.action.approved': '承認',
+  'auditLog.action.canceled': '取り消し',
+  'auditLog.action.confirmed': '確定',
+  'auditLog.action.reassigned': '担当変更',
+  'auditLog.action.unconfirmed': '仮への戻し',
 } as const

@@ -582,6 +582,25 @@ function isPlanningContentNotification(
  * bundle the Analytics module; it must match the event type the Analytics notifier writes.
  */
 const analyticsReportDeliveredEventType = 'analytics.report.delivered'
+/**
+ * Team workload events (time off and resource assignments). Kept as a literal prefix so this
+ * Lambda does not bundle the capacity planning module.
+ */
+const workloadEventTypePrefix = 'workload.'
+
+/**
+ * Checks whether an event is readable through any one scope that it covers rather than the one
+ * scope it carries: a delivered Analytics report, or a Team workload event that the workload API
+ * shows through any visible Project of the Team.
+ *
+ * @param event - Projected event.
+ * @returns Whether any covered scope admits the recipient.
+ */
+function isReadableThroughAnyCoveredScope(event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId'>): boolean {
+  if (event.projectId !== undefined) return false
+  return event.eventType === analyticsReportDeliveredEventType ||
+    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined
+}
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
   ['work-item.due', 'due'],
@@ -2544,7 +2563,7 @@ async function isEligibleRecipient(
     return false
   }
 
-  const analyticsScopes = event.eventType === analyticsReportDeliveredEventType && event.projectId === undefined
+  const analyticsScopes = isReadableThroughAnyCoveredScope(event)
     ? listAnalyticsDeliveryAuthorizationScopes(event, directoryItems)
     : undefined
   let cognitoGroupIds: string[] = []
@@ -2597,6 +2616,8 @@ async function isEligibleRecipient(
       weeklyReportReminderReasons.has(event.eventType) ||
       // A Team report can be readable through an Enterprise Project grant without a project-member row.
       event.eventType === analyticsReportDeliveredEventType ||
+      // A Team workload event is readable through an Enterprise Project grant in the Team as well.
+      event.eventType.startsWith(workloadEventTypePrefix) ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
@@ -2647,8 +2668,9 @@ async function isEligibleRecipient(
     const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
       item.teamId === event.teamId && item.projectId && !item.archivedAt)
     if (analyticsScopes && event.teamId) {
-      // A Team report is readable through any readable Project of its Team, as in the Analytics
-      // schedule and Inbox checks, while the generic Team rule requires every Project of the Team.
+      // A Team report or workload event is readable through any readable Project of its Team, as
+      // in the Analytics, workload, and Inbox checks, while the generic Team rule requires every
+      // Project of the Team.
       if (teamProjects.some((project) => hasEligibleProjectAccess(project, memberKey, directoryItems))) return true
     } else if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
       teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
