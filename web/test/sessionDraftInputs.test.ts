@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { documentRecordFixture, whiteboardRecordFixture } from '../src/documents/fixtures'
 import {
   createDocumentSessionDraftKey,
   parseDocumentSessionDraft,
+  recoverDocumentSessionDraftOperations,
 } from '../src/documents/model/documentSessionDraft'
 import {
   createTimeEntryFormSessionDraft,
@@ -85,6 +87,51 @@ describe('Document drafts', () => {
     })
   })
 
+  /** Verifies edits to a block deleted meanwhile come back as a new block the API accepts. */
+  test('adds back a block someone else deleted instead of losing the edit', () => {
+    const blockCount = documentRecordFixture.kind === 'page' ? documentRecordFixture.blocks.length : 0
+    const deletedBlockUpdate = { ...blockUpdate, block: { ...blockUpdate.block, id: 'deleted-block' }, blockId: 'deleted-block' }
+    const kept = [
+      { ...blockUpdate, block: { id: 'paragraph-context', text: 'Still here', type: 'paragraph' }, blockId: 'paragraph-context' },
+      deletedBlockUpdate,
+      { ...deletedBlockUpdate, block: { ...deletedBlockUpdate.block, text: 'Typed later' }, operationId: 'operation-3' },
+      { blockId: 'gone-block', index: 0, operationId: 'operation-4', type: 'move-block' },
+      { blockId: 'gone-block', operationId: 'operation-5', type: 'delete-block' },
+    ]
+    const draft = parseDocumentSessionDraft({ baseRevision: 7, operations: kept })
+    if (!draft) throw new Error('The draft should parse.')
+
+    expect(recoverDocumentSessionDraftOperations(documentRecordFixture, draft.operations)).toEqual({
+      operations: [
+        kept[0],
+        { block: deletedBlockUpdate.block, index: blockCount, operationId: 'operation-1', type: 'insert-block' },
+        kept[2],
+      ],
+      readdedDeletedElements: true,
+    })
+    expect(recoverDocumentSessionDraftOperations(documentRecordFixture, [draft.operations[0]!])).toEqual({
+      operations: [kept[0]],
+      readdedDeletedElements: false,
+    })
+  })
+
+  /** Verifies a Whiteboard object deleted meanwhile is inserted again rather than updated. */
+  test('adds back a Whiteboard object someone else deleted', () => {
+    const object = { bounds: { height: 10, width: 10, x: 0, y: 0 }, id: 'gone-note', style: {}, text: 'Kept', type: 'note', zIndex: 3 }
+    const draft = parseDocumentSessionDraft({
+      baseRevision: 7,
+      operations: [
+        { object, objectId: 'gone-note', operationId: 'operation-1', type: 'update-object' },
+        { objectId: 'gone-other', operationId: 'operation-2', type: 'delete-object' },
+      ],
+    })
+    if (!draft) throw new Error('The draft should parse.')
+    expect(recoverDocumentSessionDraftOperations(whiteboardRecordFixture, draft.operations)).toEqual({
+      operations: [{ object, operationId: 'operation-1', type: 'insert-object' }],
+      readdedDeletedElements: true,
+    })
+  })
+
   /** Verifies a kept value with an unknown or incomplete operation is not restored at all. */
   test('drops drafts with operations the Document API would not accept', () => {
     expect(parseDocumentSessionDraft({ baseRevision: 7, operations: [{ ...blockUpdate, type: 'rename-block' }] }))
@@ -102,11 +149,14 @@ describe('time entry form drafts', () => {
   /** Verifies Work Item time and indirect work forms keep their input apart per place. */
   test('keys each form by kind and place', () => {
     const keys = [
-      createTimeEntryFormSessionDraftKey('work-item', ['timesheet']),
-      createTimeEntryFormSessionDraftKey('indirect', ['timesheet']),
+      createTimeEntryFormSessionDraftKey('work-item', ['timesheet', 'core-team']),
+      createTimeEntryFormSessionDraftKey('indirect', ['timesheet', 'core-team']),
+      // Work Items and indirect work targets belong to one Team, so another Team keeps its own.
+      createTimeEntryFormSessionDraftKey('work-item', ['timesheet', 'design-team']),
+      createTimeEntryFormSessionDraftKey('indirect', ['timesheet', 'design-team']),
       createTimeEntryFormSessionDraftKey('work-item', ['work-item', 'core-team', 'launch-review']),
     ]
-    expect(new Set(keys).size).toBe(3)
+    expect(new Set(keys).size).toBe(5)
   })
 
   /** Verifies only the forms' named text fields are kept. */

@@ -12,7 +12,7 @@ export type TimeEntryFormSessionDraftState = {
   restored: TimeEntryFormSessionDraft | undefined
   /** Changes when input is restored, so the form's uncontrolled fields start again from it. */
   formKey: string
-  /** Records the form's input after the member changes a field. */
+  /** Notes that the member changed the form, so its input is kept from then on. */
   handleChange: (event: FormEvent<HTMLFormElement>) => void
   /** Stops keeping the input once it was saved or the form was cancelled. */
   forget: () => void
@@ -22,7 +22,9 @@ export type TimeEntryFormSessionDraftState = {
  * Keeps a new time entry form's input when the session ends and restores it after the same
  * account signs in again.
  *
- * Only input the member changed is kept, so an untouched form does not come back.
+ * Only a form the member changed is kept, so an untouched form does not come back. The input is
+ * read from the form when the session ends, so fields the form moves on its own, such as an end
+ * date carried along with the start date, are kept as they are shown.
  *
  * @param key - Identifies the form; without one nothing is kept.
  * @param onRestore - Applies restored values the form holds in its own state, such as dates.
@@ -32,19 +34,23 @@ export function useTimeEntryFormSessionDraft(
   key: string | undefined,
   onRestore?: (draft: TimeEntryFormSessionDraft) => void,
 ): TimeEntryFormSessionDraftState {
-  const [draft, setDraft] = useState<TimeEntryFormSessionDraft>()
   const [restored, setRestored] = useState<TimeEntryFormSessionDraft>()
+  const changedFormRef = useRef<HTMLFormElement | null>(null)
+  const restoredRef = useRef<TimeEntryFormSessionDraft | undefined>(undefined)
   const forgottenRef = useRef(false)
 
   useSessionDraft<TimeEntryFormSessionDraft>({
     key,
-    read: () => forgottenRef.current ? undefined : draft,
+    read: () => {
+      if (forgottenRef.current) return undefined
+      return changedFormRef.current ? readTimeEntryForm(changedFormRef.current) : restoredRef.current
+    },
     parse: parseTimeEntryFormSessionDraft,
     onRestore: (value) => {
       // Input typed since the form came back wins over the kept one.
-      if (draft) return
+      if (changedFormRef.current) return
+      restoredRef.current = value
       setRestored(value)
-      setDraft(value)
       onRestore?.(value)
     },
   })
@@ -52,12 +58,22 @@ export function useTimeEntryFormSessionDraft(
   return {
     formKey: restored ? 'restored' : 'initial',
     handleChange: (event) => {
-      const data = new FormData(event.currentTarget)
-      setDraft(createTimeEntryFormSessionDraft(data.entries(), data.get('billable') === 'on'))
+      changedFormRef.current = event.currentTarget
     },
     forget: () => {
       forgottenRef.current = true
     },
     restored,
   }
+}
+
+/**
+ * Reads a time entry form's input as it is shown.
+ *
+ * @param form - Form element.
+ * @returns The input to keep.
+ */
+function readTimeEntryForm(form: HTMLFormElement): TimeEntryFormSessionDraft {
+  const data = new FormData(form)
+  return createTimeEntryFormSessionDraft(data.entries(), data.get('billable') === 'on')
 }

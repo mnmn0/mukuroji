@@ -25,16 +25,12 @@ import {
 } from './timeTrackingText'
 import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
-/** Key of the timesheet's new Work Item time form, kept across an ended session. */
-const workItemEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('work-item', ['timesheet'])
-
-/** Key of the timesheet's new indirect work form, kept across an ended session. */
-const indirectEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet'])
-
 /** Props of the member's weekly timesheet. */
 export type PersonalTimesheetProps = {
   /** Translator. */
   t: TimeTrackingTranslator
+  /** Team the timesheet records into; new entry input is kept apart per Team. */
+  teamId: string
   /** Date and time formatters. */
   formatters: TimeTrackingFormatters
   /** Week shown. */
@@ -103,6 +99,7 @@ export function PersonalTimesheet({
   onUpdateIndirectEntry,
   rejectionReasons,
   t,
+  teamId,
   today,
   week,
   workItemOptions,
@@ -111,6 +108,10 @@ export function PersonalTimesheet({
 }: PersonalTimesheetProps) {
   const id = useId()
   const categories = useTimeEntryCategories()
+  // Work Items and indirect work targets belong to one Team, so input kept in one Team never
+  // comes back in another.
+  const workItemEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('work-item', ['timesheet', teamId])
+  const indirectEntrySessionDraftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet', teamId])
   // A form whose input was kept when the session ended opens again so the input comes back.
   const [creating, setCreating] = useState<'work-item' | 'indirect' | undefined>(() =>
     hasPendingSessionDraft(workItemEntrySessionDraftKey)

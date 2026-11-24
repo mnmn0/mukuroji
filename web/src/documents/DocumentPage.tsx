@@ -185,6 +185,7 @@ import {
 import {
   createDocumentSessionDraftKey,
   parseDocumentSessionDraft,
+  recoverDocumentSessionDraftOperations,
   type DocumentSessionDraft,
 } from './model/documentSessionDraft'
 import { useDocumentRealtime } from './queries/useDocumentRealtime'
@@ -3081,7 +3082,7 @@ function DocumentWorkspace({
     return () => onDraftGuardChange(undefined)
   }, [onDraftGuardChange, savePendingChanges])
 
-  const [isSessionDraftRestored, setIsSessionDraftRestored] = useState(false)
+  const [sessionDraftNotice, setSessionDraftNotice] = useState<'restored' | 'readded'>()
   useSessionDraft<DocumentSessionDraft>({
     key: createDocumentSessionDraftKey(selectedDocument.id),
     read: () => {
@@ -3108,8 +3109,10 @@ function DocumentWorkspace({
       ) {
         return
       }
+      // Edits to blocks or objects someone else deleted meanwhile come back as new ones.
+      const recovered = recoverDocumentSessionDraftOperations(localDocument, draft.operations)
       generationRef.current += 1
-      pendingOperationsRef.current = draft.operations
+      pendingOperationsRef.current = recovered.operations
       // Saving against the revision the edits were made on reports a Document changed since.
       revisionRef.current = draft.baseRevision
       if (draft.title !== undefined) {
@@ -3120,11 +3123,11 @@ function DocumentWorkspace({
       }
       const title = draft.title
       setLocalDocument((current) => ({
-        ...applyDocumentOperationsLocally(current, draft.operations),
+        ...applyDocumentOperationsLocally(current, recovered.operations),
         ...(title === undefined ? {} : { title }),
       }))
       onUnsavedStateChange?.(true)
-      setIsSessionDraftRestored(true)
+      setSessionDraftNotice(recovered.readdedDeletedElements ? 'readded' : 'restored')
       if (draft.conflicted) {
         // The conflict shown before the session ended still needs an explicit overwrite.
         saveStatusRef.current = 'conflict'
@@ -3206,9 +3209,11 @@ function DocumentWorkspace({
             }}
             value={localDocument.title}
           />
-          {isSessionDraftRestored ? (
+          {sessionDraftNotice ? (
             <p className="m-0 mt-1 text-xs font-semibold text-fg-amber-900" role="status">
-              {t('documents.editor.sessionDraftRestored')}
+              {sessionDraftNotice === 'readded'
+                ? t('documents.editor.sessionDraftReaddedDeleted')
+                : t('documents.editor.sessionDraftRestored')}
             </p>
           ) : null}
         </div>

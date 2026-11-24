@@ -78,7 +78,11 @@ async function mockDocuments(page: Page): Promise<DocumentsMockState> {
     }
     state.savedBatches.push(input)
     for (const operation of input.operations) {
+      if (operation.type === 'insert-block') state.blocks = [...state.blocks.slice(0, operation.index), operation.block, ...state.blocks.slice(operation.index)]
       if (operation.type !== 'update-block') continue
+      if (!state.blocks.some((block) => block.id === operation.blockId)) {
+        return route.fulfill({ status: 404, json: { code: 'DocumentElementNotFound', message: 'Block was not found.' } })
+      }
       state.blocks = state.blocks.map((block) => block.id === operation.blockId ? operation.block : block)
     }
     state.revision += 1
@@ -133,5 +137,31 @@ test.describe('Document editing across an ended session', () => {
     await expect(paragraph).toHaveValue('Edited before someone else saved.')
     await expect(page.getByRole('button', { name: 'Overwrite latest revision' })).toBeVisible()
     expect(state.savedBatches).toHaveLength(0)
+  })
+
+  test('adds back a block that someone deleted while the session was over', async ({ page }) => {
+    const state = await mockDocuments(page)
+    await page.goto(`/documents/${documentRecordFixture.id}`)
+    const paragraph = page.getByLabel('Text', { exact: true })
+    state.rejectNextSave = true
+    await paragraph.fill('Edited before someone deleted it.')
+    await expect(page.getByRole('button', { name: 'Retry save' })).toBeVisible()
+    // Another member deletes the paragraph before this member comes back.
+    state.blocks = state.blocks.filter((block) => block.type !== 'paragraph')
+    state.revision += 1
+
+    await page.reload()
+    await page.getByLabel('Email address').fill('member-a@example.com')
+    await page.getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.getByLabel('Password', { exact: true }).fill('MemberA123!')
+    await page.getByRole('button', { name: 'Log in', exact: true }).click()
+
+    await expect(paragraph).toHaveValue('Edited before someone deleted it.')
+    await expect(page.getByText('Changes to parts deleted in the meantime were added back', { exact: false })).toBeVisible()
+    // The Document changed, so the member confirms before the paragraph is added back.
+    await page.getByRole('button', { name: 'Overwrite latest revision' }).click()
+    await expect.poll(() => state.savedBatches.length).toBe(1)
+    expect(state.savedBatches[0]?.operations.map((operation) => operation.type)).toEqual(['insert-block'])
+    expect(state.blocks.at(-1)).toMatchObject({ text: 'Edited before someone deleted it.', type: 'paragraph' })
   })
 })

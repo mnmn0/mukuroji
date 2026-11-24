@@ -19,6 +19,7 @@ const meta = {
   decorators: [(Story) => <div className="bg-[var(--workbench-canvas)] p-4"><Story /></div>],
   args: {
     t: createTranslator('ja'),
+    teamId: 'core-team',
     formatters: createTimeTrackingFormatters('ja'),
     week: createWeekPeriod(timeTrackingFixtureWeekStart),
     today: '2026-11-10',

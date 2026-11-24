@@ -339,6 +339,9 @@ test.describe('Time tracking', () => {
     await form.getByLabel('Start').fill('13:15')
     await form.getByLabel('End', { exact: true }).fill('14:45')
     await form.getByLabel('Note').fill('Usability interviews')
+    // Moving the start date last also moves the end date, which must be kept as shown.
+    await form.getByLabel('Date', { exact: true }).fill('2026-11-11')
+    await expect(form.getByLabel('End date')).toHaveValue('2026-11-11')
     await rejectNextSave()
     await form.getByRole('button', { name: 'Add' }).click()
     await expect(form.getByRole('alert')).toBeVisible()
@@ -347,6 +350,8 @@ test.describe('Time tracking', () => {
     await signInAgain()
     await expect(form.getByText('Restored what you entered before your session ended. Check it and save.')).toBeVisible()
     await expect(form.getByLabel('Task')).toHaveValue('onboarding')
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2026-11-11')
+    await expect(form.getByLabel('End date')).toHaveValue('2026-11-11')
     await expect(form.getByLabel('Start')).toHaveValue('13:15')
     await expect(form.getByLabel('End', { exact: true })).toHaveValue('14:45')
     await expect(form.getByLabel('Note')).toHaveValue('Usability interviews')

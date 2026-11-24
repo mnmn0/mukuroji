@@ -1,4 +1,5 @@
 import type { DocumentOperation } from '@mukuroji/contracts'
+import type { DocumentRecord } from '../api'
 
 /**
  * Unsaved edits of one Document, kept across an ended session.
@@ -71,6 +72,92 @@ export function parseDocumentSessionDraft(value: unknown): DocumentSessionDraft 
     operations: keptOperations,
     ...(title === undefined ? {} : { title }),
   }
+}
+
+/** Unsaved operations fitted to the Document as it is now. */
+export type RecoveredDocumentSessionDraftOperations = {
+  /** Operations the Document API can apply to the current Document. */
+  operations: DocumentOperation[]
+  /** Whether edits to blocks or objects someone else deleted were added back as new ones. */
+  readdedDeletedElements: boolean
+}
+
+/**
+ * Fits kept operations to the Document as it is after the same account signed in again.
+ *
+ * Someone else may have deleted a block or Whiteboard object while the session was over. An
+ * update to it would be ignored on screen and refused by the Document API, so the edited block
+ * or object is added back instead: a block at the end of the page, an object on the board.
+ * Moving or deleting an element that is already gone is dropped.
+ *
+ * @param document - Current Document the operations are restored onto.
+ * @param operations - Kept operations, in the order they were made.
+ * @returns Operations to restore and whether deleted elements were added back.
+ */
+export function recoverDocumentSessionDraftOperations(
+  document: DocumentRecord,
+  operations: readonly DocumentOperation[],
+): RecoveredDocumentSessionDraftOperations {
+  const blockIds = document.kind === 'page' || document.kind === 'template'
+    ? document.blocks.map((block) => block.id)
+    : []
+  const objectIds = new Set(document.kind === 'whiteboard' ? document.whiteboard.objects.map((object) => object.id) : [])
+  const recovered: DocumentOperation[] = []
+  let readdedDeletedElements = false
+
+  for (const operation of operations) {
+    if (operation.type === 'insert-block') {
+      blockIds.splice(clampIndex(operation.index, blockIds.length), 0, operation.block.id)
+      recovered.push(operation)
+    } else if (operation.type === 'update-block') {
+      if (blockIds.includes(operation.blockId)) {
+        recovered.push(operation)
+        continue
+      }
+      recovered.push({ block: operation.block, index: blockIds.length, operationId: operation.operationId, type: 'insert-block' })
+      blockIds.push(operation.block.id)
+      readdedDeletedElements = true
+    } else if (operation.type === 'move-block') {
+      const currentIndex = blockIds.indexOf(operation.blockId)
+      if (currentIndex < 0) continue
+      blockIds.splice(currentIndex, 1)
+      blockIds.splice(clampIndex(operation.index, blockIds.length), 0, operation.blockId)
+      recovered.push(operation)
+    } else if (operation.type === 'delete-block') {
+      const currentIndex = blockIds.indexOf(operation.blockId)
+      if (currentIndex < 0) continue
+      blockIds.splice(currentIndex, 1)
+      recovered.push(operation)
+    } else if (operation.type === 'insert-object') {
+      objectIds.add(operation.object.id)
+      recovered.push(operation)
+    } else if (operation.type === 'update-object') {
+      if (objectIds.has(operation.objectId)) {
+        recovered.push(operation)
+        continue
+      }
+      recovered.push({ object: operation.object, operationId: operation.operationId, type: 'insert-object' })
+      objectIds.add(operation.object.id)
+      readdedDeletedElements = true
+    } else if (operation.type === 'delete-object') {
+      if (!objectIds.delete(operation.objectId)) continue
+      recovered.push(operation)
+    } else {
+      recovered.push(operation)
+    }
+  }
+  return { operations: recovered, readdedDeletedElements }
+}
+
+/**
+ * Keeps an insert position inside a list.
+ *
+ * @param value - Requested position.
+ * @param length - Number of items in the list.
+ * @returns A position from 0 to `length`.
+ */
+function clampIndex(value: number, length: number) {
+  return Math.max(0, Math.min(length, Math.trunc(value)))
 }
 
 /**

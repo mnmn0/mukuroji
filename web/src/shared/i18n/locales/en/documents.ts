@@ -222,6 +222,8 @@ export const documentsMessages = {
   'documents.editor.retrySave': 'Retry save',
   'documents.editor.sessionDraftRestored':
     'Restored the changes that were not saved when your session ended.',
+  'documents.editor.sessionDraftReaddedDeleted':
+    'Restored the changes that were not saved when your session ended. Changes to parts deleted in the meantime were added back; blocks are added at the end of the page.',
   'documents.editor.unsavedNavigation':
     'You have unsaved changes. Discard them and continue?',
   'documents.editor.saveBeforeActionError':
