@@ -1,4 +1,4 @@
-import type { AgentRunView } from '@mukuroji/contracts'
+import type { AgentRunUsage, AgentRunView } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
@@ -13,6 +13,8 @@ export type WorkItemAgentRunsPanelProps = {
   runs: readonly AgentRunView[]
   /** Whether older runs exist beyond the listed ones. */
   hasMore?: boolean
+  /** Token usage of the listed runs added together. */
+  usageTotal?: AgentRunUsage
   /** Locale-aware text. */
   labels: WorkItemAgentRunsLabels
   /** Whether the first page is loading. */
@@ -92,6 +94,7 @@ export function WorkItemAgentRunsPanelContainer({
         await mutate()
       }}
       runs={data?.items ?? []}
+      usageTotal={data?.usageTotal}
     />
   )
 }
@@ -111,6 +114,7 @@ export function WorkItemAgentRunsPanel({
   onRelease,
   onRetry,
   runs,
+  usageTotal,
 }: WorkItemAgentRunsPanelProps) {
   const [releasingRunId, setReleasingRunId] = useState<string>()
   const [releaseFailed, setReleaseFailed] = useState(false)
@@ -156,6 +160,8 @@ export function WorkItemAgentRunsPanel({
         <p className="text-sm font-medium text-[var(--workbench-muted)]">{labels.empty}</p>
       ) : null}
 
+      {usageTotal ? <AgentRunUsageSummary labels={labels} usage={usageTotal} /> : null}
+
       {releaseFailed ? (
         <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           {labels.releaseError}
@@ -189,6 +195,9 @@ export function WorkItemAgentRunsPanel({
             <AgentRunTime label={labels.lastActivity} value={formatDateTime(active.lastHeartbeatAt)} />
             <AgentRunTime label={labels.leaseExpiresAt} value={formatDateTime(active.leaseExpiresAt)} />
           </dl>
+          {active.usage ? (
+            <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-usage">{labels.formatUsageCompact(active.usage)}</p>
+          ) : null}
           {active.stalled ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.stalledHint}</p>
           ) : null}
@@ -209,6 +218,7 @@ export function WorkItemAgentRunsPanel({
                   {formatDateTime(run.startedAt)}
                   {run.finishedAt ? ` – ${formatDateTime(run.finishedAt)}` : ''}
                 </span>
+                {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
               </li>
             ))}
           </ol>
@@ -219,6 +229,33 @@ export function WorkItemAgentRunsPanel({
         <p className="text-xs font-medium text-[var(--workbench-muted)]">{labels.historyTruncated}</p>
       ) : null}
     </section>
+  )
+}
+
+/**
+ * Shows the token usage of a Work Item's listed runs.
+ *
+ * @param props - Usage and text.
+ * @returns Summary block.
+ */
+function AgentRunUsageSummary({ labels, usage }: {
+  /** Panel text. */
+  labels: WorkItemAgentRunsLabels
+  /** Usage added together over the listed runs. */
+  usage: AgentRunUsage
+}) {
+  return (
+    <div className="grid min-w-0 gap-1 rounded-md border border-[var(--workbench-border)] px-3 py-2" data-testid="work-item-agent-run-usage">
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h4 className="workbench-eyebrow text-[var(--workbench-muted)]" title={labels.usageHint}>{labels.usageTotal}</h4>
+        <span className="text-xs font-semibold text-[var(--workbench-text)]">{labels.formatUsageDetail(usage)}</span>
+      </div>
+      <p className="text-xs font-medium leading-5 text-[var(--workbench-text)]">{labels.formatUsageTokens(usage)}</p>
+      {usage.models.length > 0 ? (
+        <p className="truncate text-xs font-medium text-[var(--workbench-muted)]">{usage.models.join(', ')}</p>
+      ) : null}
+      {usage.hasMore ? <p className="text-xs font-medium text-[var(--workbench-muted)]">{labels.usagePartial}</p> : null}
+    </div>
   )
 }
 

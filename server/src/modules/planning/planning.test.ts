@@ -858,6 +858,34 @@ describe('planning domain', () => {
     })
   })
 
+  test('counts Planning entity durations in working days when the Workspace calendar is given', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createCycleInput('cycle-first', 0, {
+      baseline: { startDate: '2026-08-03', endDate: '2026-08-09' },
+      forecast: { startDate: '2026-08-03', endDate: '2026-08-09' },
+    }), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createCycleInput('cycle-second', 1, {
+      baseline: { startDate: '2026-08-10', endDate: '2026-08-14' },
+      forecast: { startDate: '2026-08-10', endDate: '2026-08-14' },
+    }), EMPTY_WORK_ITEMS)
+    const response = await client.createDependency('workspace-1', {
+      id: 'dependency-working-days',
+      predecessorId: 'cycle-first',
+      successorId: 'cycle-second',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, {
+      ...EMPTY_WORK_ITEMS,
+      workingCalendar: {
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: ['2026-08-11'],
+      },
+    })
+    // Five weekdays in the first week and four in the second, which has a holiday.
+    expect(response.planning.criticalPath.totalDurationDays).toBe(9)
+  })
+
   test('keeps a binding finish-to-finish successor when endpoint finishes tie', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await client.create('workspace-1', createCycleInput('a-predecessor', 0, {

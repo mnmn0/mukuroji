@@ -13,6 +13,8 @@ export {
   type ResolveFocusEffectivePoliciesInput,
 } from './focus-queue'
 
+export { createFocusProjectLogEntries, type FocusProjectLogSource } from './focus-project-log'
+
 export {
   FOCUS_MEMBER_INDEX_LIMIT,
   FOCUS_WORK_ITEM_REFERENCE_LIMIT,

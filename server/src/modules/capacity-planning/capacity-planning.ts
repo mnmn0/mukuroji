@@ -20,8 +20,16 @@ import type {
   WorkloadSnapshot,
   WorkloadTimeOff,
   WorkingSchedule,
+  WorkItemScheduleCalendarPolicy,
+  WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
-import { CAPACITY_PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  CAPACITY_PLANNING_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  createWorkspaceWorkItemCalendarPolicy,
+  isWorkloadCalendarSource,
+  workspaceWeekContaining,
+} from '@mukuroji/contracts'
 
 const TEAM_RECORD_PREFIX = 'CAPACITY#TEAM#'
 const MAX_RANGE_DAYS = 366
@@ -129,6 +137,13 @@ export type WorkloadSnapshotInput = {
   visibleProjectIds?: ReadonlySet<string>
   /** Whether confidential assignments and requests may be returned. */
   canViewConfidential: boolean
+  /**
+   * Workspace calendar that profiles inheriting it follow: its time zone, working weekdays, and
+   * every day off. The default Workspace calendar is used when omitted.
+   */
+  workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /** Day weekly buckets start on, from 0 (Sunday) to 6. Monday is used when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
 }
 
 /** Input for a what-if calculation that never persists. */
@@ -187,9 +202,12 @@ export function buildWorkloadSnapshot(
   generatedAt = new Date().toISOString(),
 ): WorkloadSnapshot {
   const { fromDate, toDate } = validateDateRange(input.fromDate, input.toDate)
-  const profiles = state.profiles.filter((profile) =>
+  const storedProfiles = state.profiles.filter((profile) =>
     input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
   )
+  const workspaceCalendar = input.workspaceCalendar ??
+    createWorkspaceWorkItemCalendarPolicy(DEFAULT_WORKSPACE_CALENDAR_SETTINGS)
+  const profiles = storedProfiles.map((profile) => resolveEffectiveProfile(profile, workspaceCalendar))
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const isProjectVisible = (projectId: string | undefined): boolean =>
     input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
@@ -230,15 +248,17 @@ export function buildWorkloadSnapshot(
     toDate,
   )
 
-  const members = profiles.map((profile) =>
+  const members = profiles.map((profile, index) =>
     calculateMemberSummary(
       profile,
+      storedProfiles[index] ?? profile,
       visibleAssignments.filter((assignment) => assignment.memberId === profile.memberId),
       actualByMember.get(profile.memberId) ?? { byDate: new Map(), byWorkItemId: new Map() },
       fromDate,
       toDate,
       input.granularity,
       remainingEffortByAssignmentId,
+      input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     )
   )
 
@@ -365,6 +385,11 @@ export class CapacityPlanningService {
         ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
         ...(input.role?.trim() ? { role: input.role.trim() } : {}),
         skills,
+        // A client that leaves the field out, such as one from before inheritance, keeps the
+        // profile's current calendar; a new profile then keeps its own.
+        ...((input.calendarSource ?? current?.calendarSource) === 'workspace'
+          ? { calendarSource: 'workspace' as const }
+          : {}),
         timeZone: input.timeZone,
         schedule: clone(input.schedule),
         holidays,
@@ -793,15 +818,68 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
   }
 }
 
-/** Calculates one member's daily and aggregated workload rows. */
+/**
+ * Applies the Workspace calendar to a profile that inherits it.
+ *
+ * The result uses the Workspace time zone, keeps a weekday only when both the Workspace and the
+ * member work on it, and adds every Workspace day off to the member's personal days off. A
+ * profile with its own calendar comes back as a shallow copy with the same values. Either way the
+ * result is a new object for each snapshot, so the holiday lookup cached on it never outlives the
+ * snapshot or reflects holidays from an earlier one.
+ *
+ * @param profile - Stored profile.
+ * @param workspaceCalendar - Workspace time zone, working weekdays, and days off.
+ * @returns The profile the availability rules are applied to.
+ */
+function resolveEffectiveProfile(
+  profile: WorkloadMemberProfile,
+  workspaceCalendar: WorkItemScheduleCalendarPolicy,
+): WorkloadMemberProfile {
+  if (profile.calendarSource !== 'workspace') return { ...profile }
+  const workingWeekdays = new Set<string>(workspaceCalendar.workingWeekdays)
+  const schedule = clone(profile.schedule)
+  for (const weekday of WORKING_SCHEDULE_WEEKDAYS) {
+    if (!workingWeekdays.has(weekday)) schedule[weekday] = { enabled: false, minutes: 0 }
+  }
+  const holidays = new Map(profile.holidays.map((holiday) => [holiday.date, holiday]))
+  for (const date of workspaceCalendar.holidays) {
+    if (!holidays.has(date)) holidays.set(date, { date })
+  }
+  return {
+    ...profile,
+    timeZone: workspaceCalendar.timeZone,
+    schedule,
+    holidays: [...holidays.values()],
+  }
+}
+
+/** Weekday keys of a working schedule, Monday first. */
+const WORKING_SCHEDULE_WEEKDAYS: readonly (keyof WorkingSchedule)[] = [
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+]
+
+/**
+ * Calculates one member's daily and aggregated workload rows.
+ *
+ * @param profile - Profile the availability rules are applied to.
+ * @param stored - Stored profile whose own calendar fields the summary returns for editing.
+ */
 function calculateMemberSummary(
   profile: WorkloadMemberProfile,
+  stored: WorkloadMemberProfile,
   assignments: readonly ResourceAssignment[],
   actual: { byDate: ReadonlyMap<string, number>; byWorkItemId: ReadonlyMap<string, number> },
   fromDate: string,
   toDate: string,
   granularity: CapacityPlanningGranularity,
   remainingEffortByAssignmentId: ReadonlyMap<string, number>,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadMemberSummary {
   const dates = listCalendarDates(fromDate, toDate)
   const daily = new Map<string, DailyWorkload>()
@@ -825,15 +903,17 @@ function calculateMemberSummary(
       : assignment.plannedEffortMinutes
     distributeMinutes(daily, distributionDates, remaining, 'remainingEffortMinutes')
   }
-  const cells = aggregateCells(daily, granularity)
+  const cells = aggregateCells(daily, granularity, weekStartDay)
   return {
     memberId: profile.memberId,
     ...(profile.displayName ? { displayName: profile.displayName } : {}),
     ...(profile.role ? { role: profile.role } : {}),
     skills: [...profile.skills],
-    timeZone: profile.timeZone,
-    schedule: clone(profile.schedule),
-    holidays: profile.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
+    calendarSource: stored.calendarSource ?? 'custom',
+    timeZone: stored.timeZone,
+    effectiveTimeZone: profile.timeZone,
+    schedule: clone(stored.schedule),
+    holidays: stored.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
     profileRevision: profile.revision,
     cells,
     capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
@@ -849,10 +929,11 @@ function calculateMemberSummary(
 function aggregateCells(
   daily: ReadonlyMap<string, DailyWorkload>,
   granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadCell[] {
   const groups = new Map<string, { fromDate: string; toDate: string; value: DailyWorkload }>()
   for (const [date, value] of daily) {
-    const bucket = bucketFor(date, granularity)
+    const bucket = bucketFor(date, granularity, weekStartDay)
     const current = groups.get(bucket.fromDate)
     if (!current) {
       groups.set(bucket.fromDate, { fromDate: bucket.fromDate, toDate: bucket.toDate, value: { ...value } })
@@ -892,11 +973,31 @@ function aggregateCells(
 function calculateAvailableMinutes(profile: WorkloadMemberProfile, date: string): number {
   const schedule = profile.schedule[weekdayKey(date)]
   if (!schedule.enabled || schedule.minutes === 0) return 0
-  if (profile.holidays.some((holiday) => holiday.date === date)) return 0
+  if (readHolidayDates(profile).has(date)) return 0
   const absence = profile.timeOff
     .filter((timeOff) => timeOff.status !== 'canceled' && timeOff.fromDate <= date && timeOff.toDate >= date)
     .reduce((total, timeOff) => total + (timeOff.minutesPerDay ?? schedule.minutes), 0)
   return Math.max(0, schedule.minutes - absence)
+}
+
+/**
+ * Holiday dates of each effective profile. Effective profiles are created anew for every snapshot
+ * by {@link resolveEffectiveProfile}, so an entry lives only as long as that snapshot.
+ */
+const holidayDatesByProfile = new WeakMap<WorkloadMemberProfile, ReadonlySet<string>>()
+
+/**
+ * Reads a profile's holiday dates as a set, so inherited Workspace days off stay cheap to check.
+ *
+ * @param profile - Effective profile of the current snapshot; it is not changed afterwards.
+ * @returns The holiday dates.
+ */
+function readHolidayDates(profile: WorkloadMemberProfile): ReadonlySet<string> {
+  const cached = holidayDatesByProfile.get(profile)
+  if (cached) return cached
+  const dates = new Set(profile.holidays.map((holiday) => holiday.date))
+  holidayDatesByProfile.set(profile, dates)
+  return dates
 }
 
 /** Chooses scheduled dates first so planned effort follows availability. */
@@ -1057,8 +1158,19 @@ function calculateRemainingEffortByAssignment(
   return result
 }
 
-/** Returns the Monday-first bucket containing one local date. */
-function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fromDate: string; toDate: string } {
+/**
+ * Returns the day, week, or month bucket containing one local date.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param granularity - Bucket size.
+ * @param weekStartDay - Day a week bucket starts on.
+ * @returns The first and last local dates of the bucket.
+ */
+function bucketFor(
+  date: string,
+  granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
+): { fromDate: string; toDate: string } {
   if (granularity === 'day') return { fromDate: date, toDate: date }
   if (granularity === 'month') {
     const [year, month] = date.split('-').map(Number)
@@ -1068,10 +1180,8 @@ function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fr
       toDate: `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${lastDay.toString().padStart(2, '0')}`,
     }
   }
-  const day = new Date(`${date}T12:00:00Z`).getUTCDay()
-  const mondayOffset = day === 0 ? -6 : 1 - day
-  const fromDate = addCalendarDays(date, mondayOffset)
-  return { fromDate, toDate: addCalendarDays(fromDate, 6) }
+  const week = workspaceWeekContaining(date, weekStartDay)
+  return { fromDate: week.from, toDate: week.to }
 }
 
 /** Finds the UTC instant corresponding to local midnight, including DST changes. */
@@ -1359,6 +1469,7 @@ function isStoredMemberProfile(value: unknown): value is WorkloadMemberProfile {
     isOptionalString(value.displayName) &&
     isOptionalString(value.role) &&
     isStringArray(value.skills) &&
+    (value.calendarSource === undefined || isWorkloadCalendarSource(value.calendarSource)) &&
     isValidTimeZone(value.timeZone) &&
     isWorkingSchedule(value.schedule) &&
     Array.isArray(value.holidays) &&

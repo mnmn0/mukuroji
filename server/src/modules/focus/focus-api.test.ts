@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import {
   NotificationError,
   type NotificationClient,
@@ -18,11 +18,14 @@ import {
   type FocusStateClient,
 } from './focus-state'
 import { createApiTestHarness } from '../../api/test-support/api-test-harness'
+import { createMutationAuditContext } from '../audit'
+import { InMemoryProjectRaidLogStore } from '../project-raid-log'
 import {
   createDefaultDueDateWorkItemSchedule,
   type ApprovalRequest,
   type EnterprisePermissionId,
   type PlanningUpdateTarget,
+  type ProjectRaidEntry,
 } from '@mukuroji/contracts'
 
 const {
@@ -205,6 +208,7 @@ function createOversizedFocusNotificationClient(): NotificationClient {
  * @param teamIssueCount - Number of visible canonical Work Items returned by the fixture.
  * @param workspaceRole - Workspace membership role used by the authorization fixture.
  * @param additionalTeams - Extra Teams returned by the directory fixture.
+ * @param projectOptions - Extra Project directory fixture options, such as Team Projects and accesses.
  * @returns Captured source calls and the isolated idempotency adapters.
  */
 function configureFocusSources(
@@ -213,8 +217,10 @@ function configureFocusSources(
   teamIssueCount = 1,
   workspaceRole: 'owner' | 'member' | 'guest' = 'member',
   additionalTeams?: Array<{ id: string; name: string; projects: Array<{ id: string; name: string; tone: 'purple' }> }>,
+  projectOptions: Pick<NonNullable<Parameters<typeof configureFakeProjectClients>[1]>, 'teamProjects' | 'projectAccesses'> = {},
 ) {
   const projectCalls = configureFakeProjectClients(true, {
+    ...projectOptions,
     role,
     workspaceRole,
     teamIssueCount,
@@ -2497,4 +2503,253 @@ test('fails closed when source permission is lost before a snooze write', async 
     memberKey: 'demo@example.com',
     teamIds: ['core-team'],
   })).snoozes).toEqual([])
+})
+
+test('lists overdue Project log entries the viewer owns only in Projects the viewer can see', async () => {
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const store = new InMemoryProjectRaidLogStore()
+  const workspaceId = 'user#demo@example.com'
+  const seed = async (teamId: string, projectId: string, id: string, overrides: Partial<ProjectRaidEntry>) => {
+    await store.create({
+      workspaceId,
+      teamId,
+      projectId,
+      now: '2026-01-01T00:00:00.000Z',
+      callerAuthorization: [{ ConditionCheck: { TableName: 'fence', Key: { k: 'v' }, ConditionExpression: 'attribute_exists(k)' } }],
+      auditContext: createMutationAuditContext({
+        workspaceId,
+        actor: { id: 'u', kind: 'user', displayName: 'U' },
+        idempotencyKey: id,
+        request: { method: 'POST', path: '/x', body: {} },
+        source: { kind: 'api' },
+      }),
+      creationFingerprint: id,
+      entry: {
+        id,
+        kind: 'risk',
+        title: id,
+        probability: 4,
+        impact: 4,
+        reviewDueDate: '2020-01-01',
+        ownerMemberId: 'sato@example.com',
+        status: 'open',
+        revision: 1,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        ...overrides,
+      },
+    })
+  }
+  await seed('core-team', 'refero', 'visible', {})
+  await seed('core-team', 'refero', 'someone-else', { ownerMemberId: 'other@example.com' })
+  await seed('hidden-team', 'hidden-project', 'hidden', {})
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(body.projectLogEntries).toEqual([{
+    id: 'project-log:core-team:refero:visible',
+    teamId: 'core-team',
+    projectId: 'refero',
+    projectTitle: expect.any(String),
+    entryId: 'visible',
+    kind: 'risk',
+    title: 'visible',
+    severity: 'high',
+    reason: 'review-overdue',
+    reviewDueDate: '2020-01-01',
+    deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+  }])
+  expect(body.projectLogIncomplete).toBeUndefined()
+})
+
+test('shows no Project log entries to a Workspace guest, as the log GET refuses them', async () => {
+  configureFocusSources('member', undefined, 0, 'guest')
+  const readProjects: string[] = []
+  const store = new InMemoryProjectRaidLogStore()
+  const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+  store.listOpenOwnedBy = async (scope, memberKey) => {
+    readProjects.push(`${scope.teamId}/${scope.projectId}`)
+    return await listOpenOwnedBy(scope, memberKey)
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(body.projectLogEntries).toEqual([])
+  expect(readProjects).toEqual([])
+})
+
+test('lists Project log entries in Focus only with Enterprise Project read permission', async () => {
+  await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources()
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const store = new InMemoryProjectRaidLogStore()
+    const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+    let logReads = 0
+    store.listOpenOwnedBy = async (...args) => {
+      logReads += 1
+      return listOpenOwnedBy(...args)
+    }
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+
+    for (const [permissions, expectedReads] of [
+      [['work-items.read'], 0],
+      [['work-items.read', 'projects.read'], 1],
+    ] as const) {
+      logReads = 0
+      setTestAppDependencies({
+        enterpriseIdentity: await createFocusEnterpriseIdentity('project', permissions),
+        projectRaidLogs: store,
+      })
+      const response = await app.request('/api/focus', { headers: { Authorization: authorization } })
+
+      expect(response.status).toBe(200)
+      expect(logReads).toBe(expectedReads)
+    }
+  })
+})
+
+test('lists Project log entries from a Project granted only Enterprise Project read permission', async () => {
+  await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources('member', undefined, 1, 'member', [{
+      id: 'side-team',
+      name: 'Side',
+      projects: [{ id: 'side-project', name: 'Side project', tone: 'purple' }],
+    }])
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = await createFocusEnterpriseIdentity('project', ['work-items.read'])
+    const snapshot = await identity.getSnapshot(workspaceId)
+    const group = snapshot.scimGroups.find((candidate) => candidate.active)
+    if (group === undefined) throw new Error('Expected one active Focus SCIM group.')
+    const now = new Date().toISOString()
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:focus-project-log-reader',
+      name: 'Focus Project log reader',
+      permissions: ['projects.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'focus-project-log-mapping',
+      identityProviderId: 'focus-project-idp',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:focus-project-log-reader',
+      scope: { workspaceId, kind: 'project', targetId: 'side-project', parentTeamId: 'side-team' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+    const store = new InMemoryProjectRaidLogStore()
+    const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+    const readProjects: string[] = []
+    store.listOpenOwnedBy = async (scope, ownerMemberId) => {
+      readProjects.push(`${scope.teamId}/${scope.projectId}`)
+      return listOpenOwnedBy(scope, ownerMemberId)
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity, projectRaidLogs: store })
+
+    const response = await app.request('/api/focus', {
+      headers: {
+        Authorization: `Bearer ${createAccessToken([], { client_id: 'mukuroji-main-client', token_use: 'access' })}`,
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(readProjects).toEqual(['side-team/side-project'])
+  })
+})
+
+test('reads at most 100 Project logs and reports the rest as incomplete', async () => {
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = Array.from({ length: 101 }, (_, index) => ({
+    id: `project-${String(index).padStart(3, '0')}`,
+    name: `Project ${index}`,
+    tone: 'blue',
+  }))
+  configureFocusSources('member', undefined, 0, 'member', undefined, {
+    teamProjects,
+    projectAccesses: teamProjects.map((project): { projectId: string; role: 'member' } => ({ projectId: project.id, role: 'member' })),
+  })
+  const readProjects: string[] = []
+  const store = new InMemoryProjectRaidLogStore()
+  const listOpenOwnedBy = store.listOpenOwnedBy.bind(store)
+  store.listOpenOwnedBy = async (scope, memberKey) => {
+    readProjects.push(scope.projectId)
+    return await listOpenOwnedBy(scope, memberKey)
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(readProjects).toHaveLength(100)
+  expect(readProjects).not.toContain('project-100')
+  expect(body.projectLogIncomplete).toBe(true)
+})
+
+test('reports an incomplete Project log list instead of an empty one when a log cannot be read', async () => {
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const store = new InMemoryProjectRaidLogStore()
+  store.listOpenOwnedBy = async () => {
+    throw new Error('ProvisionedThroughputExceededException')
+  }
+  setTestAppDependencies({ projectRaidLogs: store })
+  const warn = spyOn(console, 'warn').mockImplementation(() => undefined)
+
+  try {
+    const response = await focusRequest('/api/focus')
+
+    expect(response.status).toBe(200)
+    const body: unknown = await response.json()
+    if (!isRecord(body)) throw new Error('Expected a Focus response.')
+    expect(body.projectLogEntries).toEqual([])
+    expect(body.projectLogIncomplete).toBe(true)
+  } finally {
+    warn.mockRestore()
+  }
 })
