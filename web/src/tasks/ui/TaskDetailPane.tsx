@@ -110,6 +110,7 @@ import { WorkItemKeyActions } from '../../issues/ui/WorkItemKeyActions'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
+import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -353,6 +354,12 @@ export function TaskDetailPane({
   task,
   workspaceMembers,
 }: TaskDetailPaneProps) {
+  const riskPromotion = usePromoteProjectRisk({
+    accessToken,
+    teamId: task?.teamId,
+    projectId: task?.assignedProjectId,
+    workItemId: task?.id ?? '',
+  })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [isIssueSaving, setIsIssueSaving] = useState(false)
   const isIssueSavingRef = useRef(false)
@@ -1475,6 +1482,7 @@ export function TaskDetailPane({
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
               readOnlyMessage={collaborationReadOnlyMessage}
               renderCommentDetails={agentRunReports.renderCommentDetails}
+              {...(riskPromotion && !collaborationReadOnlyMessage ? { riskPromotion } : {})}
             />
           </fieldset>
         ) : null

@@ -100,6 +100,7 @@ import {
   type TeamIssueScreenProps,
   type TeamIssueTypeChangeState,
 } from './teamIssueScreenShared'
+import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /**
  * Renders the detail pane for the selected Team Work Item.
@@ -364,6 +365,12 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const riskPromotion = usePromoteProjectRisk({
+    accessToken,
+    teamId: issue.teamId,
+    projectId: issue.assignedProjectId,
+    workItemId: issue.id,
+  })
   const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
@@ -1200,6 +1207,7 @@ function IssueDetailContent({
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
             renderCommentDetails={agentRunReports.renderCommentDetails}
+            {...(riskPromotion && !collaborationReadOnlyMessage ? { riskPromotion } : {})}
           />
           </>
         ) : null

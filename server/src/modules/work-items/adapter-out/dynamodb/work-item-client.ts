@@ -1119,6 +1119,41 @@ export function createWorkItemRevisionConditionCheck(
   }
 }
 
+/**
+ * Creates a fence proving at commit time that a Work Item still exists and is still assigned to a
+ * Project, for writes that reference the Work Item from that Project.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Work Item Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @param projectId - Project the Work Item must belong to.
+ * @returns A DynamoDB condition check composable with a larger transaction.
+ */
+export function createWorkItemProjectAssignmentConditionCheck(
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+  projectId: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: readRequiredString(tableName, 'Work Item table name is required.'),
+      Key: {
+        directoryTeamId: createDirectoryTeamId(
+          readRequiredString(directoryId, 'Workspace ID is required.'),
+          readRequiredString(teamId, 'Team ID is required.'),
+        ),
+        issueId: readRequiredString(workItemId, 'Work Item ID is required.'),
+      },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+      ExpressionAttributeValues: { ':projectId': readRequiredString(projectId, 'Project ID is required.') },
+    },
+  }
+}
+
 /** Trusted request conversion handler が Work Item transactionへ追加する narrow projection です。 */
 export type RequestConversionTransactionInput = {
   /** Request intake table 名です。 */

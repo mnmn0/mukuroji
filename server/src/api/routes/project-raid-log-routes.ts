@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
 import type { ProjectRaidLogResponse } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
-import { ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import {
   createProjectRaidEntryUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
+  type ProjectRaidEntryReferences,
+  type ProjectRaidLogCallerAuthorizationCheck,
 } from '../../modules/project-raid-log'
+import { createWorkItemProjectAssignmentConditionCheck } from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
@@ -80,6 +84,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
           auditContext,
           entryId: createEntryId(teamId, projectId, auditContext.actor.id, auditContext.idempotencyKeyHash),
           creationFingerprint: auditContext.requestFingerprint,
+          verifyReferences: (references) => verifyEntryReferences(principal, teamId, projectId, references),
         },
       )
       return c.json(response, 201)
@@ -115,6 +120,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
           auditContext,
           updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
           updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
+          verifyReferences: (references) => verifyEntryReferences(principal, teamId, projectId, references),
         },
       )
       return c.json(response)
@@ -181,6 +187,118 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
     ),
     ...await projectDirectory.createActiveReferenceConditionChecks(principal.directoryId, teamId, projectId),
   ]
+}
+
+/**
+ * Verifies the owner and the related Work Items an entry gains.
+ *
+ * The owner must be a member of the Project and an active Workspace member; the returned fence
+ * fails the write when the owner is deactivated before it commits. Each added Work Item must be
+ * one the caller can read and must belong to this Project, and its fence fails the write when the
+ * Work Item is deleted or moved to another Project before it commits. Every refusal answers the same 400
+ * whether the Work Item is missing, hidden, or in another Project, so the response does not
+ * reveal which Work Items exist. An Enterprise caller also needs `work-items.read` on the Project,
+ * because the write request itself is authorized by `projects.write` alone.
+ *
+ * @param principal - Authenticated principal changing the entry.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose log is changed.
+ * @param references - Owner and added Work Items.
+ * @returns Fences for the added Work Items and the owner. The owner has none when it did not
+ * change or is the caller.
+ * @throws ProjectDataError 400 for a reference that is not allowed, 503 when membership cannot be fenced.
+ */
+async function verifyEntryReferences(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  references: ProjectRaidEntryReferences,
+): Promise<ProjectRaidLogCallerAuthorizationCheck[]> {
+  const workItemFences: ProjectRaidLogCallerAuthorizationCheck[] = []
+  const [firstAddedWorkItemId] = references.addedWorkItemIds
+  if (
+    firstAddedWorkItemId !== undefined &&
+    principal.enterprisePermissions !== undefined &&
+    !hasEnterprisePermissionAtResource(principal, 'work-items.read', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectRaidEntry',
+      `Related Work Item "${firstAddedWorkItemId}" is not a Work Item of this Project.`,
+    )
+  }
+  for (const workItemId of references.addedWorkItemIds) {
+    let assignedProjectId: string | undefined
+    try {
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      assignedProjectId = detail.issue.assignedProjectId
+    } catch (error) {
+      if (!isHiddenOrMissing(error)) throw error
+    }
+    if (assignedProjectId !== projectId) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectRaidEntry',
+        `Related Work Item "${workItemId}" is not a Work Item of this Project.`,
+      )
+    }
+    workItemFences.push(createWorkItemProjectAssignmentConditionCheck(
+      getTeamIssuesTableName(),
+      principal.directoryId,
+      teamId,
+      workItemId,
+      projectId,
+    ))
+  }
+  const { ownerMemberId } = references
+  if (ownerMemberId === undefined) return workItemFences
+  const notMember = () => new ProjectDataError(
+    400,
+    'InvalidProjectRaidEntry',
+    'The owner must be an active member of the Project.',
+  )
+  const isCaller = principal.principalKind !== 'service-account' &&
+    normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(ownerMemberId)
+  // The owner's fence is read before the membership check: removing the owner from the Project
+  // advances the member version, so a removal after this read fails the write at commit. The
+  // caller's own membership fence already covers a caller who owns the entry, and DynamoDB refuses
+  // a transaction that checks the same item twice.
+  let fence: ProjectRaidLogCallerAuthorizationCheck | undefined
+  if (!isCaller) {
+    const { workspaceAccess } = workspaceDependencies
+    if (!workspaceAccess.createActiveMemberConditionCheck) {
+      throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'The owner cannot be verified.')
+    }
+    fence = await workspaceAccess.createActiveMemberConditionCheck.call(
+      workspaceAccess,
+      principal.directoryId,
+      ownerMemberId,
+    )
+    if (!fence) throw notMember()
+  }
+  const { members } = await workspaceDependencies.projectDirectory.getProjectMembers(
+    principal.directoryId,
+    projectId,
+    teamId,
+  )
+  if (!members.some((member) => member.id === ownerMemberId)) throw notMember()
+  return fence ? [...workItemFences, fence] : workItemFences
+}
+
+/**
+ * Tells whether a Work Item read failed because the Work Item is missing or hidden from the caller.
+ *
+ * @param error - Thrown error.
+ * @returns Whether the error carries status 403 or 404.
+ */
+function isHiddenOrMissing(error: unknown) {
+  if (typeof error !== 'object' || error === null || !('status' in error)) return false
+  return error.status === 403 || error.status === 404
 }
 
 /**
