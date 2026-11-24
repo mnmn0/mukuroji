@@ -25,7 +25,7 @@ export type CalendarFeedOwner = {
 }
 
 /** Input of {@link CalendarFeedStore.save}. */
-export type CalendarFeedSaveInput<AuditContext> = {
+export type CalendarFeedSaveInput<AuditContext, Completion = never> = {
   /** Workspace partition. */
   workspaceId: string
   /** Feed to store with its new token digest. */
@@ -34,6 +34,11 @@ export type CalendarFeedSaveInput<AuditContext> = {
   previousTokenHash?: string
   /** Audit context of the request, written in the same transaction. */
   auditContext?: AuditContext
+  /**
+   * Idempotency receipt write prepared by {@link CalendarFeedIssueReceipts}, committed in the same
+   * transaction so a lost response can be replayed.
+   */
+  receiptCompletion?: Completion
   /** Request time. */
   now: string
 }
@@ -51,7 +56,7 @@ export type CalendarFeedRemoveInput<AuditContext> = {
 }
 
 /** Persistence of calendar feeds and their token lookup rows. */
-export interface CalendarFeedStore<AuditContext = unknown> {
+export interface CalendarFeedStore<AuditContext = unknown, Completion = never> {
   /**
    * Lists the feeds one member owns.
    *
@@ -70,40 +75,121 @@ export interface CalendarFeedStore<AuditContext = unknown> {
   /**
    * Stores a new feed, or replaces a feed's token when `previousTokenHash` still matches.
    *
-   * @param input - Feed, previous digest, and audit context.
-   * @throws CalendarFeedError 409 when the feed changed concurrently.
+   * @param input - Feed, previous digest, audit context, and receipt.
+   * @throws CalendarFeedError `conflict` when the feed changed concurrently.
    */
-  save(input: CalendarFeedSaveInput<AuditContext>): Promise<void>
+  save(input: CalendarFeedSaveInput<AuditContext, Completion>): Promise<void>
   /**
    * Deletes a feed and its token lookup row while the token is still current.
    *
    * @param input - Feed and audit context.
-   * @throws CalendarFeedError 409 when the feed changed concurrently.
+   * @throws CalendarFeedError `conflict` when the feed changed concurrently.
    */
   remove(input: CalendarFeedRemoveInput<AuditContext>): Promise<void>
 }
 
-/** Error of a calendar feed operation with its HTTP status. */
+/**
+ * Kind of a calendar feed failure. The HTTP adapter maps it to a status; the application does
+ * not know HTTP.
+ */
+export type CalendarFeedErrorCategory =
+  | 'invalid-input'
+  | 'not-found'
+  | 'conflict'
+  | 'limit-exceeded'
+  | 'unavailable'
+
+/** Error of a calendar feed operation with a stable code and category. */
 export class CalendarFeedError extends Error {
-  /** HTTP status of the error response. */
-  readonly status: 400 | 404 | 409 | 413 | 503
+  /** Kind of failure. */
+  readonly category: CalendarFeedErrorCategory
   /** Stable error code. */
   readonly code: string
 
   /**
    * Creates the error.
    *
-   * @param status - HTTP status.
+   * @param category - Kind of failure.
    * @param code - Stable error code.
    * @param message - Message shown to the client.
    * @param options - Optional cause.
    */
-  constructor(status: CalendarFeedError['status'], code: string, message: string, options?: ErrorOptions) {
+  constructor(category: CalendarFeedErrorCategory, code: string, message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = 'CalendarFeedError'
-    this.status = status
+    this.category = category
     this.code = code
   }
+}
+
+/** Identity of one issue request in the idempotency store. */
+export type CalendarFeedIssueReceiptKey = {
+  /** Workspace of the request. */
+  workspaceId: string
+  /** Caller namespace of the request key. */
+  credentialId: string
+  /** Caller-provided `Idempotency-Key`. */
+  idempotencyKey: string
+  /** Digest binding the key to the owner and request body. */
+  requestFingerprint: string
+}
+
+/** Decision of {@link CalendarFeedIssueReceipts.reserve}. */
+export type CalendarFeedIssueReceiptDecision =
+  | {
+      /** This request owns the key. */
+      status: 'reserved'
+      /** Ownership token used to complete or release the key. */
+      reservationId: string
+    }
+  | {
+      /** Another request with the key has not finished. */
+      status: 'in-progress'
+    }
+  | {
+      /** A request with the key committed; its response is replayed. */
+      status: 'replay'
+      /** Stored response. */
+      response: unknown
+    }
+
+/**
+ * Durable receipts of issue requests, so a client that lost the one-time URL gets it back by
+ * retrying with the same `Idempotency-Key` instead of rotating the token again.
+ *
+ * `reserve` throws {@link CalendarFeedError} `conflict` when the key was used for another request.
+ */
+export interface CalendarFeedIssueReceipts<Completion> {
+  /** Reserves the key, or returns the committed response. */
+  reserve(key: CalendarFeedIssueReceiptKey): Promise<CalendarFeedIssueReceiptDecision>
+  /**
+   * Prepares the receipt write committed with the feed, or returns `undefined` when the store
+   * cannot join the transaction and {@link complete} must run after the save.
+   */
+  prepareCompletion(
+    key: CalendarFeedIssueReceiptKey & {
+      /** Ownership token. */
+      reservationId: string
+      /** Response to replay. */
+      response: IssueCalendarFeedResponse
+    },
+  ): Promise<Completion | undefined>
+  /** Stores the receipt after a save that could not include it. */
+  complete(
+    key: CalendarFeedIssueReceiptKey & {
+      /** Ownership token. */
+      reservationId: string
+      /** Response to replay. */
+      response: IssueCalendarFeedResponse
+    },
+  ): Promise<void>
+  /** Releases the key of a request that did not commit. */
+  release(
+    key: CalendarFeedIssueReceiptKey & {
+      /** Ownership token. */
+      reservationId: string
+    },
+  ): Promise<void>
 }
 
 /** Number of random bytes in a token secret. */
@@ -265,11 +351,20 @@ export async function listCalendarFeedsUseCase<AuditContext>(
 }
 
 /** Request-scoped inputs of {@link issueCalendarFeedUseCase}. */
-export type IssueCalendarFeedOptions<AuditContext> = {
+export type IssueCalendarFeedOptions<AuditContext, Completion> = {
   /** Request time. */
   now: string
   /** Audit context written with the feed. */
   auditContext?: AuditContext
+  /** Checks that the owner can read the Project of a Project feed, with the feed-read rule. */
+  canReadProject: (owner: CalendarFeedOwner, teamId: string, projectId: string) => Promise<boolean>
+  /** Receipt store and the request key, when the client sent one. */
+  idempotency?: {
+    /** Receipt store. */
+    receipts: CalendarFeedIssueReceipts<Completion>
+    /** Caller-provided `Idempotency-Key`. */
+    key: string
+  }
   /** Creates a token; tests pass a fixed one. */
   createToken?: (workspaceId: string) => IssuedToken
   /** Creates a feed ID; tests pass a fixed one. */
@@ -278,21 +373,74 @@ export type IssueCalendarFeedOptions<AuditContext> = {
 
 /**
  * Issues the member feed or a Project feed, or replaces its token when it already exists, so
- * the previous URL stops working at once. The caller has already checked that it can read the
- * Project of a Project feed.
+ * the previous URL stops working at once.
+ *
+ * With an `Idempotency-Key`, the response is stored with the feed in one transaction, and a retry
+ * of a committed request returns the same URL without another write.
+ *
+ * @param store - Feed persistence.
+ * @param owner - Caller.
+ * @param request - Validated request.
+ * @param options - Request time, audit context, Project check, receipts, and generators.
+ * @returns The feed and its tokenized path, shown once.
+ * @throws CalendarFeedError `not-found` when the owner cannot read the Project, `limit-exceeded`
+ *   when the caller already holds the most Project feeds, and `conflict` while the same key is in
+ *   progress or was used for another request.
+ */
+export async function issueCalendarFeedUseCase<AuditContext, Completion>(
+  store: CalendarFeedStore<AuditContext, Completion>,
+  owner: CalendarFeedOwner,
+  request: IssueCalendarFeedRequest,
+  options: IssueCalendarFeedOptions<AuditContext, Completion>,
+): Promise<IssueCalendarFeedResponse> {
+  if (request.kind === 'project' && !await options.canReadProject(owner, request.teamId, request.projectId)) {
+    throw new CalendarFeedError('not-found', 'ProjectNotFound', `Project "${request.projectId}" was not found.`)
+  }
+  const receiptKey = options.idempotency ? createIssueReceiptKey(owner, request, options.idempotency.key) : undefined
+  if (!options.idempotency || !receiptKey) return issueFeed(store, owner, request, options)
+  const { receipts } = options.idempotency
+  const decision = await receipts.reserve(receiptKey)
+  if (decision.status === 'replay') return readIssueReceipt(decision.response)
+  if (decision.status === 'in-progress') {
+    throw new CalendarFeedError(
+      'conflict',
+      'CalendarFeedIssueInProgress',
+      'The same calendar feed request is still in progress. Retry shortly.',
+    )
+  }
+  const owned = { ...receiptKey, reservationId: decision.reservationId }
+  let response: IssueCalendarFeedResponse
+  let completed = false
+  try {
+    response = await issueFeed(store, owner, request, options, async (prepared) => {
+      const completion = await receipts.prepareCompletion({ ...owned, response: prepared })
+      completed = completion !== undefined
+      return completion
+    })
+  } catch (error) {
+    await receipts.release(owned).catch(() => undefined)
+    throw error
+  }
+  if (!completed) await receipts.complete({ ...owned, response })
+  return response
+}
+
+/**
+ * Stores the feed with a new token.
  *
  * @param store - Feed persistence.
  * @param owner - Caller.
  * @param request - Validated request.
  * @param options - Request time, audit context, and generators.
- * @returns The feed and its tokenized path, shown once.
- * @throws CalendarFeedError 413 when the caller already holds the most Project feeds.
+ * @param prepareReceipt - Prepares the receipt write for the response, when the request has a key.
+ * @returns The feed and its tokenized path.
  */
-export async function issueCalendarFeedUseCase<AuditContext>(
-  store: CalendarFeedStore<AuditContext>,
+async function issueFeed<AuditContext, Completion>(
+  store: CalendarFeedStore<AuditContext, Completion>,
   owner: CalendarFeedOwner,
   request: IssueCalendarFeedRequest,
-  options: IssueCalendarFeedOptions<AuditContext>,
+  options: IssueCalendarFeedOptions<AuditContext, Completion>,
+  prepareReceipt?: (response: IssueCalendarFeedResponse) => Promise<Completion | undefined>,
 ): Promise<IssueCalendarFeedResponse> {
   const records = await store.list(owner)
   const existing = records.find((record) => isSameFeedTarget(record, request))
@@ -302,7 +450,7 @@ export async function issueCalendarFeedUseCase<AuditContext>(
     records.filter((record) => record.kind === 'project').length >= CALENDAR_FEED_PROJECT_LIMIT
   ) {
     throw new CalendarFeedError(
-      413,
+      'limit-exceeded',
       'CalendarFeedLimitExceeded',
       `A member can hold at most ${CALENDAR_FEED_PROJECT_LIMIT} Project calendar feeds.`,
     )
@@ -318,14 +466,99 @@ export async function issueCalendarFeedUseCase<AuditContext>(
     memberKey: owner.memberKey,
     tokenHash: issued.tokenHash,
   }
+  const response = { feed: toCalendarFeed(record), feedPath: calendarFeedPath(issued.token) }
+  const receiptCompletion = prepareReceipt ? await prepareReceipt(response) : undefined
   await store.save({
     workspaceId: owner.workspaceId,
     record,
     ...(existing ? { previousTokenHash: existing.tokenHash } : {}),
     ...(options.auditContext === undefined ? {} : { auditContext: options.auditContext }),
+    ...(receiptCompletion === undefined ? {} : { receiptCompletion }),
     now: options.now,
   })
-  return { feed: toCalendarFeed(record), feedPath: calendarFeedPath(issued.token) }
+  return response
+}
+
+/**
+ * Binds an `Idempotency-Key` to the owner and the request body.
+ *
+ * @param owner - Caller.
+ * @param request - Validated request.
+ * @param key - Caller-provided key.
+ * @returns The receipt key, or `undefined` when the key is unusable and the request runs without
+ *   a receipt.
+ */
+function createIssueReceiptKey(
+  owner: CalendarFeedOwner,
+  request: IssueCalendarFeedRequest,
+  key: string,
+): CalendarFeedIssueReceiptKey | undefined {
+  if (key === '' || key.length > 256 || [...key].some((character) => character < ' ' || character === '\x7f')) return undefined
+  const memberDigest = createHash('sha256').update(`calendar-feed-owner-v1\0${owner.memberKey}`).digest('hex')
+  return {
+    workspaceId: owner.workspaceId,
+    credentialId: `calendar-feed-${memberDigest.slice(0, 40)}`,
+    idempotencyKey: key,
+    requestFingerprint: createHash('sha256').update(JSON.stringify([
+      'calendar-feed-issue-v1',
+      owner.workspaceId,
+      owner.memberKey,
+      request.kind,
+      request.kind === 'project' ? request.teamId : '',
+      request.kind === 'project' ? request.projectId : '',
+      request.locale ?? '',
+    ])).digest('hex'),
+  }
+}
+
+/**
+ * Validates a replayed issue response.
+ *
+ * @param value - Stored response.
+ * @returns The response.
+ * @throws CalendarFeedError `unavailable` when the receipt is malformed.
+ */
+function readIssueReceipt(value: unknown): IssueCalendarFeedResponse {
+  const body = isRecord(value) && value.status === 201 ? value.body : value
+  if (
+    isRecord(body) &&
+    typeof body.feedPath === 'string' &&
+    body.feedPath.startsWith(CALENDAR_FEED_PUBLIC_PATH_PREFIX) &&
+    isRecord(body.feed)
+  ) {
+    const feed = body.feed
+    if (
+      typeof feed.id === 'string' &&
+      (feed.kind === 'member' || feed.kind === 'project') &&
+      (feed.locale === 'ja' || feed.locale === 'en') &&
+      typeof feed.issuedAt === 'string' &&
+      typeof feed.createdAt === 'string'
+    ) {
+      return {
+        feed: {
+          id: feed.id,
+          kind: feed.kind,
+          ...(typeof feed.teamId === 'string' ? { teamId: feed.teamId } : {}),
+          ...(typeof feed.projectId === 'string' ? { projectId: feed.projectId } : {}),
+          locale: feed.locale,
+          issuedAt: feed.issuedAt,
+          createdAt: feed.createdAt,
+        },
+        feedPath: body.feedPath,
+      }
+    }
+  }
+  throw new CalendarFeedError('unavailable', 'CalendarFeedReceiptInvalid', 'Calendar feed receipt is unavailable.')
+}
+
+/**
+ * Checks for a plain object.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
@@ -335,7 +568,7 @@ export async function issueCalendarFeedUseCase<AuditContext>(
  * @param owner - Caller.
  * @param feedId - Feed to revoke.
  * @param options - Request time and audit context.
- * @throws CalendarFeedError 404 when the caller has no such feed.
+ * @throws CalendarFeedError `not-found` when the caller has no such feed.
  */
 export async function revokeCalendarFeedUseCase<AuditContext>(
   store: CalendarFeedStore<AuditContext>,
@@ -344,7 +577,7 @@ export async function revokeCalendarFeedUseCase<AuditContext>(
   options: { now: string, auditContext?: AuditContext },
 ): Promise<void> {
   const record = (await store.list(owner)).find((candidate) => candidate.id === feedId)
-  if (!record) throw new CalendarFeedError(404, 'CalendarFeedNotFound', 'Calendar feed was not found.')
+  if (!record) throw new CalendarFeedError('not-found', 'CalendarFeedNotFound', 'Calendar feed was not found.')
   await store.remove({
     workspaceId: owner.workspaceId,
     record,

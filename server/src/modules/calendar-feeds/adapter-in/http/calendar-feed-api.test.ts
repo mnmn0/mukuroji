@@ -4,6 +4,7 @@ import type {
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
+import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 
 const {
   app,
@@ -27,14 +28,16 @@ const WORKSPACE_ID = 'user#demo@example.com'
  * @param path - Request path.
  * @param method - HTTP method.
  * @param body - JSON body, if any.
+ * @param idempotencyKey - `Idempotency-Key` header, if any.
  * @returns The response.
  */
-function request(path: string, method = 'GET', body?: unknown) {
+function request(path: string, method = 'GET', body?: unknown, idempotencyKey?: string) {
   return app.request(path, {
     method,
     headers: {
       Authorization: 'Bearer test-token',
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(idempotencyKey === undefined ? {} : { 'Idempotency-Key': idempotencyKey }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
@@ -167,6 +170,22 @@ test('replacing a token stops the old URL, and revoking stops the feed', async (
   expect(gone.headers.get('cache-control')).toBe('no-store')
   expect((await request(`/api/me/calendar-feeds/${second.feed.id}`, 'DELETE')).status).toBe(404)
   expect(((await (await request('/api/me/calendar-feeds')).json()) as CalendarFeedListResponse).feeds).toEqual([])
+})
+
+test('a retry with the same Idempotency-Key returns the same URL instead of rotating it', async () => {
+  configureFakeProjectClients(true)
+  const developerPlatform = createInMemoryDeveloperPlatformAdapters()
+  setTestAppDependencies({ idempotency: developerPlatform.idempotency, transactions: {} })
+  const first = await request('/api/me/calendar-feeds', 'POST', { kind: 'member' }, 'issue-retry-1')
+  expect(first.status).toBe(201)
+  const firstBody = await first.json() as IssueCalendarFeedResponse
+  const retried = await request('/api/me/calendar-feeds', 'POST', { kind: 'member' }, 'issue-retry-1')
+  expect(retried.status).toBe(201)
+  expect(await retried.json()).toEqual(firstBody)
+  expect((await app.request(firstBody.feedPath)).status).toBe(200)
+  const reused = await request('/api/me/calendar-feeds', 'POST', { kind: 'member', locale: 'en' }, 'issue-retry-1')
+  expect(reused.status).toBe(409)
+  expect(await reused.json()).toMatchObject({ code: 'CalendarFeedIdempotencyConflict' })
 })
 
 test('serves a Project feed and drops it when the owner can no longer read the Project', async () => {

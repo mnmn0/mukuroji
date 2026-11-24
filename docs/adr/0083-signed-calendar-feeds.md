@@ -23,6 +23,9 @@
 - 発行・再発行・停止はフィード行・token 行・監査 event を 1 つの TransactWrite で書く。再発行は
   フィード行の hash を条件に置き換え、古い token 行を消す。停止は両方を消す。監査は
   `member.calendar_feed_issued` / `_rotated` / `_revoked` で、token と hash は記録しない。
+- 発行の request に `Idempotency-Key` があるときは、既存の idempotency 行（Developer Platform table、
+  response は暗号化）を予約し、response の receipt を同じ TransactWrite に入れる。応答を受け取れずに
+  同じ key で再送すると、token を作り直さずに最初の URL を返す。同じ key で別の内容を送ると 409。
 - 公開 route `GET /api/public/calendar-feeds/{token}.ics` は、token 行とフィード行を強整合で読み、
   hash が一致したときだけ使う。その上で毎回、持ち主を Public API の本人用 key と同じ方法
   （`resolveDeveloperCredentialPrincipal`、`work-items.read`）で現在の権限の principal にし、
