@@ -1825,6 +1825,8 @@ function configureFakeProjectClients(
       teamId: string
       limit: number
       cursor?: string
+      assignedProjectId?: string
+      workflowStatusId?: string
     }>,
     issueUpdates: [] as Array<{
       actorUserId: string
@@ -3153,6 +3155,8 @@ function configureFakeProjectClients(
           teamId,
           limit: readOptions.limit,
           ...(readOptions.cursor ? { cursor: readOptions.cursor } : {}),
+          ...(readOptions.assignedProjectId ? { assignedProjectId: readOptions.assignedProjectId } : {}),
+          ...(readOptions.workflowStatusId ? { workflowStatusId: readOptions.workflowStatusId } : {}),
         })
         return {
           issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),

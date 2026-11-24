@@ -202,6 +202,9 @@ function createDefaultWorkItemService(
       return createImportJob('import-commit', false)
     },
     async authorizeImportJob() {},
+    async getImportProgress(_principal, job) {
+      return { jobId: job.id, status: job.status, totalRows: 2, processedRows: 1, totalLinks: 0, processedLinks: 0 }
+    },
     async cancelImport(_principal, job) {
       return { ...job, status: 'cancelled' }
     },
@@ -2380,6 +2383,64 @@ describe('public API router', () => {
     expect(validations).toBe(3)
   })
 
+  test('accepts an import source up to the import byte limit and rejects a larger one', async () => {
+    const platform = new InMemoryDeveloperPlatformStorage(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
+      () => new Date(NOW),
+    )
+    const validatedBytes: number[] = []
+    const workItems = createDefaultWorkItemService({
+      async dryRunImport(_principal, input) {
+        validatedBytes.push(new TextEncoder().encode(input.source.content).byteLength)
+        return { valid: true, totalRows: 1, validRows: 1, invalidRows: 0, errors: [], sample: [] }
+      },
+    })
+    const { router } = createTestRouter({ platform, workItems })
+    /** Sends a dry-run whose source holds the given number of bytes, padded with `filler`. */
+    const dryRun = (bytes: number, key: string, filler = 'x') => router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: {
+          fileName: 'work-items.csv',
+          mediaType: 'text/csv',
+          content: `Title\n${filler.repeat(bytes - 'Title\n'.length)}`,
+        },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      }),
+    })
+
+    expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
+    expect(validatedBytes).toEqual([3 * 1024 * 1024])
+    expect((await dryRun(4 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
+    // Quotes are escaped in the request body and again in the Lambda event, so 1.5 MiB of them count as 6 MiB.
+    expect((await dryRun(1.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
+
+    const longField = await router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'dry-run-long-mapping',
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: { fileName: 'work-items.csv', mediaType: 'text/csv', content: 'Title\nx' },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'T'.repeat(257), targetField: 'title' }],
+      }),
+    })
+    expect(longField.status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
+  })
+
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
     const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -2562,6 +2623,46 @@ describe('public API router', () => {
       expect(detail.status).toBe(404)
       expect(await detail.json()).toMatchObject({ code: 'not_found' })
     }
+  })
+
+  test('returns the progress of the caller\'s own import job only', async () => {
+    const { platform, router } = createTestRouter()
+    const own = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+    const foreign = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-2',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+
+    const progress = await router.request(`http://localhost/developer/imports/${own.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(progress.status).toBe(200)
+    expect(await progress.json()).toEqual({
+      jobId: own.id,
+      status: own.status,
+      totalRows: 2,
+      processedRows: 1,
+      totalLinks: 0,
+      processedLinks: 0,
+    })
+
+    const hidden = await router.request(`http://localhost/developer/imports/${foreign.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(hidden.status).toBe(404)
   })
 
   test('retains the local connector credential when provider disconnect fails', async () => {

@@ -1,5 +1,11 @@
 import type { FormEvent } from 'react'
-import type { ImportDryRunReport, ImportJob } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
+  type ImportDryRunReport,
+  type ImportJob,
+  type ImportJobProgress,
+} from '@mukuroji/contracts'
 import { interpolate } from '../model/displayFormatting'
 import {
   DEVELOPER_IMPORT_FILE_ACCEPT,
@@ -38,6 +44,8 @@ export function ImportExportSection({
   importTeamOptions,
   labels,
   latestImport,
+  latestImportProgress,
+  latestImportProgressFailed = false,
   previewReport,
   onCommit,
   onExport,
@@ -45,6 +53,7 @@ export function ImportExportSection({
   onFormatChange,
   onMappingChange,
   onProjectChange,
+  onRetryImportProgress,
   onSubmit,
   onTeamChange,
 }: {
@@ -61,6 +70,8 @@ export function ImportExportSection({
   importTeamOptions: DeveloperPlatformOption[]
   labels: DeveloperPlatformLabels
   latestImport?: ImportJob
+  latestImportProgress?: ImportJobProgress
+  latestImportProgressFailed?: boolean
   previewReport?: ImportDryRunReport
   onCommit?: () => void
   onExport?: (format: DeveloperExportFormat) => Promise<void>
@@ -68,6 +79,7 @@ export function ImportExportSection({
   onFormatChange: (format: DeveloperImportFileFormat) => void
   onMappingChange: (mapping: DeveloperImportFieldMapping[]) => void
   onProjectChange: (projectId: string) => void
+  onRetryImportProgress?: () => void
   onSubmit?: (event: FormEvent<HTMLFormElement>) => void
   onTeamChange: (teamId: string) => void
 }) {
@@ -183,6 +195,7 @@ export function ImportExportSection({
                 </div>
                 <button
                   className="workbench-button-secondary min-h-9 px-3"
+                  disabled={importMappings.length >= WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES}
                   onClick={() =>
                     onMappingChange([
                       ...importMappings,
@@ -204,6 +217,7 @@ export function ImportExportSection({
                     {labels.fields.sourceField}
                     <input
                       className="workbench-input min-h-9 bg-surface px-3"
+                      maxLength={WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH}
                       placeholder={labels.placeholders.sourceField}
                       required
                       value={mapping.sourceField}
@@ -331,6 +345,40 @@ export function ImportExportSection({
                 />
               ) : null}
             </div>
+            {!previewReport && latestImportProgress?.totalRows !== undefined ? (
+              <p
+                className="mt-2 text-xs font-medium text-[var(--workbench-muted)]"
+                data-testid="developer-import-progress"
+                role="status"
+              >
+                {interpolate(labels.importProgressSummary, {
+                  links: latestImportProgress.processedLinks,
+                  rows: latestImportProgress.processedRows,
+                  totalLinks: latestImportProgress.totalLinks ?? 0,
+                  totalRows: latestImportProgress.totalRows,
+                })}
+              </p>
+            ) : null}
+            {!previewReport && latestImportProgressFailed ? (
+              <div
+                className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2"
+                data-testid="developer-import-progress-error"
+                role="alert"
+              >
+                <p className="text-xs font-semibold text-fg-red-800">
+                  {labels.importProgressLoadFailed}
+                </p>
+                {onRetryImportProgress ? (
+                  <button
+                    className="workbench-button-secondary min-h-8 px-3"
+                    onClick={onRetryImportProgress}
+                    type="button"
+                  >
+                    {labels.importProgressRetry}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {report?.errors.length ? (
               <ul className="mt-4 grid gap-2">
                 {report.errors.map((error, index) => (

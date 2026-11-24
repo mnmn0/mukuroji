@@ -12,6 +12,7 @@ import {
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
   type ImportJob,
+  type ImportJobProgress,
   type ImportReport,
   type ImportRowError,
   type UpdatePublicWorkItemRequest,
@@ -114,6 +115,7 @@ import {
   type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicMutationContext,
+  type PublicWorkItemExportFilters,
   type PublicWorkItemService,
 } from '../../modules/developer-platform/public-api'
 import {
@@ -307,6 +309,7 @@ async function requireWebhookTeamPermission(
  * @param limit - Largest number of Work Items in the page.
  * @param includeStructure - Whether rows keep contributors and acceptance criteria, as the
  *   structured export endpoint returns them.
+ * @param filters - Team, Project, and field filters that narrow the export.
  * @returns The page and the continuation of the next one.
  */
 async function readAccessibleWorkItemExportPage(
@@ -314,17 +317,26 @@ async function readAccessibleWorkItemExportPage(
   continuation: string | undefined,
   limit: number,
   includeStructure: boolean,
+  filters: PublicWorkItemExportFilters = {},
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
     : await getEffectiveProjectScopeAccessList(principal)
+  const { teamId: teamFilter, ...fieldFilters } = filters
+  // A Team or Project the caller cannot view yields an empty export, so the filter does not
+  // reveal whether it exists.
   const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
+    if (teamFilter !== undefined && team.id !== teamFilter) return []
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
     const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
       .filter((access) => projectAccessAllows(access, 'viewer'))
+    if (
+      fieldFilters.assignedProjectId !== undefined &&
+      !teamProjectAccesses.some((access) => access.projectId === fieldFilters.assignedProjectId)
+    ) return []
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []
@@ -359,6 +371,7 @@ async function readAccessibleWorkItemExportPage(
       limit,
       ...(decoded?.workItemCursor ? { cursor: decoded.workItemCursor } : {}),
       ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+      ...fieldFilters,
     },
   )
   const nextTeam = page.nextCursor ? context : contexts[teamIndex + 1]
@@ -2139,6 +2152,19 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       )
     },
 
+    async getImportProgress(managementPrincipal, job) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
+        permission: 'work-items.read',
+        teamId: job.teamId,
+        ...(job.assignedProjectId ? { projectId: job.assignedProjectId } : {}),
+        evaluateProjectScopes: true,
+      })
+      const execution = job.dryRun
+        ? undefined
+        : await developerPlatformDependencies.workItemImportExecutions.get(principal.directoryId, job.id)
+      return createImportJobProgress(job, execution)
+    },
+
     async cancelImport(managementPrincipal, job) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.write',
@@ -2178,7 +2204,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       return requireImportJob(principal.directoryId, job.id)
     },
 
-    async export(managementPrincipal, _format, continuation, limit, includeStructure = false) {
+    async export(managementPrincipal, _format, continuation, limit, includeStructure = false, filters = {}) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.read',
         evaluateProjectScopes: true,
@@ -2189,6 +2215,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         continuation,
         limit,
         includeStructure,
+        filters,
       )
     },
   }
@@ -3299,6 +3326,43 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     },
     now: () => new Date(),
     createLeaseOwner: randomUUID,
+    queue: developerPlatformDependencies.workItemImportQueue,
+  }
+}
+
+/**
+ * Builds the progress of an import from its durable execution.
+ *
+ * Steps are numbered rows first and then links, so the checkpoint splits into the two counts.
+ * A completed job counts every step even when its execution has already expired.
+ *
+ * @param job - Public import job.
+ * @param execution - Worker execution of the job, if one exists.
+ * @returns The job's progress.
+ */
+function createImportJobProgress(
+  job: ImportJob,
+  execution: WorkItemImportExecution | undefined,
+): ImportJobProgress {
+  const planned = execution?.plannedSteps ??
+    (job.report ? { rows: job.report.totalRows, links: undefined } : undefined)
+  const checkpoint = execution?.checkpointRow ?? 0
+  const completed = job.status === 'completed' && !job.dryRun
+  const totalRows = planned?.rows
+  const totalLinks = planned?.links
+  const processedRows = completed && totalRows !== undefined
+    ? totalRows
+    : Math.min(checkpoint, totalRows ?? checkpoint)
+  const processedLinks = completed && totalLinks !== undefined
+    ? totalLinks
+    : totalRows === undefined ? 0 : Math.max(0, checkpoint - totalRows)
+  return {
+    jobId: job.id,
+    status: job.status,
+    ...(totalRows !== undefined ? { totalRows } : {}),
+    processedRows,
+    ...(totalLinks !== undefined ? { totalLinks } : {}),
+    processedLinks,
   }
 }
 
