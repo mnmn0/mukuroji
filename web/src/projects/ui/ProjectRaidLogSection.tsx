@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectRaidReferenceOption } from '../model/projectRaidLogExport'
+import { useDecideProjectChangeRequest } from '../mutations/useDecideProjectChangeRequest'
 import { useSaveProjectRaidEntry } from '../mutations/useSaveProjectRaidEntry'
 import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from './ProjectRaidLogPanel'
@@ -77,6 +78,7 @@ export function ProjectRaidLogSection({
   )
   const { mutate } = log
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId })
+  const decide = useDecideProjectChangeRequest({ accessToken, teamId, projectId })
 
   if (!teamId) return null
   return (
@@ -94,6 +96,11 @@ export function ProjectRaidLogSection({
       onReloadWorkItemOptions={() => void reloadProjectIssues()}
       onReload={() => void mutate()}
       onSave={save}
+      canDecide={canMutate && log.data?.viewer?.canDecide === true}
+      onDecide={(entry, outcome, choice) => decide(entry, outcome, {
+        replaceBaseline: choice.replaceBaseline,
+        baselineName: t('projects.raidLog.decision.baselineName').replace('{title}', entry.title),
+      })}
     />
   )
 }

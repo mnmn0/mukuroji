@@ -53,6 +53,10 @@ export type CreateProjectDirectoryProjectInput = {
    * サイドバー上のプロジェクト表示色です。
    */
   tone: SidebarProjectTone
+  /**
+   * 作成直後のライフサイクル状態です。省略すると server が `active` にします。
+   */
+  lifecycleState?: ProjectLifecycleState
 }
 
 /**

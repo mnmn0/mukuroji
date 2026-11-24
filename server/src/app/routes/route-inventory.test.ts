@@ -9,9 +9,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(598)
-  expect(new Set(inventory).size).toBe(594)
+  expect(inventory).toHaveLength(608)
+  expect(new Set(inventory).size).toBe(604)
   expect(inventory).toContain('POST /api/client-errors')
+  expect(inventory).toContain('GET /api/customers/project-links')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
@@ -25,6 +27,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
+  expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
   expect(inventory).toContain('GET /api/workspace/time-entry-categories')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
@@ -80,6 +83,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/workspace/members/sign-in-security')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/password-reset')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/mfa-reset')
+  expect(inventory).toContain('PUT /api/workspace/members/:memberKey/system-administrator')
   expect(inventory).toContain('GET /api/planning/update-feed')
   expect(inventory).toContain('GET /api/planning/archived-entities')
   expect(inventory).toContain('POST /api/planning/entities/:entityId/restore')
@@ -173,11 +177,15 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
   // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
+  expect(inventory).toContain('GET /api/me/calendar-feeds')
+  expect(inventory).toContain('POST /api/me/calendar-feeds')
+  expect(inventory).toContain('DELETE /api/me/calendar-feeds/:feedId')
+  expect(inventory).toContain('GET /api/public/calendar-feeds/:token')
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'eb3dddcae6b48280dd7909f91f914efc6731ff6394315fdf466474625d9edcf4',
+    'ccfd0efbb5c37dbb3a7ee80d454ace6a3bc0406c7f221c4102ec275b2d173857',
   )
 })

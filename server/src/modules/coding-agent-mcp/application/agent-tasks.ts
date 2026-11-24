@@ -4,6 +4,7 @@ import {
   type AgentRunFinishOutcome,
   type AgentRunMutationFence,
   type AgentRunRuntime,
+  type PublicProjectCharter,
   type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -420,9 +421,13 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   }
 
   return {
-    /** Returns configured ownership, Agent settings, the agent brief, and current workflow/field requirements. */
+    /** Returns configured ownership, Agent settings, the agent brief, the configured Project's charter, and current workflow/field requirements. */
     async configuration() {
-      const [catalog, agentSettings] = await Promise.all([api.catalog(scope.assignedProjectId), api.agentSettings()])
+      const [catalog, agentSettings, projectCharter] = await Promise.all([
+        api.catalog(scope.assignedProjectId),
+        api.agentSettings(),
+        readConfiguredProjectCharter(),
+      ])
       return {
         assigneeUserId: scope.assigneeUserId,
         ...(scope.assignedProjectId ? { assignedProjectId: scope.assignedProjectId } : {}),
@@ -437,6 +442,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
         brief: composeBrief(agentSettings, scope.assignedProjectId),
+        projectCharter,
         catalog,
       }
     },
@@ -779,6 +785,23 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       inScope(await api.get(id))
       return content
     },
+  }
+
+  /**
+   * Reads the charter of the configured Project.
+   *
+   * @returns The charter, or null when no Project is configured, the server predates the
+   * endpoint, or the charter read is refused. A Project the credential owner may not view
+   * normally fails the catalog read of the same configuration first.
+   */
+  async function readConfiguredProjectCharter(): Promise<PublicProjectCharter | null> {
+    if (scope.assignedProjectId === undefined) return null
+    try {
+      return await api.projectCharter(scope.assignedProjectId) ?? null
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'forbidden') return null
+      throw error
+    }
   }
 
   /**

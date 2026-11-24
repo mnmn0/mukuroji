@@ -983,6 +983,7 @@ credential 再発行を伴う独立した運用として実施してください
 この script は user pool / client / owner を検証し、不足している mutable custom attribute `directory_id` と `workspace_id` を追加して、owner の `custom:directory_id` / `custom:workspace_id` を同じ Workspace ID に設定します。Cognito schema へ追加した custom attribute は削除できないため、値と対象 account を先に確認してください。再実行は同じ値へ収束します。
 
 team 作成・team archive など system-admin 操作も初期 owner に許可する場合は、`SystemAdminGroups` に指定する group へ owner を追加します。Workspace owner row は system-admin group の代替ではありません。
+2 人目以降の追加と交代は、Workspace owner がメンバー管理画面の **システム管理者にする** / **システム管理者を外す** で行えます（ADR 0067）。API は `SystemAdminGroups` の先頭の group へ追加し、解除では設定したすべての group から外します。
 
 ```sh
 export SYSTEM_ADMIN_GROUP=mukuroji-system-admins

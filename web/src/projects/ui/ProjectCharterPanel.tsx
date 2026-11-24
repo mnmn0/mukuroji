@@ -3,6 +3,7 @@ import {
   PROJECT_LIFECYCLE_TRANSITIONS,
   type ProjectCharter,
   type ProjectCharterState,
+  type ProjectCharterUpdateOwnerSync,
   type ProjectLifecycleState,
   type UpdateProjectCharterInput,
 } from '@mukuroji/contracts'
@@ -190,7 +191,7 @@ export function ProjectCharterPanel({
         if (current === submittedDraft) return undefined
         return current && next ? { revision: next.revision, values: current.values } : current
       })
-      setMessage({ kind: 'success', text: t('projects.charter.saved') })
+      setMessage(describeCharterSaved(next?.updateOwnerSync, t))
     } catch (error) {
       setMessage({ kind: 'error', text: describeCharterError(error, t, 'projects.charter.error.save') })
     } finally {
@@ -475,4 +476,28 @@ export function ProjectCharterPanel({
       </form>
     </section>
   )
+}
+
+/** Message keys that explain what a charter save did to the Project's health update owner. */
+const updateOwnerSyncMessageKeys: Partial<Record<ProjectCharterUpdateOwnerSync, MessageKey>> = {
+  synced: 'projects.charter.updateOwner.synced',
+  'not-permitted': 'projects.charter.updateOwner.notPermitted',
+  'owner-not-eligible': 'projects.charter.updateOwner.ownerNotEligible',
+  failed: 'projects.charter.updateOwner.failed',
+}
+
+/**
+ * Builds the message shown after a charter save.
+ *
+ * @param sync - What happened to the health update owner, when the owner changed.
+ * @param t - Translator.
+ * @returns A success message, or an error message when the update owner could not follow.
+ */
+function describeCharterSaved(
+  sync: ProjectCharterUpdateOwnerSync | undefined,
+  t: (key: MessageKey) => string,
+): { kind: 'error' | 'success'; text: string } {
+  const key = sync === undefined ? undefined : updateOwnerSyncMessageKeys[sync]
+  const text = t(key ?? 'projects.charter.saved')
+  return { kind: sync === 'synced' || key === undefined ? 'success' : 'error', text }
 }

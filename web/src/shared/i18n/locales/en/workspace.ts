@@ -175,6 +175,10 @@ export const workspaceMessages = {
   'workspace.focus.updateDeadlines.dueAt': 'Due {time}',
   'workspace.focus.updateDeadlines.project': 'Project health update',
   'workspace.focus.updateDeadlines.initiative': 'Initiative health update',
+  'workspace.focus.updateDeadlines.team': 'Team health update',
+  'workspace.focus.updateReviews.title': 'Health updates to review',
+  'workspace.focus.updateReviews.meta': '{author} · published {time}',
+  'workspace.focus.updateReviews.resolves': 'Clears when you mark it as reviewed',
   'workspace.focus.updateDeadlines.resolves': 'Clears when you publish the update',
   'workspace.focus.projectLog.title': 'Your risks, issues, and change requests',
   'workspace.focus.projectLog.reviewOverdue': 'Review overdue',
@@ -316,6 +320,7 @@ export const workspaceMessages = {
   'workspace.inbox.reason.projectMember': 'Project member',
   'workspace.inbox.reason.updateAuthor': 'Your update',
   'workspace.inbox.reason.updateOwner': 'Update owner',
+  'workspace.inbox.reason.updateReviewer': 'Update reviewer',
   'workspace.inbox.reason.contributor': 'Added as contributor',
   'workspace.inbox.reason.creator': 'You created it',
   'workspace.inbox.reason.escalation': 'Project manager',
@@ -372,6 +377,7 @@ export const workspaceMessages = {
   'workspace.registration.tone.purple': 'Neutral',
   'workspace.registration.tone.green': 'Green',
   'workspace.registration.tone.yellow': 'Yellow',
+  'workspace.registration.lifecycle': 'Starting lifecycle',
   'workspace.registration.createTeam': 'Create team',
   'workspace.registration.createProject': 'Create project',
   'workspace.registration.saving': 'Saving',
@@ -485,6 +491,35 @@ export const workspaceMessages = {
   'workspace.help.agentGuideTitle': 'Coding agent guide',
   'workspace.help.agentGuideDescription':
     'Issue a token, register your client, follow the agent workflow, and monitor the Factory board.',
+  'workspace.help.featureGuidesTitle': 'Features at a glance',
+  'workspace.help.featureGuidesDescription':
+    'A short summary of the main screens. Open the screen directly, or read the matching section of the user guide (in Japanese).',
+  'workspace.help.featureOpen': 'Open screen',
+  'workspace.help.featureGuide': 'Read guide',
+  'workspace.help.featureProjectsTitle': 'Projects',
+  'workspace.help.featureProjectsDescription':
+    'Create a Project and set up its charter, members, and WBS. Parent and child tasks form the WBS, and the Gantt view shows dates and dependencies.',
+  'workspace.help.featurePlanningTitle': 'Planning',
+  'workspace.help.featurePlanningDescription':
+    'Place plans such as Phases, Milestones, and Cycles, and review dependencies, the critical path, and cross-Project schedules on the timeline.',
+  'workspace.help.featureUpdatesTitle': 'Updates',
+  'workspace.help.featureUpdatesDescription':
+    'Read weekly status updates (health, risk, summary, next actions) and comment or acknowledge them. Publish them from the Project update panel.',
+  'workspace.help.featureReportsTitle': 'Reports',
+  'workspace.help.featureReportsDescription':
+    'Build reports from widgets such as throughput, burndown, overdue work, and completion forecasts, and schedule their delivery.',
+  'workspace.help.featureMyTasksTitle': 'My Tasks',
+  'workspace.help.featureMyTasksDescription':
+    'See the tasks you own or contribute to as a board, table, Gantt, or calendar, and drag them to change their state.',
+  'workspace.help.featureFocusTitle': 'Focus',
+  'workspace.help.featureFocusDescription':
+    'Lists only what needs your attention now, in priority order with the reason and how it clears. Snooze items to defer them.',
+  'workspace.help.featureInboxTitle': 'Inbox',
+  'workspace.help.featureInboxDescription':
+    'Receive assignments, mentions, due dates, and reminders, and triage them with read, snooze, and archive.',
+  'workspace.help.featureSettingsTitle': 'Settings',
+  'workspace.help.featureSettingsDescription':
+    'Personal settings, plus Workspace, Team, permission, Work Item, automation, and agent settings for administrators.',
   'workspace.help.buildTitle': 'Running Web build',
   'workspace.help.buildDescription':
     'Share this commit when reporting a problem. Operators use it to roll the Web app back to an earlier release.',
@@ -1028,6 +1063,16 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.defaultRole': 'Default member role',
   'workspace.tenantAdministration.fiscalYearStartMonth': 'Fiscal year starts in',
   'workspace.tenantAdministration.monthOption': 'Month {month}',
+  'workspace.tenantAdministration.planningUpdateTemplate.title': 'Health update required fields and template',
+  'workspace.tenantAdministration.planningUpdateTemplate.hint': 'Checked fields cannot be left empty when an update is published. Template text prefills the publish form.',
+  'workspace.tenantAdministration.planningUpdateTemplate.required': 'Required fields',
+  'workspace.tenantAdministration.planningUpdateTemplate.templateFor': 'Template for {field}',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.summary': 'Summary',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.riskSummary': 'Risk background',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.decisionSummary': 'Decisions',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.helpNeeded': 'Help needed',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.nextAction': 'Next action',
+  'workspace.tenantAdministration.planningUpdateTemplate.field.evidence': 'Evidence',
   'workspace.tenantAdministration.weeklyReportReminders.title': 'Weekly report reminders',
   'workspace.tenantAdministration.weeklyReportReminders.hint': 'Notifies people who have not submitted their weekly report (in the Workspace time zone). The manager notice goes to the managers of their Projects, about the week of the latest reminder.',
   'workspace.tenantAdministration.weeklyReportReminders.reminder': 'Remind the author',

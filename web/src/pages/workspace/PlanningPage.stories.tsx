@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { PlanningUpdateTarget } from '@mukuroji/contracts'
 import { expect, userEvent, within } from 'storybook/test'
 import {
   emptyPlanningSnapshotFixture,
@@ -14,6 +15,7 @@ import { createPlanningLabels } from '../../planning/ui/labels'
 
 const initiativeUpdateDetails = createInitiativeUpdateDetails()
 const projectUpdateDetails = createProjectUpdateDetails()
+const teamUpdateDetails = createTeamUpdateDetails()
 
 /** Creates the Initiative detail projection shared by update stories. */
 function createInitiativeUpdateDetails(): PlanningUpdateTargetDetailView[] {
@@ -56,6 +58,25 @@ function createProjectUpdateDetails(): PlanningUpdateTargetDetailView[] {
       title: 'Refero',
     },
     updateView: createPlanningTargetUpdateView(updateSummary),
+  }]
+}
+
+/** Creates a Team detail projection from the Project fixture's latest update and cadence. */
+function createTeamUpdateDetails(): PlanningUpdateTargetDetailView[] {
+  const updateSummary = planningSnapshotFixture.updateTargets.find((candidate) =>
+    candidate.target.type === 'project' && candidate.target.teamId === 'core-team'
+  )
+  if (!updateSummary) return []
+  const target: PlanningUpdateTarget = { type: 'team', teamId: 'core-team' }
+  return [{
+    summary: {
+      health: updateSummary.latestUpdate?.health ?? 'unknown',
+      ownerMemberKey: updateSummary.cadence?.updateOwnerMemberKey ?? '',
+      progress: updateSummary.latestUpdate?.progressSnapshot.percent ?? 0,
+      target,
+      title: 'Core team',
+    },
+    updateView: createPlanningTargetUpdateView({ ...updateSummary, target }),
   }]
 }
 
@@ -182,6 +203,30 @@ export const Roadmap: Story = {
 export const Portfolio: Story = {
   args: {
     activeView: 'portfolio',
+  },
+}
+
+/**
+ * Portfolio with the Team update panel: one Team reports weekly and the other has no schedule yet.
+ * Opening a Team's report shows its detail pane with the schedule, composer, and history.
+ */
+export const TeamUpdates: Story = {
+  args: {
+    activeView: 'portfolio',
+    directoryTeams: [
+      { id: 'core-team', name: 'Core team', projects: [{ id: 'refero', name: 'Refero' }] },
+      { id: 'design-team', name: 'Design team', projects: [] },
+    ],
+    updateTargetDetails: [...initiativeUpdateDetails, ...projectUpdateDetails, ...teamUpdateDetails],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const coreTeam = within(canvas.getByTestId('planning-team-update-core-team'))
+    await expect(canvas.getByTestId('planning-team-update-design-team')).toBeVisible()
+    await userEvent.click(coreTeam.getByRole('button', { name: '報告を開く' }))
+    const detail = within(await canvas.findByTestId('planning-update-detail-pane'))
+    await expect(detail.getByRole('heading', { name: 'Core team' })).toBeVisible()
+    await expect(detail.getByText('チーム')).toBeVisible()
   },
 }
 

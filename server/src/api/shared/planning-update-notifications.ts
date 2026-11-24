@@ -14,6 +14,7 @@ import {
 import { createPlanningUpdatePublicTargetKey } from '../../modules/collaboration'
 import {
   createPlanningUpdateTargetRecordKey,
+  readPlanningUpdateTargetId,
   PlanningError,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
@@ -71,6 +72,8 @@ export type PlanningUpdateCommentAuditInput = {
 export function createPlanningUpdateDeepLink(target: PlanningUpdateTarget) {
   const search = target.type === 'project'
     ? new URLSearchParams({ targetType: 'project', teamId: target.teamId, projectId: target.projectId })
+    : target.type === 'team'
+    ? new URLSearchParams({ targetType: 'team', teamId: target.teamId })
     : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
   return `/planning/portfolio?${search.toString()}`
 }
@@ -78,7 +81,8 @@ export function createPlanningUpdateDeepLink(target: PlanningUpdateTarget) {
 /**
  * Builds the audit outbox event for one update publish.
  *
- * The event names the escalation recipient, and the update owner when health got worse. The
+ * The event names the escalation recipient, the cadence reviewer, and the update owner when
+ * health got worse. The
  * notification projection adds current target watchers and, for a Project target, current
  * Project members. The publishing member is removed there.
  *
@@ -92,12 +96,16 @@ export function createPlanningUpdatePublishAuditEvent(
   const degraded = notification.healthDegraded
   const previousHealth = notification.previousHealth
   const targetKey = createPlanningUpdatePublicTargetKey(update.target)
+  const escalationMemberKey = notification.escalationMemberKey?.toLowerCase()
+  const reviewerMemberKey = notification.reviewerMemberKey?.toLowerCase()
   const candidates = [
-    ...(notification.escalationMemberKey
-      ? [{ memberKey: notification.escalationMemberKey.toLowerCase(), reason: 'escalation' }]
-      : []),
+    ...(escalationMemberKey ? [{ memberKey: escalationMemberKey, reason: 'escalation' }] : []),
     ...(degraded
       ? [{ memberKey: notification.updateOwnerMemberKey.toLowerCase(), reason: 'update-owner' }]
+      : []),
+    // The escalation member reviews updates when no reviewer is set and is already a candidate.
+    ...(reviewerMemberKey && reviewerMemberKey !== escalationMemberKey
+      ? [{ memberKey: reviewerMemberKey, reason: 'update-reviewer' }]
       : []),
   ]
   const message = createNotificationMessage(
@@ -136,7 +144,8 @@ export function createPlanningUpdatePublishAuditEvent(
  * Builds the audit outbox event for one update comment.
  *
  * The update author and every mentioned member are candidates; the commenter is removed by
- * the notification projection.
+ * the notification projection. A reviewer acknowledgement is a comment, so the same event tells
+ * the update author that the update was acknowledged.
  *
  * @param input - Committed comment, update author, mentions, and scope.
  * @returns Audit event input for {@link createMutationAuditEventPut}.
@@ -155,17 +164,21 @@ export function createPlanningUpdateCommentAuditEvent(
       type: 'planning-update-comment',
       id: `${targetKey}/version/${comment.updateVersion}/comment/${comment.id}`,
     },
-    action: 'commented',
+    action: comment.acknowledgement ? 'acknowledged' : 'commented',
     occurredAt: comment.createdAt,
     changes: [],
-    summary: excerpt(comment.body),
+    summary: comment.acknowledgement
+      ? `Acknowledged: ${excerpt(comment.body)}`
+      : excerpt(comment.body),
     metadata: {
       actorMemberKey: comment.authorMemberKey,
       ...planningTargetMetadata(comment.target, input.scope),
       updateVersion: comment.updateVersion,
       commentId: comment.id,
       deepLink: createPlanningUpdateDeepLink(comment.target),
-      notificationTitle: excerpt(comment.body),
+      notificationTitle: comment.acknowledgement
+        ? `Acknowledged: ${excerpt(comment.body)}`
+        : excerpt(comment.body),
       notificationCandidates: [
         { memberKey: input.updateAuthorMemberKey.toLowerCase(), reason: 'update-author' },
         ...input.mentionMemberKeys.map((memberKey) => ({ memberKey, reason: 'mention' })),
@@ -249,7 +262,7 @@ export function withPlanningAuditOutbox<TResult extends PlanningMutationTransact
 function planningTargetMetadata(target: PlanningUpdateTarget, scope: PlanningNotificationScope) {
   return {
     planningTargetType: target.type,
-    planningTargetId: target.type === 'project' ? target.projectId : target.entityId,
+    planningTargetId: readPlanningUpdateTargetId(target),
     planningTargetRecordKey: createPlanningUpdateTargetRecordKey(target),
     ...(scope.teamId ? { teamId: scope.teamId } : {}),
     ...(scope.projectId ? { projectId: scope.projectId } : {}),

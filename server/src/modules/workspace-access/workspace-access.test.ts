@@ -3079,6 +3079,84 @@ test('lets an admin reset members but not owners, and nobody reset themselves', 
   expect(transactions).toEqual([])
 })
 
+test('lets only an owner change system administrator access, never for a guest or themselves', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'owner'),
+    createWorkspaceMember('admin@example.com', 'admin'),
+    createWorkspaceMember('sato@example.com', 'member', 'active', 2),
+    createWorkspaceMember('guest@example.com', 'guest'),
+  ], transactions)
+
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'admin@example.com',
+    'sato@example.com',
+    'system-administrator-granted',
+    createAuditContext('system-admin-by-admin'),
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'guest@example.com',
+    'system-administrator-granted',
+    createAuditContext('system-admin-guest'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceGuestSystemAdministrator' })
+  await expect(client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'demo@example.com',
+    'system-administrator-revoked',
+    createAuditContext('system-admin-self'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceSelfSystemAdministratorChange' })
+  expect(transactions).toEqual([])
+
+  // Revoking stays possible for a guest, so a member demoted to guest can lose the access.
+  await client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'guest@example.com',
+    'system-administrator-revoked',
+    createAuditContext('system-admin-guest-revoke'),
+  )
+  await client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'system-administrator-granted',
+    createAuditContext('system-admin-grant'),
+  )
+  expect(transactions).toHaveLength(2)
+  const items = transactions[1].TransactItems as Array<Record<string, Record<string, unknown>>>
+  expect(items[0].ConditionCheck?.ExpressionAttributeValues).toMatchObject({ ':role': 'owner' })
+  expect(items[1].ConditionCheck?.ExpressionAttributeValues).toEqual({ ':active': 'active', ':version': 2 })
+  expect(items[2].Put?.Item).toMatchObject({ eventType: 'member.system-administrator-granted' })
+  expect(items[3].Put?.Item).toMatchObject({ action: 'system-administrator-granted', status: 'recorded' })
+})
+
+test('records a request that needs no change as completed in the same write, with no lease', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createCredentialActionClient([
+    createWorkspaceMember('demo@example.com', 'owner'),
+    createWorkspaceMember('sato@example.com', 'member'),
+  ], transactions)
+
+  const record = await client.recordMemberCredentialAction(
+    workspaceId,
+    'demo@example.com',
+    'sato@example.com',
+    'system-administrator-granted',
+    createAuditContext('system-admin-no-op'),
+    { completed: true },
+  )
+
+  expect(record).toMatchObject({ alreadyRecorded: false, completed: true })
+  const items = transactions[0].TransactItems as Array<Record<string, Record<string, unknown>>>
+  expect(items[2].Put?.Item).toMatchObject({ eventType: 'member.system-administrator-granted' })
+  expect(items[3].Put?.Item).toMatchObject({ action: 'system-administrator-granted', status: 'completed' })
+  expect(items[3].Put?.Item).not.toHaveProperty('leaseUntil')
+})
+
 test('refuses a member credential reset when no audit table keeps its progress', async () => {
   const transactions: Array<Record<string, unknown>> = []
   const client = createCredentialActionClient([
