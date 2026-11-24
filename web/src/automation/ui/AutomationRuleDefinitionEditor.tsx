@@ -6,7 +6,7 @@ import type {
   AutomationValue,
   UpdateAutomationRuleInput,
 } from '@mukuroji/contracts'
-import { useId, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   AUTOMATION_RULE_DRAFT_ACTION_TYPES,
@@ -967,35 +967,51 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
   const [teamId, setTeamId] = useState(options.teams[0]?.id ?? '')
   const [workItemId, setWorkItemId] = useState('')
   const [running, setRunning] = useState(false)
-  const [result, setResult] = useState<AutomationRuleDryRunResult>()
-  const [failed, setFailed] = useState<string>()
+  const [tested, setTested] = useState<{ key: string, result: AutomationRuleDryRunResult }>()
+  const [failed, setFailed] = useState<{ key: string, message: string }>()
+  const latestRequestKey = useRef<string | undefined>(undefined)
+  const input: AutomationRuleDryRunInput = {
+    teamId,
+    workItemId: workItemId.trim(),
+    rule: {
+      name: draft.name.trim(),
+      enabled: rule.enabled,
+      trigger: rule.trigger,
+      conditions: createAutomationRuleDraftConditions(draft),
+      actions: createAutomationRuleDraftActions(draft),
+      retryPolicy: rule.retryPolicy,
+      rateLimit: rule.rateLimit,
+      allowReentry: rule.allowReentry,
+      maxChainDepth: rule.maxChainDepth,
+    },
+  }
+  // A result describes only the inputs it was run with; editing them hides it.
+  const inputKey = JSON.stringify(input)
+  const result = tested?.key === inputKey ? tested.result : undefined
+  const failure = failed?.key === inputKey ? failed.message : undefined
 
-  /** Sends the dry run for the chosen Work Item. */
+  /** Sends the dry run for the chosen Work Item and ignores a response for superseded inputs. */
   async function run() {
     if (!canRun || !teamId || !workItemId.trim()) return
+    const requestKey = inputKey
+    latestRequestKey.current = requestKey
     setRunning(true)
     setFailed(undefined)
     try {
-      setResult(await onDryRun({
-        teamId,
-        workItemId: workItemId.trim(),
-        rule: {
-          name: draft.name.trim(),
-          enabled: rule.enabled,
-          trigger: rule.trigger,
-          conditions: createAutomationRuleDraftConditions(draft),
-          actions: createAutomationRuleDraftActions(draft),
-          retryPolicy: rule.retryPolicy,
-          rateLimit: rule.rateLimit,
-          allowReentry: rule.allowReentry,
-          maxChainDepth: rule.maxChainDepth,
-        },
-      }))
+      const response = await onDryRun(input)
+      if (latestRequestKey.current === requestKey) setTested({ key: requestKey, result: response })
     } catch (error) {
-      setResult(undefined)
-      setFailed(error instanceof Error && error.message.trim() ? error.message : t('automation.ruleEdit.dryRunFailed'))
+      if (latestRequestKey.current === requestKey) {
+        setTested(undefined)
+        setFailed({
+          key: requestKey,
+          message: error instanceof Error && error.message.trim()
+            ? error.message
+            : t('automation.ruleEdit.dryRunFailed'),
+        })
+      }
     } finally {
-      setRunning(false)
+      if (latestRequestKey.current === requestKey) setRunning(false)
     }
   }
 
@@ -1033,7 +1049,7 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
           {t(running ? 'automation.ruleEdit.dryRunRunning' : 'automation.ruleEdit.dryRunSubmit')}
         </button>
       </div>
-      {failed ? <p className="text-xs font-semibold text-fg-red-700" role="alert">{failed}</p> : null}
+      {failure ? <p className="text-xs font-semibold text-fg-red-700" role="alert">{failure}</p> : null}
       {result ? <DryRunResultView options={options} result={result} t={t} /> : null}
     </section>
   )
