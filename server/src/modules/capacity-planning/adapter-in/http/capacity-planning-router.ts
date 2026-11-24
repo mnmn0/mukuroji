@@ -286,11 +286,16 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
       const cancelAssignments = body.cancelAssignments === undefined
         ? undefined
         : readRequiredBoolean(body.cancelAssignments, 'Cancel assignments')
+      const expectedTeamRevision = readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision')
       const authorizedAssignmentIds = new Set<string>()
       if (cancelAssignments === true) {
         // Each assignment can belong to another Project or member than the request, so the cascade
-        // checks every one as the single assignment PATCH would.
-        const assignments = await dependencies.getCapacityPlanning().listActiveRequestAssignments(principal.directoryId, teamId, requestId)
+        // checks every one as the single assignment PATCH would. The checks hold only for the plan
+        // revision the cascade commits against, so a plan read at any other revision is refused.
+        const { teamRevision, assignments } = await dependencies.getCapacityPlanning().listActiveRequestAssignments(principal.directoryId, teamId, requestId)
+        if (teamRevision !== expectedTeamRevision) {
+          throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
+        }
         for (const projectId of new Set(assignments.flatMap((assignment) => assignment.projectId ? [assignment.projectId] : []))) {
           await dependencies.verifyProject(principal, teamId, projectId, 'manager')
         }
@@ -314,7 +319,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(body.status === undefined ? {} : { status: readRequestCancelStatus(body.status) }),
         ...(cancelAssignments === undefined ? {} : { cancelAssignments }),
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
-        expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
+        expectedTeamRevision,
         actorMemberId: principal.userKey,
       }, access, auditOptions(context, dependencies, principal, body))
       return context.json({ request: result })

@@ -113,6 +113,7 @@ export const capacityPlanningMessages = {
   'workload.controls.timeOffList.approve': 'Approve',
   'workload.controls.timeOffList.reject': 'Reject',
   'workload.controls.timeOffList.reopen': 'Return to pending',
+  'workload.controls.timeOffList.resubmit': 'Resubmit',
   'workload.controls.timeOffList.withdraw': 'Withdraw',
   'workload.controls.requests.cancelWithAssignmentsConfirm': 'This request has {count} assignments. Cancel the request and its assignments? A canceled request cannot be restored.',
   'workload.controls.requests.cancelWithAssignmentsAction': 'Cancel with assignments',

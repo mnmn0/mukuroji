@@ -70,7 +70,7 @@ Changing an assignment still happens in its own Team. Assigning a member of anot
 - `PATCH /api/teams/:teamId/workload/assignments/:assignmentId`
 - `POST /api/teams/:teamId/workload/what-if`
 
-Capacity planning state は Workspace / Team ごとに DynamoDB の一つの record として保存し、Team revision を CAS 条件にします。profile と assignment 自体にも revision を持たせ、同時編集で一部だけが反映される状態を防ぎます。record は DynamoDB item の 400 KB 制限を超えないよう保存前に byte budget を検証し、超過時は `413 CapacityPlanningLimitExceeded` を返します。保存のたびに、終了日から 30 日を過ぎた `canceled` / `rejected` の row と、状態にかかわらず終了日から 400 日を過ぎた row を消します（残る assignment が参照する request は残します）。
+Capacity planning state は Workspace / Team ごとに DynamoDB の一つの record として保存し、Team revision を CAS 条件にします。profile と assignment 自体にも revision を持たせ、同時編集で一部だけが反映される状態を防ぎます。record は DynamoDB item の 400 KB 制限を超えないよう保存前に byte budget を検証し、超過時は `413 CapacityPlanningLimitExceeded` を返します。保存のたびに、終了日から 30 日を過ぎた `canceled` / `rejected` の row と、状態にかかわらず終了日から 400 日を過ぎた row を消します（残る assignment が参照する request は残します）。終了日が 400 日より前になる row の作成・日付変更は `400 WorkloadDateOutOfRetention` で断ります。
 
 ## Audit and notifications
 

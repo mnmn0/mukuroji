@@ -88,6 +88,9 @@ export function WorkloadTimeOffList({ isSaving, memberNames, onReview, snapshot,
                 {canManage && (timeOff.status === 'approved' || timeOff.status === 'rejected') ? (
                   <button className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => review('planned')}>{t('workload.controls.timeOffList.reopen')}</button>
                 ) : null}
+                {isOwn && !canManage && timeOff.status === 'rejected' ? (
+                  <button className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => review('planned')}>{t('workload.controls.timeOffList.resubmit')}</button>
+                ) : null}
                 {(isOwn || canManage) && timeOff.status !== 'rejected' ? (
                   <button className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => review('canceled')}>{t('workload.controls.timeOffList.withdraw')}</button>
                 ) : null}

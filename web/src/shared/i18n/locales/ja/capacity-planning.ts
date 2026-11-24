@@ -113,6 +113,7 @@ export const capacityPlanningMessages = {
   'workload.controls.timeOffList.approve': '承認',
   'workload.controls.timeOffList.reject': '却下',
   'workload.controls.timeOffList.reopen': '承認待ちに戻す',
+  'workload.controls.timeOffList.resubmit': '再申請する',
   'workload.controls.timeOffList.withdraw': '取り下げ',
   'workload.controls.requests.cancelWithAssignmentsConfirm': 'この要求には割り当てが {count} 件あります。要求と割り当てをまとめて取り消しますか？取り消した要求は元に戻せません。',
   'workload.controls.requests.cancelWithAssignmentsAction': '割り当てもまとめて取り消す',

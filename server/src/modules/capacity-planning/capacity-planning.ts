@@ -445,6 +445,14 @@ function getTimeEntryQueryRange(
   }
 }
 
+/** Active assignments of one request, read for authorization of a cascading cancel. */
+export interface ActiveRequestAssignments {
+  /** Team plan revision the assignments were read at. */
+  teamRevision: number
+  /** Assignments of the request that are not canceled. */
+  assignments: ResourceAssignment[]
+}
+
 /** Application service for availability, allocation, and workload planning. */
 export class CapacityPlanningService {
   /** Durable capacity planning state. */
@@ -567,6 +575,7 @@ export class CapacityPlanningService {
   async saveTimeOff(input: SaveWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
     validateIdentifier(input.memberId, 'Member ID')
     validateDateRange(input.fromDate, input.toDate)
+    requireWithinRetention(input.toDate, this.now())
     if (input.minutesPerDay !== undefined) validateNonNegativeInteger(input.minutesPerDay, 'Time-off minutes')
     const reason = input.reason?.trim()
     const nextTimeOff: WorkloadTimeOff = {
@@ -640,6 +649,7 @@ export class CapacityPlanningService {
   /** Creates a resource request and records it in the audit log. */
   async createRequest(input: CreateResourceRequestInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceRequest> {
     validateRequestFields(input)
+    requireWithinRetention(input.toDate, this.now())
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.requests.length >= MAX_REQUESTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource request limit.')
@@ -722,6 +732,7 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const requestedMinutes = input.requestedMinutes ?? current.requestedMinutes
       validateNonNegativeInteger(requestedMinutes, 'Requested minutes')
       const timestamp = this.now().toISOString()
@@ -797,6 +808,7 @@ export class CapacityPlanningService {
   /** Creates an assignment for a profile, optionally fulfills a request, and notifies the member. */
   async createAssignment(input: CreateResourceAssignmentInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
+    requireWithinRetention(input.toDate, this.now())
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.assignments.length >= MAX_ASSIGNMENTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource assignment limit.')
@@ -847,14 +859,18 @@ export class CapacityPlanningService {
    * @param workspaceId - Workspace identifier.
    * @param teamId - Team identifier.
    * @param requestId - Request identifier.
-   * @returns Assignments of the request that are not canceled.
+   * @returns Assignments of the request that are not canceled, with the Team revision they were
+   * read at so the caller can tie its checks to the revision the cascade commits against.
    */
-  async listActiveRequestAssignments(workspaceId: string, teamId: string, requestId: string): Promise<ResourceAssignment[]> {
+  async listActiveRequestAssignments(workspaceId: string, teamId: string, requestId: string): Promise<ActiveRequestAssignments> {
     validateIdentifier(workspaceId, 'Workspace ID')
     validateIdentifier(teamId, 'Team ID')
     validateIdentifier(requestId, 'Request ID')
     const state = await this.repository.getState(workspaceId, teamId)
-    return clone(state.assignments.filter((assignment) => assignment.requestId === requestId && assignment.status !== 'canceled'))
+    return {
+      teamRevision: state.revision,
+      assignments: clone(state.assignments.filter((assignment) => assignment.requestId === requestId && assignment.status !== 'canceled')),
+    }
   }
 
   /** Reads one Team assignment for transport-layer authorization. */
@@ -889,6 +905,7 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const allocationMinutes = input.allocationMinutes ?? current.allocationMinutes
       const plannedEffortMinutes = input.plannedEffortMinutes ?? current.plannedEffortMinutes
       validateNonNegativeInteger(allocationMinutes, 'Allocation minutes')
@@ -2020,6 +2037,20 @@ function validateAssignmentFields(input: CreateResourceAssignmentInput | (Worklo
   validateDateRange(fromDate, toDate)
   validateNonNegativeInteger(input.allocationMinutes, 'Allocation minutes')
   validateNonNegativeInteger(input.plannedEffortMinutes, 'Planned effort minutes')
+}
+
+/**
+ * Refuses a row that would end before every row is pruned, so a write never reports success for
+ * a row the same write removes. Closing a recent row past `CLOSED_ROW_RETENTION_DAYS` is still
+ * allowed: removing it is what closing an old row means.
+ *
+ * @param toDate - End date the row is saved with.
+ * @param now - Current time.
+ */
+function requireWithinRetention(toDate: string, now: Date): void {
+  if (toDate < addCalendarDays(now.toISOString().slice(0, 10), -PAST_ROW_RETENTION_DAYS)) {
+    throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `The end date must be within the last ${PAST_ROW_RETENTION_DAYS} days.`)
+  }
 }
 
 /** Validates a complete date range and returns normalized values. */

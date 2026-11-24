@@ -366,7 +366,34 @@ describe('createCapacityPlanningRouter', () => {
 
     expect(await response.json()).toEqual({ code: 'ProjectPermissionDenied' })
     expect(calls).toContain('project:team-1:project-b:manager')
-    expect(await service.listActiveRequestAssignments(principal.directoryId, 'team-1', request.id)).toHaveLength(1)
+    expect((await service.listActiveRequestAssignments(principal.directoryId, 'team-1', request.id)).assignments).toHaveLength(1)
+    expect((await service.getRequest(principal.directoryId, 'team-1', request.id)).status).not.toBe('canceled')
+  })
+
+  test('refuses a cascading cancel whose assignment checks were read at another plan revision', async () => {
+    const { calls, router, service } = createFixture({ deniedProjectIds: ['project-b'] })
+    const request = await seedRequest(service)
+    await service.saveMemberProfile({
+      workspaceId: principal.directoryId, teamId: 'team-1', memberId: 'member-2', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 1, actorMemberId: 'member-2',
+    })
+    await service.createAssignment({
+      workspaceId: principal.directoryId, teamId: 'team-1', requestId: request.id, projectId: 'project-b', memberId: 'member-2',
+      skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 60, plannedEffortMinutes: 60,
+      confidential: false, status: 'tentative', expectedTeamRevision: 2, actorMemberId: principal.userKey,
+    })
+    const current = await service.getRequest(principal.directoryId, 'team-1', request.id)
+    calls.length = 0
+    // The plan is at revision 3 but the client read revision 2, so the checks of the assignments
+    // read now would not cover the plan the client meant; the route stops before checking them.
+    const response = await router.request(`/api/teams/team-1/workload/requests/${request.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer workload-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'canceled', cancelAssignments: true, expectedRevision: current.revision, expectedTeamRevision: 2 }),
+    })
+
+    expect(await response.json()).toEqual({ code: 'CapacityPlanningRevisionConflict' })
+    expect(calls).not.toContain('project:team-1:project-b:manager')
     expect((await service.getRequest(principal.directoryId, 'team-1', request.id)).status).not.toBe('canceled')
   })
 

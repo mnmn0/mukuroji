@@ -892,7 +892,7 @@ describe('capacity planning reviews and retention', () => {
     // An assignment the caller did not authorize, such as one added since it checked, stops the cascade.
     await expect(service.updateRequest(cancel, { canViewConfidential: true, authorizedAssignmentIds: new Set() }))
       .rejects.toMatchObject({ code: 'ResourceRequestAssignmentsChanged' })
-    expect(await service.listActiveRequestAssignments('workspace-1', 'team-1', request.id)).toEqual([assignment])
+    expect(await service.listActiveRequestAssignments('workspace-1', 'team-1', request.id)).toEqual({ teamRevision: 3, assignments: [assignment] })
     const canceled = await service.updateRequest(cancel, {
       canViewConfidential: true,
       authorizedAssignmentIds: new Set([assignment.id]),
@@ -1023,6 +1023,33 @@ describe('capacity planning reviews and retention', () => {
     expect(saved.requests[0]).toMatchObject({ status: 'partially-filled', revision: 4, title: 'Long run, phase 2' })
     expect(changed).toEqual(saved.requests[0])
     expect(repository.auditLog.at(-1)?.events[0]?.changes).not.toContainEqual(expect.objectContaining({ field: 'status' }))
+  })
+
+  test('refuses rows that would end before retention instead of saving and pruning them at once', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const before = await repository.getState('workspace-1', 'team-1')
+
+    // 2026-08-01 minus 400 days is 2025-06-27, so these rows would be pruned by the same write.
+    await expect(service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-old', fromDate: '2025-06-01', toDate: '2025-06-26', status: 'planned', expectedRevision: 1, expectedTeamRevision: before.revision,
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention', status: 400 })
+    await expect(service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Old', skillIds: [], fromDate: '2025-06-01', toDate: '2025-06-26',
+      requestedMinutes: 60, confidential: false, expectedTeamRevision: before.revision, actorMemberId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention' })
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', skillIds: [], fromDate: '2025-06-27', toDate: '2025-06-27',
+      allocationMinutes: 60, plannedEffortMinutes: 60, confidential: false, status: 'tentative',
+      expectedTeamRevision: before.revision, actorMemberId: 'manager-1',
+    })
+    await expect(service.updateAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', assignmentId: assignment.id, fromDate: '2025-06-26', toDate: '2025-06-26',
+      expectedRevision: 1, expectedTeamRevision: before.revision + 1, actorMemberId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention' })
+    expect((await repository.getState('workspace-1', 'team-1')).assignments.map((row) => row.id)).toEqual([assignment.id])
   })
 
   test('reads time off saved before approval existed as approved so capacity does not change', () => {

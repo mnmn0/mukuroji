@@ -43,6 +43,8 @@ export function TeamWorkloadView({
   t,
 }: TeamWorkloadViewProps) {
   const canChangeStatus = Boolean(onChangeAssignmentStatus) && snapshot?.viewer?.canManage !== false
+  // Assignment rows carry both the move form and the status buttons, so either callback shows them.
+  const showsAssignments = Boolean(onMoveAssignment) || canChangeStatus
   const members = snapshot?.members ?? []
   const totalCapacity = members.reduce((sum, member) => sum + member.capacityMinutes, 0)
   const totalAllocated = members.reduce((sum, member) => sum + member.allocatedMinutes, 0)
@@ -189,16 +191,16 @@ export function TeamWorkloadView({
                               {t('workload.crossTeam.over')}
                             </span>
                           ) : null}
-                          {onMoveAssignment ? snapshot?.assignments
+                          {showsAssignments ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
                               <details className="mt-2 max-w-full text-[10px] font-bold text-fg-526381" key={assignment.id}>
                                 <summary
-                                  className={`max-w-full cursor-grab truncate rounded px-1.5 py-1 shadow-sm disabled:opacity-50 ${assignment.status === 'tentative' ? 'border border-dashed border-fg-526381 bg-surface/60' : 'bg-surface/80'}`}
+                                  className={`max-w-full ${onMoveAssignment ? 'cursor-grab' : 'cursor-pointer'} truncate rounded px-1.5 py-1 shadow-sm disabled:opacity-50 ${assignment.status === 'tentative' ? 'border border-dashed border-fg-526381 bg-surface/60' : 'bg-surface/80'}`}
                                   data-status={assignment.status}
-                                  draggable={!isAssignmentMutationPending}
+                                  draggable={Boolean(onMoveAssignment) && !isAssignmentMutationPending}
                                   title={`${assignment.workItemId ?? assignment.id} · ${t(`workload.assignment.status.${assignment.status}`)}`}
-                                  onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
+                                  onDragStart={onMoveAssignment ? (event) => event.dataTransfer.setData('text/workload-assignment', assignment.id) : undefined}
                                 >
                                   {assignment.status === 'tentative' ? `${t('workload.assignment.status.tentative')} · ` : ''}
                                   {assignment.workItemId ?? assignment.id}
@@ -219,32 +221,34 @@ export function TeamWorkloadView({
                                     </button>
                                   </div>
                                 ) : null}
-                                <form
-                                  className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
-                                  onSubmit={(event) => {
-                                    event.preventDefault()
-                                    const formData = new FormData(event.currentTarget)
-                                    const targetMemberId = formData.get('memberId')
-                                    const targetDate = formData.get('targetDate')
-                                    if (typeof targetMemberId === 'string' && typeof targetDate === 'string' && targetMemberId && targetDate) {
-                                      onMoveAssignment?.(assignment.id, targetMemberId, targetDate)
-                                    }
-                                  }}
-                                >
-                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
-                                    {t('workload.assignment.member')}
-                                    <select className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
-                                      {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
-                                    </select>
-                                  </label>
-                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
-                                    {t('workload.assignment.date')}
-                                    <input className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
-                                  </label>
-                                  <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
-                                    {t('workload.assignment.move')}
-                                  </button>
-                                </form>
+                                {onMoveAssignment ? (
+                                  <form
+                                    className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
+                                    onSubmit={(event) => {
+                                      event.preventDefault()
+                                      const formData = new FormData(event.currentTarget)
+                                      const targetMemberId = formData.get('memberId')
+                                      const targetDate = formData.get('targetDate')
+                                      if (typeof targetMemberId === 'string' && typeof targetDate === 'string' && targetMemberId && targetDate) {
+                                        onMoveAssignment?.(assignment.id, targetMemberId, targetDate)
+                                      }
+                                    }}
+                                  >
+                                    <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
+                                      {t('workload.assignment.member')}
+                                      <select className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
+                                        {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
+                                      </select>
+                                    </label>
+                                    <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
+                                      {t('workload.assignment.date')}
+                                      <input className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
+                                    </label>
+                                    <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
+                                      {t('workload.assignment.move')}
+                                    </button>
+                                  </form>
+                                ) : null}
                               </details>
                             )) : null}
                         </div>

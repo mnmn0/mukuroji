@@ -103,4 +103,35 @@ describe('workload review surfaces', () => {
     expect(manager).toContain('>Confirm<')
     expect(member).not.toContain('>Confirm<')
   })
+
+  test('shows status actions without the move form when only status changes are wired', () => {
+    const html = renderToStaticMarkup(
+      <TeamWorkloadView
+        granularity="day"
+        isLoading={false}
+        onChangeAssignmentStatus={() => undefined}
+        onGranularityChange={() => undefined}
+        onRetry={() => undefined}
+        snapshot={createSnapshot({ memberId: 'mike', canManage: true })}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('>Confirm<')
+    expect(html).not.toContain('>Move assignment<')
+    expect(html).not.toContain('draggable="true"')
+  })
+
+  test('lets the member resubmit their own rejected time off', () => {
+    const snapshot = createSnapshot({ memberId: 'hana', canManage: false })
+    const member = snapshot.members[0]
+    if (!member) throw new Error('fixture member missing')
+    member.timeOff = [{ id: 'rejected', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'rejected', revision: 2 }]
+    const html = renderToStaticMarkup(
+      <WorkloadTimeOffList isSaving={false} memberNames={new Map()} onReview={() => undefined} snapshot={snapshot} t={t} />,
+    )
+
+    expect(html).toContain('>Resubmit<')
+    expect(html).not.toContain('>Withdraw<')
+  })
 })

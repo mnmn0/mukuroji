@@ -51,6 +51,9 @@ manager が「空いていない」と判断した後に休暇が取り消され
 - DynamoDB の transaction は 100 item までなので、1 回の書き込みの audit event は 99 件までにする。
   依頼の取消で巻き込める割当は 98 件までとし、超えるときは `413 ResourceRequestCascadeTooLarge` で断る（先に割当をいくつか個別に取り消す）。
   まとめた 1 件の event にすると、割当ごとの target で audit を検索・export できなくなるため。
+- 割当をまとめて取り消すときの Project・メンバーの確認は、route が読んだ Team の revision が要求の `expectedTeamRevision` と
+  一致するときだけ有効とする。違えば確認の前に `409 CapacityPlanningRevisionConflict` を返す。一致すれば保存は同じ revision を
+  CAS 条件にするので、確認した割当と取り消す割当は同じになる。
 - transaction の取消は、audit event の条件だけが失敗したとき（同じ idempotency key の再送）に `409 CapacityPlanningDuplicateRequest`、
   Team の revision が失敗したときに `409 CapacityPlanningRevisionConflict` を返す。throttling や transaction conflict は
   基盤のエラーのまま返し、記録して再試行できるようにする。
@@ -67,6 +70,10 @@ manager が「空いていない」と判断した後に休暇が取り消され
 古い割当を消すと依頼の充足（`open` / `partially-filled` / `filled`）が変わりうるので、整理は変更を適用する前にも行い、
 残った割当から充足を求め直す。変更の応答と audit は保存される状態と一致する。整理で変わった充足は派生値なので
 依頼の revision は上げず、画面が読んだ revision のまま次の変更ができる。
+
+終了日が 400 日より前になる休暇・依頼・割当の作成と日付変更は `400 WorkloadDateOutOfRetention` で断る。保存と同時に
+整理で消える row を成功として返さないため。30〜400 日前の row を取り消す・却下するのは受け付け、その row は同じ書き込みで消える
+（古い row を閉じる操作の結果として消えるのは意図どおり）。
 
 整理は別の job を作らず、書き込みの中で行う。書き込みのない Team の record は小さいままなので問題にならない。
 監査ログには変更が残るので、消した row の履歴は audit から辿れる。
