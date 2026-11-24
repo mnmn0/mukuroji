@@ -997,6 +997,84 @@ test('reports a changed authorization fence on a Milestone watch as a conflict',
   }
 })
 
+test('reads one Project, one Team, or one Portfolio of Planning', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'refero', role: 'viewer' },
+      { teamId: 'core-team', projectId: 'private-project', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const project = await planningApiRequest('/api/planning?teamId=core-team&projectId=refero')
+  expect(project.status).toBe(200)
+  const projectBody: PlanningSnapshot = await project.json()
+  expect(projectBody.readScope).toEqual({ type: 'project', teamId: 'core-team', projectId: 'refero' })
+  expect(projectBody.entities.map((entity) => entity.id)).toEqual([
+    'refero-milestone',
+    'refero-phase',
+    'team-roadmap',
+    'ws-portfolio',
+    'ws-roadmap',
+  ])
+  // Dependencies to the other Project's entities belong to the Team and Workspace reads.
+  expect(projectBody.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+  expect(projectBody.capacity.liveRowCount).toBeGreaterThan(0)
+
+  const team = await planningApiRequest('/api/planning?teamId=core-team')
+  expect(team.status).toBe(200)
+  const teamBody: PlanningSnapshot = await team.json()
+  expect(teamBody.entities.map((entity) => entity.id)).toContain('private-milestone')
+  expect(teamBody.dependencies.map((dependency) => dependency.id)).toContain('private-phase-to-refero')
+
+  const portfolio = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+  expect(portfolio.status).toBe(200)
+  expect((await portfolio.json() as PlanningSnapshot).readScope)
+    .toEqual({ type: 'portfolio', portfolioId: 'ws-portfolio' })
+
+  for (const path of [
+    '/api/planning?projectId=refero',
+    '/api/planning?teamId=core-team&teamId=other',
+    '/api/planning?portfolioId=ws-portfolio&teamId=core-team',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'PlanningReadScopeInvalid' })
+  }
+  for (const path of [
+    '/api/planning?portfolioId=ws-roadmap',
+    '/api/planning?portfolioId=missing',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+  }
+})
+
+test('answers an unreadable Portfolio like a missing one', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+})
+
 test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',
