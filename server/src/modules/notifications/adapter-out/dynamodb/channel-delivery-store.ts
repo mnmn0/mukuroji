@@ -139,6 +139,7 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
     const companions: ChannelDelivery[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     const cursors = new Set<string>()
+    let corrupt = false
     for (let pageNumber = 0; pageNumber < 10 && companions.length < limit; pageNumber += 1) {
       const page = await this.#client.send(new QueryCommand({
         TableName: this.#tableName, IndexName: names.index,
@@ -161,16 +162,19 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
           if (!companion || !companion.deliveryFrequency || companion.deliveryFrequency === 'instant') continue
           if (companion.nextAttemptAt > now.toISOString() && (result.Item?.[names.status] !== 'pending' || companion.attempts !== 0)) continue
           companions.push(companion)
-        } catch { /* The due scan reports corrupt rows when they come due. */ }
+        } catch {
+          // A corrupt row may not come due for days; report it now instead of a healthy digest.
+          corrupt = true
+        }
       }
       exclusiveStartKey = page.LastEvaluatedKey
-      if (!exclusiveStartKey) return { deliveries: companions, complete: true }
+      if (!exclusiveStartKey) return { deliveries: companions, complete: !corrupt }
       const cursor = JSON.stringify(exclusiveStartKey)
       if (cursors.has(cursor)) return { deliveries: companions, complete: false }
       cursors.add(cursor)
     }
     // Reaching the limit is complete; running out of pages with more rows left is not.
-    return { deliveries: companions, complete: companions.length >= limit }
+    return { deliveries: companions, complete: !corrupt && companions.length >= limit }
   }
 
   /** Fences slow authorization reads before sending and renews the transport lease. */

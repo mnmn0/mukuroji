@@ -120,4 +120,21 @@ describe('Email DynamoDB delivery queue', () => {
     expect(await store.listCompanions(opener, new Date('2026-09-26T12:00:00.000Z'), 49)).toEqual({ deliveries: [], complete: false })
     expect(page).toBe(10)
   })
+  test('reports an incomplete companion scan when a candidate row is corrupt', async () => {
+    const store = new DynamoDbChannelDeliveryStore({
+      async send(command) {
+        if (command instanceof QueryCommand) return { Items: [{ recipientKey: 'workspace-1#member@example.test', notificationKey: 'broken' }] }
+        if (command instanceof GetCommand) return { Item: { recipientKey: 'workspace-1#member@example.test', notificationKey: 'broken', emailQueueShard: emailDeliveryShard('workspace-1#member@example.test'), emailNextAttemptAt: 'not-a-date' } }
+        return {}
+      },
+    }, 'notifications', 'email')
+    const opener: ChannelDelivery = {
+      workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
+      notificationKey: '2026-09-26T11:00:00.000Z#opener', attempts: 0, version: 1, deliveryFrequency: 'daily',
+      nextAttemptAt: '2026-09-26T12:00:00.000Z', expiresAt: Date.parse('2026-09-26T12:00:00.000Z') / 1_000 + 3_600,
+      notification: { id: 'notification-1', eventId: 'event-1', eventType: 'comment.created',
+        reasons: ['mention'], title: 'Review', occurredAt: '2026-09-26T11:00:00.000Z', state: 'unread' },
+    }
+    expect(await store.listCompanions(opener, new Date('2026-09-26T12:00:00.000Z'), 49)).toEqual({ deliveries: [], complete: false })
+  })
 })

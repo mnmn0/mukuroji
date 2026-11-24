@@ -169,7 +169,8 @@ export type ChannelDigestCompanions = {
   deliveries: ChannelDelivery[]
   /**
    * `false` when the page budget ran out before the scan reached the end of the shard or the
-   * limit, so some of the recipient's rows may be missing from this digest.
+   * limit, or a candidate row was corrupt, so some of the recipient's rows may be missing from
+   * this digest.
    */
   complete: boolean
 }
