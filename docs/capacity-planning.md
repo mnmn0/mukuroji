@@ -37,7 +37,7 @@ Work Item の Contributor（#239）の予定工数は、capacity planning の st
 - Work Item の残工数は従来どおり Work Item ごとに1つの source から決め、resource assignment と Contributor の分担に planned effort で加重配分します。分担を足しても見積は二重に数えません。
 - workload profile のない member、閲覧できない Project の Work Item の分担は数えません。
 - snapshot の `contributorShares` に数えた分担を返します。`assignments` には入らず、heatmap で移動できません。
-- Workspace 全体の合計（Team view の `workspaceAllocatedMinutes` と `/api/workload`）にも、全 Team の分担を同じ重複除外で数えます。合計は閲覧範囲によらず全件を数え、閲覧できない分は内訳で非表示の割当に入ります。そのため snapshot のたびに、対象の各 Team の見積を読みます。Team の snapshot で別 Team の見積を読めない（Work Item の読み取り上限を超えるなど）ときは、Workspace 合計を返さずに Team の値だけを返し、snapshot に `workspaceTotalsUnavailable: true` を付けます。画面にはその旨を表示します。それ以外の失敗は Team の snapshot も失敗にします。`/api/workload` は失敗として返し、分担を黙って落としません。
+- Workspace 全体の合計（Team view の `workspaceAllocatedMinutes` と `/api/workload`）にも、全 Team の分担を同じ重複除外で数えます。合計は閲覧範囲によらず全件を数え、閲覧できない分は内訳で非表示の割当に入ります。そのため snapshot のたびに、archive されていない全 Team の見積を読みます。capacity planning の state をまだ保存していない Team も、空の state として読みます。Team の snapshot で別 Team の見積を読めない（Work Item の読み取り上限を超えるなど）ときは、Workspace 合計を返さずに Team の値だけを返し、snapshot に `workspaceTotalsUnavailable: true` を付けます。画面にはその旨を表示します。それ以外の失敗は Team の snapshot も失敗にします。`/api/workload` は失敗として返し、分担を黙って落としません。
 
 ## Resource requests and assignments
 

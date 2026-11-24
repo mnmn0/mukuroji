@@ -1399,13 +1399,21 @@ type MemberWorkspaceDaily = {
  *
  * @param teamStates - Every stored Team state of the Workspace.
  * @param activeTeamIds - Teams that are not archived, or undefined to keep every record.
- * @returns The records of active Teams.
+ * @returns The records of active Teams, with an empty state for an active Team that has none.
  */
 function filterActiveTeamStates(
   teamStates: readonly TeamCapacityPlanningState[],
   activeTeamIds: ReadonlySet<string> | undefined,
 ): TeamCapacityPlanningState[] {
-  return activeTeamIds ? teamStates.filter((teamState) => activeTeamIds.has(teamState.teamId)) : [...teamStates]
+  if (!activeTeamIds) return [...teamStates]
+  const active = teamStates.filter((teamState) => activeTeamIds.has(teamState.teamId))
+  // A Team that never saved capacity planning state can still hold contributor shares of members
+  // profiled elsewhere, so it is read with an empty state instead of being skipped.
+  const stored = new Set(active.map((teamState) => teamState.teamId))
+  for (const teamId of activeTeamIds) {
+    if (!stored.has(teamId)) active.push({ teamId, state: emptyState() })
+  }
+  return active
 }
 
 /**

@@ -1039,6 +1039,46 @@ describe('Workspace-wide workload', () => {
     })
   })
 
+  test('counts contributor shares of an active Team that never saved capacity state', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [{
+            workItemId: 'work-item-shared',
+            window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+            contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+          }]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+    const activeTeamIds = new Set(['team-1', 'team-2'])
+
+    const teamSnapshot = await service.getSnapshot({ ...createInput(), activeTeamIds })
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 600,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+      activeTeamIds,
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 600,
+      status: 'over',
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
   test('keeps a Team view when another Team\'s estimates cannot be read, and fails the Workspace read', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     await repository.saveState('workspace-1', 'team-1', createState([profile], [
