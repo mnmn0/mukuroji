@@ -8,6 +8,7 @@ import { handler as analyticsScheduleHandler } from './analytics-schedule-handle
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
 import { handler as cycleScheduleHandler } from './cycle-schedule-handler'
 import { handler as emailNotificationHandler } from './email-notifications-handler'
+import { handler as inboxDigestWorkerHandler } from './inbox-digest-worker-handler'
 import { handler as japanesePublicHolidaySyncHandler } from './japanese-public-holiday-sync-handler'
 import { handler as notificationScheduleHandler } from './notification-schedule-handler'
 import { handler as pushNotificationHandler } from './push-notifications-handler'
@@ -30,6 +31,10 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'analytics-schedule', everyMinutes: 5, attempts: 3, run: analyticsScheduleHandler },
   { name: 'notification-schedule', everyMinutes: 60, attempts: 3, run: notificationScheduleHandler },
   { name: 'cycle-schedule', everyMinutes: 60, attempts: 3, run: cycleScheduleHandler },
+  // Daily and weekly digests fall due at UTC midnight; a quarter-hour run delivers them soon
+  // after. The worker keeps failed recipients in its own checkpoints and retries them on the
+  // next run, so one try avoids racing its own 90-second shard lease.
+  { name: 'inbox-digest', everyMinutes: 15, attempts: 1, run: () => inboxDigestWorkerHandler() },
   // Runs every six hours but fetches only once a month; a failed fetch waits for the next run.
   {
     name: 'japanese-public-holiday-sync',

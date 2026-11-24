@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { DocumentsApiError } from '../../documents/api/errors'
 import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
@@ -7,7 +7,9 @@ import { useProjectDocuments } from '../../documents/queries/useProjectDocuments
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
+import { PlanningApiError } from '../../planning/api/errors'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useProjectCustomerLinks } from '../../customers/queries/useCustomers'
 import { isActiveProjectAssignmentCandidate, ProjectDirectoryApiError } from '../../projects/api'
 import {
   findProjectOverviewUpdateTarget,
@@ -19,8 +21,10 @@ import {
   summarizeProjectOverviewRaid,
   summarizeProjectOverviewWorkItems,
 } from '../../projects/model/projectOverview'
+import { buildProjectStatusReport, PROJECT_STATUS_REPORT_ROW_LIMIT } from '../../projects/model/projectStatusReport'
 import { useProjectMembers } from '../../projects/queries/useProjectMembers'
 import { useProjectRaidLog } from '../../projects/queries/useProjectRaidLog'
+import { ProjectStatusReportDialog } from '../../projects/ui/ProjectStatusReportDialog'
 import {
   ProjectOverviewView,
   type ProjectOverviewAgentRunsError,
@@ -54,7 +58,13 @@ export function ProjectOverviewPage() {
   const project = team?.projects.find((candidate) => candidate.id === projectId)
   const canRead = workspace.canLoadWorkspaceData && Boolean(team && project)
   const workItems = useProjectIssues(workspace.accessToken, projectId, canRead)
-  const planning = usePlanningSnapshot(workspace.accessToken, canRead)
+  // The overview reads the Project's Team, not the whole Workspace graph: the blocked count needs
+  // the status of blockers in the Team's other Projects too.
+  const planningScope = useMemo(
+    () => team ? { type: 'team' as const, teamId: team.id } : undefined,
+    [team],
+  )
+  const planning = usePlanningSnapshot(workspace.accessToken, canRead, planningScope)
   const members = useProjectMembers(workspace.accessToken, projectId, canRead, team?.id)
   const raidLog = useProjectRaidLog(workspace.accessToken, team?.id, projectId ?? '', canRead && Boolean(projectId))
   const documentBacklinks = useDocumentBacklinks(
@@ -62,6 +72,7 @@ export function ProjectOverviewPage() {
     'project',
     projectId,
   )
+  const customerLinks = useProjectCustomerLinks(canRead ? workspace.accessToken : undefined, Boolean(projectId))
   const projectDocuments = useProjectDocuments(canRead ? workspace.accessToken : undefined, projectId)
   // Action items are read once the first page of Project Documents is in, so
   // a slow later page never holds the list back.
@@ -153,6 +164,91 @@ export function ProjectOverviewPage() {
     [members.data],
   )
 
+  const [isReportOpen, setIsReportOpen] = useState(false)
+  // A failed read must not turn into a report that silently lacks the section, so the report
+  // waits for a retry. Only a denied read (and the Work Item list limit) leaves its section out,
+  // because those do not change on a retry and the creator cannot see that data either.
+  const isPlanningDenied = planning.error instanceof PlanningApiError && planning.error.status === 403
+  const reportReadFailed = (Boolean(planning.error) && !isPlanningDenied) ||
+    (Boolean(workItems.error) && workItemsError !== 'limit' &&
+      !(workItems.error instanceof TeamIssuesApiError && workItems.error.status === 403)) ||
+    raidError === 'load' ||
+    resolveDocumentsError(projectDocuments.error, actionItemsQuery.error) === 'load'
+  const retryReport = () => {
+    if (planning.error) void planning.mutate()
+    if (workItems.error) void workItems.mutate()
+    if (raidLog.error) void raidLog.mutate()
+    if (projectDocuments.error) void projectDocuments.refresh()
+    else if (actionItemsQuery.error) void actionItemsQuery.mutate()
+  }
+  // The report reads more rows than the overview widgets show, and only once it is opened.
+  const report = useMemo(() => {
+    if (!isReportOpen || !team || !project || !projectId || reportReadFailed) return undefined
+    if (planning.data === undefined && !isPlanningDenied) return undefined
+    if (workItems.isLoading || raidLog.isLoading || projectDocuments.isLoading || actionItemsQuery.isLoading) return undefined
+    // SWR keeps the last data after a failed revalidation, so a source whose latest read failed
+    // (for example a permission removed since the page opened) is left out even when data remains.
+    const planningData = planning.error ? undefined : planning.data
+    const raidData = raidLog.error ? undefined : raidLog.data
+    const actionItemsData = actionItemsQuery.error || projectDocuments.error ? undefined : actionItemsQuery.data
+    const today = toLocalDate(new Date())
+    const activeMembers = (members.data ?? []).filter(isActiveProjectAssignmentCandidate)
+    return buildProjectStatusReport({
+      locale: workspace.locale === 'en' ? 'en' : 'ja',
+      projectName: project.name,
+      teamName: team.name,
+      asOf: new Date(),
+      updateTarget: planningData ? findProjectOverviewUpdateTarget(planningData.updateTargets, team.id, projectId) : undefined,
+      schedule: planningData
+        ? selectProjectOverviewSchedule(planningData.entities, team.id, projectId, PROJECT_STATUS_REPORT_ROW_LIMIT)
+        : undefined,
+      // The Work Item summary reads blockers from Planning, so stale Planning data is left out of it too.
+      workItemSummary: workItems.error || !workItems.data
+        ? undefined
+        : summarizeProjectOverviewWorkItems(workItems.data, team.id, new Date(), planningData?.workItems),
+      raid: raidData
+        ? summarizeProjectOverviewRaid(raidData.entries, today, PROJECT_STATUS_REPORT_ROW_LIMIT)
+        : undefined,
+      actionItems: actionItemsData
+        ? summarizeProjectOverviewActionItems(
+            actionItemsData.items,
+            {
+              failedDocumentCount: actionItemsData.failedCount,
+              hasMoreDocuments: projectDocuments.hasMore,
+              skippedDocumentCount: actionItemsData.skippedCount,
+            },
+            activeMembers,
+            today,
+            PROJECT_STATUS_REPORT_ROW_LIMIT,
+          )
+        : undefined,
+      members: activeMembers,
+    })
+  }, [
+    actionItemsQuery.data,
+    actionItemsQuery.error,
+    actionItemsQuery.isLoading,
+    isPlanningDenied,
+    isReportOpen,
+    members.data,
+    planning.data,
+    planning.error,
+    project,
+    projectDocuments.error,
+    projectDocuments.hasMore,
+    projectDocuments.isLoading,
+    projectId,
+    raidLog.data,
+    raidLog.error,
+    raidLog.isLoading,
+    reportReadFailed,
+    team,
+    workItems.data,
+    workItems.error,
+    workItems.isLoading,
+    workspace.locale,
+  ])
+
   return (
     <WorkspaceRouteContent
       isLoading={workspace.isLoading}
@@ -169,12 +265,27 @@ export function ProjectOverviewPage() {
     >
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <ProjectOverviewView
+          linkedCustomers={customerLinks.data
+            ? customerLinks.data.items.find((links) => links.projectId === projectId)?.customers ?? []
+            : undefined}
+          linkedCustomersError={Boolean(customerLinks.error)}
+          onRetryLinkedCustomers={() => void customerLinks.mutate()}
           actionItems={actionItems}
           actionItemsError={resolveDocumentsError(actionItemsQuery.error, projectDocuments.error)}
           agentRuns={agentRuns}
           agentRunsError={agentRunsError}
           documents={documents}
           documentsError={documentsError}
+          headerActions={team && project ? (
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              data-testid="project-overview-status-report"
+              onClick={() => setIsReportOpen(true)}
+              type="button"
+            >
+              {t('projects.statusReport.open')}
+            </button>
+          ) : undefined}
           isActionItemsLoading={projectDocuments.isLoading || actionItemsQuery.isLoading}
           isAgentRunsLoading={agentRunBoard.isLoading}
           isDocumentsLoading={isBacklinksLoading || projectDocuments.isLoading}
@@ -210,6 +321,18 @@ export function ProjectOverviewPage() {
           workItemSummary={workItemSummary}
           workItemsError={workItemsError}
         />
+        {isReportOpen && team && projectId ? (
+          <ProjectStatusReportDialog
+            accessToken={workspace.accessToken}
+            hasReportError={reportReadFailed}
+            onClose={() => setIsReportOpen(false)}
+            onRetryReport={retryReport}
+            projectId={projectId}
+            report={report}
+            t={t}
+            teamId={team.id}
+          />
+        ) : null}
       </div>
     </WorkspaceRouteContent>
   )

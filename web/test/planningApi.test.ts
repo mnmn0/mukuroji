@@ -70,6 +70,50 @@ describe('Planning API', () => {
     expect(requests[0]?.init.headers).toMatchObject({ Authorization: 'Bearer access-token' })
   })
 
+  test('loads one Project, Team, or Portfolio of Planning', async () => {
+    const projectScope = { type: 'project' as const, teamId: 'core team', projectId: 'refero' }
+    const requests = installFetchRecorder({ ...planningSnapshotFixture, readScope: projectScope })
+
+    await expect(getPlanningSnapshot('access-token', projectScope)).resolves.toMatchObject({
+      readScope: projectScope,
+    })
+    expect(requests[0]?.url).toBe('/api/planning?teamId=core+team&projectId=refero')
+
+    const teamScope = { type: 'team' as const, teamId: 'core-team' }
+    const teamRequests = installFetchRecorder({ ...planningSnapshotFixture, readScope: teamScope })
+    await getPlanningSnapshot('access-token', teamScope)
+    expect(teamRequests[0]?.url).toBe('/api/planning?teamId=core-team')
+
+    const portfolioScope = { type: 'portfolio' as const, portfolioId: 'portfolio-1' }
+    const portfolioRequests = installFetchRecorder({
+      ...planningSnapshotFixture,
+      readScope: portfolioScope,
+    })
+    await getPlanningSnapshot('access-token', portfolioScope)
+    expect(portfolioRequests[0]?.url).toBe('/api/planning?portfolioId=portfolio-1')
+  })
+
+  test('rejects a snapshot read for another scope than requested', async () => {
+    installFetchRecorder({
+      ...planningSnapshotFixture,
+      readScope: { type: 'project', teamId: 'core-team', projectId: 'other' },
+    })
+    await expect(getPlanningSnapshot('access-token', {
+      type: 'project',
+      teamId: 'core-team',
+      projectId: 'refero',
+    })).rejects.toMatchObject({ code: 'InvalidPlanningSnapshot' })
+
+    installFetchRecorder({ ...planningSnapshotFixture, readScope: { type: 'team', teamId: 'core-team' } })
+    await expect(getPlanningSnapshot('access-token')).rejects.toMatchObject({
+      code: 'InvalidPlanningSnapshot',
+    })
+
+    installFetchRecorder({ ...planningSnapshotFixture, readScope: { type: 'team', teamId: '' } })
+    await expect(getPlanningSnapshot('access-token', { type: 'team', teamId: '' })).rejects
+      .toMatchObject({ code: 'InvalidPlanningSnapshot' })
+  })
+
   test('rejects a current snapshot missing canonical update targets', async () => {
     const rollingSnapshot = {
       criticalPath: planningSnapshotFixture.criticalPath,

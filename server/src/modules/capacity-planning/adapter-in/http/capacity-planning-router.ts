@@ -9,6 +9,7 @@ import type {
   WorkingSchedule,
   WorkingScheduleDay,
 } from '@mukuroji/contracts'
+import type { MutationAuditContext } from '../../../audit'
 import { isWorkloadCalendarSource } from '@mukuroji/contracts'
 import {
   CapacityPlanningError,
@@ -72,6 +73,10 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
   verifyMember(principal: Principal, teamId: string, memberId: string, permission: CapacityPlanningTeamPermission): Promise<void>
   /** Returns whether the principal may mutate another member's profile. */
   canManageMember(principal: Principal, teamId: string, memberId: string): Promise<boolean>
+  /** Returns whether the principal is a Team manager who may review time off and assignments. */
+  canManageTeam(principal: Principal, teamId: string): Promise<boolean>
+  /** Creates the request audit context for a mutation, or undefined when audit is not recorded. */
+  createAuditContext?(context: Context, principal: Principal, body: unknown): MutationAuditContext | undefined
   /** Verifies Project access for a mutation. */
   verifyProject(principal: Principal, teamId: string, projectId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Verifies Work Item access and returns its owning Project when available. */
@@ -108,6 +113,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
       const toDate = readRequiredQuery(context, 'to')
       const granularity = readGranularity(context.req.query('granularity'))
       const visibility = await dependencies.getWorkloadVisibility(principal, teamId, permission)
+      const canManage = await dependencies.canManageTeam(principal, teamId)
       const snapshot = await dependencies.getCapacityPlanning().getSnapshot({
         workspaceId: principal.directoryId,
         teamId,
@@ -115,6 +121,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         toDate,
         granularity,
         viewerMemberId: principal.userKey,
+        viewer: { memberId: principal.userKey, canManage },
         ...(visibility.visibleMemberIds ? { visibleMemberIds: visibility.visibleMemberIds } : {}),
         ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
         canViewConfidential: visibility.canViewConfidential,
@@ -181,7 +188,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected profile revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, auditOptions(context, dependencies, principal, body))
       return context.json({ profile: result })
     })
   })
@@ -196,7 +203,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
       }
       const body = asRecord(await dependencies.readJson(context.req))
       const status = readTimeOffStatus(body.status)
-      if (status === 'approved') await dependencies.requireTeamPermission(principal, teamId, 'manager')
+      if (status === 'approved' || status === 'rejected') await requireTimeOffReviewer(dependencies, principal, teamId)
       const timeOff: WorkloadTimeOff = {
         id: readRequiredString(context.req.param('timeOffId'), 'Time-off ID'),
         fromDate: readRequiredString(body.fromDate, 'Start date'),
@@ -214,7 +221,31 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected profile revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, auditOptions(context, dependencies, principal, body))
+      return context.json({ timeOff: result })
+    })
+  })
+
+  router.patch('/api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId', async (context) => {
+    return await withTeam(context, dependencies, 'member', async (principal, teamId, permission) => {
+      const memberId = readRequiredString(context.req.param('memberId'), 'Member ID')
+      await dependencies.verifyMember(principal, teamId, memberId, permission)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const status = readTimeOffStatus(body.status)
+      // The member may withdraw or resubmit their own absence; only a Team manager decides it.
+      if (status === 'approved' || status === 'rejected' || memberId !== principal.userKey) {
+        await requireTimeOffReviewer(dependencies, principal, teamId)
+      }
+      const result = await dependencies.getCapacityPlanning().reviewTimeOff({
+        workspaceId: principal.directoryId,
+        teamId,
+        memberId,
+        timeOffId: readRequiredString(context.req.param('timeOffId'), 'Time-off ID'),
+        status,
+        expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected time-off revision'),
+        expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
+        actorMemberId: principal.userKey,
+      }, auditOptions(context, dependencies, principal, body))
       return context.json({ timeOff: result })
     })
   })
@@ -237,7 +268,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         confidential: readRequiredBoolean(body.confidential, 'Confidential'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, auditOptions(context, dependencies, principal, body))
       return context.json({ request: result }, 201)
     })
   })
@@ -252,7 +283,28 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
       }
       const body = asRecord(await dependencies.readJson(context.req))
-      const access = { canViewConfidential: visibility.canViewConfidential }
+      const cancelAssignments = body.cancelAssignments === undefined
+        ? undefined
+        : readRequiredBoolean(body.cancelAssignments, 'Cancel assignments')
+      const expectedTeamRevision = readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision')
+      const authorizedAssignmentIds = new Set<string>()
+      if (cancelAssignments === true) {
+        // Each assignment can belong to another Project or member than the request, so the cascade
+        // checks every one as the single assignment PATCH would. The checks hold only for the plan
+        // revision the cascade commits against, so a plan read at any other revision is refused.
+        const { teamRevision, assignments } = await dependencies.getCapacityPlanning().listActiveRequestAssignments(principal.directoryId, teamId, requestId)
+        if (teamRevision !== expectedTeamRevision) {
+          throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
+        }
+        for (const projectId of new Set(assignments.flatMap((assignment) => assignment.projectId ? [assignment.projectId] : []))) {
+          await dependencies.verifyProject(principal, teamId, projectId, 'manager')
+        }
+        for (const memberId of new Set(assignments.map((assignment) => assignment.memberId))) {
+          await dependencies.verifyMember(principal, teamId, memberId, permission)
+        }
+        for (const assignment of assignments) authorizedAssignmentIds.add(assignment.id)
+      }
+      const access = { canViewConfidential: visibility.canViewConfidential, authorizedAssignmentIds }
       const result = await dependencies.getCapacityPlanning().updateRequest({
         workspaceId: principal.directoryId,
         teamId,
@@ -265,10 +317,11 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         ...(body.requestedMinutes === undefined ? {} : { requestedMinutes: readRequiredInteger(body.requestedMinutes, 'Requested minutes') }),
         ...(body.confidential === undefined ? {} : { confidential: readRequiredBoolean(body.confidential, 'Confidential') }),
         ...(body.status === undefined ? {} : { status: readRequestCancelStatus(body.status) }),
+        ...(cancelAssignments === undefined ? {} : { cancelAssignments }),
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
-        expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
+        expectedTeamRevision,
         actorMemberId: principal.userKey,
-      }, access)
+      }, access, auditOptions(context, dependencies, principal, body))
       return context.json({ request: result })
     })
   })
@@ -313,7 +366,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         status: readAssignmentStatus(body.status),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, auditOptions(context, dependencies, principal, body))
       return context.json({ assignment: result }, 201)
     })
   })
@@ -340,7 +393,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected assignment revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, auditOptions(context, dependencies, principal, body))
       return context.json({ assignment: result })
     })
   })
@@ -376,6 +429,42 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   return router
+}
+
+/**
+ * Requires a Team manager for approving or rejecting time off, or for changing another member's.
+ *
+ * @param dependencies - Router dependencies.
+ * @param principal - Authenticated caller.
+ * @param teamId - Team identifier.
+ */
+async function requireTimeOffReviewer<Principal extends CapacityPlanningPrincipal>(
+  dependencies: CapacityPlanningRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+): Promise<void> {
+  if (!await dependencies.canManageTeam(principal, teamId)) {
+    throw new CapacityPlanningError(403, 'WorkloadTimeOffReviewDenied', 'Only a Team manager may approve, reject, or change another member\'s time off.')
+  }
+}
+
+/**
+ * Creates the audit options passed to a workload mutation.
+ *
+ * @param context - Hono request context.
+ * @param dependencies - Router dependencies.
+ * @param principal - Authenticated caller.
+ * @param body - Parsed request body recorded in the audit fingerprint.
+ * @returns Mutation options with the audit context, when audit is configured.
+ */
+function auditOptions<Principal extends CapacityPlanningPrincipal>(
+  context: Context,
+  dependencies: CapacityPlanningRouterDependencies<Principal>,
+  principal: Principal,
+  body: unknown,
+): { auditContext?: MutationAuditContext } {
+  const auditContext = dependencies.createAuditContext?.(context, principal, body)
+  return auditContext ? { auditContext } : {}
 }
 
 /**
@@ -562,7 +651,7 @@ function readAssignmentStatus(value: unknown): ResourceAssignmentStatus {
 
 /** Reads a time-off lifecycle state. */
 function readTimeOffStatus(value: unknown): WorkloadTimeOff['status'] {
-  if (value === 'planned' || value === 'approved' || value === 'canceled') return value
+  if (value === 'planned' || value === 'approved' || value === 'rejected' || value === 'canceled') return value
   throw new CapacityPlanningError(400, 'InvalidRequest', 'time-off status is invalid.')
 }
 

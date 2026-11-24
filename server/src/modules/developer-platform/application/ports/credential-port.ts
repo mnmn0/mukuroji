@@ -118,6 +118,8 @@ export type RotateOAuthClientSecretRequest = IdempotentDomainMutationRequest & {
   workspaceId: string
   /** OAuth application to rotate. */
   oauthAppId: string
+  /** User performing the mutation, recorded in the audit event. */
+  actorUserId?: string
 }
 
 /** Request used to revoke an OAuth application. */

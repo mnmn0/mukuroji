@@ -85,3 +85,33 @@ export const ReadOnly: Story = {
     onSubmit: undefined,
   },
 }
+
+/** Displays the rows and links a running import has processed so far. */
+export const RunningImport: Story = {
+  args: {
+    latestImport: {
+      ...developerPlatformResourcesFixture.imports[0]!,
+      status: 'running',
+    },
+    latestImportProgress: {
+      jobId: developerPlatformResourcesFixture.imports[0]!.id,
+      status: 'running',
+      totalRows: 5_000,
+      processedRows: 1_200,
+      totalLinks: 4_900,
+      processedLinks: 0,
+    },
+  },
+}
+
+/** Displays the retry action when the running import's progress could not be loaded. */
+export const ImportProgressFailed: Story = {
+  args: {
+    latestImport: {
+      ...developerPlatformResourcesFixture.imports[0]!,
+      status: 'running',
+    },
+    latestImportProgressFailed: true,
+    onRetryImportProgress: () => undefined,
+  },
+}

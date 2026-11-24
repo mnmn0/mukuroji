@@ -20,6 +20,7 @@ function snapshotWithMondayOff(): WorkloadSnapshot {
     members: [{
       memberId: 'hana',
       skills: [],
+      timeOff: [],
       calendarSource: 'custom',
       timeZone: 'UTC',
       schedule: {

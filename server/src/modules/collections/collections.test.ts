@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { COLLECTION_ITEM_LIMIT, COLLECTION_LIMIT } from '@mukuroji/contracts'
+import { createMutationAuditContext } from '../audit'
 import { InMemoryCollectionsStore } from './adapter-out/collections-store'
 import {
   addCollectionItem,
@@ -364,4 +365,35 @@ test('rejects a change before writing a revision the stored-row validator would 
   await expect(addCollectionItem(store, context, collectionId, 'core-team', 'item-1', readWorkItem))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   expect(writes).toBe(0)
+})
+
+test('records one audit event for each Collection change and none for a no-op', async () => {
+  const store = new InMemoryCollectionsStore()
+  const audit = createMutationAuditContext({
+    workspaceId: 'w',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'collection-request',
+    request: { method: 'POST', path: '/api/collections' },
+    source: { kind: 'api' },
+  })
+  const audited = { ...context, audit }
+  const created = await createCollection(store, audited, { name: 'Launch' }, 'audit-key')
+  await updateCollection(store, audited, created.collectionId, { name: 'Launch 2', expectedRevision: 1 })
+  await updateCollection(store, audited, created.collectionId, { name: 'Launch 2', expectedRevision: 2 })
+  await addCollectionItem(store, audited, created.collectionId, 't', 'a', readWorkItem)
+  await addCollectionItem(store, audited, created.collectionId, 't', 'a', readWorkItem)
+  await removeCollectionItem(store, audited, created.collectionId, 't', 'a', readWorkItem)
+  await deleteCollection(store, 'w', created.collectionId, 4, audit)
+  await createCollection(store, context, { name: 'Unaudited' }, 'plain-key')
+
+  expect(store.auditWrites.map((write) => write.event.eventType)).toEqual([
+    'collection.created',
+    'collection.updated',
+    'collection.item-added',
+    'collection.item-removed',
+    'collection.deleted',
+  ])
+  expect(store.auditWrites.every((write) => write.event.entityType === 'collection' && write.event.entityId === created.collectionId)).toBe(true)
+  expect(store.auditWrites[2]?.event.metadata).toEqual({ teamId: 't', issueId: 'a' })
+  expect(store.auditWrites[1]?.event.changes).toEqual([{ field: 'name', before: 'Launch', after: 'Launch 2' }])
 })

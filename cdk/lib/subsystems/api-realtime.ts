@@ -631,8 +631,10 @@ export function buildApiRuntime(
   // The Planning, Analytics, and Work Item configuration statements have the same actions and
   // each sit in a different policy, so CDK does not merge them and each table keeps a
   // statement of its own.
+  // BatchGetItem reads the Work Item links of one Project for a Project-scoped Planning read.
   apiTableDataPolicy.addStatements(new iam.PolicyStatement({
     actions: [
+      'dynamodb:BatchGetItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',
@@ -976,9 +978,12 @@ export function buildApiRuntime(
       resources: [auditExportBucket.bucketArn],
     }),
   );
+  // Owners grant and revoke system administrator access from the member screen (ADR 0067), and
+  // the member list shows who is in the system administrator groups.
   apiFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: [
+        'cognito-idp:AdminAddUserToGroup',
         'cognito-idp:AdminCreateUser',
         'cognito-idp:AdminDeleteUser',
         'cognito-idp:AdminDeleteUserAttributes',
@@ -986,6 +991,7 @@ export function buildApiRuntime(
         'cognito-idp:AdminEnableUser',
         'cognito-idp:AdminGetUser',
         'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:AdminRemoveUserFromGroup',
         'cognito-idp:AdminResetUserPassword',
         'cognito-idp:AdminSetUserMFAPreference',
         'cognito-idp:AdminUserGlobalSignOut',
@@ -994,6 +1000,7 @@ export function buildApiRuntime(
         'cognito-idp:DescribeUserPoolClient',
         'cognito-idp:GetUser',
         'cognito-idp:ListUsers',
+        'cognito-idp:ListUsersInGroup',
       ],
       resources: [cognitoUserPoolArn],
     }),

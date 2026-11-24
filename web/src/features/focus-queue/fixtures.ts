@@ -11,6 +11,7 @@ import {
   type FocusSignalResolutionCondition,
   type FocusSignalType,
   type FocusUpdateDeadline,
+  type FocusUpdateReview,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -374,6 +375,31 @@ export const focusUpdateDeadlinesFixture = [
     deepLink: '/planning/portfolio?targetType=project&teamId=design-team&projectId=brand-refresh',
   },
 ] satisfies FocusUpdateDeadline[]
+
+/** Pending health update reviews covering a titled Team, an untitled Project, and a long summary. */
+export const focusUpdateReviewsFixture = [
+  {
+    id: 'update-review:team:core-team:3',
+    target: { type: 'team', teamId: 'core-team' },
+    title: 'Core team',
+    version: 3,
+    health: 'at-risk',
+    summary: 'Hiring for the platform squad is two weeks behind plan; the onboarding of the new vendor moved to next sprint.',
+    authorMemberKey: 'lead@example.com',
+    publishedAt: '2026-08-07T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+  },
+  {
+    id: 'update-review:project:design-team:brand-refresh:2',
+    target: { type: 'project', teamId: 'design-team', projectId: 'brand-refresh' },
+    version: 2,
+    health: 'on-track',
+    summary: 'On plan.',
+    authorMemberKey: 'designer@example.com',
+    publishedAt: '2026-08-08T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=design-team&projectId=brand-refresh',
+  },
+] satisfies FocusUpdateReview[]
 
 /** Project log entries the viewer owns: an overdue risk, an overdue issue without a Project title, and a pending change request. */
 export const focusProjectLogEntriesFixture = [

@@ -793,6 +793,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     Description: 'Processes durable Work Item imports with resumable row receipts.',
     Handler: 'index.workItemImportHandler',
     MemorySize: 1024,
+    RecursiveLoop: 'Allow',
     Runtime: 'nodejs22.x',
     Timeout: 15 * 60,
     Environment: {

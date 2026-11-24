@@ -419,6 +419,15 @@ function validateBulkOperationRequest(value: unknown): BulkOperationRequest {
       type: 'archive',
       archived: requireBoolean(action.archived, 'Bulk archived'),
     }
+  } else if (action.type === 'reassign-member') {
+    const fromMemberUserId = requireBoundedText(action.fromMemberUserId, 'Bulk reassign source member', 256)
+      .toLowerCase()
+    const toMemberUserId = requireBoundedText(action.toMemberUserId, 'Bulk reassign target member', 256)
+      .toLowerCase()
+    if (fromMemberUserId === toMemberUserId) {
+      throw invalidInput('Bulk reassign target member must differ from the source member.')
+    }
+    normalizedAction = { type: 'reassign-member', fromMemberUserId, toMemberUserId }
   } else {
     throw invalidInput('Bulk operation action is invalid.')
   }

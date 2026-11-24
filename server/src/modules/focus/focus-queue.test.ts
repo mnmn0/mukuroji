@@ -17,6 +17,7 @@ import type { FocusSnoozeRecord } from './focus-state'
 import {
   createFocusCauseFingerprint,
   createFocusQueue,
+  createFocusUpdateReviewKey,
   focusQueueUsesApprovalSummary,
   focusQueueUsesScheduleBaseline,
   resolveFocusEffectivePolicies,
@@ -836,6 +837,137 @@ describe('Focus queue projection', () => {
       { type: 'project', teamId: 'team-a', projectId: 'project-due-soon' },
     ])
     expect(published.updateDeadlines?.[0]?.title).toBeUndefined()
+  })
+
+  test('shows unacknowledged latest updates to the cadence reviewer only', () => {
+    const latest = (
+      version: number,
+      authorMemberKey: string,
+      createdAt: string,
+    ): NonNullable<PlanningSnapshot['updateTargets'][number]['latestUpdate']> => ({
+      id: `update-${version}`,
+      version,
+      health: 'at-risk',
+      risk: 'medium',
+      summary: 'Weekly report',
+      progressSnapshot: { percent: 40, linkedWorkItemCount: 2 },
+      authorMemberKey,
+      coveredDueAt: '2026-08-07T00:00:00.000Z',
+      createdAt,
+    })
+    const cadence = (
+      reviewerMemberKey?: string,
+    ): NonNullable<PlanningSnapshot['updateTargets'][number]['cadence']> => ({
+      updateOwnerMemberKey: 'author',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-14T00:00:00.000Z',
+      reminderHoursBefore: 24,
+      ...(reviewerMemberKey ? { reviewerMemberKey } : {}),
+    })
+    const planning: PlanningSnapshot = {
+      ...createPlanningSnapshot([], [], [], []),
+      updateTargets: [
+        {
+          target: { type: 'team', teamId: 'team-a' },
+          cadence: cadence('Viewer'),
+          updateState: 'current',
+          latestVersion: 2,
+          latestUpdate: latest(2, 'author', '2026-08-07T10:00:00.000Z'),
+          updatedAt: '2026-08-07T10:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-acknowledged' },
+          cadence: cadence('viewer'),
+          updateState: 'current',
+          latestVersion: 1,
+          latestUpdate: latest(1, 'author', '2026-08-06T10:00:00.000Z'),
+          updatedAt: '2026-08-06T10:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-other-reviewer' },
+          cadence: cadence('someone-else'),
+          updateState: 'current',
+          latestVersion: 1,
+          latestUpdate: latest(1, 'author', '2026-08-05T10:00:00.000Z'),
+          updatedAt: '2026-08-05T10:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-own-update' },
+          cadence: cadence('viewer'),
+          updateState: 'current',
+          latestVersion: 1,
+          latestUpdate: latest(1, 'viewer', '2026-08-04T10:00:00.000Z'),
+          updatedAt: '2026-08-04T10:00:00.000Z',
+        },
+        {
+          // Without an explicit reviewer, the escalation member reviews the update.
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-escalation-reviewer' },
+          cadence: { ...cadence(), escalationMemberKey: 'viewer' },
+          updateState: 'current',
+          latestVersion: 1,
+          latestUpdate: latest(1, 'author', '2026-08-03T10:00:00.000Z'),
+          updatedAt: '2026-08-03T10:00:00.000Z',
+        },
+        {
+          // An explicit reviewer replaces the escalation member as reviewer.
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-explicit-reviewer' },
+          cadence: { ...cadence('someone-else'), escalationMemberKey: 'viewer' },
+          updateState: 'current',
+          latestVersion: 1,
+          latestUpdate: latest(1, 'author', '2026-08-02T10:00:00.000Z'),
+          updatedAt: '2026-08-02T10:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-no-update' },
+          cadence: cadence('viewer'),
+          updateState: 'missing',
+          latestVersion: 0,
+          updatedAt: '2026-08-04T10:00:00.000Z',
+        },
+      ],
+    }
+    const input = {
+      now: '2026-08-09T12:00:00.000Z',
+      viewerMemberKey: 'viewer',
+      workItems: [],
+      planning,
+      reviewerApprovals: [],
+      notifications: [],
+      teamPolicies: [],
+      snoozeRecords: [],
+      canApproveByWorkItemKey: {},
+      canWriteByWorkItemKey: {},
+      canWatchByWorkItemKey: {},
+      watchingByWorkItemKey: {},
+    }
+    const queue = createFocusQueue({
+      ...input,
+      acknowledgedUpdateKeys: new Set([
+        createFocusUpdateReviewKey(
+          { type: 'project', teamId: 'team-a', projectId: 'project-acknowledged' },
+          1,
+        ),
+        // An acknowledgement of an older version does not hide the latest one.
+        createFocusUpdateReviewKey({ type: 'team', teamId: 'team-a' }, 1),
+      ]),
+    })
+
+    expect(queue.updateReviews?.map((review) => review.target)).toEqual([
+      { type: 'project', teamId: 'team-a', projectId: 'project-escalation-reviewer' },
+      { type: 'team', teamId: 'team-a' },
+    ])
+    expect(queue.updateReviews?.slice(1)).toEqual([{
+      id: `update-review:${encodeURIComponent(JSON.stringify(['team', 'team-a', 2]))}`,
+      target: { type: 'team', teamId: 'team-a' },
+      version: 2,
+      health: 'at-risk',
+      summary: 'Weekly report',
+      authorMemberKey: 'author',
+      publishedAt: '2026-08-07T10:00:00.000Z',
+      deepLink: '/planning/portfolio?targetType=team&teamId=team-a',
+    }])
+    expect(createFocusQueue(input).updateReviews).toEqual([])
   })
 
   test('applies Team overrides before user overrides and preserves deterministic Team order', () => {

@@ -640,7 +640,7 @@ function createBulkOperationRequest(
   return {
     action: {
       patch: createBulkEditPatch(editField, editValue),
-      type: action,
+      type: 'edit',
     },
     items,
     workspaceId,

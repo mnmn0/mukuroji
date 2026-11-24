@@ -28,6 +28,7 @@ const catalog: AgentCatalog = {
       { id: 'canceled', name: 'Canceled', category: 'canceled', sortOrder: 4 },
     ],
   } }],
+  templates: [],
 }
 
 /** Scope shared by tests unless a test needs another instance or Project. */
@@ -277,6 +278,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
     async relatedDocuments() { return undefined },
+    async projectCharter() { return undefined },
     async document() { throw new AgentTaskError('not_found', 'Not found') },
     ...overrides,
   }
@@ -470,6 +472,36 @@ describe('agent task lifecycle', () => {
     const plain = fixture(rows)
     expect(await plain.service.configuration()).toMatchObject({ brief: null })
     expect(await plain.service.next({})).toMatchObject({ action: 'start', task: { id: 'todo-first' } })
+  })
+
+  test('returns the configured Project charter in the configuration and null when it cannot be read', async () => {
+    const charter = {
+      schemaVersion: 1 as const, teamId: 'team', projectId: 'web', lifecycleState: 'active' as const, revision: 3,
+      code: 'WEB', purpose: 'Ship the Web app', tags: ['frontend'], repositoryUrls: ['https://example.com/web'],
+    }
+    const reads: string[] = []
+    const { api } = fixture([task()], {
+      async projectCharter(projectId) {
+        reads.push(projectId)
+        return charter
+      },
+    })
+    expect(await createAgentTasks(api, { ...baseScope, assignedProjectId: 'web' }).configuration())
+      .toMatchObject({ projectCharter: charter })
+    expect(reads).toEqual(['web'])
+    // Without a configured Project there is no charter to read.
+    expect(await createAgentTasks(api, baseScope).configuration()).toMatchObject({ projectCharter: null })
+    expect(reads).toEqual(['web'])
+
+    const oldServer = fixture([task()], { async projectCharter() { return undefined } })
+    expect(await createAgentTasks(oldServer.api, { ...baseScope, assignedProjectId: 'web' }).configuration())
+      .toMatchObject({ projectCharter: null })
+    const hidden = fixture([task()], { async projectCharter() { throw new AgentTaskError('forbidden', 'Denied') } })
+    expect(await createAgentTasks(hidden.api, { ...baseScope, assignedProjectId: 'web' }).configuration())
+      .toMatchObject({ projectCharter: null })
+    const outage = fixture([task()], { async projectCharter() { throw new AgentTaskError('unavailable', 'Down', true) } })
+    await expect(createAgentTasks(outage.api, { ...baseScope, assignedProjectId: 'web' }).configuration())
+      .rejects.toMatchObject({ code: 'unavailable' })
   })
 
   test('skips tasks without acceptance criteria when the Team requires them and marks criteria by ID', async () => {

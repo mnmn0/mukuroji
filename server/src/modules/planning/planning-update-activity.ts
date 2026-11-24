@@ -8,7 +8,11 @@ export type PlanningUpdateActivity = {
   /** Most recent successfully added comment timestamp. */ commentAt?: string
   /** Most recent successfully added reaction timestamp, including subsequently removed reactions. */ reactionAt?: string
   /** At most 32 most recently active distinct members; no comment text or reaction values. */ participants: { /** Normalized actor. */ memberKey: string; /** Latest successful interaction time. */ at: string }[]
+  /** Reviewer acknowledgement of this version, recorded once with its acknowledgement comment. */ acknowledgement?: { /** Normalized reviewer. */ memberKey: string; /** Acknowledgement comment timestamp. */ at: string }
 }
+
+/** Annotation kinds that advance the compact activity. An acknowledgement is also a comment. */
+export type PlanningUpdateActivityKind = 'comment' | 'reaction' | 'acknowledgement'
 
 /** Advances compact activity after a source annotation commits atomically.
  * @param previous - Prior target projection, possibly for an older immutable version.
@@ -19,14 +23,16 @@ export type PlanningUpdateActivity = {
  * @param at - Source annotation timestamp.
  * @returns Monotonic compact activity with a bounded recent-member window.
  */
-export function advancePlanningUpdateActivity(previous: PlanningUpdateActivity | undefined, target: PlanningUpdateTarget, version: number, kind: 'comment' | 'reaction', memberKey: string, at: string): PlanningUpdateActivity {
+export function advancePlanningUpdateActivity(previous: PlanningUpdateActivity | undefined, target: PlanningUpdateTarget, version: number, kind: PlanningUpdateActivityKind, memberKey: string, at: string): PlanningUpdateActivity {
   const current = previous?.version === version ? previous : undefined
-  const previousAt = kind === 'comment' ? current?.commentAt : current?.reactionAt
+  const commentLike = kind !== 'reaction'
+  const previousAt = commentLike ? current?.commentAt : current?.reactionAt
   const member = memberKey.trim().toLowerCase()
   const existing = current?.participants.find((participant) => participant.memberKey === member)
   const participants = [...(current?.participants.filter((participant) => participant.memberKey !== member) ?? []), { memberKey: member, at: existing && existing.at > at ? existing.at : at }]
     .sort((a, b) => b.at.localeCompare(a.at) || a.memberKey.localeCompare(b.memberKey)).slice(0, 32)
-  return { target, version, revision: (previous?.revision ?? 0) + 1, ...(current?.commentAt ? { commentAt: current.commentAt } : {}), ...(current?.reactionAt ? { reactionAt: current.reactionAt } : {}), [kind === 'comment' ? 'commentAt' : 'reactionAt']: previousAt && previousAt > at ? previousAt : at, participants }
+  const acknowledgement = current?.acknowledgement ?? (kind === 'acknowledgement' ? { memberKey: member, at } : undefined)
+  return { target, version, revision: (previous?.revision ?? 0) + 1, ...(current?.commentAt ? { commentAt: current.commentAt } : {}), ...(current?.reactionAt ? { reactionAt: current.reactionAt } : {}), [commentLike ? 'commentAt' : 'reactionAt']: previousAt && previousAt > at ? previousAt : at, participants, ...(acknowledgement ? { acknowledgement } : {}) }
 }
 
 /** Validates untrusted compact projection content without retaining unknown fields.
@@ -34,10 +40,10 @@ export function advancePlanningUpdateActivity(previous: PlanningUpdateActivity |
  * @returns Validated projection, or undefined for corrupt/unknown content.
  */
 export function readPlanningUpdateActivity(value: unknown): PlanningUpdateActivity | undefined {
-  if (!record(value) || !record(value.target) || !positive(value.version) || !positive(value.revision) || value.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(value.participants) || value.participants.length > 32 || !value.participants.every(participant) || new Set(value.participants.map((item) => item.memberKey)).size !== value.participants.length || value.commentAt !== undefined && !timestamp(value.commentAt) || value.reactionAt !== undefined && !timestamp(value.reactionAt)) return undefined
-  const target = value.target.type === 'project' && identifier(value.target.teamId) && identifier(value.target.projectId) ? { type: 'project', teamId: value.target.teamId, projectId: value.target.projectId } satisfies PlanningUpdateTarget : value.target.type === 'initiative' && identifier(value.target.entityId) ? { type: 'initiative', entityId: value.target.entityId } satisfies PlanningUpdateTarget : undefined
+  if (!record(value) || !record(value.target) || !positive(value.version) || !positive(value.revision) || value.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(value.participants) || value.participants.length > 32 || !value.participants.every(participant) || new Set(value.participants.map((item) => item.memberKey)).size !== value.participants.length || value.commentAt !== undefined && !timestamp(value.commentAt) || value.reactionAt !== undefined && !timestamp(value.reactionAt) || value.acknowledgement !== undefined && !participant(value.acknowledgement)) return undefined
+  const target = value.target.type === 'project' && identifier(value.target.teamId) && identifier(value.target.projectId) ? { type: 'project', teamId: value.target.teamId, projectId: value.target.projectId } satisfies PlanningUpdateTarget : value.target.type === 'initiative' && identifier(value.target.entityId) ? { type: 'initiative', entityId: value.target.entityId } satisfies PlanningUpdateTarget : value.target.type === 'team' && identifier(value.target.teamId) ? { type: 'team', teamId: value.target.teamId } satisfies PlanningUpdateTarget : undefined
   if (!target) return undefined
-  return { target, version: value.version, revision: value.revision, ...(timestamp(value.commentAt) ? { commentAt: value.commentAt } : {}), ...(timestamp(value.reactionAt) ? { reactionAt: value.reactionAt } : {}), participants: value.participants.map(({ memberKey, at }) => ({ memberKey, at })) }
+  return { target, version: value.version, revision: value.revision, ...(timestamp(value.commentAt) ? { commentAt: value.commentAt } : {}), ...(timestamp(value.reactionAt) ? { reactionAt: value.reactionAt } : {}), participants: value.participants.map(({ memberKey, at }) => ({ memberKey, at })), ...(participant(value.acknowledgement) ? { acknowledgement: { memberKey: value.acknowledgement.memberKey, at: value.acknowledgement.at } } : {}) }
 }
 /** Narrows a persisted JSON object. */
 function record(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }

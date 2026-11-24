@@ -35,7 +35,7 @@ export interface UpdateFeedReadStateStore {
  */
 export function updateFeedReportKey(report: UpdateFeedReportReference): string {
   const target = report.target
-  return JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId, report.version] : ['initiative', target.entityId, report.version])
+  return JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId, report.version] : target.type === 'team' ? ['team', target.teamId, report.version] : ['initiative', target.entityId, report.version])
 }
 
 /** Adds personal state only after target/content authorization and response bounding.
@@ -70,6 +70,9 @@ export function parseUpdateFeedReadState(value: unknown): SetUpdateFeedReadState
   }
   if (target.type === 'initiative' && isIdentifier(target.entityId)) {
     return { target: { type: 'initiative', entityId: target.entityId }, version: value.version, read: value.read, expectedRevision: value.expectedRevision }
+  }
+  if (target.type === 'team' && isIdentifier(target.teamId)) {
+    return { target: { type: 'team', teamId: target.teamId }, version: value.version, read: value.read, expectedRevision: value.expectedRevision }
   }
   throw new PlanningError(400, 'UpdateFeedReadStateInvalid', 'Invalid report target.')
 }

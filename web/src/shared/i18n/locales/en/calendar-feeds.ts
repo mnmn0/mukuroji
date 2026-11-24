@@ -1,0 +1,31 @@
+import type { calendarFeedsMessages as jaCalendarFeedsMessages } from '../ja/calendar-feeds'
+
+/** English copy for the calendar feed settings (#352). */
+export const calendarFeedsMessages = {
+  'calendarFeeds.title': 'Calendar subscription',
+  'calendarFeeds.description': 'Show due dates and date ranges of your tasks, and Project Milestones and Cycles, in Google Calendar, Outlook, or Apple Calendar.',
+  'calendarFeeds.loading': 'Loading calendar subscriptions…',
+  'calendarFeeds.loadError': 'Calendar subscriptions could not be loaded.',
+  'calendarFeeds.retry': 'Retry',
+  'calendarFeeds.operationError': 'The action could not be completed. Try again later.',
+  'calendarFeeds.member.title': 'My schedule',
+  'calendarFeeds.member.description': 'Tasks you own or contribute to, with the Milestones and Cycles of their Projects.',
+  'calendarFeeds.project.title': 'Project schedules',
+  'calendarFeeds.project.description': 'Due dates of one Project\'s tasks, with its Milestones and Cycles.',
+  'calendarFeeds.project.select': 'Choose a Project',
+  'calendarFeeds.project.empty': 'You have not issued a Project schedule.',
+  'calendarFeeds.project.unknown': 'Project you cannot view',
+  'calendarFeeds.issue': 'Issue URL',
+  'calendarFeeds.reissue': 'Reissue URL',
+  'calendarFeeds.revoke': 'Stop',
+  'calendarFeeds.notIssued': 'Not issued',
+  'calendarFeeds.issuedAt': 'Issued',
+  'calendarFeeds.issuedTitle': 'URL to add to your calendar',
+  'calendarFeeds.issuedDescription': 'This URL is shown only now. Paste it into "Add calendar from URL" in your calendar app. Anyone with the URL can see the schedule, so reissue it if it leaks.',
+  'calendarFeeds.copy': 'Copy',
+  'calendarFeeds.copied': 'Copied.',
+  'calendarFeeds.copyFailed': 'Could not copy. Select the URL and copy it with your device.',
+  'calendarFeeds.openInApp': 'Open in calendar app',
+  'calendarFeeds.dismiss': 'Close',
+  'calendarFeeds.refreshNote': 'Changes appear the next time your calendar app reloads the subscription (Google Calendar can take a few hours).',
+} as const satisfies Record<keyof typeof jaCalendarFeedsMessages, string>
