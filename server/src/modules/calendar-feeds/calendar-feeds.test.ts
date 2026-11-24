@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test'
 import { CALENDAR_FEED_PROJECT_LIMIT } from '@mukuroji/contracts'
 import { InMemoryCalendarFeedStore } from './adapter-out/dynamodb/calendar-feed-store'
 import {
+  CALENDAR_FEED_PLANNING_LIMIT,
+  CALENDAR_FEED_WORK_ITEM_LIMIT,
   CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT,
   readCalendarFeedUseCase,
   type CalendarFeedOwnerView,
@@ -228,6 +230,35 @@ test('fails instead of serving a partial feed when Work Item pages remain', asyn
   const token = issued.feedPath.split('/').at(-1)
   expect(await readCalendarFeedUseCase(store, reader, token, new Date())).toEqual({ kind: 'too-large' })
   expect(pages).toBe(CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT)
+})
+
+test('fails instead of dropping events beyond the event limits', async () => {
+  const store = new InMemoryCalendarFeedStore()
+  const issued = await issueCalendarFeedUseCase(store, owner, { kind: 'member' }, {
+    now: '2026-11-24T00:00:00.000Z',
+    canReadProject,
+  })
+  const token = issued.feedPath.split('/').at(-1)
+  const readerWith = (view: Omit<CalendarFeedOwnerView, 'memberKeys'>): CalendarFeedReader => ({
+    openOwnerView: async () => ({ memberKeys: [owner.memberKey], ...view }),
+    readTimeZone: async () => 'Asia/Tokyo',
+    consumeRateLimit: async () => ({ allowed: true }),
+  })
+  const tasks = Array.from({ length: CALENDAR_FEED_WORK_ITEM_LIMIT + 1 }, (_, index) =>
+    workItemRow(String(index), 'dated', '2026-11-30'))
+  const manyTasks = readerWith({
+    readWorkItemPage: async (_filter, cursor) => cursor
+      ? { workItems: tasks.slice(500) }
+      : { workItems: tasks.slice(0, 500), nextCursor: 'next' },
+    readPlanningEntities: async () => [],
+  })
+  expect(await readCalendarFeedUseCase(store, manyTasks, token, new Date())).toEqual({ kind: 'too-large' })
+  const manyMilestones = readerWith({
+    readWorkItemPage: async () => ({ workItems: [workItemRow('1', 'dated', '2026-11-30')] }),
+    readPlanningEntities: async () => Array.from({ length: CALENDAR_FEED_PLANNING_LIMIT + 1 }, (_, index) =>
+      milestoneRow(`m-${index}`, 'dated')),
+  })
+  expect(await readCalendarFeedUseCase(store, manyMilestones, token, new Date())).toEqual({ kind: 'too-large' })
 })
 
 test('answers not found when the owner loses access during a read, and reports a rate limit', async () => {

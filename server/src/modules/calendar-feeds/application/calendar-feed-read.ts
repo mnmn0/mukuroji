@@ -247,14 +247,16 @@ function feedProject(record: CalendarFeedRecord) {
 
 /**
  * Reads the feed's Work Items. Every page read counts toward the Planning scope, scheduled or
- * not; only scheduled Work Items become events, at most {@link CALENDAR_FEED_WORK_ITEM_LIMIT}.
+ * not; only scheduled Work Items become events. More than {@link CALENDAR_FEED_WORK_ITEM_LIMIT} of
+ * them fails the feed rather than dropping some.
  * Reading stops after {@link CALENDAR_FEED_WORK_ITEM_PAGE_LIMIT} pages so one feed cannot read the
  * whole Workspace; a feed that still has pages left fails instead of serving a partial calendar.
  *
  * @param view - Owner view.
  * @param filter - Feed filter.
  * @returns Scheduled Work Items and the Projects and Teams of all read Work Items.
- * @throws CalendarFeedError `limit-exceeded` when pages remain after the page limit.
+ * @throws CalendarFeedError `limit-exceeded` when pages remain after the page limit, or when the
+ * scheduled Work Items exceed the event limit.
  */
 async function readFeedWorkItems(view: CalendarFeedOwnerView, filter: CalendarFeedWorkItemFilter) {
   const scheduled: CalendarFeedWorkItemRow[] = []
@@ -266,18 +268,14 @@ async function readFeedWorkItems(view: CalendarFeedOwnerView, filter: CalendarFe
     for (const workItem of result.workItems) {
       teamIds.add(workItem.teamId)
       if (workItem.assignedProjectId) projectKeys.add(scopeKey(workItem.teamId, workItem.assignedProjectId))
-      if (workItem.schedule.mode !== 'unscheduled' && scheduled.length < CALENDAR_FEED_WORK_ITEM_LIMIT) {
-        scheduled.push(workItem)
-      }
+      if (workItem.schedule.mode === 'unscheduled') continue
+      if (scheduled.length >= CALENDAR_FEED_WORK_ITEM_LIMIT) throw feedTooLarge()
+      scheduled.push(workItem)
     }
     cursor = result.nextCursor
     if (!cursor) return { scheduled, projectKeys, teamIds }
   }
-  throw new CalendarFeedError(
-    'limit-exceeded',
-    'CalendarFeedTooLarge',
-    'Calendar feed has more Work Items than one read can evaluate.',
-  )
+  throw feedTooLarge()
 }
 
 /**
@@ -288,7 +286,8 @@ async function readFeedWorkItems(view: CalendarFeedOwnerView, filter: CalendarFe
  * @param ownerKeys - Owner member keys, empty for a Project feed.
  * @param projectKeys - Projects in scope.
  * @param teamIds - Teams in scope.
- * @returns The entities by start date, at most {@link CALENDAR_FEED_PLANNING_LIMIT}.
+ * @returns The entities by start date.
+ * @throws CalendarFeedError `limit-exceeded` when more than {@link CALENDAR_FEED_PLANNING_LIMIT} match.
  */
 function selectPlanningEntities(
   readable: readonly CalendarFeedPlanningRow[],
@@ -296,7 +295,7 @@ function selectPlanningEntities(
   projectKeys: ReadonlySet<string>,
   teamIds: ReadonlySet<string>,
 ): CalendarFeedPlanningRow[] {
-  return readable
+  const selected = readable
     .filter((entity) => {
       if (entity.projectId !== undefined) {
         if (entity.teamId !== undefined && projectKeys.has(scopeKey(entity.teamId, entity.projectId))) return true
@@ -307,7 +306,21 @@ function selectPlanningEntities(
     })
     .sort((left, right) =>
       left.forecast.startDate.localeCompare(right.forecast.startDate) || left.id.localeCompare(right.id))
-    .slice(0, CALENDAR_FEED_PLANNING_LIMIT)
+  if (selected.length > CALENDAR_FEED_PLANNING_LIMIT) throw feedTooLarge()
+  return selected
+}
+
+/**
+ * Error for a feed that does not fit in one read, so that it fails instead of omitting events.
+ *
+ * @returns A `limit-exceeded` calendar feed error.
+ */
+function feedTooLarge() {
+  return new CalendarFeedError(
+    'limit-exceeded',
+    'CalendarFeedTooLarge',
+    'Calendar feed has more events than one feed can hold.',
+  )
 }
 
 /**
