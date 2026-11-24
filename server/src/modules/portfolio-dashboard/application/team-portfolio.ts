@@ -421,9 +421,8 @@ export async function captureTeamPortfolioSnapshot<TCallerCheck, TAudit>(
   if (!input.canCapture) {
     throw new ProjectDataError(403, 'PortfolioSnapshotForbidden', 'Only a manager of the whole Team can save its portfolio snapshot.')
   }
-  if (input.month !== input.currentMonth) {
-    throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'Only the current month can be saved.')
-  }
+  // A retry of a save that committed returns it even after the month has turned, so the
+  // client can learn the outcome; only a new save is held to the current month.
   const receipt = await ports.store.getReceipt(input.workspaceId, input.teamId, input.idempotencyKeyHash)
   if (receipt) {
     if (receipt.requestFingerprint !== input.requestFingerprint || receipt.month !== input.month) {
@@ -434,6 +433,9 @@ export async function captureTeamPortfolioSnapshot<TCallerCheck, TAudit>(
       throw new ProjectDataError(502, 'PortfolioSnapshotCorruptState', 'The stored portfolio snapshot is missing.')
     }
     return saved
+  }
+  if (input.month !== input.currentMonth) {
+    throw new ProjectDataError(400, 'InvalidPortfolioSnapshot', 'Only the current month can be saved.')
   }
   const previous = await ports.store.get(input.workspaceId, input.teamId, input.month)
   const projects = await ports.computeProjects()

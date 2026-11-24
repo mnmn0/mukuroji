@@ -327,7 +327,9 @@ export function parsePortfolioProjectMetrics(value: unknown): PortfolioProjectMe
     !isCount(workItems.total) ||
     !isCount(workItems.open) ||
     !isCount(workItems.completed) ||
-    !isCount(workItems.overdueOpen)
+    !isCount(workItems.overdueOpen) ||
+    workItems.total !== workItems.open + workItems.completed ||
+    workItems.overdueOpen > workItems.open
   ) {
     return undefined
   }
@@ -507,11 +509,15 @@ function isInstant(value: unknown): value is string {
 }
 
 /**
- * Checks whether a value is a `YYYY-MM-DD` date.
+ * Checks whether a value is a `YYYY-MM-DD` date that exists in the calendar.
  *
  * @param value - Value to check.
  * @returns Whether the value is a local date.
  */
 function isLocalDate(value: unknown): value is string {
-  return typeof value === 'string' && LOCAL_DATE_PATTERN.test(value)
+  if (typeof value !== 'string' || !LOCAL_DATE_PATTERN.test(value)) return false
+  const [year, month, day] = value.split('-').map(Number)
+  if (year === undefined || month === undefined || day === undefined) return false
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
 }

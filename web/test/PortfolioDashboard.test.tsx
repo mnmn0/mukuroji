@@ -272,3 +272,26 @@ describe('summarizePortfolioUtilization', () => {
     expect(createPortfolioDashboardModel({ teams, reads: [], today: '2026-11-24', workloadFailed: true }).utilizationUnavailable).toBe(true)
   })
 })
+
+test('compares the delay only when both months measured against a baseline', () => {
+  const compared = createPortfolioDashboardModel({
+    teams,
+    reads: [{ teamId: 'core', agentBoardFailed: false, portfolio: portfolio('core', [metrics('alpha', { schedule: { hasBaseline: false, delayedOpenCount: 0 } })]) }],
+    snapshots: [{
+      teamId: 'core',
+      failed: false,
+      snapshot: {
+        schemaVersion: 1,
+        teamId: 'core',
+        month: '2026-10',
+        capturedAt: '2026-10-31T00:00:00.000Z',
+        projects: [metrics('alpha', { schedule: { hasBaseline: true, delayedOpenCount: 1, maxDelayDays: 5 } })],
+        hiddenProjectCount: 0,
+        costHiddenProjectCount: 0,
+      },
+    }],
+    today: '2026-11-24',
+  })
+  expect(compared.rows[0]?.delta).toBeDefined()
+  expect(compared.rows[0]?.delta?.delay).toBeUndefined()
+})

@@ -323,7 +323,7 @@ async function readBudgets(
       entryLimit: PORTFOLIO_TIME_ENTRY_READ_LIMIT,
     })
   } catch (error) {
-    if (error instanceof TimeTrackingError && (error.status === 400 || error.status === 413)) {
+    if (error instanceof TimeTrackingError && (error.status === 400 || error.status === 413 || error.status === 422)) {
       throw new ProjectDataError(error.status, error.code, error.message)
     }
     throw error
@@ -363,6 +363,7 @@ const PORTFOLIO_ERROR_CODES = new Set([
   'PortfolioSnapshotRetryable',
   'PortfolioSnapshotAuthorizationUnavailable',
   'PortfolioTeamFenceUnavailable',
+  'PortfolioCostOverflow',
 ])
 
 /**
@@ -389,12 +390,13 @@ function toPortfolioErrorResponse(c: Context, error: unknown) {
  * @param status - Status carried by the error.
  * @returns The same status when it is expected, otherwise 502.
  */
-function toPortfolioStatus(status: number): 400 | 403 | 409 | 413 | 502 | 503 {
+function toPortfolioStatus(status: number): 400 | 403 | 409 | 413 | 422 | 502 | 503 {
   switch (status) {
     case 400:
     case 403:
     case 409:
     case 413:
+    case 422:
     case 503:
       return status
     default:

@@ -396,7 +396,10 @@ function createDelta(current: PortfolioProjectMetrics, previous: PortfolioProjec
   return {
     ...(currentProgress === undefined || previousProgress === undefined ? {} : { progress: currentProgress - previousProgress }),
     ...(currentBudget === undefined || previousBudget === undefined ? {} : { budget: currentBudget - previousBudget }),
-    delay: (current.schedule.maxDelayDays ?? 0) - (previous.schedule.maxDelayDays ?? 0),
+    // A delay change is only meaningful when both months measured against a baseline.
+    ...(current.schedule.hasBaseline && previous.schedule.hasBaseline
+      ? { delay: (current.schedule.maxDelayDays ?? 0) - (previous.schedule.maxDelayDays ?? 0) }
+      : {}),
     risks: openRiskCount(current) - openRiskCount(previous),
   }
 }

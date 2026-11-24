@@ -2038,12 +2038,15 @@ export class TimeTrackingService {
     const result = new Map<string, ProjectBudgetConsumption>()
     if (budgets.size === 0) return result
     const nowInstant = input.now.toISOString()
+    const today = localDateAt(input.now.getTime(), input.timeZone)
     const periods = new Map<string, { from?: string; to: string }>()
     for (const [projectId, budget] of budgets) {
       const from = budget.periodFrom === undefined
         ? undefined
         : new Date(resolveLocalDateStart(budget.periodFrom, input.timeZone)).toISOString()
-      const periodEnd = budget.periodTo === undefined
+      // A period still running ends now; only an ended period needs the day after its end, which
+      // also keeps far-future end dates such as 9999-12-31 out of the date arithmetic.
+      const periodEnd = budget.periodTo === undefined || budget.periodTo >= today
         ? nowInstant
         : new Date(resolveLocalDateStart(addCalendarDays(budget.periodTo, 1), input.timeZone)).toISOString()
       const to = periodEnd < nowInstant ? periodEnd : nowInstant
@@ -2079,21 +2082,32 @@ export class TimeTrackingService {
       }
       entries.push(...read)
     }
-    for (const [projectId, budget] of budgets) {
-      const period = periods.get(projectId)
-      let actualCostMinor = 0
-      let hasOtherCurrencyCost = false
-      if (period && (period.from === undefined || period.from < period.to)) {
-        const from = period.from ?? new Date(0).toISOString()
-        for (const entry of entries) {
-          if (entry.projectId !== projectId) continue
-          const cost = costForEntry(entry, clippedEntryMinutes(entry, from, period.to), true)
-          if (cost === undefined) continue
-          if (entry.currency === budget.currency) actualCostMinor += cost
-          else hasOtherCurrencyCost = true
-        }
+    const totals = new Map<string, { actualCostMinor: number; hasOtherCurrencyCost: boolean }>()
+    for (const projectId of budgets.keys()) totals.set(projectId, { actualCostMinor: 0, hasOtherCurrencyCost: false })
+    for (const entry of entries) {
+      if (entry.projectId === undefined) continue
+      const budget = budgets.get(entry.projectId)
+      const period = periods.get(entry.projectId)
+      const total = totals.get(entry.projectId)
+      if (!budget || !period || !total || (period.from !== undefined && !(period.from < period.to))) continue
+      const cost = costForEntry(entry, clippedEntryMinutes(entry, period.from ?? new Date(0).toISOString(), period.to), true)
+      if (cost === undefined) continue
+      if (entry.currency !== budget.currency) {
+        total.hasOtherCurrencyCost = true
+        continue
       }
-      result.set(projectId, { budget, actualCostMinor, hasOtherCurrencyCost })
+      total.actualCostMinor += cost
+      if (!Number.isSafeInteger(total.actualCostMinor)) {
+        throw new TimeTrackingError(
+          422,
+          'PortfolioCostOverflow',
+          `The billable cost of Project "${entry.projectId}" is too large to total exactly.`,
+        )
+      }
+    }
+    for (const [projectId, budget] of budgets) {
+      const total = totals.get(projectId) ?? { actualCostMinor: 0, hasOtherCurrencyCost: false }
+      result.set(projectId, { budget, ...total })
     }
     return result
   }

@@ -201,6 +201,38 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     expect(budgets.get('alpha')).toMatchObject({ actualCostMinor: 6_000 })
     expect(budgets.get('beta')).toMatchObject({ actualCostMinor: 6_000 })
   })
+
+  test('reads a budget that ends far in the future up to now', async () => {
+    const repository = new InMemoryTimeTrackingRepository()
+    const service = new TimeTrackingService(repository)
+    await repository.saveBudget({
+      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      periodFrom: '2026-11-01', periodTo: '9999-12-31', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
+    }, 0)
+    await repository.saveEntry(timeEntry('inside', 'alpha', '2026-11-10T10:00:00.000Z', '2026-11-10T11:00:00.000Z'))
+    const budgets = await service.summarizeProjectBudgets({
+      workspaceId: 'w', teamId: 't', projectIds: ['alpha'], timeZone: 'Asia/Tokyo', now: new Date('2026-11-23T00:00:00.000Z'), entryLimit: 10,
+    })
+    expect(budgets.get('alpha')).toMatchObject({ actualCostMinor: 6_000 })
+  })
+
+  test('refuses a total cost that cannot be represented exactly', async () => {
+    const repository = new InMemoryTimeTrackingRepository()
+    const service = new TimeTrackingService(repository)
+    await repository.saveBudget({
+      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      periodFrom: '2026-11-01', periodTo: '2026-11-30', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
+    }, 0)
+    for (const id of ['a', 'b']) {
+      await repository.saveEntry({
+        ...timeEntry(id, 'alpha', '2026-11-10T10:00:00.000Z', '2026-11-10T11:00:00.000Z'),
+        hourlyRateMinor: 5_000_000_000_000_000,
+      })
+    }
+    await expect(service.summarizeProjectBudgets({
+      workspaceId: 'w', teamId: 't', projectIds: ['alpha'], timeZone: 'UTC', now: new Date('2026-11-23T00:00:00.000Z'), entryLimit: 10,
+    })).rejects.toMatchObject({ status: 422, code: 'PortfolioCostOverflow' })
+  })
 })
 
 describe('canCaptureTeamPortfolioSnapshot', () => {

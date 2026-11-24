@@ -211,9 +211,15 @@ export function PortfolioDashboardView({
   })
   const [sort, setSort] = useState<PortfolioDashboardSort>({ key: 'health', descending: false })
   const [rootElement, setRootElement] = useState<HTMLElement | null>(null)
+  // Without Planning every row reads as unknown health, so a chosen health filter would hide every
+  // row behind a disabled control. It is kept and applies again once Planning loads.
+  const effectiveFilters = useMemo(
+    () => isPlanningUnavailable ? { ...filters, health: 'all' as const } : filters,
+    [filters, isPlanningUnavailable],
+  )
   const visibleRows = useMemo(
-    () => arrangePortfolioDashboardRows(model.rows, filters, thresholds, sort),
-    [filters, model.rows, sort, thresholds],
+    () => arrangePortfolioDashboardRows(model.rows, effectiveFilters, thresholds, sort),
+    [effectiveFilters, model.rows, sort, thresholds],
   )
   const portfolios = useMemo(() => listPortfolioDashboardPortfolios(model.rows), [model.rows])
   const attentionCounts = useMemo(() => {
@@ -349,7 +355,7 @@ export function PortfolioDashboardView({
               label: value === 'all' ? t('portfolioDashboard.filter.all') : t(healthMessageKeys[value]),
             }))}
             testId="portfolio-filter-health"
-            value={filters.health}
+            value={effectiveFilters.health}
             onChange={(value) => {
               const health = healthFilterOptions.find((candidate) => candidate === value) ?? 'all'
               setFilters((current) => ({ ...current, health }))
