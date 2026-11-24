@@ -60,6 +60,7 @@ export type SettingsPanelId =
   | 'members'
   | 'tenant'
   | 'directory'
+  | 'time-periods'
   | 'developer-platform'
   | 'automation'
   | 'audit-log'
