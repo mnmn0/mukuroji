@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(600)
-  expect(new Set(inventory).size).toBe(596)
+  expect(inventory).toHaveLength(604)
+  expect(new Set(inventory).size).toBe(600)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
@@ -173,11 +173,15 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
   // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
+  expect(inventory).toContain('GET /api/me/calendar-feeds')
+  expect(inventory).toContain('POST /api/me/calendar-feeds')
+  expect(inventory).toContain('DELETE /api/me/calendar-feeds/:feedId')
+  expect(inventory).toContain('GET /api/public/calendar-feeds/:token')
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '4fc9d308e8beea8ea5aaad8822c640a5b556baadeb91ea9a6db2bbee5c18f8e5',
+    '19747efb52aac6f387ef805e083bb773c8c7a25bc6d5e77c098e0861c8180422',
   )
 })
