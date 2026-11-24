@@ -27,7 +27,7 @@ endpoint を使ったりできてはならない。既存の Workspace 全体の
   を Workspace で持つ必要がある。Team scope の Enterprise grant による委任は今回入れない。
 - Team rule は保存時に次を拒否する（`403 AutomationTeamScopeViolation`）: form・inbound webhook の
   trigger、outbound webhook の action（どちらも Workspace の endpoint と secret を使う）、他の Team を
-  見る Work Item Type trigger、他の Team に作る create action、他の Team の Project への move / create、
+  見る Work Item Type trigger、他の Team に作る create action、他の Team の Project への move / create / update、
   他の Team の template や他の Team に作る template の参照。Team template は同じ Team の rule・
   recurring Work・適用だけが使え、Team recurring Work の `teamId` は所有 Team と同じにする。
 - 実行時にも同じ境界を守る。rule の実行開始時に `ownerTeamId` を execution に固定し、

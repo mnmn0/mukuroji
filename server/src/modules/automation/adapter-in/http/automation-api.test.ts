@@ -5358,6 +5358,10 @@ test('lets a Team manager create and change rules of their own Team only', async
     ...teamRuleBody,
     actions: [{ type: 'move', targetProjectId: 'other-team-project' }],
   })
+  const otherTeamUpdate = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'update', patch: { assignedProjectId: 'other-team-project' } }],
+  })
   const formTrigger = await post({ ...teamRuleBody, trigger: { type: 'form', formId: 'form-1' } })
   const stopOwn = await app.request('/api/automation/rules/rule-team', {
     method: 'PATCH',
@@ -5374,7 +5378,7 @@ test('lets a Team manager create and change rules of their own Team only', async
   expect(ownTeam.status).toBe(201)
   expect(workspaceRule.status).toBe(403)
   expect(await workspaceRule.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
-  for (const response of [webhookAction, otherTeamCreate, otherTeamProject, formTrigger]) {
+  for (const response of [webhookAction, otherTeamCreate, otherTeamProject, otherTeamUpdate, formTrigger]) {
     expect(response.status).toBe(403)
     expect(await response.json()).toMatchObject({ code: 'AutomationTeamScopeViolation' })
   }

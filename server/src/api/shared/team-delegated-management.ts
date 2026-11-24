@@ -114,7 +114,7 @@ export async function listDelegatedManagementScopes(
  * @param workspaceId - Workspace that owns the rule.
  * @param ownerTeamId - Team that owns the rule.
  * @param actions - Validated rule actions.
- * @throws AutomationError when a move or create action names another Team's Project.
+ * @throws AutomationError when a move, create or update action names another Team's Project.
  */
 export async function assertAutomationActionsUseOwnerTeamProjects(
   workspaceId: string,
@@ -128,7 +128,9 @@ export async function assertAutomationActionsUseOwnerTeamProjects(
       ? action.targetProjectId
       : action.type === 'create'
         ? action.values?.assignedProjectId
-        : undefined
+        : action.type === 'update'
+          ? action.patch.assignedProjectId
+          : undefined
     if (typeof projectId === 'string' && projectId !== '' && !projectIds.has(projectId)) {
       throw new AutomationError(
         'forbidden',
