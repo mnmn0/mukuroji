@@ -745,6 +745,29 @@ describe('collaboration projection pure helpers', () => {
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
   })
+  test('delivers a scope-less requester notification only to its requester', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'guest', status: 'active' }, $metadata: {},
+    }))
+    const event = createProjectionEvent({ eventType: 'request.requester.rejected',
+      notificationCandidates: [{ memberKey, reason: 'requester' }] })
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    try {
+      expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(true)
+      expect(await authorizeNotificationDelivery(event, 'other@example.com', identity)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...event,
+        notificationCandidates: [{ memberKey, reason: 'automation' }] }, memberKey, identity)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('never queues delayed events from before the current Slack activation boundary', () => {
     const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
     const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,

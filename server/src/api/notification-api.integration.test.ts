@@ -23,6 +23,8 @@ import type {
 } from '../modules/notifications'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../modules/analytics'
+import { RequestIntakeError, type RequestIntakeClient } from '../modules/request-intake'
+import type { RequestSubmission } from '@mukuroji/contracts'
 import { InMemoryAnalyticsRepository } from '../modules/analytics/analytics'
 import { createTriageCapabilities } from '../modules/triage'
 import {
@@ -1710,4 +1712,120 @@ test('shows a scheduled report delivery only while its recipient can still read 
     [shared.id, true],
     [team.id, false],
   ]))
+})
+
+test('shows a requester notification only to the member who still owns the request', async () => {
+  const unsupported = async (): Promise<never> => {
+    throw new Error('Unexpected Request Intake call in notification visibility test.')
+  }
+  const ownSubmission: RequestSubmission = {
+    schemaVersion: 1,
+    id: 'req-own',
+    receiptId: 'rcpt-own',
+    formId: 'form-1',
+    formVersion: 1,
+    formSnapshot: {
+      schemaVersion: 1,
+      formId: 'form-1',
+      version: 1,
+      createdBy: 'admin@example.com',
+      createdAt: TRIAGE_NOW,
+      snapshot: {
+        definition: {
+          defaultLocale: 'en',
+          supportedLocales: ['en'],
+          title: { en: 'IT request' },
+          sections: [],
+          confirmation: { message: { en: 'Received.' } },
+        },
+        routing: {
+          defaultTarget: { teamId: 'core-team', assigneeUserId: 'triager@example.com', priority: 'medium', dueDateOffsetDays: 0 },
+          rules: [],
+          mapping: { titleFieldId: 'title' },
+        },
+      },
+    },
+    status: 'rejected',
+    source: 'web',
+    revision: 2,
+    locale: 'en',
+    answers: {},
+    attachments: [],
+    routingTarget: { teamId: 'core-team', assigneeUserId: 'triager@example.com', priority: 'medium', dueDateOffsetDays: 0 },
+    workItemMapping: { titleFieldId: 'title' },
+    duplicateCandidateIds: [],
+    requesterUserId: 'demo@example.com',
+    messages: [],
+    events: [],
+    createdAt: TRIAGE_NOW,
+    updatedAt: TRIAGE_NOW,
+    capabilities: { canAssign: false, canRequestMoreInfo: false, canReject: false, canMarkDuplicate: false, canConvert: false },
+  }
+  const reads: string[] = []
+  const requestIntake: RequestIntakeClient = {
+    listForms: unsupported,
+    listCurrentPublishedFormVersions: unsupported,
+    getForm: unsupported,
+    createForm: unsupported,
+    updateForm: unsupported,
+    publishForm: unsupported,
+    resolveLink: unsupported,
+    getPublicForm: unsupported,
+    createAttachmentUpload: unsupported,
+    submit: unsupported,
+    listSubmissions: unsupported,
+    getSubmission: unsupported,
+    applyAction: unsupported,
+    completeConversion: unsupported,
+    getRequesterThread: unsupported,
+    replyToThread: unsupported,
+    listRequesterSubmissions: unsupported,
+    getRequesterSubmission: async (_workspaceId, userKey, submissionId) => {
+      reads.push(`${userKey}:${submissionId}`)
+      if (userKey === 'demo@example.com' && submissionId === ownSubmission.id) return ownSubmission
+      throw new RequestIntakeError(404, 'RequestSubmissionNotFound', 'Request submission was not found.')
+    },
+    replyAsRequester: unsupported,
+    ingestEmail: unsupported,
+    createAttachmentAccess: unsupported,
+  }
+  /**
+   * Builds one stored requester notification for the demo member.
+   *
+   * @param id - Notification ID.
+   * @param submissionId - Request the notification is about.
+   * @param reasons - Why the member was notified.
+   * @returns The notification row as the projection stores it.
+   */
+  const requesterNotification = (id: string, submissionId: string | undefined, reasons = ['requester']) => createNotificationItem({
+    id,
+    eventType: 'request.requester.rejected',
+    entityId: submissionId,
+    reasons,
+    title: 'IT request',
+    deepLink: `/my-requests?requestId=${submissionId ?? ''}`,
+    teamId: undefined,
+    projectId: undefined,
+    issueId: undefined,
+  })
+  const own = requesterNotification('requester-own', 'req-own')
+  const other = requesterNotification('requester-other', 'req-other')
+  const wrongReason = requesterNotification('requester-wrong-reason', 'req-own', ['automation'])
+  const missingEntity = requesterNotification('requester-missing-entity', undefined)
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const probe = createNotificationVisibilityProbe([own, other, wrongReason, missingEntity])
+  setTestAppDependencies({ requestIntake, notifications: probe.client })
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [own.id, true],
+    [other.id, false],
+    [wrongReason.id, false],
+    [missingEntity.id, false],
+  ]))
+  expect(reads).toEqual(['demo@example.com:req-own', 'demo@example.com:req-other'])
 })
