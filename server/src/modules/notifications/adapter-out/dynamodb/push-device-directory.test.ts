@@ -63,9 +63,14 @@ describe('DynamoDbPushSubscriptionStore devices for delivery', () => {
     expect(query instanceof QueryCommand && query.input.ConsistentRead).toBe(true)
   })
 
-  test('fails closed on a row whose ID does not match its endpoint', async () => {
+  test('fails closed on a row whose ID does not match its endpoint or whose expiry is missing or malformed', async () => {
     const corrupt = { ...row('a'), subscriptionId: 'other' }
     await expect(store([corrupt], {}).directory.listDevices('ws-1', 'ada', now, AbortSignal.timeout(5_000))).rejects.toThrow('invalid')
+    for (const expiresAt of [undefined, '2000000000', 1.5, Number.NaN]) {
+      const unbounded = { ...row('b'), expiresAt }
+      await expect(store([unbounded], { [unbounded.subscriptionId]: owner }).directory.listDevices('ws-1', 'ada', now, AbortSignal.timeout(5_000)))
+        .rejects.toThrow('invalid')
+    }
   })
 
   test('deletes only the exact registration that was sent to', async () => {

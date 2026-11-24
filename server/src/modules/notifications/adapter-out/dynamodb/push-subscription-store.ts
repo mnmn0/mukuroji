@@ -309,7 +309,11 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore, Pus
       }), { abortSignal: signal })
       for (const item of result.Items ?? []) {
         const { subscriptionId, endpoint, p256dh, auth, updatedAt, expiresAt } = item
-        if (typeof expiresAt === 'number' && expiresAt <= nowSeconds) continue
+        // A row whose retention cannot be established fails closed instead of being sent to.
+        if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) {
+          throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
+        }
+        if (expiresAt <= nowSeconds) continue
         if (
           typeof subscriptionId !== 'string' || typeof endpoint !== 'string' || typeof p256dh !== 'string' ||
           typeof auth !== 'string' || typeof updatedAt !== 'string' || createPushSubscriptionId(endpoint) !== subscriptionId
