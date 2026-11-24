@@ -26,8 +26,26 @@ describe('automation rule definition draft', () => {
       expectedRevision: rule.revision,
       name: rule.name,
       conditions: rule.conditions,
-      actions: rule.actions,
     })
+    const edited = { ...draft, actions: [...draft.actions, createEmptyAutomationRuleActionDraft('webhook', rule.name)] }
+    expect(createAutomationRuleDraftUpdate(rule, edited).actions).toEqual([
+      ...rule.actions,
+      { type: 'webhook', url: '' },
+    ])
+  })
+
+  test('leaves unchanged create actions out so their pinned template version stays', () => {
+    const pinned: AutomationRule = {
+      ...rule,
+      actions: [{ type: 'create', templateId: 'template-1', templateVersion: 3 }],
+    }
+    const draft = createAutomationRuleDraft(pinned)
+
+    expect(createAutomationRuleDraftUpdate(pinned, draft).actions).toBeUndefined()
+    expect(createAutomationRuleDraftUpdate(pinned, {
+      ...draft,
+      actions: [{ type: 'create', templateId: 'template-2' }],
+    }).actions).toEqual([{ type: 'create', templateId: 'template-2' }])
   })
 
   test('saves rows matched by any condition as one any group', () => {

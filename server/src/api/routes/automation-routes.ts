@@ -188,6 +188,7 @@ import {
 } from '../shared/search-access'
 import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
+  loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
@@ -2868,12 +2869,9 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const teamId = requireAutomationDryRunText(body.teamId, 'Team ID')
       const workItemId = requireAutomationDryRunText(body.workItemId, 'Work Item ID')
       await requireAutomationTeam(principal.directoryId, teamId)
-      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
-        principal.directoryId,
-        teamId,
-        workItemId,
-        { consistentIssueRead: true, includeEvents: false },
-      )
+      // Workspace administration does not grant every Project, so the dry run reads the Work Item
+      // only when the administrator could view it; otherwise its values would leak through the plan.
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
       // A JSON round trip drops unset fields, as the stored event snapshot does.
       const workItem: unknown = JSON.parse(JSON.stringify(detail.issue))
       if (!isAutomationValueRecord(workItem)) {

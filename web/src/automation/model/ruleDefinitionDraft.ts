@@ -296,12 +296,46 @@ export function createAutomationRuleDraftUpdate(
   rule: AutomationRule,
   draft: AutomationRuleDraft,
 ): UpdateAutomationRuleInput {
+  const actions = createAutomationRuleDraftActions(draft)
   return {
     expectedRevision: rule.revision,
     name: draft.name.trim(),
     conditions: createAutomationRuleDraftConditions(draft),
-    actions: createAutomationRuleDraftActions(draft),
+    // Sending actions makes the server pin create actions to the current template version, so
+    // unchanged actions are left out and keep the version they were saved with.
+    ...(canonicalJson(actions) === canonicalJson(rule.actions.map(withoutPinnedTemplateVersion))
+      ? {}
+      : { actions }),
   }
+}
+
+/**
+ * Serializes a JSON-compatible value with object keys in a fixed order.
+ *
+ * @param value - Value to serialize.
+ * @returns A string equal for equal values regardless of key order.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([first], [second]) => first.localeCompare(second))
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/**
+ * Drops the template version the server pinned, which the editor never sends.
+ *
+ * @param action - Saved action.
+ * @returns The action as the editor would rebuild it.
+ */
+function withoutPinnedTemplateVersion(action: AutomationAction): AutomationAction {
+  if (action.type !== 'create' || action.templateVersion === undefined) return action
+  const { templateVersion: _pinned, ...rest } = action
+  return rest
 }
 
 /**

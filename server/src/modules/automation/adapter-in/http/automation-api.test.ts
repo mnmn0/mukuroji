@@ -5543,6 +5543,16 @@ test('dry-runs an unsaved rule against a Work Item without running actions', asy
     body: JSON.stringify({ rule, teamId: 'removed-team', workItemId: 'onboarding-friction' }),
   })
   expect(removedTeam.status).toBe(409)
+
+  // Workspace administration alone does not reveal a Work Item of a Project the admin cannot view.
+  configureFakeProjectClients(false)
+  const hidden = await app.request('/api/automation/rule-dry-runs', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rule, teamId: 'core-team', workItemId: 'onboarding-friction' }),
+  })
+  expect(hidden.status).toBe(403)
+  expect(JSON.stringify(await hidden.json())).not.toContain('high')
 })
 
 test('keeps rule definition changes and dry runs to Workspace administrators', async () => {
