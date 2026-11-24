@@ -1,4 +1,5 @@
 import type { CapacityPlanningGranularity, ResourceAssignment, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
+import { Link } from 'react-router'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
 /** Props for the Team workload heatmap. */
@@ -21,6 +22,8 @@ export type TeamWorkloadViewProps = {
   onMoveAssignment?: (assignmentId: string, memberId: string, targetDate: string) => void
   /** Whether an assignment mutation is currently in flight. */
   isAssignmentMutationPending?: boolean
+  /** Path of the workload view across Teams, linked from the heading when given. */
+  crossTeamPath?: string
 }
 
 /** Renders a capacity-aware workload heatmap with an accessible tabular fallback. */
@@ -32,13 +35,14 @@ export function TeamWorkloadView({
   onRetry,
   onMoveAssignment,
   isAssignmentMutationPending = false,
+  crossTeamPath,
   snapshot,
   t,
 }: TeamWorkloadViewProps) {
   const members = snapshot?.members ?? []
   const totalCapacity = members.reduce((sum, member) => sum + member.capacityMinutes, 0)
   const totalAllocated = members.reduce((sum, member) => sum + member.allocatedMinutes, 0)
-  const overloaded = members.filter((member) => member.overloaded).length
+  const overloaded = members.filter((member) => member.overloaded || member.workspaceOverloaded === true).length
   const totalRemaining = members.reduce((sum, member) => sum + member.remainingEffortMinutes, 0)
   const cells = members[0]?.cells ?? []
 
@@ -55,6 +59,11 @@ export function TeamWorkloadView({
           <p className="mt-1 max-w-2xl text-sm font-medium leading-6 text-[var(--workbench-muted)]">
             {t('workload.description')}
           </p>
+          {crossTeamPath ? (
+            <Link className="mt-2 inline-block text-sm font-bold text-[var(--workbench-primary-text)] underline" to={crossTeamPath}>
+              {t('workload.crossTeam.link')}
+            </Link>
+          ) : null}
         </div>
         <fieldset className="flex rounded-lg border border-slate-200 bg-surface p-1">
           <legend className="sr-only">{t('workload.granularity.label')}</legend>
@@ -139,7 +148,7 @@ export function TeamWorkloadView({
                   <tr className="border-b border-slate-100 last:border-b-0" key={member.memberId}>
                     <th className="sticky left-0 z-10 bg-surface px-4 py-3" scope="row">
                       <span className="block truncate text-sm font-bold text-fg-0d1833">{member.displayName ?? member.memberId}</span>
-                      <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.timeZone}</span>
+                      <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.effectiveTimeZone ?? member.timeZone}</span>
                     </th>
                     {member.cells.map((cell) => (
                       <td
@@ -159,6 +168,11 @@ export function TeamWorkloadView({
                           <span className="mt-1 block text-[11px] font-semibold text-fg-526381">
                             {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                           </span>
+                          {isOverOnlyWithOtherTeams(cell) ? (
+                            <span className="mt-1 block text-[10px] font-bold text-fg-9f3f3f" data-testid="workload-cross-team-over">
+                              {t('workload.crossTeam.over')}
+                            </span>
+                          ) : null}
                           {onMoveAssignment ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
@@ -235,9 +249,19 @@ function Legend({ color, label }: { color: string; label: string }) {
   return <span className="inline-flex items-center gap-1.5"><span className={`h-2.5 w-2.5 rounded-sm ${color}`} aria-hidden="true" />{label}</span>
 }
 
-/** Returns the heatmap surface for one workload cell. */
+/**
+ * Tells whether a cell is within this Team's capacity but over once other Teams' assignments count.
+ *
+ * @param cell - Team view cell.
+ * @returns Whether only the Workspace-wide totals are over.
+ */
+function isOverOnlyWithOtherTeams(cell: WorkloadCell): boolean {
+  return cell.workspaceStatus === 'over' && cell.status !== 'over'
+}
+
+/** Returns the heatmap surface for one workload cell; a cell over across Teams shows as over. */
 function cellClass(cell: WorkloadCell): string {
-  if (cell.status === 'over') return 'border border-tone-efb3b3 bg-tone-fff0f0'
+  if (cell.status === 'over' || cell.workspaceStatus === 'over') return 'border border-tone-efb3b3 bg-tone-fff0f0'
   if (cell.status === 'balanced') return 'border border-tone-f1d18b bg-tone-fff8e6'
   if (cell.status === 'unavailable') return 'border border-slate-100 bg-slate-50'
   return 'border border-tone-a7d8d2 bg-tone-edf9f7'
@@ -265,7 +289,12 @@ function formatMinutes(minutes: number): string {
 
 /** Creates an accessible cell summary. */
 function formatCellTitle(cell: WorkloadCell, t: (key: MessageKey) => string): string {
-  return `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')} · ${cell.utilizationPercent}%`
+  const team = `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')} · ${cell.utilizationPercent}%`
+  if (cell.workspaceAllocatedMinutes === undefined || cell.workspaceCapacityMinutes === undefined) return team
+  const workspace = t('workload.crossTeam.title')
+    .replace('{allocated}', formatMinutes(cell.workspaceAllocatedMinutes))
+    .replace('{capacity}', formatMinutes(cell.workspaceCapacityMinutes))
+  return `${team} · ${workspace}`
 }
 
 /** Checks whether an assignment intersects a displayed member and date bucket. */

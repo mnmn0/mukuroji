@@ -795,6 +795,6 @@
         }
       }
     ],
-    "timeToLiveAttribute": null
+    "timeToLiveAttribute": "usageExpiresAt"
   }
 ]

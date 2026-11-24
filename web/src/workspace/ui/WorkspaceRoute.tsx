@@ -31,6 +31,7 @@ import {
 } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
 import { AiActivityProvider } from '../../features/ai-assistance/ui/AiActivityProvider'
+import { WorkItemKeyPrefixesProvider } from '../../issues/queries/WorkItemKeyPrefixesProvider'
 import { AiActivityLauncher } from '../../features/ai-assistance/ui/AiActivityLauncher'
 
 /** Header and sidebar metadata owned by one authenticated workspace route. */
@@ -102,6 +103,11 @@ const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'workspace.myTasks.eyebrow',
   titleKey: 'workspace.myTasks.title',
   descriptionKey: 'workspace.myTasks.description',
+}
+const workspaceWorkloadRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'workspaceWorkload.eyebrow',
+  titleKey: 'workspaceWorkload.title',
+  descriptionKey: 'workspaceWorkload.description',
 }
 const workItemsRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'work-items',
@@ -302,6 +308,7 @@ export function WorkspaceRoute() {
 
   return (
     <AiActivityProvider fallbackFocusRef={activityFallbackFocusRef} key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
+    <WorkItemKeyPrefixesProvider accessToken={workspace.accessToken}>
     <WorkspaceSidebarProvider controller={sidebarController}>
       <WorkspaceRouteShell
         activityFallbackFocusRef={activityFallbackFocusRef}
@@ -310,6 +317,7 @@ export function WorkspaceRoute() {
         openMobileSidebar={openMobileSidebar}
       />
     </WorkspaceSidebarProvider>
+    </WorkItemKeyPrefixesProvider>
     </AiActivityProvider>
   )
 }
@@ -753,6 +761,8 @@ function resolveWorkspaceRouteMetadata(
   if (matchPath('/my-tasks', pathname)) {
     return myTasksRouteMetadata
   }
+
+  if (matchPath('/workload', pathname)) return workspaceWorkloadRouteMetadata
 
   if (matchPath('/work-items', pathname)) {
     return workItemsRouteMetadata

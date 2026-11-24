@@ -85,14 +85,19 @@ export function createDefaultTaskScheduleCalendarPolicy(): WorkItemScheduleCalen
  *   fails. National holiday dates the server sent are used; older servers send none, and then the
  *   bundled national holidays are used.
  * @returns The Workspace time zone with the Workspace working weekdays and days off (company
- *   holidays and, when the Workspace uses them, national holidays), or the default
- *   Monday-to-Friday policy without holidays when no settings are available.
+ *   holidays and, when the Workspace uses them, national holidays). Without settings it is the
+ *   Monday-to-Friday policy without holidays, still marked as following the shared calendar, so a
+ *   Work Item created before the settings load takes its Team or Project calendar on the server.
  */
 export function createWorkspaceTaskScheduleCalendarPolicy(
   settings: WorkspaceCalendarSettingsResponse | undefined,
 ): WorkItemScheduleCalendarPolicy {
-  if (!settings) return createDefaultTaskScheduleCalendarPolicy()
-  return createWorkspaceWorkItemCalendarPolicy(settings, settings.nationalHolidayDates)
+  if (!settings) return { ...createDefaultTaskScheduleCalendarPolicy(), calendarSource: 'shared' }
+  // The Work Item follows the shared calendar; the server applies its Team and Project calendars.
+  return {
+    ...createWorkspaceWorkItemCalendarPolicy(settings, settings.nationalHolidayDates),
+    calendarSource: 'shared',
+  }
 }
 
 /**
@@ -656,11 +661,7 @@ export function replaceTaskDeadlineSchedule(
     throw new RangeError('Range tasks and milestones require mode-specific schedule edits.')
   }
 
-  const calendarPolicy = {
-    holidays: [...schedule.calendarPolicy.holidays],
-    timeZone: schedule.calendarPolicy.timeZone,
-    workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
-  }
+  const calendarPolicy = cloneTaskScheduleCalendarPolicy(schedule.calendarPolicy)
   const effort = createPlannedEffortFields(schedule.plannedEffortMinutes)
   const normalizedDueDate = dueDate.trim()
   return normalizedDueDate
@@ -687,11 +688,7 @@ export function unscheduleTaskSchedule(
   schedule: WorkItemSchedule,
 ): UnscheduledWorkItemSchedule {
   return {
-    calendarPolicy: {
-      holidays: [...schedule.calendarPolicy.holidays],
-      timeZone: schedule.calendarPolicy.timeZone,
-      workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
-    },
+    calendarPolicy: cloneTaskScheduleCalendarPolicy(schedule.calendarPolicy),
     mode: 'unscheduled',
     ...createPlannedEffortFields(schedule.plannedEffortMinutes),
   }
@@ -834,4 +831,24 @@ function normalizeTimelinePadding(paddingDays: number): number {
     throw new RangeError('Timeline padding must be a non-negative safe integer.')
   }
   return paddingDays
+}
+
+/**
+ * Copies a calendar policy for a schedule edit, keeping whether it follows the shared calendar.
+ *
+ * Dropping `calendarSource` would turn a Work Item that follows its Team or Project calendar into
+ * one with its own rules on an ordinary edit (ADR 0058).
+ *
+ * @param policy - Policy to copy.
+ * @returns A detached policy with copied weekday and holiday arrays.
+ */
+export function cloneTaskScheduleCalendarPolicy(
+  policy: WorkItemScheduleCalendarPolicy,
+): WorkItemScheduleCalendarPolicy {
+  return {
+    holidays: [...policy.holidays],
+    timeZone: policy.timeZone,
+    workingWeekdays: [...policy.workingWeekdays],
+    ...(policy.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
+  }
 }

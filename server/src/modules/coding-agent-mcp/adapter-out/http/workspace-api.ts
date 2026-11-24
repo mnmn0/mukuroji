@@ -147,5 +147,21 @@ export function createWorkspaceApi(
         teamId: id(teamId, 'teamId'), cursor, limit,
       })
     },
+    /** Creates a Work Item with `POST work-items` and checks its Team; see {@link WorkspaceApi.createIssue}. */
+    async createIssue(input, key) {
+      return scoped(await request('work-items', taskSchema, 'POST', { ...input, teamId: id(input.teamId, 'teamId') }, key), input.teamId)
+    },
+    /** Updates a Work Item with `PATCH` and checks its Team and ID; see {@link WorkspaceApi.updateIssue}. */
+    async updateIssue(teamId, workItemId, input, key) {
+      return scoped(await request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}`, taskSchema, 'PATCH', input, key, {
+        teamId: id(teamId, 'teamId'),
+      }), teamId, workItemId)
+    },
+    /** Adds a comment to a Work Item; see {@link WorkspaceApi.addComment}. */
+    addComment(teamId, workItemId, body, key) {
+      return request(`work-items/${encodeURIComponent(id(workItemId, 'id'))}/comments`, commentSchema, 'POST', { body }, key, {
+        teamId: id(teamId, 'teamId'),
+      })
+    },
   }
 }

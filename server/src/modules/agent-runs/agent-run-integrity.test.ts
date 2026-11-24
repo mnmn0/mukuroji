@@ -368,6 +368,9 @@ describe('runAgentRunsIntegrityCheck', () => {
       [partition]: healthyRows(),
       [other]: [{ directoryTeamId: other, recordKey: 'agent-settings' }],
       'agent-run-triage-sweep': [{ directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' }],
+      // Agent usage rows and export receipts belong to members and are not Team partitions.
+      'workspace-1#agent-usage#member#demo@example.com': [{ directoryTeamId: 'workspace-1#agent-usage#member#demo@example.com', recordKey: 'bucket' }],
+      'workspace-1#agent-usage-batch#member#demo@example.com': [{ directoryTeamId: 'workspace-1#agent-usage-batch#member#demo@example.com', recordKey: 'batch#0' }],
     })
     const evidence = await runAgentRunsIntegrityCheck({ client, tableName: 'agent-runs', bounds, correlationId: 'corr-1', now })
     expect(evidence).toMatchObject({

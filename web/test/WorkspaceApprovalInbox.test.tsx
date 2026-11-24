@@ -310,7 +310,7 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('href="/focus?section=next"')
     const focusLink = html.match(/<a[^>]*data-testid="workspace-home-focus-now"[^>]*>([\s\S]*?)<\/a>/)
     expect(focusLink).not.toBeNull()
-    expect(focusLink?.[1].replace(/<[^>]*>/g, '')).toBe('Open Focus')
+    expect(focusLink?.[1].split(/<[^>]*>/u).join('')).toBe('Open Focus')
   })
 
   test('keeps complete Home Focus emptiness distinct from unavailable data', () => {

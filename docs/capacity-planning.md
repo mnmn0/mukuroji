@@ -6,6 +6,8 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 `WorkloadMemberProfile` は IANA `timeZone`、曜日ごとの working minutes、holiday、time off、skills、role を保持します。`fromDate` / `toDate` は member の local calendar date です。
 
+`calendarSource: "workspace"` の profile は Workspace カレンダー（#337）を継承します。計算の前に、`timeZone` を Workspace の time zone に、Workspace が稼働しない曜日を disabled に置き換え、Workspace の休日（会社の休日と、使う設定なら日本の祝日）を profile の holiday に足します。profile 側の曜日 schedule は個人の勤務時間と勤務しない曜日、holiday は個人の休みとして残ります。Workspace カレンダーは新しい Work Item の calendar policy と同じもの（`readWorkspaceWorkItemCalendarPolicy`）を使います。`calendarSource` が無い profile（継承の導入前に保存したもの）と `"custom"` は、profile 自身の time zone・schedule・holiday だけを使います。`PUT .../profiles/:memberId` で `calendarSource` を省くと、今の設定を保ちます（新しい profile は `"custom"`）。Web の稼働プロファイルは新しい profile を `"workspace"` で作ります。snapshot の member summary は編集用に保存値（継承前の time zone・schedule・holiday）と `calendarSource` を返し、cell の capacity は継承後の値です。
+
 1. 曜日の schedule が disabled なら capacity は 0 です。
 2. holiday はその日の capacity を 0 にします。
 3. canceled ではない time off は `minutesPerDay`（省略時は scheduled minutes）を差し引き、capacity が負にならないよう 0 にします。
@@ -23,7 +25,7 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 - `varianceMinutes`: `capacityMinutes - allocatedMinutes`。
 - `status`: capacity が 0 で demand がなければ `unavailable`、差が負なら `over`、0 なら `balanced`、正なら `under` です。
 
-日次 cell を Monday-first の week、または calendar month に集約できます。member ごとに timezone が異なっても availability は member の local date で再現されます。
+日次 cell を Workspace の「週の開始曜日」から始まる week（未設定なら月曜始まり）、または calendar month に集約できます。member ごとに timezone が異なっても availability は member の local date で再現されます。
 
 ## Resource requests and assignments
 
@@ -42,9 +44,22 @@ Team member 画面では、稼働プロファイル、time off、resource reques
 - confidential assignment / request は Team manager と assignment の本人だけが内容を見られます。非許可 viewer には行を返さず、snapshot の `redactedAssignmentCount` / `redactedRequestCount` だけを返します。
 - guest は workload API の Team access を持たず、capacity planning の mutation は実行できません。
 
+## Workspace-wide totals
+
+A member can have a profile and assignments in several Teams. Every Team view cell also carries the member's Workspace-wide totals, and `GET /api/workload` lists them for every member the caller may see across Teams ([ADR 0068](adr/0068-workspace-workload-across-teams.md)).
+
+- `workspaceCapacityMinutes`: on each local date, the smallest capacity any of the member's Team profiles gives (after the Workspace calendar for inheriting profiles), so time off or a day off saved in one Team lowers the capacity everywhere.
+- `workspaceAllocatedMinutes`: the allocation of every non-canceled assignment of the member in every Team, spread the way its own Team spreads it (over the dates that Team's profile makes available). It includes confidential assignments and assignments in Teams the viewer cannot see, as totals only.
+- `workspaceStatus` uses the same rule as `status` on those totals, and the member's `workspaceOverloaded` is true when any cell is `over`. The Web colors a Team view cell as over and shows Workspace 全体では超過 when only the Workspace totals are over. The label does not name the cause: the Workspace totals also count confidential and other hidden allocation in the same Team.
+
+`GET /api/workload?from&to&granularity` reads every Team record of the Workspace partition with a Query, sending the next Query from `LastEvaluatedKey` while one is returned (each Query returns at most 1 MB). It includes the Teams the caller may view (`teams.read` / Project viewer, as for the Team route; Workspace guests are denied) and, in each, the members that Team's workload visibility allows; Workspace owners / admins see every Team and member. Each cell returns the Workspace-wide capacity and total allocation, the allocation per viewable Team and per Project (`projects[].projectId` absent for Team-wide work), and `hiddenAllocatedMinutes`: allocation the caller may not see in detail, which is confidential assignments they are not allowed to see, Projects they cannot view, Teams they cannot view, and Teams whose member visibility leaves the member out. Archived Teams keep their record but count in no total, here or in the Team view's Workspace-wide fields. Actual time is not part of this view; each Team view still reports it. When a member's profiles use different time zones, each Team's dates are compared as local dates without conversion.
+
+Changing an assignment still happens in its own Team. Assigning a member of another Team, and moving the storage from one record per Team to rows per member and period, are not implemented: one Team record stays within the 350 KB budget for the expected Workspace size (about 50 members), and the Workspace view reads all of them by paging through the partition.
+
 ## HTTP surface
 
 - `GET /api/teams/:teamId/workload?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month`
+- `GET /api/workload?from=YYYY-MM-DD&to=YYYY-MM-DD&granularity=day|week|month`
 - `PUT /api/teams/:teamId/workload/profiles/:memberId`
 - `PUT /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId`
 - `POST /api/teams/:teamId/workload/requests`

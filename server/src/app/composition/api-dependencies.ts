@@ -19,6 +19,9 @@ import {
 import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ZONE,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
 } from '@mukuroji/contracts'
@@ -132,7 +135,12 @@ import {
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
-import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
+import {
+  DynamoDbAgentRunStore,
+  DynamoDbAgentRunUsageStore,
+  InMemoryAgentRunStore,
+  InMemoryAgentRunUsageStore,
+} from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -164,6 +172,10 @@ import {
   InMemoryTeamPortfolioSnapshotStore,
 } from '../../modules/portfolio-dashboard'
 import {
+  DynamoDbCycleScheduleBaselineStore,
+  InMemoryCycleScheduleBaselineStore,
+} from '../../modules/planning'
+import {
   DynamoDbProjectScheduleBaselineStore,
   DynamoDbTeamIssuesClient,
   InMemoryProjectScheduleBaselineStore,
@@ -180,9 +192,12 @@ import {
   normalizeProjectMemberKey,
 } from '../../modules/directory'
 import {
+  DynamoDbWorkCalendarStore,
+  InMemoryWorkCalendarStore,
   createProductionTenantExportDownloadClient,
   type TenantLifecycleEnforcement,
 } from '../../modules/tenant-administration'
+import { loadServerDynamoDbResourceConfig } from '../../infrastructure/config/server-resource-config'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import {
   TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
@@ -197,6 +212,7 @@ import {
   DynamoDbTimeTrackingRepository,
   InMemoryTimeTrackingRepository,
   TimeTrackingService,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
 import {
@@ -360,9 +376,13 @@ export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
  * Creates the configured durable time tracking service.
  *
  * @param idempotency - Optional shared receipt store used for mutation replay.
+ * @param categories - Optional Workspace work category reader; the built-in categories when omitted.
  * @returns A configured time tracking service.
  */
-export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyPort): TimeTrackingService {
+export function createTimeTrackingService(
+  idempotency?: TimeTrackingIdempotencyPort,
+  categories?: TimeTrackingCategorySource,
+): TimeTrackingService {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
   const tableName = config.environment.ANALYTICS_TABLE_NAME
@@ -384,6 +404,7 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
         retentionDays: getConfiguredAuditRetentionDays(),
       },
       ...(idempotency ? { idempotency } : {}),
+      ...(categories ? { categories } : {}),
       estimates: {
         async listPlannedEffort(workspaceId, teamId) {
           // Archived Work Items keep their estimate, because their recorded time still counts in reports.
@@ -578,6 +599,10 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
     nationalHolidays: createProductionJapanesePublicHolidayDates(),
+    workCalendars: new DynamoDbWorkCalendarStore(
+      loadServerDynamoDbResourceConfig().tenantAdministrationTableName,
+      createDynamoDbDocumentClient(createDynamoDbClient()),
+    ),
     tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantLifecycleEnforcement: tenantAdministration,
   }
@@ -620,6 +645,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
+    agentRunUsage: new DynamoDbAgentRunUsageStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
     focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
@@ -651,6 +680,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       getConfiguredAuditTableName(),
     ),
     portfolioSnapshots: new DynamoDbTeamPortfolioSnapshotStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+    ),
+    cycleScheduleBaselines: new DynamoDbCycleScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
@@ -1808,13 +1842,25 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  */
 export function createProductionAppDependencies(): AppDependencies {
   const developerPlatform = createProductionDeveloperPlatformDependencies()
+  const workspace = createProductionWorkspaceDependencies()
   const timeTrackingService = createTimeTrackingService(
     createTimeTrackingIdempotencyPort(
       developerPlatform.idempotency,
       developerPlatform.transactions,
     ),
+    {
+      // Only a missing profile means the defaults; any other read failure propagates.
+      readCategories: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.timeEntryCategories ??
+          DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readTimeZone: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.timeZone ??
+          DEFAULT_WORKSPACE_TIME_ZONE,
+      readWeekStartDay: async (workspaceId) =>
+        (await workspace.tenantAdministration.getProfile(workspaceId))?.calendar?.weekStartDay ??
+          DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+    },
   )
-  const workspace = createProductionWorkspaceDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
@@ -1905,6 +1951,9 @@ export function createTestAppDependencies(): AppDependencies {
       tenantAdministration,
       // Tests have no synced list, so the bundled national holidays are used.
       nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
+      // Test authorization does not change during a request, so every fence holds; tests of a
+      // revoked fence build their own store.
+      workCalendars: new InMemoryWorkCalendarStore(() => true),
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },
@@ -1918,12 +1967,14 @@ export function createTestAppDependencies(): AppDependencies {
       weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       portfolioSnapshots: new InMemoryTeamPortfolioSnapshotStore(),
+      cycleScheduleBaselines: new InMemoryCycleScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
+      agentRunUsage: new InMemoryAgentRunUsageStore(),
       requestIntake,
     },
     automation,
@@ -2029,6 +2080,7 @@ export function overrideAppDependencies(
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
+      ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }
@@ -2050,6 +2102,7 @@ export function overrideAppDependencies(
       ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.portfolioSnapshots ? { portfolioSnapshots: overrides.portfolioSnapshots } : {}),
+      ...(overrides.cycleScheduleBaselines ? { cycleScheduleBaselines: overrides.cycleScheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
       ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),

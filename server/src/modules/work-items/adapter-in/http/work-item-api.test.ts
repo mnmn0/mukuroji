@@ -3016,6 +3016,42 @@ test.each([
   })
 })
 
+test('lists only the key prefixes of Teams the caller can read', async () => {
+  configureFakeProjectClients(true, {
+    workItemKeyPrefixes: [
+      { keyPrefix: 'CT', teamId: 'core-team' },
+      { keyPrefix: 'CT2', teamId: 'core-team' },
+      { keyPrefix: 'HID', teamId: 'hidden-team' },
+    ],
+  })
+
+  const response = await app.request('/api/work-items/key-prefixes', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ prefixes: ['CT', 'CT2'] })
+})
+
+test('lists no key prefixes for a caller without Team access', async () => {
+  configureFakeProjectClients(false, {
+    workItemKeyPrefixes: [{ keyPrefix: 'CT', teamId: 'core-team' }],
+  })
+
+  const response = await app.request('/api/work-items/key-prefixes', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ prefixes: [] })
+})
+
+test('requires a bearer token to list Work Item key prefixes', async () => {
+  configureFakeProjectClients(true)
+
+  expect((await app.request('/api/work-items/key-prefixes')).status).toBe(401)
+})
+
 test('requires a bearer token to resolve a Work Item key', async () => {
   configureFakeProjectClients(true)
 

@@ -49,6 +49,7 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
@@ -99,6 +100,7 @@ import {
   type TeamIssueScreenProps,
   type TeamIssueTypeChangeState,
 } from './teamIssueScreenShared'
+import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /**
  * Renders the detail pane for the selected Team Work Item.
@@ -363,6 +365,13 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const riskPromotion = usePromoteProjectRisk({
+    accessToken,
+    teamId: issue.teamId,
+    projectId: issue.assignedProjectId,
+    workItemId: issue.id,
+  })
+  const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
@@ -875,7 +884,7 @@ function IssueDetailContent({
   )
 
   // Keys written in the saved description, as links, because the description is edited as plain text.
-  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '').map((match) => match.key))]
+  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '', workItemKeyPrefixes).map((match) => match.key))]
     .filter((key) => key !== issue.key)
   /**
    * Lists the Work Item keys written in the saved description, each opening its key URL in a new tab.
@@ -1198,6 +1207,7 @@ function IssueDetailContent({
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
             renderCommentDetails={agentRunReports.renderCommentDetails}
+            {...(riskPromotion && !collaborationReadOnlyMessage ? { riskPromotion } : {})}
           />
           </>
         ) : null

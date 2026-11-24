@@ -87,6 +87,30 @@ export {
   InMemoryTransactionCanceledError,
 } from './adapter-out/in-memory/agent-run-store'
 export {
+  AgentTelemetryFormatError,
+  agentUsageRunBucketRange,
+  combineAgentRunUsage,
+  deriveAgentTelemetryBatchId,
+  formatUsageBucketStart,
+  groupAgentUsageBuckets,
+  isAgentUsageBucketInRun,
+  layoutAgentUsageBuckets,
+  parseAgentTelemetryLogs,
+  summarizeAgentUsage,
+  summarizeFactoryUsage,
+  type AgentRunUsageEntry,
+  type AgentUsageBucket,
+  type AgentUsageEvent,
+  type ParsedAgentTelemetry,
+} from './domain/agent-run-usage'
+export {
+  AGENT_USAGE_TTL_ATTRIBUTE,
+  DynamoDbAgentRunUsageStore,
+  type AgentRunUsageStore,
+  type AgentUsageBucketPage,
+} from './adapter-out/dynamodb/agent-run-usage-store'
+export { InMemoryAgentRunUsageStore } from './adapter-out/in-memory/agent-run-usage-store'
+export {
   AGENT_RUN_TRIAGE_FAILED_BATCH,
   AGENT_RUN_TRIAGE_MAX_TEAMS,
   AGENT_RUN_TRIAGE_STALLED_BATCH,

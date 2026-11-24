@@ -1,4 +1,4 @@
-import type { TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
+import type { AgentRunUsage, FactoryAnalyticsUsage, TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 import { useId } from 'react'
 import {
   FACTORY_ANALYTICS_PERIOD_DAYS,
@@ -26,6 +26,113 @@ export type FactoryAnalyticsSummaryProps = {
   labels: FactoryAnalyticsLabels
   /** Formats a number for the locale. */
   formatNumber: (value: number) => string
+  /** Project names by ID, for the usage per Project; an unknown ID shows as the ID. */
+  projectNames?: Readonly<Record<string, string>>
+}
+
+/** Props of the token usage part. */
+type UsageSummaryProps = {
+  /** Usage of the period. */
+  usage: FactoryAnalyticsUsage
+  /** Locale-aware text. */
+  labels: FactoryAnalyticsLabels
+  /** Project names by ID. */
+  projectNames: Readonly<Record<string, string>>
+}
+
+/**
+ * Adds the four token counts of a usage.
+ *
+ * @param usage - Usage.
+ * @returns Total tokens.
+ */
+function totalTokens(usage: AgentRunUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+}
+
+/**
+ * Shows the telemetry usage of the period: the total, the usage per Project, and the Work Items with
+ * the most tokens. Each row's bar is relative to the largest row of its list.
+ *
+ * @param props - Usage, text, and Project names.
+ * @returns Usage part.
+ */
+function UsageSummary({ usage, labels, projectNames }: UsageSummaryProps) {
+  const projectMax = Math.max(1, ...usage.projects.map((project) => totalTokens(project.usage)))
+  const workItemMax = Math.max(1, ...usage.workItems.map((item) => totalTokens(item.usage)))
+  const partial = usage.runsHasMore || usage.total.hasMore ||
+    usage.projects.some((project) => project.usage.hasMore) || usage.workItems.some((item) => item.usage.hasMore)
+  return (
+    <div className="flex flex-col gap-2" data-testid="factory-analytics-usage">
+      <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{labels.usageHeading}</h3>
+      <p className="text-xs text-[var(--workbench-muted)]">{labels.usageHint}</p>
+      {partial ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-fg-amber-800" role="note">{labels.usagePartial}</p>
+      ) : null}
+      <div className="flex flex-col gap-0.5 rounded-md border border-[var(--workbench-border)] px-3 py-2">
+        <span className="text-lg font-semibold tabular-nums text-[var(--workbench-text)]">{labels.formatUsageCompact(usage.total)}</span>
+        <span className="text-xs tabular-nums text-[var(--workbench-muted)]">{labels.formatUsageTokens(usage.total)}</span>
+        <span className="text-xs tabular-nums text-[var(--workbench-muted)]">{labels.formatUsageDetail(usage.total)}</span>
+      </div>
+      <div className="grid gap-3 min-[760px]:grid-cols-2">
+        <section className="flex min-w-0 flex-col gap-1">
+          <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.usageProjectsHeading}</h4>
+          <ul className="flex flex-col gap-1.5">
+            {usage.projects.map((project) => (
+              <UsageRow
+                key={project.projectId ?? ''}
+                labels={labels}
+                max={projectMax}
+                name={project.projectId === undefined ? labels.usageNoProject : projectNames[project.projectId] ?? project.projectId}
+                usage={project.usage}
+              />
+            ))}
+          </ul>
+        </section>
+        <section className="flex min-w-0 flex-col gap-1">
+          <h4 className="text-xs font-semibold text-[var(--workbench-muted)]">{labels.usageWorkItemsHeading}</h4>
+          <ol className="flex flex-col gap-1.5">
+            {usage.workItems.map((item) => (
+              <UsageRow key={item.workItemId} labels={labels} max={workItemMax} name={item.title} usage={item.usage} />
+            ))}
+          </ol>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+/** Props of one usage row. */
+type UsageRowProps = {
+  /** Project or Work Item name. */
+  name: string
+  /** Usage of the row. */
+  usage: AgentRunUsage
+  /** Largest total tokens in the row's list, for the bar width. */
+  max: number
+  /** Locale-aware text. */
+  labels: FactoryAnalyticsLabels
+}
+
+/**
+ * Shows the name, total tokens, and a relative bar of one Project or Work Item.
+ *
+ * @param props - Name, usage, list maximum, and text.
+ * @returns List item.
+ */
+function UsageRow({ name, usage, max, labels }: UsageRowProps) {
+  const width = Math.max(2, Math.round((totalTokens(usage) / max) * 100))
+  return (
+    <li className="flex min-w-0 flex-col gap-0.5" title={labels.formatUsageTokens(usage)}>
+      <div className="flex min-w-0 items-baseline justify-between gap-2 text-sm">
+        <span className="min-w-0 truncate text-[var(--workbench-text)]">{name}</span>
+        <span className="shrink-0 tabular-nums text-xs text-[var(--workbench-muted)]">{labels.formatUsageCompact(usage)}</span>
+      </div>
+      <div aria-hidden="true" className="h-1.5 rounded-full bg-[var(--workbench-surface-muted)]">
+        <div className="h-1.5 rounded-full bg-[var(--workbench-primary)]" style={{ width: `${width}%` }} />
+      </div>
+    </li>
+  )
 }
 
 /** Props of one headline figure. */
@@ -57,7 +164,7 @@ function Figure({ label, value, detail }: FigureProps) {
 /**
  * Shows the Factory analytics of a Team for a period above the board: success and rework rates,
  * interventions, finished runs, the median time runs spent in each station, and the same rates per
- * runtime. Missing rates show a dash instead of zero, and a notice says when the server left runs out.
+ * runtime, and the telemetry token usage when runs have it. Missing rates show a dash instead of zero, and a notice says when the server left runs out.
  *
  * @param props - Analytics, read state, period, and text.
  * @returns Analytics summary section.
@@ -71,6 +178,7 @@ export function FactoryAnalyticsSummary({
   onPeriodDaysChange,
   labels,
   formatNumber,
+  projectNames = {},
 }: FactoryAnalyticsSummaryProps) {
   const headingId = useId()
   const periodId = useId()
@@ -199,6 +307,8 @@ export function FactoryAnalyticsSummary({
                   </table>
                 </div>
               </div>
+
+              {analytics.usage ? <UsageSummary labels={labels} projectNames={projectNames} usage={analytics.usage} /> : null}
             </>
           )}
         </>

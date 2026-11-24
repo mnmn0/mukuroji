@@ -24,6 +24,7 @@ import {
 import { loadServerConfig } from '../infrastructure/config/server-config'
 import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
 import { createConfiguredWeeklyReportReminderRevalidator } from '../app/composition/weekly-report-reminders'
+import { createConfiguredPlanningMilestoneNotificationRevalidator } from '../app/composition/planning-milestone-notifications'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -44,6 +45,10 @@ const timesheetReminders = createConfiguredTimesheetReminderRevalidator(
 )
 
 const weeklyReportReminders = createConfiguredWeeklyReportReminderRevalidator(
+  readOptionalEnvironment('PLANNING_TABLE_NAME'),
+)
+
+const planningMilestones = createConfiguredPlanningMilestoneNotificationRevalidator(
   readOptionalEnvironment('PLANNING_TABLE_NAME'),
 )
 
@@ -160,6 +165,7 @@ export async function handler(event: DynamoStreamEvent) {
     realtime,
     ...(timesheetReminders ? { timesheetReminders } : {}),
     ...(weeklyReportReminders ? { weeklyReportReminders } : {}),
+    ...(planningMilestones ? { planningMilestones } : {}),
   })
 }
 
