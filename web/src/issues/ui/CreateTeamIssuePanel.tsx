@@ -62,6 +62,7 @@ export function CreateIssuePanel({
   locale,
   onApplyTemplate,
   onCancel,
+  onRetryTemplates,
   onSubmit,
   projects,
   t,
@@ -95,6 +96,8 @@ export function CreateIssuePanel({
   t: (key: MessageKey) => string
   /** Whether the Work Item templates could not be loaded. */
   templateLoadFailed?: boolean
+  /** Loads the Work Item templates again after a failed load. */
+  onRetryTemplates?: () => void
   /** Enabled Work Item templates of the Team. */
   templates?: readonly WorkItemTemplate[]
   /** Initial Work Item Type inherited from a Board column. */
@@ -241,6 +244,7 @@ export function CreateIssuePanel({
         {onApplyTemplate && !(duplicateDraft && !duplicateDraft.sourceTemplate) ? (
           <WorkItemTemplatePicker
             hasLoadError={templateLoadFailed}
+            onRetry={onRetryTemplates}
             onSelect={(template) => {
               const form = globalThis.document.getElementById(formId)
               const dueDate = form instanceof HTMLFormElement ? new FormData(form).get('dueDate') : null

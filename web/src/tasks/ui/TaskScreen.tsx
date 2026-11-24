@@ -3749,6 +3749,7 @@ export function TaskScreen({
                 }}
                 onDirtyChange={reportCreateTaskDirty}
                 templateLoadFailed={createTemplates.hasLoadError}
+                onRetryTemplates={createTemplates.retry}
                 templates={teamCreateTemplates}
                 onCancel={() => {
                   if (!confirmCreateTaskDiscard()) return

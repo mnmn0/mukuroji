@@ -49,6 +49,7 @@ export const issuesMessages = {
   'issues.template.help': 'Picking a template fills in its description, type, priority, custom fields, and acceptance criteria. It replaces what you have typed.',
   'issues.template.note': 'This draft starts from the template "{name}". Nothing is created until you save.',
   'issues.template.loadError': 'Could not load templates',
+  'issues.template.retry': 'Retry',
   'issues.key.label': 'Key',
   'issues.key.copy': 'Copy key',
   'issues.key.copyLink': 'Copy link',

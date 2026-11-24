@@ -108,6 +108,8 @@ export type CreateTaskPanelProps = {
   t: (key: MessageKey) => string
   /** Whether the Work Item templates could not be loaded. */
   templateLoadFailed?: boolean
+  /** Loads the Work Item templates again after a failed load. */
+  onRetryTemplates?: () => void
   /** Enabled Work Item templates of the destination Team. */
   templates?: readonly WorkItemTemplate[]
   /** Workspace members used by person custom fields. */
@@ -136,6 +138,7 @@ export function CreateTaskPanel({
   onApplyTemplate,
   onCancel,
   onDirtyChange,
+  onRetryTemplates,
   onSubmit,
   projectId,
   projectName,
@@ -480,8 +483,10 @@ export function CreateTaskPanel({
         </div>
         {onApplyTemplate && !(duplicateDraft && !duplicateDraft.sourceTemplate) ? (
           <WorkItemTemplatePicker
-            disabled={isSubmitPending || isSubmissionDisabled}
+            // A template's Work Item Type resolves against the Team configuration, so wait for it.
+            disabled={isSubmitPending || isSubmissionDisabled || !hasLoadedWorkItemConfiguration}
             hasLoadError={templateLoadFailed}
+            onRetry={onRetryTemplates}
             onSelect={(template) => {
               const form = formRef.current
               const formData = form ? new FormData(form) : undefined

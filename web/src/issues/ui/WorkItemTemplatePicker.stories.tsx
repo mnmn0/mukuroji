@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { AUTOMATION_SCHEMA_VERSION, createDefaultUnscheduledWorkItemSchedule } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { WorkItemTemplate } from '../model/workItemDuplicate'
@@ -59,7 +60,12 @@ export const Selected: Story = {
   args: { selectedTemplateId: 'release-check' },
 }
 
-/** The template list could not be loaded. */
+/** The template list could not be loaded; the member can load it again. */
 export const LoadError: Story = {
-  args: { hasLoadError: true, templates: [] },
+  args: { hasLoadError: true, onRetry: fn(), templates: [] },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '再読み込み' }))
+    await expect(args.onRetry).toHaveBeenCalledTimes(1)
+  },
 }

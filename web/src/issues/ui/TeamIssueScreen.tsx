@@ -1619,6 +1619,7 @@ export function TeamIssueScreen({
                       setCreateDuplicateDraft(template ? createWorkItemTemplateDraft(template) : undefined)
                     }}
                     templateLoadFailed={createTemplates.hasLoadError}
+                    onRetryTemplates={createTemplates.retry}
                     templates={teamCreateTemplates}
                     workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}

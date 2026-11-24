@@ -1961,6 +1961,41 @@ test('DynamoDB idempotent Work Item create conflicts when the contributor list d
   )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
 })
 
+test('DynamoDB idempotent Work Item create compares acceptance criteria by text only', async () => {
+  const client = createIdempotentReplayClient()
+  /**
+   * Builds the create body with the given acceptance criteria.
+   *
+   * @param criteria - Acceptance criteria for this attempt.
+   * @returns A create request bound to one caller-selected resource ID.
+   */
+  const body = (criteria: { id: string; text: string; satisfied: boolean }[]) => ({
+    ...createIdempotentContributorCreateBody([]),
+    acceptanceCriteria: criteria,
+  })
+  const created = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body([{ id: 'a'.repeat(32), text: 'Tests pass', satisfied: false }]),
+    'demo@example.com',
+  )
+
+  // A retry generates new criterion IDs, so only the texts identify the same request.
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body([{ id: 'b'.repeat(32), text: 'Tests pass', satisfied: false }]),
+    'demo@example.com',
+  )
+  expect(replay).toEqual(created)
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body([{ id: 'a'.repeat(32), text: 'Docs updated', satisfied: false }]),
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
 test('DynamoDB idempotent Work Item create replays a shared-calendar schedule after the calendar changed', async () => {
   const client = createIdempotentReplayClient()
   /**

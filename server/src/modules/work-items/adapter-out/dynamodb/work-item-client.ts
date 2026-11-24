@@ -2878,6 +2878,7 @@ export class DynamoDbTeamIssuesClient {
             { consistentIssueRead: true, includeEvents: false },
           ).catch(() => undefined)
           if (existing && isMatchingIdempotentWorkItemCreate(existing.issue, {
+            acceptanceCriteria,
             actorUserId,
             assigneeUserId,
             assignedProjectId,
@@ -5850,11 +5851,13 @@ export function readIdempotencyResourceId(value: unknown) {
  *
  * @param issue - Work Item already stored under the caller-selected resource ID.
  * @param expected - Normalized fields of the create request being retried.
- * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ * @returns Whether every logical create field, including contributors and acceptance criteria texts, matches
+ * the stored Work Item.
  */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
+    acceptanceCriteria: readonly WorkItemAcceptanceCriterion[]
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
@@ -5872,6 +5875,8 @@ function isMatchingIdempotentWorkItemCreate(
   },
 ) {
   return issue.creatorMemberKey === expected.actorUserId &&
+    // Criterion IDs are generated per attempt and `satisfied` changes after creation, so only the texts count.
+    acceptanceCriterionTextsEqual(issue.acceptanceCriteria ?? [], expected.acceptanceCriteria) &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
     contributorAssignmentListsLogicallyEqual(
@@ -5889,6 +5894,20 @@ function isMatchingIdempotentWorkItemCreate(
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares acceptance criteria lists by their texts in order.
+ *
+ * @param left - First acceptance criteria list.
+ * @param right - Second acceptance criteria list.
+ * @returns Whether both lists hold the same texts in the same order.
+ */
+function acceptanceCriterionTextsEqual(
+  left: readonly WorkItemAcceptanceCriterion[],
+  right: readonly WorkItemAcceptanceCriterion[],
+): boolean {
+  return left.length === right.length && left.every((criterion, index) => criterion.text === right[index]?.text)
 }
 
 /**

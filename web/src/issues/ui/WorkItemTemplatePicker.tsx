@@ -9,6 +9,8 @@ export type WorkItemTemplatePickerProps = {
   selectedTemplateId?: string
   /** Whether the list could not be loaded. */
   hasLoadError?: boolean
+  /** Loads the list again after a failed load; no retry button without it. */
+  onRetry?: () => void
   /** Whether the picker is disabled, such as while the form is saving. */
   disabled?: boolean
   /** Starts the draft from the picked template, or from an empty form when undefined. */
@@ -30,6 +32,7 @@ export type WorkItemTemplatePickerProps = {
 export function WorkItemTemplatePicker({
   disabled = false,
   hasLoadError = false,
+  onRetry,
   onSelect,
   selectedTemplateId,
   t,
@@ -38,9 +41,14 @@ export function WorkItemTemplatePicker({
 }: WorkItemTemplatePickerProps) {
   if (hasLoadError) {
     return (
-      <p className="text-xs font-semibold text-fg-amber-700" role="status">
-        {t('issues.template.loadError')}
-      </p>
+      <div className="flex flex-wrap items-center gap-2" role="status">
+        <p className="text-xs font-semibold text-fg-amber-700">{t('issues.template.loadError')}</p>
+        {onRetry ? (
+          <button className="workbench-button-secondary min-h-8 px-3 text-xs" onClick={onRetry} type="button">
+            {t('issues.template.retry')}
+          </button>
+        ) : null}
+      </div>
     )
   }
   if (templates.length === 0) return null

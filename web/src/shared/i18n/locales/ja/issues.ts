@@ -49,6 +49,7 @@ export const issuesMessages = {
   'issues.template.help': '選ぶと、テンプレートの説明・Type・優先度・custom field・受け入れ条件が入ります。入力中の内容は置き換わります。',
   'issues.template.note': 'テンプレート「{name}」の内容を下書きに入れました。保存するまで作成されません。',
   'issues.template.loadError': 'テンプレートを読み込めませんでした',
+  'issues.template.retry': '再読み込み',
   'issues.key.label': 'Key',
   'issues.key.copy': 'key をコピー',
   'issues.key.copyLink': 'link をコピー',
