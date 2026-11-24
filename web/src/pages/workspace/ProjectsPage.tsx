@@ -202,6 +202,21 @@ export function ProjectsPage() {
                   {t('workspace.planningUpdate.error.loading')}
                 </p>
               ) : null}
+              {customerLinks.error ? (
+                <div
+                  className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
+                  data-testid="project-directory-customer-links-error"
+                >
+                  <p role="status">{t('projects.directory.customerLinksError')}</p>
+                  <button
+                    className="workbench-button-secondary min-h-10 px-4"
+                    onClick={() => void customerLinks.mutate()}
+                    type="button"
+                  >
+                    {t('workspace.error.retry')}
+                  </button>
+                </div>
+              ) : null}
               <ProjectDirectoryView
               assignees={assigneeOptions.assignees}
               filteredCount={filteredRows.length}

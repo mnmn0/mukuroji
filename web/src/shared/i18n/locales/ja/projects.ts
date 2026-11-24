@@ -64,6 +64,7 @@ export const projectsMessages = {
   'projects.directory.pagination.label': '{page} / {pages}ページ',
   'projects.directory.customers': '顧客: {names}',
   'projects.directory.customersMore': 'ほか{count}社',
+  'projects.directory.customerLinksError': '顧客の紐づけを読み込めませんでした。プロジェクトの表示はそのまま使えます。',
   'projects.directory.lifecycleFilter': 'ライフサイクル',
   'projects.directory.column.charter': '責任者・期間',
   'projects.directory.charter.noOwner': '責任者未設定',

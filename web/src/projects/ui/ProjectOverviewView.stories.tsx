@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
-import { expect, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { documentBacklinkFixtures, documentSummaryFixtures } from '../../documents/fixtures'
 import { factoryBoardFixture } from '../../features/factory-board/fixtures'
 import { planningSnapshotFixture } from '../../planning/fixtures'
@@ -163,5 +163,19 @@ export const WithLinkedCustomers: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('link', { name: 'Acme Corporation' })).toHaveAttribute('href', '/customers/acme')
     await expect(canvas.getByRole('link', { name: 'Globex' })).toHaveAttribute('href', '/customers/globex')
+  },
+}
+
+/** A failed Customer link read is shown as such, with a retry, instead of hiding the entry. */
+export const LinkedCustomersError: Story = {
+  args: {
+    linkedCustomersError: true,
+    onRetryLinkedCustomers: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const entry = within(within(canvasElement).getByTestId('project-overview-customers-error'))
+    await expect(entry.getByRole('alert')).toHaveTextContent('顧客の紐づけを読み込めませんでした。')
+    await userEvent.click(entry.getByRole('button', { name: '再読み込み' }))
+    await expect(args.onRetryLinkedCustomers).toHaveBeenCalled()
   },
 }

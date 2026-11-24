@@ -66,6 +66,7 @@ export const projectsMessages = {
   'projects.directory.pagination.label': 'Page {page} of {pages}',
   'projects.directory.customers': 'Customers: {names}',
   'projects.directory.customersMore': '+{count} more',
+  'projects.directory.customerLinksError': 'Could not load the linked Customers. The rest of the Project view is still available.',
   'projects.directory.lifecycleFilter': 'Lifecycle',
   'projects.directory.column.charter': 'Owner and period',
   'projects.directory.charter.noOwner': 'No owner',

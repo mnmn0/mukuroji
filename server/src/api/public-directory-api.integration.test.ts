@@ -184,6 +184,18 @@ describe('Public API directory', () => {
       .getProjectCharter(credential, 'core-team', 'refero'))).rejects.toMatchObject({ status: 403 })
   })
 
+  test('lets a Workspace administrator without a Project role read the charter, as on the Web', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [],
+      role: 'viewer',
+      workspaceRole: 'admin',
+    })
+    const charter = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .getProjectCharter(credential, 'core-team', 'refero'))
+    expect(charter).toMatchObject({ schemaVersion: 1, teamId: 'core-team', projectId: 'refero' })
+  })
+
   test('resolves a readable key and answers 404 alike for unused, stale, and unreadable keys', async () => {
     const locations = {
       'CT-11': { key: 'CT-11', teamId: 'core-team', workItemId: 'onboarding-friction' },

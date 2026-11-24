@@ -18,7 +18,12 @@ import {
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import { requirePlanningUpdateProjectPermission } from './planning-access'
-import { requireWorkspaceBusinessRead } from './project-access'
+import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
+import {
+  requireProjectPermission,
+  requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
+} from './project-access'
 import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from './project-directory-visibility'
 
 /**
@@ -165,7 +170,7 @@ async function listCredentialProjectRaidLog(
 /**
  * Reads a Project's charter and lifecycle state for an owner who can view the Project.
  *
- * The rule matches the Web charter panel: viewer access to the Project reads the charter, and
+ * The rule matches the Web charter panel: a Workspace administrator or viewer access to the Project reads the charter, and
  * Workspace guests cannot read it.
  *
  * @param credential - Authenticated developer credential.
@@ -185,7 +190,7 @@ async function readCredentialProjectCharter(
     evaluateProjectScopes: true,
   })
   requireWorkspaceBusinessRead(principal)
-  await requirePlanningUpdateProjectPermission(principal, teamId, projectId, 'viewer')
+  await requireCredentialProjectCharterRead(principal, teamId, projectId)
   const state = await workspaceDependencies.projectDirectory.getProjectCharter(
     principal.directoryId,
     teamId,
@@ -209,6 +214,27 @@ async function readCredentialProjectCharter(
     tags: [...charter.tags],
     repositoryUrls: [...charter.repositoryUrls],
   }
+}
+
+/**
+ * Applies the Web charter read rule: a Workspace administrator, or viewer access to the Project.
+ *
+ * @param principal - Principal resolved for the credential owner and this Project.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ */
+async function requireCredentialProjectCharterRead(
+  principal: Awaited<ReturnType<typeof resolveDeveloperCredentialPrincipal>>,
+  teamId: string,
+  projectId: string,
+): Promise<void> {
+  try {
+    requireWorkspaceAdministration(principal)
+    return
+  } catch (error) {
+    if (!(error instanceof WorkspaceAccessError)) throw error
+  }
+  await requireProjectPermission(principal, projectId, 'viewer', teamId)
 }
 
 /**

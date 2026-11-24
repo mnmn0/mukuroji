@@ -123,6 +123,10 @@ export type ProjectOverviewViewProps = {
    * Customers or the links have not loaded, which hides the profile entry.
    */
   linkedCustomers?: readonly ProjectLinkedCustomer[]
+  /** Whether reading the Customer links failed; the profile then offers a retry. */
+  linkedCustomersError?: boolean
+  /** Reads the Customer links again after a failure. */
+  onRetryLinkedCustomers?: () => void
 }
 
 /** Badge tokens for reported Project health. */
@@ -182,6 +186,8 @@ export function ProjectOverviewView({
   isPlanningLoading,
   isWorkItemsLoading,
   linkedCustomers,
+  linkedCustomersError = false,
+  onRetryLinkedCustomers,
   locale,
   members,
   membersError,
@@ -244,7 +250,18 @@ export function ProjectOverviewView({
           <ProfileItem label={t('projects.overview.profile.lifecycle')}>
             {t(`projects.lifecycle.${lifecycleState}`)}
           </ProfileItem>
-          {linkedCustomers ? (
+          {linkedCustomersError ? (
+            <ProfileItem label={t('projects.overview.profile.customers')}>
+              <span className="flex flex-wrap items-center gap-2" data-testid="project-overview-customers-error">
+                <span role="alert">{t('projects.directory.customerLinksError')}</span>
+                {onRetryLinkedCustomers ? (
+                  <button className={linkClassName} onClick={onRetryLinkedCustomers} type="button">
+                    {t('workspace.error.retry')}
+                  </button>
+                ) : null}
+              </span>
+            </ProfileItem>
+          ) : linkedCustomers ? (
             <ProfileItem label={t('projects.overview.profile.customers')}>
               {linkedCustomers.length > 0 ? (
                 <span className="flex flex-wrap gap-x-3" data-testid="project-overview-customers">

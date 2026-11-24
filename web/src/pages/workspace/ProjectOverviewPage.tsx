@@ -174,6 +174,8 @@ export function ProjectOverviewPage() {
           linkedCustomers={customerLinks.data
             ? customerLinks.data.items.find((links) => links.projectId === projectId)?.customers ?? []
             : undefined}
+          linkedCustomersError={Boolean(customerLinks.error)}
+          onRetryLinkedCustomers={() => void customerLinks.mutate()}
           actionItems={actionItems}
           actionItemsError={resolveDocumentsError(actionItemsQuery.error, projectDocuments.error)}
           agentRuns={agentRuns}
