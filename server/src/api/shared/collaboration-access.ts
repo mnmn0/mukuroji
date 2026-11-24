@@ -168,6 +168,31 @@ export async function loadFileProofingRequestContext(
   }
 
   const projectId = readRequiredRouteId(c.req.param('projectId'), 'Project ID')
+  const { scope, actor } = await loadProjectFileProofingContext(principal, teamId, projectId)
+  return { scope, actor }
+}
+
+/**
+ * Authorizes a principal for one Team-owned Project's files and resolves its file actor.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose files are read or written.
+ * @returns The Project file scope, the actor's file capabilities, and the Team permission context.
+ * @throws ProjectDataError when the Project is missing or the principal cannot view it.
+ */
+export async function loadProjectFileProofingContext(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): Promise<{
+  /** Project file scope. */
+  scope: FileProofingScope
+  /** Actor capabilities on the Project files. */
+  actor: FileProofingActor
+  /** Team permission context the Project access was resolved from. */
+  context: TeamPermissionContext
+}> {
   const context = await requireTeamPermission(principal, teamId, 'viewer')
   if (!context.team.projects.some((project) => project.id === projectId)) {
     throw new ProjectDataError(
@@ -191,7 +216,7 @@ export async function loadFileProofingRequestContext(
     scope: {
       workspaceId: principal.directoryId,
       teamId,
-      kind,
+      kind: 'project',
       projectId,
     },
     actor: {
@@ -200,6 +225,7 @@ export async function loadFileProofingRequestContext(
       canWrite,
       canManage,
     },
+    context,
   }
 }
 

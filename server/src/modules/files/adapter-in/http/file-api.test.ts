@@ -927,3 +927,217 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
     ConsistentRead: true,
   })
 })
+
+/**
+ * Creates a deliverable summary for one scope, as the file proofing client returns it.
+ *
+ * @param fileId - File ID of the summary.
+ * @param approvalState - Current-version approval state.
+ * @param updatedAt - File update time that orders the list.
+ * @returns The summary.
+ */
+function createDeliverableSummaryFixture(
+  fileId: string,
+  approvalState: 'none' | 'pending' | 'approved',
+  updatedAt: string,
+) {
+  const upload = createFileUploadSessionFixture()
+  return {
+    file: { ...upload.file, id: fileId, updatedAt, unresolvedAnnotationCount: 0 },
+    approvalState,
+    unresolvedAnnotationCount: approvalState === 'pending' ? 2 : 0,
+  }
+}
+
+test('lists Project deliverables only from the Project and its readable Work Items', async () => {
+  configureFakeProjectClients(true, {
+    role: 'viewer',
+    canonicalProjectIssueIds: ['visible-item', 'other-team-item'],
+    canonicalProjectIssueTeamIds: { 'other-team-item': 'other-team' },
+  })
+  const reads: Array<{ kind: string; teamId: string; issueId?: string; projectId?: string }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push({
+          kind: scope.kind,
+          teamId: scope.teamId,
+          ...(scope.issueId ? { issueId: scope.issueId } : {}),
+          ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        })
+        if (scope.kind === 'project') {
+          return [createDeliverableSummaryFixture('project-file', 'approved', '2026-07-10T00:00:00.000Z')]
+        }
+        return [createDeliverableSummaryFixture(`${scope.issueId}-file`, 'pending', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    deliverables: Array<{ file: { id: string }; owner: { kind: string; issueId?: string }; approvalState: string }>
+  }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual([
+    'visible-item-file',
+    'project-file',
+  ])
+  expect(body.deliverables[0]?.owner).toMatchObject({ kind: 'work-item', issueId: 'visible-item' })
+  expect(reads).toEqual([
+    { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+    { kind: 'work-item', teamId: 'core-team', issueId: 'visible-item', projectId: 'refero' },
+  ])
+
+  const unapproved = await app.request(
+    '/api/teams/core-team/projects/refero/deliverables?approval=unapproved',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  const unapprovedBody = await unapproved.json() as { deliverables: Array<{ file: { id: string } }> }
+  expect(unapprovedBody.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['visible-item-file'])
+
+  const invalid = await app.request(
+    '/api/teams/core-team/projects/refero/deliverables?approval=everything',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalid.status).toBe(400)
+})
+
+test('does not read any deliverable when the Project is not readable', async () => {
+  configureFakeProjectClients(true, {
+    role: 'viewer',
+    projectAccesses: [{ projectId: 'other-project', role: 'viewer' }],
+    canonicalProjectIssueIds: ['hidden-item'],
+  })
+  let reads = 0
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables() {
+        reads += 1
+        return []
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(403)
+  expect(reads).toBe(0)
+})
+
+test('requests approval of a Project file without a Work Item completion target', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const requests: Array<{ kind: string; projectId?: string; reviewerMemberKeys: string[] }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async list() {
+        const upload = createFileUploadSessionFixture()
+        return {
+          files: [{ ...upload.file, targetType: 'project', targetId: 'refero' }],
+          approvals: [],
+          capabilities: { canUpload: true, canRequestApproval: true, canGrantGuestAccess: false },
+        }
+      },
+      async createApproval(scope, _actor, input) {
+        requests.push({ kind: scope.kind, projectId: scope.projectId, reviewerMemberKeys: input.reviewerMemberKeys })
+        const { issueId: _issueId, ...approval } = createApprovalRequestFixture({ projectId: 'refero' })
+        return approval
+      },
+    }),
+  })
+  const request = (body: Record<string, unknown>) => app.request('/api/teams/core-team/projects/refero/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      versionId: 'version-1',
+      reviewerMemberKeys: [' Sato@example.com '],
+      ...body,
+    }),
+  })
+
+  const rejected = await request({ completionTransition: 'done' })
+  expect(rejected.status).toBe(400)
+  expect(await rejected.json()).toMatchObject({ code: 'ApprovalCompletionTransitionUnsupported' })
+
+  const response = await request({})
+  expect(response.status).toBe(201)
+  expect(requests).toEqual([{ kind: 'project', projectId: 'refero', reviewerMemberKeys: ['sato@example.com'] }])
+})
+
+test('keeps Project file approvals in the reviewer Inbox only while the Project is readable', async () => {
+  const { issueId: _issueId, ...projectApproval } = createApprovalRequestFixture({ projectId: 'refero' })
+  for (const [hasAccess, expectedIds] of [[true, ['approval-1']], [false, []]] as const) {
+    configureFakeProjectClients(hasAccess, { role: 'viewer' })
+    setTestAppDependencies({
+      fileProofing: createFileProofingStub({
+        async listReviewerApprovals() {
+          return { approvals: [projectApproval] }
+        },
+      }),
+    })
+
+    const response = await app.request('/api/approvals/reviewer', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+
+    expect(response.status).toBe(200)
+    const body = await response.json() as { approvals: Array<{ id: string }> }
+    expect(body.approvals.map((approval) => approval.id)).toEqual([...expectedIds])
+    resetTestApp()
+  }
+})
+
+test('routes annotation resolve, reopen, and delete to the authorized file scope', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const calls: Array<{ action: string; kind: string; annotationId: string; resolved?: boolean }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async setAnnotationResolution(scope, _actor, fileId, versionId, annotationId, resolved) {
+        calls.push({ action: 'resolution', kind: scope.kind, annotationId, resolved })
+        return {
+          id: annotationId,
+          fileId,
+          versionId,
+          anchor: { kind: 'image', x: 0.5, y: 0.5 },
+          bodyMarkdown: 'Fix this.',
+          authorMemberKey: 'demo@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          ...(resolved ? { resolvedAt: '2026-07-13T00:00:00.000Z' } : {}),
+          capabilities: { canResolve: true, canDelete: true },
+        }
+      },
+      async deleteAnnotation(scope, _actor, _fileId, _versionId, annotationId) {
+        calls.push({ action: 'delete', kind: scope.kind, annotationId })
+      },
+    }),
+  })
+  const base = '/api/teams/core-team/projects/refero/files/file-1/versions/version-1/annotations/annotation-1'
+
+  const resolved = await app.request(`${base}/resolve`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(resolved.status).toBe(200)
+  expect(await resolved.json()).toMatchObject({ annotation: { resolvedAt: '2026-07-13T00:00:00.000Z' } })
+  const reopened = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/annotations/annotation-1/reopen',
+    { method: 'POST', headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(reopened.status).toBe(200)
+  const deleted = await app.request(base, {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(deleted.status).toBe(204)
+  expect(calls).toEqual([
+    { action: 'resolution', kind: 'project', annotationId: 'annotation-1', resolved: true },
+    { action: 'resolution', kind: 'work-item', annotationId: 'annotation-1', resolved: false },
+    { action: 'delete', kind: 'project', annotationId: 'annotation-1' },
+  ])
+})

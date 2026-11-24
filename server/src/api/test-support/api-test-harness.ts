@@ -601,6 +601,9 @@ function createFileProofingStub(
     createAccess: unsupported,
     listAnnotations: unsupported,
     createAnnotation: unsupported,
+    setAnnotationResolution: unsupported,
+    deleteAnnotation: unsupported,
+    listDeliverables: unsupported,
     deleteFile: unsupported,
     createApproval: unsupported,
     createWorkItemApproval: unsupported,
@@ -1650,6 +1653,8 @@ function configureFakeProjectClients(
     }>
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
+    /** Owning Team of a canonical Project Work Item by Issue ID; unlisted ones belong to `core-team`. */
+    canonicalProjectIssueTeamIds?: Readonly<Record<string, string>>
     /** Project 別 canonical Work Item fake の Issue ID ごとの canonical schedule です。 */
     canonicalProjectIssueSchedules?: Readonly<Record<string, WorkItemSchedule>>
     /** Project quick access fake が最初に返す viewer preference です。 */
@@ -1962,7 +1967,7 @@ function configureFakeProjectClients(
           schemaVersion: WORK_ITEM_SCHEMA_VERSION,
           revision: 1,
           id: issueId,
-          teamId: 'core-team',
+          teamId: options.canonicalProjectIssueTeamIds?.[issueId] ?? 'core-team',
           assignedProjectId: projectId,
           title: `Canonical Work Item ${index}`,
           assigneeUserId: 'sato@example.com',

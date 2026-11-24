@@ -2582,8 +2582,9 @@ async function isEligibleRecipient(
     const role = readWorkspaceNotificationRole(member.role)
     if (!enterpriseIdentity || !role) return false
     if (event.eventType.startsWith('approval.')) {
-      if (!readApproval || !event.targetId || !event.teamId || !event.issueId) return false
-      if (!await readApproval({ workspaceId: event.workspaceId, teamId: event.teamId, issueId: event.issueId,
+      if (!readApproval || !event.targetId || !event.teamId || (!event.issueId && !event.projectId)) return false
+      if (!await readApproval({ workspaceId: event.workspaceId, teamId: event.teamId,
+        ...(event.issueId ? { issueId: event.issueId } : { projectId: event.projectId }),
         approvalId: event.targetId, fileId: event.fileId, guest: role === 'guest' })) return false
     }
     let snapshot = enterpriseSnapshotCache.get(event.workspaceId)
