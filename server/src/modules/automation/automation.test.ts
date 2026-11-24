@@ -1980,6 +1980,38 @@ describe('automation execution safety', () => {
     })
   })
 
+  test('fences a template delete with the definition revision read during its usage check', async () => {
+    const transactions: Array<Record<string, unknown>> = []
+    const documentClient = {
+      async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        if (command.constructor.name !== 'TransactWriteCommand') {
+          throw new Error(`Unexpected command: ${command.constructor.name}`)
+        }
+        transactions.push(command.input)
+        return {}
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+
+    await client.deleteTemplate('workspace-1', 'template-1', 4, 7)
+    await client.deleteTemplate('workspace-1', 'template-1', 4, 0)
+    await client.deleteRule('workspace-1', 'rule-1', 2)
+
+    const sentinelConditions = transactions.map((input) => {
+      const items = input.TransactItems as Array<{ Update?: { ConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> } }>
+      const update = items[1]?.Update
+      return [update?.ConditionExpression, update?.ExpressionAttributeValues[':expected']]
+    })
+    expect(sentinelConditions).toEqual([
+      ['#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :expected', 7],
+      ['attribute_not_exists(scopeKey)', undefined],
+      [
+        'attribute_not_exists(scopeKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
+        undefined,
+      ],
+    ])
+  })
+
   test('skips a stale rule snapshot when the current definition changes before reservation', async () => {
     const rule = createRule({ rateLimit: { maxExecutions: 2, windowSeconds: 60 } })
     const documentClient = {
@@ -2326,6 +2358,47 @@ describe('automation execution safety', () => {
     )
     expect(retried).toMatchObject({ status: 'dead-letter', retryable: true, attempts: 2 })
     expect(calls).toBe(2)
+  })
+
+  test('reports dead letters and rate-limit skips without failing the saved execution', async () => {
+    const reports: string[] = []
+    const notifier = {
+      async notify(rule: AutomationRule, execution: AutomationExecution, kind: string) {
+        reports.push(`${kind}:${rule.id}:${execution.status}:${execution.attempts}`)
+        if (reports.length === 1) throw new Error('Audit outbox is down.')
+      },
+    }
+    const executor = {
+      async execute() {
+        throw new AutomationError('invalid-input', 'StillFailing', 'Still failing.')
+      },
+    }
+    const rule = createRule({ actions: [{ type: 'comment', body: 'Only action' }] })
+    const client = createMemoryClient()
+    client.rules.set(`${rule.id}\0${rule.version}`, rule)
+    const engine = new AutomationEngine(client, executor, notifier)
+    const event = createEvent()
+
+    expect(await engine.handleEvent(rule, event)).toMatchObject({ status: 'dead-letter' })
+    expect(await engine.retryExecution(rule.workspaceId, createAutomationExecutionId(rule, event.eventId), event))
+      .toMatchObject({ status: 'dead-letter', attempts: 2 })
+
+    const limited = await new AutomationEngine(createMemoryClient(true), executor, notifier).handleEvent(
+      createRule({ rateLimit: { maxExecutions: 1, windowSeconds: 60 } }),
+      createEvent(),
+    )
+    expect(limited).toMatchObject({ status: 'skipped', errorCode: 'AutomationRateLimitExceeded' })
+
+    const succeeded = await new AutomationEngine(createMemoryClient(), {
+      async execute() {},
+    }, notifier).handleEvent(createRule({ id: 'rule-ok' }), createEvent({ eventId: 'event-ok' }))
+    expect(succeeded).toMatchObject({ status: 'succeeded' })
+
+    expect(reports).toEqual([
+      `dead-letter:${rule.id}:dead-letter:1`,
+      `dead-letter:${rule.id}:dead-letter:2`,
+      `rate-limited:${rule.id}:skipped:0`,
+    ])
   })
 })
 

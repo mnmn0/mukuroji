@@ -18,6 +18,7 @@ import {
   type CreateAutomationInboundWebhookEndpointInput,
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
+  type DeleteAutomationDefinitionInput,
   type ScheduleDependencyType,
   type UpdateAutomationInboundWebhookEndpointInput,
   WORK_ITEM_TITLE_MAX_LENGTH,
@@ -33,6 +34,27 @@ import { normalizeAutomationWorkItemSchedule } from './work-item-schedule-valida
 
 /** Longest routing Team ID; matches the Triage identifier boundary and canonical Team IDs. */
 const TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH = 200
+
+/**
+ * Validates the body of a rule, template, or recurring definition delete request.
+ *
+ * @param value - Untrusted request body.
+ * @returns The revision the client read.
+ */
+export function validateDeleteAutomationDefinitionInput(
+  value: unknown,
+): DeleteAutomationDefinitionInput {
+  const input = requireRecord(value, 'Automation delete request')
+  assertOnlyKeys(input, ['expectedRevision'], 'Automation delete request')
+  return {
+    expectedRevision: requireInteger(
+      input.expectedRevision,
+      'Automation delete expected revision',
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  }
+}
 
 /**
  * Validates and normalizes an untrusted Automation template definition.

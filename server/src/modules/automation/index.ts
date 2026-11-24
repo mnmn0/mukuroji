@@ -23,6 +23,8 @@ export {
   type AutomationExecutionClaimToken,
   type AutomationExecutionDefinitionGuard,
   type AutomationExecutionDefinitionReader,
+  type AutomationExecutionFailureKind,
+  type AutomationExecutionFailureNotifier,
   type AutomationExecutionPage,
   type AutomationExecutionPort,
   type AutomationExecutionQuery,
@@ -59,8 +61,10 @@ export {
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
+  validateDeleteAutomationDefinitionInput,
   validateUpdateAutomationInboundWebhookEndpointInput,
 } from './domain/management-validation'
+export { dryRunAutomationRule } from './domain/rule-dry-run'
 export {
   createAutomationActionId,
   createAutomationCommentId,

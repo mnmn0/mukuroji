@@ -10,6 +10,8 @@ export {
   type AutomationExecutionClaimToken,
   type AutomationExecutionDefinitionGuard,
   type AutomationExecutionDefinitionReader,
+  type AutomationExecutionFailureKind,
+  type AutomationExecutionFailureNotifier,
   type AutomationExecutionPage,
   type AutomationExecutionPort,
   type AutomationExecutionQuery,

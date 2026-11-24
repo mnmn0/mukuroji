@@ -23,6 +23,7 @@ import {
 } from '../../domain/recurring-schedule'
 import type {
   AutomationActionExecutor,
+  AutomationExecutionFailureNotifier,
   AutomationExecutionClaimToken,
   AutomationExecutionServicePort,
   AutomationFeatureEntitlementPort,
@@ -59,6 +60,8 @@ export type AutomationScheduleDependencies = {
   entitlement: AutomationFeatureEntitlementPort
   /** Recurring Work Item create action の executor です。 */
   actionExecutor: AutomationActionExecutor
+  /** Reports dead-lettered and rate-limited rule executions to people. */
+  failureNotifier?: AutomationExecutionFailureNotifier
   /** Revoke 済み inbound webhook secret の durable cleanup store です。 */
   inboundWebhookSecrets?: AutomationInboundWebhookSecretStore
 }
@@ -188,7 +191,11 @@ export async function processDueAutomationExecution(
   if (!await dependencies.entitlement.isAutomationEnabled(execution.workspaceId)) {
     return execution
   }
-  const engine = new AutomationEngine(dependencies.client, dependencies.actionExecutor)
+  const engine = new AutomationEngine(
+    dependencies.client,
+    dependencies.actionExecutor,
+    dependencies.failureNotifier,
+  )
   try {
     if (execution.ruleId.startsWith('recurring:')) {
       const recurringWorkId = execution.ruleId.slice('recurring:'.length)
@@ -265,7 +272,11 @@ export async function processScheduledAutomationRule(
     now,
     dependencies.client,
   )
-  const engine = new AutomationEngine(dependencies.client, dependencies.actionExecutor)
+  const engine = new AutomationEngine(
+    dependencies.client,
+    dependencies.actionExecutor,
+    dependencies.failureNotifier,
+  )
 
   for (const occurrence of selected) {
     let execution: AutomationExecution | undefined

@@ -302,8 +302,21 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     )
   }
 
-  /** Rule を作成します。 */
-  async createRule(workspaceId: string, input: CreateAutomationRuleInput, idempotencyKey?: string) {
+  /**
+   * Rule を作成します。
+   *
+   * @param workspaceId - Workspace that owns the rule.
+   * @param input - Rule definition.
+   * @param idempotencyKey - Client idempotency key.
+   * @param createdByMemberKey - Member who creates the rule; not part of the replay fingerprint.
+   * @returns The created or replayed rule.
+   */
+  async createRule(
+    workspaceId: string,
+    input: CreateAutomationRuleInput,
+    idempotencyKey?: string,
+    createdByMemberKey?: string,
+  ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
     const normalized = validateCreateAutomationRuleInput(input)
@@ -373,6 +386,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       version: 1,
       revision: 1,
       ...(nextRunAt ? { nextRunAt: nextRunAt.toISOString() } : {}),
+      ...(createdByMemberKey?.trim() ? { createdByMemberKey: createdByMemberKey.trim() } : {}),
       createdAt: now,
       updatedAt: now,
     }
@@ -640,9 +654,27 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return template
   }
 
-  /** Template を削除します。 */
-  async deleteTemplate(workspaceId: string, templateId: string, expectedRevision: number) {
-    await this.deleteCurrent(workspaceId, `TEMPLATE#${encodeKey(templateId)}`, expectedRevision)
+  /**
+   * Template を削除します。
+   *
+   * @param workspaceId - Workspace that owns the template.
+   * @param templateId - Template to delete.
+   * @param expectedRevision - Template revision the caller read.
+   * @param expectedDefinitionRevision - Workspace definition revision that must still be current.
+   * @returns A promise that resolves after the delete.
+   */
+  async deleteTemplate(
+    workspaceId: string,
+    templateId: string,
+    expectedRevision: number,
+    expectedDefinitionRevision?: number,
+  ) {
+    await this.deleteCurrent(
+      workspaceId,
+      `TEMPLATE#${encodeKey(templateId)}`,
+      expectedRevision,
+      expectedDefinitionRevision,
+    )
   }
 
   /**
@@ -3126,7 +3158,22 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Current row を revision CAS 付きで削除します。 */
-  private async deleteCurrent(workspaceId: string, recordKey: string, expectedRevision: number) {
+  /**
+   * Deletes a current definition row and advances the Workspace definition revision.
+   *
+   * @param workspaceId - Workspace that owns the row.
+   * @param recordKey - Current row key.
+   * @param expectedRevision - Row revision the caller read.
+   * @param expectedDefinitionRevision - When given, the Workspace definition revision that must
+   *   still be current, so a definition saved after the caller's checks rejects the delete.
+   * @returns A promise that resolves after the delete.
+   */
+  private async deleteCurrent(
+    workspaceId: string,
+    recordKey: string,
+    expectedRevision: number,
+    expectedDefinitionRevision?: number,
+  ) {
     await this.ensureTable()
     try {
       const scopeKey = automationScopeKey(workspaceId)
@@ -3141,7 +3188,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
             },
           },
-          createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
+          createAutomationDefinitionRevisionUpdate(
+            this.tableName,
+            scopeKey,
+            expectedDefinitionRevision,
+          ),
         ],
       }))
     } catch (error) {
@@ -3256,12 +3307,16 @@ function automationScopeKey(workspaceId: string) {
  *
  * @param tableName - Automation table that stores the sentinel.
  * @param scopeKey - Encoded Workspace Automation partition key.
+ * @param expectedRevision - When given, the revision the sentinel must still hold (0 means the
+ *   sentinel must not exist yet).
  * @returns Atomic sentinel update transaction item.
  */
 function createAutomationDefinitionRevisionUpdate(
   tableName: string,
   scopeKey: string,
+  expectedRevision?: number,
 ): DynamoDbAutomationTransactionItem {
+  const fenced = expectedRevision !== undefined
   return {
     Update: {
       TableName: tableName,
@@ -3272,9 +3327,12 @@ function createAutomationDefinitionRevisionUpdate(
       UpdateExpression:
         'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
         '#revision = if_not_exists(#revision, :zero) + :one',
-      ConditionExpression:
-        'attribute_not_exists(scopeKey) OR (' +
-        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
+      ConditionExpression: fenced
+        ? expectedRevision === 0
+          ? 'attribute_not_exists(scopeKey)'
+          : '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :expected'
+        : 'attribute_not_exists(scopeKey) OR (' +
+          '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#revision': 'revision',
@@ -3285,6 +3343,7 @@ function createAutomationDefinitionRevisionUpdate(
         ':one': 1,
         ':schemaVersion': AUTOMATION_SCHEMA_VERSION,
         ':zero': 0,
+        ...(fenced && expectedRevision !== 0 ? { ':expected': expectedRevision } : {}),
       },
     },
   }

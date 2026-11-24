@@ -1,5 +1,6 @@
 import {
   createAutomationActionExecutor,
+  createAutomationExecutionFailureNotifier,
   shouldEnableWorkspaceSearchProjection,
   type AutomationActionExecutorDependencies,
 } from '../../api/api-router'
@@ -116,7 +117,11 @@ export function createProductionAutomationEventHandler() {
     {
       isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
     },
-    new AutomationEngine(automationRepository, actionExecutor),
+    new AutomationEngine(
+      automationRepository,
+      actionExecutor,
+      createAutomationExecutionFailureNotifier(actionDependencies),
+    ),
     teamIssues,
     actionDependencies.customers,
     new DynamoDbDocumentsClient(),
@@ -133,12 +138,12 @@ export function createProductionAutomationEventHandler() {
 export function createProductionAutomationScheduleHandler() {
   const automationRepository = createAutomationRepository()
   const inboundWebhookSecrets = createAutomationInboundWebhookSecretStore()
-  const actionExecutor = createAutomationActionExecutor(
-    createAutomationActionDependencies(
-      automationRepository,
-      new DynamoDbTeamIssuesClient(),
-    ),
+  const actionDependencies = createAutomationActionDependencies(
+    automationRepository,
+    new DynamoDbTeamIssuesClient(),
   )
+  const actionExecutor = createAutomationActionExecutor(actionDependencies)
+  const failureNotifier = createAutomationExecutionFailureNotifier(actionDependencies)
   const tenantFeatureGate = createProductionTenantFeatureGate()
 
   return (event: AutomationScheduleEvent = {}) =>
@@ -150,6 +155,7 @@ export function createProductionAutomationScheduleHandler() {
           isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
         },
         actionExecutor,
+        failureNotifier,
         inboundWebhookSecrets,
       },
     )

@@ -344,6 +344,11 @@ export type AutomationRule = {
   nextRunAt?: string
   /** Schedule trigger の最後に完了した occurrence timestamp です。 */
   lastRunAt?: string
+  /**
+   * Workspace member key of the administrator who created the rule. Rules created before this
+   * field existed have none; their failure notifications go to the Workspace administrators only.
+   */
+  createdByMemberKey?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終更新日時の ISO 8601 timestamp です。 */
@@ -377,6 +382,83 @@ export type UpdateAutomationRuleInput = Partial<CreateAutomationRuleInput> & {
   /** 読み込み時点の optimistic revision です。 */
   expectedRevision: number
 }
+
+/** Body of a delete request for a rule, template, or recurring definition. */
+export type DeleteAutomationDefinitionInput = {
+  /** Revision the client read; a newer revision rejects the delete. */
+  expectedRevision: number
+}
+
+/** Work Item a dry run evaluates an unsaved rule definition against. */
+export type AutomationRuleDryRunInput = {
+  /** Rule definition as the editor would save it. */
+  rule: CreateAutomationRuleInput
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID inside the Team. */
+  workItemId: string
+}
+
+/** Result of one top-level condition in a dry run. */
+export type AutomationRuleDryRunConditionResult = {
+  /** Zero-based index in the rule's `conditions`. */
+  index: number
+  /** Whether the condition holds for the Work Item. */
+  matched: boolean
+  /** Whether the condition reads `event.` fields, which a dry run has no trigger event for. */
+  readsEventFields: boolean
+}
+
+/** One field an action would change on the Work Item. */
+export type AutomationRuleDryRunFieldChange = {
+  /** Work Item field name. */
+  field: string
+  /** Current value; absent when the field is unset. */
+  before?: AutomationValue
+  /** Value the action would write. */
+  after: AutomationValue
+}
+
+/** What one action would do if the rule ran now. */
+export type AutomationRuleDryRunActionPlan = {
+  /** Zero-based index in the rule's `actions`. */
+  index: number
+  /** Action discriminator. */
+  type: AutomationAction['type']
+  /**
+   * Fields an assign, move, or update action would change. Fields that already hold the target
+   * value are left out, so an empty list means the action would change nothing.
+   */
+  changes?: AutomationRuleDryRunFieldChange[]
+  /** Members a notify or approval action would reach. */
+  recipientMemberKeys?: string[]
+  /** Host of the endpoint a webhook action would call. */
+  webhookHost?: string
+}
+
+/** Result of evaluating an unsaved rule against one Work Item without running any action. */
+export type AutomationRuleDryRunResult = {
+  /** Whether every top-level condition holds, so the actions would run once the trigger fires. */
+  matched: boolean
+  /**
+   * Trigger the rule waits for. A dry run assumes it fired; it does not check that the Work Item
+   * could cause it.
+   */
+  triggerType: AutomationTrigger['type']
+  /** Result of each top-level condition. */
+  conditions: AutomationRuleDryRunConditionResult[]
+  /** Planned actions in execution order; empty when `matched` is false. */
+  actions: AutomationRuleDryRunActionPlan[]
+}
+
+/** Audit event type that tells the rule's creator and administrators an execution dead-lettered. */
+export const AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE = 'automation.execution.dead-lettered'
+
+/** Audit event type that tells the rule's creator and administrators the rule hit its rate limit. */
+export const AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE = 'automation.rule.rate-limited'
+
+/** Most administrators one rule failure notification reaches, besides the rule's creator. */
+export const AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT = 20
 
 /** Automation template の3種類です。 */
 export type AutomationTemplateKind = 'work-item' | 'project' | 'workflow'

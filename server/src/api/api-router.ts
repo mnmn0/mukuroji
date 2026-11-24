@@ -84,6 +84,7 @@ export type {
 
 export {
   createAutomationActionExecutor,
+  createAutomationExecutionFailureNotifier,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
   toBulkOperationResponse,

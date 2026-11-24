@@ -33,6 +33,16 @@ Approval action は event が指す canonical Work Item 自体を承認対象に
 
 Condition は event snapshot と現在の Work Item snapshot のどちらを読むかを field path で明示する。Field path の namespace、比較 operator、値の型と condition tree の深さは保存前に検証し、実行時に存在しない field は `not-exists` 以外では一致しない。
 
+### 編集・削除・dry-run（#393）
+
+管理画面の **編集** は、保存済み rule の名前・条件・action を変えて次の version を保存する（`PATCH /api/automation/rules/{ruleId}` に `expectedRevision` を付ける）。Trigger、retry、rate limit、loop guard は保存済みの値のまま変えない。条件は field 条件の行を「すべてに一致」（top level に並べる）か「いずれかに一致」（1 つの `any` group）でまとめる。`not` や入れ子の group、文字列でない値を持つ条件は行として表示できないため、そのまま保存するか作り直すかを選ぶ。Action は上から順に実行し、↑↓ で並べ替える。画面で表せない action（複数 field の update、値を指定した create、secret alias や body を持つ webhook）は保存済みのまま残す。
+
+Rule を作った member は `createdByMemberKey` に記録する（fingerprint には含めない。この変更より前の rule にはない）。
+
+`POST /api/automation/rule-dry-runs` は保存前の rule 定義（`CreateAutomationRuleInput` と同じ検証）を、Team と Work Item ID で指定した 1 件に当てて評価する。Trigger は起きたものとして、空の event と今の Work Item snapshot で top level の条件を 1 つずつ評価し、すべて一致したときだけ各 action の予定（assign・move・update は今の値と違う field の before/after、notify・approval は宛先、webhook は host）を返す。Action は実行せず、何も書き込まない。`event.` を読む条件は実際の event で結果が変わるため `readsEventFields` で示す。Workspace 管理者だけが呼べ、Team が無効なら `409` を返し、Work Item が読めなければ通常の Work Item 参照と同じ error を返す。
+
+削除は `DELETE /api/automation/rules/{ruleId}`、`DELETE /api/automation/templates/{templateId}`、`DELETE /api/recurring-work/{recurringWorkId}` に `{ "expectedRevision": n }` を付けて行い、成功すると `204` を返す。Rule と recurring work は current row を消すので、event consumer と schedule worker は以後実行しない（予約済み execution は固定済み version で終わる）。Template は、create action を持つ rule か recurring work が参照している間は `409 AutomationTemplateInUse` で拒否する。参照の確認から削除までに rule や recurring が保存されないよう、削除は確認時に読んだ definition revision を condition にする。
+
 ### baseline slip trigger
 
 `{ "type": "baseline-slip", "minDelayDays": 3 }` は、未完了の Work Item の予定終了日が、所属 Project の今の schedule baseline の終了日より `minDelayDays` 日（1〜365、省略時 1）以上遅れたときに動く。遅れの数え方は週次まとめ・Gantt・Focus の `slipped` と同じ `deriveWorkItemBaselineEndDelayDays` で、閾値を下から越えた変更で1回だけ動き、さらに遅れても同じ rule は動かない（閾値未満に戻ってから再び越えると、また動く）。
@@ -58,6 +68,12 @@ Event consumer の current rule 一覧は strongly consistent に読み、停止
 内部 Work Item action は deterministic な resource/event ID を使い、状態更新と automation source の audit event を既存の DynamoDB transaction で確定する。Action receipt 保存前に応答が失われても、再実行は同じ resource/event を照合して成功済み mutation として扱う。Webhook には同じ deterministic idempotency key を送る。外部 endpoint が idempotency を実装していない場合、応答消失時の exactly-once は保証できない。
 
 Outbound webhook は HTTPS の既定 port のみを許可し、credential 付き URL、private/reserved address、redirect を拒否する。Hostname は実行時に一度だけ解決し、すべての A/AAAA answer が public であることを検証してから、その address へ socket を固定する。DNS 解決を含む request 全体を 10 秒で timeout する。Secret alias や secret 本文は外部へ送らず、Unix timestamp と raw JSON body を `timestamp.body` として HMAC-SHA256 署名し、`X-Mukuroji-Timestamp` / `X-Mukuroji-Signature` で送る。Signature 値は `sha256=<hex digest>` とし、同じ execution/action の retry では同じ `Idempotency-Key` を送る。
+
+### 失敗の通知（#393）
+
+Rule の execution が dead-letter になったとき、または rate limit で skip されたとき、rule の作成者（active な member のとき）と active な owner / admin（最大 `AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT` = 20 人）に Inbox 通知を送る。通知は audit event（`automation.execution.dead-lettered` / `automation.rule.rate-limited`、entity は `automation-rule`）を outbox にし、collaboration projection が `notificationCandidates`（理由 `automation`）から Inbox を作る。リンク先は実行履歴タブ（`/settings/workspace?automationTab=runs`）。
+
+重複を避けるため、event ID の元になる idempotency key は dead-letter では execution ID と attempt 数、rate limit では rule ID と UTC の 1 時間単位にする（同じ rule の連続 skip は 1 時間に 1 通）。通知は best effort で、失敗しても保存済みの execution は変えずにログだけ残す。Recurring work の dead-letter は rule を持たないため、今は通知しない。
 
 ## Signed inbound webhook
 
@@ -161,18 +177,19 @@ Archive は hard delete ではなく reversible archive metadata を Work Item �
 
 ## API
 
-Rule/template/recurring の作成・更新と execution retry は Workspace administration 権限を要求する。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
+Rule/template/recurring の作成・更新・削除、rule の dry-run と execution retry は Workspace administration 権限を要求する。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
 
 ```text
 GET|POST  /api/automation/rules
-PATCH     /api/automation/rules/{ruleId}
+PATCH|DELETE /api/automation/rules/{ruleId}
+POST      /api/automation/rule-dry-runs
 GET|POST  /api/automation/templates
-PATCH     /api/automation/templates/{templateId}
+PATCH|DELETE /api/automation/templates/{templateId}
 POST      /api/automation/templates/{templateId}/duplicate
 POST      /api/automation/templates/{templateId}/applications
 GET       /api/automation/template-applications/{applicationId}
 GET|POST  /api/recurring-work
-PATCH     /api/recurring-work/{recurringWorkId}
+PATCH|DELETE /api/recurring-work/{recurringWorkId}
 GET       /api/automation/executions
 POST      /api/automation/executions/{executionId}/retry
 POST      /api/automation/forms/{formId}/submissions
