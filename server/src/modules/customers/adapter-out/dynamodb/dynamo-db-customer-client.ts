@@ -34,6 +34,7 @@ import type {
   CustomerSortField,
   CustomerWorkspaceExport,
   CustomerWorkItemSummary,
+  ProjectCustomerLinks,
   LinkCustomerRequestWorkItemInput,
   MergeCustomerContactInput,
   MergeCustomerInput,
@@ -1547,6 +1548,16 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
   ): Promise<CustomerImpactSignal> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
     return await memory.getProjectImpact(workspaceId, projectId, resolveWorkItemProject)
+  }
+
+  /** Lists the Customers each Project is linked to through Customer Request to Project links.
+   *
+   * @param workspaceId Workspace containing the links.
+   * @returns One entry for each linked Project, ordered by Project ID.
+   */
+  async listProjectCustomerLinks(workspaceId: string): Promise<ProjectCustomerLinks[]> {
+    const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
+    return await memory.listProjectCustomerLinks(workspaceId)
   }
 
   /** Returns Work Items associated with a Customer.

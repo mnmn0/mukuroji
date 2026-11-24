@@ -100,3 +100,4 @@
 | [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
 | [0076](0076-workspace-wide-time-period-close.md) | Workspace 単位の月の締めは Team ごとの締め row をまとめて作る | 提案 |
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
+| [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |

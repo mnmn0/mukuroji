@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono'
 import type { MutationAuditContext } from '../../../audit'
 import type {
+  ProjectCustomerLinkList,
   CreateCustomerContactInput,
   CreateCustomerInput,
   CreateCustomerRequestInput,
@@ -106,6 +107,14 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   verifyWorkItemAccess(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member'): Promise<CustomerWorkItemAuthorization>
   /** Resolves and authorizes a Project before reading or mutating its associations. */
   verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<CustomerProjectAuthorization>
+  /**
+   * Decides which Projects an Enterprise-managed caller may view, from its own Project grants
+   * rather than the Customer route's authorization.
+   *
+   * @returns The viewable Project IDs, or undefined when the caller is not Enterprise-managed and
+   * each Project goes through `verifyProjectAccess` instead.
+   */
+  listEnterpriseViewableProjectIds?(principal: Principal, projectIds: readonly string[]): Promise<ReadonlySet<string> | undefined>
   /** Returns the Triage operations used for Customer associations. */
   getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
   /** Safely parses a JSON request body. */
@@ -151,6 +160,37 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const views = await customersFor(dependencies, context, principal).listSavedViews(principal.directoryId)
       return context.json({ views: views.map((view) => projectSavedView(principal, view)) })
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Registered before `/api/customers/:customerId` so the path is not read as a Customer ID.
+  router.get('/api/customers/project-links', async (context) => {
+    try {
+      const principal = await dependencies.requireWorkspaceAccess(context, 'read')
+      const links = await dependencies.getCustomers().listProjectCustomerLinks(principal.directoryId)
+      const enterpriseViewable = await dependencies.listEnterpriseViewableProjectIds?.(
+        principal,
+        links.map((link) => link.projectId),
+      )
+      if (enterpriseViewable) {
+        return context.json({
+          items: links.filter((link) => enterpriseViewable.has(link.projectId)),
+        } satisfies ProjectCustomerLinkList)
+      }
+      const items = await mapWithConcurrency(links, PROJECT_LINK_AUTHORIZATION_CONCURRENCY, async (link) => {
+        try {
+          await dependencies.verifyProjectAccess(principal, link.projectId, 'viewer')
+          return link
+        } catch (error) {
+          if (isHiddenCustomerRelationshipError(error)) return undefined
+          throw error
+        }
+      })
+      return context.json({
+        items: items.flatMap((item) => item === undefined ? [] : [item]),
+      } satisfies ProjectCustomerLinkList)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -1728,6 +1768,28 @@ function isHiddenCustomerRelationshipError(value: unknown): boolean {
 /** Checks whether an untrusted value is a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Projects whose access is checked at once when listing Project to Customer links. */
+const PROJECT_LINK_AUTHORIZATION_CONCURRENCY = 8
+
+/** Maps values with a bounded number of concurrent calls, keeping the input order.
+ *
+ * @param values Values to map.
+ * @param concurrency Maximum number of calls in flight.
+ * @param map Asynchronous mapping for one value.
+ * @returns Mapped values in input order.
+ */
+async function mapWithConcurrency<Value, Result>(
+  values: readonly Value[],
+  concurrency: number,
+  map: (value: Value) => Promise<Result>,
+): Promise<Result[]> {
+  const results: Result[] = []
+  for (let start = 0; start < values.length; start += concurrency) {
+    results.push(...await Promise.all(values.slice(start, start + concurrency).map(map)))
+  }
+  return results
 }
 
 /** Request-bound Customer clients, so every write of one request shares one audit sequence. */

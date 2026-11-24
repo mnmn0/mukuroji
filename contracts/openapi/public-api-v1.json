@@ -2616,6 +2616,108 @@
         ],
         "type": "object"
       },
+      "PublicProjectCharter": {
+        "description": "Charter and lifecycle state of one Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "code": {
+            "description": "Workspace-unique Project code.",
+            "type": "string"
+          },
+          "description": {
+            "description": "What the Project delivers.",
+            "type": "string"
+          },
+          "lifecycleState": {
+            "enum": [
+              "proposed",
+              "approved",
+              "active",
+              "on-hold",
+              "closed",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/PublicProjectCharterPerson"
+          },
+          "plannedEndDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "plannedStartDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "purpose": {
+            "description": "Why the Project exists.",
+            "type": "string"
+          },
+          "repositoryUrls": {
+            "items": {
+              "format": "uri",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Revision shared by charter and lifecycle changes.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "sponsor": {
+            "$ref": "#/components/schemas/PublicProjectCharterPerson"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "projectId",
+          "lifecycleState",
+          "revision",
+          "tags",
+          "repositoryUrls"
+        ],
+        "type": "object"
+      },
+      "PublicProjectCharterPerson": {
+        "description": "Workspace member named in a Project charter. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "displayName": {
+            "description": "Name or email captured when the charter was saved.",
+            "type": "string"
+          },
+          "memberId": {
+            "description": "Workspace member ID of the person.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memberId",
+          "displayName"
+        ],
+        "type": "object"
+      },
       "PublicProjectMember": {
         "description": "Active Workspace member of a Project. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
@@ -10585,6 +10687,91 @@
         "summary": "OpenAPI 3.1 document を取得する",
         "tags": [
           "Schema"
+        ]
+      }
+    },
+    "/api/v1/projects/{projectId}/charter": {
+      "get": {
+        "description": "Reads the charter and lifecycle state of a Project, as the Web charter panel shows them: code, description, purpose, owner, sponsor, planned dates, tags, and related repository URLs. The credential owner needs viewer access to the Project; Workspace guests cannot read it.",
+        "operationId": "getPublicProjectCharter",
+        "parameters": [
+          {
+            "description": "Project ID です。",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProjectCharter"
+                }
+              }
+            },
+            "description": "Project charter",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the charter of a Project",
+        "tags": [
+          "Directory"
         ]
       }
     },
