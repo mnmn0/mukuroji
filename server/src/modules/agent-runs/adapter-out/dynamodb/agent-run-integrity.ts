@@ -13,6 +13,7 @@ import {
   triageSweepResumeKey,
   workItemRunSortKey,
 } from './agent-run-store'
+import { isAgentUsagePartition } from './agent-run-usage-store'
 
 /** Version of the Agent Run integrity evidence shape. */
 export const AGENT_RUN_INTEGRITY_SCHEMA_VERSION = 1
@@ -849,8 +850,10 @@ async function discoverTeams(input: {
   for (const item of items) {
     const partition = item.directoryTeamId
     if (partition === triageSweepResumeKey.directoryTeamId) continue
-    if (typeof partition !== 'string' || parseAgentRunPartition(partition) === undefined) unresolved.add(partition)
-    else partitions.add(partition)
+    if (typeof partition === 'string' && parseAgentRunPartition(partition) !== undefined) partitions.add(partition)
+    // Usage rows and export receipts share the table but belong to members, not Teams.
+    else if (typeof partition === 'string' && isAgentUsagePartition(partition)) continue
+    else unresolved.add(partition)
   }
   // One finding per partition key, not per row; the key itself is not reported.
   for (const _partition of unresolved) input.findings.push({ code: 'AGENT_RUN_PARTITION_UNRESOLVED', sample: {} })

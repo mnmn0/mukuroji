@@ -3,6 +3,7 @@ import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTeamIssue } from '../../issues/api/workItems'
 import type { CreateWorkItemInput, CanonicalWorkItem } from '@mukuroji/contracts'
 import { resolveLatestTaskSnapshot } from '../model/taskView'
+import { revalidateWorkItemKeyPrefixes } from '../../issues/queries/workItemKeyPrefixesCache'
 
 /** Dependencies used by the Project task create mutation controller. */
 export type TaskCreateMutationControllerOptions = {
@@ -73,6 +74,7 @@ export function createTaskMutationController({
         context,
       ),
     ))
+    void revalidateWorkItemKeyPrefixes()
     let hasRefreshError = false
     let refreshError: unknown
     let highestObservedTask = task

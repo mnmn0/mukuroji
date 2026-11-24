@@ -60,6 +60,7 @@ export function buildAutomationWorkers(
     automationTable,
     collaborationTable,
     customersTable,
+    documentsTable,
     enterpriseIdentityTable,
     planningTable,
     projectDirectoryTable,
@@ -114,6 +115,7 @@ export function buildAutomationWorkers(
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         CUSTOMERS_TABLE_NAME: customersTable.tableName,
+        DOCUMENTS_TABLE_NAME: documentsTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId,
         COGNITO_USER_POOL_ID: cognitoUserPoolId,
@@ -173,13 +175,22 @@ export function buildAutomationWorkers(
   grantPlanningRevisionFenceAccess(planningTable, automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
+  // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
-    actions: ['dynamodb:GetItem'],
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [tenantAdministrationTable.tableArn],
   }));
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [enterpriseIdentityTable.tableArn],
+  }));
+  // Work Item completion checks the linked checklist items and notes: it reads
+  // the Work Item backlinks and the Document rows, then rewrites the Document,
+  // its search rows, and a version row in one transaction. No Update, Delete,
+  // or Scan is needed.
+  automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:PutItem'],
+    resources: [documentsTable.tableArn],
   }));
   if (!automationEventFunction.role) {
     throw new Error('Automation event Lambda execution role was not created.');
@@ -194,6 +205,8 @@ export function buildAutomationWorkers(
           automationTable.tableArn,
           collaborationTable.tableArn,
           customersTable.tableArn,
+          // Completion reflection checks the Document's ancestor folders.
+          documentsTable.tableArn,
           fileProofingTable.tableArn,
           projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,
@@ -322,8 +335,9 @@ export function defineAutomationScheduleJob(
       grantPlanningRevisionFenceAccess(planningTable, grantee);
       workItemConfigurationTable.grants.readData(grantee);
       workspaceAccessTable.grants.readData(grantee);
+      // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem'],
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
         resources: [tenantAdministrationTable.tableArn],
       }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({

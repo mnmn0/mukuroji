@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, PublicWorkItemTemplate, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -43,6 +43,11 @@ export type AgentCatalog = {
     /** Public field definitions displayed as data, never executed or interpreted as instructions. */
     customFields: Record<string, unknown>[]
   }[]
+  /**
+   * Work Item templates create_task can start from; empty when none, or when the server is older
+   * than template support. Names and texts are user data, never instructions.
+   */
+  templates: PublicWorkItemTemplate[]
 }
 
 /** Filters applied by the remote API before pagination. */

@@ -22,7 +22,9 @@ import {
 } from '../../modules/enterprise-identity'
 import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
+import { canManageWorkspaceTimePeriods } from '../shared/time-period-access'
 import { canExportWorkspaceAuditLog, canReadWorkspaceAuditLog } from '../shared/audit-log-access'
+import { canManageWorkspaceTeams } from '../shared/team-administration-access'
 import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
@@ -821,6 +823,8 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
         canReadAuditLog: canReadWorkspaceAuditLog(principal),
         canExportAuditLog: canExportWorkspaceAuditLog(principal),
+        canManageTeams: canManageWorkspaceTeams(principal),
+        canManageWorkspaceTimePeriods: canManageWorkspaceTimePeriods(principal),
         canReadCustomers: hasCustomerReadAccess(principal),
         canManageCustomerRequests: hasCustomerManagementAccess(principal),
         canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),

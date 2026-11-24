@@ -1,3 +1,4 @@
+import type { EnterprisePermissionId } from '@mukuroji/contracts'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 const {
   app,
@@ -9,6 +10,7 @@ const {
   withTestEnvironment,
 } = createApiTestHarness()
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
+import { InMemoryProjectRaidLogStore } from '../../adapter-out/dynamodb/project-raid-log-store'
 import type { ProjectRaidEntryResponse, ProjectRaidLogResponse } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 
@@ -156,14 +158,30 @@ test('lets a Project viewer read the log but not change it', async () => {
 /**
  * Grants the demo user one Enterprise role on the `refero` Project only.
  *
- * @param roleId - Built-in Project role to assign.
+ * @param roleId - Built-in Project role, or the custom role defined by `customPermissions`.
+ * @param customPermissions - Permissions of the custom role.
  */
-function grantEnterpriseProjectRole(roleId: 'project:member' | 'project:viewer') {
+function grantEnterpriseProjectRole(
+  roleId: 'project:member' | 'project:viewer' | 'custom:raid-writer',
+  customPermissions: EnterprisePermissionId[] = [],
+) {
   const workspaceId = 'user#demo@example.com'
   const identity = new InMemoryEnterpriseIdentityClient()
   const readSnapshot = identity.getSnapshot.bind(identity)
   identity.getSnapshot = async (currentWorkspaceId) => ({
     ...await readSnapshot(currentWorkspaceId),
+    customRoles: roleId === 'custom:raid-writer'
+      ? [{
+          workspaceId,
+          roleId,
+          name: 'RAID writer',
+          permissions: customPermissions,
+          guestAssignable: false,
+          revision: 1,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }]
+      : [],
     roleAssignments: [{
       workspaceId,
       assignmentId: 'refero-grant',
@@ -225,6 +243,33 @@ test('reports edit access to an Enterprise member granted only on the Project', 
   })
 })
 
+test('refuses related Work Items from an Enterprise writer without Work Item read access', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    const { issues } = await getTestAppDependencies().workItems.teamIssues.getTeamIssues(
+      'user#demo@example.com',
+      'core-team',
+    )
+    const referoWorkItem = issues.find((issue) => issue.assignedProjectId === 'refero')
+    if (!referoWorkItem) throw new Error('The fake Team has no refero Work Item.')
+    const path = '/api/teams/core-team/projects/refero/raid-log/entries'
+    const entry = { kind: 'issue', title: 'A', impact: 3, status: 'open', relatedWorkItemIds: [referoWorkItem.id] }
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write'])
+    const refused = await requestAsEnterprise(path, 'POST', { entry })
+    expect(refused.status).toBe(400)
+    expect(await refused.json()).toMatchObject({ code: 'InvalidProjectRaidEntry' })
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write', 'work-items.read'])
+    const accepted = await requestAsEnterprise(path, 'POST', { entry })
+    expect(accepted.status).toBe(201)
+  })
+})
+
 test('keeps an Enterprise Project viewer read-only', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(true, {
@@ -257,3 +302,194 @@ test('requires a bearer token', async () => {
   const response = await app.request('/api/teams/core-team/projects/p/raid-log')
   expect(response.status).toBe(401)
 })
+
+test('accepts a Project member as owner and Work Items of the same Project only', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/raid-log`
+  const dependencies = getTestAppDependencies()
+  const { members } = await dependencies.workspace.projectDirectory.getProjectMembers(
+    'user#demo@example.com',
+    projectId,
+    'core-team',
+  )
+  const ownerMemberId = members[0]?.id
+  if (!ownerMemberId) throw new Error('The fake Project has no member.')
+  const { issues } = await dependencies.workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
+  const sameProject = issues.find((issue) => issue.assignedProjectId === projectId)
+  const otherProject = issues.find((issue) => issue.assignedProjectId !== projectId)
+  if (!sameProject) throw new Error('The fake Project has no Work Item.')
+
+  const created = await request(`${path}/entries`, 'POST', {
+    entry: {
+      kind: 'issue',
+      title: 'Build server down',
+      impact: 3,
+      ownerMemberId,
+      relatedWorkItemIds: [sameProject.id, ` ${sameProject.id} `],
+      status: 'open',
+    },
+  }, 'refs-1')
+  expect(created.status).toBe(201)
+  const entry = (await created.json() as ProjectRaidEntryResponse).entry
+  expect(entry).toMatchObject({ ownerMemberId, relatedWorkItemIds: [sameProject.id] })
+
+  const outsider = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Outsider', impact: 3, ownerMemberId: 'nobody@example.com', status: 'open' },
+  }, 'refs-2')
+  expect(outsider.status).toBe(400)
+  expect(await outsider.json()).toMatchObject({ code: 'InvalidProjectRaidEntry' })
+
+  const missing = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Missing', impact: 3, relatedWorkItemIds: ['wireframe'], status: 'open' },
+  }, 'refs-3')
+  expect(missing.status).toBe(400)
+
+  if (otherProject) {
+    const foreign = await request(`${path}/entries/${entry.id}`, 'PUT', {
+      expectedRevision: 1,
+      entry: { kind: 'issue', title: 'Build server down', impact: 3, relatedWorkItemIds: [sameProject.id, otherProject.id], status: 'open' },
+    }, 'refs-4')
+    expect(foreign.status).toBe(400)
+  }
+
+  const cleared = await request(`${path}/entries/${entry.id}`, 'PUT', {
+    expectedRevision: 1,
+    entry: { kind: 'issue', title: 'Build server down', impact: 3, status: 'open' },
+  }, 'refs-5')
+  expect(cleared.status).toBe(200)
+  const clearedEntry = (await cleared.json() as ProjectRaidEntryResponse).entry
+  expect(clearedEntry.ownerMemberId).toBeUndefined()
+  expect(clearedEntry.relatedWorkItemIds).toBeUndefined()
+
+  const tooMany = await request(`${path}/entries`, 'POST', {
+    entry: {
+      kind: 'issue',
+      title: 'Too many',
+      impact: 3,
+      relatedWorkItemIds: Array.from({ length: 11 }, (_, index) => `item-${index}`),
+      status: 'open',
+    },
+  }, 'refs-6')
+  expect(tooMany.status).toBe(400)
+})
+
+test('fences another owner once and adds no second fence when the caller owns the entry', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/raid-log`
+  const store = new InMemoryProjectRaidLogStore()
+  const recorded: unknown[][] = []
+  setTestAppDependencies({
+    projectRaidLogs: {
+      list: (scope) => store.list(scope),
+      listOpenOwnedBy: (scope, owner) => store.listOpenOwnedBy(scope, owner),
+      get: (scope, entryId) => store.get(scope, entryId),
+      async create(input) {
+        recorded.push([...input.callerAuthorization])
+        return await store.create(input)
+      },
+      async update(input) {
+        recorded.push([...input.callerAuthorization])
+        return await store.update(input)
+      },
+    },
+  })
+  const dependencies = getTestAppDependencies()
+  const fences: string[] = []
+  const order: string[] = []
+  const workspaceAccess = dependencies.workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      getMember: workspaceAccess.getMember.bind(workspaceAccess),
+      getActiveMember: workspaceAccess.getActiveMember.bind(workspaceAccess),
+      async createActiveMemberConditionCheck(workspaceId: string, memberKey: string) {
+        fences.push(memberKey)
+        order.push('fence')
+        return { ConditionCheck: { TableName: 'access', Key: { workspaceId, recordKey: `MEMBER#${memberKey}` }, ConditionExpression: 'attribute_exists(workspaceId)' } }
+      },
+    },
+  })
+  const projectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const listMembers = projectDirectory.getProjectMembers.bind(projectDirectory)
+  setTestAppDependencies({
+    projectDirectory: new Proxy(projectDirectory, {
+      get(target, property, receiver) {
+        if (property !== 'getProjectMembers') return Reflect.get(target, property, receiver)
+        return async (workspaceId: string, requestedProjectId: string, teamId?: string) => {
+          order.push('members')
+          const response = await listMembers(workspaceId, requestedProjectId, teamId)
+          const first = response.members[0]
+          if (!first) throw new Error('The fake Project has no member.')
+          return { ...response, members: [...response.members, { ...first, id: 'sato@example.com', email: 'sato@example.com' }] }
+        }
+      },
+    }),
+  })
+  const self = { id: 'demo@example.com' }
+  const other = { id: 'sato@example.com' }
+
+  const own = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Mine', impact: 2, ownerMemberId: self.id, status: 'open' },
+  }, 'own-1')
+  expect(own.status).toBe(201)
+  expect(fences).toEqual([])
+  const theirs = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Theirs', impact: 2, ownerMemberId: other.id, status: 'open' },
+  }, 'own-2')
+  expect(theirs.status).toBe(201)
+  expect(fences).toEqual([other.id])
+  // The owner's version is fenced before membership is read, so a later removal fails the write.
+  expect(order.slice(-2)).toEqual(['fence', 'members'])
+  const { issues } = await dependencies.workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
+  const related = issues.find((issue) => issue.assignedProjectId === projectId)
+  if (!related) throw new Error('The fake Project has no Work Item.')
+  const linked = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'Linked', impact: 2, relatedWorkItemIds: [related.id], status: 'open' },
+  }, 'own-3')
+  expect(linked.status).toBe(201)
+  expect(recorded.at(-1)).toContainEqual({
+    ConditionCheck: expect.objectContaining({
+      Key: { directoryTeamId: 'user#demo@example.com#team#core-team', issueId: related.id },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeValues: { ':projectId': projectId },
+    }),
+  })
+  expect(recorded).toHaveLength(3)
+  // DynamoDB refuses two operations on one item in a transaction, whatever their conditions.
+  for (const checks of recorded) {
+    const targets = checks.map(transactionItemTarget)
+    expect(new Set(targets).size).toBe(targets.length)
+  }
+})
+
+/**
+ * Names the item a recorded transaction operation touches: its table and its key, with the key's
+ * attributes in a fixed order so that two operations on the same item always compare equal.
+ *
+ * @param item - One recorded transaction item, such as `{ ConditionCheck: { TableName, Key } }`.
+ * @returns The table name and the normalized key, serialized.
+ */
+function transactionItemTarget(item: unknown): string {
+  if (!isPlainRecord(item)) throw new Error('Expected a transaction item.')
+  const operations = Object.values(item).filter(isPlainRecord)
+  const operation = operations[0]
+  if (operations.length !== 1 || operation === undefined) throw new Error('Expected one operation per item.')
+  const key = operation.Key
+  if (typeof operation.TableName !== 'string' || !isPlainRecord(key)) {
+    throw new Error('Expected a table name and a key.')
+  }
+  const normalizedKey = Object.keys(key).sort().map((name) => [name, key[name]])
+  return JSON.stringify([operation.TableName, normalizedKey])
+}
+
+/**
+ * Tells whether a value is a non-array object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a plain record.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

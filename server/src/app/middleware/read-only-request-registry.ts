@@ -17,7 +17,8 @@ import { TrieRouter } from 'hono/router/trie-router'
  * Sign-in and token refresh keep sessions alive so users do not lose what they are editing.
  * They may still record incidental bookkeeping, such as sign-in rate-limit counters, audit events,
  * and the idempotent membership reconciliation run at sign-in. A migration that cannot tolerate
- * any write uses the `disabled` mode instead.
+ * any write uses the `disabled` mode instead. Browser error reports only count rate-limit windows
+ * and write a log record, and errors during maintenance are worth keeping.
  *
  * Routes use Hono path patterns; a `:name` segment matches one non-empty path segment.
  */
@@ -28,6 +29,7 @@ export const READ_ONLY_POST_ROUTES: readonly string[] = Object.freeze([
   '/api/auth/logout',
   '/api/auth/sso/start',
   '/api/auth/sso/exchange',
+  '/api/client-errors',
   '/api/analytics/query',
   '/api/analytics/evidence',
   '/api/analytics/export',
@@ -36,6 +38,7 @@ export const READ_ONLY_POST_ROUTES: readonly string[] = Object.freeze([
   '/api/enterprise/security/policy/preview',
   '/api/teams/:teamId/issues/:issueId/schedule/preview',
   '/api/teams/:teamId/issues/:issueId/work-item-type-preview',
+  '/api/teams/:teamId/projects/:projectId/status-report/pdf',
 ])
 
 /** Methods that never change data. */

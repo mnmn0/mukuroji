@@ -67,6 +67,11 @@ export interface ApiTransportsAndRealtimeInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable queues exposed through API configuration. */
   readonly workerChannels: WorkerChannels;
+  /**
+   * Comma-separated origins the app is served from. Same-origin browser error reports from
+   * these origins are accepted even when `ApiAllowedOrigins` lists only local origins.
+   */
+  readonly webBrowserOrigins: string;
 }
 
 /**
@@ -309,6 +314,7 @@ function bindApiRuntimeConfiguration(
     'Complete API runtime configuration, updated in place on each revision.',
     {
       ALLOWED_ORIGINS: apiAllowedOrigins.valueAsString,
+      WEB_APP_ORIGINS: input.webBrowserOrigins,
       AUTOMATION_INBOUND_WEBHOOK_BASE_URL: httpApi.apiEndpoint,
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID:
         input.runtimeControls.applicationId,
@@ -622,8 +628,10 @@ export function buildApiRuntime(
   // The Planning, Analytics, and Work Item configuration statements have the same actions and
   // each sit in a different policy, so CDK does not merge them and each table keeps a
   // statement of its own.
+  // BatchGetItem reads the Work Item links of one Project for a Project-scoped Planning read.
   apiTableDataPolicy.addStatements(new iam.PolicyStatement({
     actions: [
+      'dynamodb:BatchGetItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',
@@ -673,6 +681,8 @@ export function buildApiRuntime(
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
           'dynamodb:PutItem',
+          // The Workspace workload view reads every Team record of one Workspace partition.
+          'dynamodb:Query',
         ],
         resources: [capacityPlanningTable.tableArn],
       }),

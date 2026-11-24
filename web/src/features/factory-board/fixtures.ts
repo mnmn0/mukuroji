@@ -175,3 +175,20 @@ export const factoryAnalyticsFixture: TeamFactoryAnalyticsResponse = {
   workItemsHasMore: false,
   historyHasMore: false,
 }
+
+/** Factory analytics of the fixture Team with telemetry usage, as a Team manager sees it. */
+export const factoryAnalyticsWithUsageFixture: TeamFactoryAnalyticsResponse = {
+  ...factoryAnalyticsFixture,
+  usage: {
+    total: { inputTokens: 182_000, outputTokens: 64_500, cacheReadTokens: 2_410_000, cacheCreationTokens: 120_000, requestCount: 386, estimatedCostMicroUsd: 18_420_000, models: ['claude-opus-4-8', 'claude-sonnet-4-6'], hasMore: false },
+    projects: [
+      { projectId: 'refero', usage: { inputTokens: 140_000, outputTokens: 50_000, cacheReadTokens: 1_900_000, cacheCreationTokens: 90_000, requestCount: 290, estimatedCostMicroUsd: 14_100_000, models: ['claude-opus-4-8'], hasMore: false } },
+      { usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], hasMore: false } },
+    ],
+    workItems: [
+      { workItemId: 'auth-flow', title: 'API の認証フローを整理する', projectId: 'refero', usage: { inputTokens: 96_000, outputTokens: 31_000, cacheReadTokens: 1_250_000, cacheCreationTokens: 60_000, requestCount: 180, estimatedCostMicroUsd: 9_300_000, models: ['claude-opus-4-8'], hasMore: false } },
+      { workItemId: 'release-notes', title: 'リリースノートを書く', usage: { inputTokens: 42_000, outputTokens: 14_500, cacheReadTokens: 510_000, cacheCreationTokens: 30_000, requestCount: 96, estimatedCostMicroUsd: 4_320_000, models: ['claude-sonnet-4-6'], hasMore: false } },
+    ],
+    runsHasMore: false,
+  },
+}

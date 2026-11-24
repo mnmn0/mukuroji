@@ -733,3 +733,25 @@ export type PrepareDocumentWorkItemDeletionFenceRequest = {
   /** Canonical Work Item ID. */
   workItemId: string
 }
+
+/**
+ * Request to mark the Document elements linked to a completed Work Item as done.
+ */
+export type ReflectWorkItemCompletionRequest = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Canonical ID of the completed Work Item, `team/<teamId>/issue/<issueId>`. */
+  workItemId: string
+  /** Audit event ID of the completion, used in operation IDs. */
+  eventId: string
+  /** Member key or service identity recorded as the Document editor. */
+  actorId: string
+}
+
+/**
+ * Documents changed by reflecting a Work Item completion.
+ */
+export type ReflectWorkItemCompletionResult = {
+  /** IDs of the Documents whose checklist items or notes were marked done. */
+  updatedDocumentIds: string[]
+}

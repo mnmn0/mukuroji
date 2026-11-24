@@ -493,7 +493,7 @@ export type PlanningWorkItemSummary = {
 export type PlanningCriticalPath = {
   /** Critical path 上の entity ID を先頭から並べた配列です。 */
   entityIds: string[]
-  /** Critical path の合計 calendar day 数です。 */
+  /** Critical path の合計日数です。Workspace の稼働カレンダーがあれば稼働日で数えます（ADR 0058）。 */
   totalDurationDays: number
   /** Entity ID ごとの total slack day 数です。 */
   slackByEntityId: Record<string, number>
@@ -519,6 +519,35 @@ export type PlanningCapacity = {
   /** この byte 数以上で `warning` になる閾値です。 */
   warningByteCount: number
 }
+
+/**
+ * Planning snapshot を Workspace 全体ではなく一部の単位に絞って読むときの範囲です。
+ *
+ * - `team`: Workspace scope と、その Team と Team の Project の entity、Team の Work Item
+ * - `project`: Workspace scope、Team scope、その Project の entity と、Project の Work Item
+ * - `portfolio`: Portfolio とその子孫の entity と、Portfolio の scope の Work Item
+ */
+export type PlanningReadScope =
+  | {
+      /** Team 単位の読み取りです。 */
+      type: 'team'
+      /** 読み取る Team ID です。 */
+      teamId: string
+    }
+  | {
+      /** Project 単位の読み取りです。 */
+      type: 'project'
+      /** Project を所有する Team ID です。 */
+      teamId: string
+      /** 読み取る Project ID です。 */
+      projectId: string
+    }
+  | {
+      /** Portfolio 単位の読み取りです。 */
+      type: 'portfolio'
+      /** 読み取る Portfolio entity ID です。 */
+      portfolioId: string
+    }
 
 /** Planning API が返す Workspace 単位の整合した snapshot です。 */
 export type PlanningSnapshot = {
@@ -546,6 +575,11 @@ export type PlanningSnapshot = {
   capacity: PlanningCapacity
   /** 永続化済み graph の最終更新日時です。 */
   updatedAt?: string
+  /**
+   * 一部の単位だけを読んだ snapshot の範囲です。省略時は Workspace 全体の snapshot です。
+   * 範囲外の entity、link、dependency は含まず、critical path と roll-up も範囲内で算出します。
+   */
+  readScope?: PlanningReadScope
 }
 
 /**

@@ -2,8 +2,14 @@ import { expect, test } from 'bun:test'
 import { Hono } from 'hono'
 import { createAuditEvent, createMutationAuditContext } from '../../modules/audit/audit'
 import { shouldEvaluateAllPlanningHistoryScopes } from './planning-access'
+import type {
+  PlanningEntityChangeAction,
+  PlanningEntityTransactionSnapshot,
+} from '../../modules/planning'
 import {
+  createPlanningEntityAuditEvent,
   readPlanningEntityAuditScopes,
+  readPlanningMilestoneNotificationKind,
   redactPlanningEntityAuditReferences,
   toPlanningEntityActivityPageView,
 } from './planning-entity-audit'
@@ -111,4 +117,76 @@ test('shows the other end of a dependency only when the reader can see it', () =
     relatedEntityId: 'visible-successor',
   })
   expect(hidden.events[0]?.metadata).toEqual({ teamId: 'team-1', dependencyId: 'dependency-1', dependencyRole: 'predecessor' })
+})
+
+/**
+ * Creates a stored Milestone value for the audit event builder.
+ *
+ * @param overrides - Fields that differ from a planned Milestone on 2026-07-14.
+ * @returns Milestone snapshot.
+ */
+function createMilestone(overrides: Partial<PlanningEntityTransactionSnapshot> = {}): PlanningEntityTransactionSnapshot {
+  return {
+    id: 'milestone-1',
+    type: 'milestone',
+    title: 'Beta launch',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    ownerMemberKey: 'owner@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'none',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-14', endDate: '2026-07-14' },
+    forecast: { startDate: '2026-07-14', endDate: '2026-07-14' },
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-10T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+test('tells the Milestone watchers when it is completed or its day changes', () => {
+  const previous = createMilestone()
+  /** Builds the audit event of one update from the planned Milestone. */
+  const updated = (entity: PlanningEntityTransactionSnapshot, action: PlanningEntityChangeAction = 'updated') =>
+    createPlanningEntityAuditEvent({
+      workspaceId: 'workspace-1',
+      actorMemberKey: 'Editor@Example.com',
+      result: { kind: 'entity', revision: 2, action, entity, previous },
+    })
+
+  const completed = updated(createMilestone({
+    status: 'completed',
+    forecast: { startDate: '2026-07-15', endDate: '2026-07-15' },
+  }))
+  expect(completed.eventType).toBe('planning-entity.milestone-completed')
+  expect(completed.action).toBe('updated')
+  expect(completed.metadata).toMatchObject({
+    actorMemberKey: 'editor@example.com',
+    teamId: 'team-1',
+    projectId: 'project-1',
+    deepLink: '/planning/timeline?entityId=milestone-1',
+    notificationTitle: 'Beta launch',
+    notificationCandidates: [],
+  })
+  expect(updated(createMilestone({ forecast: { startDate: '2026-07-21', endDate: '2026-07-21' } })).eventType)
+    .toBe('planning-entity.milestone-rescheduled')
+  expect(updated(createMilestone({ baseline: { startDate: '2026-07-07', endDate: '2026-07-07' } })).eventType)
+    .toBe('planning-entity.milestone-rescheduled')
+
+  // Other edits, other entities, and other actions stay plain entity events without recipients.
+  for (const event of [
+    updated(createMilestone({ title: 'Beta' })),
+    updated(createMilestone({ type: 'phase', status: 'completed' })),
+    updated(createMilestone({ status: 'completed' }), 'moved'),
+    updated(createMilestone({ status: 'completed', archivedAt: '2026-07-11T00:00:00.000Z' })),
+  ]) {
+    expect(event.eventType.startsWith('planning-entity.milestone-')).toBe(false)
+    expect(event.metadata?.notificationCandidates).toBeUndefined()
+  }
+  expect(readPlanningMilestoneNotificationKind({
+    action: 'updated',
+    entity: createMilestone({ status: 'completed' }),
+    previous: createMilestone({ status: 'completed' }),
+  })).toBeUndefined()
 })

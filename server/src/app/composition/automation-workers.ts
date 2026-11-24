@@ -26,6 +26,7 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
+import { DynamoDbDocumentsClient } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbCustomerClient } from '../../modules/customers'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
@@ -33,7 +34,14 @@ import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
-import { createProductionTenantFeatureGate } from './tenant-administration'
+import {
+  createProductionTenantAdministrationClient,
+  createProductionTenantFeatureGate,
+} from './tenant-administration'
+import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
+import { DynamoDbWorkCalendarStore } from '../../modules/tenant-administration'
+import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
+import { loadServerDynamoDbResourceConfig } from '../../infrastructure/config/server-resource-config'
 
 /**
  * Creates only the production ports used by Automation actions.
@@ -66,6 +74,14 @@ function createAutomationActionDependencies(
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     automation,
+    workCalendarSources: {
+      tenantAdministration: createProductionTenantAdministrationClient(),
+      nationalHolidays: createProductionJapanesePublicHolidayDates(),
+      workCalendars: new DynamoDbWorkCalendarStore(
+        loadServerDynamoDbResourceConfig().tenantAdministrationTableName,
+        createDynamoDbDocumentClient(createDynamoDbClient()),
+      ),
+    },
   }
 }
 
@@ -103,6 +119,7 @@ export function createProductionAutomationEventHandler() {
     new AutomationEngine(automationRepository, actionExecutor),
     teamIssues,
     actionDependencies.customers,
+    new DynamoDbDocumentsClient(),
   )
 
   return (event: DynamoStreamEvent) => processAutomationEventBatch(event, processor)

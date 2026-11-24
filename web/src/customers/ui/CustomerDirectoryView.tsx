@@ -36,6 +36,8 @@ import {
   CustomerRequestLinksEditor,
   type CustomerEditingProps,
 } from './CustomerEditors'
+import { CustomerMergeForm } from './CustomerMergeForm'
+import { CustomerSavedViewManager } from './CustomerSavedViewManager'
 
 /** Props for the Customer directory and selected Customer detail view. */
 export type CustomerDirectoryViewProps = {
@@ -81,6 +83,20 @@ export type CustomerDirectoryViewProps = {
   isSavingView: boolean
   /** User-facing saved-view mutation failure, when present. */
   saveViewError?: string
+  /** Renames one saved view. Resolves true when it was saved. */
+  onRenameView: (view: CustomerSavedView, name: string) => Promise<boolean>
+  /** Replaces one saved view's filters and grouping with the current directory state. */
+  onReplaceViewFilters: (view: CustomerSavedView) => Promise<boolean>
+  /** Deletes one saved view. */
+  onDeleteView: (view: CustomerSavedView) => Promise<boolean>
+  /** Whether the member may download the Workspace Customer export. */
+  canExport: boolean
+  /** Whether the export is being prepared. */
+  isExporting: boolean
+  /** User-facing export failure, when present. */
+  exportError?: string
+  /** Prepares and downloads the Workspace Customer export. */
+  onExport: () => void
   /** Opens one Customer detail route. */
   onSelectCustomer: (customerId: string) => void
   /** Retries the failed query. */
@@ -122,6 +138,13 @@ export function CustomerDirectoryView({
   onSaveView,
   isSavingView,
   saveViewError,
+  onRenameView,
+  onReplaceViewFilters,
+  onDeleteView,
+  canExport,
+  isExporting,
+  exportError,
+  onExport,
   onSelectCustomer,
   onRetry,
   onLoadMoreCustomers,
@@ -266,6 +289,16 @@ export function CustomerDirectoryView({
               <span className="ml-auto text-sm font-semibold text-[var(--workbench-muted)]">
                 {t('customers.requestCount').replace('{count}', String(customers.reduce((sum, customer) => sum + customer.requestCount, 0)))}
               </span>
+              {canManageCustomerViews ? (
+                <CustomerSavedViewManager
+                  isSaving={isSavingView}
+                  onDelete={onDeleteView}
+                  onRename={onRenameView}
+                  onReplaceFilters={onReplaceViewFilters}
+                  t={t}
+                  views={savedViews}
+                />
+              ) : null}
             </div>
           </div>
         </ResponsiveDisclosure>
@@ -291,17 +324,32 @@ export function CustomerDirectoryView({
               <h2 className="text-base font-bold text-[var(--workbench-text)]" id="customer-directory-list-title">
                 {t('customers.title')}
               </h2>
-              {editing ? (
-                <button
-                  className="workbench-button-primary min-h-9 px-3 text-xs"
-                  disabled={isCreatingCustomer}
-                  onClick={() => setIsCreatingCustomer(true)}
-                  type="button"
-                >
-                  {t('customers.edit.newCustomer')}
-                </button>
-              ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                {canExport ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 px-3 text-xs"
+                    disabled={isExporting}
+                    onClick={onExport}
+                    type="button"
+                  >
+                    {isExporting ? t('customers.export.preparing') : t('customers.export.download')}
+                  </button>
+                ) : null}
+                {editing ? (
+                  <button
+                    className="workbench-button-primary min-h-9 px-3 text-xs"
+                    disabled={isCreatingCustomer}
+                    onClick={() => setIsCreatingCustomer(true)}
+                    type="button"
+                  >
+                    {t('customers.edit.newCustomer')}
+                  </button>
+                ) : null}
+              </div>
             </div>
+            {exportError ? (
+              <p className="border-b border-[var(--workbench-border)] px-5 py-3 text-sm font-semibold text-fg-red-700" role="alert">{exportError}</p>
+            ) : null}
             {customers.length === 0 ? (
               <p className="p-8 text-sm font-semibold text-[var(--workbench-muted)]">
                 {t('customers.empty')}
@@ -366,6 +414,7 @@ export function CustomerDirectoryView({
               />
             </aside>
           ) : <CustomerDetailPanel
+            customers={customers}
             detail={detail}
             editing={editing}
             locale={locale}
@@ -381,6 +430,7 @@ export function CustomerDirectoryView({
 
 /** Renders the selected Customer graph without coupling it to HTTP state. */
 function CustomerDetailPanel({
+  customers,
   detail,
   editing,
   locale,
@@ -388,6 +438,8 @@ function CustomerDetailPanel({
   onOpenWorkItem,
   t,
 }: {
+  /** Loaded directory Customers, offered as merge targets. */
+  customers: readonly Customer[]
   /** Selected Customer graph. */
   detail?: CustomerDetail
   /** Customer editing operations, when the member may change Customers. */
@@ -409,6 +461,7 @@ function CustomerDetailPanel({
     <CustomerDetailContent
       // Remount on Customer change so open editors never carry over to another Customer.
       key={detail.customer.id}
+      customers={customers}
       detail={detail}
       editing={editing}
       locale={locale}
@@ -422,11 +475,13 @@ function CustomerDetailPanel({
 /** Which editor is open in the Customer detail panel. */
 type CustomerDetailEditor =
   | { /** Editor kind. */ kind: 'customer' }
+  | { /** Editor kind. */ kind: 'merge' }
   | { /** Editor kind. */ kind: 'contact'; /** Contact being edited, or undefined for a new one. */ contactId?: string }
   | { /** Editor kind. */ kind: 'request'; /** Request being edited, or undefined for a new one. */ requestId?: string }
 
 /** Renders one loaded Customer graph and the editors the member may open on it. */
 function CustomerDetailContent({
+  customers,
   detail,
   editing,
   locale,
@@ -434,6 +489,8 @@ function CustomerDetailContent({
   onOpenWorkItem,
   t,
 }: {
+  /** Loaded directory Customers, offered as merge targets. */
+  customers: readonly Customer[]
   /** Selected Customer graph. */
   detail: CustomerDetail
   /** Customer editing operations, when the member may change Customers. */
@@ -471,6 +528,15 @@ function CustomerDetailContent({
             onUpdate={editing.onUpdateCustomer}
             t={t}
           />
+        ) : editing && openEditor?.kind === 'merge' ? (
+          <CustomerMergeForm
+            candidates={customers}
+            isSaving={editing.isSaving}
+            onCancel={closeEditor({ kind: 'merge' })}
+            onMerge={(target) => editing.onMergeCustomer(customer, target)}
+            source={customer}
+            t={t}
+          />
         ) : <>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -488,6 +554,16 @@ function CustomerDetailContent({
                 type="button"
               >
                 {t('customers.edit.edit')}
+              </button>
+            ) : null}
+            {editing ? (
+              <button
+                aria-label={t('customers.merge.openNamed').replace('{name}', customer.name)}
+                className="workbench-button-secondary min-h-8 px-3 text-xs"
+                onClick={() => setOpenEditor({ kind: 'merge' })}
+                type="button"
+              >
+                {t('customers.merge.open')}
               </button>
             ) : null}
           </div>

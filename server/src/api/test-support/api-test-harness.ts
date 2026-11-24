@@ -95,6 +95,9 @@ import {
   type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
+  type TeamWorkItemKeyPrefixState,
+  type ChangeTeamWorkItemKeyPrefixInput,
   listWorkItemMemberIndexKeys,
   normalizeWorkItemMemberIndexKey,
 } from '../../modules/work-items'
@@ -702,6 +705,7 @@ function createWorkspaceAccessFake(
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
     listActiveMembers: unsupported,
+    listMembers: unsupported,
     createInvitation: unsupported,
     getInvitation: unsupported,
     acquireInvitationAcceptanceLock: unsupported,
@@ -718,6 +722,7 @@ function createWorkspaceAccessFake(
     prepareReinvite: unsupported,
     reconcileAuthenticatedMember: unsupported,
     updateMember: unsupported,
+    updateMemberName: unsupported,
     recordMemberCredentialAction: unsupported,
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
@@ -872,6 +877,9 @@ function createTeamIssuesFake(
     getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
+    listWorkItemKeyPrefixes: unsupported,
+    getTeamWorkItemKeyPrefix: unsupported,
+    changeTeamWorkItemKeyPrefix: unsupported,
     getProjectIssues: unsupported,
     getTeamIssuePage: unsupported,
     getProjectIssuePage: unsupported,
@@ -1445,6 +1453,10 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Display names on Workspace member rows that differ from Cognito; null clears the name. */
+    workspaceMemberNames?: Record<string, string | null>
+    /** Makes listing every Workspace member row fail, as a throttled Query would. */
+    workspaceMemberListFails?: boolean
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
     /** Custom fields returned by the resolved Work Item configuration. */
@@ -1566,6 +1578,10 @@ function configureFakeProjectClients(
     }) => Promise<void> | void
     /** Work Item key registry rows, by canonical key, returned by key lookups. */
     workItemKeyLocations?: Readonly<Record<string, WorkItemKeyLocation>>
+    /** Work Item key prefix reservations returned by the prefix listing. */
+    workItemKeyPrefixes?: readonly WorkItemKeyPrefixAssignment[]
+    /** Team key prefix states by Team ID; a change replaces the Team's state. */
+    teamWorkItemKeyPrefixes?: Record<string, TeamWorkItemKeyPrefixState>
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
     /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
@@ -1727,6 +1743,7 @@ function configureFakeProjectClients(
     authorizationRecordKeys: string[]
   }> = []
   const calls = {
+    keyPrefixChanges: [] as ChangeTeamWorkItemKeyPrefixInput[],
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     projectCharterUpdates,
     projectLifecycleTransitions,
@@ -1808,6 +1825,8 @@ function configureFakeProjectClients(
       teamId: string
       limit: number
       cursor?: string
+      assignedProjectId?: string
+      workflowStatusId?: string
     }>,
     issueUpdates: [] as Array<{
       actorUserId: string
@@ -1869,6 +1888,12 @@ function configureFakeProjectClients(
       role?: WorkspaceRole
       status?: WorkspaceMemberStatus
     }>,
+    workspaceMemberNameUpdates: [] as Array<{
+      actorMemberKey: string
+      expectedVersion: number
+      memberKey: string
+      name?: string
+    }>,
     workspaceReconciliations: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
@@ -1896,7 +1921,10 @@ function configureFakeProjectClients(
     id: memberKey,
     memberKey,
     email: memberKey,
-    name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
+    // Members start with the Cognito name they signed up with, as reconciliation copies it.
+    name: options.workspaceMemberNames && memberKey in options.workspaceMemberNames
+      ? options.workspaceMemberNames[memberKey] ?? undefined
+      : createFakeCognitoProfile(memberKey).name,
     role: memberKey === 'demo@example.com'
       ? workspaceRole
       : options.guestWorkspaceMemberKeys?.includes(memberKey)
@@ -1975,6 +2003,18 @@ function configureFakeProjectClients(
         ]
     return issues
   }
+  /** Prefix states saved through the fake `changeTeamWorkItemKeyPrefix`, by Team ID. */
+  const changedTeamKeyPrefixes = new Map<string, TeamWorkItemKeyPrefixState>()
+  /**
+   * Reads a Team's prefix state from saved changes, then the fixture, then the empty default.
+   *
+   * @param teamId - Team ID.
+   * @returns The Team's current fake prefix state.
+   */
+  const readFakeTeamKeyPrefix = (teamId: string): TeamWorkItemKeyPrefixState =>
+    changedTeamKeyPrefixes.get(teamId)
+      ?? options.teamWorkItemKeyPrefixes?.[teamId]
+      ?? { lastNumber: 0, previousPrefixes: [] }
   const createFakeTeamIssues = (teamId: string) =>
     Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -2442,6 +2482,17 @@ function configureFakeProjectClients(
           ],
         }
       },
+      async bindTeamGrantRequest() {},
+      async addProjectMemberIfAbsent(directoryId, _teamId, projectId, memberKey, input) {
+        if (memberKey.trim().toLowerCase() === 'demo@example.com') return { added: false }
+        calls.memberUpdates.push({
+          directoryId,
+          memberKey,
+          projectId,
+          role: String(input.role),
+        })
+        return { added: true }
+      },
       async updateProjectMember(directoryId, projectId, memberKey, input) {
         calls.memberUpdates.push({
           directoryId,
@@ -2544,6 +2595,11 @@ function configureFakeProjectClients(
         calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
 
         return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
+      },
+      async updateTeamProfile(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'updateTeamProfile', directoryId, teamId, input })
+
+        return { teamId, description: '説明', leaderMemberKey: 'leader-user', profileRevision: 1 }
       },
       async renameProject(directoryId, teamId, projectId, input) {
         calls.directoryAdministration.push({
@@ -2659,11 +2715,11 @@ function configureFakeProjectClients(
           : (options.additionalTeams ?? []).find((team) => team.id === teamId)?.projects ?? []
         const project = projects.find((candidate) => candidate.id === projectId)
         if (!project) return undefined
-        if (archivedDirectoryKeys.has(teamId)) return undefined
         const key = `${teamId}/${projectId}`
         const state = structuredClone(readProjectCharterState(teamId, projectId))
         return {
           archived: archivedDirectoryKeys.has(key),
+          teamArchived: archivedDirectoryKeys.has(teamId),
           state,
           project: { ...project, lifecycleState: state.lifecycleState },
           englishName: project.name,
@@ -2769,6 +2825,15 @@ function configureFakeProjectClients(
           createWorkspaceMember('suzuki@example.com'),
           createWorkspaceMember('viewer@example.com'),
         ].filter((member) => member.status === 'active')
+      },
+      async listMembers() {
+        if (options.workspaceMemberListFails) throw new Error('Workspace member Query was throttled.')
+        return [
+          createWorkspaceMember('demo@example.com'),
+          createWorkspaceMember('sato@example.com'),
+          createWorkspaceMember('suzuki@example.com'),
+          createWorkspaceMember('viewer@example.com'),
+        ]
       },
       async getAccessSnapshot(_workspaceId, memberKey) {
         const currentMember = createWorkspaceMember(memberKey)
@@ -2987,6 +3052,21 @@ function configureFakeProjectClients(
           version: input.expectedVersion + 1,
         }
       },
+      async updateMemberName(_workspaceId, actorMemberKey, memberKey, input, auditContext) {
+        calls.workspaceMutationAuditContexts.push({ stage: 'updateMemberName', context: auditContext })
+        calls.workspaceMemberNameUpdates.push({
+          actorMemberKey,
+          memberKey,
+          expectedVersion: input.expectedVersion,
+          ...(input.name === undefined ? {} : { name: input.name }),
+        })
+        const { name: _previousName, ...member } = createWorkspaceMember(memberKey)
+        return {
+          ...member,
+          ...(input.name === undefined ? {} : { name: input.name }),
+          version: input.expectedVersion + 1,
+        }
+      },
     },
     teamIssues: {
       /**
@@ -3075,6 +3155,8 @@ function configureFakeProjectClients(
           teamId,
           limit: readOptions.limit,
           ...(readOptions.cursor ? { cursor: readOptions.cursor } : {}),
+          ...(readOptions.assignedProjectId ? { assignedProjectId: readOptions.assignedProjectId } : {}),
+          ...(readOptions.workflowStatusId ? { workflowStatusId: readOptions.workflowStatusId } : {}),
         })
         return {
           issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
@@ -3107,6 +3189,25 @@ function configureFakeProjectClients(
       async getWorkItemKeyLocation(_directoryId, key) {
         const parsed = parseWorkItemKey(key)
         return parsed ? options.workItemKeyLocations?.[parsed.key] : undefined
+      },
+      async listWorkItemKeyPrefixes() {
+        return [...(options.workItemKeyPrefixes ?? [])]
+      },
+      async getTeamWorkItemKeyPrefix(_directoryId, teamId) {
+        return readFakeTeamKeyPrefix(teamId)
+      },
+      async changeTeamWorkItemKeyPrefix(input) {
+        calls.keyPrefixChanges.push(input)
+        const current = readFakeTeamKeyPrefix(input.teamId)
+        const next: TeamWorkItemKeyPrefixState = {
+          keyPrefix: input.keyPrefix,
+          lastNumber: current.lastNumber,
+          previousPrefixes: current.keyPrefix && !current.previousPrefixes.includes(current.keyPrefix)
+            ? [...current.previousPrefixes, current.keyPrefix]
+            : current.previousPrefixes,
+        }
+        changedTeamKeyPrefixes.set(input.teamId, next)
+        return next
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
@@ -3235,6 +3336,9 @@ function configureFakeProjectClients(
             assigneeUserId: String(input.assigneeUserId),
             ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
               ? { contributorAssignments: input.contributorAssignments }
+              : {}),
+            ...(isStoredAcceptanceCriterionList(input.acceptanceCriteria)
+              ? { acceptanceCriteria: input.acceptanceCriteria }
               : {}),
             creatorMemberKey: actorUserId,
             workflowSchemaVersion: 1,
@@ -3644,6 +3748,9 @@ async function configureEnterpriseScimGuestRoleScenario(
     },
     async listActiveMembers() {
       return [...members.values()].filter((member) => member.status === 'active')
+    },
+    async listMembers() {
+      return [...members.values()]
     },
     async reconcileDirectoryMember(
       _workspaceId: string,

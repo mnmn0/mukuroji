@@ -2,6 +2,8 @@ export {
   createProjectRaidEntryUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
+  type ProjectRaidEntryReferences,
+  type ProjectRaidEntryReferenceVerifier,
   type ProjectRaidLogScope,
 } from './application/project-raid-log-use-cases'
 export {

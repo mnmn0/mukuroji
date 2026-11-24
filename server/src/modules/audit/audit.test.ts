@@ -14,6 +14,7 @@ import {
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
   createWorkspaceMemberAuditEntityIdFromKeyBytes,
+  deriveMutationAuditPartContext,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
@@ -857,4 +858,28 @@ test('leaves the timeline name out of a query without a time range', async () =>
       .not.toContain('#timelineKey')
   }
   expect(commands).toHaveLength(2)
+})
+
+test('gives each part of a mutation its own stable event identity under one correlation', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-a',
+    actor: { id: 'sub-admin', kind: 'user', displayName: 'admin@example.com' },
+    idempotencyKey: 'team-grant-key',
+    request: { method: 'POST', path: '/api/teams/core/members', body: { role: 'member' } },
+    source: { kind: 'api' },
+  })
+  const event = (part: string) => createAuditEvent({
+    context: deriveMutationAuditPartContext(context, part),
+    eventType: 'member.added',
+    entity: { type: 'member', id: `${part}/sato` },
+    action: 'created',
+    changes: [],
+    expiresAt: auditExpiresAt,
+  })
+
+  const alpha = event('alpha')
+  expect(event('beta').eventId).not.toBe(alpha.eventId)
+  expect(event('alpha').eventId).toBe(alpha.eventId)
+  expect(alpha.correlationId).toBe(context.correlationId)
+  expect(() => deriveMutationAuditPartContext(context, ' ')).toThrow()
 })

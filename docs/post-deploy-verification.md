@@ -141,6 +141,14 @@ unset MUKUROJI_SMOKE_ACCESS_TOKEN
 - [ ] 通知 Email（`NotificationEmailSender`）を使う場合は、通知を 1 件起こして届くことを確かめる。
 - [ ] 届かないときは SES の送信統計と suppression list を見る。
 
+### Update の受信トレイ・ダイジェスト（#241）
+
+- [ ] 自分で「アップデート」→「受信トレイのダイジェスト設定」を日次でオンにし、未読の Update がある状態で
+      UTC 0:00（日本時間 9:00）を15分ほど過ぎたら、受信トレイに「更新ダイジェストを確認できます」が 1 件届く。
+- [ ] 同じ日のうちに2件目が届かない。scheduled-jobs の DLQ alarm が鳴っていない。
+- [ ] その Project の閲覧権限を外したメンバーには、外した Project の Update が入らない（届いたダイジェストを開いても見えない）。
+- [ ] 止めるときは `InboxDigestDeliveryEnabled=false` で deploy するか、runtime control の `notification-schedule` を止める。
+
 ### データ移行の実 STS（#637）
 
 `data:migrate:aws` の `--apply` は operator の credential で STS の presigned URL を作り、function がそれを STS に送って

@@ -176,6 +176,7 @@ function readAudit(transaction: TransactWriteCommand['input'] | undefined) {
     summary: item?.summary,
     baselineSlip: Reflect.get(metadata, 'baselineSlip'),
     candidates: Reflect.get(metadata, 'notificationCandidates'),
+    message: Reflect.get(metadata, 'notificationMessage'),
   }
 }
 
@@ -234,6 +235,7 @@ test('records the slip and notifies the assignee when a deadline crosses three d
   })
   expect(audit.candidates).toContainEqual({ memberKey: 'sato@example.com', reason: 'baseline-slip' })
   expect(audit.summary).toBe('Work Item now ends 4 days after its schedule baseline.')
+  expect(audit.message).toEqual({ code: 'work-item.baseline-slip', params: { delayDays: 4 } })
 })
 
 test('records a smaller slip for Automation without notifying', async () => {
@@ -251,6 +253,7 @@ test('records a smaller slip for Automation without notifying', async () => {
   })
   expect(audit.candidates).not.toContainEqual(expect.objectContaining({ reason: 'baseline-slip' }))
   expect(audit.summary).toBe('Work Item schedule changed.')
+  expect(audit.message).toEqual({ code: 'work-item.schedule-changed' })
 })
 
 test('records nothing when the deadline moves earlier or the item is outside the baseline', async () => {

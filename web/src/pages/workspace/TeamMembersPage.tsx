@@ -131,12 +131,14 @@ export function TeamMembersPage() {
           teamId={activeTeam?.id}
         />
         <TeamWorkloadView
+          crossTeamPath="/workload"
           error={workload.error ?? assignmentMutation.error}
           granularity={granularity}
           isLoading={Boolean(workload.key && workload.isLoading)}
           isAssignmentMutationPending={assignmentMutation.isPending}
           onGranularityChange={setGranularity}
           onMoveAssignment={assignmentMutation.move}
+          onChangeAssignmentStatus={assignmentMutation.setStatus}
           onRetry={() => { void workload.mutate() }}
           snapshot={workload.data}
           t={t}

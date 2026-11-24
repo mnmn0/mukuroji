@@ -10,6 +10,9 @@ import {
 /** Milliseconds in one day. */
 const dayMilliseconds = 86_400_000
 
+/** Milliseconds in one hour, the interval of the reminder schedule. */
+const hourMilliseconds = 3_600_000
+
 /** One weekly local time at which the hourly schedule acts. */
 export type WeeklyReportReminderSlot = {
   /** Local weekday, 0 (Sunday) to 6 (Saturday). */
@@ -32,14 +35,16 @@ export type WeeklyReportReminderTiming = {
  * Turns a Workspace's reminder settings into the schedule timing, in the Workspace time zone.
  *
  * @param settings - Stored settings; the defaults when the Workspace has not chosen its own.
+ * @param timeZone - Workspace time zone the hours are read in; Japan time by default.
  * @returns The timing, or undefined when reminders are off. Escalation needs the reminder.
  */
 export function toWeeklyReportReminderTiming(
   settings: WeeklyReportReminderSettings = DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+  timeZone: string = DEFAULT_WORKSPACE_TIME_ZONE,
 ): WeeklyReportReminderTiming | undefined {
   if (!settings.enabled) return undefined
   return {
-    timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
+    timeZone,
     reminder: settings.reminder,
     ...(settings.escalationEnabled ? { escalation: settings.escalation } : {}),
   }
@@ -106,27 +111,53 @@ export type WeeklyReportReminderCandidate = {
  *
  * The reminder is about the week that contains the reminder day. The escalation is about the same
  * week: the most recent reminder day at or before the escalation (a week back when both fall on
- * the same weekday and the escalation hour is not later).
+ * the same weekday and the escalation hour is not later). Both can be due in one run when daylight
+ * saving time skips the earlier slot onto the later one; the reminder then comes first.
  *
  * @param now - Schedule execution instant.
  * @param timing - Reminder timing.
- * @returns The run, or undefined when this hour is neither slot.
+ * @returns The due runs, empty when this hour is neither slot.
  */
-export function resolveWeeklyReportReminderRun(
+export function resolveWeeklyReportReminderRuns(
   now: Date,
   timing: WeeklyReportReminderTiming,
-): WeeklyReportReminderRun | undefined {
+): WeeklyReportReminderRun[] {
   const date = toWorkspaceLocalDate(now, timing.timeZone)
   const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay()
   const hour = readLocalHour(now, timing.timeZone)
-  if (weekday === timing.reminder.weekday && hour === timing.reminder.hour) {
-    return { kind: 'reminder', date }
+  const previousHour = readLocalHour(new Date(now.getTime() - hourMilliseconds), timing.timeZone)
+  const runs: WeeklyReportReminderRun[] = []
+  if (weekday === timing.reminder.weekday && isSlotHour(timing.reminder.hour, hour, previousHour)) {
+    runs.push({ kind: 'reminder', date })
   }
   const escalation = timing.escalation
-  if (!escalation || weekday !== escalation.weekday || hour !== escalation.hour) return undefined
-  let daysBack = (escalation.weekday - timing.reminder.weekday + 7) % 7
-  if (daysBack === 0 && escalation.hour <= timing.reminder.hour) daysBack = 7
-  return { kind: 'escalation', date: addDays(date, -daysBack) }
+  if (escalation && weekday === escalation.weekday && isSlotHour(escalation.hour, hour, previousHour)) {
+    let daysBack = (escalation.weekday - timing.reminder.weekday + 7) % 7
+    if (daysBack === 0 && escalation.hour <= timing.reminder.hour) daysBack = 7
+    runs.push({ kind: 'escalation', date: addDays(date, -daysBack) })
+  }
+  return runs
+}
+
+/**
+ * Tells whether an hourly run falls on a slot's local hour.
+ *
+ * When the clocks go forward over the slot (for example 2:00 does not exist on the day daylight
+ * saving time starts), the run of the first hour after the gap acts instead, so the week's
+ * reminder is not lost. An offset that is not a whole hour (such as Asia/Kathmandu) runs within
+ * the slot's local hour rather than on the hour.
+ *
+ * @param slotHour - Local hour of the slot.
+ * @param hour - Local hour of this run.
+ * @param previousHour - Local hour one hour before this run.
+ * @returns Whether this run acts for the slot.
+ */
+function isSlotHour(slotHour: number, hour: number, previousHour: number): boolean {
+  if (hour === slotHour) return true
+  // The local hour jumped past the slot: one hour ago it was before the slot, now it is after.
+  const step = (hour - previousHour + 24) % 24
+  const slotOffset = (slotHour - previousHour + 24) % 24
+  return step > 1 && slotOffset > 0 && slotOffset < step
 }
 
 /**

@@ -3,7 +3,7 @@ import { CONNECTOR_OAUTH_CALLBACK_APP_PATH } from '@mukuroji/contracts'
 import { Navigate, createBrowserRouter, type LazyRouteFunction, type RouteObject } from 'react-router'
 import { LoginPage } from '../pages/auth/LoginPage'
 import { NotFoundPage } from '../pages/public/NotFoundPage'
-import { RouteErrorPage } from '../pages/public/RouteErrorPage'
+import { RouteErrorBoundary } from './RouteErrorBoundary'
 import { loadPageWithReload } from './staleChunkReload'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
@@ -25,12 +25,12 @@ function lazyPage(load: () => Promise<ComponentType>): LazyRouteFunction<RouteOb
  *
  * The pathless root shows an empty busy page while the first page chunk loads; later navigations
  * keep the current page until the next one is ready. A page that fails to load or render shows
- * {@link RouteErrorPage}.
+ * the route error page, which reports the failure.
  */
 export const appRoutes: RouteObject[] = [
   {
     hydrateFallbackElement: <div aria-busy="true" className="min-h-svh" />,
-    errorElement: <RouteErrorPage />,
+    errorElement: <RouteErrorBoundary />,
     children: [
       {
         path: '/',
@@ -62,6 +62,10 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/DashboardPage')).DashboardPage),
                   },
                   {
+                    path: '/dashboard/portfolio',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/PortfolioDashboardPage')).PortfolioDashboardPage),
+                  },
+                  {
                     path: '/home',
                     lazy: lazyPage(async () => (await import('../pages/workspace/HomePage')).HomePage),
                   },
@@ -73,6 +77,10 @@ export const appRoutes: RouteObject[] = [
                   {
                     path: '/my-tasks',
                     lazy: lazyPage(async () => (await import('../pages/workspace/MyTasksPage')).MyTasksPage),
+                  },
+                  {
+                    path: '/workload',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/WorkspaceWorkloadPage')).WorkspaceWorkloadPage),
                   },
                   {
                     path: '/work-items',
@@ -243,6 +251,10 @@ export const appRoutes: RouteObject[] = [
       {
         path: '/share/documents/:shareToken',
         lazy: lazyPage(async () => (await import('../documents/SharedDocumentPage')).SharedDocumentPage),
+      },
+      {
+        path: '/share/project-status/:shareToken',
+        lazy: lazyPage(async () => (await import('../pages/public/SharedProjectStatusReportPage')).SharedProjectStatusReportPage),
       },
       {
         path: '*',

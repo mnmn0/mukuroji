@@ -183,6 +183,31 @@ describe('DeveloperPlatformPanel connector management', () => {
     )
   })
 
+  test('offers to load the import progress again after it failed', () => {
+    const failedHtml = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="imports"
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        latestImportProgressFailed
+        onRetryImportProgress={() => undefined}
+      />,
+    )
+    const loadedHtml = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="imports"
+        labels={developerPlatformLabelsFixture}
+        resources={developerPlatformResourcesFixture}
+        onRetryImportProgress={() => undefined}
+      />,
+    )
+
+    expect(failedHtml).toContain('data-testid="developer-import-progress-error"')
+    expect(failedHtml).toContain('The import progress could not be loaded.')
+    expect(failedHtml).toContain('Load again')
+    expect(loadedHtml).not.toContain('developer-import-progress-error')
+  })
+
   test('shows only import projects owned by the selected Team', () => {
     const html = renderToStaticMarkup(
       <DeveloperPlatformPanel

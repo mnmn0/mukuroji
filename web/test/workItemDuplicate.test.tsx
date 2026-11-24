@@ -1,8 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+  type AutomationTemplate,
+} from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
-import { createWorkItemDuplicateDraft } from '../src/issues/model/workItemDuplicate'
+import {
+  createWorkItemDuplicateDraft,
+  createWorkItemTemplateDraft,
+  listWorkItemTemplatesForTeam,
+  type WorkItemTemplate,
+} from '../src/issues/model/workItemDuplicate'
 import { CreateIssuePanel } from '../src/issues/ui/CreateTeamIssuePanel'
 import { CreateTaskPanel } from '../src/tasks/ui/CreateTaskPanel'
 import { taskViewStoryProjectMembers } from '../src/tasks/ui/TaskView.stories.fixtures'
@@ -68,7 +78,38 @@ describe('Work Item duplicate draft', () => {
       contributorAssignments: [
         { memberUserId: 'suzuki@example.com', jobRoleId: 'reviewer', plannedEffortMinutes: 120 },
       ],
+      acceptanceCriteria: [],
     })
+  })
+
+  test('copies acceptance criteria texts so the copy starts with them unmet', () => {
+    const draft = createWorkItemDuplicateDraft({
+      ...source,
+      acceptanceCriteria: [
+        { id: 'a'.repeat(32), text: 'テストが通る', satisfied: true },
+        { id: 'b'.repeat(32), text: '手順書を更新する', satisfied: false },
+      ],
+    })
+
+    expect(draft.acceptanceCriteria).toEqual(['テストが通る', '手順書を更新する'])
+    const markup = renderToStaticMarkup(
+      <CreateIssuePanel
+        assigneeOptions={assigneeOptions}
+        canCreateUnassignedIssue
+        duplicateDraft={draft}
+        locale="ja"
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+        projects={projectDirectoryFixtures[0]?.projects ?? []}
+        t={createTranslator('ja')}
+        workspaceMembers={[]}
+      />,
+    )
+    expect(markup.match(/data-testid="work-item-acceptance-criterion-row"/g)).toHaveLength(2)
+    expect(markup).toContain('テストが通る')
+    expect(markup).toContain('手順書を更新する')
+    expect(markup).toContain('&quot;satisfied&quot;:false')
+    expect(markup).not.toContain('&quot;satisfied&quot;:true')
   })
 
   test('leaves the due date empty for an unscheduled source', () => {
@@ -220,5 +261,125 @@ describe('Task action menu extra actions', () => {
       'move',
       'archive',
     ])
+  })
+})
+
+/**
+ * Builds a Work Item template.
+ *
+ * @param overrides - Template fields replacing the defaults.
+ * @param payload - Payload fields replacing the defaults.
+ * @returns The template.
+ */
+function workItemTemplate(
+  overrides: Partial<Pick<WorkItemTemplate, 'id' | 'name' | 'enabled'>> = {},
+  payload: Partial<WorkItemTemplate['payload']> = {},
+): WorkItemTemplate {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'release-check',
+    workspaceId: 'workspace-1',
+    kind: 'work-item',
+    name: 'リリース確認',
+    enabled: true,
+    version: 2,
+    revision: 2,
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    ...overrides,
+    payload: {
+      title: 'リリースを確認する',
+      description: 'リリース前の確認です。',
+      priority: 'high',
+      customFieldValues: { 'story-points': 3, nested: { not: 'a field value' } },
+      acceptanceCriteria: ['テストが通る', '手順書を更新する'],
+      schedule: createDefaultDueDateWorkItemSchedule('2025-01-31'),
+      ...payload,
+    },
+  }
+}
+
+describe('Work Item template draft', () => {
+  test('offers enabled Work Item templates of the Team by name', () => {
+    const projectTemplate: AutomationTemplate = {
+      ...workItemTemplate({ id: 'project' }),
+      kind: 'project',
+      payload: { name: 'Project' },
+    }
+    const templates = listWorkItemTemplatesForTeam([
+      workItemTemplate({ id: 'z', name: 'Z' }),
+      workItemTemplate({ id: 'a', name: 'A' }),
+      workItemTemplate({ id: 'disabled', enabled: false }),
+      workItemTemplate({ id: 'other-team' }, { teamId: 'other-team' }),
+      workItemTemplate({ id: 'own-team' }, { teamId: 'core-team' }),
+      projectTemplate,
+    ], 'core-team')
+
+    expect(templates.map((template) => template.id)).toEqual(['a', 'z', 'own-team'])
+  })
+
+  test('fills the draft from the template but keeps the form date and leaves odd values out', () => {
+    expect(createWorkItemTemplateDraft(workItemTemplate())).toEqual({
+      sourceWorkItemId: 'template:release-check:2',
+      sourceTemplate: { id: 'release-check', name: 'リリース確認' },
+      title: 'リリースを確認する',
+      description: 'リリース前の確認です。',
+      assigneeUserId: '',
+      priority: 'high',
+      customFieldValues: { 'story-points': 3 },
+      contributorAssignments: [],
+      acceptanceCriteria: ['テストが通る', '手順書を更新する'],
+    })
+  })
+
+  test('starts the create panel from the picked template', () => {
+    const t = createTranslator('ja')
+    const template = workItemTemplate({}, { schedule: createDefaultUnscheduledWorkItemSchedule() })
+    const markup = renderToStaticMarkup(
+      <CreateIssuePanel
+        assigneeOptions={assigneeOptions}
+        canCreateUnassignedIssue
+        duplicateDraft={createWorkItemTemplateDraft(template)}
+        locale="ja"
+        onApplyTemplate={() => undefined}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+        projects={projectDirectoryFixtures[0]?.projects ?? []}
+        t={t}
+        templates={[template]}
+        workspaceMembers={[]}
+      />,
+    )
+
+    expect(markup).toContain('data-testid="create-issue-template"')
+    expect(markup).toMatch(/<option value="release-check" selected="">/)
+    expect(markup).toContain('テンプレート「リリース確認」の内容を下書きに入れました。')
+    expect(markup).toContain('value="リリースを確認する"')
+    expect(markup).toMatch(/<option value="high" selected="">/)
+    expect(markup.match(/data-testid="work-item-acceptance-criterion-row"/g)).toHaveLength(2)
+    expect(markup).not.toContain('value="2025-01-31"')
+  })
+
+  test('hides the template picker for a duplicate and when no template is offered', () => {
+    const t = createTranslator('ja')
+    const props = {
+      assigneeOptions,
+      canCreateUnassignedIssue: true,
+      locale: 'ja' as const,
+      onApplyTemplate: () => undefined,
+      onCancel: () => undefined,
+      onSubmit: async () => undefined,
+      projects: projectDirectoryFixtures[0]?.projects ?? [],
+      t,
+      workspaceMembers: [],
+    }
+
+    expect(renderToStaticMarkup(
+      <CreateIssuePanel {...props} duplicateDraft={createWorkItemDuplicateDraft(source)} templates={[workItemTemplate()]} />,
+    )).not.toContain('data-testid="create-issue-template"')
+    expect(renderToStaticMarkup(<CreateIssuePanel {...props} templates={[]} />))
+      .not.toContain('data-testid="create-issue-template"')
+    expect(renderToStaticMarkup(<CreateIssuePanel {...props} templateLoadFailed templates={[]} />))
+      .toContain('テンプレートを読み込めませんでした')
   })
 })

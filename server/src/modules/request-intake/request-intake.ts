@@ -766,6 +766,8 @@ export function createRequestWorkItemInput(
     holidays: [...workspaceCalendarPolicy.holidays],
     timeZone: workspaceCalendarPolicy.timeZone,
     workingWeekdays: [...workspaceCalendarPolicy.workingWeekdays],
+    // Keeps the shared marker so the target Team and Project calendar replaces it (ADR 0058).
+    ...(workspaceCalendarPolicy.calendarSource ? { calendarSource: workspaceCalendarPolicy.calendarSource } : {}),
   }
   const dueDate = new Date(`${toWorkspaceLocalDate(submission.createdAt, calendarPolicy.timeZone)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)

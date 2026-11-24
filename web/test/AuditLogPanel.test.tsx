@@ -135,7 +135,7 @@ describe('audit event type labels', () => {
     expect(formatAuditEventType('auth.signed-in', en)).toBe('Sign-in succeeded')
     expect(formatAuditEventType('customer.merged', ja)).toBe('顧客の統合')
     expect(formatAuditEventType('collection.item-added', en)).toBe('Collection item added')
-    expect(formatAuditEventType('resource-assignment.updated', ja)).toBe('要員の割り当ての更新')
+    expect(formatAuditEventType('workload.profile.updated', ja)).toBe('稼働プロフィールの更新')
     expect(formatAuditEventType('comment.teleported', ja)).toBe('コメント: teleported')
     expect(formatAuditEventType('unknown.created', en)).toBe('unknown.created')
     expect(formatAuditEventType('created', en)).toBe('created')
