@@ -14,6 +14,7 @@ import type {
   AiSummaryDraft,
   CuratedContextSource,
 } from '@mukuroji/contracts'
+import { MarkdownAttachmentReactContext } from '../../files/ui/markdownAttachmentContext'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { WatchIcon } from '../../shared/ui/icons'
@@ -41,6 +42,7 @@ import { IssueActivityTab } from './IssueActivityTab'
 import { IssueConversationTab } from './IssueConversationTab'
 import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
+import type { ProjectRiskPromotion } from '../../projects/mutations/usePromoteProjectRisk'
 
 /**
  * Feature-owned Brief slot for an optional Work Item collaboration tab.
@@ -93,6 +95,8 @@ type AiSummaryOperationPendingController = {
 export type IssueCollaborationPanelProps = {
   /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
   aiAssistance?: IssueSummaryAiAssistance
+  /** Adds a curated risk to the Work Item's Project log; absent when the Work Item has no Project. */
+  riskPromotion?: ProjectRiskPromotion
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -159,9 +163,14 @@ export function IssueCollaborationPanel({
   onCommentDraftDirtyChange,
   readOnlyMessage,
   renderCommentDetails,
+  riskPromotion,
   route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const markdownAttachments = useMemo(
+    () => artifacts ? { controller: artifacts, t } : undefined,
+    [artifacts, t],
+  )
   const [uncontrolledTab, setUncontrolledTab] = useState(defaultTab)
   const [promotedContextDraft, setPromotedContextDraft] =
     useState<IssueContextDraft>()
@@ -371,6 +380,7 @@ export function IssueCollaborationPanel({
   }
 
   return (
+    <MarkdownAttachmentReactContext.Provider value={markdownAttachments}>
     <section
       className={`border-t border-[var(--workbench-border)] bg-surface ${className}`}
       data-testid="issue-collaboration-panel"
@@ -602,6 +612,7 @@ export function IssueCollaborationPanel({
               setPromotedContextDraft(undefined)
               onContextDraftConsumed?.()
             }}
+            {...(riskPromotion ? { riskPromotion } : {})}
             onOpenSource={(item, source) => {
               const target = {
                 contextItemId: item.id,
@@ -631,6 +642,7 @@ export function IssueCollaborationPanel({
         ) : null}
       </div>
     </section>
+    </MarkdownAttachmentReactContext.Provider>
   )
 }
 

@@ -14,6 +14,21 @@ export {
   type TeamWorkItemHierarchySourceEntry,
 } from './application/use-cases/read-team-work-item-hierarchy'
 export {
+  applyWorkCalendarChange,
+  planWorkCalendarChange,
+  previewWorkCalendarChange,
+  WORKSPACE_CALENDAR_VERSION_KEY,
+  workCalendarVersionKey,
+  type WorkCalendarChangeApplyOptions,
+  type WorkCalendarChangePlan,
+  type WorkCalendarChangePlanInput,
+  type WorkCalendarChangePorts,
+  type WorkCalendarChangeRules,
+  type WorkCalendarChangeWorkItem,
+  type WorkCalendarScheduleUpdate,
+  type WorkCalendarVersion,
+} from './application/use-cases/work-calendar-change'
+export {
   WorkItemContributorAssignmentError,
   listAddedContributorMembers,
   normalizeContributorAssignments,
@@ -39,6 +54,7 @@ export {
   addWorkItemScheduleCalendarDays,
   applyWorkItemScheduleOperation,
   calculateWorkItemScheduleDurationDays,
+  rebaseWorkItemScheduleCalendar,
   calculateWorkItemScheduleDateDeltaDays,
   calculateWorkItemScheduleEndDate,
   deriveWorkItemScheduleDueDate,
@@ -143,6 +159,7 @@ export {
 export {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  createWorkItemProjectAssignmentConditionCheck,
   createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
@@ -186,10 +203,14 @@ export {
   type WorkItemAuthorizationSnapshot,
 } from './adapter-out/dynamodb/work-item-client'
 export {
+  isWorkItemKeyPrefix,
   isWorkItemKeyRegistryRecord,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './adapter-out/dynamodb/work-item-key-registry'
-export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
+export { createWorkItemKeyPrefixCandidates, deriveWorkItemKeyPrefix } from './domain/work-item-key'
 export {
   DynamoDbProjectScheduleBaselineStore,
   InMemoryProjectScheduleBaselineStore,

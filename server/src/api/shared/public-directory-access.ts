@@ -1,17 +1,21 @@
-import type {
-  PublicCredentialOwner,
-  PublicProjectMemberList,
-  PublicTeamList,
-  PublicWorkItemKeyLookup,
+import {
+  deriveProjectRaidSeverity,
+  type PublicCredentialOwner,
+  type PublicProjectMemberList,
+  type PublicProjectRaidLog,
+  type PublicTeamList,
+  type PublicWorkItemKeyLookup,
 } from '@mukuroji/contracts'
+import { readProjectRaidLogUseCase } from '../../modules/project-raid-log'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
 import {
   PublicApiServiceError,
   type PublicDirectoryService,
 } from '../../modules/developer-platform/public-api'
-import { workspaceDependencies } from './app-dependencies'
+import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { resolveDeveloperCredentialPrincipal } from './developer-platform-access'
 import { requirePlanningUpdateProjectPermission } from './planning-access'
+import { requireWorkspaceBusinessRead } from './project-access'
 import { filterReadableProjectDirectory, resolveReadableWorkItemKey } from './project-directory-visibility'
 
 /**
@@ -120,6 +124,42 @@ async function listCredentialProjectMembers(
 }
 
 /**
+ * Lists a Project's risks, issues, and change requests for an owner who can view the Project.
+ *
+ * The rule matches the Web log panel: viewer access to the Project reads the whole log.
+ *
+ * @param credential - Authenticated developer credential.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Every entry, newest first, with its severity.
+ */
+async function listCredentialProjectRaidLog(
+  credential: AuthenticatedDeveloperCredential,
+  teamId: string,
+  projectId: string,
+): Promise<PublicProjectRaidLog> {
+  const principal = await resolveDeveloperCredentialPrincipal(credential, {
+    permission: 'projects.read',
+    teamId,
+    projectId,
+    evaluateProjectScopes: true,
+  })
+  // The same restriction as the Web log GET: guests cannot read Project logs.
+  requireWorkspaceBusinessRead(principal)
+  await requirePlanningUpdateProjectPermission(principal, teamId, projectId, 'viewer')
+  const log = await readProjectRaidLogUseCase(
+    workItemDependencies.projectRaidLogs,
+    { workspaceId: principal.directoryId, teamId, projectId },
+  )
+  return {
+    schemaVersion: 1,
+    teamId,
+    projectId,
+    items: log.entries.map((entry) => ({ ...entry, severity: deriveProjectRaidSeverity(entry) })),
+  }
+}
+
+/**
  * Resolves a Work Item key for the credential owner.
  *
  * @param credential - Authenticated developer credential.
@@ -145,13 +185,14 @@ async function lookupCredentialWorkItemKey(
  * Creates the Public API directory service backed by the canonical Project directory and the
  * credential owner's current permissions.
  *
- * @returns Directory service for `/api/v1/me`, `/api/v1/teams`, Project members, and key lookup.
+ * @returns Directory service for `/api/v1/me`, `/api/v1/teams`, Project members, the Project log, and key lookup.
  */
 export function createCanonicalPublicDirectoryService(): PublicDirectoryService {
   return {
     getCredentialOwner: readCredentialOwner,
     listTeams: listCredentialTeams,
     listProjectMembers: listCredentialProjectMembers,
+    listProjectRaidLog: listCredentialProjectRaidLog,
     lookupWorkItemKey: lookupCredentialWorkItemKey,
   }
 }

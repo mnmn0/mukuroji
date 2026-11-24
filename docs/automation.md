@@ -12,6 +12,8 @@ Rule は `schemaVersion`、論理 `id`、単調増加 `version` / `revision`、`
 
 Template を参照する create action は保存時点の enabled Work Item template version を server が固定する。Client が送る version は信用しない。Actions を明示更新した場合だけ current template へ再固定し、名前・停止など actions と無関係な更新では既存の固定 version を保持する。
 
+Work Item template の payload は `acceptanceCriteria`（文言の配列、Work Item と同じ 20 件・1 件 1024 文字の上限）を持てる。create action と繰り返し作業は、各文言を未達成の新しい受け入れ条件として作成し、ID は server が振る。有効な Work Item template は Workspace の読み取り権限で一覧でき、Web の作成フォームと Public API の作成用 catalog（`templates`）、`POST /api/v1/work-items` の `templateId` からも使う。`payload.teamId` を持つ template はその Team でだけ使える。
+
 Trigger は次を扱う。
 
 - status
@@ -156,6 +158,10 @@ Bulk は UI の選択内容を直接 N 個の通常 API に fan-out しない。
 Operation 状態は `running`、`succeeded`、`partial`、`failed`、`undone` を持つ。部分失敗時は item ごとに success、conflict、validation failure、permission failure、infrastructure failure を表示する。Retry は失敗 item だけを処理し、成功 receipt がある item を再実行しない。Undo は期限内かつ after revision が変わっていない item だけに before snapshot を戻し、競合 item を部分失敗として返す。Status を変える Edit の before snapshot には実績開始日・実績終了日も含める。Undo の status 遷移だけで実績日が戻らない場合、Project manager か Team manager の undo は snapshot の実績日を補正として戻す。それ以外の member の undo は、実績終了日が戻らないときに `BulkUndoUnavailable` の部分失敗にする（初回着手の取り消しのように実績開始日だけが残る場合は undo できる）。
 
 Operation ID と downstream mutation key は開始 actor に束縛する。Retry/undo は operation を開始した member だけが実行でき、管理者 override は設けない。各再実行では owner の現在の Team/Project 権限も再検証する。同じ apply の再配送で durable operation が `running` の場合は残った `ready` item から CAS 付きで再開する。Item mutation または undo の commit 後に応答が失われた場合は、保存済み before snapshot、deterministic mutation key、期待 revision のちょうど 1 増加、適用後 state の一致を確認して成功を回収する。
+
+`reassign-member` action は、ある member の責任者と `done` でない Contributor 分担を別の member へ移す（member の無効化・Team 異動の引き継ぎ用）。`fromMemberUserId` と `toMemberUserId` は trim・小文字化し、同じ member は `InvalidAutomationInput` で拒否する。どちらも持たない Work Item は `BulkReassignMemberNotInvolved` の失敗になる。移し先の検証、合併の規則、undo の扱いは [Work Items の「責任者と Contributor」](work-items.md#責任者と-contributor) のとおり。undo payload は元の `assigneeUserId` と `contributorAssignments` で、合併で消えた assignment ID は新しい分担として戻す。
+
+Work Item template の payload は `contributorAssignments` を持てる。保存時は形（member か job role の少なくとも一方、予定工数 0〜60,000、status、最大 20 件）だけを確かめ、Work Item を作るときに通常の作成と同じく job role と active member を検証する。
 
 Archive は hard delete ではなく reversible archive metadata を Work Item に保存する。通常 list/search は archived item を除外し、audit/detail/undo は保持する。未 archive の子を持つ親の archive は `WorkItemActiveChildren`、親が archive 済みの Work Item の復元は `WorkItemParentArchived` の conflict として item 単位で失敗する。確認の後に親子が変わって fence で書き込めなかった item は `WorkItemHierarchyChanged` になる。この 3 つの失敗は retryable で、階層を直した後の retry で確認し直す（Web の単体 archive は自動では retry せず、失敗を表示した後の次のクリックで retry する）。親子をまとめた archive・復元は通る。preview は同じ operation の同じ Team の item を相手として数えず、適用は archive なら子から親、復元なら親から子の順に item を並べ替えて、先に確定した item の状態で確認する（Bulk adapter の `orderItems`。retry も同じ順、Undo は逆順。[Work Items](work-items.md#archive復元と階層633)）。
 

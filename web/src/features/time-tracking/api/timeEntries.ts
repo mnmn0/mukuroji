@@ -1,4 +1,11 @@
-import type { TimeEntry, TimeEntryCategory, TimeEntryHistory, TimeEntryStatus } from '@mukuroji/contracts'
+import {
+  readTimeEntryPolicyWarning,
+  type TimeEntry,
+  type TimeEntryCategory,
+  type TimeEntryHistory,
+  type TimeEntryPolicyWarning,
+  type TimeEntryStatus,
+} from '@mukuroji/contracts'
 import { isRecord, isStringArray } from '../../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import {
@@ -155,14 +162,14 @@ async function listTimeEntryPage(
  * @param teamId - Team that owns the Work Item.
  * @param input - Entry fields.
  * @param context - Mutation identity shared by retries.
- * @returns Created draft.
+ * @returns Created draft and the Team checks it broke.
  */
 export async function createTimeEntry(
   accessToken: string,
   teamId: string,
   input: TimeEntryDraftInput,
   context: MutationRequestContext,
-): Promise<TimeEntry> {
+): Promise<SavedTimeEntry> {
   const description = input.description.trim()
   const data = await requestTimeTrackingJson(createTeamTimeTrackingUrl(teamId, '/time-entries'), accessToken, {
     method: 'POST',
@@ -175,7 +182,7 @@ export async function createTimeEntry(
       billable: input.billable,
     }),
   })
-  return readEntryEnvelope(data, 'Time entry creation')
+  return readSavedEntryEnvelope(data, 'Time entry creation')
 }
 
 /**
@@ -185,14 +192,14 @@ export async function createTimeEntry(
  * @param entry - Entry being edited, whose revision is expected.
  * @param input - Replacement fields.
  * @param context - Mutation identity shared by retries.
- * @returns Updated entry.
+ * @returns Updated entry and the Team checks its new time broke.
  */
 export async function updateTimeEntry(
   accessToken: string,
   entry: Pick<TimeEntry, 'id' | 'revision' | 'teamId'>,
   input: TimeEntryDraftInput,
   context: MutationRequestContext,
-): Promise<TimeEntry> {
+): Promise<SavedTimeEntry> {
   const description = input.description.trim()
   const data = await requestTimeTrackingJson(
     createTeamTimeTrackingUrl(entry.teamId, `/time-entries/${encodeURIComponent(entry.id)}`),
@@ -210,7 +217,7 @@ export async function updateTimeEntry(
       }),
     },
   )
-  return readEntryEnvelope(data, 'Time entry update')
+  return readSavedEntryEnvelope(data, 'Time entry update')
 }
 
 /**
@@ -220,14 +227,14 @@ export async function updateTimeEntry(
  * @param teamId - Team the time belongs to.
  * @param input - Category, Project, date, and minutes.
  * @param context - Mutation identity shared by retries.
- * @returns Created draft.
+ * @returns Created draft and the Team checks it broke.
  */
 export async function createIndirectTimeEntry(
   accessToken: string,
   teamId: string,
   input: IndirectTimeEntryInput,
   context: MutationRequestContext,
-): Promise<TimeEntry> {
+): Promise<SavedTimeEntry> {
   const description = input.description.trim()
   const data = await requestTimeTrackingJson(createTeamTimeTrackingUrl(teamId, '/time-entries'), accessToken, {
     method: 'POST',
@@ -242,7 +249,7 @@ export async function createIndirectTimeEntry(
       billable: input.billable,
     }),
   })
-  return readEntryEnvelope(data, 'Indirect time entry creation')
+  return readSavedEntryEnvelope(data, 'Indirect time entry creation')
 }
 
 /**
@@ -253,14 +260,14 @@ export async function createIndirectTimeEntry(
  * @param entry - Entry being edited, whose revision is expected.
  * @param input - Replacement fields.
  * @param context - Mutation identity shared by retries.
- * @returns Updated entry.
+ * @returns Updated entry and the Team checks its new time broke.
  */
 export async function updateIndirectTimeEntry(
   accessToken: string,
   entry: Pick<TimeEntry, 'id' | 'revision' | 'teamId'>,
   input: IndirectTimeEntryInput,
   context: MutationRequestContext,
-): Promise<TimeEntry> {
+): Promise<SavedTimeEntry> {
   const description = input.description.trim()
   const data = await requestTimeTrackingJson(
     createTeamTimeTrackingUrl(entry.teamId, `/time-entries/${encodeURIComponent(entry.id)}`),
@@ -278,7 +285,7 @@ export async function updateIndirectTimeEntry(
       }),
     },
   )
-  return readEntryEnvelope(data, 'Indirect time entry update')
+  return readSavedEntryEnvelope(data, 'Indirect time entry update')
 }
 
 /**
@@ -391,6 +398,34 @@ export async function listTimeEntryHistory(
     throw createInvalidTimeTrackingResponseError('Time entry history')
   }
   return history.filter((record) => record !== undefined)
+}
+
+/** A saved entry with the checks it broke in a Team that only warns about them. */
+export type SavedTimeEntry = {
+  /** Saved entry. */
+  entry: TimeEntry
+  /** Broken checks; empty when there are none. */
+  warnings: TimeEntryPolicyWarning[]
+}
+
+/**
+ * Reads a saved entry and its warnings. Warnings of a kind this client does not know are dropped,
+ * since the entry was saved either way.
+ *
+ * @param data - Response body.
+ * @param subject - Operation name used in the error.
+ * @returns The entry and its known warnings.
+ */
+function readSavedEntryEnvelope(data: unknown, subject: string): SavedTimeEntry {
+  const entry = readEntryEnvelope(data, subject)
+  const rawWarnings = isRecord(data) && Array.isArray(data.warnings) ? data.warnings : []
+  return {
+    entry,
+    warnings: rawWarnings.flatMap((warning) => {
+      const known = readTimeEntryPolicyWarning(warning)
+      return known ? [known] : []
+    }),
+  }
 }
 
 /**

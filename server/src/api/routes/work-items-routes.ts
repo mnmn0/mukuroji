@@ -34,6 +34,7 @@ import {
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
   type WorkItemKeyLookupResponse,
+  type WorkItemKeyPrefixesResponse,
   type WorkItemOpenChildCountResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -299,6 +300,7 @@ import {
 } from '../shared/work-item-actual-dates'
 import {
   projectAccessAllows,
+  readWorkspaceMemberNames,
   requireActiveWorkspaceAssignee,
   type TeamPermissionContext,
   validateRequestRoutingTarget,
@@ -307,9 +309,15 @@ import {
   readContributorAssignmentChange,
   withContributorAssignmentChange,
 } from '../shared/work-item-contributors'
-import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
+import {
+  readAcceptanceCriteriaChange,
+  readNewWorkItemAcceptanceCriteria,
+} from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import {
+  applySharedCalendarToNewSchedule,
+  readWorkspaceWorkItemCalendarPolicy,
+} from '../shared/workspace-calendar'
 import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
@@ -2361,12 +2369,15 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
   try {
     const profile = await authenticationDependencies.cognito.getUserProfile(member.id)
 
+    // The Workspace member row holds the name a member or administrator set (ADR 0074); Cognito
+    // keeps the name from sign-up.
+    const name = workspaceMember ? workspaceMember.name?.trim() || undefined : profile.name
     return {
       ...member,
       id: profile.id,
       email: profile.email,
       username: profile.username,
-      name: profile.name,
+      name,
       enabled: profile.enabled,
       status: profile.status,
       workspaceStatus: workspaceMember?.status ?? 'deactivated',
@@ -2375,6 +2386,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     if (isCognitoUserNotFoundError(error)) {
       return {
         ...member,
+        ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
         workspaceStatus: workspaceMember?.status ?? 'deactivated',
       }
     }
@@ -2382,6 +2394,7 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
     console.warn('Failed to hydrate project member from Cognito:', error)
     return {
       ...member,
+      ...(workspaceMember ? { name: workspaceMember.name?.trim() || undefined } : {}),
       workspaceStatus: workspaceMember?.status ?? 'deactivated',
     }
   }
@@ -2390,9 +2403,10 @@ async function hydrateProjectMember(member: ProjectMemberResponseItem, directory
 async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) {
   const input = readCognitoUsersInput(c, directoryId)
   const limit = clampCognitoPageLimit(input.limit)
-  const activeMemberKeys = new Set(
-    (await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)).map((member) => member.memberKey),
-  )
+  const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(directoryId)
+  const activeMemberKeys = new Set(activeMembers.map((member) => member.memberKey))
+  // The member row holds the display name members set (ADR 0074); Cognito keeps the sign-up name.
+  const memberNames = new Map(activeMembers.map((member) => [member.memberKey, member.name?.trim() || undefined]))
   const users: CognitoUserProfile[] = []
   let paginationToken = input.paginationToken
 
@@ -2406,7 +2420,11 @@ async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) 
     users.push(
       ...response.users
         .filter((user) => activeMemberKeys.has(user.id))
-        .map((user) => ({ ...user, workspaceStatus: 'active' as const })),
+        .map((user) => {
+          const { name: _signUpName, ...identity } = user
+          const name = memberNames.get(user.id)
+          return { ...identity, ...(name ? { name } : {}), workspaceStatus: 'active' as const }
+        }),
     )
     paginationToken = response.nextToken
   } while (users.length < limit && paginationToken)
@@ -2417,8 +2435,8 @@ async function listActiveWorkspaceCognitoUsers(directoryId: string, c: Context) 
   } satisfies CognitoUsersResponse
 }
 
-async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
-  const profiles = await readIssueAssigneeProfiles(response.issues)
+async function hydrateTeamIssuesResponse(response: TeamIssuesResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.issues)
 
   return {
     ...response,
@@ -2426,8 +2444,8 @@ async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
   } satisfies TeamIssuesResponse
 }
 
-async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
-  const profiles = await readIssueAssigneeProfiles(response.issues)
+async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.issues)
 
   return {
     ...response,
@@ -2436,7 +2454,7 @@ async function hydrateProjectIssuesResponse(response: ProjectIssuesResponse) {
 }
 
 async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId: string) {
-  const profiles = await readIssueAssigneeProfiles(response.workItems)
+  const profiles = await readIssueAssigneeProfiles(directoryId, response.workItems)
   const hydratedItems = response.workItems.map((workItem) => hydrateTeamIssue(workItem, profiles))
   const scopes = hydratedItems.map((workItem) => ({
     workspaceId: directoryId,
@@ -2500,7 +2518,7 @@ async function hydrateTeamIssueDetailResponse(
   response: TeamIssueDetailResponse,
   directoryId: string,
 ) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
   const issue = hydrateTeamIssue(response.issue, profiles)
   const approvalSummary = await readWorkItemApprovalSummary(directoryId, issue)
 
@@ -2523,16 +2541,16 @@ async function readWorkItemApprovalSummary(directoryId: string, workItem: TeamIs
   return hasApprovalSummaryContent(summary) ? summary : undefined
 }
 
-async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
 
   return {
     issue: hydrateTeamIssue(response.issue, profiles),
   } satisfies CreateTeamIssueResponse
 }
 
-async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse) {
-  const profiles = await readIssueAssigneeProfiles([response.issue])
+async function hydrateUpdateTeamIssueResponse(response: UpdateTeamIssueResponse, directoryId: string) {
+  const profiles = await readIssueAssigneeProfiles(directoryId, [response.issue])
 
   return {
     issue: hydrateTeamIssue(response.issue, profiles),
@@ -3208,17 +3226,26 @@ function compareWorkItemScheduleEvaluationRevisions(
   return createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
 }
 
-async function readIssueAssigneeProfiles(issues: TeamIssueResponseItem[]) {
-  return readAssigneeProfiles(issues.map((issue) => issue.assigneeUserId).filter(isDefined))
+/**
+ * Reads the assignee profiles of Work Items.
+ *
+ * @param directoryId - Workspace ID, whose member rows hold the display names.
+ * @param issues - Work Items whose assignees to read.
+ * @returns Profiles keyed by assignee ID.
+ */
+async function readIssueAssigneeProfiles(directoryId: string, issues: TeamIssueResponseItem[]) {
+  return readAssigneeProfiles(directoryId, issues.map((issue) => issue.assigneeUserId).filter(isDefined))
 }
 
 /**
- * Reads Cognito profiles for assignee IDs, skipping users that no longer exist.
+ * Reads Cognito profiles for assignee IDs, skipping users that no longer exist, with the display
+ * names from the Workspace member rows. Neither read fails the caller.
  *
+ * @param directoryId - Workspace ID, whose member rows hold the display names.
  * @param assigneeIds - Assignee user IDs, possibly repeated.
  * @returns Profiles keyed by assignee ID.
  */
-async function readAssigneeProfiles(assigneeIds: readonly string[]) {
+async function readAssigneeProfiles(directoryId: string, assigneeIds: readonly string[]) {
   const profiles = new Map<string, CognitoUserProfile>()
   const userIds = new Set(assigneeIds.filter(Boolean))
 
@@ -3236,7 +3263,32 @@ async function readAssigneeProfiles(assigneeIds: readonly string[]) {
       }
     },
   )
+  if (profiles.size === 0) return profiles
 
+  // Members rename themselves on their Workspace member row (ADR 0074), so Cognito keeps the name
+  // from sign-up. The member row's name wins, and a cleared name falls back to the email. Create
+  // and update responses read this after the change is saved, so a failed read must not turn a
+  // saved change into an error: the assignees then show by email instead of a possibly stale name.
+  const workspaceNames = await readWorkspaceMemberNames(directoryId).catch((error: unknown) => {
+    console.warn('Failed to read Workspace member names for issue assignees:', {
+      code: error instanceof WorkspaceAccessError ? error.code : error instanceof Error ? error.name : 'Unknown',
+    })
+    return undefined
+  })
+  for (const [userId, profile] of profiles) {
+    const key = profile.email.trim().toLowerCase()
+    if (workspaceNames === undefined) {
+      const { name: _staleName, ...withoutName } = profile
+      profiles.set(userId, withoutName)
+      continue
+    }
+    if (!workspaceNames.has(key)) continue
+    const name = workspaceNames.get(key)
+    const next: CognitoUserProfile = { ...profile }
+    if (name === undefined) delete next.name
+    else next.name = name
+    profiles.set(userId, next)
+  }
   return profiles
 }
 
@@ -3844,6 +3896,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       )
       const normalized = normalizeTeamIssueInput({
         ...conversion.input,
+        // The Request becomes a Work Item of its target Team and Project, so it takes their
+        // shared calendar (ADR 0058).
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          {
+            teamId: conversion.target.teamId,
+            ...(conversion.target.projectId ? { projectId: conversion.target.projectId } : {}),
+          },
+          conversion.input.schedule,
+        ),
         idempotentIssueId: deterministicIssueId,
         idempotentRequestDigest: triageIdempotency.fingerprint,
       }, teamContext.team)
@@ -3938,7 +4000,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           occurredAt: triageOccurredAt,
           transactItems: triageAcceptance.transactItems,
         },
-      ))
+      ), principal.directoryId)
       await projectWorkItemSearchDocumentBestEffort(
         principal.directoryId,
         created.issue,
@@ -4286,6 +4348,36 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
   })
 
   /**
+   * Lists the Work Item key prefixes of the Teams whose Work Items the caller can read.
+   *
+   * Clients link only key-shaped text with one of these prefixes, so words such as `UTF-8` stay
+   * text. A Team the caller cannot read is left out, as a key lookup would reveal nothing either.
+   */
+  routeApp.get('/api/work-items/key-prefixes', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const [contexts, assignments] = await Promise.all([
+        resolveAccessibleWorkItemTeamContexts(principal),
+        workItemDependencies.teamIssues.listWorkItemKeyPrefixes(principal.directoryId),
+      ])
+      const readableTeamIds = new Set(contexts.map((context) => context.team.id))
+      const prefixes = [...new Set(assignments
+        .filter((assignment) => readableTeamIds.has(assignment.teamId))
+        .map((assignment) => assignment.keyPrefix))]
+        .sort()
+      return c.json({ prefixes } satisfies WorkItemKeyPrefixesResponse)
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
    * Resolves a Work Item key such as `ABC-123` to the Work Item it names.
    *
    * Answers 404 alike for text that is not a key, an unused key, a deleted Work Item, and a
@@ -4325,6 +4417,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
       const summary = await summarizeAccessibleWorkItems(principal, contexts, new Date())
       const profiles = await readAssigneeProfiles(
+        principal.directoryId,
         summary.buckets.flatMap((bucket) => bucket.assignees.map((assignee) => assignee.id)),
       )
       return c.json({
@@ -4462,7 +4555,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             {
               ...body,
               email: profile.email,
-              name: profile.name,
+              // The member row holds the display name members set (ADR 0074).
+              name: workspaceMember.name?.trim() || undefined,
             },
             workspaceMember.version,
             createApiMutationContext(c, principal, {
@@ -4644,7 +4738,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         const hydrated = await hydrateTeamIssuesResponse({
           teamId: context.team.id,
           issues: page.issues,
-        })
+        }, principal.directoryId)
         return c.json({
           teamId: hydrated.teamId,
           issues: hydrated.issues,
@@ -4659,7 +4753,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           scope,
           isReadable,
         ),
-      }))
+      }, principal.directoryId))
     } catch (error) {
       if (error instanceof CognitoServiceError) {
         return toCognitoDirectoryErrorResponse(c, error)
@@ -4694,21 +4788,32 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       }
       // Built from public fields only; the raw body never reaches the adapter input.
       const requestBody = readPublicWorkItemCreateBody(rawRequestBody)
-      const body = normalizeTeamIssueInput(
+      const normalizedBody = normalizeTeamIssueInput(
         requestBody,
         context.team,
       )
       const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
         principal.directoryId,
         context.team,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
       )
       requireAssignedProjectPermission(
         principal,
         context,
-        readAssignedProjectId(body.assignedProjectId),
+        readAssignedProjectId(normalizedBody.assignedProjectId),
         'member',
       )
+      // A schedule that follows the shared calendar takes the Team or Project calendar the server
+      // resolves, not the copy the client showed (ADR 0058).
+      const newWorkItemProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
+      const body = {
+        ...normalizedBody,
+        schedule: await applySharedCalendarToNewSchedule(
+          principal.directoryId,
+          { teamId, ...(newWorkItemProjectId ? { projectId: newWorkItemProjectId } : {}) },
+          normalizedBody.schedule,
+        ),
+      }
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,
@@ -4727,6 +4832,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         resolvedConfiguration,
         [],
       )
+      const acceptanceCriteria = readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria)
       const response = await hydrateCreateTeamIssueResponse(
         await workItemDependencies.teamIssues.createTeamIssue(
           principal.directoryId,
@@ -4735,11 +4841,12 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...configuredBody,
             assigneeUserId,
             ...withContributorAssignmentChange(configuredBody, contributorChange),
+            acceptanceCriteria,
             ...newWorkItemProjectFence,
           },
           principal.userKey,
           createApiMutationContext(c, principal, { teamId, ...configuredBody }),
-        ),
+        ), principal.directoryId,
       )
       await projectWorkItemSearchDocumentBestEffort(
         principal.directoryId,
@@ -5257,7 +5364,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...actualDateRequest.correction,
             expectedRevision,
           }),
-        ),
+        ), principal.directoryId,
       )
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,
@@ -6033,7 +6140,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
 
       if (pageQuery.paged) {
         const page = await readScopedWorkItemPage(principal.directoryId, scope, pageQuery)
-        const hydrated = await hydrateProjectIssuesResponse({ projectId, issues: page.issues })
+        const hydrated = await hydrateProjectIssuesResponse({ projectId, issues: page.issues }, principal.directoryId)
         return c.json({
           projectId,
           issues: hydrated.issues,
@@ -6045,7 +6152,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const response = await hydrateProjectIssuesResponse({
         projectId,
         issues: await readScopedWorkItemsWithinLegacyLimit(principal.directoryId, scope),
-      })
+      }, principal.directoryId)
       return c.json({
         ...response,
         canReadCustomerImpact,

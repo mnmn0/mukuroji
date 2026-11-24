@@ -41,12 +41,13 @@ import {
   applySavedPersonalCredentialPolicy,
   type SavedPersonalCredentialPolicy,
 } from '../model/credentials'
-import type { DeveloperExportFormat } from '../model/transfers'
+import { selectLatestImport, type DeveloperExportFormat } from '../model/transfers'
 import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
 import { exportDeveloperWorkItems } from '../queries/developerExport'
 import {
   useAvailableDeveloperConnectorProviders,
+  useDeveloperImportProgress,
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
   usePersonalCredentialAdministration,
@@ -58,7 +59,7 @@ import type {
   DeveloperPlatformOption,
   DeveloperPlatformSection,
 } from './DeveloperPlatformView'
-import { triggerDeveloperExportDownload } from './developerExportDownload'
+import { triggerDeveloperExportDownload } from '../../shared/lib/files/fileDownload'
 
 /**
  * Props used to connect the Developer Platform panel to authenticated data.
@@ -113,6 +114,19 @@ export function DeveloperPlatformPanelContainer({
     isValidating: isResourcesValidating,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
+  const latestImport = resources ? selectLatestImport(resources.imports) : undefined
+  // A job that ended while its progress was read refreshes the job list, which holds its report.
+  const {
+    data: latestImportProgress,
+    error: latestImportProgressError,
+    mutate: mutateLatestImportProgress,
+  } = useDeveloperImportProgress(
+    mutationSession.accessToken,
+    latestImport,
+    () => {
+      if (resourceKey) void mutateCache(resourceKey)
+    },
+  )
   const {
     data: availableConnectorProviders,
     error: availableConnectorProvidersError,
@@ -256,6 +270,15 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
+      latestImportProgress={latestImportProgress?.jobId === latestImport?.id
+        ? latestImportProgress
+        : undefined}
+      latestImportProgressFailed={latestImportProgressError !== undefined}
+      onRetryImportProgress={() => {
+        void mutateLatestImportProgress().catch(() => {
+          // The progress error stays visible with its retry action.
+        })
+      }}
       availableConnectorProviders={availableConnectorProviders}
       connectorAvailabilityErrorMessage={
         availableConnectorProvidersError && !availableConnectorProviders

@@ -43,6 +43,7 @@ function createFixture(initial: FixtureScope) {
     authenticate: async () => ({ directoryId: 'workspace-1', userKey: scope.userKey }),
     requireWrite: () => {},
     requireTeamPermission: async () => {},
+    listTimeTrackingTeams: async () => [],
     canManageRates: async () => scope.canManage,
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,

@@ -73,6 +73,34 @@ export async function updateWorkspaceMember(
 }
 
 /**
+ * Corrects a member's display name as a Workspace administrator.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member to rename.
+ * @param input - New name (null removes it) and the member version it was read at.
+ * @param mutationContext - Idempotency context of the request.
+ * @returns The updated member.
+ */
+export async function updateWorkspaceMemberName(
+  accessToken: string,
+  memberKey: string,
+  input: { name: string | null; expectedVersion: number },
+  mutationContext: MutationRequestContext,
+) {
+  const response = await sendWorkspaceAccessRequest<WorkspaceMemberResponse>(
+    `/workspace/members/${encodeURIComponent(memberKey)}/name`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  )
+
+  return response.member
+}
+
+/**
  * Reads each active member's MFA enrollment and whether a password reset can be sent.
  *
  * Only owners and admins can call it.

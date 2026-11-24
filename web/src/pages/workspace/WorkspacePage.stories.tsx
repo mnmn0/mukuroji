@@ -163,6 +163,7 @@ const storyWorkspaceCommandMenuContext: WorkspaceCommandMenuContextValue = {
 const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   accessToken: 'storybook-access-token',
   canManageAiAssistance: true,
+  canManageTeams: true,
   canReadCustomers: true,
   canReadAuditLog: true,
   canExportAuditLog: true,
@@ -964,6 +965,22 @@ export const HelpRoute: Story = {
 /** The navigation between personal, Workspace admin, and Team settings, on the Team area. */
 export const SettingsSectionNavigation: Story = {
   render: () => <SettingsSectionNav current="team" t={t} />,
+}
+
+/** The settings navigation with in-page links to each panel of the personal settings. */
+export const SettingsSectionNavigationWithPanels: Story = {
+  render: () => (
+    <SettingsSectionNav
+      current="personal"
+      panels={[
+        { panel: 'profile', section: 'personal' },
+        { panel: 'display', section: 'personal' },
+        { panel: 'notifications', section: 'personal' },
+        { panel: 'agent-connection', section: 'personal' },
+      ]}
+      t={t}
+    />
+  ),
 }
 
 /** The `/settings/personal` route display preferences without authenticated feature requests. */

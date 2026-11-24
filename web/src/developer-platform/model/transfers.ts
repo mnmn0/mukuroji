@@ -13,7 +13,7 @@ import {
   createWorkItemOutlineKey,
 } from '../../work-items/model/workItemHierarchy'
 import { createMsProjectXml, type MsProjectTaskInput } from './msProjectXml'
-import { createSpreadsheetWorkbook } from './spreadsheet'
+import { createSpreadsheetWorkbook } from '../../shared/lib/files/spreadsheet'
 
 /**
  * Mapping between a source field and a Work Item field.

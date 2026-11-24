@@ -347,7 +347,7 @@ describe('time tracking API', () => {
     const meeting = createTimeEntryFixture({ id: 'meeting', workItemId: undefined, category: 'meeting', durationOnly: true, durationMinutes: 90 })
     let requests = respondWith({ entry: meeting })
     const input = { category: 'meeting' as const, date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: ' Weekly sync ', billable: false }
-    const created = await createIndirectTimeEntry('token', 'core-team', input, context)
+    const { entry: created } = await createIndirectTimeEntry('token', 'core-team', input, context)
     expect(created).toMatchObject({ category: 'meeting', durationOnly: true })
     expect(created.workItemId).toBeUndefined()
     expect(requests[0]?.body).toEqual({ category: 'meeting', date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: 'Weekly sync', billable: false })

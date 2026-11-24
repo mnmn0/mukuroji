@@ -62,8 +62,14 @@ import {
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  changeTeamWorkItemKeyPrefix,
+  listWorkItemKeyPrefixes,
+  readTeamWorkItemKeyPrefixState,
   readWorkItemKeyLocation,
+  type ChangeTeamWorkItemKeyPrefixInput,
+  type TeamWorkItemKeyPrefixState,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './work-item-key-registry'
 import {
   deriveWorkItemScheduleDueDate,
@@ -106,6 +112,9 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   WORK_ITEM_TITLE_MAX_LENGTH,
+  createNotificationMessage,
+  formatNotificationMessage,
+  type NotificationMessage,
   type ParsedWorkItemKey,
 } from '@mukuroji/contracts'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
@@ -1023,6 +1032,11 @@ export type PublicCreateTeamIssueRequestBody = {
   assigneeUserId?: unknown
   /** Contributor assignments already normalized by the API handler. */
   contributorAssignments?: unknown
+  /**
+   * Acceptance criteria. The API handler replaces client input with the normalized list (server
+   * IDs included) before it reaches the adapter.
+   */
+  acceptanceCriteria?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -1106,6 +1120,41 @@ export function createWorkItemRevisionConditionCheck(
       },
       ConditionExpression: 'revision = :expectedRevision',
       ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+    },
+  }
+}
+
+/**
+ * Creates a fence proving at commit time that a Work Item still exists and is still assigned to a
+ * Project, for writes that reference the Work Item from that Project.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Work Item Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @param projectId - Project the Work Item must belong to.
+ * @returns A DynamoDB condition check composable with a larger transaction.
+ */
+export function createWorkItemProjectAssignmentConditionCheck(
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+  projectId: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: readRequiredString(tableName, 'Work Item table name is required.'),
+      Key: {
+        directoryTeamId: createDirectoryTeamId(
+          readRequiredString(directoryId, 'Workspace ID is required.'),
+          readRequiredString(teamId, 'Team ID is required.'),
+        ),
+        issueId: readRequiredString(workItemId, 'Work Item ID is required.'),
+      },
+      ConditionExpression: 'attribute_exists(issueId) AND #assignedProjectId = :projectId',
+      ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+      ExpressionAttributeValues: { ':projectId': readRequiredString(projectId, 'Project ID is required.') },
     },
   }
 }
@@ -1419,6 +1468,28 @@ export type TeamIssuesClient = {
     directoryId: string,
     key: string,
   ): Promise<WorkItemKeyLocation | undefined>
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]>
+  /**
+   * Reads a Team's current key prefix and earlier prefixes, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState>
+  /**
+   * Sets the key prefix of a Team's new Work Items; the caller authorizes the Team first.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -2422,6 +2493,9 @@ export class DynamoDbTeamIssuesClient {
     const contributorAssignments = input.contributorAssignments === undefined
       ? []
       : readNormalizedContributorAssignments(input.contributorAssignments)
+    const acceptanceCriteria = input.acceptanceCriteria === undefined
+      ? []
+      : readNormalizedAcceptanceCriteria(input.acceptanceCriteria)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -2568,6 +2642,9 @@ export class DynamoDbTeamIssuesClient {
       if (contributorAssignments.length > 0) {
         item.contributorAssignments = contributorAssignments
       }
+      if (acceptanceCriteria.length > 0) {
+        item.acceptanceCriteria = acceptanceCriteria
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -2599,6 +2676,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was created.',
         createdAt: now,
       })
+      const createdMessage = createNotificationMessage('work-item.created-assigned')
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.created',
@@ -2606,7 +2684,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'created',
         occurredAt: now,
-        summary: 'Work Item was created and assigned.',
+        summary: formatNotificationMessage(createdMessage, 'en'),
         changes: createAuditFieldChanges(undefined, item, [
           'key',
           'title',
@@ -2614,6 +2692,7 @@ export class DynamoDbTeamIssuesClient {
           'assignedProjectId',
           'assigneeUserId',
           'contributorAssignments',
+          'acceptanceCriteria',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -2636,8 +2715,10 @@ export class DynamoDbTeamIssuesClient {
           sourceTriageEntryId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
+          notificationMessage: createdMessage,
           notificationCandidates: [
             { memberKey: assigneeUserId, reason: 'assignment' },
+            ...createContributorNotificationCandidates(item, []),
           ],
           afterRevision: item.revision,
         },
@@ -2797,6 +2878,7 @@ export class DynamoDbTeamIssuesClient {
             { consistentIssueRead: true, includeEvents: false },
           ).catch(() => undefined)
           if (existing && isMatchingIdempotentWorkItemCreate(existing.issue, {
+            acceptanceCriteria,
             actorUserId,
             assigneeUserId,
             assignedProjectId,
@@ -2939,6 +3021,8 @@ export class DynamoDbTeamIssuesClient {
         afterIssue,
         baselineReads,
       )
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.schedule-cascade-updated',
@@ -2947,8 +3031,7 @@ export class DynamoDbTeamIssuesClient {
         action: 'schedule-cascade-updated',
         sequence,
         occurredAt,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
         metadata: {
           adapter: 'canonical-work-item',
@@ -2958,6 +3041,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -3555,6 +3639,8 @@ export class DynamoDbTeamIssuesClient {
       )
       const baselineSlip = baselineRead.slip
       baselineFence = baselineRead.fence
+      const updateMessage = createWorkItemBaselineSlipMessage(baselineSlip) ??
+        createWorkItemNotificationMessage(beforeIssue, afterIssue)
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3562,8 +3648,7 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
-        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
-          createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: formatNotificationMessage(updateMessage, 'en'),
         changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
@@ -3593,6 +3678,7 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: afterIssue.title,
+          notificationMessage: updateMessage,
           notificationCandidates: [
             ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
             ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
@@ -4031,6 +4117,57 @@ export class DynamoDbTeamIssuesClient {
         directoryId,
         parsed.key,
       )
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams.
+   *
+   * The caller must keep only the Teams it may reveal before returning the prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  async listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]> {
+    await this.ensureLocalTables()
+    try {
+      return await listWorkItemKeyPrefixes(this.documentClient, this.issueTableName, directoryId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads a Team's current key prefix and earlier prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @param teamId - Team ID.
+   * @returns The Team's prefix state.
+   */
+  async getTeamWorkItemKeyPrefix(directoryId: string, teamId: string): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await readTeamWorkItemKeyPrefixState(this.documentClient, this.issueTableName, directoryId, teamId)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Sets the key prefix of a Team's new Work Items.
+   *
+   * @param input - Team, prefixes, time, and the authorization and audit transaction items.
+   * @returns The Team's prefix state after the change.
+   */
+  async changeTeamWorkItemKeyPrefix(input: ChangeTeamWorkItemKeyPrefixInput): Promise<TeamWorkItemKeyPrefixState> {
+    await this.ensureLocalTables()
+    try {
+      return await changeTeamWorkItemKeyPrefix(this.documentClient, this.issueTableName, input)
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
@@ -5714,11 +5851,13 @@ export function readIdempotencyResourceId(value: unknown) {
  *
  * @param issue - Work Item already stored under the caller-selected resource ID.
  * @param expected - Normalized fields of the create request being retried.
- * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ * @returns Whether every logical create field, including contributors and acceptance criteria texts, matches
+ * the stored Work Item.
  */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
+    acceptanceCriteria: readonly WorkItemAcceptanceCriterion[]
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
@@ -5736,6 +5875,8 @@ function isMatchingIdempotentWorkItemCreate(
   },
 ) {
   return issue.creatorMemberKey === expected.actorUserId &&
+    // Criterion IDs are generated per attempt and `satisfied` changes after creation, so only the texts count.
+    acceptanceCriterionTextsEqual(issue.acceptanceCriteria ?? [], expected.acceptanceCriteria) &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
     contributorAssignmentListsLogicallyEqual(
@@ -5744,14 +5885,29 @@ function isMatchingIdempotentWorkItemCreate(
     ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
-    issue.dueDate === expected.dueDate &&
-    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
+    // The due date of a shared date range is its end date, which the calendar may move (see below).
+    (followsSharedCalendarRange(expected.schedule) || issue.dueDate === expected.dueDate) &&
+    idempotentCreateSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares acceptance criteria lists by their texts in order.
+ *
+ * @param left - First acceptance criteria list.
+ * @param right - Second acceptance criteria list.
+ * @returns Whether both lists hold the same texts in the same order.
+ */
+function acceptanceCriterionTextsEqual(
+  left: readonly WorkItemAcceptanceCriterion[],
+  right: readonly WorkItemAcceptanceCriterion[],
+): boolean {
+  return left.length === right.length && left.every((criterion, index) => criterion.text === right[index]?.text)
 }
 
 /**
@@ -5799,6 +5955,52 @@ function workItemSchedulesEqual(
 ): boolean {
   return JSON.stringify(normalizeWorkItemSchedule(left)) ===
     JSON.stringify(normalizeWorkItemSchedule(right))
+}
+
+/**
+ * Compares the schedules of an idempotent create and its stored Work Item.
+ *
+ * @param stored - Schedule of the stored Work Item.
+ * @param requested - Schedule of the create request being retried.
+ * @returns Whether both identify the same create.
+ */
+function idempotentCreateSchedulesEqual(stored: WorkItemSchedule, requested: WorkItemSchedule): boolean {
+  return JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(stored))) ===
+    JSON.stringify(toComparableWorkItemSchedule(normalizeWorkItemSchedule(requested)))
+}
+
+/**
+ * Checks whether a schedule is a date range that follows the shared calendar.
+ *
+ * @param schedule - Schedule of a create request.
+ * @returns Whether the calendar in force when it is created places its end date.
+ */
+function followsSharedCalendarRange(schedule: WorkItemSchedule): boolean {
+  return schedule.mode === 'date-range' && schedule.calendarPolicy.calendarSource === 'shared'
+}
+
+/**
+ * Reduces a schedule to what identifies an idempotent create.
+ *
+ * A schedule that follows the shared calendar takes its rules, and the working days counted on
+ * them, from the calendar saved when it is created (ADR 0058). A retry after that calendar changed
+ * resolves other rules for the same request, and a date range whose working days ran out keeps
+ * its duration, so its end date moves. For such a schedule only the mode, the start date (or the
+ * fixed deadline or milestone dates) and the planned effort identify it.
+ *
+ * @param schedule - Normalized schedule.
+ * @returns The schedule, or its identifying fields when it follows the shared calendar.
+ */
+function toComparableWorkItemSchedule(schedule: WorkItemSchedule): unknown {
+  if (schedule.calendarPolicy.calendarSource !== 'shared') return schedule
+  return {
+    mode: schedule.mode,
+    calendarSource: 'shared',
+    ...(schedule.mode === 'due-date' ? { dueDate: schedule.dueDate } : {}),
+    ...(schedule.mode === 'date-range' ? { startDate: schedule.startDate } : {}),
+    ...(schedule.mode === 'milestone' ? { startDate: schedule.startDate, endDate: schedule.endDate } : {}),
+    ...(schedule.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: schedule.plannedEffortMinutes }),
+  }
 }
 
 function readOptionalString(value: unknown, message: string) {
@@ -6061,11 +6263,11 @@ export function createTeamIssueDeepLink(teamId: string, issueId: string) {
 export function createWorkItemNotificationCandidates(
   before: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
   after: Pick<
     TeamIssueItem,
-    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey'
+    'assigneeUserId' | 'workflowStatusId' | 'schedule' | 'archivedAt' | 'creatorMemberKey' | 'contributorAssignments'
   >,
 ) {
   const candidates: Array<{ memberKey: string; reason: string }> = []
@@ -6090,7 +6292,39 @@ export function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.creatorMemberKey, reason: 'creator' })
   }
 
-  return candidates
+  return [
+    ...candidates,
+    ...createContributorNotificationCandidates(after, before.contributorAssignments ?? []),
+  ]
+}
+
+/**
+ * Notifies the members who newly take a share of a Work Item as contributors.
+ *
+ * A contributor hears only that they joined the work: status, schedule, and reminder
+ * notifications stay with the accountable owner, and approvals and watchers keep their own
+ * reasons. A member counts as newly added when they had no contributor entry before the change;
+ * the owner and a member added with a share already `done` are left out, so a contributor
+ * entry never doubles the owner's notifications.
+ *
+ * @param after - Work Item after the change.
+ * @param previous - Contributors stored before the change; empty for a new Work Item.
+ * @returns One `contributor` candidate per newly added member.
+ */
+export function createContributorNotificationCandidates(
+  after: Pick<TeamIssueItem, 'assigneeUserId' | 'contributorAssignments'>,
+  previous: readonly WorkItemContributorAssignment[],
+): Array<{ memberKey: string; reason: string }> {
+  const previousMembers = new Set(previous.flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId.toLowerCase()]))
+  const owner = after.assigneeUserId.trim().toLowerCase()
+  return (after.contributorAssignments ?? []).flatMap((assignment) => {
+    const memberKey = assignment.memberUserId?.toLowerCase()
+    if (!memberKey || memberKey === owner || previousMembers.has(memberKey) || assignment.status === 'done') {
+      return []
+    }
+    return [{ memberKey, reason: 'contributor' }]
+  })
 }
 
 /**
@@ -6116,38 +6350,42 @@ function createWorkItemBaselineSlipCandidates(
  * @param slip - Slip recorded for the change, if any.
  * @returns The summary, or `undefined` when the change did not cross the threshold.
  */
-function createWorkItemBaselineSlipSummary(slip: WorkItemBaselineSlipChange | undefined): string | undefined {
+function createWorkItemBaselineSlipMessage(slip: WorkItemBaselineSlipChange | undefined): NotificationMessage | undefined {
   if (!slip || !crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) {
     return undefined
   }
-  return `Work Item now ends ${slip.delayDays} days after its schedule baseline.`
+  return createNotificationMessage('work-item.baseline-slip', { delayDays: slip.delayDays })
 }
 
 /**
- * Work Item 更新通知と activity に使う最も具体的な概要を選びます。
+ * Chooses the most specific text for a Work Item update notification and activity entry.
+ *
+ * @param before - Work Item before the update.
+ * @param after - Work Item after the update.
+ * @returns The notification message; its English text is the audit summary.
  */
-function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIssueItem) {
+function createWorkItemNotificationMessage(before: TeamIssueItem, after: TeamIssueItem): NotificationMessage {
   if (before.archivedAt !== after.archivedAt) {
-    return after.archivedAt ? 'Work Item was archived.' : 'Work Item was restored.'
+    return createNotificationMessage(after.archivedAt ? 'work-item.archived' : 'work-item.restored')
   }
 
   if (before.assigneeUserId !== after.assigneeUserId) {
-    return 'Work Item assignment changed.'
+    return createNotificationMessage('work-item.assignment-changed')
   }
 
   if (before.statusCategory !== 'completed' && after.statusCategory === 'completed') {
-    return 'Work Item was completed.'
+    return createNotificationMessage('work-item.completed')
   }
 
   if (before.workflowStatusId !== after.workflowStatusId) {
-    return 'Work Item status changed.'
+    return createNotificationMessage('work-item.status-changed')
   }
 
   if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
-    return 'Work Item schedule changed.'
+    return createNotificationMessage('work-item.schedule-changed')
   }
 
-  return 'Work Item was updated.'
+  return createNotificationMessage('work-item.updated')
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {

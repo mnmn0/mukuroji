@@ -140,3 +140,55 @@ describe('parseProjectRaidLogResponse', () => {
     expect(parseProjectRaidLogResponse({ teamId: 't', projectId: 'p', entries: [], viewer: { canEdit: 'yes' } })).toBeUndefined()
   })
 })
+
+describe('entry owner and related Work Items', () => {
+  test('trims the owner and drops repeated Work Items', () => {
+    expect(parseProjectRaidEntryInput({
+      kind: 'issue',
+      title: 'Build server down',
+      impact: 3,
+      ownerMemberId: ' member-1 ',
+      relatedWorkItemIds: ['item-1', ' item-2', 'item-1'],
+      status: 'open',
+    })).toEqual({
+      ok: true,
+      value: {
+        kind: 'issue',
+        title: 'Build server down',
+        impact: 3,
+        ownerMemberId: 'member-1',
+        relatedWorkItemIds: ['item-1', 'item-2'],
+        status: 'open',
+      },
+    })
+  })
+
+  test('treats an empty owner and an empty list as absent', () => {
+    const parsed = parseProjectRaidEntryInput({
+      kind: 'issue',
+      title: 'Build server down',
+      impact: 3,
+      ownerMemberId: '',
+      relatedWorkItemIds: [],
+      status: 'open',
+    })
+    expect(parsed).toEqual({ ok: true, value: { kind: 'issue', title: 'Build server down', impact: 3, status: 'open' } })
+  })
+
+  test('rejects malformed references', () => {
+    const base = { kind: 'issue', title: 'Build server down', impact: 3, status: 'open' }
+    expect(parseProjectRaidEntryInput({ ...base, ownerMemberId: 3 }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, relatedWorkItemIds: 'item-1' }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, relatedWorkItemIds: [''] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({
+      ...base,
+      relatedWorkItemIds: Array.from({ length: 11 }, (_, index) => `item-${index}`),
+    }).ok).toBe(false)
+  })
+
+  test('rejects a stored entry whose references are not normalized', () => {
+    expect(parseProjectRaidEntry(entry({ relatedWorkItemIds: ['item-1'] }))).toBeDefined()
+    expect(parseProjectRaidEntry({ ...entry(), relatedWorkItemIds: ['item-1', 'item-1'] })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry(), ownerMemberId: ' member-1' })).toBeUndefined()
+  })
+})

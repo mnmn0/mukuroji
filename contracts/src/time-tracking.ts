@@ -8,7 +8,8 @@ export type TimeEntryStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 
 export type TimeEntrySource = 'manual' | 'timer'
 
 /**
- * Work categories a time entry can be classified under, in display order.
+ * Built-in work categories, in display order. A Workspace starts with these and may retire them
+ * or add its own (see `WorkspaceTimeEntryCategorySettings`).
  *
  * Entries saved before categories existed have no category and are reported as uncategorized.
  */
@@ -22,8 +23,14 @@ export const TIME_ENTRY_CATEGORIES = [
   'leave',
 ] as const
 
-/** Work category of a time entry, such as implementation or a meeting. */
-export type TimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
+/** Key of a built-in work category. */
+export type BuiltInTimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
+
+/**
+ * Key of a work category of a time entry, such as `implementation` or `meeting`: a built-in key
+ * from {@link TIME_ENTRY_CATEGORIES} or one the Workspace added.
+ */
+export type TimeEntryCategory = string
 
 /** Report group key used for entries that have no work category. */
 export const UNCATEGORIZED_TIME_ENTRY_GROUP_KEY = 'uncategorized' as const
@@ -306,4 +313,71 @@ export type TimeSheet = {
    * manages and entries without a Project.
    */
   canManageTeam: boolean
+}
+
+/** The caller's own time in one Team of the personal timesheet. */
+export type MyTimesheetTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** The caller's own daily and weekly totals in the Team. */
+  timesheet: TimeSheet
+  /** The caller's own entries in the period, without money fields. */
+  entries: TimeEntry[]
+}
+
+/** The caller's own time across every Team they can view, for one period. */
+export type MyTimesheet = {
+  /** IANA timezone used to split intervals. */
+  timeZone: string
+  /** One row per Team, in directory order. */
+  teams: MyTimesheetTeam[]
+}
+
+/** Result of submitting one Team's part of the personal timesheet. */
+export type MyTimesheetSubmitTeamResult = {
+  /** Team identifier. */
+  teamId: string
+  /** Entries submitted in the Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+  /**
+   * Whether the Team could not be processed at all, for example after losing access; every entry
+   * sent for it is then in `failedEntryIds`.
+   */
+  failed?: boolean
+}
+
+/** One time entry a cross-Team submission names. */
+export type MyTimesheetSubmitEntry = {
+  /** Team the entry is stored in. */
+  teamId: string
+  /** Time entry identifier. */
+  entryId: string
+  /** Revision of the entry the member saw; a newer entry is not submitted. */
+  expectedRevision: number
+}
+
+/** Request body of `POST /api/time-tracking/my-timesheet/submit`. */
+export type MyTimesheetSubmitRequest = {
+  /** Inclusive period start as an ISO 8601 instant. */
+  from: string
+  /** Exclusive period end as an ISO 8601 instant. */
+  to: string
+  /** Entries to submit, 1 to 500; only these are submitted. */
+  entries: MyTimesheetSubmitEntry[]
+}
+
+/** Result of submitting the caller's draft and rejected time in every Team at once. */
+export type MyTimesheetSubmitResult = {
+  /** Entries submitted across every Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+  /** Whether any entry failed. */
+  partialFailure: boolean
+  /** Per-Team results, in the order the Teams first appear in the request. */
+  teams: MyTimesheetSubmitTeamResult[]
 }

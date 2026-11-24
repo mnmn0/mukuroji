@@ -14,11 +14,15 @@ import { registerAgentRunRoutes } from './routes/agent-run-routes'
 import { registerCapacityPlanningRoutes } from './routes/capacity-planning-routes'
 import { registerNotificationsRoutes } from './routes/notifications-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
+import { registerWorkItemKeyPrefixRoutes } from './routes/work-item-key-prefix-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
+import { registerPortfolioRoutes } from './routes/portfolio-routes'
+import { registerProjectStatusReportRoutes } from './routes/project-status-report-routes'
 import { registerWeeklyReportRoutes } from './routes/weekly-report-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
+import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
@@ -173,10 +177,14 @@ registerCapacityPlanningRoutes(routeApp)
 registerNotificationsRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
+registerWorkItemKeyPrefixRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
 registerProjectRaidLogRoutes(routeApp)
+registerPortfolioRoutes(routeApp)
+registerProjectStatusReportRoutes(routeApp)
 registerWeeklyReportRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
+registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)

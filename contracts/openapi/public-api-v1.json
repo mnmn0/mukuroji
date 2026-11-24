@@ -737,6 +737,36 @@
         ],
         "type": "object"
       },
+      "AgentTelemetryExportLogsRequest": {
+        "description": "OpenTelemetry `ExportLogsServiceRequest` in the OTLP/HTTP JSON encoding.",
+        "properties": {
+          "resourceLogs": {
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 2000,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AgentTelemetryExportLogsResponse": {
+        "description": "OpenTelemetry `ExportLogsServiceResponse`.",
+        "properties": {
+          "partialSuccess": {
+            "properties": {
+              "errorMessage": {
+                "type": "string"
+              },
+              "rejectedLogRecords": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "ApiKeyOneTimeSecretOutput": {
         "additionalProperties": false,
         "properties": {
@@ -1421,6 +1451,7 @@
             "description": "Deadline for a Work Item created without schedule; it gets a due-date schedule under the Workspace working calendar. Cannot be combined with schedule."
           },
           "priority": {
+            "description": "Priority of the Work Item. When it is left out, the template priority is used, else medium.",
             "enum": [
               "high",
               "medium",
@@ -1439,6 +1470,10 @@
           "teamId": {
             "type": "string"
           },
+          "templateId": {
+            "description": "Work Item template to start from, listed by GET /api/v1/work-item-templates. Body fields win; the template fills an omitted description, workItemTypeId, workflowStatusId, and priority, adds its custom field values under the sent ones, and gives the Work Item its acceptance criteria as new unmet criteria. An unknown, disabled, or other-Team template returns 404.",
+            "type": "string"
+          },
           "title": {
             "maxLength": 256,
             "minLength": 1,
@@ -1454,8 +1489,7 @@
         "required": [
           "teamId",
           "title",
-          "assigneeUserId",
-          "priority"
+          "assigneeUserId"
         ],
         "type": "object"
       },
@@ -2038,6 +2072,54 @@
         ],
         "type": "object"
       },
+      "ImportJobProgress": {
+        "additionalProperties": false,
+        "description": "Work Item import job の進捗です。worker は全行を作成してから link を適用します。",
+        "properties": {
+          "jobId": {
+            "description": "Import job ID です。",
+            "type": "string"
+          },
+          "processedLinks": {
+            "description": "適用済みの link の数です。",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "processedRows": {
+            "description": "作成済みの行数です。",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "validating",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "totalLinks": {
+            "description": "全行の作成後に適用する link の数です。worker が source を検証するまで返しません。",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "totalRows": {
+            "description": "作成する行数です。worker が source を検証するまで返しません。",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "jobId",
+          "status",
+          "processedRows",
+          "processedLinks"
+        ],
+        "type": "object"
+      },
       "ImportReport": {
         "additionalProperties": false,
         "properties": {
@@ -2591,6 +2673,135 @@
         ],
         "type": "object"
       },
+      "PublicProjectRaidEntry": {
+        "description": "One risk, issue, or change request of a Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "closedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "impact": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "risk",
+              "issue",
+              "change-request"
+            ],
+            "type": "string"
+          },
+          "ownerMemberId": {
+            "description": "Project member responsible for the entry.",
+            "maxLength": 254,
+            "type": "string"
+          },
+          "probability": {
+            "description": "Likelihood; only a risk has one.",
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "relatedWorkItemIds": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "response": {
+            "description": "Mitigation, resolution, or decision.",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "reviewDueDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "impact",
+          "status",
+          "severity",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "PublicProjectRaidLog": {
+        "description": "Risks, issues, and change requests of one Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicProjectRaidEntry"
+            },
+            "type": "array"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "projectId",
+          "items"
+        ],
+        "type": "object"
+      },
       "PublicTeam": {
         "description": "Team with the Projects in it that the credential owner can view. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
@@ -2833,6 +3044,82 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTemplate": {
+        "additionalProperties": false,
+        "description": "Work Item template offered for creation. Its assignee, Project, and schedule are left out because the create body sets them.",
+        "properties": {
+          "acceptanceCriteria": {
+            "description": "Acceptance criteria texts the new Work Item starts with; empty when none.",
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Template ID to send as templateId.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
+          "workflowStatusId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "name",
+          "title",
+          "acceptanceCriteria"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTemplateList": {
+        "additionalProperties": false,
+        "description": "Work Item templates a Team can create from.",
+        "properties": {
+          "teamId": {
+            "type": "string"
+          },
+          "templates": {
+            "description": "Enabled Work Item templates that can create a Work Item in this Team, by name.",
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkItemTemplate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teamId",
+          "templates"
         ],
         "type": "object"
       },
@@ -5992,6 +6279,55 @@
             }
           },
           {
+            "description": "export する Team ID です。閲覧できない Team を指定すると空の export になります。",
+            "in": "query",
+            "name": "teamId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Assigned Project ID filter です。閲覧できない Project を指定すると空の export になります。",
+            "in": "query",
+            "name": "assignedProjectId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Assignee Workspace user ID filter です。",
+            "in": "query",
+            "name": "assigneeUserId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Workflow status ID filter です。",
+            "in": "query",
+            "name": "workflowStatusId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Work Item Type ID filter です。",
+            "in": "query",
+            "name": "workItemTypeId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "指定 timestamp 以降に更新された resource へ絞り込みます。",
+            "in": "query",
+            "name": "updatedAfter",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
             "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
             "in": "query",
             "name": "cursor",
@@ -6777,6 +7113,83 @@
           }
         ],
         "summary": "Work Item import job を取得する",
+        "tags": [
+          "Import and Export"
+        ]
+      }
+    },
+    "/api/developer/imports/{importJobId}/progress": {
+      "get": {
+        "description": "作成済みの行と適用済みの link（親子・依存・relation・受け入れ条件）の数を返します。行と link の総数は worker が source を検証するまで返しません。",
+        "operationId": "getManagedWorkItemImportProgress",
+        "parameters": [
+          {
+            "description": "Import job ID です。",
+            "in": "path",
+            "name": "importJobId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportJobProgress"
+                }
+              }
+            },
+            "description": "Import job の進捗です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "Work Item import の進捗を取得する",
         "tags": [
           "Import and Export"
         ]
@@ -8721,6 +9134,55 @@
             }
           },
           {
+            "description": "export する Team ID です。閲覧できない Team を指定すると空の export になります。",
+            "in": "query",
+            "name": "teamId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Assigned Project ID filter です。閲覧できない Project を指定すると空の export になります。",
+            "in": "query",
+            "name": "assignedProjectId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Assignee Workspace user ID filter です。",
+            "in": "query",
+            "name": "assigneeUserId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Workflow status ID filter です。",
+            "in": "query",
+            "name": "workflowStatusId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Work Item Type ID filter です。",
+            "in": "query",
+            "name": "workItemTypeId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "指定 timestamp 以降に更新された resource へ絞り込みます。",
+            "in": "query",
+            "name": "updatedAfter",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
             "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
             "in": "query",
             "name": "cursor",
@@ -9765,6 +10227,83 @@
         ]
       }
     },
+    "/api/v1/agent-telemetry/v1/logs": {
+      "post": {
+        "description": "OTLP/HTTP JSON logs receiver for coding agent telemetry. Point `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` at this path. Only `claude_code.api_request` records are read, and only their token counts, estimated cost, model, time, and the `mukuroji.agent_instance` attribute; every other attribute, including prompts, is dropped. Usage is attributed to the credential owner's Agent Runs by time when read.",
+        "operationId": "exportPublicAgentTelemetryLogs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTelemetryExportLogsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTelemetryExportLogsResponse"
+                }
+              }
+            },
+            "description": "Usage added. `partialSuccess` counts usage records the receiver refused; a retried export adds nothing.",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "description": "The body is not OTLP/HTTP JSON (`Content-Type: application/json`)."
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Receive coding agent token usage as OpenTelemetry logs",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
     "/api/v1/me": {
       "get": {
         "description": "Returns the Workspace member that owns the credential, so a client can refer to the owner without being told the member ID separately.",
@@ -10023,6 +10562,91 @@
         ]
       }
     },
+    "/api/v1/projects/{projectId}/raid-log": {
+      "get": {
+        "description": "Lists every risk, issue, and change request of a Project, open and closed, newest first, with each entry's severity. The credential owner needs viewer access to the Project, as in the Web log panel.",
+        "operationId": "listPublicProjectRaidLog",
+        "parameters": [
+          {
+            "description": "Project ID です。",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProjectRaidLog"
+                }
+              }
+            },
+            "description": "Project log",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List a Project's risks, issues, and change requests",
+        "tags": [
+          "Directory"
+        ]
+      }
+    },
     "/api/v1/teams": {
       "get": {
         "description": "Lists the Teams that hold a Project the credential owner can view, or that Enterprise RBAC grants directly, with those Projects and their charter summary.",
@@ -10175,6 +10799,87 @@
         "summary": "Resolve a Work Item key",
         "tags": [
           "Directory"
+        ]
+      }
+    },
+    "/api/v1/work-item-templates": {
+      "get": {
+        "description": "指定 Team で使える有効な Work Item テンプレートを名前順に返します。Workspace の業務データを読めない主体（ゲストなど）には空の一覧を返します。",
+        "operationId": "listPublicWorkItemTemplates",
+        "parameters": [
+          {
+            "description": "テンプレートを取得する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTemplateList"
+                }
+              }
+            },
+            "description": "Work Item テンプレートの一覧です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Work Item 作成に使えるテンプレートを取得する",
+        "tags": [
+          "Work Items"
         ]
       }
     },

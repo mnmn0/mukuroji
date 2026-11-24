@@ -31,6 +31,7 @@ export const notificationFixtures: InboxNotification[] = [
     reasons: ['assignee'],
     actorLabel: '鈴木 大輔',
     title: 'ロードマップの依存リスクを確認',
+    workItemKey: 'CORE-42',
     summary: 'この Work Item の担当者に設定されました。',
     teamId: 'core-team',
     projectId: 'product-roadmap',
@@ -78,6 +79,25 @@ export const blockerClearedNotificationFixture: InboxNotification = {
   actorLabel: '佐藤 花子',
   title: 'リリース手順を作る',
   summary: 'A blocker was removed.',
+  teamId: 'core-team',
+  projectId: 'refero',
+  issueId: 'release-steps',
+  occurredAt: '2026-07-12T03:20:00.000Z',
+  state: 'unread',
+}
+
+/**
+ * Storybook と UI test で使う、概要を message code で持つ期限超過の通知です。
+ * 表示言語で文にし、code がなければ保存済みの英語の概要を出します。
+ */
+export const overdueMessageNotificationFixture: InboxNotification = {
+  id: 'notification-overdue-1',
+  eventId: 'event-overdue-1',
+  eventType: 'work-item.overdue',
+  reasons: ['assignee'],
+  title: 'リリース手順を作る',
+  summary: 'Work Item "リリース手順を作る" is overdue.',
+  message: { code: 'work-item.overdue', params: { title: 'リリース手順を作る' } },
   teamId: 'core-team',
   projectId: 'refero',
   issueId: 'release-steps',

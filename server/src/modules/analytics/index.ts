@@ -26,6 +26,9 @@ export {
 } from './analytics-milestone-trend'
 export {
   ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING,
+  MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE,
+  type AnalyticsRecipientDelivery,
+  type AnalyticsRecipientDeliveryPage,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
   analyticsQueryReadsMilestones,
@@ -41,6 +44,7 @@ export {
   createAnalyticsEvidenceCursor,
   createAnalyticsNextDeliveryAtRecordKey,
   createAnalyticsPdf,
+  createAnalyticsTextPdf,
   createAnalyticsPermissionScopeHash,
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,

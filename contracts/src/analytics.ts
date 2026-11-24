@@ -185,6 +185,13 @@ export type AnalyticsSchedule = {
   nextRunAt?: string
 }
 
+/**
+ * Saved Analytics report の共有範囲です。
+ *
+ * `project` は Team と Project の組を指し、その Project を読める member に公開します。
+ */
+export type AnalyticsReportVisibility = 'personal' | 'team' | 'project' | 'shared'
+
 /** 保存・共有できる analytics report definition です。 */
 export type AnalyticsReport = {
   /** Report schema version です。 */
@@ -198,9 +205,11 @@ export type AnalyticsReport = {
   /** Report の説明です。 */
   description?: string
   /** Report の共有範囲です。 */
-  visibility: 'personal' | 'team' | 'shared'
-  /** Team visibility が参照する Team ID です。 */
+  visibility: AnalyticsReportVisibility
+  /** Team visibility が参照する Team ID、または Project visibility の Project を所有する Team ID です。 */
   teamId?: string
+  /** Project visibility が参照する Project ID です。 */
+  projectId?: string
   /** Report を作成した Workspace member key です。 */
   ownerMemberKey: string
   /** Report の期間 bucket と date-only field を解釈する IANA timezone です。 */
@@ -240,9 +249,11 @@ export type CreateAnalyticsReportInput = {
   /** Report の説明です。 */
   description?: string
   /** Report の共有範囲です。 */
-  visibility: 'personal' | 'team' | 'shared'
-  /** Team visibility が参照する Team ID です。 */
+  visibility: AnalyticsReportVisibility
+  /** Team visibility が参照する Team ID、または Project visibility の Project を所有する Team ID です。 */
   teamId?: string
+  /** Project visibility が参照する Project ID です。 */
+  projectId?: string
   /** Report の期間 bucket と date-only field を解釈する IANA timezone です。 */
   timeZone: string
   /** 全 widget に適用する filter です。 */
@@ -266,9 +277,11 @@ export type UpdateAnalyticsReportInput = {
   /** 変更後の説明です。null で削除します。 */
   description?: string | null
   /** 変更後の共有範囲です。 */
-  visibility?: 'personal' | 'team' | 'shared'
+  visibility?: AnalyticsReportVisibility
   /** 変更後の Team ID です。null で削除します。 */
   teamId?: string | null
+  /** 変更後の Project ID です。null で削除します。 */
+  projectId?: string | null
   /** 変更後の IANA timezone です。 */
   timeZone?: string
   /** 変更後の filter です。 */
@@ -490,6 +503,28 @@ export type AnalyticsSnapshotListResponse = {
   /** この response でcurrent ACLを検査した保存済みrecord数です。0以上1,000以下です。 */
   inspectedCount: number
   /** 検査上限または返却上限に達し、保存済み record が残る場合の scope-bound cursor です。 */
+  nextCursor?: string
+}
+
+/** A scheduled delivery to the caller, in `GET /api/analytics/deliveries`. */
+export type AnalyticsDelivery = {
+  /** Delivered report ID. */
+  reportId: string
+  /** Current report name. */
+  reportName: string
+  /** Snapshot created for the caller, opened at `/reports?v=1&report=<id>&snapshot=<id>`. */
+  snapshotId: string
+  /** Artifact format of the delivery. */
+  format: 'csv' | 'pdf'
+  /** Scheduled occurrence instant of the delivery. */
+  deliveredAt: string
+}
+
+/** One page of the caller's deliveries, newest first. */
+export type AnalyticsDeliveryListResponse = {
+  /** Deliveries of reports the caller can read now; a page can be shorter than the limit. */
+  deliveries: AnalyticsDelivery[]
+  /** Cursor of the next page. */
   nextCursor?: string
 }
 

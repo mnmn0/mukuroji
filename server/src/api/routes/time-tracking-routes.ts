@@ -14,6 +14,7 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
+  listPermittedTeams,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -96,6 +97,11 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
     requireTeamPermission: async (principal, teamId, minimum) => {
       await requireTeamPermission(principal, teamId, minimum)
     },
+    listTimeTrackingTeams: async (principal, minimum) =>
+      (await listPermittedTeams(principal, minimum)).map((context) => ({
+        teamId: context.team.id,
+        name: context.team.name,
+      })),
     canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
     canManageWholeTeam: async (principal, teamId) =>
       principal.isSystemAdmin || (await readTeamManagerContext(principal, teamId))?.directTeamGrant === true,
