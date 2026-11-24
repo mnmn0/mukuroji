@@ -312,6 +312,8 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
+  // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
+  { method: '*', pathPattern: '/api/time-periods/*', permission: 'workspace.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/automation/*', permission: 'automation.read' },
   { method: '*', pathPattern: '/api/automation/*', permission: 'automation.manage' },
