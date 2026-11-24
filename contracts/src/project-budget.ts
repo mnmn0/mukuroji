@@ -130,7 +130,10 @@ export type ProjectBudgetReport = {
   timeZone: string
   /** Calendar bucket of `points`. */
   interval: ProjectBudgetReportInterval
-  /** Local date the earned value figures and actual totals are measured at: today or `to`. */
+  /**
+   * Local date the earned value figures and actual totals are measured at: today clamped to
+   * `from`..`to`. Before `from` it is `from` and no actuals are counted yet.
+   */
   asOf: string
   /** Project budget, or `null` when none is set. */
   budget: TimeBudget | null
