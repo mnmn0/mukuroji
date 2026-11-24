@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbChannelDeliveryStore } from './channel-delivery-store'
+import type { ChannelDelivery } from '../../application/channel-delivery'
 import { emailDeliveryShard } from '../../domain/channel-delivery'
 
 const now = new Date('2026-09-26T12:00:00.000Z')
@@ -90,7 +91,8 @@ describe('Email DynamoDB delivery queue', () => {
     }, 'notifications', 'email')
     const opener = (await store.listDue(shard, now, 1)).deliveries[0]!
     expect(opener).toMatchObject({ notificationKey: '2026-09-26T11:00:00.000Z#opener', deliveryFrequency: 'daily' })
-    const companions = await store.listCompanions(opener, now, 49)
+    const { deliveries: companions, complete } = await store.listCompanions(opener, now, 49)
+    expect(complete).toBe(true)
     expect(companions.map((companion) => companion.notificationKey.split('#')[1])).toEqual(['due', 'later'])
     const query = commands.filter((command) => command instanceof QueryCommand).at(-1)
     expect(query?.input).toMatchObject({
@@ -98,6 +100,24 @@ describe('Email DynamoDB delivery queue', () => {
       FilterExpression: 'recipientKey = :recipientKey',
       ExpressionAttributeValues: { ':shard': shard, ':recipientKey': recipientKey, ':horizon': '2026-10-04T12:00:00.000Z' },
     })
-    expect(await store.listCompanions(opener, now, 1)).toHaveLength(1)
+    expect(await store.listCompanions(opener, now, 1)).toMatchObject({ deliveries: [expect.anything()], complete: true })
+  })
+  test('reports an incomplete companion scan when the page budget runs out first', async () => {
+    let page = 0
+    const store = new DynamoDbChannelDeliveryStore({
+      async send(command) {
+        if (command instanceof QueryCommand) { page += 1; return { Items: [], LastEvaluatedKey: { page } } }
+        return {}
+      },
+    }, 'notifications', 'email')
+    const opener: ChannelDelivery = {
+      workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
+      notificationKey: '2026-09-26T11:00:00.000Z#opener', attempts: 0, version: 1, deliveryFrequency: 'daily',
+      nextAttemptAt: '2026-09-26T12:00:00.000Z', expiresAt: Date.parse('2026-09-26T12:00:00.000Z') / 1_000 + 3_600,
+      notification: { id: 'notification-1', eventId: 'event-1', eventType: 'comment.created',
+        reasons: ['mention'], title: 'Review', occurredAt: '2026-09-26T11:00:00.000Z', state: 'unread' },
+    }
+    expect(await store.listCompanions(opener, new Date('2026-09-26T12:00:00.000Z'), 49)).toEqual({ deliveries: [], complete: false })
+    expect(page).toBe(10)
   })
 })

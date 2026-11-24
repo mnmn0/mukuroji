@@ -1,5 +1,5 @@
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
-import type { ChannelDelivery, ChannelDeliveryBatch, ChannelDeliveryStore } from '../../application/channel-delivery'
+import type { ChannelDelivery, ChannelDeliveryBatch, ChannelDeliveryStore, ChannelDigestCompanions } from '../../application/channel-delivery'
 import { EXTERNAL_DELIVERY_CHANNELS, channelDeliveryShard, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../../domain/channel-delivery'
 import { NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences, toNotificationItem, type NotificationFrequency } from '../../notifications'
 
@@ -132,7 +132,7 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
    * @param limit - Most companions to return.
    * @returns Companion deliveries, oldest scheduled first.
    */
-  async listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDelivery[]> {
+  async listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDigestCompanions> {
     const names = this.#names
     const shard = channelDeliveryShard(names.channel, delivery.recipientKey)
     const horizon = new Date(now.getTime() + DIGEST_COMPANION_HORIZON_MS)
@@ -145,7 +145,8 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
         KeyConditionExpression: `${names.shard} = :shard AND ${names.next} <= :horizon`,
         FilterExpression: 'recipientKey = :recipientKey',
         ExpressionAttributeValues: { ':shard': shard, ':horizon': horizon.toISOString(), ':recipientKey': delivery.recipientKey },
-        Limit: 100, ExclusiveStartKey: exclusiveStartKey,
+        // Without Limit each page reads up to 1 MB of the keys-only index.
+        ExclusiveStartKey: exclusiveStartKey,
       }))
       for (const candidate of page.Items ?? []) {
         if (companions.length >= limit) break
@@ -163,12 +164,13 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
         } catch { /* The due scan reports corrupt rows when they come due. */ }
       }
       exclusiveStartKey = page.LastEvaluatedKey
-      if (!exclusiveStartKey) break
+      if (!exclusiveStartKey) return { deliveries: companions, complete: true }
       const cursor = JSON.stringify(exclusiveStartKey)
-      if (cursors.has(cursor)) break
+      if (cursors.has(cursor)) return { deliveries: companions, complete: false }
       cursors.add(cursor)
     }
-    return companions
+    // Reaching the limit is complete; running out of pages with more rows left is not.
+    return { deliveries: companions, complete: companions.length >= limit }
   }
 
   /** Fences slow authorization reads before sending and renews the transport lease. */

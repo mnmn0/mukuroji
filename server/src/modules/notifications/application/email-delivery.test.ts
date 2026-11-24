@@ -85,7 +85,7 @@ describe('Email opt-in boundary', () => {
 
 describe('Email digest delivery', () => {
   /** Creates a queue whose first due row opens a digest with the given companions. */
-  function digestFixture(companionCount: number, options: { lostRenewal?: string, suppressedKey?: string, result?: ChannelSendResult } = {}) {
+  function digestFixture(companionCount: number, options: { lostRenewal?: string, suppressedKey?: string, result?: ChannelSendResult, incomplete?: boolean } = {}) {
     const f = fixture({ succeeded: true, retryable: false }, emailOn)
     const base: ChannelDelivery = {
       workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
@@ -114,7 +114,7 @@ describe('Email digest delivery', () => {
       },
       isAuthorized: async (delivery) => delivery.notificationKey !== options.suppressedKey,
       digest: {
-        listCompanions: async () => companions,
+        listCompanions: async () => ({ deliveries: companions, complete: options.incomplete !== true }),
         send: async (deliveries) => { digests.push(deliveries.map((delivery) => delivery.notificationKey)); return options.result ?? { succeeded: true, retryable: false } },
       },
     }
@@ -137,6 +137,12 @@ describe('Email digest delivery', () => {
       { key: '2026-09-26T11:01:00.000Z#event-2', status: 'suppressed', code: undefined },
       { key: '2026-09-26T11:00:00.000Z#event-1', status: 'pending', code: 'EmailRateLimited' },
     ])
+  })
+  test('sends what an incomplete companion scan found and reports the run for attention', async () => {
+    const f = digestFixture(2, { incomplete: true })
+    await expect(deliverDueEmailNotifications(f.dependencies)).rejects.toThrow()
+    expect(f.digests).toHaveLength(1)
+    expect(f.digests[0]).toHaveLength(3)
   })
   test('hands every row back without sending when the renewals outlast the budget for the send', async () => {
     const f = digestFixture(2)

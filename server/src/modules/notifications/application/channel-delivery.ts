@@ -148,7 +148,7 @@ export type ChannelDigestDependencies = {
    * Lists the recipient's other due, non-instant deliveries in the same queue shard, excluding
    * `delivery` itself, at most `limit`.
    */
-  listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDelivery[]>
+  listCompanions(delivery: ChannelDelivery, now: Date, limit: number): Promise<ChannelDigestCompanions>
   /** Sends one digest for every delivery, which all share one recipient. */
   send(deliveries: ChannelDelivery[]): Promise<ChannelSendResult>
 }
@@ -162,6 +162,17 @@ export const MAX_DIGEST_NOTIFICATIONS = 50
  * with a margin, until the send has finished.
  */
 const DIGEST_RENEWAL_BUDGET_MS = 25_000
+
+/** Companion rows found for a digest and whether the scan reached its end. */
+export type ChannelDigestCompanions = {
+  /** Companion deliveries, at most the requested limit. */
+  deliveries: ChannelDelivery[]
+  /**
+   * `false` when the page budget ran out before the scan reached the end of the shard or the
+   * limit, so some of the recipient's rows may be missing from this digest.
+   */
+  complete: boolean
+}
 
 /** Channel identity and opt-in rule that parameterize the shared delivery loop. */
 export type ChannelDeliveryPolicy = {
@@ -424,8 +435,11 @@ async function deliverOne(run: DeliveryRun, delivery: ChannelDelivery): Promise<
 async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies, delivery: ChannelDelivery): Promise<string[]> {
   let companions: ChannelDelivery[] = []
   try {
-    companions = (await digest.listCompanions(delivery, run.dependencies.now(), MAX_DIGEST_NOTIFICATIONS - 1))
-      .filter((companion) => companion.recipientKey === delivery.recipientKey && isDigestDelivery(companion) &&
+    const found = await digest.listCompanions(delivery, run.dependencies.now(), MAX_DIGEST_NOTIFICATIONS - 1)
+    // A scan that ran out of pages still sends what it found; the rest come in a later digest,
+    // and the run reports it so a crowded shard does not pass as healthy.
+    if (!found.complete) run.failed = true
+    companions = found.deliveries.filter((companion) => companion.recipientKey === delivery.recipientKey && isDigestDelivery(companion) &&
         deliveryIdentity(companion) !== deliveryIdentity(delivery))
   } catch {
     // Without the companions the row is still sent, as a digest of one.
