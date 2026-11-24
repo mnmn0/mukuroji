@@ -3,6 +3,8 @@ export {
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
   decideProjectRaidChangeRequestUseCase,
+  holdProjectRaidChangeRequestUseCase,
+  type ProjectRaidApprovalHoldMutation,
   type ProjectRaidDecisionMutation,
   type ProjectRaidEntryReferences,
   type ProjectRaidEntryReferenceVerifier,

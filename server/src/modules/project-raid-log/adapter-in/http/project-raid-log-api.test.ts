@@ -291,6 +291,10 @@ test('lets an Enterprise Project manager decide change requests by projects.mana
       outcome: 'rejected',
     })
     expect(refused.status).toBe(403)
+    const refusedHold = await requestAsEnterprise(`${path}/entries/${entry.id}/approval-hold`, 'POST', {
+      expectedRevision: entry.revision,
+    })
+    expect(refusedHold.status).toBe(403)
 
     grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write', 'projects.manage'])
     const managerRead = await requestAsEnterprise(path)
@@ -552,8 +556,19 @@ test('approves a change request with the captured baseline and rejects one witho
   expect(edited.status).toBe(409)
 
   const approvedRequest = await create('Move the launch', 'cr-2')
-  const unknownBaseline = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
+  const unheld = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
     expectedRevision: 1,
+    outcome: 'approved',
+  }, 'decide-unheld')
+  expect(unheld.status).toBe(409)
+  const held = await request(`${path}/entries/${approvedRequest.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-1')
+  expect(held.status).toBe(200)
+  const heldEntry = (await held.json() as ProjectRaidEntryResponse).entry
+  expect(heldEntry).toMatchObject({ status: 'open', revision: 2, approvalHold: { heldByMemberId: 'demo@example.com' } })
+  const heldRetry = await request(`${path}/entries/${approvedRequest.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-1')
+  expect((await heldRetry.json() as ProjectRaidEntryResponse).entry).toEqual(heldEntry)
+  const unknownBaseline = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
+    expectedRevision: 2,
     outcome: 'approved',
     baselineId: 'not-active',
   }, 'decide-3')
@@ -571,12 +586,14 @@ test('approves a change request with the captured baseline and rejects one witho
     },
   })
   const approved = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
-    expectedRevision: 1,
+    expectedRevision: 2,
     outcome: 'approved',
     baselineId: activeBaselineId,
   }, 'decide-4')
   expect(approved.status).toBe(200)
-  expect((await approved.json() as ProjectRaidEntryResponse).entry.decision).toMatchObject({ outcome: 'approved', baselineId: activeBaselineId })
+  const approvedEntry = (await approved.json() as ProjectRaidEntryResponse).entry
+  expect(approvedEntry.decision).toMatchObject({ outcome: 'approved', baselineId: activeBaselineId })
+  expect(approvedEntry.approvalHold).toBeUndefined()
 
   const risk = await request(`${path}/entries`, 'POST', {
     entry: { kind: 'risk', title: 'Risk', probability: 2, impact: 2, status: 'open' },
@@ -587,6 +604,8 @@ test('approves a change request with the captured baseline and rejects one witho
     outcome: 'approved',
   }, 'decide-5')
   expect(notRequest.status).toBe(400)
+  const notHeldRequest = await request(`${path}/entries/${riskEntry.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-2')
+  expect(notHeldRequest.status).toBe(400)
 })
 
 /**

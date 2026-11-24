@@ -212,6 +212,9 @@ function toEntryInput(values: EntryFormValues): ProjectRaidEntryInput {
   }
 }
 
+/** Error code of a change refused because another manager is approving the request. */
+const HELD_ERROR_CODE = 'ProjectRaidChangeRequestHeld'
+
 /**
  * Describes a failed save for the person who tried it.
  *
@@ -221,6 +224,7 @@ function toEntryInput(values: EntryFormValues): ProjectRaidEntryInput {
  */
 function describeSaveError(error: unknown, t: (key: MessageKey) => string) {
   if (error instanceof ProjectDirectoryApiError) {
+    if (error.code === HELD_ERROR_CODE) return t('projects.raidLog.decision.error.held')
     if (error.status === 409) return t('projects.raidLog.error.conflict')
     if (error.status === 403) return t('projects.raidLog.error.forbidden')
     if (error.status === 413) return t('projects.raidLog.error.full')
@@ -244,6 +248,7 @@ function describeDecisionError(error: unknown, t: (key: MessageKey) => string) {
     return t('projects.raidLog.decision.error.movedWorkItem')
   }
   if (error instanceof ProjectDirectoryApiError) {
+    if (error.code === HELD_ERROR_CODE) return t('projects.raidLog.decision.error.held')
     if (error.status === 409) return t('projects.raidLog.error.conflict')
     if (error.status === 403) return t('projects.raidLog.decision.error.forbidden')
   }

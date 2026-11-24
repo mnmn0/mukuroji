@@ -2,6 +2,7 @@ import {
   parseProjectRaidEntryResponse,
   parseProjectRaidLogResponse,
   type DecideProjectRaidChangeRequest,
+  type HoldProjectRaidChangeRequest,
   type ProjectRaidEntryInput,
   type ProjectRaidEntryResponse,
   type ProjectRaidLogResponse,
@@ -93,6 +94,35 @@ export async function updateProjectRaidEntry(
     accessToken,
     'PUT',
     { expectedRevision, entry },
+    mutationContext,
+  )
+}
+
+/**
+ * Holds an open change request for the caller's approval, so nobody else rejects or edits it
+ * while its date changes are applied. The caller may renew their own hold.
+ *
+ * @param accessToken - Bearer token of the current session.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project identifier.
+ * @param entryId - Change request identifier.
+ * @param request - Revision that was read.
+ * @param mutationContext - Idempotency and correlation identifiers.
+ * @returns The held entry, with its next revision.
+ */
+export async function holdProjectRaidChangeRequest(
+  accessToken: string,
+  teamId: string,
+  projectId: string,
+  entryId: string,
+  request: HoldProjectRaidChangeRequest,
+  mutationContext: MutationRequestContext,
+): Promise<ProjectRaidEntryResponse> {
+  return await sendEntryMutation(
+    `${createLogPath(teamId, projectId)}/entries/${encodeURIComponent(entryId)}/approval-hold`,
+    accessToken,
+    'POST',
+    request,
     mutationContext,
   )
 }

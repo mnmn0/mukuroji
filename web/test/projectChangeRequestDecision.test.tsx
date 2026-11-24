@@ -81,6 +81,8 @@ type FakeCalls = {
   captures: number
   /** Decision requests with their Idempotency-Key. */
   decisions: Array<{ key: string; body: unknown }>
+  /** Approval holds, as the revision each one expected. */
+  holds: unknown[]
 }
 
 /**
@@ -89,6 +91,8 @@ type FakeCalls = {
  *
  * @param items - Work Items by ID.
  * @param decisionStatuses - Status codes answered to successive decision requests.
+ * @param storedEntries - Entries as stored; a hold on any other revision, or on a closed entry,
+ * is refused as a conflict.
  * @returns The calls seen.
  */
 function installFakeApi(
@@ -96,7 +100,7 @@ function installFakeApi(
   decisionStatuses: number[],
   storedEntries?: ProjectRaidEntry[],
 ): FakeCalls {
-  const calls: FakeCalls = { confirms: [], captures: 0, decisions: [] }
+  const calls: FakeCalls = { confirms: [], captures: 0, decisions: [], holds: [] }
   globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost')
     const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
@@ -165,6 +169,24 @@ function installFakeApi(
         entries: storedEntries ?? [changeRequest(
           Object.keys(items).map((workItemId) => ({ workItemId, operation: { type: 'move', targetDate: '2026-11-25' } })),
         )],
+      })
+    }
+    if (url.pathname.endsWith('/approval-hold')) {
+      const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
+      calls.holds.push(expectedRevision)
+      const stored = storedEntries?.find((candidate) => candidate.id === 'cr-1') ??
+        changeRequest(Object.keys(items).map((workItemId) => ({ workItemId, operation: { type: 'move', targetDate: '2026-11-25' } })))
+      if (stored.status !== 'open' || stored.revision !== expectedRevision) {
+        return Response.json({ code: 'ProjectRaidEntryConflict', message: 'changed' }, { status: 409 })
+      }
+      return Response.json({
+        teamId: 'core-team',
+        projectId: 'refero',
+        entry: {
+          ...stored,
+          revision: stored.revision + 1,
+          approvalHold: { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' },
+        },
       })
     }
     if (url.pathname.endsWith('/decision')) {
@@ -246,7 +268,10 @@ describe('approving a change request', () => {
     await captureDecide()(entry, 'approved', { replaceBaseline: false, baselineName: '' })
 
     expect(calls.confirms).toEqual(['a:2026-11-25', 'b:2026-12-05'])
+    // The request is held before any date moves, and the decision expects the held revision.
+    expect(calls.holds).toEqual([1])
     expect(calls.decisions).toHaveLength(1)
+    expect(calls.decisions[0]?.body).toMatchObject({ expectedRevision: 2, outcome: 'approved' })
   })
 
   test('refuses to change the dates of a Work Item that moved to another Project', async () => {
@@ -318,6 +343,7 @@ describe('approving a change request', () => {
 
     await expect(captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: '変更要求' }))
       .rejects.toMatchObject({ status: 409 })
+    expect(calls.holds).toEqual([1])
     expect(calls.confirms).toEqual([])
     expect(calls.captures).toBe(0)
     expect(calls.decisions).toEqual([])

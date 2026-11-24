@@ -25,19 +25,30 @@
   （`{ expectedRevision, outcome, baselineId? }`）で記録する。判断は登録を close し、`decision`
   （outcome・日時・判断した member・差し替えた baseline）を残す。判断済みの登録は更新できない。
 - 判断できるのは Project のマネージャーだけにする（baseline の capture と同じ）。Enterprise では Project に対する `projects.manage` で判定する。
-- 承認の操作は Web が次の順で行う。始める前に登録を読み直し、ほかの人が先に編集・判断・クローズしていたら（revision が違うか open でない）、日程に触れずに衝突として止める。読み直してから判断を記録するまでの間の競合は、最後の判断の `expectedRevision` で検出する。
-  1. 各 `scheduleChanges` を、Work Item 画面と同じ preview → confirm で適用する。関連 Work Item が別の Project に
+- 承認の操作は Web が次の順で行う。
+  1. `POST .../entries/:entryId/approval-hold`（`{ expectedRevision }`、マネージャーだけ）で変更要求に承認中の保留
+     （`approvalHold`: 保留した member・開始日時・期限）を付ける。revision が上がる。ほかの人が先に編集・判断・クローズしていたら
+     （revision が違うか open でない）、日程に触れずに衝突として止める。保留は 10 分で切れる。
+     期限内は、保留した本人以外の却下・編集・保留を `409 ProjectRaidChangeRequestHeld` で断る。本人は保留を延長できる。
+     承認の判断は、判断する本人の保留が付いた revision でしか記録できない（`409 ProjectRaidApprovalHoldRequired`）。
+     期限を過ぎても revision が変わっていなければ（誰も却下・編集していなければ）承認できる。期限後にほかの人が却下・編集すると
+     revision が変わり、承認は衝突として止まる。編集と判断は保留を外す。保留は Public API には出さない。
+  2. 各 `scheduleChanges` を、Work Item 画面と同じ preview → confirm で適用する。関連 Work Item が別の Project に
      移っていたら止める。すでに反映済みのものは飛ばす。依存のある Work Item 同士では、適用の順番や後の連鎖で
      結果が変わるため、全件を適用したあと全件が要求どおりの日付かを確かめる。外れたものがあれば、もう一巡適用する。
      件数より多く巡っても全件がそろわなければ、衝突として止める。
-  2. 指定があれば、反映後の計画を `変更要求: <件名>` という名前で baseline に capture する。
-  3. 判断を記録する。approve で `baselineId` を渡した場合、server はそれが Project の active baseline であることを確かめる。
+  3. 指定があれば、反映後の計画を `変更要求: <件名>` という名前で baseline に capture する。
+  4. 判断を記録する。保留で上がった revision を `expectedRevision` にする。approve で `baselineId` を渡した場合、server はそれが Project の active baseline であることを確かめる。
      判断の応答が失われたとき（5xx や通信の失敗）は、次の操作で日程と capture をやり直さず、同じ判断を
      同じ Idempotency-Key で送り直す。承認と却下のどちらを押しても、先に送った判断の結果がわかるまでは
      その判断を送り直す。結果のわからない却下のあとに承認を押しても、日程は変わらない。
 - 却下は判断の記録だけで、日程と baseline には触れない。
 
 ## 検討した選択肢
+
+- 保留なしで、承認の前に登録を読み直すだけにする: 日程の反映中にほかのマネージャーが却下すると、却下は記録されるが
+  反映済みの日程は戻らず、「却下では何も変えない」が守れない。
+- 承認中は保留する代わりに、却下の制約を文書に書くだけにする: 実装は軽いが、上と同じく完了条件を満たさない。
 
 - 承認・日程更新・baseline 差し替えを1つの TransactWrite にする: 上の同じ item の二重チェックと 100 item の上限に当たる。
   schedule confirm と baseline の store を分解して組み直すことになり、既存の idempotency と conflict 判定の書き直しが大きい。
@@ -48,6 +59,9 @@
 
 ## 結果
 
+- 承認中の保留で、承認が日程を動かし始めてから判断を記録するまで、ほかの人の却下・編集は入らない。
+  保留した人が 10 分以上かかったり途中で画面を閉じたりした場合は、期限が切れるまでほかの人は待つことになる。
+  保留の付与・延長は `raid_change_request_approval_held` として監査に残る（member key は残さない）。
 - 手順は原子的ではない。日程の反映後や capture 後に失敗すると、変更要求は open のまま残る。
   もう一度承認すると、反映済みの日程は impact がなくなるため飛ばされ、残りから進む。
 - capture 後に判断の記録が失敗し、画面を開き直してから承認し直したとき、判断が 4xx で断られたあとに承認し直したとき、
@@ -57,6 +71,6 @@
 - 各手順は既存 API の権限・conflict・audit をそのまま使う。日程の連鎖には member 権限が要り、
   capture と判断には Project のマネージャー権限が要る。
 - 判断が指す baseline は記録用の参照で、後で別の baseline に切り替えても判断は書き換えない。
-- 1件あたりのサイズは `scheduleChanges` 10件（ID 128 文字と日付）と `decision` の分だけ増える。
+- 1件あたりのサイズは `scheduleChanges` 10件（ID 128 文字と日付）と `decision`・`approvalHold` の分だけ増える。
   300 件すべてが上限まで使っても、一覧の応答は Lambda の 6 MB に収まる。既存行は値を持たないだけなので、
   schema version は変えない。

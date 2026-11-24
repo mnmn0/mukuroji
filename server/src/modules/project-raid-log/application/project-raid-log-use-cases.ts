@@ -1,5 +1,7 @@
 import {
+  PROJECT_RAID_APPROVAL_HOLD_MINUTES,
   PROJECT_RAID_BASELINE_ID_MAX_LENGTH,
+  isProjectRaidApprovalHoldActive,
   parseProjectRaidEntryInput,
   type DecideProjectRaidChangeRequest,
   type ProjectRaidEntry,
@@ -195,7 +197,8 @@ export async function createProjectRaidEntryUseCase<TCallerCheck, TAudit>(
  * @param body - Untrusted request body.
  * @param mutation - Mutation time, caller fences, audit context, and the request's update receipt.
  * @returns The stored entry, or the current entry when this same request was already applied.
- * @throws ProjectDataError 400 for an invalid body, 404 for an unknown entry, and 409 for a stale revision.
+ * @throws ProjectDataError 400 for an invalid body, 404 for an unknown entry, and 409 for a stale
+ * revision or a change request another member is approving.
  */
 export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   store: ProjectRaidLogStore<TCallerCheck, TAudit>,
@@ -205,6 +208,7 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & {
     updateReceipt: string
     updateKey: string
+    editorMemberId: string
     verifyReferences: ProjectRaidEntryReferenceVerifier<TCallerCheck>
   },
 ): Promise<ProjectRaidEntryResponse> {
@@ -238,6 +242,8 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   if (previous.decision !== undefined) {
     throw new ProjectDataError(409, 'ProjectRaidChangeRequestDecided', 'A decided change request cannot change.')
   }
+  // An edit drops the hold, so only its holder may edit while someone's approval is under way.
+  requireNotHeldByOther(previous, mutation.editorMemberId, mutation.now)
   const previousWorkItemIds = new Set(previous.relatedWorkItemIds ?? [])
   const referenceChecks = await mutation.verifyReferences({
     ...(input.ownerMemberId === undefined || input.ownerMemberId === previous.ownerMemberId
@@ -301,7 +307,8 @@ export type ProjectRaidDecisionMutation<TCallerCheck, TAudit> = ProjectRaidLogMu
  * @param mutation - Mutation time, caller fences, audit context, decider, and receipt.
  * @returns The closed entry, or the current entry when this same request was already applied.
  * @throws ProjectDataError 400 for an invalid body or an entry that is not a change request, 404
- * for an unknown entry, and 409 for a stale revision or a request already decided.
+ * for an unknown entry, and 409 for a stale revision, a request already decided, an approval
+ * without the decider's hold, or a rejection while another member's hold is active.
  */
 export async function decideProjectRaidChangeRequestUseCase<TCallerCheck, TAudit>(
   store: ProjectRaidLogStore<TCallerCheck, TAudit>,
@@ -334,9 +341,19 @@ export async function decideProjectRaidChangeRequestUseCase<TCallerCheck, TAudit
   if (previous.decision !== undefined || previous.status !== 'open') {
     throw new ProjectDataError(409, 'ProjectRaidChangeRequestDecided', 'Only an open change request can be decided.')
   }
+  if (request.outcome === 'approved') {
+    // The hold is taken before any date changes, so an unchanged revision held by the decider
+    // proves nobody rejected or edited the request while they were applied, even past expiry.
+    if (previous.approvalHold?.heldByMemberId !== mutation.deciderMemberId) {
+      throw new ProjectDataError(409, 'ProjectRaidApprovalHoldRequired', 'Hold the change request for approval before approving it.')
+    }
+  } else {
+    requireNotHeldByOther(previous, mutation.deciderMemberId, mutation.now)
+  }
+  const { approvalHold: _approvalHold, ...unheld } = previous
   const baselineChecks = request.baselineId === undefined ? [] : await mutation.verifyBaseline(request.baselineId)
   const next: ProjectRaidEntry = {
-    ...previous,
+    ...unheld,
     decision: {
       outcome: request.outcome,
       decidedAt: mutation.now,
@@ -359,6 +376,97 @@ export async function decideProjectRaidChangeRequestUseCase<TCallerCheck, TAudit
     next,
   })
   return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
+}
+
+/** Approval hold mutation context: who holds the request, and the receipt. */
+export type ProjectRaidApprovalHoldMutation<TCallerCheck, TAudit> = ProjectRaidLogMutation<TCallerCheck, TAudit> & {
+  /** Receipt of this hold request. */
+  updateReceipt: string
+  /** Key of this hold request without its content. */
+  updateKey: string
+  /** Member key of the person about to approve. */
+  holderMemberId: string
+}
+
+/**
+ * Puts an approval hold on an open change request, or renews the caller's own hold, so nobody
+ * else rejects or edits it while its date changes are applied (ADR 0078).
+ *
+ * @param store - Log persistence.
+ * @param scope - Authorized Team and Project.
+ * @param entryId - Change request to hold.
+ * @param body - Untrusted request body.
+ * @param mutation - Mutation time, caller fences, audit context, holder, and receipt.
+ * @returns The held entry, or the current entry when this same request was already applied.
+ * @throws ProjectDataError 400 for an invalid body or an entry that is not a change request, 404
+ * for an unknown entry, and 409 for a stale revision, a request already decided, or another
+ * member's active hold.
+ */
+export async function holdProjectRaidChangeRequestUseCase<TCallerCheck, TAudit>(
+  store: ProjectRaidLogStore<TCallerCheck, TAudit>,
+  scope: ProjectRaidLogScope,
+  entryId: string,
+  body: unknown,
+  mutation: ProjectRaidApprovalHoldMutation<TCallerCheck, TAudit>,
+): Promise<ProjectRaidEntryResponse> {
+  const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
+  if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw new ProjectDataError(400, 'InvalidProjectRaidDecision', 'expectedRevision must be a positive integer.')
+  }
+  const record = await store.get(scope, entryId)
+  if (!record) {
+    throw new ProjectDataError(404, 'ProjectRaidEntryNotFound', 'The log entry was not found.')
+  }
+  const previous = record.entry
+  if (previous.revision === expectedRevision + 1 && record.lastUpdateReceipt === mutation.updateReceipt) {
+    return { teamId: scope.teamId, projectId: scope.projectId, entry: previous }
+  }
+  if (record.lastUpdateKey === mutation.updateKey && record.lastUpdateReceipt !== mutation.updateReceipt) {
+    throw new ProjectDataError(409, 'ProjectRaidEntryIdempotencyConflict', 'This Idempotency-Key was already used for another change.')
+  }
+  if (previous.revision !== expectedRevision) {
+    throw new ProjectDataError(409, 'ProjectRaidEntryConflict', 'The log entry changed. Reload and try again.')
+  }
+  if (previous.kind !== 'change-request') {
+    throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Only a change request can be approved or rejected.')
+  }
+  if (previous.decision !== undefined || previous.status !== 'open') {
+    throw new ProjectDataError(409, 'ProjectRaidChangeRequestDecided', 'Only an open change request can be decided.')
+  }
+  requireNotHeldByOther(previous, mutation.holderMemberId, mutation.now)
+  const expiresAt = new Date(Date.parse(mutation.now) + PROJECT_RAID_APPROVAL_HOLD_MINUTES * 60_000).toISOString()
+  const next: ProjectRaidEntry = {
+    ...previous,
+    approvalHold: { heldByMemberId: mutation.holderMemberId, heldAt: mutation.now, expiresAt },
+    revision: previous.revision + 1,
+    updatedAt: mutation.now,
+  }
+  const stored = await store.update({
+    ...scope,
+    now: mutation.now,
+    callerAuthorization: mutation.callerAuthorization,
+    auditContext: mutation.auditContext,
+    updateReceipt: mutation.updateReceipt,
+    updateKey: mutation.updateKey,
+    previous,
+    next,
+  })
+  return { teamId: scope.teamId, projectId: scope.projectId, entry: stored }
+}
+
+/**
+ * Refuses a change while another member's approval hold is active on the entry.
+ *
+ * @param entry - Entry about to change.
+ * @param memberId - Member key of the person changing it.
+ * @param now - Mutation time as an ISO timestamp.
+ * @throws ProjectDataError 409 when another member holds the entry and the hold has not expired.
+ */
+function requireNotHeldByOther(entry: ProjectRaidEntry, memberId: string, now: string) {
+  const hold = entry.approvalHold
+  if (hold && hold.heldByMemberId !== memberId && isProjectRaidApprovalHoldActive(hold, new Date(now))) {
+    throw new ProjectDataError(409, 'ProjectRaidChangeRequestHeld', 'Another manager is approving this change request. Try again later.')
+  }
 }
 
 /**

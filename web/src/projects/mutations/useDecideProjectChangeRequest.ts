@@ -13,7 +13,7 @@ import { createMutationRequestContext, type MutationRequestContext } from '../..
 import { captureProjectScheduleBaseline } from '../../work-items/api/scheduleBaseline'
 import { PROJECT_SCHEDULE_BASELINE_KEY } from '../../work-items/queries/useProjectScheduleBaseline'
 import { WORK_ITEM_SCHEDULE_BASELINES_KEY } from '../../work-items/queries/useWorkItemScheduleBaselines'
-import { decideProjectRaidChangeRequest, getProjectRaidLog } from '../api/raidLog'
+import { decideProjectRaidChangeRequest, holdProjectRaidChangeRequest } from '../api/raidLog'
 import { ProjectDirectoryApiError } from '../api/errors'
 import {
   isScheduleChangeInPlace,
@@ -200,31 +200,6 @@ type PendingDecision = {
 }
 
 /**
- * Reads the request again and refuses an approval of one that someone else has since edited,
- * decided, or closed, before any date changes or baseline capture run. Without it, a tab showing
- * an old revision would change the plan for a request that is already rejected, and learn of the
- * conflict only from the final decision.
- *
- * @param accessToken - Bearer token of the current session.
- * @param teamId - Team that owns the Project.
- * @param projectId - Project of the request.
- * @param entry - The request as the approver sees it.
- * @throws ProjectDirectoryApiError with status 409 when the stored request differs.
- */
-async function requireOpenAtRevision(
-  accessToken: string,
-  teamId: string,
-  projectId: string,
-  entry: ProjectRaidEntry,
-) {
-  const log = await getProjectRaidLog(accessToken, teamId, projectId)
-  const stored = log.entries.find((candidate) => candidate.id === entry.id)
-  if (stored === undefined || stored.status !== 'open' || stored.revision !== entry.revision) {
-    throw new ProjectDirectoryApiError(409, 'projects.raidLog.error.conflict')
-  }
-}
-
-/**
  * Drops a retained decision once its outcome is known, unless a newer attempt replaced it.
  *
  * @param pending - Retained decisions by entry key.
@@ -248,7 +223,8 @@ function replaceLogEntry(log: ProjectRaidLogResponse, stored: ProjectRaidEntry):
 /**
  * Returns a function that approves or rejects a change request (ADR 0078).
  *
- * Approval first applies the requested date changes through the Work Item schedule cascade and
+ * Approval first holds the request so nobody else rejects or edits it, then applies the requested
+ * date changes through the Work Item schedule cascade and
  * checks that all of them hold, then, when asked, saves the resulting plan as the new active baseline, and records the decision
  * last. A failure on the way leaves the request open, and approving again skips the date changes
  * already in place. Rejection records the decision only and changes no dates.
@@ -283,9 +259,16 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
     let attempt = pendingDecisions.current.get(entryKey)
     if (attempt === undefined) {
       let baselineId: string | undefined
+      let expectedRevision = entry.revision
       try {
         if (outcome === 'approved') {
-          await requireOpenAtRevision(accessToken, teamId, projectId, entry)
+          // The hold refuses a request someone else has since edited, decided, or closed, and keeps
+          // others from rejecting or editing it until the decision, so no rejection can land
+          // after its dates have moved.
+          const held = await holdProjectRaidChangeRequest(
+            accessToken, teamId, projectId, entry.id, { expectedRevision: entry.revision }, createMutationRequestContext(),
+          )
+          expectedRevision = held.entry.revision
           await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [], affected)
           if (options.replaceBaseline) {
             const captured = await captureProjectScheduleBaseline(
@@ -304,7 +287,7 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       attempt = {
         entryKey,
         request: {
-          expectedRevision: entry.revision,
+          expectedRevision,
           outcome,
           ...(baselineId === undefined ? {} : { baselineId }),
         },

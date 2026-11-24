@@ -176,6 +176,34 @@ export const ChangeRequestDecision: Story = {
   },
 }
 
+/** Another manager is approving a change request, so a note says who and until when others must wait. */
+export const ChangeRequestHeld: Story = {
+  args: {
+    canDecide: true,
+    onDecide: async () => undefined,
+    entries: [
+      {
+        id: 'cr-held',
+        kind: 'change-request',
+        title: 'リリース日を2週間延ばす',
+        impact: 4,
+        relatedWorkItemIds: ['wi-2'],
+        scheduleChanges: [{ workItemId: 'wi-2', operation: { type: 'move', targetDate: '2026-12-10' } }],
+        approvalHold: { heldByMemberId: 'tanaka@example.com', heldAt: '2026-11-18T01:00:00.000Z', expiresAt: '2026-11-18T01:10:00.000Z' },
+        status: 'open',
+        revision: 2,
+        createdAt: '2026-11-18T00:00:00.000Z',
+        updatedAt: '2026-11-18T01:00:00.000Z',
+      },
+      ...entries,
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('project-raid-log-approval-hold')).toHaveTextContent('田中 太郎 さんが承認しています')
+  },
+}
+
 /** An author states the date change a change request asks for on a related Work Item. */
 export const ChangeRequestDates: Story = {
   play: async ({ canvasElement }) => {

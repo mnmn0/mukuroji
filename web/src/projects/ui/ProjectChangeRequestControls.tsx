@@ -177,7 +177,16 @@ export function ChangeRequestDecision({ entry, canDecide, ownerOptions, t, onDec
       </p>
     )
   }
-  if (entry.status !== 'open' || !canDecide || !onDecide) return null
+  // An approval under way keeps others from rejecting or editing until its hold expires.
+  const hold = entry.status === 'open' ? entry.approvalHold : undefined
+  const holdNote = hold ? (
+    <p className="text-xs font-semibold text-fg-amber-800" data-testid="project-raid-log-approval-hold">
+      {t('projects.raidLog.decision.held')
+        .replace('{name}', labelProjectRaidReference(ownerOptions, hold.heldByMemberId))
+        .replace('{time}', formatClockTime(hold.expiresAt))}
+    </p>
+  ) : null
+  if (entry.status !== 'open' || !canDecide || !onDecide) return holdNote
 
   /**
    * Sends one decision and keeps its outcome on screen.
@@ -200,6 +209,7 @@ export function ChangeRequestDecision({ entry, canDecide, ownerOptions, t, onDec
 
   return (
     <div className="grid gap-2" data-testid="project-raid-log-decide">
+      {holdNote}
       {confirming ? (
         <div className="grid gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2" role="group" aria-label={t('projects.raidLog.decision.confirmTitle')}>
           <p className="text-sm font-semibold text-fg-amber-800">
@@ -262,4 +272,14 @@ export function ChangeRequestDecision({ entry, canDecide, ownerOptions, t, onDec
       {error ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{error}</p> : null}
     </div>
   )
+}
+
+/**
+ * Formats a timestamp as a local clock time.
+ *
+ * @param timestamp - ISO timestamp.
+ * @returns Hours and minutes in the viewer's time zone.
+ */
+function formatClockTime(timestamp: string) {
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }

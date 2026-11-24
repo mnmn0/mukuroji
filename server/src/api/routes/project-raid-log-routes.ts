@@ -5,6 +5,7 @@ import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/direc
 import {
   createProjectRaidEntryUseCase,
   decideProjectRaidChangeRequestUseCase,
+  holdProjectRaidChangeRequestUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
   type ProjectRaidEntryReferences,
@@ -126,7 +127,47 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
           auditContext,
           updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
           updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
+          editorMemberId: principal.userKey,
           verifyReferences: (references) => verifyEntryReferences(principal, teamId, projectId, references),
+        },
+      )
+      return c.json(response)
+    } catch (error) {
+      return toProjectRaidLogErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Holds an open change request for the calling manager's approval, so nobody else rejects or
+   * edits it while the client applies its date changes (ADR 0078).
+   */
+  routeApp.post('/api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId/approval-hold', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const { teamId, projectId } = readLogRoute(c)
+      const entryId = c.req.param('entryId')?.trim()
+      if (!entryId) throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Entry ID is required.')
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canDecideProjectChangeRequests(principal, teamId, projectId)) {
+        throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project manager can approve or reject a change request.')
+      }
+      const body = await readJson<unknown>(c.req)
+      const auditContext = createApiMutationContext(c, principal, body)
+      const response = await holdProjectRaidChangeRequestUseCase(
+        workItemDependencies.projectRaidLogs,
+        { workspaceId: principal.directoryId, teamId, projectId },
+        entryId,
+        body,
+        {
+          now: new Date().toISOString(),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
+          auditContext,
+          updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
+          updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
+          holderMemberId: principal.userKey,
         },
       )
       return c.json(response)

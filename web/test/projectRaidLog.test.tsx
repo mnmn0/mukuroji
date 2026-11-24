@@ -181,6 +181,19 @@ describe('ProjectRaidLogPanel change requests', () => {
     expect(renderDecider([request], false)).not.toContain('project-raid-log-approve')
   })
 
+  test('tells everyone who is approving a held request', () => {
+    const held: ProjectRaidEntry = {
+      ...request,
+      approvalHold: { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' },
+    }
+    for (const canDecide of [true, false]) {
+      const markup = renderDecider([held], canDecide)
+      expect(markup).toContain('data-testid="project-raid-log-approval-hold"')
+      expect(markup).toContain('佐藤 花子 さんが承認しています')
+    }
+    expect(renderDecider([request], true)).not.toContain('project-raid-log-approval-hold')
+  })
+
   test('shows who decided and whether the baseline was replaced', () => {
     const decided: ProjectRaidEntry = {
       ...request,

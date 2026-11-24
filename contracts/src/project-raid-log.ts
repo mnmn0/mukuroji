@@ -95,6 +95,22 @@ export type ProjectRaidChangeDecision = {
   baselineId?: string
 }
 
+/** Minutes an approval hold keeps others from rejecting or editing a change request. */
+export const PROJECT_RAID_APPROVAL_HOLD_MINUTES = 10
+
+/**
+ * Hold a Project manager puts on an open change request before applying its date changes, so
+ * nobody else rejects or edits it while the approval is under way (ADR 0078).
+ */
+export type ProjectRaidApprovalHold = {
+  /** Member approving the request, by member key. */
+  heldByMemberId: string
+  /** ISO timestamp the hold was taken or last renewed. */
+  heldAt: string
+  /** ISO timestamp after which others may reject or edit the request again. */
+  expiresAt: string
+}
+
 /** One risk, issue, or change request recorded for a Project. */
 export type ProjectRaidEntry = {
   /** Server-assigned entry ID, unique within the Project. */
@@ -121,6 +137,8 @@ export type ProjectRaidEntry = {
   scheduleChanges?: ProjectRaidScheduleChange[]
   /** Decision on a change request; set only by the decision endpoint. */
   decision?: ProjectRaidChangeDecision
+  /** Approval under way on an open change request; set only by the approval hold endpoint. */
+  approvalHold?: ProjectRaidApprovalHold
   /** Whether the entry is still open. */
   status: ProjectRaidEntryStatus
   /** Increments with every change to this entry. */
@@ -188,6 +206,15 @@ export type DecideProjectRaidChangeRequest = {
   outcome: ProjectRaidChangeDecisionOutcome
   /** Baseline captured for the approval; it must be the Project's active baseline. Approval only. */
   baselineId?: string
+}
+
+/**
+ * Request body that puts an approval hold on an open change request before its date changes are
+ * applied. The same member may renew their own hold; another member's active hold is refused.
+ */
+export type HoldProjectRaidChangeRequest = {
+  /** Entry revision read before holding. */
+  expectedRevision: number
 }
 
 /** Open entry counts and the most severe open entry of a Project log. */
@@ -512,6 +539,34 @@ function readDecision(value: unknown): ProjectRaidChangeDecision | undefined | n
 }
 
 /**
+ * Reads a stored approval hold.
+ *
+ * @param value - Raw hold.
+ * @returns The hold, `undefined` when absent, or `null` when malformed.
+ */
+function readApprovalHold(value: unknown): ProjectRaidApprovalHold | undefined | null {
+  if (value === undefined) return undefined
+  if (!isRecord(value) || !hasOnlyKeys(value, ['heldByMemberId', 'heldAt', 'expiresAt'])) return null
+  const { heldByMemberId, heldAt, expiresAt } = value
+  if (typeof heldByMemberId !== 'string' || heldByMemberId.length === 0 || heldByMemberId.length > PROJECT_RAID_OWNER_ID_MAX_LENGTH) {
+    return null
+  }
+  if (!isTimestamp(heldAt) || !isTimestamp(expiresAt)) return null
+  return { heldByMemberId, heldAt, expiresAt }
+}
+
+/**
+ * Tells whether an approval hold still keeps others from rejecting or editing its change request.
+ *
+ * @param hold - Hold on the entry, if any.
+ * @param now - Current time.
+ * @returns Whether a hold exists and has not expired.
+ */
+export function isProjectRaidApprovalHoldActive(hold: ProjectRaidApprovalHold | undefined, now: Date): boolean {
+  return hold !== undefined && Date.parse(hold.expiresAt) > now.getTime()
+}
+
+/**
  * Tells whether a stored schedule change list equals its normalized form.
  *
  * @param normalized - Normalized changes, or `undefined` when there are none.
@@ -565,6 +620,8 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
   const { id, revision, createdAt, updatedAt, closedAt } = value
   const decision = readDecision(value.decision)
   if (decision === null) return undefined
+  const approvalHold = readApprovalHold(value.approvalHold)
+  if (approvalHold === null) return undefined
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return undefined
   if (!isTimestamp(createdAt) || !isTimestamp(updatedAt)) return undefined
@@ -586,10 +643,15 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
   }
   // Only a closed change request carries a decision.
   if (decision !== undefined && (input.value.kind !== 'change-request' || input.value.status !== 'closed')) return undefined
+  // Only an open, undecided change request is held for approval.
+  if (approvalHold !== undefined && (input.value.kind !== 'change-request' || input.value.status !== 'open' || decision !== undefined)) {
+    return undefined
+  }
   return {
     id,
     ...input.value,
     ...(decision === undefined ? {} : { decision }),
+    ...(approvalHold === undefined ? {} : { approvalHold }),
     revision,
     createdAt,
     updatedAt,
@@ -725,10 +787,24 @@ export function parseProjectRaidEntryResponse(value: unknown): ProjectRaidEntryR
   return entry ? { teamId: value.teamId, projectId: value.projectId, entry } : undefined
 }
 
-/** One Project log entry as the Public API returns it, with its derived severity. */
-export type PublicProjectRaidEntry = ProjectRaidEntry & {
+/**
+ * One Project log entry as the Public API returns it, with its derived severity. The approval hold
+ * is internal to the approval flow and is left out.
+ */
+export type PublicProjectRaidEntry = Omit<ProjectRaidEntry, 'approvalHold'> & {
   /** Severity derived from probability and impact by {@link deriveProjectRaidSeverity}. */
   severity: ProjectRaidSeverity
+}
+
+/**
+ * Builds the Public API form of an entry: adds its severity and leaves out the approval hold.
+ *
+ * @param entry - Stored entry.
+ * @returns The entry as the Public API returns it.
+ */
+export function toPublicProjectRaidEntry(entry: ProjectRaidEntry): PublicProjectRaidEntry {
+  const { approvalHold: _approvalHold, ...visible } = entry
+  return { ...visible, severity: deriveProjectRaidSeverity(entry) }
 }
 
 /** Response of `GET /api/v1/projects/{projectId}/raid-log`. */

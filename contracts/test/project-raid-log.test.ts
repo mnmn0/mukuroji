@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import {
   deriveProjectRaidSeverity,
+  isProjectRaidApprovalHoldActive,
   parseProjectRaidEntry,
   parseProjectRaidEntryInput,
   parseProjectRaidEntryResponse,
   parseProjectRaidLogResponse,
   summarizeProjectRaidLog,
+  toPublicProjectRaidEntry,
   type ProjectRaidEntry,
 } from '../src/project-raid-log'
 
@@ -154,6 +156,32 @@ describe('change request schedule changes and decisions', () => {
     expect(parseProjectRaidEntry({ ...closed, status: 'open', closedAt: undefined, decision })).toBeUndefined()
     expect(parseProjectRaidEntry({ ...entry({ status: 'closed', closedAt: '2026-11-20T00:00:00.000Z' }), decision })).toBeUndefined()
     expect(parseProjectRaidEntry({ ...closed, decision: { ...decision, outcome: 'rejected' } })).toBeUndefined()
+  })
+})
+
+describe('approval holds', () => {
+  const approvalHold = { heldByMemberId: 'sato@example.com', heldAt: '2026-11-20T00:00:00.000Z', expiresAt: '2026-11-20T00:10:00.000Z' }
+  const open = entry({ kind: 'change-request', probability: undefined })
+
+  test('keeps a hold only on an open, undecided change request', () => {
+    expect(parseProjectRaidEntry({ ...open, approvalHold })?.approvalHold).toEqual(approvalHold)
+    expect(parseProjectRaidEntry({ ...entry(), approvalHold })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, status: 'closed', closedAt: '2026-11-20T00:00:00.000Z', approvalHold })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, extra: true } })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, expiresAt: 'later' } })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...open, approvalHold: { ...approvalHold, heldByMemberId: '' } })).toBeUndefined()
+  })
+
+  test('treats a hold as active until it expires', () => {
+    expect(isProjectRaidApprovalHoldActive(undefined, new Date('2026-11-20T00:05:00.000Z'))).toBe(false)
+    expect(isProjectRaidApprovalHoldActive(approvalHold, new Date('2026-11-20T00:09:59.999Z'))).toBe(true)
+    expect(isProjectRaidApprovalHoldActive(approvalHold, new Date('2026-11-20T00:10:00.000Z'))).toBe(false)
+  })
+
+  test('leaves the hold out of the Public API form', () => {
+    const visible = toPublicProjectRaidEntry({ ...open, approvalHold })
+    expect('approvalHold' in visible).toBe(false)
+    expect(visible.severity).toBe(deriveProjectRaidSeverity(open))
   })
 })
 
