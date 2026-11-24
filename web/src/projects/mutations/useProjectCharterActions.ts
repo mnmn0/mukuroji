@@ -3,6 +3,7 @@ import { useSWRConfig } from 'swr'
 import type { ProjectCharterState, ProjectLifecycleState, UpdateProjectCharterInput } from '@mukuroji/contracts'
 import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { transitionProjectLifecycle, updateProjectCharter } from '../api'
+import { newerProjectCharterState } from '../model/projectCharterView'
 import { useProjectCharter } from '../queries/useProjectCharter'
 import { isProjectDirectoryKey } from '../queries/useProjectDirectory'
 
@@ -55,12 +56,17 @@ export function useProjectCharterActions({
   const { key, mutate } = charter
 
   // The cache entry is the one the request started from, so a response that arrives after the
-  // viewer moved to another Team or Project never lands in that other Project's cache.
+  // viewer moved to another Team or Project never lands in that other Project's cache. A response
+  // that arrives after a newer revision was cached keeps the newer state.
   const commit = useCallback(async (
     requestKey: NonNullable<typeof key>,
     next: ProjectCharterState,
   ) => {
-    await mutateGlobal(requestKey, next, { revalidate: false })
+    await mutateGlobal(
+      requestKey,
+      (current: ProjectCharterState | undefined) => newerProjectCharterState(current, next),
+      { revalidate: false },
+    )
     await mutateGlobal(isProjectDirectoryKey)
     // A charter owner change can also move the Project's health update owner (ADR 0084).
     if (next.updateOwnerSync === 'synced') await mutateGlobal(isPlanningSnapshotKey)

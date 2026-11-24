@@ -3241,6 +3241,25 @@ export async function syncProjectUpdateOwnerWithCharter(
           throw error
         }
       }
+      // The reviewer acknowledges with an update comment, so it is checked as the cadence
+      // endpoint checks it. Without an explicit reviewer the escalation recipient reviews.
+      const reviewerMemberKey = resolvePlanningUpdateReviewerMemberKey(current.cadence)
+      if (reviewerMemberKey) {
+        try {
+          recipients.push(await requirePlanningCadenceRecipientTargetPermission(
+            principal,
+            visibleSnapshot,
+            target,
+            reviewerMemberKey,
+            'member',
+            'planning.write',
+          ))
+        } catch (error) {
+          // The reviewer lost access; the cadence must be fixed in Planning by hand.
+          if (isAccessRefusal(error)) return 'failed'
+          throw error
+        }
+      }
       // A later save that moved the charter owner again owns the update owner from here on.
       if (await isCharterOwnerSuperseded(principal, teamId, projectId, ownerMemberKey)) return 'superseded'
       const charterOwnerCheck = (await workspaceDependencies.projectDirectory.createProjectCharterOwnerConditionCheck?.(

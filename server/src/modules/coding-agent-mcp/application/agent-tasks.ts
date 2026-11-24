@@ -791,7 +791,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
    * Reads the charter of the configured Project.
    *
    * @returns The charter, or null when no Project is configured, the server predates the
-   * endpoint, or the credential owner may not view the Project.
+   * endpoint, or the charter read is refused. A Project the credential owner may not view
+   * normally fails the catalog read of the same configuration first.
    */
   async function readConfiguredProjectCharter(): Promise<PublicProjectCharter | null> {
     if (scope.assignedProjectId === undefined) return null

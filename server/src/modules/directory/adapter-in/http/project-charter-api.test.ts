@@ -3,6 +3,8 @@ import {
 } from '../../../../api/test-support/api-test-harness'
 import { syncProjectUpdateOwnerWithCharter } from '../../../../api/routes/planning-routes'
 import { authenticateWorkspacePrincipal } from '../../../../api/shared/request-authorization'
+import { workItemDependencies } from '../../../../api/shared/app-dependencies'
+import { readPlanningWorkItemState } from '../../../../api/shared/planning-access'
 const {
   app,
   configureFakeProjectClients,
@@ -135,6 +137,43 @@ describe('Project charter API', () => {
     ))
 
     expect(late).toBe('superseded')
+    expect(await readUpdateOwner()).toBe('sato@example.com')
+  })
+
+  test('keeps the update owner when the configured reviewer can no longer acknowledge updates', async () => {
+    // A Workspace owner without Project roles; owner@example.com has no access to the Project.
+    configureFakeProjectClients(false, {
+      workspaceRole: 'owner',
+      systemAdminMemberKeys: ['demo@example.com'],
+    })
+    await configureUpdateCadence('demo@example.com')
+    // The owner and reviewer lost access after the cadence was saved, so it is written without the endpoint check.
+    await runWithTestAppDependencies(async () => {
+      const principal = await authenticateWorkspacePrincipal('test-token')
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      const current = snapshot.updateTargets.find((candidate) => candidate.target.type === 'project' &&
+        candidate.target.projectId === 'refero')?.cadence
+      if (!current) throw new Error('The cadence was not configured.')
+      await workItemDependencies.planning.configureUpdateCadence(
+        principal.directoryId,
+        {
+          target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+          cadence: { ...current, updateOwnerMemberKey: 'sato@example.com', reviewerMemberKey: 'owner@example.com' },
+          expectedRevision: snapshot.revision,
+        },
+        workItemState,
+      )
+    })
+
+    const late = await runWithTestAppDependencies(async () => await syncProjectUpdateOwnerWithCharter(
+      await authenticateWorkspacePrincipal('test-token'),
+      'core-team',
+      'refero',
+      'demo@example.com',
+    ))
+
+    expect(late).toBe('failed')
     expect(await readUpdateOwner()).toBe('sato@example.com')
   })
 
