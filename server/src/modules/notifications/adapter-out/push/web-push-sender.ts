@@ -109,6 +109,16 @@ export function createWebPushNotificationSender(options: WebPushNotificationSend
     const worker = async () => {
       for (let device = pending.shift(); device; device = pending.shift()) {
         if (signal.aborted) { outcomes.push('retryable'); return }
+        // The locale read and other devices take time, so ownership is checked again just before
+        // the request: a device another member took over meanwhile is skipped.
+        let owned: boolean
+        try {
+          owned = await options.devices.isDeviceOwned(delivery.workspaceId, delivery.memberKey, device, signal)
+        } catch {
+          outcomes.push('retryable')
+          continue
+        }
+        if (!owned) continue
         const result = await sendToDevice(options, keys, device, plaintext, signal, now())
         if (result.retryAfterMs) retryAfterMs = Math.max(retryAfterMs, result.retryAfterMs)
         if (result.outcome === 'gone') {
@@ -199,7 +209,14 @@ async function sendToDevice(
 }
 
 /**
- * Reads a `Retry-After` header given in seconds or as an HTTP date, capped at one hour.
+ * Longest receiver-requested delay honored. It is longer than any notification is retained, so a
+ * receiver's request is never cut short while the delivery can still be sent; the bound only
+ * keeps an absurd header from producing an invalid retry time.
+ */
+const MAX_RETRY_AFTER_MS = 31 * 86_400_000
+
+/**
+ * Reads a `Retry-After` header given in seconds or as an HTTP date.
  * @param value - Header value.
  * @param now - Current time.
  * @returns Delay in milliseconds, or undefined when absent or invalid.
@@ -207,7 +224,7 @@ async function sendToDevice(
 function readRetryAfterMs(value: string | null, now: Date): number | undefined {
   if (!value) return undefined
   const seconds = /^\d+$/.test(value.trim()) ? Number(value.trim()) * 1_000 : Date.parse(value) - now.getTime()
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 60 * 60 * 1_000) : undefined
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, MAX_RETRY_AFTER_MS) : undefined
 }
 
 /**

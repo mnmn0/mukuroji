@@ -3,6 +3,7 @@ import { DeleteCommand, GetCommand, QueryCommand, type TransactWriteCommand } fr
 import { createPushSubscriptionId } from '../../domain/push-subscription'
 import { DynamoDbPushSubscriptionStore } from './push-subscription-store'
 
+/** Commands the fake DynamoDB client records. */
 type SentCommand = GetCommand | QueryCommand | TransactWriteCommand | DeleteCommand
 
 const now = new Date('2026-11-24T00:00:00.000Z')
@@ -71,6 +72,16 @@ describe('DynamoDbPushSubscriptionStore devices for delivery', () => {
       await expect(store([unbounded], { [unbounded.subscriptionId]: owner }).directory.listDevices('ws-1', 'ada', now, AbortSignal.timeout(5_000)))
         .rejects.toThrow('invalid')
     }
+  })
+
+  test('rechecks the endpoint owner right before a send', async () => {
+    const live = row('live')
+    const device = { subscriptionId: live.subscriptionId, endpoint: live.endpoint, keys: { p256dh: 'p', auth: 'a' }, updatedAt: live.updatedAt }
+    const signal = AbortSignal.timeout(5_000)
+    expect(await store([], { [live.subscriptionId]: owner }).directory.isDeviceOwned('ws-1', 'ada', device, signal)).toBe(true)
+    expect(await store([], { [live.subscriptionId]: { ...owner, memberKey: 'grace' } }).directory.isDeviceOwned('ws-1', 'ada', device, signal)).toBe(false)
+    expect(await store([], { [live.subscriptionId]: { ...owner, removed: true } }).directory.isDeviceOwned('ws-1', 'ada', device, signal)).toBe(false)
+    expect(await store([], {}).directory.isDeviceOwned('ws-1', 'ada', device, signal)).toBe(false)
   })
 
   test('deletes only the exact registration that was sent to', async () => {

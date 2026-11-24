@@ -36,14 +36,14 @@ function device(name: string): PushDevice {
  * @param statuses - Status per endpoint, or an error to throw.
  * @returns Sender, recorded requests, and removed device IDs.
  */
-function sender(devices: PushDevice[] | Error, statuses: Record<string, number | Error>) {
+function sender(devices: PushDevice[] | Error, statuses: Record<string, number | Error>, options: { retryAfter?: string, notOwned?: string[] } = {}) {
   const requests: Array<{ endpoint: string, headers: Record<string, string>, body: Buffer }> = []
   const removed: string[] = []
   const post: WebPushHttpClient = async (endpoint, request) => {
     requests.push({ endpoint, headers: request.headers, body: request.body })
     const status = statuses[endpoint] ?? 201
     if (status instanceof Error) throw status
-    return { status, headers: { get: (name: string) => name === 'retry-after' && status === 429 ? '120' : null } }
+    return { status, headers: { get: (name: string) => name === 'retry-after' && status === 429 ? options.retryAfter ?? '120' : null } }
   }
   const send = createWebPushNotificationSender({
     appOrigin: 'https://app.example.test', loadKeys: async () => keys, post,
@@ -53,6 +53,7 @@ function sender(devices: PushDevice[] | Error, statuses: Record<string, number |
         if (devices instanceof Error) throw devices
         return devices
       },
+      isDeviceOwned: async (_workspaceId, _memberKey, owned) => !options.notOwned?.includes(owned.subscriptionId),
       removeGoneDevice: async (_workspaceId, _memberKey, gone) => { removed.push(gone.subscriptionId) },
     },
     now: () => new Date('2026-11-24T00:00:00Z'),
@@ -84,9 +85,23 @@ describe('Web Push notification sender', () => {
     const send = createWebPushNotificationSender({
       appOrigin: 'https://app.example.test', loadKeys: async () => keys,
       post: async () => ({ status: 410, headers: { get: () => null } }),
-      devices: { listDevices: async () => [gone], removeGoneDevice: async () => { throw new Error('throttled') } },
+      devices: { listDevices: async () => [gone], isDeviceOwned: async () => true, removeGoneDevice: async () => { throw new Error('throttled') } },
     })
     expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'PushCleanupUnavailable' })
+  })
+
+  test('skips a device another member took over after the listing', async () => {
+    const f = sender([device('a'), device('b')], {}, { notOwned: ['a'] })
+    expect(await f.send(delivery)).toEqual({ succeeded: true, retryable: false })
+    expect(f.requests.map((request) => request.endpoint)).toEqual([device('b').endpoint])
+    const none = sender([device('a')], {}, { notOwned: ['a'] })
+    expect(await none.send(delivery)).toMatchObject({ suppressed: true, code: 'PushNoDevices' })
+    expect(none.requests).toEqual([])
+  })
+
+  test('honors a Retry-After longer than an hour', async () => {
+    expect(await sender([device('a')], { [device('a').endpoint]: 429 }, { retryAfter: '7200' }).send(delivery))
+      .toMatchObject({ retryable: true, retryAfterMs: 7_200_000 })
   })
 
   test('counts the notification as sent once any device accepts it', async () => {
@@ -130,7 +145,7 @@ describe('Web Push notification sender', () => {
         }
         return { status: 201, headers: { get: () => null } }
       },
-      devices: { listDevices: async () => [stalled, device('healthy')], removeGoneDevice: async () => {} },
+      devices: { listDevices: async () => [stalled, device('healthy')], isDeviceOwned: async () => true, removeGoneDevice: async () => {} },
     })
     expect(await send(delivery)).toEqual({ succeeded: true, retryable: false })
     expect(attempted).toEqual([stalled.endpoint, device('healthy').endpoint])

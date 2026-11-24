@@ -334,6 +334,20 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore, Pus
   }
 
   /**
+   * Strongly rechecks that the recipient still owns a device's endpoint right before a send.
+   *
+   * @param workspaceId - Workspace of the recipient.
+   * @param memberKey - Recipient member key.
+   * @param device - Device about to be sent to.
+   * @param signal - Delivery deadline.
+   * @returns `true` while the live owner record names the recipient.
+   */
+  async isDeviceOwned(workspaceId: string, memberKey: string, device: PushDevice, signal: AbortSignal): Promise<boolean> {
+    const owner = await this.#readOwner(device.subscriptionId, signal)
+    return Boolean(owner && !owner.removed && owner.workspaceId === workspaceId && owner.memberKey === memberKey)
+  }
+
+  /**
    * Deletes a device the push service reported as gone (`404` / `410`). Only the exact
    * registration that was sent to is deleted, so a browser that registered the endpoint again
    * meanwhile keeps its newer row.
