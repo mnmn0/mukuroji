@@ -270,14 +270,14 @@ describe('approving a change request', () => {
     await captureDecide()(entry, 'approved', { replaceBaseline: false, baselineName: '' })
 
     expect(calls.confirms).toEqual(['a:2026-11-25', 'b:2026-12-05'])
-    // The request is held before any date moves and renewed before the second round, and the
+    // The request is held before any date moves and renewed before each further change, and the
     // decision expects the last held revision.
-    expect(calls.holds).toEqual([1, 2])
+    expect(calls.holds).toEqual([1, 2, 3, 4])
     expect(calls.decisions).toHaveLength(1)
-    expect(calls.decisions[0]?.body).toMatchObject({ expectedRevision: 3, outcome: 'approved' })
+    expect(calls.decisions[0]?.body).toMatchObject({ expectedRevision: 5, outcome: 'approved' })
   })
 
-  test('stops before the next round when the hold cannot be renewed', async () => {
+  test('stops before the next date change when the hold cannot be renewed', async () => {
     const items = {
       a: { assignedProjectId: 'refero', schedule: due('2026-12-10'), revision: 1 },
       b: { assignedProjectId: 'refero', schedule: due('2026-12-11'), revision: 1 },
@@ -290,8 +290,8 @@ describe('approving a change request', () => {
 
     await expect(captureDecide()(entry, 'approved', { replaceBaseline: true, baselineName: 'x' }))
       .rejects.toMatchObject({ status: 409 })
-    // Only the first round ran; the second, the capture, and the decision did not.
-    expect(calls.confirms).toEqual(['a:2026-11-25'])
+    // Only the first change was tried (it conflicts until `a` moves); nothing after it ran.
+    expect(calls.confirms).toEqual([])
     expect(calls.holds).toEqual([1, 2])
     expect(calls.captures).toBe(0)
     expect(calls.decisions).toEqual([])

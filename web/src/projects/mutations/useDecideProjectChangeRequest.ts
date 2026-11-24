@@ -126,8 +126,8 @@ async function applyScheduleChange(
  * @param projectId - Project of the change request.
  * @param changes - Requested changes.
  * @param affected - Collects the Teams and Projects the cascade reaches.
- * @param beforeRound - Runs before every round after the first, such as renewing the approval
- * hold; an error stops the approval before any more dates move.
+ * @param beforeNextChange - Runs before every change after the first, such as renewing the
+ * approval hold; an error stops the approval before any more dates move.
  * @throws ProjectChangeRequestScheduleConflictError when the requested dates cannot all hold.
  * @throws ProjectChangeRequestWorkItemMovedError when a Work Item left the Project.
  */
@@ -137,11 +137,13 @@ export async function applyScheduleChanges(
   projectId: string,
   changes: readonly ProjectRaidScheduleChange[],
   affected: AffectedScopes,
-  beforeRound: () => Promise<void> = async () => undefined,
+  beforeNextChange: () => Promise<void> = async () => undefined,
 ) {
+  let started = false
   for (let round = 0; round <= changes.length; round += 1) {
-    if (round > 0) await beforeRound()
     for (const change of changes) {
+      if (started) await beforeNextChange()
+      started = true
       await applyScheduleChange(accessToken, teamId, projectId, change, affected)
     }
     const pending: ProjectRaidScheduleChange[] = []
@@ -270,9 +272,9 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
           // others from rejecting or editing it until the decision, so no rejection can land
           // after its dates have moved.
           /**
-           * Takes or renews the hold at the revision last seen. Renewing before each further round
-           * and before the capture keeps the hold from expiring mid-approval, and a refused renewal
-           * stops the approval before anything else moves.
+           * Takes or renews the hold at the revision last seen. Renewing before each further date
+           * change and before the capture keeps the hold from expiring mid-approval, and a refused
+           * renewal stops the approval before anything else moves.
            */
           const renewHold = async () => {
             const held = await holdProjectRaidChangeRequest(
