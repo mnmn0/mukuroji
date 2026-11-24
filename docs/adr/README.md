@@ -86,6 +86,7 @@
 | [0062](0062-analytics-project-report-visibility.md) | Analytics report の共有範囲に Project を足し、Team と Project の組で読み書きを判定する | 提案 |
 | [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |
 | [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |
+| [0066](0066-inbox-digest-scheduled-job.md) | Update の受信トレイ・ダイジェストを共有の scheduled-jobs Lambda で15分おきに配る | 提案 |
 | [0068](0068-workspace-workload-across-teams.md) | 要員の負荷を Workspace の全 Team の record を合算して見せ、詳細は Team ごとの可視性で絞る | 提案 |
 | [0069](0069-team-portfolio-snapshot-row.md) | Workspace のポートフォリオを Team ごとに読み、月次 snapshot を Team と月ごとの Planning row で持つ | 提案 |
 | [0070](0070-planning-scoped-reads.md) | Planning を Team / Project / Portfolio 単位で読み、key 設計は変えずに link と Work Item だけを絞る | 提案 |
