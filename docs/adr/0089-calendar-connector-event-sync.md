@@ -57,6 +57,8 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   解決をやり直してもらう。競合中の link は poll されないので、ここで読み直さないと古い ETag のまま失敗し続ける。
 - 日付の競合は「マージ」で開始日と終了日を選び直せる。カレンダーの競合のマージは `schedule` だけ、他の
   connector の競合のマージは title・description・status だけを受け付ける。
+- Google の PATCH は `start`・`end` を項目ごとにマージするので、`dateTime` と `timeZone` を `null` で消してから
+  `date` を書く。カレンダーで時刻つきに変えられた予定も終日に戻る。
 - Graph は日時を UTC で返すよう `Prefer: outlook.timezone="UTC"` を送り、予定を書いたときの IANA time zone を
   extended property `mukurojiTimeZone` に記録して、読むときにその time zone の日付へ戻す。
 

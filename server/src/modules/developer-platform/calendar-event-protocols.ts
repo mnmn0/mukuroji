@@ -146,7 +146,7 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
     const response = await request({
       method: 'PATCH',
       path: `calendars/primary/events/${encodeURIComponent(readEventId(mutation.externalId))}`,
-      body: createGoogleEventBody(mutation),
+      body: createGooglePatchBody(mutation),
       ...ifMatch(mutation.expectedExternalVersion),
       allowedStatuses: [404, 410, 412],
     })
@@ -177,7 +177,7 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
     const existing = await request({
       method: 'PATCH',
       path: `calendars/primary/events/${id}`,
-      body,
+      body: createGooglePatchBody(mutation),
     })
     return readGoogleEvent(existing.payload)
   }
@@ -335,6 +335,23 @@ function createGoogleEventBody(mutation: ConnectorCreateMutation) {
         [ORIGIN_PROPERTY]: mutation.originMarker,
       },
     },
+  }
+}
+
+/**
+ * Builds the Google patch body. A patch merges `start` and `end` field by field, so the body
+ * clears `dateTime` and `timeZone` too: an event someone made timed in the calendar becomes
+ * all-day again instead of holding both kinds of boundary.
+ *
+ * @param mutation - Work Item contents.
+ * @returns The event body for patch.
+ */
+function createGooglePatchBody(mutation: ConnectorCreateMutation) {
+  const body = createGoogleEventBody(mutation)
+  return {
+    ...body,
+    start: { ...body.start, dateTime: null, timeZone: null },
+    end: { ...body.end, dateTime: null, timeZone: null },
   }
 }
 

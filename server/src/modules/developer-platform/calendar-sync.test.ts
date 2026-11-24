@@ -35,6 +35,44 @@ type FakeGoogleEvent = Record<string, unknown> & {
 }
 
 /**
+ * Checks for a plain object.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a plain object.
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Applies a Google patch: nested objects merge field by field and `null` clears a field.
+ *
+ * @param current - Stored event.
+ * @param patch - Patch body.
+ * @returns The patched event.
+ */
+function mergeGooglePatch(current: Record<string, unknown>, patch: Record<string, unknown>) {
+  const next: Record<string, unknown> = { ...current }
+  for (const [key, value] of Object.entries(patch)) {
+    const existing = next[key]
+    if (value === null) delete next[key]
+    else if (isPlainObject(value) && isPlainObject(existing)) next[key] = mergeGooglePatch(existing, value)
+    else next[key] = value
+  }
+  return next
+}
+
+/**
+ * Checks whether an event boundary holds both a date and a date-time, which Google refuses.
+ *
+ * @param boundary - Event start or end.
+ * @returns Whether both kinds are present.
+ */
+function hasMixedBoundaries(boundary: unknown) {
+  return isPlainObject(boundary) && 'date' in boundary && 'dateTime' in boundary
+}
+
+/**
  * Builds a fake Google Calendar API on top of `fetch`.
  *
  * @param clock - Returns the time used for `updated`.
@@ -72,7 +110,11 @@ function createFakeGoogle(clock: () => Date) {
       if (!current) return Response.json({ error: 'missing' }, { status: 404 })
       const expected = headers.get('If-Match')
       if (expected !== null && expected !== current.etag) return Response.json({ error: 'changed' }, { status: 412 })
-      const next = { ...current, ...body, ...stamp(), id }
+      const merged = mergeGooglePatch(current, body ?? {})
+      if (hasMixedBoundaries(merged.start) || hasMixedBoundaries(merged.end)) {
+        return Response.json({ error: 'invalid boundaries' }, { status: 400 })
+      }
+      const next = { ...merged, ...stamp(), id }
       events.set(id, next)
       return Response.json(next)
     }
@@ -641,6 +683,44 @@ describe('calendar connectors (ADR 0089)', () => {
     expect(resolved.status).toBe('resolved')
     expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-12', endDate: '2026-12-13' })
     expect(fixture.google.events.get(conflict.externalId)).toMatchObject({ start: { date: '2026-12-12' }, end: { date: '2026-12-14' } })
+  })
+
+  test('makes an event that was changed to a timed event all-day again', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, {
+      ...event,
+      start: { dateTime: '2026-12-02T10:00:00+09:00', timeZone: 'Asia/Tokyo' },
+      end: { dateTime: '2026-12-02T11:00:00+09:00', timeZone: 'Asia/Tokyo' },
+      etag: '"made-timed"',
+    })
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(polled.results).toMatchObject([{ kind: 'synced' }])
+
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: fixture.getWorkItem().revision + 1,
+      schedule: { startDate: '2026-12-04', endDate: '2026-12-04', timeZone: 'Asia/Tokyo' },
+    })
+    const pushed = await fixture.engine.processOutbound({ workspaceId: 'workspace-1', link, operationId: 'push-all-day' })
+
+    expect(pushed).toMatchObject({ kind: 'synced' })
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({
+      start: { date: '2026-12-04' },
+      end: { date: '2026-12-05' },
+    })
+    expect(fixture.google.events.get(link.externalId)?.start).not.toHaveProperty('dateTime')
   })
 
   test('records dates the Work Item cannot take as a conflict instead of failing the poll', async () => {
