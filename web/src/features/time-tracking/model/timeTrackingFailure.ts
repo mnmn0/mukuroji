@@ -6,6 +6,10 @@ export type TimeTrackingFailureKind =
   | 'conflict'
   /** The time falls in a month a manager has closed. */
   | 'closed'
+  /** The Team rejects time that overlaps another entry of the member. */
+  | 'overlap'
+  /** The Team rejects time that takes a day past its daily limit. */
+  | 'dailyLimit'
   /** The member lacks the permission. */
   | 'forbidden'
   /** The API rejected the input. */
@@ -36,6 +40,8 @@ export function classifyTimeTrackingFailure(error: unknown): TimeTrackingFailure
   const { status, code } = readErrorFields(error)
   if (status === 0) return 'offline'
   if (status === 409 && code === 'TimePeriodClosed') return 'closed'
+  if (status === 409 && code === 'TimeEntryOverlap') return 'overlap'
+  if (status === 409 && code === 'TimeEntryDailyLimitExceeded') return 'dailyLimit'
   if (status === 409 && code !== 'TimeTrackingMutationInProgress') return 'conflict'
   if (status === 401 || status === 403) return 'forbidden'
   if (status === 400 || status === 404 || status === 422) return 'invalid'

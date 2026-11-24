@@ -282,6 +282,55 @@ test('bounds shared Analytics page reads for paginated canonical events', async 
   expect(auditReads).toBe(500)
 })
 
+test('lists the caller\'s deliveries only for reports the caller can read now', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  await repository.createReport('user#demo@example.com', 'owner@example.com', {
+    id: 'team-report',
+    name: 'Team report',
+    visibility: 'team',
+    teamId: 'core-team',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    widgets: createAnalyticsQueryInput().widgets,
+  })
+  const delivery = (reportId: string, deliveredAt: string, recipientMemberKey = 'demo@example.com') => ({
+    workspaceId: 'user#demo@example.com',
+    recipientMemberKey,
+    reportId,
+    snapshotId: `snapshot-${reportId}`,
+    format: 'pdf' as const,
+    deliveredAt,
+  })
+  await repository.putRecipientDelivery(delivery('team-report', '2026-07-13T00:00:00.000Z'))
+  await repository.putRecipientDelivery(delivery('deleted-report', '2026-07-14T00:00:00.000Z'))
+  await repository.putRecipientDelivery(delivery('team-report', '2026-07-15T00:00:00.000Z', 'kato@example.com'))
+  setTestAppDependencies({ analytics: repository })
+  const listDeliveries = async (query = '') => {
+    const response = await app.request(`/api/analytics/deliveries${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    return { status: response.status, body: await response.json() }
+  }
+
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  expect(await listDeliveries()).toEqual({ status: 200, body: { deliveries: [] } })
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  expect(await listDeliveries()).toEqual({
+    status: 200,
+    body: {
+      deliveries: [{
+        reportId: 'team-report',
+        reportName: 'Team report',
+        snapshotId: 'snapshot-team-report',
+        format: 'pdf',
+        deliveredAt: '2026-07-13T00:00:00.000Z',
+      }],
+    },
+  })
+  expect((await listDeliveries('?limit=0')).status).toBe(400)
+})
+
 test('requires authentication and enforces Team report viewer/manager ACLs', async () => {
   const unauthenticated = await app.request('/api/analytics/query', {
     method: 'POST',
@@ -338,6 +387,72 @@ test('requires authentication and enforces Team report viewer/manager ACLs', asy
   expect(await managerWrite.json()).toMatchObject({
     report: { name: 'Manager edit', revision: 2 },
   })
+})
+
+test('shares a Project report with the Project and lets its manager change it', async () => {
+  const query = createAnalyticsQueryInput()
+  const repository = new InMemoryAnalyticsRepository()
+  setTestAppDependencies({ analytics: repository })
+  const projectReport = {
+    id: 'project-report',
+    name: 'Project report',
+    visibility: 'project',
+    teamId: 'core-team',
+    projectId: 'refero',
+    timeZone: 'UTC',
+    filter: query.filter,
+    widgets: query.widgets,
+  }
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const viewerCreate = await analyticsApiRequest('/api/analytics/reports', projectReport)
+  expect(viewerCreate.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const missingProject = await analyticsApiRequest('/api/analytics/reports', {
+    ...projectReport,
+    projectId: 'unknown-project',
+  })
+  expect(missingProject.status).toBe(404)
+  const created = await analyticsApiRequest('/api/analytics/reports', projectReport)
+  expect(created.status).toBe(201)
+  expect(await created.json()).toMatchObject({
+    report: { visibility: 'project', teamId: 'core-team', projectId: 'refero' },
+  })
+
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  const hidden = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(await hidden.json()).toEqual({ reports: [] })
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const visible = await app.request('/api/analytics/reports', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(await visible.json()).toMatchObject({
+    reports: [expect.objectContaining({ id: 'project-report' })],
+  })
+  const viewerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/project-report',
+    { expectedRevision: 1, name: 'Viewer edit' },
+    'PATCH',
+  )
+  expect(viewerWrite.status).toBe(403)
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const managerWrite = await analyticsApiRequest(
+    '/api/analytics/reports/project-report',
+    { expectedRevision: 1, name: 'Manager edit' },
+    'PATCH',
+  )
+  expect(managerWrite.status).toBe(200)
+  const withoutProject = await analyticsApiRequest(
+    '/api/analytics/reports/project-report',
+    { expectedRevision: 2, projectId: null },
+    'PATCH',
+  )
+  expect(withoutProject.status).toBe(400)
 })
 
 test('paginates Analytics reports with a Workspace-bound cursor', async () => {

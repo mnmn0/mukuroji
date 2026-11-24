@@ -1068,6 +1068,8 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(focusStatements).toHaveLength(2);
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
+      // A Project-scoped Planning read reads the Project's Work Item links by key.
+      'dynamodb:BatchGetItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',

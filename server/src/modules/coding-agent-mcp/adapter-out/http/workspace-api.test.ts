@@ -52,3 +52,20 @@ test('refuses an insecure origin and never echoes the token in errors', async ()
   }
   await expect(broken.me()).rejects.toMatchObject({ code: 'unavailable', retryable: true })
 })
+
+test('sends writes with the idempotency key and rejects a Work Item saved in another Team', async () => {
+  const seen: { url: string, method: string | undefined, key: string | null }[] = []
+  const api = createWorkspaceApi(config, async (url, init) => {
+    seen.push({ url: url.href, method: init.method, key: new Headers(init.headers).get('Idempotency-Key') })
+    return Response.json(validTask)
+  })
+  const key = '00000000-0000-4000-8000-000000000001'
+
+  await api.updateIssue('team', 'task', { expectedRevision: 1, title: 'Renamed' }, key)
+  expect(seen[0]).toEqual({ url: 'https://mukuroji.example.test/api/v1/work-items/task?teamId=team', method: 'PATCH', key })
+
+  await expect(api.createIssue({ teamId: 'other', title: 'Task', assigneeUserId: 'agent', priority: 'medium' }, key))
+    .rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.updateIssue('team', 'another-task', { expectedRevision: 1, title: 'Renamed' }, key))
+    .rejects.toMatchObject({ code: 'invalid_response' })
+})

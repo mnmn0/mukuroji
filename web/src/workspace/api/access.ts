@@ -61,6 +61,10 @@ export type WorkspaceMember = {
    */
   status: WorkspaceMemberStatus
   /**
+   * Whether the membership is managed by hand or by a directory (SCIM), which owns the name.
+   */
+  provisioningSource?: 'manual' | 'directory'
+  /**
    * 同時更新検知に使用する version です。
    */
   version: number

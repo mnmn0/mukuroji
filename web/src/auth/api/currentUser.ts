@@ -40,6 +40,8 @@ export type CurrentUser = {
   canReadAuditLog?: boolean
   /** Whether the current user may request and download audit log exports (`audit.export`). */
   canExportAuditLog?: boolean
+  /** Whether the current user may manage Teams across the Workspace (`teams.manage`). */
+  canManageTeams?: boolean
   /** Whether the current user may create Customer Requests. */
   canManageCustomerRequests?: boolean
   /** Whether the current user may create or update Customer saved views. */

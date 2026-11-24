@@ -53,9 +53,10 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
 import type { TeamReminderSettingsStore } from '../../modules/notifications/application/ports/reminder-settings-reader'
-import type { AgentRunStore } from '../../modules/agent-runs'
+import type { AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CycleScheduleBaselineStore } from '../../modules/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
 import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
@@ -63,7 +64,9 @@ import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-tick
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
+import type { TeamPortfolioSnapshotStore } from '../../modules/portfolio-dashboard'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
+import type { ProjectStatusShareStore } from '../../modules/project-status-shares'
 import type { WeeklyReportStore } from '../../modules/weekly-reports'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
@@ -75,6 +78,7 @@ import type { WorkspaceAccessClient } from '../../modules/workspace-access/works
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type {
   JapanesePublicHolidayDates,
+  WorkCalendarStore,
   TenantAdministrationClient,
   TenantLifecycleEnforcement,
   TenantExportDownloadPort,
@@ -152,6 +156,8 @@ export interface WorkspaceDependencies {
   tenantAdministration: TenantAdministrationClient
   /** Lists the Japanese national holiday dates new Work Items use. */
   nationalHolidays: JapanesePublicHolidayDates
+  /** Keeps Team and Project calendars (ADR 0058). */
+  workCalendars: WorkCalendarStore
   /** Provides authorized access to completed tenant export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
   /** Enforces tenant lifecycle state at authenticated route boundaries. */
@@ -192,6 +198,8 @@ export interface WorkItemDependencies {
   teamReminderSettings: TeamReminderSettingsStore
   /** Provides Agent Run, claim, and Team Agent settings persistence. */
   agentRuns: AgentRunStore
+  /** Provides agent telemetry usage persistence, attributed to Agent Runs when read. */
+  agentRunUsage: AgentRunUsageStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */
@@ -210,10 +218,16 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
+  /** Provides each Project's read-only status report share links. */
+  projectStatusShares: ProjectStatusShareStore
   /** Provides members' saved and submitted weekly reports. */
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
+  /** Provides each Team's monthly portfolio snapshots. */
+  portfolioSnapshots: TeamPortfolioSnapshotStore
+  /** Provides the named schedule baselines of each Cycle. */
+  cycleScheduleBaselines: CycleScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */

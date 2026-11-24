@@ -80,3 +80,15 @@ export {
 } from './application/japanese-public-holiday-sync'
 export { DynamoDbJapanesePublicHolidayStore } from './adapter-out/dynamodb/japanese-public-holiday-store'
 export { createCabinetOfficeHolidaySource } from './adapter-out/http/cabinet-office-holiday-source'
+export {
+  InMemoryWorkCalendarStore,
+  InvalidStoredWorkCalendarError,
+  WorkCalendarAuthorizationChangedError,
+  WorkCalendarRevisionConflictError,
+} from './domain/work-calendars'
+export type {
+  StoredWorkCalendarScope,
+  WorkCalendarStore,
+  WorkCalendarWrite,
+} from './domain/work-calendars'
+export { DynamoDbWorkCalendarStore } from './adapter-out/dynamodb/work-calendar-store'

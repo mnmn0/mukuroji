@@ -108,6 +108,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     projectDirectoryTable,
     tenantAdministrationTable,
     workItemsTable,
+    workspaceAccessTable,
   } = input.dataStores;
   const { auditRetentionDays, notificationReminderDefaultDays } = input.parameters;
 
@@ -129,6 +130,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
       WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+      WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
     },
     grant: (grantee) => {
       // Planning update targets, and the weekly report rows that decide who is reminded.
@@ -189,6 +191,11 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem'],
         resources: [notificationsTable.tableArn],
+      }));
+      // Members' current display names for weekly report reminders (ADR 0074).
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [workspaceAccessTable.tableArn],
       }));
       // Unsubmitted time entries for timesheet reminders.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({

@@ -15,6 +15,7 @@ import {
   type PublicDocumentContent,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
+  type PublicProjectRaidLog,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
   type PublicWorkItemDocument,
@@ -503,6 +504,18 @@ export interface PublicDirectoryService {
     projectId: string,
   ): Promise<PublicProjectMemberList>
   /**
+   * Lists the risks, issues, and change requests of a Project, when the owner can view it.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project ID.
+   * @returns Every log entry, newest first, with its severity.
+   */
+  listProjectRaidLog(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    projectId: string,
+  ): Promise<PublicProjectRaidLog>
+  /**
    * Resolves a Work Item key to the Work Item it names; answers 404 alike for every key that names
    * no Work Item the owner can read.
    * @param credential - Authenticated developer credential.
@@ -551,6 +564,25 @@ export interface PublicDocumentService {
     workItemId: string,
     documentId: string,
   ): Promise<PublicDocumentContent>
+}
+
+/** Result of one accepted OTLP logs export. */
+export type PublicAgentTelemetryIngestResult = {
+  /** Usage records the export carried that the receiver refused. */
+  rejectedRecords: number
+  /** Whether the same export had already been added, as after an exporter retry. */
+  duplicate: boolean
+}
+
+/** Receiver of coding agent OpenTelemetry usage, attributed to the credential owner. */
+export interface PublicAgentTelemetryService {
+  /**
+   * Adds the model request usage of one OTLP/HTTP JSON logs export to the credential owner's totals.
+   * @param credential - Authenticated developer credential.
+   * @param body - Parsed `ExportLogsServiceRequest`.
+   * @returns How many usage records were refused and whether the export was a retry.
+   */
+  ingestLogs(credential: AuthenticatedDeveloperCredential, body: unknown): Promise<PublicAgentTelemetryIngestResult>
 }
 
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
@@ -879,6 +911,8 @@ export type PublicApiDependencies = {
   workItems: PublicWorkItemService
   /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
   agentRuns?: PublicAgentRunService
+  /** Agent telemetry receiver; telemetry routes report unavailable when it is not configured. */
+  agentTelemetry?: PublicAgentTelemetryService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
@@ -1143,6 +1177,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     c.header('Cache-Control', 'private, no-store')
     return c.json(await requireDirectoryService(dependencies).listProjectMembers(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('projectId'), 'Project ID'),
+    ))
+  })
+
+  router.get('/v1/projects/:projectId/raid-log', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireDirectoryService(dependencies).listProjectRaidLog(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('projectId'), 'Project ID'),
@@ -1475,6 +1519,26 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readAgentRunId(c.req.param('runId'), '/runId'),
     ))
+  })
+
+  router.post('/v1/agent-telemetry/v1/logs', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const contentType = (c.req.header('Content-Type') ?? '').split(';')[0]?.trim().toLowerCase()
+    if (contentType !== 'application/json') {
+      // OTLP/HTTP exporters send protobuf by default; only the JSON encoding is accepted.
+      throw new PublicApiServiceError(415, 'invalid_request', 'Set OTEL_EXPORTER_OTLP_PROTOCOL=http/json; only OTLP/HTTP JSON is accepted.')
+    }
+    const telemetry = requireAgentTelemetryService(dependencies)
+    const result = await telemetry.ingestLogs(credential, await readJson(c))
+    // OTLP partial success: the exporter must not retry refused records.
+    return c.json(result.rejectedRecords === 0
+      ? {}
+      : {
+          partialSuccess: {
+            rejectedLogRecords: String(result.rejectedRecords),
+            errorMessage: 'Some usage records were malformed or outside the accepted time window.',
+          },
+        })
   })
 
   router.post('/v1/agent-runs/:runId/heartbeat', async (c) => {
@@ -5185,6 +5249,19 @@ function requireDocumentService(dependencies: PublicApiDependencies): PublicDocu
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Documents are not configured.', true)
   }
   return dependencies.documents
+}
+
+/**
+ * Returns the agent telemetry receiver or reports that it is unavailable.
+ *
+ * @param dependencies - Public API dependencies.
+ * @returns The receiver.
+ */
+function requireAgentTelemetryService(dependencies: PublicApiDependencies): PublicAgentTelemetryService {
+  if (!dependencies.agentTelemetry) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent telemetry is not configured.', true)
+  }
+  return dependencies.agentTelemetry
 }
 
 /**

@@ -682,6 +682,29 @@ describe('independent task views', () => {
     expect(html).toContain(t('tasks.calendar.empty'))
   })
 
+  test('shades and labels the Workspace days off in a Calendar month', () => {
+    const html = renderToStaticMarkup(
+      <TaskCalendarView
+        month="2026-06"
+        t={t}
+        tasks={taskViewStoryTasks}
+        workingCalendar={{
+          timeZone: 'Asia/Tokyo',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: ['2026-06-03'],
+        }}
+      />,
+    )
+    // 2026-06-06 is a Saturday and 2026-06-03 a company holiday; 2026-06-01 is a working Monday.
+    expect(html).toMatch(/data-non-working=""[^>]*data-testid="task-calendar-day-2026-06-06"/u)
+    expect(html).toMatch(/data-non-working=""[^>]*data-testid="task-calendar-day-2026-06-03"/u)
+    expect(html).not.toMatch(/data-non-working=""[^>]*data-testid="task-calendar-day-2026-06-01"/u)
+    expect(html).toContain(t('tasks.calendar.nonWorking'))
+    // Without a working calendar, no date is shaded.
+    expect(renderToStaticMarkup(<TaskCalendarView month="2026-06" t={t} tasks={taskViewStoryTasks} />))
+      .not.toContain('data-non-working')
+  })
+
   test('renders the project-file panel', () => {
     const projectFilesHtml = renderToStaticMarkup(
       <TaskFileView
@@ -989,7 +1012,7 @@ describe('independent task views', () => {
     )
 
     expect(orderedHtml.indexOf('スケジュール種別')).toBeLessThan(orderedHtml.indexOf('data-testid="task-detail-overview"'))
-    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明<textarea'))
+    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明</label>'))
     expect(overviewlessHtml).not.toContain('data-testid="task-detail-overview"')
     expect(overviewlessHtml).toContain('data-testid="task-detail-work-item-type"')
     expect(overviewlessHtml).toContain('name="workItemTypeId"')

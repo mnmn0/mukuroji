@@ -24,6 +24,12 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- server API: `POST /api/v1/agent-telemetry/v1/logs` を追加しました。Claude Code の OpenTelemetry logs
+  （OTLP/HTTP JSON）からトークン数と推定費用を受け取り、同じ instance の Run に時刻で割り当てます。scope は既存の
+  `work-items:write` で、今の本人用 token のまま送れます（ADR 0061）。MCP の変更はありません。
+- Web: Factory board の期間サマリーに、期間内に終わった Run のトークン使用量（合計・Project 別・上位のタスク）を
+  表示します。推定費用は Team manager にだけ表示します。agent を接続の画面で Claude Code に instance ID を入力すると、
+  トークン使用量を送る設定も作ります。
 - `get_task` が、タスクに link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページを
   `relatedDocuments` で返します。古い server と、所有者が Document を読めない場合は `null` です。
 - 読み取りツール `list_task_documents`（link された Document の一覧）と `read_document`（ページ・テンプレートの
@@ -37,6 +43,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   Team を固定せずに `whoami`、`list_teams`、`list_projects`、`list_users`、`list_issue_statuses`、`list_issues`、
   `get_issue`、`list_comments` の読み取りツールを公開します。`get_issue` と `list_comments` は `ABC-123` 形式の key だけで
   Work Item を指せます。既定の profile（`tasks`）のツールと設定は変わりません。
+- Workspace profile に書き込みのツール `save_issue`（`id` なしで作成、`id` ありで更新）と `save_comment` を追加しました。
+  更新には `expectedRevision`、書き込みには UUID の `idempotencyKey` が要ります。`MUKUROJI_MCP_READ_ONLY=true` で外せます。
 - server API: `GET /api/v1/me`、`GET /api/v1/teams`、`GET /api/v1/projects/{projectId}/members`、
   `GET /api/v1/work-item-keys/{key}` を追加しました。scope は `work-items:read` で、request ごとに credential 所有者の
   現在の権限で評価します。読めない Work Item の key は、存在しない key と同じ 404 です。

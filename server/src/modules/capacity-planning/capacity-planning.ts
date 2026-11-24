@@ -1,12 +1,15 @@
 import {
   GetCommand,
   PutCommand,
+  TransactWriteCommand,
+  QueryCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import type {
   CapacityPlanningGranularity,
   ResourceAssignment,
   ResourceRequest,
+  ReviewWorkloadTimeOffInput,
   SaveWorkloadMemberProfileInput,
   SaveWorkloadTimeOffInput,
   CreateResourceAssignmentInput,
@@ -14,14 +17,37 @@ import type {
   UpdateResourceAssignmentInput,
   UpdateResourceRequestInput,
   WorkloadCell,
+  WorkloadCellStatus,
+  WorkloadContributorShare,
   WorkloadHoliday,
   WorkloadMemberProfile,
   WorkloadMemberSummary,
   WorkloadSnapshot,
+  WorkloadSnapshotViewer,
   WorkloadTimeOff,
   WorkingSchedule,
+  WorkItemScheduleCalendarPolicy,
+  WorkspaceWorkloadCell,
+  WorkspaceWorkloadMember,
+  WorkspaceWorkloadProjectShare,
+  WorkspaceWorkloadSnapshot,
+  WorkspaceWorkloadTeam,
+  WorkspaceWorkloadTeamShare,
+  WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
-import { CAPACITY_PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  CAPACITY_PLANNING_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  createWorkspaceWorkItemCalendarPolicy,
+  isWorkloadCalendarSource,
+  workspaceWeekContaining,
+} from '@mukuroji/contracts'
+import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  type MutationAuditContext,
+  type MutationAuditEventInput,
+} from '../audit'
 
 const TEAM_RECORD_PREFIX = 'CAPACITY#TEAM#'
 const MAX_RANGE_DAYS = 366
@@ -31,6 +57,22 @@ const MAX_ASSIGNMENTS = 20_000
 const MAX_SKILLS = 64
 const MAX_STATE_BYTES = 350_000
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
+/** Days after their end date that canceled, rejected, and empty request rows are kept. */
+const CLOSED_ROW_RETENTION_DAYS = 30
+/**
+ * Most audit events one Team write may carry: DynamoDB transactions hold at most 100 items and
+ * the Team state Put is one of them.
+ */
+const MAX_AUDIT_EVENTS_PER_WRITE = 99
+/**
+ * Most assignments one request cancellation can cancel with it. Each gets its own audit event,
+ * so with the request's event they stay within `MAX_AUDIT_EVENTS_PER_WRITE`.
+ */
+const MAX_CASCADE_ASSIGNMENTS = MAX_AUDIT_EVENTS_PER_WRITE - 1
+/** Days after their end date that any row is kept; longer than the widest snapshot range. */
+const PAST_ROW_RETENTION_DAYS = 400
+/** Audit entity type for Team workload changes. */
+const WORKLOAD_AUDIT_ENTITY_TYPE = 'team-workload'
 
 /** A time entry projection used by capacity calculations. */
 export type WorkloadTimeEntry = {
@@ -63,6 +105,19 @@ export type WorkloadEstimate = {
   estimateMinutes?: number
   /** Recorded remaining effort, or 0 for a completed or canceled Work Item, when known. */
   remainingEffortMinutes?: number
+  /** Project of the Work Item, when assigned. */
+  projectId?: string
+  /** Local dates over which contributor shares are placed; absent when unscheduled. */
+  window?: { fromDate: string, toDate: string }
+  /** Unfinished contributor shares of decided members with planned effort. */
+  contributors?: Array<{
+    /** Contributor assignment ID within the Work Item. */
+    assignmentId: string
+    /** Contributing member. */
+    memberId: string
+    /** Planned effort of the share in minutes. */
+    plannedEffortMinutes: number
+  }>
 }
 
 /** Read-only source data needed to reconcile capacity with actual time. */
@@ -78,7 +133,12 @@ export type CapacityPlanningDataSource = {
     /** Exclusive instant upper bound. */
     to: string
   }): Promise<WorkloadTimeEntry[]>
-  /** Lists the canonical Work Item estimates and remaining effort for the selected Team. */
+  /**
+   * Lists the canonical Work Item estimates and remaining effort for the selected Team.
+   *
+   * @throws CapacityPlanningError with code {@link WORKLOAD_ESTIMATES_LIMIT_EXCEEDED} when the
+   *   Team has too many Work Items to read.
+   */
   listEstimates(workspaceId: string, teamId: string): Promise<WorkloadEstimate[]>
 }
 
@@ -86,13 +146,34 @@ export type CapacityPlanningDataSource = {
 export interface CapacityPlanningRepository {
   /** Reads the current Team state. */
   getState(workspaceId: string, teamId: string): Promise<CapacityPlanningState>
-  /** Saves the state using the previous Team revision as a CAS condition. */
+  /** Reads every Team state saved in the Workspace, for Workspace-wide totals. */
+  listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]>
+  /**
+   * Saves the state using the previous Team revision as a CAS condition.
+   *
+   * @param audit - Audit events written atomically with the state, when the caller records them.
+   */
   saveState(
     workspaceId: string,
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void>
+}
+
+/** Audit events for one workload mutation and the request context that produced them. */
+export type CapacityPlanningAudit = {
+  /** Request-scoped actor, source, and idempotency context. */
+  context: MutationAuditContext
+  /** Events to write in the same transaction as the Team state. */
+  events: MutationAuditEventInput[]
+}
+
+/** Options shared by workload mutations. */
+export type CapacityPlanningMutationOptions = {
+  /** Request audit context; when absent the mutation is saved without audit events. */
+  auditContext?: MutationAuditContext
 }
 
 /** Storage shape kept private to the capacity-planning module. */
@@ -107,6 +188,53 @@ export type CapacityPlanningState = {
   assignments: ResourceAssignment[]
   /** Last update timestamp. */
   updatedAt?: string
+}
+
+/** One Team's stored capacity planning state, read for Workspace-wide totals. */
+export type TeamCapacityPlanningState = {
+  /** Team that owns the state. */
+  teamId: string
+  /** Stored state. */
+  state: CapacityPlanningState
+}
+
+/** Visibility of one Team in a Workspace workload read, resolved by the HTTP adapter. */
+export type WorkspaceWorkloadTeamVisibility = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** Member allowlist for the caller in this Team. Undefined means every member. */
+  visibleMemberIds?: ReadonlySet<string>
+  /** Project allowlist for the caller in this Team. Undefined means every Project. */
+  visibleProjectIds?: ReadonlySet<string>
+  /** Whether confidential assignments in this Team may be shown in detail. */
+  canViewConfidential: boolean
+}
+
+/** Input for a Workspace workload read after HTTP authorization has been performed. */
+export type WorkspaceWorkloadSnapshotInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Inclusive local start date. */
+  fromDate: string
+  /** Inclusive local end date. */
+  toDate: string
+  /** Requested output granularity. */
+  granularity: CapacityPlanningGranularity
+  /** Member whose own confidential assignments stay visible. */
+  viewerMemberId: string
+  /** Teams the caller may view, with each Team's visibility; other Teams count only in totals. */
+  teams: readonly WorkspaceWorkloadTeamVisibility[]
+  /** Workspace calendar that inheriting profiles follow; the default calendar when omitted. */
+  workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /**
+   * Teams that are not archived. Records of other Teams stay stored but count nowhere; every
+   * stored Team counts when omitted.
+   */
+  activeTeamIds?: ReadonlySet<string>
+  /** Day weekly buckets start on, from 0 (Sunday) to 6. Monday is used when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
 }
 
 /** Input for a workload read after HTTP authorization has been performed. */
@@ -129,6 +257,27 @@ export type WorkloadSnapshotInput = {
   visibleProjectIds?: ReadonlySet<string>
   /** Whether confidential assignments and requests may be returned. */
   canViewConfidential: boolean
+  /** The viewer and their review rights, echoed on the snapshot for the client. */
+  viewer?: WorkloadSnapshotViewer
+  /**
+   * Workspace calendar that profiles inheriting it follow: its time zone, working weekdays, and
+   * every day off. The default Workspace calendar is used when omitted.
+   */
+  workspaceCalendar?: WorkItemScheduleCalendarPolicy
+  /**
+   * Every Team state of the Workspace, this Team's included. When given, each cell also carries
+   * the member's Workspace-wide capacity, allocation, and status.
+   */
+  workspaceTeamStates?: readonly TeamCapacityPlanningState[]
+  /** Marks the snapshot as leaving out the Workspace-wide totals that could not be read. */
+  workspaceTotalsUnavailable?: boolean
+  /**
+   * Teams that are not archived, for the Workspace-wide totals; every stored Team counts when
+   * omitted. The Team being read always counts.
+   */
+  activeTeamIds?: ReadonlySet<string>
+  /** Day weekly buckets start on, from 0 (Sunday) to 6. Monday is used when omitted. */
+  weekStartDay?: WorkspaceWeekStartDay
 }
 
 /** Input for a what-if calculation that never persists. */
@@ -145,6 +294,19 @@ export type WorkloadWhatIfInput = WorkloadSnapshotInput & {
   allocationMinutes: number
   /** Preview planned effort minutes. */
   plannedEffortMinutes: number
+}
+
+/** Error code of a Team whose Work Items are too many to read their estimates. */
+export const WORKLOAD_ESTIMATES_LIMIT_EXCEEDED = 'WorkloadEstimatesLimitExceeded'
+
+/**
+ * Tells whether an error is a Team having too many Work Items to read its estimates.
+ *
+ * @param error - Thrown value.
+ * @returns True for the {@link WORKLOAD_ESTIMATES_LIMIT_EXCEEDED} capacity-planning error.
+ */
+function isWorkloadEstimatesLimitExceeded(error: unknown): boolean {
+  return error instanceof CapacityPlanningError && error.code === WORKLOAD_ESTIMATES_LIMIT_EXCEEDED
 }
 
 /** Stable capacity-planning validation and authorization error. */
@@ -187,9 +349,12 @@ export function buildWorkloadSnapshot(
   generatedAt = new Date().toISOString(),
 ): WorkloadSnapshot {
   const { fromDate, toDate } = validateDateRange(input.fromDate, input.toDate)
-  const profiles = state.profiles.filter((profile) =>
+  const storedProfiles = state.profiles.filter((profile) =>
     input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
   )
+  const workspaceCalendar = input.workspaceCalendar ??
+    createWorkspaceWorkItemCalendarPolicy(DEFAULT_WORKSPACE_CALENDAR_SETTINGS)
+  const profiles = storedProfiles.map((profile) => resolveEffectiveProfile(profile, workspaceCalendar))
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const isProjectVisible = (projectId: string | undefined): boolean =>
     input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
@@ -222,25 +387,49 @@ export function buildWorkloadSnapshot(
   )
   const actualByWorkItemId = aggregateActualMinutesByWorkItem(actualByMember)
   const estimateByWorkItemId = new Map(estimates.map((estimate) => [estimate.workItemId, estimate]))
+  const contributorShares = listWorkloadContributorShares(
+    estimates,
+    state.assignments,
+    (memberId) => profileByMemberId.has(memberId),
+    isProjectVisible,
+  )
+  // Contributor shares count like assignments in the member rows, but stay out of `assignments`
+  // because they belong to the Work Item and cannot be moved here.
+  const countedAssignments = [
+    ...visibleAssignments,
+    ...contributorShares.map((share) => toContributorWorkloadAssignment(share, input, generatedAt)),
+  ]
   const remainingEffortByAssignmentId = calculateRemainingEffortByAssignment(
-    visibleAssignments,
+    countedAssignments,
     actualByWorkItemId,
     estimateByWorkItemId,
     fromDate,
     toDate,
   )
 
-  const members = profiles.map((profile) =>
+  const members = profiles.map((profile, index) =>
     calculateMemberSummary(
       profile,
-      visibleAssignments.filter((assignment) => assignment.memberId === profile.memberId),
+      storedProfiles[index] ?? profile,
+      countedAssignments.filter((assignment) => assignment.memberId === profile.memberId),
       actualByMember.get(profile.memberId) ?? { byDate: new Map(), byWorkItemId: new Map() },
       fromDate,
       toDate,
       input.granularity,
       remainingEffortByAssignmentId,
+      input.canViewConfidential || profile.memberId === input.viewerMemberId,
+      input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
     )
   )
+  if (input.workspaceTeamStates) {
+    const dates = listCalendarDates(fromDate, toDate)
+    for (const member of members) {
+      const daily = buildMemberWorkspaceDaily(member.memberId, input.workspaceTeamStates, workspaceCalendar, dates)
+      if (daily) {
+        applyWorkspaceTotals(member, daily, input.granularity, input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay)
+      }
+    }
+  }
 
   return {
     schemaVersion: CAPACITY_PLANNING_SCHEMA_VERSION,
@@ -252,11 +441,133 @@ export function buildWorkloadSnapshot(
     members,
     requests: visibleRequests.map(clone),
     assignments: visibleAssignments.map(clone),
+    contributorShares,
     redactedAssignmentCount,
+    ...(input.workspaceTotalsUnavailable ? { workspaceTotalsUnavailable: true } : {}),
     redactedRequestCount,
     revision: state.revision,
     generatedAt,
+    ...(input.viewer ? { viewer: { ...input.viewer } } : {}),
   }
+}
+
+/**
+ * Lists the Work Item contributor shares counted in the visible members' workload.
+ *
+ * A share is counted for a counted member on a scheduled, visible Work Item. It is left out when that member has any resource assignment for the same Work Item that is not
+ * canceled, confidential ones included, because the assignment already plans that member's part
+ * and counting both would double the same work.
+ *
+ * @param estimates - Canonical Work Item estimates with their contributor shares.
+ * @param assignments - Every stored resource assignment of the Team.
+ * @param isMemberCounted - Whether a member's shares count, such as a visible member with a profile.
+ * @param isProjectVisible - Project visibility of the reader.
+ * @returns The counted shares, ordered by Work Item and assignment ID.
+ */
+function listWorkloadContributorShares(
+  estimates: readonly WorkloadEstimate[],
+  assignments: readonly ResourceAssignment[],
+  isMemberCounted: (memberId: string) => boolean,
+  isProjectVisible: (projectId: string | undefined) => boolean,
+): WorkloadContributorShare[] {
+  const plannedMembers = new Set(assignments.flatMap((assignment) =>
+    assignment.workItemId === undefined || assignment.status === 'canceled'
+      ? []
+      : [`${assignment.workItemId}\0${assignment.memberId}`]))
+  return estimates.flatMap((estimate) => {
+    const window = estimate.window
+    if (!window || !isProjectVisible(estimate.projectId)) return []
+    return (estimate.contributors ?? []).flatMap((contributor) =>
+      !isMemberCounted(contributor.memberId) ||
+        plannedMembers.has(`${estimate.workItemId}\0${contributor.memberId}`)
+        ? []
+        : [{
+            workItemId: estimate.workItemId,
+            assignmentId: contributor.assignmentId,
+            memberId: contributor.memberId,
+            ...(estimate.projectId ? { projectId: estimate.projectId } : {}),
+            fromDate: window.fromDate,
+            toDate: window.toDate,
+            plannedEffortMinutes: contributor.plannedEffortMinutes,
+          }])
+  }).sort((left, right) =>
+    left.workItemId.localeCompare(right.workItemId) || left.assignmentId.localeCompare(right.assignmentId))
+}
+
+/**
+ * Expresses a contributor share as a read-only assignment for the workload calculation.
+ *
+ * The share's planned effort is both its allocation and its planned effort, so a member's
+ * contributor work shows up against their capacity like a resource assignment does.
+ *
+ * @param share - Contributor share counted in the workload.
+ * @param input - Snapshot scope.
+ * @param generatedAt - Snapshot time used for the timestamps.
+ * @returns An assignment that is never stored or returned.
+ */
+function toContributorWorkloadAssignment(
+  share: WorkloadContributorShare,
+  input: Pick<WorkloadSnapshotInput, 'workspaceId' | 'teamId'>,
+  generatedAt: string,
+): ResourceAssignment {
+  return {
+    id: `contributor:${share.workItemId}:${share.assignmentId}`,
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    ...(share.projectId ? { projectId: share.projectId } : {}),
+    workItemId: share.workItemId,
+    memberId: share.memberId,
+    skillIds: [],
+    fromDate: share.fromDate,
+    toDate: share.toDate,
+    allocationMinutes: share.plannedEffortMinutes,
+    plannedEffortMinutes: share.plannedEffortMinutes,
+    confidential: false,
+    status: 'confirmed',
+    revision: 0,
+    createdAt: generatedAt,
+    updatedAt: generatedAt,
+  }
+}
+
+/**
+ * Adds each Team's contributor shares to its state as read-only assignments for Workspace-wide totals.
+ *
+ * Workspace-wide totals count every member's work in every Team, so every scheduled share counts,
+ * whatever the reader may see, unless the member has a resource assignment for the same Work Item.
+ * The added assignments only feed the totals and the aggregated breakdowns and are never stored.
+ *
+ * @param teamStates - Team states the totals are built from.
+ * @param estimatesByTeamId - Canonical Work Item estimates of each Team.
+ * @param workspaceId - Workspace that owns the states.
+ * @param generatedAt - Snapshot time used for the timestamps.
+ * @returns The Team states with the contributor shares added to their assignments.
+ */
+function withContributorReservations(
+  teamStates: readonly TeamCapacityPlanningState[],
+  estimatesByTeamId: ReadonlyMap<string, readonly WorkloadEstimate[]>,
+  workspaceId: string,
+  generatedAt: string,
+): TeamCapacityPlanningState[] {
+  return teamStates.map(({ teamId, state }) => {
+    const shares = listWorkloadContributorShares(
+      estimatesByTeamId.get(teamId) ?? [],
+      state.assignments,
+      () => true,
+      () => true,
+    )
+    if (shares.length === 0) return { teamId, state }
+    return {
+      teamId,
+      state: {
+        ...state,
+        assignments: [
+          ...state.assignments,
+          ...shares.map((share) => toContributorWorkloadAssignment(share, { workspaceId, teamId }, generatedAt)),
+        ],
+      },
+    }
+  })
 }
 
 /** Applies the member, Project, lifecycle, and confidential visibility rules to one assignment. */
@@ -272,11 +583,23 @@ function isAssignmentVisible(
     (!assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId)
 }
 
-/** Builds the smallest time-entry window needed for the visible workload range. */
+/**
+ * Builds the smallest time-entry window needed for the visible workload range.
+ *
+ * The window covers the visible resource assignments and the scheduled contributor shares,
+ * so time logged before the displayed range still reduces their remaining effort.
+ *
+ * @param state - Stored capacity planning state.
+ * @param input - Snapshot scope and visibility.
+ * @param range - Displayed date range.
+ * @param estimates - Canonical Work Item estimates with their contributor shares.
+ * @returns The ISO time-entry query bounds.
+ */
 function getTimeEntryQueryRange(
   state: CapacityPlanningState,
   input: WorkloadSnapshotInput,
   range: { fromDate: string; toDate: string },
+  estimates: readonly WorkloadEstimate[],
 ): { from: string; to: string } {
   const profiles = state.profiles.filter((profile) =>
     input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
@@ -284,9 +607,12 @@ function getTimeEntryQueryRange(
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const isProjectVisible = (projectId: string | undefined): boolean =>
     input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
-  const relevantAssignments = state.assignments.filter((assignment) =>
-    assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
-  )
+  const relevantAssignments: Array<{ fromDate: string; toDate: string }> = [
+    ...state.assignments.filter((assignment) =>
+      assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
+    ),
+    ...listWorkloadContributorShares(estimates, state.assignments, (memberId) => profileByMemberId.has(memberId), isProjectVisible),
+  ]
   const fromDate = relevantAssignments.reduce(
     (earliest, assignment) => assignment.fromDate < earliest ? assignment.fromDate : earliest,
     range.fromDate,
@@ -299,6 +625,14 @@ function getTimeEntryQueryRange(
     from: `${addCalendarDays(fromDate, -1)}T00:00:00.000Z`,
     to: `${addCalendarDays(toDate, 2)}T00:00:00.000Z`,
   }
+}
+
+/** Active assignments of one request, read for authorization of a cascading cancel. */
+export interface ActiveRequestAssignments {
+  /** Team plan revision the assignments were read at. */
+  teamRevision: number
+  /** Assignments of the request that are not canceled. */
+  assignments: ResourceAssignment[]
 }
 
 /** Application service for availability, allocation, and workload planning. */
@@ -327,22 +661,67 @@ export class CapacityPlanningService {
   /** Reads a capacity snapshot with member and confidential visibility already applied. */
   async getSnapshot(input: WorkloadSnapshotInput): Promise<WorkloadSnapshot> {
     const range = validateDateRange(input.fromDate, input.toDate)
-    const state = await this.repository.getState(input.workspaceId, input.teamId)
-    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
-    const [entries, estimates] = await Promise.all([
-      this.dataSource.listTimeEntries({
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        from: timeEntryRange.from,
-        to: timeEntryRange.to,
-      }),
-      this.dataSource.listEstimates(input.workspaceId, input.teamId),
+    const [state, workspaceTeamStates] = await Promise.all([
+      this.repository.getState(input.workspaceId, input.teamId),
+      this.repository.listStates(input.workspaceId),
     ])
-    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
+    const { entries, estimates } = await this.readWorkloadSources(state, input, range)
+    const generatedAt = this.now().toISOString()
+    const teamStates = replaceTeamState(
+      filterActiveTeamStates(workspaceTeamStates, input.activeTeamIds),
+      input.teamId,
+      state,
+    )
+    // Another Team over the Work Item read limit must not fail this Team's view. Without its
+    // shares the Workspace totals would be too low, so they are left out and marked as such.
+    // Any other failure is not expected and fails the read.
+    const teamEstimates = await this.readTeamEstimates(
+      input.workspaceId,
+      teamStates,
+      { teamId: input.teamId, estimates },
+    ).catch((error: unknown) => {
+      if (isWorkloadEstimatesLimitExceeded(error)) return undefined
+      throw error
+    })
+    return buildWorkloadSnapshot(
+      state,
+      entries,
+      estimates,
+      teamEstimates === undefined
+        ? { ...input, workspaceTotalsUnavailable: true }
+        : {
+            ...input,
+            workspaceTeamStates: withContributorReservations(teamStates, teamEstimates, input.workspaceId, generatedAt),
+          },
+      generatedAt,
+    )
+  }
+
+  /**
+   * Reads the Workspace-wide workload of the members the caller may see in the given Teams.
+   *
+   * @param input - Range, granularity, and the Teams the caller may view with their visibility.
+   * @returns Members with Workspace-wide capacity, total allocation, and visible breakdowns.
+   */
+  async getWorkspaceSnapshot(input: WorkspaceWorkloadSnapshotInput): Promise<WorkspaceWorkloadSnapshot> {
+    validateDateRange(input.fromDate, input.toDate)
+    const teamStates = filterActiveTeamStates(await this.repository.listStates(input.workspaceId), input.activeTeamIds)
+    const generatedAt = this.now().toISOString()
+    // A Team whose estimates cannot be read fails the read instead of leaving its shares out.
+    return buildWorkspaceWorkloadSnapshot(
+      withContributorReservations(
+        teamStates,
+        await this.readTeamEstimates(input.workspaceId, teamStates),
+        input.workspaceId,
+        generatedAt,
+      ),
+      input,
+      generatedAt,
+    )
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
-  async saveMemberProfile(input: SaveWorkloadMemberProfileInput): Promise<WorkloadMemberProfile> {
+  async saveMemberProfile(input: SaveWorkloadMemberProfileInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadMemberProfile> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.memberId, 'Member ID')
@@ -365,6 +744,11 @@ export class CapacityPlanningService {
         ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
         ...(input.role?.trim() ? { role: input.role.trim() } : {}),
         skills,
+        // A client that leaves the field out, such as one from before inheritance, keeps the
+        // profile's current calendar; a new profile then keeps its own.
+        ...((input.calendarSource ?? current?.calendarSource) === 'workspace'
+          ? { calendarSource: 'workspace' as const }
+          : {}),
         timeZone: input.timeZone,
         schedule: clone(input.schedule),
         holidays,
@@ -374,13 +758,23 @@ export class CapacityPlanningService {
       }
       replaceById(state.profiles, profile, 'memberId')
       return profile
-    })
+    }, options)
   }
 
-  /** Saves or replaces one member's planned absence. */
-  async saveTimeOff(input: SaveWorkloadTimeOffInput): Promise<WorkloadTimeOff> {
+  /**
+   * Saves or replaces one member's absence.
+   *
+   * Changing an absence's dates or minutes returns it to whatever status the caller sends, so a
+   * member who edits an approved absence must have it approved again.
+   *
+   * @param input - Absence fields, status, and expected revisions.
+   * @param options - Request audit context.
+   * @returns The saved absence.
+   */
+  async saveTimeOff(input: SaveWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
     validateIdentifier(input.memberId, 'Member ID')
     validateDateRange(input.fromDate, input.toDate)
+    requireWithinRetention(input.toDate, this.now())
     if (input.minutesPerDay !== undefined) validateNonNegativeInteger(input.minutesPerDay, 'Time-off minutes')
     const reason = input.reason?.trim()
     const nextTimeOff: WorkloadTimeOff = {
@@ -392,24 +786,77 @@ export class CapacityPlanningService {
       status: input.status,
       revision: 1,
     }
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const profile = requireProfile(state, input.memberId)
       if (profile.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'WorkloadProfileRevisionConflict', 'The workload profile was changed by another request.')
       }
+      const timestamp = this.now().toISOString()
       const previous = profile.timeOff.find((timeOff) => timeOff.id === nextTimeOff.id)
-      const saved: WorkloadTimeOff = { ...nextTimeOff, revision: (previous?.revision ?? 0) + 1 }
+      const saved: WorkloadTimeOff = {
+        ...nextTimeOff,
+        ...reviewFields(nextTimeOff.status, input.actorMemberId, timestamp),
+        revision: (previous?.revision ?? 0) + 1,
+      }
       profile.timeOff = [...profile.timeOff.filter((timeOff) => timeOff.id !== saved.id), saved]
       profile.revision += 1
-      profile.updatedAt = this.now().toISOString()
+      profile.updatedAt = timestamp
+      events.push(createTimeOffAuditEvent(input, profile.memberId, previous, saved))
       return saved
-    })
+    }, options)
   }
 
-  /** Creates a resource request. */
-  async createRequest(input: CreateResourceRequestInput): Promise<ResourceRequest> {
+  /**
+   * Approves, rejects, reopens, or cancels one absence without changing its dates.
+   *
+   * The transport adapter decides who may set each status; this method checks only the
+   * absence's own revision so a review never overwrites a newer edit.
+   *
+   * @param input - Absence, new status, and expected revisions.
+   * @param options - Request audit context.
+   * @returns The reviewed absence.
+   */
+  async reviewTimeOff(input: ReviewWorkloadTimeOffInput, options: CapacityPlanningMutationOptions = {}): Promise<WorkloadTimeOff> {
+    validateIdentifier(input.memberId, 'Member ID')
+    validateIdentifier(input.timeOffId, 'Time-off ID')
+    const replayed = findReplayedReview(await this.repository.getState(input.workspaceId, input.teamId), input)
+    if (replayed) return replayed
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
+      const profile = requireProfile(state, input.memberId)
+      const current = profile.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
+      if (!current) throw new CapacityPlanningError(404, 'WorkloadTimeOffNotFound', 'The time off was not found.')
+      if (current.revision !== input.expectedRevision) {
+        throw new CapacityPlanningError(409, 'WorkloadTimeOffRevisionConflict', 'The time off was changed by another request.')
+      }
+      if (current.status === 'canceled') {
+        throw new CapacityPlanningError(409, 'WorkloadTimeOffCanceled', 'A canceled time off cannot be reviewed.')
+      }
+      // A rejection of an absence that ended past the closed-row retention would be pruned by the
+      // same write, leaving neither the decision for the member nor a row a retry could find.
+      if (input.status === 'rejected' && current.toDate < addCalendarDays(this.now().toISOString().slice(0, 10), -CLOSED_ROW_RETENTION_DAYS)) {
+        throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `Time off that ended more than ${CLOSED_ROW_RETENTION_DAYS} days ago cannot be rejected.`)
+      }
+      const timestamp = this.now().toISOString()
+      const { reviewedAt: _reviewedAt, reviewedBy: _reviewedBy, submittedAt: _submittedAt, ...unreviewed } = current
+      const saved: WorkloadTimeOff = {
+        ...unreviewed,
+        status: input.status,
+        ...reviewFields(input.status, input.actorMemberId, timestamp),
+        revision: current.revision + 1,
+      }
+      profile.timeOff = profile.timeOff.map((timeOff) => timeOff.id === saved.id ? saved : timeOff)
+      profile.revision += 1
+      profile.updatedAt = timestamp
+      events.push(createTimeOffAuditEvent(input, profile.memberId, current, saved))
+      return saved
+    }, options)
+  }
+
+  /** Creates a resource request and records it in the audit log. */
+  async createRequest(input: CreateResourceRequestInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceRequest> {
     validateRequestFields(input)
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    requireWithinRetention(input.toDate, this.now())
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.requests.length >= MAX_REQUESTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource request limit.')
       }
@@ -432,8 +879,9 @@ export class CapacityPlanningService {
         updatedAt: timestamp,
       }
       state.requests.push(request)
+      events.push(createRequestAuditEvent(input, undefined, request))
       return request
-    })
+    }, options)
   }
 
   /** Reads one Team resource request for transport-layer authorization. */
@@ -449,10 +897,13 @@ export class CapacityPlanningService {
    * Changes or cancels a resource request using optimistic concurrency.
    *
    * A request can be canceled only after every assignment that fills it is canceled, so a
-   * canceled request never keeps reserving capacity. Canceled requests are read-only.
+   * canceled request never keeps reserving capacity. With `cancelAssignments` the remaining
+   * assignments are canceled in the same write. Canceled requests are read-only.
    *
    * @param input - Changed request fields, an optional cancel status, and expected revisions.
-   * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
+   * @param access - Whether the actor may see confidential requests, where hidden requests are
+   *   reported as missing, and which assignments the caller authorized for a cascading cancel.
+   * @param options - Request audit context.
    * @returns The saved request.
    */
   async updateRequest(
@@ -460,12 +911,18 @@ export class CapacityPlanningService {
     access: {
       /** Whether the actor may read and change confidential requests. */
       canViewConfidential: boolean
+      /**
+       * Assignments whose Project and member the caller verified for this actor. A cascading
+       * cancel is refused when any active assignment of the request is missing from it.
+       */
+      authorizedAssignmentIds?: ReadonlySet<string>
     },
+    options: CapacityPlanningMutationOptions = {},
   ): Promise<ResourceRequest> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.requestId, 'Request ID')
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const current = requireRequest(state, input.requestId)
       if (current.confidential && !access.canViewConfidential) {
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
@@ -481,11 +938,48 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const requestedMinutes = input.requestedMinutes ?? current.requestedMinutes
       validateNonNegativeInteger(requestedMinutes, 'Requested minutes')
-      if (input.status === 'canceled' && state.assignments.some((assignment) =>
+      const timestamp = this.now().toISOString()
+      const activeAssignments = state.assignments.filter((assignment) =>
         assignment.requestId === current.id && assignment.status !== 'canceled'
-      )) {
+      )
+      if (input.status === 'canceled' && input.cancelAssignments === true) {
+        if (!access.canViewConfidential && activeAssignments.some((assignment) => assignment.confidential)) {
+          throw new CapacityPlanningError(
+            409,
+            'ResourceRequestHasActiveAssignments',
+            'Some assignments that fill this resource request are confidential. Ask a manager who can see them to cancel it.',
+          )
+        }
+        if (activeAssignments.some((assignment) => access.authorizedAssignmentIds?.has(assignment.id) !== true)) {
+          throw new CapacityPlanningError(
+            409,
+            'ResourceRequestAssignmentsChanged',
+            'The assignments that fill this resource request changed. Reload and try again.',
+          )
+        }
+        if (activeAssignments.length > MAX_CASCADE_ASSIGNMENTS) {
+          throw new CapacityPlanningError(
+            413,
+            'ResourceRequestCascadeTooLarge',
+            `Cancel some assignments of this resource request first; at most ${MAX_CASCADE_ASSIGNMENTS} can be canceled with it.`,
+          )
+        }
+        const canceledAssignments = activeAssignments.map((assignment): ResourceAssignment => ({
+          ...assignment,
+          status: 'canceled',
+          revision: assignment.revision + 1,
+          updatedAt: timestamp,
+        }))
+        activeAssignments.forEach((assignment, index) => {
+          const canceled = canceledAssignments[index]
+          if (!canceled) return
+          replaceById(state.assignments, canceled, 'id')
+          events.push(createAssignmentAuditEvent(input, assignment, canceled))
+        })
+      } else if (input.status === 'canceled' && activeAssignments.length > 0) {
         throw new CapacityPlanningError(
           409,
           'ResourceRequestHasActiveAssignments',
@@ -493,7 +987,6 @@ export class CapacityPlanningService {
         )
       }
       const role = input.role === undefined ? current.role : input.role.trim() || undefined
-      const timestamp = this.now().toISOString()
       const next: ResourceRequest = {
         ...current,
         title,
@@ -512,14 +1005,17 @@ export class CapacityPlanningService {
       else delete next.role
       replaceById(state.requests, next, 'id')
       refreshRequestStatuses(state, timestamp)
-      return clone(requireRequest(state, next.id))
-    })
+      const saved = clone(requireRequest(state, next.id))
+      events.push(createRequestAuditEvent(input, current, saved))
+      return saved
+    }, options)
   }
 
-  /** Creates an assignment for a profile and optionally fulfills a request. */
-  async createAssignment(input: CreateResourceAssignmentInput): Promise<ResourceAssignment> {
+  /** Creates an assignment for a profile, optionally fulfills a request, and notifies the member. */
+  async createAssignment(input: CreateResourceAssignmentInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    requireWithinRetention(input.toDate, this.now())
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       if (state.assignments.length >= MAX_ASSIGNMENTS) {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource assignment limit.')
       }
@@ -557,8 +1053,30 @@ export class CapacityPlanningService {
       }
       state.assignments.push(assignment)
       refreshRequestStatuses(state, timestamp)
+      events.push(createAssignmentAuditEvent(input, undefined, assignment))
       return assignment
-    })
+    }, options)
+  }
+
+  /**
+   * Lists the active assignments that fill a request, for transport-layer authorization of a
+   * cascading cancel.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param requestId - Request identifier.
+   * @returns Assignments of the request that are not canceled, with the Team revision they were
+   * read at so the caller can tie its checks to the revision the cascade commits against.
+   */
+  async listActiveRequestAssignments(workspaceId: string, teamId: string, requestId: string): Promise<ActiveRequestAssignments> {
+    validateIdentifier(workspaceId, 'Workspace ID')
+    validateIdentifier(teamId, 'Team ID')
+    validateIdentifier(requestId, 'Request ID')
+    const state = await this.repository.getState(workspaceId, teamId)
+    return {
+      teamRevision: state.revision,
+      assignments: clone(state.assignments.filter((assignment) => assignment.requestId === requestId && assignment.status !== 'canceled')),
+    }
   }
 
   /** Reads one Team assignment for transport-layer authorization. */
@@ -572,9 +1090,9 @@ export class CapacityPlanningService {
     return clone(assignment)
   }
 
-  /** Moves, reassigns, or resizes an assignment using optimistic concurrency. */
-  async updateAssignment(input: UpdateResourceAssignmentInput): Promise<ResourceAssignment> {
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+  /** Moves, reassigns, resizes, confirms, or cancels an assignment using optimistic concurrency. */
+  async updateAssignment(input: UpdateResourceAssignmentInput, options: CapacityPlanningMutationOptions = {}): Promise<ResourceAssignment> {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const current = state.assignments.find((assignment) => assignment.id === input.assignmentId)
       if (!current) throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
       if (current.revision !== input.expectedRevision) {
@@ -593,6 +1111,7 @@ export class CapacityPlanningService {
       const fromDate = input.fromDate ?? current.fromDate
       const toDate = input.toDate ?? current.toDate
       validateDateRange(fromDate, toDate)
+      if (input.toDate !== undefined) requireWithinRetention(toDate, this.now())
       const allocationMinutes = input.allocationMinutes ?? current.allocationMinutes
       const plannedEffortMinutes = input.plannedEffortMinutes ?? current.plannedEffortMinutes
       validateNonNegativeInteger(allocationMinutes, 'Allocation minutes')
@@ -611,8 +1130,9 @@ export class CapacityPlanningService {
       }
       replaceById(state.assignments, next, 'id')
       refreshRequestStatuses(state, timestamp)
+      events.push(createAssignmentAuditEvent(input, current, next))
       return next
-    })
+    }, options)
   }
 
   /** Calculates a proposed reschedule or reassignment without persisting it. */
@@ -676,38 +1196,122 @@ export class CapacityPlanningService {
         }
     if (current) replaceById(state.assignments, preview, 'id')
     else state.assignments.push(preview)
-    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
-    const [entries, estimates] = await Promise.all([
-      this.dataSource.listTimeEntries({
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        from: timeEntryRange.from,
-        to: timeEntryRange.to,
-      }),
-      this.dataSource.listEstimates(input.workspaceId, input.teamId),
-    ])
+    const { entries, estimates } = await this.readWorkloadSources(state, input, range)
     return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
   }
 
-  /** Applies one state mutation with a Team-wide optimistic concurrency check. */
+  /**
+   * Reads the estimates and the time entries a workload snapshot needs.
+   *
+   * Estimates are read first because their contributor shares widen the time-entry window.
+   *
+   * @param state - Capacity planning state the snapshot is built from.
+   * @param input - Snapshot scope and visibility.
+   * @param range - Displayed date range.
+   * @returns The time entries and estimates.
+   */
+  private async readWorkloadSources(
+    state: CapacityPlanningState,
+    input: WorkloadSnapshotInput,
+    range: { fromDate: string; toDate: string },
+  ): Promise<{ entries: Awaited<ReturnType<CapacityPlanningDataSource['listTimeEntries']>>, estimates: WorkloadEstimate[] }> {
+    const estimates = await this.dataSource.listEstimates(input.workspaceId, input.teamId)
+    const timeEntryRange = getTimeEntryQueryRange(state, input, range, estimates)
+    const entries = await this.dataSource.listTimeEntries({
+      workspaceId: input.workspaceId,
+      teamId: input.teamId,
+      from: timeEntryRange.from,
+      to: timeEntryRange.to,
+    })
+    return { entries, estimates }
+  }
+
+  /**
+   * Reads the canonical Work Item estimates of every Team whose contributor shares count in
+   * Workspace-wide totals.
+   *
+   * @param workspaceId - Workspace that owns the Teams.
+   * @param teamStates - Teams to read.
+   * @param known - Estimates already read for one Team, reused instead of read again.
+   * @returns The estimates of each Team.
+   */
+  private async readTeamEstimates(
+    workspaceId: string,
+    teamStates: readonly TeamCapacityPlanningState[],
+    known?: { teamId: string; estimates: readonly WorkloadEstimate[] },
+  ): Promise<Map<string, readonly WorkloadEstimate[]>> {
+    const results = await Promise.allSettled(teamStates.map(({ teamId }) =>
+      known?.teamId === teamId ? known.estimates : this.dataSource.listEstimates(workspaceId, teamId)))
+    // Every read settles first, so an unexpected failure is reported even when another Team is
+    // only over the read limit.
+    // The settled results are searched rather than their reasons, so a rejection whose reason is
+    // undefined is still told apart from finding none.
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    const unexpected = failures.find((failure) => !isWorkloadEstimatesLimitExceeded(failure.reason))
+    if (unexpected) throw unexpected.reason
+    const [limitExceeded] = failures
+    if (limitExceeded) throw limitExceeded.reason
+    return new Map(teamStates.map(({ teamId }, index) => {
+      const result = results[index]
+      return [teamId, result?.status === 'fulfilled' ? result.value : []]
+    }))
+  }
+
+  /**
+   * Applies one state mutation with a Team-wide optimistic concurrency check.
+   *
+   * Before saving, rows that ended long ago or were closed a while ago are pruned so the single
+   * Team record stays small. Audit events pushed by the mutation are saved in the same write.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @param expectedRevision - Team revision the caller read.
+   * @param mutate - Changes the state and pushes audit events.
+   * @param options - Request audit context.
+   * @returns The mutation result.
+   */
   private async mutateState<T>(
     workspaceId: string,
     teamId: string,
     expectedRevision: number,
-    mutate: (state: CapacityPlanningState) => T,
+    mutate: (state: CapacityPlanningState, events: MutationAuditEventInput[]) => T,
+    options: CapacityPlanningMutationOptions = {},
   ): Promise<T> {
     const current = await this.repository.getState(workspaceId, teamId)
     if (current.revision !== expectedRevision) {
       throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
     }
     const next = clone(current)
-    const result = mutate(next)
+    const now = this.now()
+    const today = now.toISOString().slice(0, 10)
+    // Prune first so the mutation, its result, and its audit events see the request fulfillment
+    // that is saved: pruning can drop an old assignment of a kept request. Readers never saw the
+    // pruned rows' effect as a change, so the derived status moves without a new request revision
+    // and the revision the caller read still matches.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
+    const events: MutationAuditEventInput[] = []
+    const result = mutate(next, events)
+    if (events.length > MAX_AUDIT_EVENTS_PER_WRITE) {
+      throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'This workload change touches too many rows to save at once.')
+    }
+    // Rows the mutation itself closed or moved may already be past retention. Canceled rows no
+    // longer count toward fulfillment, so this normally leaves request statuses unchanged; the
+    // stored state stays consistent even when it does not.
+    pruneCapacityPlanningState(next, today)
+    refreshRequestStatuses(next, now.toISOString(), { bumpRevision: false })
     next.revision = current.revision + 1
-    next.updatedAt = this.now().toISOString()
+    next.updatedAt = now.toISOString()
     if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
       throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team workload plan is too large to save.')
     }
-    await this.repository.saveState(workspaceId, teamId, next, current.revision)
+    await this.repository.saveState(
+      workspaceId,
+      teamId,
+      next,
+      current.revision,
+      options.auditContext && events.length > 0 ? { context: options.auditContext, events } : undefined,
+    )
     return result
   }
 }
@@ -716,10 +1320,20 @@ export class CapacityPlanningService {
 export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepository {
   /** Stored Team states. */
   private readonly states = new Map<string, CapacityPlanningState>()
+  /** Audit batches saved with each state, oldest first, for tests. */
+  readonly auditLog: CapacityPlanningAudit[] = []
 
   /** Reads an isolated clone of the Team state. */
   async getState(workspaceId: string, teamId: string): Promise<CapacityPlanningState> {
     return clone(this.states.get(stateKey(workspaceId, teamId)) ?? emptyState())
+  }
+
+  /** Reads isolated clones of every Team state in the Workspace. */
+  async listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]> {
+    const prefix = stateKey(workspaceId, '')
+    return [...this.states.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, state]) => ({ teamId: key.slice(prefix.length), state: clone(state) }))
   }
 
   /** Saves a Team state after checking the expected revision. */
@@ -728,6 +1342,7 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void> {
     const key = stateKey(workspaceId, teamId)
     const current = this.states.get(key)
@@ -735,6 +1350,7 @@ export class InMemoryCapacityPlanningRepository implements CapacityPlanningRepos
       throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
     }
     this.states.set(key, clone(state))
+    if (audit) this.auditLog.push(clone(audit))
   }
 }
 
@@ -744,11 +1360,20 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
   private readonly tableName: string
   /** Configured DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
+  /** Audit event table written with each state change, when audit is configured. */
+  private readonly auditTableName: string | undefined
 
-  /** Creates a DynamoDB-backed capacity planning repository. */
-  constructor(tableName: string, documentClient: DynamoDBDocumentClient) {
+  /**
+   * Creates a DynamoDB-backed capacity planning repository.
+   *
+   * @param tableName - Capacity planning table.
+   * @param documentClient - Configured DocumentClient.
+   * @param auditTableName - Audit event table written in the same transaction, when configured.
+   */
+  constructor(tableName: string, documentClient: DynamoDBDocumentClient, auditTableName?: string) {
     this.tableName = validateIdentifier(tableName, 'Capacity planning table name')
     this.documentClient = documentClient
+    this.auditTableName = auditTableName
   }
 
   /** Reads a Team state from the shared Workspace partition. */
@@ -762,53 +1387,149 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
     return readState(response.Item, workspaceId, teamId)
   }
 
-  /** Writes a Team state using a revision condition. */
+  /** Reads every Team state of the Workspace partition, following pagination. */
+  async listStates(workspaceId: string): Promise<TeamCapacityPlanningState[]> {
+    const states: TeamCapacityPlanningState[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': TEAM_RECORD_PREFIX },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const recordKey = item.recordKey
+        if (typeof recordKey !== 'string' || !recordKey.startsWith(TEAM_RECORD_PREFIX)) continue
+        const teamId = recordKey.slice(TEAM_RECORD_PREFIX.length)
+        states.push({ teamId, state: readState(item, workspaceId, teamId) })
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return states
+  }
+
+  /** Writes a Team state using a revision condition, with its audit events in one transaction. */
   async saveState(
     workspaceId: string,
     teamId: string,
     state: CapacityPlanningState,
     expectedRevision: number,
+    audit?: CapacityPlanningAudit,
   ): Promise<void> {
+    const put = {
+      TableName: this.tableName,
+      Item: {
+        workspaceId,
+        recordKey: stateRecordKey(teamId),
+        ...state,
+      },
+      ...(expectedRevision === 0
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+          }),
+    }
+    const auditTableName = this.auditTableName
+    const auditPuts = audit && auditTableName
+      ? audit.events.flatMap((event, sequence) =>
+          createMutationAuditEventPut(auditTableName, audit.context, { ...event, sequence }) ?? [])
+      : []
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          workspaceId,
-          recordKey: stateRecordKey(teamId),
-          ...state,
-        },
-        ...(expectedRevision === 0
-          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-          : {
-              ConditionExpression: 'revision = :expectedRevision',
-              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-            }),
+      if (auditPuts.length === 0) {
+        await this.documentClient.send(new PutCommand(put))
+        return
+      }
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{ Put: put }, ...auditPuts],
       }))
     } catch (error) {
-      if (isConditionalFailure(error)) {
+      if (isConditionalFailure(error) || isStateConditionCanceled(error)) {
         throw new CapacityPlanningError(409, 'CapacityPlanningRevisionConflict', 'The workload plan was changed by another request.')
+      }
+      if (isAuditConditionCanceled(error)) {
+        throw new CapacityPlanningError(409, 'CapacityPlanningDuplicateRequest', 'This workload change was already recorded. Reload and try again.')
       }
       throw error
     }
   }
 }
 
-/** Calculates one member's daily and aggregated workload rows. */
+/**
+ * Applies the Workspace calendar to a profile that inherits it.
+ *
+ * The result uses the Workspace time zone, keeps a weekday only when both the Workspace and the
+ * member work on it, and adds every Workspace day off to the member's personal days off. A
+ * profile with its own calendar comes back as a shallow copy with the same values. Either way the
+ * result is a new object for each snapshot, so the holiday lookup cached on it never outlives the
+ * snapshot or reflects holidays from an earlier one.
+ *
+ * @param profile - Stored profile.
+ * @param workspaceCalendar - Workspace time zone, working weekdays, and days off.
+ * @returns The profile the availability rules are applied to.
+ */
+function resolveEffectiveProfile(
+  profile: WorkloadMemberProfile,
+  workspaceCalendar: WorkItemScheduleCalendarPolicy,
+): WorkloadMemberProfile {
+  if (profile.calendarSource !== 'workspace') return { ...profile }
+  const workingWeekdays = new Set<string>(workspaceCalendar.workingWeekdays)
+  const schedule = clone(profile.schedule)
+  for (const weekday of WORKING_SCHEDULE_WEEKDAYS) {
+    if (!workingWeekdays.has(weekday)) schedule[weekday] = { enabled: false, minutes: 0 }
+  }
+  const holidays = new Map(profile.holidays.map((holiday) => [holiday.date, holiday]))
+  for (const date of workspaceCalendar.holidays) {
+    if (!holidays.has(date)) holidays.set(date, { date })
+  }
+  return {
+    ...profile,
+    timeZone: workspaceCalendar.timeZone,
+    schedule,
+    holidays: [...holidays.values()],
+  }
+}
+
+/** Weekday keys of a working schedule, Monday first. */
+const WORKING_SCHEDULE_WEEKDAYS: readonly (keyof WorkingSchedule)[] = [
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+]
+
+/**
+ * Calculates one member's daily and aggregated workload rows.
+ *
+ * @param profile - Profile the availability rules are applied to.
+ * @param stored - Stored profile whose own calendar fields the summary returns for editing.
+ */
 function calculateMemberSummary(
   profile: WorkloadMemberProfile,
+  stored: WorkloadMemberProfile,
   assignments: readonly ResourceAssignment[],
   actual: { byDate: ReadonlyMap<string, number>; byWorkItemId: ReadonlyMap<string, number> },
   fromDate: string,
   toDate: string,
   granularity: CapacityPlanningGranularity,
   remainingEffortByAssignmentId: ReadonlyMap<string, number>,
+  canViewTimeOffReason: boolean,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadMemberSummary {
   const dates = listCalendarDates(fromDate, toDate)
   const daily = new Map<string, DailyWorkload>()
   for (const date of dates) {
+    const capacityMinutes = calculateAvailableMinutes(profile, date)
     daily.set(date, {
-      capacityMinutes: calculateAvailableMinutes(profile, date),
+      capacityMinutes,
+      pendingTimeOffMinutes: calculatePendingTimeOffMinutes(profile, date, capacityMinutes),
       allocatedMinutes: 0,
+      tentativeAllocatedMinutes: 0,
       plannedEffortMinutes: 0,
       actualMinutes: actual.byDate.get(date) ?? 0,
       remainingEffortMinutes: 0,
@@ -819,22 +1540,31 @@ function calculateMemberSummary(
     if (!assignmentDates.some((date) => daily.has(date))) continue
     const distributionDates = chooseDistributionDates(profile, assignmentDates)
     distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'allocatedMinutes')
+    if (assignment.status === 'tentative') {
+      distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'tentativeAllocatedMinutes')
+    }
     distributeMinutes(daily, distributionDates, assignment.plannedEffortMinutes, 'plannedEffortMinutes')
     const remaining = assignment.workItemId
       ? remainingEffortByAssignmentId.get(assignment.id) ?? 0
       : assignment.plannedEffortMinutes
     distributeMinutes(daily, distributionDates, remaining, 'remainingEffortMinutes')
   }
-  const cells = aggregateCells(daily, granularity)
+  const cells = aggregateCells(daily, granularity, weekStartDay)
   return {
     memberId: profile.memberId,
     ...(profile.displayName ? { displayName: profile.displayName } : {}),
     ...(profile.role ? { role: profile.role } : {}),
     skills: [...profile.skills],
-    timeZone: profile.timeZone,
-    schedule: clone(profile.schedule),
-    holidays: profile.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
+    calendarSource: stored.calendarSource ?? 'custom',
+    timeZone: stored.timeZone,
+    effectiveTimeZone: profile.timeZone,
+    schedule: clone(stored.schedule),
+    holidays: stored.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
     profileRevision: profile.revision,
+    timeOff: profile.timeOff
+      .filter((timeOff) => timeOff.status !== 'canceled' && timeOff.toDate >= fromDate)
+      .sort((left, right) => left.fromDate.localeCompare(right.fromDate) || left.id.localeCompare(right.id))
+      .map(({ reason, ...timeOff }) => ({ ...timeOff, ...(reason && canViewTimeOffReason ? { reason } : {}) })),
     cells,
     capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
     allocatedMinutes: sum(cells, (cell) => cell.allocatedMinutes),
@@ -849,10 +1579,11 @@ function calculateMemberSummary(
 function aggregateCells(
   daily: ReadonlyMap<string, DailyWorkload>,
   granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
 ): WorkloadCell[] {
   const groups = new Map<string, { fromDate: string; toDate: string; value: DailyWorkload }>()
   for (const [date, value] of daily) {
-    const bucket = bucketFor(date, granularity)
+    const bucket = bucketFor(date, granularity, weekStartDay)
     const current = groups.get(bucket.fromDate)
     if (!current) {
       groups.set(bucket.fromDate, { fromDate: bucket.fromDate, toDate: bucket.toDate, value: { ...value } })
@@ -860,43 +1591,462 @@ function aggregateCells(
     }
     current.toDate = bucket.toDate
     current.value.capacityMinutes += value.capacityMinutes
+    current.value.pendingTimeOffMinutes += value.pendingTimeOffMinutes
     current.value.allocatedMinutes += value.allocatedMinutes
+    current.value.tentativeAllocatedMinutes += value.tentativeAllocatedMinutes
     current.value.plannedEffortMinutes += value.plannedEffortMinutes
     current.value.actualMinutes += value.actualMinutes
     current.value.remainingEffortMinutes += value.remainingEffortMinutes
   }
   return [...groups.values()].sort((left, right) => left.fromDate.localeCompare(right.fromDate)).map((group) => {
     const varianceMinutes = group.value.capacityMinutes - group.value.allocatedMinutes
-    const status = group.value.capacityMinutes === 0
-      ? group.value.allocatedMinutes > 0 ? 'over' : 'unavailable'
-      : varianceMinutes < 0 ? 'over' : varianceMinutes === 0 ? 'balanced' : 'under'
+    const status = calculateCellStatus(group.value.capacityMinutes, group.value.allocatedMinutes)
     return {
       fromDate: group.fromDate,
       toDate: group.toDate,
       label: group.fromDate,
       capacityMinutes: group.value.capacityMinutes,
+      pendingTimeOffMinutes: group.value.pendingTimeOffMinutes,
       allocatedMinutes: group.value.allocatedMinutes,
+      tentativeAllocatedMinutes: group.value.tentativeAllocatedMinutes,
       plannedEffortMinutes: group.value.plannedEffortMinutes,
       actualMinutes: group.value.actualMinutes,
       remainingEffortMinutes: group.value.remainingEffortMinutes,
-      utilizationPercent: group.value.capacityMinutes === 0
-        ? group.value.allocatedMinutes > 0 ? 100 : 0
-        : Math.round((group.value.allocatedMinutes / group.value.capacityMinutes) * 100),
+      utilizationPercent: calculateUtilizationPercent(group.value.capacityMinutes, group.value.allocatedMinutes),
       varianceMinutes,
       status,
     }
   })
 }
 
-/** Computes the member's available minutes for one local date. */
+/**
+ * Classifies a bucket by comparing allocation with capacity.
+ *
+ * @param capacityMinutes - Available minutes in the bucket.
+ * @param allocatedMinutes - Reserved minutes in the bucket.
+ * @returns `unavailable` with no capacity and no demand, otherwise under, balanced, or over.
+ */
+function calculateCellStatus(capacityMinutes: number, allocatedMinutes: number): WorkloadCellStatus {
+  if (capacityMinutes === 0) return allocatedMinutes > 0 ? 'over' : 'unavailable'
+  const varianceMinutes = capacityMinutes - allocatedMinutes
+  return varianceMinutes < 0 ? 'over' : varianceMinutes === 0 ? 'balanced' : 'under'
+}
+
+/**
+ * Expresses allocation as a share of capacity.
+ *
+ * @param capacityMinutes - Available minutes in the bucket.
+ * @param allocatedMinutes - Reserved minutes in the bucket.
+ * @returns The rounded percentage; 100 when demand meets no capacity.
+ */
+function calculateUtilizationPercent(capacityMinutes: number, allocatedMinutes: number): number {
+  if (capacityMinutes === 0) return allocatedMinutes > 0 ? 100 : 0
+  return Math.round((allocatedMinutes / capacityMinutes) * 100)
+}
+
+/** Daily minutes one active assignment reserves for a member, inside the selected range. */
+type WorkspaceAssignmentLoad = {
+  /** Team that owns the assignment. */
+  teamId: string
+  /** Stored assignment. */
+  assignment: ResourceAssignment
+  /** Reserved minutes per selected local date. */
+  minutesByDate: Map<string, number>
+}
+
+/** A member's Workspace-wide daily capacity and every Team's daily allocation. */
+type MemberWorkspaceDaily = {
+  /** Display name from the first Team profile that has one. */
+  displayName?: string
+  /** Role from the first Team profile that has one. */
+  role?: string
+  /** Smallest capacity of the member's Team profiles on each selected date. */
+  capacityByDate: Map<string, number>
+  /** Active assignments overlapping the range, with their daily minutes. */
+  loads: WorkspaceAssignmentLoad[]
+}
+
+/**
+ * Keeps the records of Teams that are not archived.
+ *
+ * An archived Team keeps its capacity record, but its profiles and allocations must no longer
+ * lower or add to its former members' Workspace-wide numbers.
+ *
+ * @param teamStates - Every stored Team state of the Workspace.
+ * @param activeTeamIds - Teams that are not archived, or undefined to keep every record.
+ * @returns The records of active Teams, with an empty state for an active Team that has none.
+ */
+function filterActiveTeamStates(
+  teamStates: readonly TeamCapacityPlanningState[],
+  activeTeamIds: ReadonlySet<string> | undefined,
+): TeamCapacityPlanningState[] {
+  if (!activeTeamIds) return [...teamStates]
+  const active = teamStates.filter((teamState) => activeTeamIds.has(teamState.teamId))
+  // A Team that never saved capacity planning state can still hold contributor shares of members
+  // profiled elsewhere, so it is read with an empty state instead of being skipped.
+  const stored = new Set(active.map((teamState) => teamState.teamId))
+  for (const teamId of activeTeamIds) {
+    if (!stored.has(teamId)) active.push({ teamId, state: emptyState() })
+  }
+  return active
+}
+
+/**
+ * Computes one member's Workspace-wide daily capacity and allocation from every Team state.
+ *
+ * Capacity on a date is the smallest capacity any of the member's Team profiles gives, so time off
+ * or a day off saved in one Team lowers the member's capacity everywhere. Each assignment is spread
+ * the way its own Team's view spreads it: over the dates its Team profile makes available, or the
+ * member's first profile when that Team has none.
+ *
+ * @param memberId - Member to compute.
+ * @param teamStates - Every Team state of the Workspace.
+ * @param workspaceCalendar - Workspace calendar applied to inheriting profiles.
+ * @param dates - Selected local dates, in order.
+ * @param metadataTeamIds - Teams whose profiles may supply the display name and role, in order;
+ *   profiles of other Teams still count for capacity but never show their own labels.
+ * @returns The daily values, or `undefined` when no Team has a profile for the member.
+ */
+function buildMemberWorkspaceDaily(
+  memberId: string,
+  teamStates: readonly TeamCapacityPlanningState[],
+  workspaceCalendar: WorkItemScheduleCalendarPolicy,
+  dates: readonly string[],
+  metadataTeamIds: readonly string[] = [],
+): MemberWorkspaceDaily | undefined {
+  const profileByTeamId = new Map<string, WorkloadMemberProfile>()
+  for (const { teamId, state } of teamStates) {
+    const profile = state.profiles.find((candidate) => candidate.memberId === memberId)
+    if (profile) profileByTeamId.set(teamId, resolveEffectiveProfile(profile, workspaceCalendar))
+  }
+  const profiles = [...profileByTeamId.values()]
+  const firstProfile = profiles[0]
+  if (!firstProfile) return undefined
+  const capacityByDate = new Map(dates.map((date) => [
+    date,
+    Math.min(...profiles.map((profile) => calculateAvailableMinutes(profile, date))),
+  ]))
+  const firstDate = dates[0] ?? ''
+  const lastDate = dates.at(-1) ?? ''
+  const loads: WorkspaceAssignmentLoad[] = []
+  for (const { teamId, state } of teamStates) {
+    for (const assignment of state.assignments) {
+      if (
+        assignment.memberId !== memberId ||
+        assignment.status === 'canceled' ||
+        assignment.toDate < firstDate ||
+        assignment.fromDate > lastDate
+      ) continue
+      const profile = profileByTeamId.get(teamId) ?? firstProfile
+      const distributionDates = chooseDistributionDates(profile, listCalendarDates(assignment.fromDate, assignment.toDate))
+      loads.push({
+        teamId,
+        assignment,
+        minutesByDate: distributeMinutesOverDates(distributionDates, assignment.allocationMinutes, capacityByDate),
+      })
+    }
+  }
+  const labelProfiles = metadataTeamIds.flatMap((teamId) => {
+    const profile = profileByTeamId.get(teamId)
+    return profile ? [profile] : []
+  })
+  const displayName = labelProfiles.find((profile) => profile.displayName)?.displayName
+  const role = labelProfiles.find((profile) => profile.role)?.role
+  return {
+    ...(displayName ? { displayName } : {}),
+    ...(role ? { role } : {}),
+    capacityByDate,
+    loads,
+  }
+}
+
+/**
+ * Spreads minutes evenly over dates, keeping only the dates inside the selected range.
+ *
+ * @param dates - Dates the minutes are spread over.
+ * @param minutes - Minutes to spread; remainder minutes go to the earliest dates.
+ * @param selected - Selected dates; minutes on other dates are dropped.
+ * @returns Minutes per selected date.
+ */
+function distributeMinutesOverDates(
+  dates: readonly string[],
+  minutes: number,
+  selected: ReadonlyMap<string, number>,
+): Map<string, number> {
+  const result = new Map<string, number>()
+  if (dates.length === 0 || minutes === 0) return result
+  const base = Math.floor(minutes / dates.length)
+  let remainder = minutes % dates.length
+  for (const date of dates) {
+    const value = base + (remainder > 0 ? 1 : 0)
+    remainder -= 1
+    if (selected.has(date) && value > 0) result.set(date, value)
+  }
+  return result
+}
+
+/**
+ * Adds a member's Workspace-wide capacity, allocation, and status to each Team view cell.
+ *
+ * @param member - Team view row, changed in place.
+ * @param daily - The member's Workspace-wide daily values.
+ * @param granularity - Granularity of the row's cells.
+ * @param weekStartDay - Day weekly buckets start on.
+ */
+function applyWorkspaceTotals(
+  member: WorkloadMemberSummary,
+  daily: MemberWorkspaceDaily,
+  granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
+): void {
+  const totals = new Map<string, { capacityMinutes: number; allocatedMinutes: number }>()
+  for (const [date, capacityMinutes] of daily.capacityByDate) {
+    const bucket = bucketFor(date, granularity, weekStartDay).fromDate
+    const current = totals.get(bucket) ?? { capacityMinutes: 0, allocatedMinutes: 0 }
+    current.capacityMinutes += capacityMinutes
+    current.allocatedMinutes += sum(daily.loads, (load) => load.minutesByDate.get(date) ?? 0)
+    totals.set(bucket, current)
+  }
+  for (const cell of member.cells) {
+    const total = totals.get(cell.fromDate) ?? { capacityMinutes: 0, allocatedMinutes: 0 }
+    cell.workspaceCapacityMinutes = total.capacityMinutes
+    cell.workspaceAllocatedMinutes = total.allocatedMinutes
+    cell.workspaceStatus = calculateCellStatus(total.capacityMinutes, total.allocatedMinutes)
+  }
+  member.workspaceOverloaded = member.cells.some((cell) => cell.workspaceStatus === 'over')
+}
+
+/**
+ * Returns the Team states with one Team's state replaced by a fresher read.
+ *
+ * @param teamStates - Every Team state of the Workspace.
+ * @param teamId - Team whose state was read separately.
+ * @param state - The separately read state.
+ * @returns The Team states, with that Team's state replaced or added.
+ */
+function replaceTeamState(
+  teamStates: readonly TeamCapacityPlanningState[],
+  teamId: string,
+  state: CapacityPlanningState,
+): TeamCapacityPlanningState[] {
+  return [...teamStates.filter((candidate) => candidate.teamId !== teamId), { teamId, state }]
+}
+
+/** Running totals of one Workspace workload bucket. */
+type WorkspaceBucketTotals = {
+  /** Inclusive bucket start date. */
+  fromDate: string
+  /** Inclusive bucket end date. */
+  toDate: string
+  /** Workspace-wide capacity. */
+  capacityMinutes: number
+  /** Allocation of every Team. */
+  allocatedMinutes: number
+  /** Visible allocation per Team ID. */
+  teams: Map<string, number>
+  /** Visible allocation per Team and Project key. */
+  projects: Map<string, WorkspaceWorkloadProjectShare>
+}
+
+/**
+ * Builds the Workspace-wide workload of the members the caller may see.
+ *
+ * A member appears when a viewable Team has a profile for them and the Team's member allowlist
+ * includes them. Totals count every active assignment of every Team; the Team and Project
+ * breakdowns count only assignments of viewable Teams whose member allowlist includes the member
+ * and that the Team's Project and confidential rules let the caller see, and the rest is reported
+ * as hidden allocation.
+ *
+ * @param teamStates - Every Team state of the Workspace.
+ * @param input - Range, granularity, viewer, and viewable Teams with their visibility.
+ * @param generatedAt - Generation timestamp.
+ * @returns The Workspace workload snapshot.
+ */
+export function buildWorkspaceWorkloadSnapshot(
+  teamStates: readonly TeamCapacityPlanningState[],
+  input: WorkspaceWorkloadSnapshotInput,
+  generatedAt = new Date().toISOString(),
+): WorkspaceWorkloadSnapshot {
+  const { fromDate, toDate } = validateDateRange(input.fromDate, input.toDate)
+  const dates = listCalendarDates(fromDate, toDate)
+  const workspaceCalendar = input.workspaceCalendar ??
+    createWorkspaceWorkItemCalendarPolicy(DEFAULT_WORKSPACE_CALENDAR_SETTINGS)
+  const stateByTeamId = new Map(teamStates.map((teamState) => [teamState.teamId, teamState.state]))
+  const visibilityByTeamId = new Map(input.teams.map((team) => [team.teamId, team]))
+  const teamIdsByMemberId = new Map<string, string[]>()
+  for (const team of input.teams) {
+    for (const profile of stateByTeamId.get(team.teamId)?.profiles ?? []) {
+      if (team.visibleMemberIds !== undefined && !team.visibleMemberIds.has(profile.memberId)) continue
+      teamIdsByMemberId.set(profile.memberId, [...teamIdsByMemberId.get(profile.memberId) ?? [], team.teamId])
+    }
+  }
+  const members: WorkspaceWorkloadMember[] = []
+  for (const [memberId, teamIds] of teamIdsByMemberId) {
+    const daily = buildMemberWorkspaceDaily(memberId, teamStates, workspaceCalendar, dates, teamIds)
+    if (!daily) continue
+    const cells = aggregateWorkspaceCells(
+      daily,
+      input.granularity,
+      input.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+      (load) => {
+      const team = visibilityByTeamId.get(load.teamId)
+      if (!team) return false
+      const { assignment } = load
+      // The owning Team's member allowlist applies too, as it does in that Team's own view.
+      if (team.visibleMemberIds !== undefined && !team.visibleMemberIds.has(memberId)) return false
+      return (team.visibleProjectIds === undefined ||
+        assignment.projectId === undefined ||
+        team.visibleProjectIds.has(assignment.projectId)) &&
+        (!assignment.confidential || team.canViewConfidential || assignment.memberId === input.viewerMemberId)
+    })
+    members.push({
+      memberId,
+      ...(daily.displayName ? { displayName: daily.displayName } : {}),
+      ...(daily.role ? { role: daily.role } : {}),
+      teamIds,
+      cells,
+      capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
+      allocatedMinutes: sum(cells, (cell) => cell.allocatedMinutes),
+      overloaded: cells.some((cell) => cell.status === 'over'),
+    })
+  }
+  members.sort((left, right) =>
+    Number(right.overloaded) - Number(left.overloaded) ||
+    (left.displayName ?? left.memberId).localeCompare(right.displayName ?? right.memberId) ||
+    left.memberId.localeCompare(right.memberId)
+  )
+  const teams: WorkspaceWorkloadTeam[] = input.teams.map((team) => ({ teamId: team.teamId, name: team.name }))
+  return {
+    schemaVersion: CAPACITY_PLANNING_SCHEMA_VERSION,
+    workspaceId: input.workspaceId,
+    fromDate,
+    toDate,
+    granularity: input.granularity,
+    teams,
+    members,
+    generatedAt,
+  }
+}
+
+/**
+ * Groups a member's Workspace-wide daily values into buckets with visible breakdowns.
+ *
+ * @param daily - The member's Workspace-wide daily values.
+ * @param granularity - Output granularity.
+ * @param weekStartDay - Day weekly buckets start on.
+ * @param isVisible - Whether the caller may see one assignment in the breakdowns.
+ * @returns Buckets in date order.
+ */
+function aggregateWorkspaceCells(
+  daily: MemberWorkspaceDaily,
+  granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
+  isVisible: (load: WorkspaceAssignmentLoad) => boolean,
+): WorkspaceWorkloadCell[] {
+  const buckets = new Map<string, WorkspaceBucketTotals>()
+  const bucketOf = (date: string): WorkspaceBucketTotals => {
+    const range = bucketFor(date, granularity, weekStartDay)
+    const current = buckets.get(range.fromDate)
+    if (current) return current
+    const created: WorkspaceBucketTotals = {
+      fromDate: range.fromDate,
+      toDate: range.toDate,
+      capacityMinutes: 0,
+      allocatedMinutes: 0,
+      teams: new Map(),
+      projects: new Map(),
+    }
+    buckets.set(range.fromDate, created)
+    return created
+  }
+  for (const [date, capacityMinutes] of daily.capacityByDate) bucketOf(date).capacityMinutes += capacityMinutes
+  for (const load of daily.loads) {
+    const visible = isVisible(load)
+    for (const [date, minutes] of load.minutesByDate) {
+      const bucket = bucketOf(date)
+      bucket.allocatedMinutes += minutes
+      if (!visible) continue
+      bucket.teams.set(load.teamId, (bucket.teams.get(load.teamId) ?? 0) + minutes)
+      const projectKey = `${load.teamId}\0${load.assignment.projectId ?? ''}`
+      const project = bucket.projects.get(projectKey) ?? {
+        teamId: load.teamId,
+        ...(load.assignment.projectId ? { projectId: load.assignment.projectId } : {}),
+        allocatedMinutes: 0,
+      }
+      project.allocatedMinutes += minutes
+      bucket.projects.set(projectKey, project)
+    }
+  }
+  return [...buckets.values()].sort((left, right) => left.fromDate.localeCompare(right.fromDate)).map((bucket) => {
+    const teams: WorkspaceWorkloadTeamShare[] = [...bucket.teams.entries()]
+      .map(([teamId, allocatedMinutes]) => ({ teamId, allocatedMinutes }))
+      .sort((left, right) => right.allocatedMinutes - left.allocatedMinutes || left.teamId.localeCompare(right.teamId))
+    const projects = [...bucket.projects.values()]
+      .sort((left, right) => right.allocatedMinutes - left.allocatedMinutes)
+    return {
+      fromDate: bucket.fromDate,
+      toDate: bucket.toDate,
+      label: bucket.fromDate,
+      capacityMinutes: bucket.capacityMinutes,
+      allocatedMinutes: bucket.allocatedMinutes,
+      utilizationPercent: calculateUtilizationPercent(bucket.capacityMinutes, bucket.allocatedMinutes),
+      varianceMinutes: bucket.capacityMinutes - bucket.allocatedMinutes,
+      status: calculateCellStatus(bucket.capacityMinutes, bucket.allocatedMinutes),
+      teams,
+      projects,
+      hiddenAllocatedMinutes: bucket.allocatedMinutes - sum(teams, (team) => team.allocatedMinutes),
+    }
+  })
+}
+
+/** Computes the member's available minutes for one local date; only approved time off counts. */
 function calculateAvailableMinutes(profile: WorkloadMemberProfile, date: string): number {
   const schedule = profile.schedule[weekdayKey(date)]
   if (!schedule.enabled || schedule.minutes === 0) return 0
-  if (profile.holidays.some((holiday) => holiday.date === date)) return 0
-  const absence = profile.timeOff
-    .filter((timeOff) => timeOff.status !== 'canceled' && timeOff.fromDate <= date && timeOff.toDate >= date)
-    .reduce((total, timeOff) => total + (timeOff.minutesPerDay ?? schedule.minutes), 0)
-  return Math.max(0, schedule.minutes - absence)
+  if (readHolidayDates(profile).has(date)) return 0
+  return Math.max(0, schedule.minutes - sumTimeOffMinutes(profile, date, 'approved', schedule.minutes))
+}
+
+/**
+ * Computes the time off still waiting for approval on one date, capped at the minutes that
+ * approved time off leaves available.
+ */
+function calculatePendingTimeOffMinutes(profile: WorkloadMemberProfile, date: string, availableMinutes: number): number {
+  if (availableMinutes === 0) return 0
+  const scheduled = profile.schedule[weekdayKey(date)].minutes
+  return Math.min(availableMinutes, sumTimeOffMinutes(profile, date, 'planned', scheduled))
+}
+
+/** Sums one status of time off covering a date, using the scheduled minutes for full days. */
+function sumTimeOffMinutes(
+  profile: WorkloadMemberProfile,
+  date: string,
+  status: WorkloadTimeOff['status'],
+  scheduledMinutes: number,
+): number {
+  return profile.timeOff
+    .filter((timeOff) => timeOff.status === status && timeOff.fromDate <= date && timeOff.toDate >= date)
+    .reduce((total, timeOff) => total + (timeOff.minutesPerDay ?? scheduledMinutes), 0)
+}
+
+/**
+ * Holiday dates of each effective profile. Effective profiles are created anew for every snapshot
+ * by {@link resolveEffectiveProfile}, so an entry lives only as long as that snapshot.
+ */
+const holidayDatesByProfile = new WeakMap<WorkloadMemberProfile, ReadonlySet<string>>()
+
+/**
+ * Reads a profile's holiday dates as a set, so inherited Workspace days off stay cheap to check.
+ *
+ * @param profile - Effective profile of the current snapshot; it is not changed afterwards.
+ * @returns The holiday dates.
+ */
+function readHolidayDates(profile: WorkloadMemberProfile): ReadonlySet<string> {
+  const cached = holidayDatesByProfile.get(profile)
+  if (cached) return cached
+  const dates = new Set(profile.holidays.map((holiday) => holiday.date))
+  holidayDatesByProfile.set(profile, dates)
+  return dates
 }
 
 /** Chooses scheduled dates first so planned effort follows availability. */
@@ -910,7 +2060,7 @@ function distributeMinutes(
   daily: Map<string, DailyWorkload>,
   dates: readonly string[],
   minutes: number,
-  field: keyof Pick<DailyWorkload, 'allocatedMinutes' | 'plannedEffortMinutes' | 'remainingEffortMinutes'>,
+  field: keyof Pick<DailyWorkload, 'allocatedMinutes' | 'tentativeAllocatedMinutes' | 'plannedEffortMinutes' | 'remainingEffortMinutes'>,
 ): void {
   if (dates.length === 0 || minutes === 0) return
   const base = Math.floor(minutes / dates.length)
@@ -1057,8 +2207,19 @@ function calculateRemainingEffortByAssignment(
   return result
 }
 
-/** Returns the Monday-first bucket containing one local date. */
-function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fromDate: string; toDate: string } {
+/**
+ * Returns the day, week, or month bucket containing one local date.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param granularity - Bucket size.
+ * @param weekStartDay - Day a week bucket starts on.
+ * @returns The first and last local dates of the bucket.
+ */
+function bucketFor(
+  date: string,
+  granularity: CapacityPlanningGranularity,
+  weekStartDay: WorkspaceWeekStartDay,
+): { fromDate: string; toDate: string } {
   if (granularity === 'day') return { fromDate: date, toDate: date }
   if (granularity === 'month') {
     const [year, month] = date.split('-').map(Number)
@@ -1068,10 +2229,8 @@ function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fr
       toDate: `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${lastDay.toString().padStart(2, '0')}`,
     }
   }
-  const day = new Date(`${date}T12:00:00Z`).getUTCDay()
-  const mondayOffset = day === 0 ? -6 : 1 - day
-  const fromDate = addCalendarDays(date, mondayOffset)
-  return { fromDate, toDate: addCalendarDays(fromDate, 6) }
+  const week = workspaceWeekContaining(date, weekStartDay)
+  return { fromDate: week.from, toDate: week.to }
 }
 
 /** Finds the UTC instant corresponding to local midnight, including DST changes. */
@@ -1140,6 +2299,20 @@ function validateAssignmentFields(input: CreateResourceAssignmentInput | (Worklo
   validateDateRange(fromDate, toDate)
   validateNonNegativeInteger(input.allocationMinutes, 'Allocation minutes')
   validateNonNegativeInteger(input.plannedEffortMinutes, 'Planned effort minutes')
+}
+
+/**
+ * Refuses a row that would end before every row is pruned, so a write never reports success for
+ * a row the same write removes. Closing a recent row past `CLOSED_ROW_RETENTION_DAYS` is still
+ * allowed: removing it is what closing an old row means.
+ *
+ * @param toDate - End date the row is saved with.
+ * @param now - Current time.
+ */
+function requireWithinRetention(toDate: string, now: Date): void {
+  if (toDate < addCalendarDays(now.toISOString().slice(0, 10), -PAST_ROW_RETENTION_DAYS)) {
+    throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `The end date must be within the last ${PAST_ROW_RETENTION_DAYS} days.`)
+  }
 }
 
 /** Validates a complete date range and returns normalized values. */
@@ -1225,8 +2398,21 @@ function requireRequest(state: CapacityPlanningState, requestId: string): Resour
   return request
 }
 
-/** Refreshes request status from the allocation committed against it. */
-function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string): void {
+/**
+ * Refreshes request status from the allocation committed against it.
+ *
+ * @param state - State to update in place.
+ * @param timestamp - Time recorded on a changed request.
+ * @param options - Whether a changed request gets a new revision; retention pruning keeps it.
+ */
+function refreshRequestStatuses(
+  state: CapacityPlanningState,
+  timestamp: string,
+  options: {
+    /** Whether to increment the revision of a request whose status changes. */
+    bumpRevision: boolean
+  } = { bumpRevision: true },
+): void {
   for (const request of state.requests) {
     if (request.status === 'canceled') continue
     const assigned = state.assignments
@@ -1236,7 +2422,7 @@ function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string)
     if (status !== request.status) {
       request.status = status
       request.updatedAt = timestamp
-      request.revision += 1
+      if (options.bumpRevision) request.revision += 1
     }
   }
 }
@@ -1277,14 +2463,260 @@ function sum<T>(values: readonly T[], selector: (value: T) => number): number {
 type DailyWorkload = {
   /** Available minutes. */
   capacityMinutes: number
+  /** Time off waiting for approval. */
+  pendingTimeOffMinutes: number
   /** Allocated minutes. */
   allocatedMinutes: number
+  /** Allocated minutes from tentative assignments. */
+  tentativeAllocatedMinutes: number
   /** Planned effort minutes. */
   plannedEffortMinutes: number
   /** Actual minutes. */
   actualMinutes: number
   /** Remaining effort minutes. */
   remainingEffortMinutes: number
+}
+
+/**
+ * Removes rows the heatmap and lists no longer need, so the single Team record stays small.
+ *
+ * Canceled and rejected rows, and canceled requests, go once they ended more than
+ * `CLOSED_ROW_RETENTION_DAYS` ago; any row goes once it ended more than `PAST_ROW_RETENTION_DAYS`
+ * ago. A request stays while a kept assignment still refers to it.
+ *
+ * @param state - State to prune in place.
+ * @param today - Current UTC calendar date.
+ */
+export function pruneCapacityPlanningState(state: CapacityPlanningState, today: string): void {
+  const closedBefore = addCalendarDays(today, -CLOSED_ROW_RETENTION_DAYS)
+  const pastBefore = addCalendarDays(today, -PAST_ROW_RETENTION_DAYS)
+  const keep = (row: { toDate: string; status: string }) =>
+    row.toDate >= pastBefore && !((row.status === 'canceled' || row.status === 'rejected') && row.toDate < closedBefore)
+  for (const profile of state.profiles) {
+    if (profile.timeOff.every(keep)) continue
+    profile.timeOff = profile.timeOff.filter(keep)
+  }
+  state.assignments = state.assignments.filter(keep)
+  const referencedRequestIds = new Set(state.assignments.flatMap((assignment) => assignment.requestId ? [assignment.requestId] : []))
+  state.requests = state.requests.filter((request) => referencedRequestIds.has(request.id) || keep(request))
+}
+
+/**
+ * Finds the saved result of an approval or rejection that is being sent again after its response
+ * was lost: the absence is one revision past the one the request expected, with the requested
+ * decision by the same reviewer. The revisions would otherwise refuse the retry with a conflict.
+ *
+ * @param state - Current Team state.
+ * @param input - Review request.
+ * @returns The saved absence when the request already succeeded, otherwise `undefined`.
+ */
+function findReplayedReview(state: CapacityPlanningState, input: ReviewWorkloadTimeOffInput): WorkloadTimeOff | undefined {
+  if (input.status !== 'approved' && input.status !== 'rejected') return undefined
+  // The original write moved the Team past the revision the request expected.
+  if (state.revision <= input.expectedTeamRevision) return undefined
+  const current = state.profiles
+    .find((profile) => profile.memberId === input.memberId)
+    ?.timeOff.find((timeOff) => timeOff.id === input.timeOffId)
+  if (
+    !current ||
+    current.revision !== input.expectedRevision + 1 ||
+    current.status !== input.status ||
+    current.reviewedBy !== input.actorMemberId
+  ) return undefined
+  return clone(current)
+}
+
+/**
+ * Returns the submission or reviewer fields for a status set by an actor: a `planned` absence
+ * records when it was submitted, and an approval or rejection records who decided it.
+ */
+function reviewFields(
+  status: WorkloadTimeOff['status'],
+  actorMemberId: string,
+  timestamp: string,
+): Pick<WorkloadTimeOff, 'reviewedAt' | 'reviewedBy' | 'submittedAt'> {
+  if (status === 'planned') return { submittedAt: timestamp }
+  return status === 'approved' || status === 'rejected' ? { reviewedBy: actorMemberId, reviewedAt: timestamp } : {}
+}
+
+/**
+ * Reads a stored absence saved before time-off approval existed as approved.
+ *
+ * Such rows are `planned` without `submittedAt`, and they used to reduce capacity. Reading them
+ * as approved keeps capacity unchanged on deploy; the next write of the Team stores them that way.
+ *
+ * @param timeOff - Stored absence.
+ * @returns The absence, upgraded when it predates approval.
+ */
+export function upgradeLegacyTimeOff(timeOff: WorkloadTimeOff): WorkloadTimeOff {
+  return timeOff.status === 'planned' && timeOff.submittedAt === undefined ? { ...timeOff, status: 'approved' } : timeOff
+}
+
+/** Workspace, Team, and actor shared by every workload mutation input. */
+type WorkloadAuditScope = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Member performing the mutation. */
+  actorMemberId: string
+}
+
+/** Time-off fields recorded in audit changes; the free-text reason is redacted. */
+const TIME_OFF_AUDIT_FIELDS = ['fromDate', 'toDate', 'minutesPerDay', 'status', 'reason'] as const
+/** Request fields recorded in audit changes. */
+const REQUEST_AUDIT_FIELDS = ['title', 'projectId', 'role', 'skillIds', 'fromDate', 'toDate', 'requestedMinutes', 'confidential', 'status'] as const
+/** Assignment fields recorded in audit changes. */
+const ASSIGNMENT_AUDIT_FIELDS = ['memberId', 'requestId', 'projectId', 'workItemId', 'fromDate', 'toDate', 'allocationMinutes', 'plannedEffortMinutes', 'confidential', 'status'] as const
+
+/**
+ * Builds the audit event for a time-off change and notifies the member when someone else made it.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param memberId - Member whose absence changed.
+ * @param previous - Absence before the change, or undefined when it was created.
+ * @param next - Absence after the change.
+ * @returns The audit event input.
+ */
+function createTimeOffAuditEvent(
+  scope: WorkloadAuditScope,
+  memberId: string,
+  previous: WorkloadTimeOff | undefined,
+  next: WorkloadTimeOff,
+): MutationAuditEventInput {
+  const action = !previous
+    ? next.status === 'planned' ? 'requested' : 'created'
+    : previous.status === next.status
+      ? 'updated'
+      : next.status === 'planned' ? 'reopened' : next.status
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.time-off.${action}`,
+    action: `time_off_${action}`,
+    target: { type: 'workload-time-off', id: next.id },
+    changes: createAuditFieldChanges(
+      previous ? { ...previous } : undefined,
+      { ...next },
+      TIME_OFF_AUDIT_FIELDS,
+      ['reason'],
+    ),
+    summary: `Time off ${next.fromDate} – ${next.toDate} ${action}`,
+    recipients: [{ memberKey: memberId, reason: 'time-off-review' }],
+    metadata: { memberId, timeOffId: next.id, status: next.status },
+  })
+}
+
+/**
+ * Builds the audit event for a resource request change.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param previous - Request before the change, or undefined when it was created.
+ * @param next - Request after the change.
+ * @returns The audit event input.
+ */
+function createRequestAuditEvent(
+  scope: WorkloadAuditScope,
+  previous: ResourceRequest | undefined,
+  next: ResourceRequest,
+): MutationAuditEventInput {
+  const action = !previous ? 'created' : next.status === 'canceled' && previous.status !== 'canceled' ? 'canceled' : 'updated'
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.request.${action}`,
+    action: `resource_request_${action}`,
+    target: { type: 'resource-request', id: next.id },
+    changes: createAuditFieldChanges(
+      previous ? { ...previous } : undefined,
+      { ...next },
+      REQUEST_AUDIT_FIELDS,
+      next.confidential || previous?.confidential ? ['title'] : [],
+    ),
+    summary: next.confidential ? `Confidential resource request ${action}` : `Resource request "${next.title}" ${action}`,
+    recipients: [],
+    metadata: { requestId: next.id, status: next.status, ...(next.projectId ? { projectId: next.projectId } : {}) },
+  })
+}
+
+/**
+ * Builds the audit event for an assignment change and notifies the assigned members.
+ *
+ * Both the previous and the new member are notified of a reassignment.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param previous - Assignment before the change, or undefined when it was created.
+ * @param next - Assignment after the change.
+ * @returns The audit event input.
+ */
+function createAssignmentAuditEvent(
+  scope: WorkloadAuditScope,
+  previous: ResourceAssignment | undefined,
+  next: ResourceAssignment,
+): MutationAuditEventInput {
+  const action = !previous
+    ? 'created'
+    : previous.status !== next.status
+      ? next.status === 'confirmed' ? 'confirmed' : next.status === 'canceled' ? 'canceled' : 'unconfirmed'
+      : previous.memberId !== next.memberId ? 'reassigned' : 'updated'
+  const memberIds = [...new Set([previous?.memberId, next.memberId].filter((memberId): memberId is string => Boolean(memberId)))]
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.assignment.${action}`,
+    action: `resource_assignment_${action}`,
+    target: { type: 'resource-assignment', id: next.id },
+    changes: createAuditFieldChanges(previous ? { ...previous } : undefined, { ...next }, ASSIGNMENT_AUDIT_FIELDS),
+    summary: `Assignment ${next.fromDate} – ${next.toDate} ${action}`,
+    recipients: memberIds.map((memberKey) => ({ memberKey, reason: 'workload-assignment' })),
+    metadata: {
+      assignmentId: next.id,
+      status: next.status,
+      ...(next.projectId ? { projectId: next.projectId } : {}),
+      ...(next.workItemId ? { workItemId: next.workItemId } : {}),
+    },
+  })
+}
+
+/**
+ * Builds a Team workload audit event whose recipients, other than the actor, get a notification.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param event - Event type, target, changes, summary, recipients, and extra metadata.
+ * @returns The audit event input.
+ */
+function createWorkloadAuditEvent(
+  scope: WorkloadAuditScope,
+  event: {
+    /** Event type, such as `workload.time-off.approved`. */
+    eventType: string
+    /** Short action identifier. */
+    action: string
+    /** Changed row. */
+    target: { type: string; id: string }
+    /** Field changes. */
+    changes: MutationAuditEventInput['changes']
+    /** Short summary shown in activity and notifications. */
+    summary: string
+    /** Members to notify, before the actor is removed. */
+    recipients: Array<{ memberKey: string; reason: string }>
+    /** Extra metadata. */
+    metadata: Record<string, unknown>
+  },
+): MutationAuditEventInput {
+  const notificationCandidates = event.recipients.filter((recipient) => recipient.memberKey !== scope.actorMemberId)
+  return {
+    directoryId: scope.workspaceId,
+    eventType: event.eventType,
+    entityType: WORKLOAD_AUDIT_ENTITY_TYPE,
+    entityId: scope.teamId,
+    target: event.target,
+    action: event.action,
+    ...(event.changes ? { changes: event.changes } : {}),
+    summary: event.summary,
+    metadata: {
+      ...event.metadata,
+      teamId: scope.teamId,
+      actorMemberKey: scope.actorMemberId,
+      deepLink: `/teams/${encodeURIComponent(scope.teamId)}/members`,
+      notificationTitle: 'Team workload',
+      ...(notificationCandidates.length > 0 ? { notificationCandidates } : {}),
+    },
+  }
 }
 
 /** Creates an empty state. */
@@ -1327,7 +2759,7 @@ function readState(item: Record<string, unknown>, workspaceId: string, teamId: s
   }
   return {
     revision,
-    profiles,
+    profiles: profiles.map((profile) => ({ ...profile, timeOff: profile.timeOff.map(upgradeLegacyTimeOff) })),
     requests,
     assignments,
     ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
@@ -1359,6 +2791,7 @@ function isStoredMemberProfile(value: unknown): value is WorkloadMemberProfile {
     isOptionalString(value.displayName) &&
     isOptionalString(value.role) &&
     isStringArray(value.skills) &&
+    (value.calendarSource === undefined || isWorkloadCalendarSource(value.calendarSource)) &&
     isValidTimeZone(value.timeZone) &&
     isWorkingSchedule(value.schedule) &&
     Array.isArray(value.holidays) &&
@@ -1426,6 +2859,9 @@ function isStoredTimeOff(value: unknown): value is WorkloadTimeOff {
     (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
     isOptionalString(value.reason) &&
     isTimeOffStatus(value.status) &&
+    isOptionalString(value.submittedAt) &&
+    isOptionalString(value.reviewedBy) &&
+    isOptionalString(value.reviewedAt) &&
     isPositiveSafeInteger(value.revision)
 }
 
@@ -1507,7 +2943,7 @@ function isValidTimeZone(value: unknown): value is string {
 
 /** Checks a stored time-off lifecycle state. */
 function isTimeOffStatus(value: unknown): value is WorkloadTimeOff['status'] {
-  return value === 'planned' || value === 'approved' || value === 'canceled'
+  return value === 'planned' || value === 'approved' || value === 'rejected' || value === 'canceled'
 }
 
 /** Checks a stored resource request lifecycle state. */
@@ -1523,6 +2959,32 @@ function isResourceAssignmentStatus(value: unknown): value is ResourceAssignment
 /** Detects a DynamoDB conditional failure without importing service-specific exceptions. */
 function isConditionalFailure(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error && error.name === 'ConditionalCheckFailedException'
+}
+
+/** Checks whether a transaction was canceled. */
+function isTransactionCanceled(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'TransactionCanceledException'
+}
+
+/** Checks whether a canceled transaction failed on the Team state revision (its first item). */
+function isStateConditionCanceled(error: unknown): boolean {
+  if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const [stateReason] = error.CancellationReasons
+  return isRecord(stateReason) && stateReason.Code === 'ConditionalCheckFailed'
+}
+
+/**
+ * Checks whether a canceled transaction failed only because an audit event already exists, which
+ * means the same idempotency key was replayed. Throttling, transaction conflicts, and other
+ * cancellations stay infrastructure errors so they are logged and can be retried.
+ */
+function isAuditConditionCanceled(error: unknown): boolean {
+  if (!isTransactionCanceled(error) || !isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  const [, ...auditReasons] = error.CancellationReasons
+  const failedAudit = auditReasons.some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
+  const onlyConditionsFailed = error.CancellationReasons.every((reason) =>
+    isRecord(reason) && (reason.Code === undefined || reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed'))
+  return failedAudit && onlyConditionsFailed
 }
 
 /** Clones a value at the repository boundary. */

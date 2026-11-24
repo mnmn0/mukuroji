@@ -16,6 +16,7 @@ const profileSchema = z.enum(['tasks', 'workspace']).default('tasks')
 const workspaceConfigSchema = z.object({
   MUKUROJI_MCP_URL: z.url(),
   MUKUROJI_MCP_TOKEN: z.string().min(1),
+  MUKUROJI_MCP_READ_ONLY: z.enum(['true', 'false']).default('false'),
 })
 
 const configSchema = z.object({
@@ -128,8 +129,8 @@ function createServerCompatibilityReader(origin: string): () => Promise<ServerCo
 }
 
 /**
- * Composes the Workspace profile: Linear-style read tools that need only the origin and the
- * token, because each call names its Team.
+ * Composes the Workspace profile: Linear-style tools that need only the origin and the token,
+ * because each call names its Team. `MUKUROJI_MCP_READ_ONLY=true` leaves out the write tools.
  *
  * @param environment - Process environment or isolated test configuration.
  * @returns A server factory for stdio clients.
@@ -137,9 +138,10 @@ function createServerCompatibilityReader(origin: string): () => Promise<ServerCo
 function composeWorkspaceMcp(environment: Record<string, string | undefined>): CodingAgentMcpFactory {
   const parsed = workspaceConfigSchema.safeParse(environment)
   if (!parsed.success) {
-    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL and MUKUROJI_MCP_TOKEN for the workspace profile.')
+    throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL and MUKUROJI_MCP_TOKEN for the workspace profile. MUKUROJI_MCP_READ_ONLY must be true or false.')
   }
   const api = createWorkspaceApi({ origin: parsed.data.MUKUROJI_MCP_URL, token: parsed.data.MUKUROJI_MCP_TOKEN })
   const serverCompatibility = createServerCompatibilityReader(parsed.data.MUKUROJI_MCP_URL)
-  return Object.assign(() => createWorkspaceMcpServer(api), { serverCompatibility })
+  const readOnly = parsed.data.MUKUROJI_MCP_READ_ONLY === 'true'
+  return Object.assign(() => createWorkspaceMcpServer(api, readOnly), { serverCompatibility })
 }

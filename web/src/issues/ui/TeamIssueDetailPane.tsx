@@ -49,8 +49,10 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
+import { MarkdownDescriptionField } from './MarkdownDescriptionField'
 import {
   isCustomFieldApplicable,
   parseCustomFieldFormData,
@@ -99,6 +101,7 @@ import {
   type TeamIssueScreenProps,
   type TeamIssueTypeChangeState,
 } from './teamIssueScreenShared'
+import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjectRisk'
 
 /**
  * Renders the detail pane for the selected Team Work Item.
@@ -363,6 +366,13 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const riskPromotion = usePromoteProjectRisk({
+    accessToken,
+    teamId: issue.teamId,
+    projectId: issue.assignedProjectId,
+    workItemId: issue.id,
+  })
+  const workItemKeyPrefixes = useWorkItemKeyPrefixes()
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   /** Reports this Team Issue's comment dirtiness to the owning screen. */
@@ -596,6 +606,8 @@ function IssueDetailContent({
     void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
   const editorFormId = useId()
+  // True while the description field is still inserting uploaded attachments; saving waits for it.
+  const [isDescriptionUploading, setIsDescriptionUploading] = useState(false)
   const editorIdentity = [issue.teamId, issue.id, draftRevision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
@@ -605,7 +617,7 @@ function IssueDetailContent({
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending || isDescriptionUploading) {
       return
     }
 
@@ -875,7 +887,7 @@ function IssueDetailContent({
   )
 
   // Keys written in the saved description, as links, because the description is edited as plain text.
-  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '').map((match) => match.key))]
+  const mentionedWorkItemKeys = [...new Set(findWorkItemKeys(issue.description ?? '', workItemKeyPrefixes).map((match) => match.key))]
     .filter((key) => key !== issue.key)
   /**
    * Lists the Work Item keys written in the saved description, each opening its key URL in a new tab.
@@ -993,22 +1005,21 @@ function IssueDetailContent({
         )
       case 'description':
         return (
-          <fieldset
-            className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
-          >
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('issues.create.description')}
-              <textarea
-                className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue.description}
-                form={editorFormId}
-                key={editorIdentity + ':description'}
-                name="description"
-              />
-            </label>
+          <>
+            <MarkdownDescriptionField
+              artifacts={artifacts}
+              defaultValue={issue.description}
+              disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+              form={editorFormId}
+              key={editorIdentity + ':description'}
+              label={t('issues.create.description')}
+              name="description"
+              onUploadingChange={setIsDescriptionUploading}
+              readOnly={isIssueReadOnly}
+              t={t}
+            />
             {renderMentionedWorkItemKeys()}
-          </fieldset>
+          </>
         )
       case 'custom-fields':
         return hasCustomFields ? (
@@ -1198,6 +1209,7 @@ function IssueDetailContent({
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             readOnlyMessage={collaborationReadOnlyMessage}
             renderCommentDetails={agentRunReports.renderCommentDetails}
+            {...(riskPromotion && !collaborationReadOnlyMessage ? { riskPromotion } : {})}
           />
           </>
         ) : null
@@ -1284,7 +1296,7 @@ function IssueDetailContent({
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending || isDescriptionUploading}
           form={editorFormId}
           type="submit"
         >
