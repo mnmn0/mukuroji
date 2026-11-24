@@ -160,13 +160,22 @@ test('lets the Inbox digest job find due members through its sparse index only',
   }));
   expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
     .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
-  // The shared role merges the Inbox digest job's grant with the Email feedback job's UpdateItem;
-  // the whole set is pinned so no other action on the table slips in.
-  const notificationsTableActions = statements
-    .filter((statement) => JSON.stringify(statement).includes('"Fn::GetAtt":["NotificationsTable'))
+  // Every job on the shared role, through inline and managed policies, adds to what the role may
+  // do on the notifications table itself; the whole set is pinned so no other action slips in.
+  const roleStatements = [
+    ...statements,
+    ...Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
+      .filter((policy) => JSON.stringify(policy.Properties.Roles ?? []).includes(JSON.stringify({ Ref: roleLogicalId })))
+      .flatMap((policy): unknown[] => policy.Properties.PolicyDocument.Statement),
+  ];
+  expect(roleStatements.length).toBeGreaterThan(statements.length);
+  const notificationsTableActions = roleStatements
     .flatMap((statement): unknown[] => {
-      const action = typeof statement === 'object' && statement !== null && 'Action' in statement ? statement.Action : undefined;
-      return Array.isArray(action) ? action : [action];
+      if (typeof statement !== 'object' || statement === null || !('Resource' in statement) || !('Action' in statement)) return [];
+      const resources: unknown[] = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+      const onTable = resources.some((resource) => /^\{"Fn::GetAtt":\["NotificationsTable[0-9A-F]+","Arn"\]\}$/u.test(JSON.stringify(resource)));
+      if (!onTable) return [];
+      return Array.isArray(statement.Action) ? statement.Action : [statement.Action];
     });
   expect([...new Set(notificationsTableActions)].sort()).toEqual([
     'dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
