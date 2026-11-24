@@ -63,6 +63,11 @@ export type UseFileArtifactsOptions = {
    * file を読み書きする resource scope です。
    */
   scope?: FileArtifactScope
+  /**
+   * Called after the file and approval collection is reloaded, so views derived from the same
+   * files (such as the Project deliverables list) can reload too. Its failure is ignored.
+   */
+  onRefreshed?: () => Promise<void> | void
 }
 
 /**
@@ -207,6 +212,7 @@ export type FileArtifactsController = {
  */
 export function useFileArtifacts({
   accessToken,
+  onRefreshed,
   scope,
 }: UseFileArtifactsOptions): FileArtifactsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
@@ -240,7 +246,9 @@ export function useFileArtifacts({
 
   const refresh = useCallback(async () => {
     await mutate()
-  }, [mutate])
+    // A derived view reloads on its own; its failure never fails this file mutation.
+    void Promise.resolve(onRefreshed?.()).catch(() => undefined)
+  }, [mutate, onRefreshed])
 
   const runMutation = useCallback(async <T,>(
     requestToken: symbol,

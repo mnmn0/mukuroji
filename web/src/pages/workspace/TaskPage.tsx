@@ -864,12 +864,17 @@ export function TaskPage() {
   const artifactProjectTeamId = selectedWorkItemTeamId
   const issueFileScope = useWorkItemFileScope(artifactIssueId, selectedIssueDetailTeamId)
   const projectFileScope = useProjectFileScope(projectId, artifactProjectTeamId)
+  const projectDeliverables = useProjectDeliverables(accessToken, projectFileScope)
   const issueArtifacts = useFileArtifacts({
     accessToken,
+    onRefreshed: projectDeliverables.refresh,
     scope: hasUnavailableCommentOwner ? undefined : issueFileScope,
   })
-  const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
-  const projectDeliverables = useProjectDeliverables(accessToken, projectFileScope)
+  const projectFiles = useFileArtifacts({
+    accessToken,
+    onRefreshed: projectDeliverables.refresh,
+    scope: projectFileScope,
+  })
   const collaborationOwnerMatchesLive = !liveCommentOwner || (
     liveCommentOwnerInProjectList &&
     selectedIssueDetailIsInScope &&
