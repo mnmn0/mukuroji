@@ -32,6 +32,15 @@ export function canAdministerWorkspace(principal: WorkspacePrincipal): boolean {
   }
 }
 
+/** Options of {@link requireDelegatedManagement}. */
+export type DelegatedManagementOptions = {
+  /**
+   * Whether the call changes a stored definition. Administrators then skip the active-Team check,
+   * so they can stop definitions of an archived Team.
+   */
+  existingDefinition?: boolean
+}
+
 /**
  * Requires the principal to manage definitions (Automation rules, templates, recurring Work,
  * Request forms) owned by the given scope.
@@ -44,19 +53,22 @@ export function canAdministerWorkspace(principal: WorkspacePrincipal): boolean {
  *
  * @param principal - Authenticated Workspace principal.
  * @param ownerTeamId - Team that owns the definition, or undefined for a Workspace definition.
+ * @param options - Whether the call changes a stored definition rather than creating one.
  * @throws WorkspaceAccessError or ProjectDataError when the principal cannot manage the scope.
  * @throws AutomationError when the owner Team does not exist.
  */
 export async function requireDelegatedManagement(
   principal: WorkspacePrincipal,
   ownerTeamId: string | undefined,
+  options: DelegatedManagementOptions = {},
 ): Promise<void> {
   if (ownerTeamId === undefined) {
     requireWorkspaceAdministration(principal)
     return
   }
   if (canAdministerWorkspace(principal)) {
-    await requireAutomationOwnerTeam(principal.directoryId, ownerTeamId)
+    // An administrator can still stop or fix a definition after its Team was archived.
+    if (!options.existingDefinition) await requireAutomationOwnerTeam(principal.directoryId, ownerTeamId)
     return
   }
   if (principal.enterprisePermissions !== undefined) {

@@ -2773,7 +2773,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!current) {
         throw new AutomationError('not-found', 'AutomationRuleNotFound', 'Automation rule was not found.')
       }
-      await requireDelegatedManagement(principal, current.ownerTeamId)
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       if (current.ownerTeamId !== undefined && Array.isArray(input.actions)) {
         await assertAutomationActionsUseOwnerTeamProjects(
           principal.directoryId,
@@ -3083,7 +3083,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!current) {
         throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
       }
-      await requireDelegatedManagement(principal, current.ownerTeamId)
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       return c.json(await automationDependencies.ruleTemplates.updateTemplate(
         principal.directoryId,
         c.req.param('templateId'),
@@ -3290,7 +3290,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!current) {
         throw new AutomationError('not-found', 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
       }
-      await requireDelegatedManagement(principal, current.ownerTeamId)
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       await requireAutomationTeam(principal.directoryId, input.teamId ?? current.teamId)
       return c.json(await automationDependencies.recurringSchedules.updateRecurringWork(
         principal.directoryId,
@@ -3327,7 +3327,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!execution) {
         throw new AutomationError('not-found', 'AutomationExecutionNotFound', 'Automation execution was not found.')
       }
-      await requireDelegatedManagement(principal, execution.ownerTeamId)
+      await requireDelegatedManagement(principal, execution.ownerTeamId, { existingDefinition: true })
       const event = await automationDependencies.executions.getExecutionEvent(principal.directoryId, executionId)
       if (!event) {
         throw new AutomationError('not-found', 'AutomationExecutionNotFound', 'Automation execution was not found.')

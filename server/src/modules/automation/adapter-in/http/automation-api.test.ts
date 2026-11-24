@@ -5437,6 +5437,28 @@ test('lets a Workspace administrator stop a Team rule and see every Team as mana
   expect(await scopes.json()).toEqual({ workspace: true, teamIds: ['core-team'] })
 })
 
+test('lets a Workspace administrator stop a rule whose Team is no longer active', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getRule() {
+        return createStoredTeamRule('archived-team')
+      },
+      async updateRule() {
+        return { ...createStoredTeamRule('archived-team'), enabled: false }
+      },
+    }),
+  })
+
+  const stop = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+
+  expect(stop.status).toBe(200)
+})
+
 test('reports Enterprise management scopes from the manage grant, not the read grant', async () => {
   configureFakeProjectClients(true)
   const principal = (permissions: WorkspacePrincipal['enterprisePermissions']): WorkspacePrincipal => ({
