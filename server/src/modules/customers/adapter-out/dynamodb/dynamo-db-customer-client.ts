@@ -2002,7 +2002,14 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     }
     const retentionAt = this.now().toISOString()
     const retentionResult = await memory.redactExpired(workspaceId, retentionAt)
-    return { memory, loaded, retentionResult, retentionAt }
+    // The mutation's audit events compare against the graph after this implicit retention pass,
+    // so redactions of expired records are not attributed to the requesting member.
+    return {
+      memory,
+      loaded: this.audit ? { ...loaded, auditBaseline: memory.readWorkspaceStateWithoutRetention(workspaceId) } : loaded,
+      retentionResult,
+      retentionAt,
+    }
   }
 
   /** Loads selected Workspace records and persists any retention redaction before returning it.
@@ -2078,7 +2085,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     // A retention sweep is a system change, and a merge with a cursor already committed its events
     // in the first step, possibly from an earlier request whose recorded set this one cannot see.
     if (!options.retention && options.merge?.expected.cursor === undefined) {
-      this.prepareAudit(workspaceId, loaded.state, nextState, options.merge?.expected ?? contactMerge)
+      this.prepareAudit(workspaceId, loaded.auditBaseline ?? loaded.state, nextState, options.merge?.expected ?? contactMerge)
     }
     try {
       await this.persistPrepared(workspaceId, loaded, nextState, options)
@@ -2704,6 +2711,11 @@ type LoadedCustomerWorkspace = {
   pendingContactOperation?: CustomerContactOperation
   /** Durable Customer Request operation marker, when Triage reverse links are being checked. */
   pendingRequestOperation?: CustomerRequestDeletionOperation
+  /**
+   * Graph after the read's implicit retention pass, compared by the mutation's audit events
+   * instead of `state`; absent when the graph was not read through retention or is not audited.
+   */
+  auditBaseline?: CustomerWorkspaceState
 }
 
 /** Metadata returned by a focused read of the Customer control row. */

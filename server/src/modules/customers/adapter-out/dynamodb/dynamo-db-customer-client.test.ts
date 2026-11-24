@@ -452,6 +452,35 @@ test('persists and replays a keyed Customer creation', async () => {
   }
 })
 
+test('does not attribute an implicit retention redaction to the member who mutates the graph', async () => {
+  const expired = ['customer-a', 'customer-b', 'customer-c'].map((id) =>
+    createCustomerRow(id, `Expired ${id}`, {}, '2026-07-01T00:00:00.000Z'))
+  const harness = createHarness(expired, { auditTableName: 'AuditTable' })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'create-customer',
+      request: { method: 'POST', path: '/customers', body: {} },
+      source: { kind: 'api' },
+    }))
+    const created = await client.createCustomer('workspace-1', 'member-1', {
+      name: 'New Customer', tier: 'enterprise', size: 'enterprise', status: 'active', health: 'healthy',
+    })
+    const auditEvents = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item] : []
+      })
+    expect(auditEvents.map((event) => [event.eventType, isRecord(event.entity) ? event.entity.id : undefined]))
+      .toEqual([['customer.created', created.id]])
+  } finally {
+    harness.restore()
+  }
+})
+
 test('loads only the selected Customer graph for a Customer detail read', async () => {
   const targetRequest = createRequest('request-target', '2027-08-01T00:00:00.000Z', 'customer-1')
   const unrelatedRequest = createRequest('request-unrelated', '2027-08-01T00:00:00.000Z', 'customer-2')

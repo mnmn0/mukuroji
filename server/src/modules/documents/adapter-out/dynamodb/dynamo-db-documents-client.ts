@@ -382,7 +382,7 @@ type DocumentAuditEvent = {
 }
 
 /** Document fields compared by a lifecycle audit event; content is tracked by versions instead. */
-const DOCUMENT_AUDIT_FIELDS: readonly string[] = ['title', 'parentId', 'scope', 'permission', 'archivedAt']
+const DOCUMENT_AUDIT_FIELDS: readonly string[] = ['title', 'parentId', 'position', 'scope', 'permission', 'archivedAt']
 
 /**
  * Lists one optional DynamoDB transaction action.

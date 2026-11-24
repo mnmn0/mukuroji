@@ -4396,11 +4396,19 @@ test('records Document lifecycle, permission, public link, and export audit even
     expectedRevision: shared.revision,
     auditContext: auditContext(),
   })
-  await client.restoreArchived({
+  const restored = await client.restoreArchived({
     workspaceId: 'workspace-1',
     documentId: document.id,
     access: ownerShareAccess,
     expectedRevision: archived.revision,
+    auditContext: auditContext(),
+  })
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: restored.revision,
+    position: 'zz',
     auditContext: auditContext(),
   })
 
@@ -4414,6 +4422,7 @@ test('records Document lifecycle, permission, public link, and export audit even
     'document.public-link.revoked',
     'document.restored',
     'document.updated',
+    'document.updated',
   ])
   /** Finds the stored event of one type. */
   const eventOf = (eventType: string) => events.find((event) => event.eventType === eventType)
@@ -4422,6 +4431,10 @@ test('records Document lifecycle, permission, public link, and export audit even
     action: 'updated',
     changes: [{ field: 'title', before: 'Audited page', after: 'Renamed page' }],
     metadata: { actorMemberKey: ownerShareAccess.memberKey, documentKind: 'page', documentScopeType: 'workspace' },
+  })
+  // A reorder alone still says what changed.
+  expect(events.filter((event) => event.eventType === 'document.updated').at(-1)).toMatchObject({
+    changes: [{ field: 'position', after: 'zz' }],
   })
   expect(eventOf('document.permission.updated')).toMatchObject({
     changes: [{
