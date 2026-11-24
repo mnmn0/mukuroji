@@ -3531,6 +3531,8 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       throw new DocumentError(403, 'DocumentCommentAuthorRequired', 'Only the author can change this comment.')
     }
     if (stored.deletedAt !== undefined) {
+      // A retried delete whose first response was lost finds the comment already deleted.
+      if (action === 'deleted') return stripCommentStorageFields(stored)
       throw new DocumentError(409, 'DocumentCommentDeleted', 'The comment was deleted.')
     }
     const now = this.now().toISOString()

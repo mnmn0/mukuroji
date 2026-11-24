@@ -4548,6 +4548,12 @@ test('notifies thread participants of replies and lets authors edit and delete o
     access: thirdAccess,
   })
   expect(deleted).toMatchObject({ body: '', mentions: [], deletedAt: expect.any(String) })
+  expect(await client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'reply-2',
+    access: thirdAccess,
+  })).toEqual(deleted)
   await expect(client.updateComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
