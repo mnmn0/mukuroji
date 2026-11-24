@@ -29,6 +29,7 @@ function installStores() {
       const record: ChannelDestinationRecord = {
         target: input.target, provider: 'slack', ...(input.label ? { label: input.label } : {}), locale: input.locale,
         revision: input.expectedRevision + 1, updatedAt: input.now.toISOString(), updatedBy: input.updatedBy,
+        secretVersion: input.secretVersion,
       }
       records.set(JSON.stringify(input.target), record)
       return record

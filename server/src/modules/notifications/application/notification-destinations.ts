@@ -128,8 +128,10 @@ export type SaveChannelDestinationCommand = {
   workspaceId: string
   /** Team or Project. */
   target: ChannelDestinationTarget
-  /** Server-derived secret name of the target. */
-  secretId: string
+  /** Server-derived secret name of one webhook version of the target. */
+  secretIdOf(secretVersion: string): string
+  /** Fresh version a new webhook is stored under. */
+  newSecretVersion: string
   /** Validated body. */
   body: ChannelDestinationSaveBody
   /** Member who saves. */
@@ -143,8 +145,10 @@ export type SaveChannelDestinationCommand = {
 }
 
 /**
- * Saves a channel destination. A new webhook is written to Secrets Manager first, so the settings
- * row never points at a missing secret; a first save needs a webhook.
+ * Saves a channel destination. A new webhook is written to Secrets Manager under a new version
+ * first, and the fenced settings save switches to that version, so a save rejected by its revision
+ * or authorization fences never changes where posts go. The candidate is removed after a rejected
+ * save and the replaced version after a committed one. A first save needs a webhook.
  *
  * @param store - Settings store.
  * @param secrets - Webhook storage.
@@ -153,7 +157,7 @@ export type SaveChannelDestinationCommand = {
  */
 export async function saveChannelDestination(
   store: ChannelDestinationStore,
-  secrets: Pick<NotificationDestinationSecrets, 'put'>,
+  secrets: Pick<NotificationDestinationSecrets, 'put' | 'delete'>,
   command: SaveChannelDestinationCommand,
 ): Promise<ChannelDestinationRecord> {
   const current = await store.get(command.workspaceId, command.target)
@@ -163,18 +167,49 @@ export async function saveChannelDestination(
   if (!current && !command.body.webhookUrl) {
     throw new NotificationError(400, 'InvalidNotificationDestination', 'A Slack Incoming Webhook URL is required.')
   }
-  if (command.body.webhookUrl) await secrets.put(command.secretId, command.body.webhookUrl)
-  return await store.save({
-    workspaceId: command.workspaceId,
-    target: command.target,
-    ...(command.body.label ? { label: command.body.label } : {}),
-    locale: command.body.locale,
-    expectedRevision: command.body.expectedRevision,
-    updatedBy: command.memberKey,
-    now: command.now,
-    authorizationConditionChecks: command.authorizationConditionChecks,
-    ...(command.auditPut ? { auditPut: command.auditPut } : {}),
-  })
+  const replacesWebhook = Boolean(command.body.webhookUrl)
+  const secretVersion = replacesWebhook ? command.newSecretVersion : current?.secretVersion
+  if (!secretVersion) {
+    throw new NotificationError(400, 'InvalidNotificationDestination', 'A Slack Incoming Webhook URL is required.')
+  }
+  if (command.body.webhookUrl) await secrets.put(command.secretIdOf(secretVersion), command.body.webhookUrl)
+  let record: ChannelDestinationRecord
+  try {
+    record = await store.save({
+      workspaceId: command.workspaceId,
+      target: command.target,
+      ...(command.body.label ? { label: command.body.label } : {}),
+      locale: command.body.locale,
+      expectedRevision: command.body.expectedRevision,
+      secretVersion,
+      updatedBy: command.memberKey,
+      now: command.now,
+      authorizationConditionChecks: command.authorizationConditionChecks,
+      ...(command.auditPut ? { auditPut: command.auditPut } : {}),
+    })
+  } catch (error) {
+    // The settings still point at the previous version; drop the unused candidate.
+    if (replacesWebhook) await deleteQuietly(secrets, command.secretIdOf(secretVersion))
+    throw error
+  }
+  if (replacesWebhook && current && current.secretVersion !== secretVersion) {
+    await deleteQuietly(secrets, command.secretIdOf(current.secretVersion))
+  }
+  return record
+}
+
+/**
+ * Deletes a webhook version that no settings point at. A failure leaves an unused secret, which
+ * Workspace closure removes with the rest of the namespace.
+ * @param secrets - Webhook storage.
+ * @param secretId - Secret name.
+ */
+async function deleteQuietly(secrets: Pick<NotificationDestinationSecrets, 'delete'>, secretId: string) {
+  try {
+    await secrets.delete(secretId)
+  } catch {
+    // Unreferenced; nothing reads it.
+  }
 }
 
 /** Inputs of a channel destination delete. */
@@ -183,8 +218,8 @@ export type DeleteChannelDestinationCommand = {
   workspaceId: string
   /** Team or Project. */
   target: ChannelDestinationTarget
-  /** Server-derived secret name of the target. */
-  secretId: string
+  /** Server-derived secret name of one webhook version of the target. */
+  secretIdOf(secretVersion: string): string
   /** Revision the caller read. */
   expectedRevision: number
   /** Commit-time authorization fences. */
@@ -206,6 +241,10 @@ export async function deleteChannelDestination(
   secrets: Pick<NotificationDestinationSecrets, 'delete'>,
   command: DeleteChannelDestinationCommand,
 ): Promise<void> {
+  const current = await store.get(command.workspaceId, command.target)
+  if (!current || current.revision !== command.expectedRevision) {
+    throw new NotificationError(409, 'NotificationDestinationConflict', 'The destination changed before this change was saved. Reload and try again.')
+  }
   await store.delete({
     workspaceId: command.workspaceId,
     target: command.target,
@@ -213,7 +252,7 @@ export async function deleteChannelDestination(
     authorizationConditionChecks: command.authorizationConditionChecks,
     ...(command.auditPut ? { auditPut: command.auditPut } : {}),
   })
-  await secrets.delete(command.secretId)
+  await deleteQuietly(secrets, command.secretIdOf(current.secretVersion))
 }
 
 /**

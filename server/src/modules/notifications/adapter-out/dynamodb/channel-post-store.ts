@@ -17,12 +17,14 @@ import type {
   ChannelDestinationStore,
   ChannelPost,
   ChannelPostContent,
+  ChannelPostSource,
   ChannelPostStore,
   DeleteChannelDestinationInput,
   SaveChannelDestinationInput,
 } from '../../application/ports/channel-posts'
 import {
   channelDestinationTargetKey,
+  isChannelDestinationSecretVersion,
   type ChannelDestinationRecord,
   type ChannelDestinationTarget,
 } from '../../domain/channel-destination'
@@ -109,6 +111,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
       revision: input.expectedRevision + 1,
       updatedAt: input.now.toISOString(),
       updatedBy: input.updatedBy,
+      secretVersion: input.secretVersion,
     }
     const checks = input.authorizationConditionChecks ?? []
     await this.#transact([
@@ -128,6 +131,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
             revision: record.revision,
             updatedAt: record.updatedAt,
             updatedBy: record.updatedBy,
+            secretVersion: record.secretVersion,
           },
           ...revisionCondition(input.expectedRevision),
         },
@@ -175,6 +179,13 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
           ...(post.message ? { message: post.message } : {}),
           ...(post.deepLink ? { deepLink: post.deepLink } : {}),
           occurredAt: post.occurredAt,
+          source: {
+            teamId: post.source.teamId,
+            ...(post.source.projectId ? { projectId: post.source.projectId } : {}),
+            ...(post.source.issueId ? { issueId: post.source.issueId } : {}),
+            ...(post.source.entityId ? { entityId: post.source.entityId } : {}),
+            ...(post.source.planningTargetRecordKey ? { planningTargetRecordKey: post.source.planningTargetRecordKey } : {}),
+          },
           version: 1,
           slackQueueShard: shard,
           slackNextAttemptAt: now.toISOString(),
@@ -231,6 +242,26 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
         ExpressionAttributeValues: {
           ':version': post.version, ':due': post.nextAttemptAt, ':shard': post.shard, ':token': token,
           ':lease': leaseUntil.toISOString(), ':sending': 'sending', ':one': 1,
+        },
+      }))
+      return true
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return false
+      throw error
+    }
+  }
+
+  /** @inheritdoc */
+  async renew(post: ChannelPost, token: string, now: Date): Promise<boolean> {
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName, Key: postKey(post.workspaceId, post.eventId),
+        ConditionExpression: 'slackLeaseToken = :token AND slackNextAttemptAt > :now AND #version = :version',
+        UpdateExpression: 'SET slackNextAttemptAt = :lease ADD #version :one',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: {
+          ':token': token, ':now': now.toISOString(), ':version': post.version,
+          ':lease': new Date(now.getTime() + 60_000).toISOString(), ':one': 1,
         },
       }))
       return true
@@ -346,6 +377,7 @@ function parseDestinationRow(
     (target.scope === 'project' && row.projectId !== target.projectId) ||
     !locale || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1 ||
     typeof row.updatedAt !== 'string' || typeof row.updatedBy !== 'string' ||
+    !isChannelDestinationSecretVersion(row.secretVersion) ||
     (row.label !== undefined && typeof row.label !== 'string')
   ) throw new Error('Invalid notification channel destination row.')
   return {
@@ -356,6 +388,7 @@ function parseDestinationRow(
     revision: row.revision,
     updatedAt: row.updatedAt,
     updatedBy: row.updatedBy,
+    secretVersion: row.secretVersion,
   }
 }
 
@@ -396,6 +429,8 @@ function parsePostRow(row: Record<string, unknown> | undefined, shard: string, n
   const target: ChannelDestinationTarget = row.scope === 'project' && typeof row.projectId === 'string'
     ? { scope: 'project', teamId: row.teamId, projectId: row.projectId }
     : { scope: 'team', teamId: row.teamId }
+  const source = parsePostSource(row.source)
+  if (!source) throw invalid()
   const message = parseNotificationMessage(row.message)
   return {
     workspaceId: row.workspaceId,
@@ -408,11 +443,36 @@ function parsePostRow(row: Record<string, unknown> | undefined, shard: string, n
     ...(message ? { message } : {}),
     ...(typeof row.deepLink === 'string' ? { deepLink: row.deepLink } : {}),
     occurredAt: row.occurredAt,
+    source,
     shard,
     attempts: row.slackAttempts,
     version: row.version,
     nextAttemptAt: next,
   }
+}
+
+/** Optional fields of a post's source identity. */
+const postSourceOptionalFields: ReadonlyArray<Exclude<keyof ChannelPostSource, 'teamId'>> = [
+  'projectId', 'issueId', 'entityId', 'planningTargetRecordKey',
+]
+
+/**
+ * Validates the stored source identity of a post.
+ * @param value - Stored `source` map.
+ * @returns The source, or undefined when it is malformed.
+ */
+function parsePostSource(value: unknown): ChannelPostSource | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const teamId: unknown = Reflect.get(value, 'teamId')
+  if (typeof teamId !== 'string' || !teamId) return undefined
+  const source: ChannelPostSource = { teamId }
+  for (const field of postSourceOptionalFields) {
+    const fieldValue: unknown = Reflect.get(value, field)
+    if (fieldValue === undefined) continue
+    if (typeof fieldValue !== 'string' || !fieldValue) return undefined
+    source[field] = fieldValue
+  }
+  return source
 }
 
 /**

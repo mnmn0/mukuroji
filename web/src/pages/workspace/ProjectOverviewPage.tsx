@@ -219,7 +219,7 @@ export function ProjectOverviewPage() {
         />
         {slackChannelOwner ? (
           <div className="mt-5">
-            <SlackDestinationPanel controller={slackChannel} kind="project" t={t} />
+            <SlackDestinationPanel controller={slackChannel} key={`${team?.id ?? ''}/${projectId ?? ''}`} kind="project" t={t} />
           </div>
         ) : null}
       </div>

@@ -153,7 +153,7 @@ export function TeamMembersPage() {
         {activeTeam && !reminderSettings.isUnavailable
           ? <TeamReminderSettingsPanel controller={reminderSettings} t={t} />
           : null}
-        {activeTeam ? <SlackDestinationPanel controller={slackChannel} kind="team" t={t} /> : null}
+        {activeTeam ? <SlackDestinationPanel controller={slackChannel} key={activeTeam.id} kind="team" t={t} /> : null}
       </div>
     </WorkspaceRouteContent>
   )

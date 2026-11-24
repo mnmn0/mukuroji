@@ -108,25 +108,31 @@ export function useSlackDestination(
     }
   }, { revalidateOnFocus: false, shouldRetryOnError: false })
   const [pending, setPending] = useState(false)
-  const [outcome, setOutcome] = useState<SlackDestinationOutcome>()
+  // The outcome belongs to the owner it was reached for, so switching Teams or Projects drops it.
+  const [result, setResult] = useState<{ ownerKey: string | undefined, outcome: SlackDestinationOutcome }>()
+  const outcome = result && result.ownerKey === ownerKey ? result.outcome : undefined
   const { mutate } = query
   const revision = query.data?.revision ?? 0
 
   const run = useCallback((action: () => Promise<SlackDestinationOutcome>) => {
     if (pending || !accessToken || !owner) return
     setPending(true)
-    setOutcome(undefined)
+    setResult(undefined)
+    const actionOwnerKey = ownerKey
     void action()
-      .then((result) => setOutcome(result))
-      .catch((error: unknown) => setOutcome({
-        kind: 'error',
-        ...(error instanceof NotificationsApiError && error.code ? { code: error.code } : {}),
+      .then((reached) => setResult({ ownerKey: actionOwnerKey, outcome: reached }))
+      .catch((error: unknown) => setResult({
+        ownerKey: actionOwnerKey,
+        outcome: {
+          kind: 'error',
+          ...(error instanceof NotificationsApiError && error.code ? { code: error.code } : {}),
+        },
       }))
       .finally(() => {
         setPending(false)
         void mutate()
       })
-  }, [accessToken, mutate, owner, pending])
+  }, [accessToken, mutate, owner, ownerKey, pending])
 
   return {
     ...(query.data ? { view: query.data.view } : {}),

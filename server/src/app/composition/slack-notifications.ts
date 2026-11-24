@@ -18,6 +18,8 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { createMemberNotificationLocaleReader } from './notification-locale'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
+import { isCurrentChannelPostSource } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
+import { createProductionTenantAvailability } from './tenant-administration'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 import { createConfiguredPlanningMilestoneNotificationRevalidator } from './planning-milestone-notifications'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
@@ -35,13 +37,15 @@ export function createProductionSlackNotificationHandler() {
   if (!tableName || !identityTableName || !fileTableName) throw new Error('Slack notification runtime is not configured.')
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const store = new DynamoDbSlackDeliveryStore(documentClient, tableName)
+  const planningMilestones = createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient)
   const isAuthorized = createProductionNotificationDeliveryAuthorizer(documentClient, {
     identityTableName,
     fileTableName,
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
     weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
-    planningMilestones: createConfiguredPlanningMilestoneNotificationRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
+    planningMilestones,
   })
+  const tenant = createProductionTenantAvailability()
   // Without an origin (local runs), messages keep their text and omit links.
   const appOrigin = environment.NOTIFICATION_SLACK_APP_ORIGIN?.trim()
     ? parseNotificationAppOrigin(environment.NOTIFICATION_SLACK_APP_ORIGIN, 'NOTIFICATION_SLACK_APP_ORIGIN')
@@ -65,6 +69,9 @@ export function createProductionSlackNotificationHandler() {
         destinations: channelPostStore,
         posts: channelPostStore,
         send: sendChannelPost,
+        // The Workspace must still be active, and the source must still sit where it was queued.
+        isAuthorized: async (post) => await tenant.isActive(post.workspaceId) &&
+          await isCurrentChannelPostSource({ workspaceId: post.workspaceId, eventType: post.eventType, ...post.source }, planningMilestones),
         shards: channelPostShards(),
         reportFailure: (failure) => console.log(JSON.stringify({ event: 'SlackChannelPostFailed', ...failure })),
         createToken: randomUUID,

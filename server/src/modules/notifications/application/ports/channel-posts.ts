@@ -14,6 +14,8 @@ export type SaveChannelDestinationInput = {
   locale: NotificationMessageLocale
   /** Revision the caller read; 0 when creating. */
   expectedRevision: number
+  /** Webhook secret version the settings point at after the save. */
+  secretVersion: string
   /** Member who saves. */
   updatedBy: string
   /** Save time. */
@@ -84,6 +86,22 @@ export type ChannelPostContent = {
   deepLink?: string
   /** When the event happened. */
   occurredAt: string
+  /** Where the event's source sat when the post was queued, rechecked before sending. */
+  source: ChannelPostSource
+}
+
+/** Identity of a post's source, enough to reread its current Team and Project. */
+export type ChannelPostSource = {
+  /** Team of the source when queued. */
+  teamId: string
+  /** Project of the source when queued, when it had one. */
+  projectId?: string
+  /** Work Item of a due or overdue event. */
+  issueId?: string
+  /** Planning entity of a Milestone event. */
+  entityId?: string
+  /** Planning update target record of a health update event. */
+  planningTargetRecordKey?: string
 }
 
 /** One queued post with its delivery state. */
@@ -127,6 +145,15 @@ export type ChannelPostStore = {
    * @returns False when another worker claimed it first.
    */
   claim(post: ChannelPost, token: string, leaseUntil: Date): Promise<boolean>
+  /**
+   * Extends the lease right before sending, only while this attempt still holds an unexpired lease
+   * on the claimed revision, so a stalled attempt never sends after another one took over.
+   * @param post - Claimed post, with the claimed revision.
+   * @param token - Lease token of the claim.
+   * @param now - Current time.
+   * @returns False when the lease was lost or expired.
+   */
+  renew(post: ChannelPost, token: string, now: Date): Promise<boolean>
   /**
    * Records the outcome of a claimed attempt.
    * @param post - Claimed post.

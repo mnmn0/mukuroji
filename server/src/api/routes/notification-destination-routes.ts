@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import type { NotificationChannelDestination, PersonalSlackDestination } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
@@ -97,7 +98,8 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
         {
           workspaceId: principal.directoryId,
           target,
-          secretId: slackChannelDestinationSecretId(principal.directoryId, target),
+          secretIdOf: (version) => slackChannelDestinationSecretId(principal.directoryId, target, version),
+          newSecretVersion: randomUUID(),
           body,
           memberKey: principal.userKey,
           now: new Date(),
@@ -121,7 +123,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
         {
           workspaceId: principal.directoryId,
           target,
-          secretId: slackChannelDestinationSecretId(principal.directoryId, target),
+          secretIdOf: (version) => slackChannelDestinationSecretId(principal.directoryId, target, version),
           expectedRevision,
           authorizationConditionChecks: await createAuthorizationChecks(principal, target),
           auditPut: createChannelAuditPut(c, principal, target, 'deleted', { beforeRevision: expectedRevision }),
@@ -135,7 +137,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
       if (!record) return c.json({ delivered: false, code: 'DestinationNotConfigured' })
       return c.json(await testNotificationDestination(
         workItemDependencies.notificationDestinationSecrets,
-        slackChannelDestinationSecretId(principal.directoryId, target),
+        slackChannelDestinationSecretId(principal.directoryId, target, record.secretVersion),
         record.locale,
         sendTestMessage,
       ))

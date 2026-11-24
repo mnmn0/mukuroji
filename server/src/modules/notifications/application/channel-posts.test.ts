@@ -11,7 +11,7 @@ const now = new Date('2026-11-24T00:00:00.000Z')
  * @returns Destination settings in Japanese.
  */
 function destination(target: ChannelDestinationTarget): ChannelDestinationRecord {
-  return { target, provider: 'slack', locale: 'ja', revision: 1, updatedAt: now.toISOString(), updatedBy: 'manager@example.test' }
+  return { target, provider: 'slack', locale: 'ja', revision: 1, updatedAt: now.toISOString(), updatedBy: 'manager@example.test', secretVersion: '00000000-0000-4000-8000-000000000001' }
 }
 
 /**
@@ -31,7 +31,7 @@ function destinations(...targets: ChannelDestinationTarget[]) {
 const event = {
   eventId: 'event-1', eventType: 'planning-update.published', workspaceId: 'workspace-1',
   teamId: 'core', projectId: 'alpha', notificationTitle: 'Weekly update', summary: 'Update published.',
-  deepLink: '/planning/timeline', occurredAt: now.toISOString(),
+  deepLink: '/planning/timeline', occurredAt: now.toISOString(), planningTargetRecordKey: 'TARGET#alpha',
 }
 
 describe('channel post queuing', () => {
@@ -46,6 +46,8 @@ describe('channel post queuing', () => {
     expect(queued).toHaveLength(1)
     expect(queued[0]?.target).toEqual({ scope: 'project', teamId: 'core', projectId: 'alpha' })
     expect(queued[0]?.title).toBe('Weekly update')
+    // The source is kept so the worker can recheck where it sits before sending.
+    expect(queued[0]?.source).toEqual({ teamId: 'core', projectId: 'alpha', planningTargetRecordKey: 'TARGET#alpha' })
   })
 
   test('falls back to the Team channel and skips events channels do not receive', async () => {
@@ -76,7 +78,7 @@ describe('channel post queuing', () => {
 /** Queued post due now. */
 const post: ChannelPost = {
   workspaceId: 'workspace-1', eventId: 'event-1', eventType: 'work-item.overdue',
-  target: { scope: 'team', teamId: 'core' }, occurredAt: now.toISOString(),
+  target: { scope: 'team', teamId: 'core' }, occurredAt: now.toISOString(), source: { teamId: 'core', issueId: 'issue-1' },
   shard: 'slack-channel#1', attempts: 0, version: 1, nextAttemptAt: now.toISOString(),
 }
 
@@ -85,13 +87,14 @@ const post: ChannelPost = {
  * @param due - Due post.
  * @returns Queue port and the outcomes it recorded.
  */
-function queue(due: ChannelPost) {
+function queue(due: ChannelPost, renewed = true) {
   const finished: { status: string, nextAttemptAt?: Date, code?: string }[] = []
   return {
     finished,
     posts: {
       async listDue(shard: string) { return { posts: shard === due.shard ? [due] : [], invalidCount: 0 } },
       async claim() { return true },
+      async renew() { return renewed },
       async finish(_post: ChannelPost, _token: string, status: 'sent' | 'suppressed' | 'failed' | 'pending', nextAttemptAt?: Date, code?: string) {
         finished.push({ status, ...(nextAttemptAt ? { nextAttemptAt } : {}), ...(code ? { code } : {}) })
       },
@@ -105,6 +108,7 @@ describe('channel post delivery', () => {
     const delivered = await deliverDueChannelPosts({
       destinations: destinations({ scope: 'team', teamId: 'core' }),
       posts: state.posts,
+      isAuthorized: async () => true,
       send: async (sent, saved) => {
         expect(sent.attempts).toBe(1)
         expect(saved.locale).toBe('ja')
@@ -124,6 +128,7 @@ describe('channel post delivery', () => {
     const delivered = await deliverDueChannelPosts({
       destinations: destinations(),
       posts: state.posts,
+      isAuthorized: async () => true,
       send: async () => { throw new Error('Must not send') },
       shards: ['slack-channel#1'],
       reportFailure: () => { throw new Error('Must not fail') },
@@ -139,6 +144,7 @@ describe('channel post delivery', () => {
     await deliverDueChannelPosts({
       destinations: destinations({ scope: 'team', teamId: 'core' }),
       posts: retrying.posts,
+      isAuthorized: async () => true,
       send: async () => ({ succeeded: false, retryable: true, code: 'SlackDeliveryRejected', retryAfterMs: 120_000 }),
       shards: ['slack-channel#1'],
       reportFailure: () => { throw new Error('Must not fail yet') },
@@ -153,6 +159,7 @@ describe('channel post delivery', () => {
     await expect(deliverDueChannelPosts({
       destinations: destinations({ scope: 'team', teamId: 'core' }),
       posts: last.posts,
+      isAuthorized: async () => true,
       send: async () => ({ succeeded: false, retryable: true, code: 'SlackDeliveryUnavailable' }),
       shards: ['slack-channel#1'],
       reportFailure: (failure) => failures.push(failure),
@@ -161,5 +168,55 @@ describe('channel post delivery', () => {
     })).rejects.toThrow('1 failed')
     expect(last.finished).toEqual([{ status: 'failed', code: 'SlackDeliveryUnavailable' }])
     expect(failures).toEqual([{ shard: 'slack-channel-failed#1', dueAt: post.nextAttemptAt, reference: 'token-5', code: 'SlackDeliveryUnavailable' }])
+  })
+
+  test('drops a post whose source left its Team or Project, or whose Workspace closed', async () => {
+    const state = queue(post)
+    const delivered = await deliverDueChannelPosts({
+      destinations: destinations({ scope: 'team', teamId: 'core' }),
+      posts: state.posts,
+      isAuthorized: async (checked) => {
+        expect(checked.source).toEqual({ teamId: 'core', issueId: 'issue-1' })
+        return false
+      },
+      send: async () => { throw new Error('Must not send') },
+      shards: ['slack-channel#1'],
+      reportFailure: () => { throw new Error('Must not fail') },
+      createToken: () => 'token-1',
+      now: () => now,
+    })
+    expect(delivered).toBe(0)
+    expect(state.finished).toEqual([{ status: 'suppressed', code: 'SourceOutOfScope' }])
+  })
+
+  test('never sends after the lease was lost while the checks ran', async () => {
+    const state = queue(post, false)
+    const delivered = await deliverDueChannelPosts({
+      destinations: destinations({ scope: 'team', teamId: 'core' }),
+      posts: state.posts,
+      isAuthorized: async () => true,
+      send: async () => { throw new Error('Must not send') },
+      shards: ['slack-channel#1'],
+      reportFailure: () => { throw new Error('Must not fail') },
+      createToken: () => 'token-1',
+      now: () => now,
+    })
+    expect(delivered).toBe(0)
+    expect(state.finished).toEqual([])
+  })
+
+  test('retries when the recheck cannot read the source', async () => {
+    const state = queue(post)
+    await deliverDueChannelPosts({
+      destinations: destinations({ scope: 'team', teamId: 'core' }),
+      posts: state.posts,
+      isAuthorized: async () => { throw new Error('read failed') },
+      send: async () => { throw new Error('Must not send') },
+      shards: ['slack-channel#1'],
+      reportFailure: () => { throw new Error('Must not fail yet') },
+      createToken: () => 'token-1',
+      now: () => now,
+    })
+    expect(state.finished[0]?.status).toBe('pending')
   })
 })

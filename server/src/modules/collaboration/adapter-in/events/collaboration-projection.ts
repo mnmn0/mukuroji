@@ -3442,3 +3442,65 @@ function requireEnv(name: string) {
 
   return value
 }
+
+/** Source of a queued Team or Project channel post, as saved when it was queued. */
+export type ChannelPostSourceScope = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Audit event type of the post. */
+  eventType: string
+  /** Team of the source when queued. */
+  teamId: string
+  /** Project of the source when queued, when it had one. */
+  projectId?: string
+  /** Work Item of a due or overdue event. */
+  issueId?: string
+  /** Planning entity of a Milestone event. */
+  entityId?: string
+  /** Planning update target record of a health update event. */
+  planningTargetRecordKey?: string
+}
+
+/**
+ * Rechecks, before a channel post is sent, that its source still exists, is not archived, and
+ * still sits in the Team and Project it was queued for. A Work Item moved to another Project, an
+ * archived Project update target, or a moved Milestone is no longer posted to the old channel.
+ * Event types this check does not know fail closed.
+ *
+ * @param source - Source saved on the queued post.
+ * @param planningMilestones - Milestone reader; without it Milestone posts are dropped.
+ * @returns Whether the post may still be sent.
+ */
+export async function isCurrentChannelPostSource(
+  source: ChannelPostSourceScope,
+  planningMilestones: PlanningMilestoneNotificationRevalidator | undefined,
+): Promise<boolean> {
+  const event: AuditProjectionEvent = {
+    eventId: 'channel-post-recheck',
+    eventType: source.eventType,
+    workspaceId: source.workspaceId,
+    occurredAt: new Date().toISOString(),
+    notificationCandidates: [],
+    outboxStatus: 'pending',
+    teamId: source.teamId,
+    ...(source.projectId ? { projectId: source.projectId } : {}),
+    ...(source.issueId ? { issueId: source.issueId } : {}),
+    ...(source.entityId ? { entityId: source.entityId } : {}),
+    ...(source.planningTargetRecordKey ? { planningTargetRecordKey: source.planningTargetRecordKey } : {}),
+  }
+  if (scheduledWorkItemNotificationReasons.has(source.eventType)) {
+    if (!source.issueId) return false
+    const scope = await readCurrentWorkItemScope(event)
+    return scope.checked && scope.exists && !scope.archived && scope.projectId === source.projectId
+  }
+  if (planningUpdatePublishEventTypes.has(source.eventType)) {
+    if (!source.planningTargetRecordKey) return false
+    const scope = await readCurrentPlanningUpdateScope(event)
+    return scope.checked && scope.exists && !scope.archived &&
+      scope.teamId === source.teamId && scope.projectId === source.projectId
+  }
+  if (planningMilestoneNotificationEventTypes.has(source.eventType)) {
+    return await isCurrentPlanningMilestoneNotification(event, planningMilestones)
+  }
+  return false
+}

@@ -27,11 +27,12 @@ export function createSlackChannelPostSender(
   return async (post, destination) => {
     let webhookUrl: string | undefined
     try {
-      webhookUrl = await secrets.read(slackChannelDestinationSecretId(post.workspaceId, post.target))
+      webhookUrl = await secrets.read(slackChannelDestinationSecretId(post.workspaceId, post.target, destination.secretVersion))
     } catch {
       return { succeeded: false, retryable: true, code: 'SlackDestinationUnavailable' }
     }
-    if (webhookUrl === undefined) return { succeeded: false, retryable: false, code: 'SlackDestinationMissing' }
+    // A save that replaced the webhook just now removes the version read before it; retry reads the new one.
+    if (webhookUrl === undefined) return { succeeded: false, retryable: true, code: 'SlackDestinationMissing' }
     const locale = destination.locale
     const label = NOTIFICATION_CHANNEL_POST_EVENT_LABELS[post.eventType][locale]
     const heading = formatNotificationHeading(post)

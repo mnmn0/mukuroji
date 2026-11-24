@@ -227,13 +227,19 @@ Team の送信先は Team の **メンバー** 画面、Project の送信先は 
   Team と Project が有効であることを同じ transaction で確かめ、`notification-channel.saved` / `.deleted` の audit を
   書きます。audit と request digest に URL は入りません。
 - URL は `mukuroji/automation-webhooks/<sha256(workspaceId)>/slack-channel/<sha256("team#<teamId>" または
-  "project#<teamId>#<projectId>")>` に置き、channel 名（表示用）・投稿の言語（ja / en）・revision は Notifications table の
-  `<workspaceId>#!channel-destinations` partition に置きます。最初の保存には URL が必要で、以降は URL を空にすると
-  名前と言語だけを変えます。
+  "project#<teamId>#<projectId>")>/<version>` に置き、channel 名（表示用）・投稿の言語（ja / en）・revision・使う URL の
+  version は Notifications table の `<workspaceId>#!channel-destinations` partition に置きます。新しい URL は新しい
+  version に書き、設定の保存が commit されたときだけそちらに切り替えるので、権限や revision の確認で拒否された保存は
+  投稿先を変えません（拒否された候補と置き換えた古い version は消します）。最初の保存には URL が必要で、以降は URL を
+  空にすると名前と言語だけを変えます。
+- Enterprise の role では、Team の送信先は `teams.read`（閲覧）と `teams.manage`（変更）、Project の送信先は
+  `projects.read` と `projects.manage` を使います。本人の送信先は `workspace.read` で登録できます。
 
 投稿するのは次の event です。collaboration projection が通常の通知と同じ再認可（対象の存在、現在の Team・Project の
 再解決、Milestone と health update の現在の範囲）を通した後、Project に送信先があればそこへ、なければ Team の送信先へ
-1 件だけ投稿します。
+1 件だけ投稿します。送信の直前にも、Workspace が有効なことと、対象（Work Item、health update の対象、Milestone）が
+今も投稿 row を作ったときの Team・Project にあることを読み直し、外れていれば投稿しません。読み直しの後に lease を
+更新し、別の実行に引き継がれていれば送りません。
 
 | event | 見出し（ja / en） |
 | --- | --- |

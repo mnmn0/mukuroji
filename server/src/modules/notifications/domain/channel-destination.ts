@@ -33,6 +33,23 @@ export type ChannelDestinationRecord = {
   updatedAt: string
   /** Member who saved last. */
   updatedBy: string
+  /**
+   * Version of the webhook secret the settings point at. Each new webhook is stored under a new
+   * version, and only a committed save switches to it, so a rejected save never changes where posts go.
+   */
+  secretVersion: string
+}
+
+/** Format of a webhook secret version: a lower-case UUID. */
+const secretVersionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+
+/**
+ * Tests a stored webhook secret version.
+ * @param value - Stored value.
+ * @returns True for a lower-case UUID.
+ */
+export function isChannelDestinationSecretVersion(value: unknown): value is string {
+  return typeof value === 'string' && secretVersionPattern.test(value)
 }
 
 /**

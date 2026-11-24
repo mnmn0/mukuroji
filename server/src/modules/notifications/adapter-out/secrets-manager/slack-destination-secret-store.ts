@@ -7,7 +7,11 @@ import {
   PutSecretValueCommand,
   type SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager'
-import { channelDestinationTargetKey, type ChannelDestinationTarget } from '../../domain/channel-destination'
+import {
+  channelDestinationTargetKey,
+  isChannelDestinationSecretVersion,
+  type ChannelDestinationTarget,
+} from '../../domain/channel-destination'
 import { NotificationError } from '../../domain/notification-error'
 
 /** Port that keeps Slack webhook URLs in Secrets Manager and never returns them to clients. */
@@ -52,11 +56,18 @@ function workspaceHash(workspaceId: string): string {
  *
  * @param workspaceId - Canonical Workspace ID.
  * @param target - Team or Project that owns the destination.
+ * @param secretVersion - Version saved on the destination settings.
  * @returns Secret name that shows neither the Workspace nor the Team or Project.
+ * @throws Error when the version is not a UUID.
  */
-export function slackChannelDestinationSecretId(workspaceId: string, target: ChannelDestinationTarget): string {
+export function slackChannelDestinationSecretId(
+  workspaceId: string,
+  target: ChannelDestinationTarget,
+  secretVersion: string,
+): string {
+  if (!isChannelDestinationSecretVersion(secretVersion)) throw new Error('Invalid webhook secret version.')
   const targetHash = createHash('sha256').update(channelDestinationTargetKey(target)).digest('hex')
-  return `mukuroji/automation-webhooks/${workspaceHash(workspaceId)}/slack-channel/${targetHash}`
+  return `mukuroji/automation-webhooks/${workspaceHash(workspaceId)}/slack-channel/${targetHash}/${secretVersion}`
 }
 
 /** Secrets Manager adapter for Slack webhook URLs. */

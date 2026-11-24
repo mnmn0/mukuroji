@@ -30,6 +30,12 @@ export type ChannelPostSourceEvent = {
   deepLink?: string
   /** When the event happened. */
   occurredAt: string
+  /** Work Item of a Work Item event. */
+  issueId?: string
+  /** Planning entity of a Milestone event. */
+  entityId?: string
+  /** Planning update target record of a health update event. */
+  planningTargetRecordKey?: string
 }
 
 /** Ports the projection uses to queue channel posts. */
@@ -69,6 +75,13 @@ export async function enqueueChannelPost(
       ...(event.notificationMessage ? { message: event.notificationMessage } : {}),
       ...(event.deepLink ? { deepLink: event.deepLink } : {}),
       occurredAt: event.occurredAt,
+      source: {
+        teamId: event.teamId,
+        ...(event.projectId ? { projectId: event.projectId } : {}),
+        ...(event.issueId ? { issueId: event.issueId } : {}),
+        ...(event.entityId ? { entityId: event.entityId } : {}),
+        ...(event.planningTargetRecordKey ? { planningTargetRecordKey: event.planningTargetRecordKey } : {}),
+      },
     }, dependencies.now())
     return true
   }
@@ -95,7 +108,12 @@ export type ChannelPostDeliveryDependencies = {
   /** Destination settings reader. */
   destinations: Pick<ChannelDestinationStore, 'get'>
   /** Post queue. */
-  posts: Pick<ChannelPostStore, 'listDue' | 'claim' | 'finish'>
+  posts: Pick<ChannelPostStore, 'listDue' | 'claim' | 'renew' | 'finish'>
+  /**
+   * Rechecks, right before sending, that the Workspace is active and the post's source still sits
+   * in the Team and Project it was queued for.
+   */
+  isAuthorized(post: ChannelPost): Promise<boolean>
   /** Chat transport. */
   send: ChannelPostSender
   /** Queue partitions to drain. */
@@ -115,8 +133,9 @@ const postsPerShard = 8
 const maximumAttempts = 5
 
 /**
- * Sends due channel posts. A post whose destination was removed since it was queued is dropped,
- * and transport failures are retried with backoff up to five attempts.
+ * Sends due channel posts. A post whose destination was removed, whose Workspace is no longer
+ * active, or whose source left the queued Team or Project is dropped. The lease is renewed right
+ * before sending, and transport failures are retried with backoff up to five attempts.
  *
  * @param dependencies - Queue, destination reader, transport, and clock.
  * @returns Number of posts the chat service accepted.
@@ -134,9 +153,12 @@ export async function deliverDueChannelPosts(dependencies: ChannelPostDeliveryDe
       if (!await dependencies.posts.claim(post, token, new Date(claimedAt.getTime() + 60_000))) continue
       const claimed: ChannelPost = { ...post, version: post.version + 1, attempts: post.attempts + 1 }
       let destination: ChannelDestinationRecord | undefined
+      let authorized: boolean
       try {
         destination = await dependencies.destinations.get(post.workspaceId, post.target)
+        authorized = destination ? await dependencies.isAuthorized(claimed) : false
       } catch {
+        // Failed reads never permit sending.
         if (!await retryOrFail(dependencies, claimed, token, { succeeded: false, retryable: true, code: 'NotificationDestinationUnavailable' })) failedCount += 1
         continue
       }
@@ -144,11 +166,18 @@ export async function deliverDueChannelPosts(dependencies: ChannelPostDeliveryDe
         await dependencies.posts.finish(claimed, token, 'suppressed', undefined, 'DestinationRemoved')
         continue
       }
-      const result = await dependencies.send(claimed, destination)
+      if (!authorized) {
+        await dependencies.posts.finish(claimed, token, 'suppressed', undefined, 'SourceOutOfScope')
+        continue
+      }
+      // Reads above can stall past the lease; send only while this attempt still holds it.
+      if (!await dependencies.posts.renew(claimed, token, dependencies.now())) continue
+      const leased: ChannelPost = { ...claimed, version: claimed.version + 1 }
+      const result = await dependencies.send(leased, destination)
       if (result.succeeded) {
-        await dependencies.posts.finish(claimed, token, 'sent')
+        await dependencies.posts.finish(leased, token, 'sent')
         delivered += 1
-      } else if (!await retryOrFail(dependencies, claimed, token, result)) {
+      } else if (!await retryOrFail(dependencies, leased, token, result)) {
         failedCount += 1
       }
     }
