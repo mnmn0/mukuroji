@@ -768,6 +768,7 @@ function createDocumentFake(
     updatePreference: unsupported,
     listRecent: unsupported,
     getCommentCreateReplay: unsupported,
+    getCommentUpdateReplay: unsupported,
     getCommentWindowRevision: async () => 0,
     createComment: unsupported,
     listComments: unsupported,

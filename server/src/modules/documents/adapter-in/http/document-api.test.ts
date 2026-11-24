@@ -2472,6 +2472,9 @@ test('edits and deletes a comment through the author-only comment routes', async
     editedAt: '2026-07-18T00:01:00.000Z',
   }
   const app = createTestApp(createDocumentClient({
+    async getCommentUpdateReplay() {
+      return undefined
+    },
     async updateComment(input) {
       calls.push({
         kind: 'update',
@@ -2513,6 +2516,64 @@ test('edits and deletes a comment through the author-only comment routes', async
     { kind: 'update', commentId: 'comment-1', body: 'Edited', mentions: [], idempotencyKey: 'edit-key' },
     { kind: 'delete', commentId: 'comment-1', idempotencyKey: 'delete-key' },
   ])
+})
+
+test('replays a recorded comment edit before revalidating mutable mentioned members', async () => {
+  let memberLookups = 0
+  const replayed: DocumentComment[] = []
+  const comment: DocumentComment = {
+    id: 'comment-1',
+    documentId: 'document-1',
+    anchor: { type: 'document' },
+    body: 'Ask @Mina',
+    mentions: [{ userId: 'mina@example.com', offset: 4, length: 5 }],
+    authorUserId: 'owner@example.com',
+    resolved: false,
+    createdAt: '2026-07-18T00:00:00.000Z',
+    updatedAt: '2026-07-18T00:01:00.000Z',
+    editedAt: '2026-07-18T00:01:00.000Z',
+  }
+  const app = createTestApp(
+    createDocumentClient({
+      async getCommentUpdateReplay(input) {
+        if (input.idempotencyKey !== 'edit-key') return undefined
+        replayed.push(comment)
+        return comment
+      },
+      async updateComment() {
+        throw new Error('A recorded edit must not be written again.')
+      },
+    }),
+    {
+      // Mina left the Workspace after the first attempt.
+      getActiveMember: async () => {
+        memberLookups += 1
+        return undefined
+      },
+    },
+  )
+  const request = (idempotencyKey: string) => app.request('/api/documents/document-1/comments/comment-1', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      body: 'Ask @Mina',
+      mentions: [{ userId: 'mina@example.com', offset: 4, length: 5 }],
+    }),
+  })
+
+  const retried = await request('edit-key')
+  expect(retried.status).toBe(200)
+  expect(await retried.json()).toEqual({ comment })
+  expect(memberLookups).toBe(0)
+  // A new edit still checks that every mentioned member is active.
+  const fresh = await request('edit-key-2')
+  expect(fresh.status).toBe(400)
+  expect(memberLookups).toBe(1)
+  expect(replayed).toHaveLength(1)
 })
 
 test('does not signal a presence heartbeat that only extends the lease', async () => {

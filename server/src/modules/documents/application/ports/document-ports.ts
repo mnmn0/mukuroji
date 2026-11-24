@@ -299,6 +299,16 @@ export interface DocumentCommentsPort {
    */
   updateComment(input: UpdateDocumentCommentRequest): Promise<StoredDocumentComment>
   /**
+   * Returns the recorded result of an idempotent comment edit after checking that the caller
+   * may comment, before the edit's mentions are validated again.
+   *
+   * @param input - Edit request with its idempotency key.
+   * @returns The first result, or `undefined` when the edit has not been recorded.
+   */
+  getCommentUpdateReplay(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment | undefined>
+  /**
    * Deletes the actor's own comment, keeping a placeholder so the thread stays readable.
    *
    * @param input - Comment identity.

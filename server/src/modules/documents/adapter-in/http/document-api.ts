@@ -47,6 +47,7 @@ import type {
   DocumentAuthorizationFenceSnapshot,
   DocumentBacklink,
   DocumentProjectRole,
+  UpdateDocumentCommentRequest,
 } from '../../document-types'
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
@@ -901,8 +902,7 @@ export function registerDocumentApiRoutes(
       const commentId = readRequiredCommentId(c)
       const documentId = readRequiredDocumentId(c)
       const idempotencyKey = readOptionalIdempotencyKey(c)
-      await validateMentionMembers(dependencies, principal.workspaceId, input)
-      const comment = await dependencies.getClient().updateComment({
+      const request: UpdateDocumentCommentRequest = {
         workspaceId: principal.workspaceId,
         documentId,
         commentId,
@@ -910,6 +910,16 @@ export function registerDocumentApiRoutes(
         body: input.body,
         mentions: input.mentions,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      }
+      // A recorded edit is answered before its mentions are checked again: a mentioned member
+      // may have left since the first attempt, and the retry must still get the first result.
+      if (idempotencyKey !== undefined) {
+        const replay = await dependencies.getClient().getCommentUpdateReplay(request)
+        if (replay !== undefined) return c.json({ comment: replay })
+      }
+      await validateMentionMembers(dependencies, principal.workspaceId, input)
+      const comment = await dependencies.getClient().updateComment({
+        ...request,
         auditContext: createDocumentCommentAuditContext(c, principal, input, idempotencyKey),
       })
       await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {

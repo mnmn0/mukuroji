@@ -119,7 +119,9 @@ Mention は active Workspace member を検証し、comment と同じ transaction
 書き、返信時はその thread の row だけを全 page 読みます。新しい root comment は index の完了 marker
 （`COMMENT_PARTICIPANT_INDEX#<documentId>#<rootCommentId>`）も書きます。marker のない、index が
 できる前の thread は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
-transaction で参加者 row と marker を書き足します。どちらも page を途中で打ち切りません（ADR 0092）。Comment の作成者は自分の
+transaction で参加者 row と marker を書き足します。どちらも page を途中で打ち切りません（ADR 0092）。
+既存の thread は data migration `0002-document-comment-participant-index` で参加者 row と marker を
+一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
 し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
 thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の
@@ -127,7 +129,9 @@ thread の返信はそのまま残り、画面は「このコメントは削除�
 `COMMENT_MUTATION#<documentId>#<hash>` の receipt（operation・comment・入力の fingerprint と
 結果の comment を持ち、30 日の TTL）に、変更と同じ transaction で記録します。同じ key の
 再送は comment を書き換えずに最初の結果を返し（その後の新しい編集を巻き戻さない）、同じ key で
-別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
+別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。記録済みの
+編集の再送は mention の member 検証より前に結果を返すので、その後 mention した member が Workspace を
+離れても失敗しません。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
 化・archive された Document は表示されません。
 
 Favorite と最終 open 時刻は、preference revision の条件付き transaction を競合時に再試行して
@@ -257,6 +261,8 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
   描画しません。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の開始
   `<` だけを escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。
+  fence は取り込みと同じ規則で判定し、info string に backtick を含む backtick の行は fence に
+  しません。fence を閉じるのは marker だけの行です。
   そのため書き出したページを取り込み直しても段落の表示は変わりません。この変更より前に取り込んだ段落は escape を外して保存
   しているため、`*` などを含むと強調として表示されることがあります。
 - folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。

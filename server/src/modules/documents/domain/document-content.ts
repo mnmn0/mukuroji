@@ -1524,8 +1524,26 @@ function escapeMarkdownText(value: string): string {
 /** The start of a raw HTML tag, comment, declaration, or processing instruction. */
 const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
 
-/** An opening or closing code fence line. */
-const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/u
+/** A line that may open a code fence: the fence marker and the info string after it. */
+const CODE_FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/u
+
+/** A line of only a fence marker and trailing spaces, which may close a code fence. */
+const CODE_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u
+
+/**
+ * Reads the marker of a line that opens a code fence, as Markdown does: a backtick fence's info
+ * string must not contain a backtick, or the line is an inline code span instead.
+ *
+ * @param line - One Markdown line outside fenced code.
+ * @returns The fence marker, or `undefined` when the line does not open a fence.
+ */
+function readCodeFenceOpen(line: string): string | undefined {
+  const match = CODE_FENCE_OPEN.exec(line)
+  const marker = match?.[1]
+  if (!marker) return undefined
+  if (marker.startsWith('`') && (match?.[2] ?? '').includes('`')) return undefined
+  return marker
+}
 
 /**
  * Escapes the `<` that would start raw HTML in Markdown, so the exported file never carries
@@ -1538,11 +1556,12 @@ const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/u
 function escapeMarkdownHtml(value: string): string {
   let fence: string | undefined
   return value.split('\n').map((line) => {
-    const marker = line.match(CODE_FENCE_LINE)?.[1]
     if (fence !== undefined) {
-      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined
+      const close = CODE_FENCE_CLOSE.exec(line)?.[1]
+      if (close !== undefined && close[0] === fence[0] && close.length >= fence.length) fence = undefined
       return line
     }
+    const marker = readCodeFenceOpen(line)
     if (marker !== undefined) {
       fence = marker
       return line

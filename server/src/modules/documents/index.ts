@@ -12,4 +12,6 @@ export {
   validateDocumentPayload,
 } from './domain/document-content'
 export * from './domain/document-limits'
+/** Backfill of the comment thread participant index (ADR 0092). */
+export { documentCommentParticipantIndexMigration } from './document-comment-participant-index-migration'
 export * from './errors'

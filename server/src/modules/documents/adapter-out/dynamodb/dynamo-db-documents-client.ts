@@ -126,6 +126,19 @@ import {
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
 import {
+  DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
+  commentKey,
+  commentParticipantIndexKey,
+  commentParticipantKey,
+  commentParticipantPrefix,
+  createCommentParticipantIndexItem,
+  createCommentParticipantItem,
+  encodeKeyPart,
+  normalizeCommentMemberKey,
+  type StoredDocumentCommentParticipantIndexItem,
+  type StoredDocumentCommentParticipantItem,
+} from './document-comment-records'
+import {
   isWorkItemCompletionRelationId,
   planWorkItemCompletionOperations,
 } from '../../domain/work-item-completion'
@@ -573,43 +586,6 @@ type StoredDocumentCommentReceiptItem = {
   authorUserId: string
   /** Timestamp を除いた comment input fingerprint です。 */
   fingerprint: string
-}
-
-/**
- * Participant index row of one comment thread: one row per member who wrote in it, so reply
- * notifications read the thread's participants without scanning the Document's comments.
- */
-type StoredDocumentCommentParticipantItem = {
-  /** Canonical Workspace partition key. */
-  workspaceId: string
-  /** Sort key from the Document, the root comment, and the member. */
-  recordKey: string
-  /** Row discriminator. */
-  entryType: 'document-comment-participant'
-  /** Document that owns the thread. */
-  documentId: string
-  /** Root comment of the thread. */
-  rootCommentId: string
-  /** Normalized member key of the participant. */
-  memberKey: string
-}
-
-/**
- * Marks a thread whose participant index is complete: written with a new root, or after an
- * older thread's participants were all backfilled. Kept apart from the participant rows, so
- * a reply by the root author never marks an incomplete older thread as complete.
- */
-type StoredDocumentCommentParticipantIndexItem = {
-  /** Canonical Workspace partition key. */
-  workspaceId: string
-  /** Sort key from the Document and the root comment. */
-  recordKey: string
-  /** Row discriminator. */
-  entryType: 'document-comment-participant-index'
-  /** Document that owns the thread. */
-  documentId: string
-  /** Root comment of the thread. */
-  rootCommentId: string
 }
 
 /**
@@ -3118,27 +3094,14 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       ...[...new Set([...(threadRead?.backfill ?? []), actorMemberKey])].map((memberKey) => ({
         Put: {
           TableName: this.tableName,
-          Item: {
-            workspaceId: input.workspaceId,
-            recordKey: commentParticipantKey(input.documentId, rootCommentId, memberKey),
-            entryType: 'document-comment-participant',
-            documentId: input.documentId,
-            rootCommentId,
-            memberKey,
-          } satisfies StoredDocumentCommentParticipantItem,
+          Item: createCommentParticipantItem(input.workspaceId, input.documentId, rootCommentId, memberKey),
         },
       })),
       ...(storedParent === undefined || threadRead?.completesIndex === true
         ? [{
             Put: {
               TableName: this.tableName,
-              Item: {
-                workspaceId: input.workspaceId,
-                recordKey: commentParticipantIndexKey(input.documentId, rootCommentId),
-                entryType: 'document-comment-participant-index',
-                documentId: input.documentId,
-                rootCommentId,
-              } satisfies StoredDocumentCommentParticipantIndexItem,
+              Item: createCommentParticipantIndexItem(input.workspaceId, input.documentId, rootCommentId),
             },
           }]
         : []),
@@ -3587,6 +3550,37 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   }
 
   /**
+   * Returns the recorded result of an idempotent comment edit, so a retry is answered before
+   * the request's mentions are validated again: a member mentioned in the first edit may have
+   * left the Workspace since. The caller must still be allowed to comment on the Document.
+   *
+   * @param input - Edit request with its idempotency key.
+   * @returns The first result, or `undefined` when the request carries no key or the key has
+   *   no live receipt.
+   * @throws DocumentError 409 when the key was used for another operation, comment, or input.
+   */
+  async getCommentUpdateReplay(
+    input: UpdateDocumentCommentRequest,
+  ): Promise<StoredDocumentComment | undefined> {
+    const idempotency = commentMutationIdempotency(input, 'updated', {
+      body: input.body,
+      mentions: input.mentions,
+    })
+    if (idempotency === undefined) return undefined
+    await this.ensureTable()
+    assertIdentifier(input.commentId, 'commentId')
+    await this.requireDocumentCapabilityAuthorization(
+      input.workspaceId,
+      input.documentId,
+      input.access,
+      'canComment',
+      'DocumentCommentDenied',
+      true,
+    )
+    return this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+  }
+
+  /**
    * Deletes the actor's own comment. The row stays as an empty placeholder so replies keep
    * their thread and the deletion is visible to the other participants.
    *
@@ -3637,18 +3631,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         'DocumentCommentDenied',
         true,
       )
-    const idempotency: CommentMutationIdempotency | undefined = input.idempotencyKey === undefined
-      ? undefined
-      : {
-          recordKey: commentMutationReceiptKey(
-            input.documentId,
-            sha256(
-              `document-comment-mutation-v1\0${input.workspaceId}\0` +
-              `${normalizeCommentMemberKey(input.access.memberKey)}\0${input.idempotencyKey}`,
-            ),
-          ),
-          fingerprint: fingerprint({ action, commentId: input.commentId, payload }),
-        }
+    const idempotency = commentMutationIdempotency(input, action, payload)
     if (idempotency !== undefined) {
       const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
       if (replay !== undefined) return replay
@@ -6837,10 +6820,6 @@ function stableStringify(value: unknown): string {
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`
 }
 
-function encodeKeyPart(value: string): string {
-  return Buffer.from(value, 'utf8').toString('base64url')
-}
-
 function documentKey(documentId: string): string {
   return `DOCUMENT#${documentId}`
 }
@@ -6900,46 +6879,9 @@ function recentKey(
 }
 
 
-/**
- * Normalizes a comment author or mention member key for comparisons.
- *
- * @param memberKey - Stored or requested member key.
- * @returns Trimmed lowercase member key.
- */
-function normalizeCommentMemberKey(memberKey: string): string {
-  return memberKey.trim().toLowerCase()
-}
-
-function commentKey(documentId: string, createdAt: string, commentId: string): string {
-  return `COMMENT#${encodeKeyPart(documentId)}#${createdAt}#${encodeKeyPart(commentId)}`
-}
-
 /** Builds the deterministic sort key for one Document comment-window fence row. */
 function commentWindowKey(documentId: string): string {
   return `COMMENT_WINDOW#${encodeKeyPart(documentId)}`
-}
-
-/**
- * Builds the sort key prefix of one thread's participant index.
- *
- * @param documentId - Document that owns the thread.
- * @param rootCommentId - Root comment of the thread.
- * @returns The prefix shared by the thread's participant rows.
- */
-function commentParticipantPrefix(documentId: string, rootCommentId: string): string {
-  return `COMMENT_PARTICIPANT#${encodeKeyPart(documentId)}#${encodeKeyPart(rootCommentId)}#`
-}
-
-/**
- * Builds the sort key of one thread participant row.
- *
- * @param documentId - Document that owns the thread.
- * @param rootCommentId - Root comment of the thread.
- * @param memberKey - Normalized participant member key.
- * @returns The participant row sort key.
- */
-function commentParticipantKey(documentId: string, rootCommentId: string, memberKey: string): string {
-  return `${commentParticipantPrefix(documentId, rootCommentId)}${encodeKeyPart(memberKey)}`
 }
 
 /**
@@ -6966,7 +6908,8 @@ function readStoredCommentParticipant(
     value.rootCommentId !== rootCommentId ||
     typeof value.memberKey !== 'string' ||
     !value.memberKey ||
-    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey)
+    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey) ||
+    value.schemaVersion !== DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION
   ) {
     throw invalidStoredDocumentData()
   }
@@ -6977,18 +6920,8 @@ function readStoredCommentParticipant(
     documentId,
     rootCommentId,
     memberKey: value.memberKey,
+    schemaVersion: DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
   }
-}
-
-/**
- * Builds the sort key of the marker of a thread whose participant index is complete.
- *
- * @param documentId - Document that owns the thread.
- * @param rootCommentId - Root comment of the thread.
- * @returns The marker sort key.
- */
-function commentParticipantIndexKey(documentId: string, rootCommentId: string): string {
-  return `COMMENT_PARTICIPANT_INDEX#${encodeKeyPart(documentId)}#${encodeKeyPart(rootCommentId)}`
 }
 
 /**
@@ -7013,7 +6946,8 @@ function readStoredCommentParticipantIndex(
     value.recordKey !== commentParticipantIndexKey(documentId, rootCommentId) ||
     value.entryType !== 'document-comment-participant-index' ||
     value.documentId !== documentId ||
-    value.rootCommentId !== rootCommentId
+    value.rootCommentId !== rootCommentId ||
+    value.schemaVersion !== DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION
   ) {
     throw invalidStoredDocumentData()
   }
@@ -7023,6 +6957,33 @@ function readStoredCommentParticipantIndex(
     entryType: 'document-comment-participant-index',
     documentId,
     rootCommentId,
+    schemaVersion: DOCUMENT_COMMENT_PARTICIPANT_INDEX_SCHEMA_VERSION,
+  }
+}
+
+/**
+ * Builds the receipt identity of an idempotent comment edit or delete.
+ *
+ * @param input - Comment identity, actor access, and optional idempotency key.
+ * @param action - Operation the key is bound to.
+ * @param payload - Request input bound to the key.
+ * @returns The receipt key and request fingerprint, or `undefined` without an idempotency key.
+ */
+function commentMutationIdempotency(
+  input: DeleteDocumentCommentRequest,
+  action: 'updated' | 'deleted',
+  payload: Record<string, unknown>,
+): CommentMutationIdempotency | undefined {
+  if (input.idempotencyKey === undefined) return undefined
+  return {
+    recordKey: commentMutationReceiptKey(
+      input.documentId,
+      sha256(
+        `document-comment-mutation-v1\0${input.workspaceId}\0` +
+        `${normalizeCommentMemberKey(input.access.memberKey)}\0${input.idempotencyKey}`,
+      ),
+    ),
+    fingerprint: fingerprint({ action, commentId: input.commentId, payload }),
   }
 }
 

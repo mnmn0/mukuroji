@@ -12,6 +12,17 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../../../audit/audit'
 import {
+  assertValidDataMigrationRegistry,
+  runDataMigration,
+  verifyDataMigration,
+  type DataMigrationRowStore,
+} from '../../../data-migration'
+import {
+  createManualClock,
+  createMemoryCheckpointStore,
+} from '../../../data-migration/test-support/data-migration-fakes'
+import { documentCommentParticipantIndexMigration } from '../../document-comment-participant-index-migration'
+import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ELEMENT_LINK_COUNT,
@@ -4730,6 +4741,179 @@ test('keeps reading an older thread too large to backfill, even after the root a
   expect(candidates).toHaveLength(27)
 })
 
+/**
+ * Builds a data migration row store over the in-memory Documents table, reading one partition
+ * in key order from the rows present when it is created.
+ *
+ * @param memory - In-memory Documents table.
+ * @returns The row store.
+ */
+function createMemoryDocumentsRowStore(
+  memory: ReturnType<typeof createMemoryDocumentClient>,
+): DataMigrationRowStore {
+  const keyOf = (row: Readonly<Record<string, unknown>>) => `${String(row.workspaceId)}|${String(row.recordKey)}`
+  const find = (key: string) => memory.items().find((row) => keyOf(row) === key)
+  const keys = memory.items().map(keyOf).sort()
+  return {
+    targetTable: 'documents-table',
+    listPartitions: () => ['segment-0-of-1'],
+    readPage: async ({ cursor, limit }) => {
+      const start = cursor === undefined ? 0 : Number(cursor)
+      const rows = keys.slice(start, start + limit).flatMap((key) => {
+        const row = find(key)
+        return row === undefined ? [] : [row]
+      })
+      return start + limit < keys.length ? { rows, nextCursor: String(start + limit) } : { rows }
+    },
+    getRow: async (key) => find(keyOf(key)),
+    replaceRow: async () => 'condition-failed',
+    writeDerivedRows: async ({ sourceKey, rows }) => {
+      if (find(keyOf(sourceKey)) === undefined) return 'condition-failed'
+      for (const row of rows) memory.put({ ...row })
+      return 'replaced'
+    },
+  }
+}
+
+test('the participant index migration backfills older threads so replies read only the index', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Migrated thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // More repliers than one reply transaction backfills, written before the index existed.
+  for (let index = 0; index < 26; index += 1) {
+    await reply(`Member-${index}@example.com`, `legacy-${index}`)
+  }
+  for (const item of memory.items()) {
+    if (
+      item.entryType === 'document-comment-participant' ||
+      item.entryType === 'document-comment-participant-index'
+    ) {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+  const commentCount = memory.items().filter(({ entryType }) => entryType === 'document-comment').length
+  expect(commentCount).toBe(27)
+  expect(() => assertValidDataMigrationRegistry([documentCommentParticipantIndexMigration])).not.toThrow()
+  const runInput = {
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: createMemoryDocumentsRowStore(memory),
+    checkpointStore: createMemoryCheckpointStore(),
+    clock: createManualClock(),
+    runId: 'run-1',
+    operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+    pageSize: 10,
+    maxPages: 100,
+    maxWritesPerSecond: 1000,
+  }
+  const verify = () => verifyDataMigration({
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: runInput.rowStore,
+    checkpointStore: runInput.checkpointStore,
+    pageSize: 10,
+    maxPages: 100,
+  })
+
+  const dryRun = await runDataMigration({ ...runInput, mode: 'dry-run' })
+  expect(dryRun.counters.migrated).toBe(commentCount)
+  expect(memory.items().filter(({ entryType }) => entryType === 'document-comment-participant')).toEqual([])
+  expect(await verify()).toMatchObject({ status: 'fail', pendingRows: commentCount })
+
+  const applied = await runDataMigration({ ...runInput, mode: 'apply' })
+  expect(applied).toMatchObject({ status: 'completed' })
+  expect(applied.counters.migrated).toBe(commentCount)
+  expect(await verify()).toMatchObject({ status: 'pass', pendingRows: 0, migratedRows: commentCount })
+  expect(memory.items()
+    .filter((item) => item.entryType === 'document-comment-participant')
+    .map(({ memberKey }) => memberKey)
+    .sort()).toEqual([
+    ...Array.from({ length: 26 }, (_, index) => `member-${index}@example.com`),
+    ownerAccess.memberKey.toLowerCase(),
+  ].sort())
+  expect(memory.items().filter((item) => item.entryType === 'document-comment-participant-index'))
+    .toHaveLength(1)
+
+  // A replier whose comment row is gone is still notified, so the reply read the index alone.
+  memory.remove('workspace-1', String(memory.items().find(({ id }) => id === 'legacy-0')?.recordKey))
+  await reply('late@example.com', 'late-reply')
+  const lateEvent = memory.items().find(({ eventType, metadata }) =>
+    eventType === 'document.comment.replied' &&
+    typeof metadata === 'object' && metadata !== null &&
+    'commentId' in metadata && metadata.commentId === 'late-reply')
+  const candidates = lateEvent && typeof lateEvent.metadata === 'object' && lateEvent.metadata !== null &&
+    'notificationCandidates' in lateEvent.metadata && Array.isArray(lateEvent.metadata.notificationCandidates)
+    ? lateEvent.metadata.notificationCandidates
+    : []
+  expect(candidates).toHaveLength(27)
+  expect(candidates).toContainEqual({ memberKey: 'member-0@example.com', reason: 'reply' })
+
+  // A live reply writes the same participant row the migration derives from it.
+  const lateComment = memory.items().find(({ id, entryType }) => id === 'late-reply' && entryType === 'document-comment')
+  expect(lateComment).toBeDefined()
+  const [derivedLate] = documentCommentParticipantIndexMigration.derive(lateComment ?? {})
+  expect(memory.items().find(({ recordKey }) => recordKey === derivedLate?.recordKey)).toEqual(derivedLate)
+})
+
+test('the participant index migration stops on a malformed comment row', async () => {
+  const memory = createMemoryDocumentClient()
+  memory.put({
+    workspaceId: 'workspace-1',
+    recordKey: 'COMMENT#broken',
+    entryType: 'document-comment',
+    id: 'broken',
+  })
+  memory.put({ workspaceId: 'workspace-1', recordKey: 'DOCUMENT#doc-1', entryType: 'document' })
+  expect(documentCommentParticipantIndexMigration.classify(memory.items()[0] ?? {})).toBe('unknown')
+  expect(documentCommentParticipantIndexMigration.classify(memory.items()[1] ?? {})).toBe('unrelated')
+
+  const report = await runDataMigration({
+    definition: documentCommentParticipantIndexMigration,
+    rowStore: createMemoryDocumentsRowStore(memory),
+    checkpointStore: createMemoryCheckpointStore(),
+    clock: createManualClock(),
+    runId: 'run-1',
+    operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+    mode: 'apply',
+    pageSize: 10,
+    maxPages: 100,
+    maxWritesPerSecond: 1000,
+  })
+
+  expect(report).toMatchObject({ status: 'failed', failureCode: 'UNKNOWN_ROW' })
+  expect(memory.items()).toHaveLength(2)
+})
+
 test('replays an idempotent comment edit or delete without rewriting a newer change', async () => {
   const memory = createMemoryDocumentClient()
   let clock = Date.parse('2026-07-18T00:00:00.000Z')
@@ -4764,6 +4948,26 @@ test('replays an idempotent comment edit or delete without rewriting a newer cha
   const second = await edit('Second edit', 'edit-key-2')
   // The lost-response retry of the first edit returns its own result and keeps the newer edit.
   expect(await edit('First edit', 'edit-key-1')).toEqual(first)
+  const replayRequest = {
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body: 'First edit',
+    mentions: [],
+    idempotencyKey: 'edit-key-1',
+  }
+  // The API answers a recorded edit before it validates the mentions again.
+  expect(await client.getCommentUpdateReplay(replayRequest)).toEqual(first)
+  expect(await client.getCommentUpdateReplay({ ...replayRequest, idempotencyKey: 'edit-key-unused' }))
+    .toBeUndefined()
+  await expect(client.getCommentUpdateReplay({ ...replayRequest, body: 'Other body' }))
+    .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  // The replay is read only for a caller who may still comment on the Document.
+  await expect(client.getCommentUpdateReplay({
+    ...replayRequest,
+    access: { memberKey: ownerAccess.memberKey, workspaceRole: 'guest' },
+  })).rejects.toMatchObject({ status: 403 })
   const listed = await client.listComments({ workspaceId: 'workspace-1', documentId: document.id, access: ownerAccess })
   expect(listed.comments.find(({ id }) => id === 'comment-1')).toEqual(second)
 
@@ -5524,6 +5728,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
       { id: 'block-e', type: 'paragraph', text: 'already \\<div> and \\\\<span>' },
       { id: 'block-t', type: 'paragraph', text: '\\`<img src=x onerror=alert(1)>`' },
       { id: 'block-u', type: 'paragraph', text: 'run \\``<b>`' },
+      { id: 'block-v', type: 'paragraph', text: '```a`b\n<img src=x onerror=alert(1)>' },
+      { id: 'block-w', type: 'paragraph', text: '```\n``` <b>\n<i>still code</i>\n```' },
       {
         id: 'block-b',
         type: 'table',
@@ -5545,6 +5751,10 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   // rest of an escaped run can open one.
   expect(markdown.content).toContain('\n\\`\\<img src=x onerror=alert(1)>`\n')
   expect(markdown.content).toContain('\nrun \\``<b>`\n')
+  // A backtick in a backtick fence's info string makes the line text, not a fence, so the HTML
+  // after it is escaped; only a bare marker line closes a fence.
+  expect(markdown.content).toContain('\n```a`b\n\\<img src=x onerror=alert(1)>\n')
+  expect(markdown.content).toContain('\n```\n``` <b>\n<i>still code</i>\n```\n')
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
   expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')

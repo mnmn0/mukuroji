@@ -114,6 +114,7 @@ row は conditional put で置き換えます。条件は「key が存在し、`
 | id | table | 内容 |
 | --- | --- | --- |
 | `0001-work-item-member-index` | `work-items` | Work Item の責任者と Contributor ごとに Focus の index row を作る（ADR 0038）。Work Item の作成・更新・削除は同じ row を transaction で保つので、writer は止めない（`revision-fenced`） |
+| `0002-document-comment-participant-index` | `documents` | Document comment ごとに thread の参加者 row を、root comment からは index の完了 marker を作る（ADR 0092）。root の marker が返信の参加者 row より先に書かれることがあり、その間の返信は通知先を取りこぼすので、migration の間は comment の作成を止める（`pause-writers`） |
 
 ## Writer と dual-read
 
@@ -320,7 +321,7 @@ local の emulator（Floci）では CLI が初回に table を作ります。Flo
 ## 対象外にしたもの（Issue #365）
 
 - **Team / Workspace の partition を Query で読む row store**: [ADR 0013](adr/0013-data-migration-runner.md) のとおり、
-  必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`）は parallel scan の
+  必要な migration が出たときに足します。今の対象 table（`work-items`、`project-directory`、`documents`）は parallel scan の
   segment で読み切れる規模で、Workspace をまたいで table 全体を移すので Query の単位が要りません。
 - **#335・#340・#337 の migration 定義**: #335・#340 の schema 変更は初回 deploy（#636）より前に入り、旧 version の
   row を持つ環境がまだ無いため、migration は作りません。#337 も初回 deploy より前に入るなら同じです。初回 deploy の後に
