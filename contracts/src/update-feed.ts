@@ -34,6 +34,16 @@ export type UpdateFeedEntry = {
   attention?: UpdateFeedAttention
   /** Per-member read state for this exact published version; absent without readable content. */
   readState?: UpdateFeedReadState
+  /** Reviewer acknowledgement of the latest version; absent while unacknowledged or without a reviewer. */
+  acknowledgement?: UpdateFeedAcknowledgement
+}
+
+/** Reviewer acknowledgement shown with the latest report in the feed. */
+export type UpdateFeedAcknowledgement = {
+  /** Reviewer who acknowledged the latest version. */
+  memberKey: string
+  /** ISO 8601 acknowledgement time. */
+  acknowledgedAt: string
 }
 
 /** Durable member-specific state with optimistic concurrency. */

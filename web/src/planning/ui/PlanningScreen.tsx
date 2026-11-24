@@ -19,6 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
   WorkspaceWeekStartDay,
+  PlanningUpdateTemplateSettings,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS, toWorkspaceLocalDate } from '@mukuroji/contracts'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -92,6 +93,7 @@ import {
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
   type PlanningUpdateLabels,
+  type PlanningUpdateTemplateLoadState,
   type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
 
@@ -235,6 +237,12 @@ export type PlanningLabels = PlanningUpdateLabels & {
   cycleBaseline: CycleScheduleBaselineLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
+  /** Team update list heading. */
+  teamUpdatesTitle: string
+  /** Team update list description. */
+  teamUpdatesDescription: string
+  /** Action that opens one Team's updates. */
+  openTeamUpdates: string
   /** Portfolio section の説明です。 */
   portfolioDescription: string
   /** Entity name の列見出しです。 */
@@ -456,6 +464,10 @@ export type PlanningScreenProps = {
     target: PlanningUpdateTargetView,
     draft: PlanningUpdateCadenceDraft,
   ) => void | Promise<void>
+  /** Workspace の health update 必須項目とテンプレートです。 */
+  updateTemplate?: PlanningUpdateTemplateSettings
+  /** 必須項目とテンプレートの読み込み中、または読み込み失敗の状態です。 */
+  updateTemplateLoadState?: PlanningUpdateTemplateLoadState
   /** Project または Initiative の structured manual update を公開する callback です。 */
   onPublishUpdate?: (
     target: PlanningUpdateTargetView,
@@ -551,6 +563,8 @@ export function PlanningScreen({
   onOpenProjectOverview,
   onOpenWorkItem,
   onPublishUpdate,
+  updateTemplate,
+  updateTemplateLoadState,
   onSaveUpdateCadence,
   onSaveWorkItemLink,
   onSelectUpdateTarget,
@@ -660,7 +674,9 @@ export function PlanningScreen({
     ? updateBaselineDelays.delays
     : undefined
   const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
-    aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
+    // AI drafting reads Project or Initiative sources; Team updates are written by hand.
+    aiAssistance && snapshot && resolvedSelectedUpdateTarget &&
+      resolvedSelectedUpdateTarget.type !== 'team' && onPublishUpdate && canPublishSelectedUpdate
       ? {
           accessToken: aiAssistance.accessToken,
           onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
@@ -683,6 +699,13 @@ export function PlanningScreen({
     setSelectedEntityId(entityId)
     setSelectedUpdateTarget(target)
     if (target) onSelectUpdateTarget?.(target)
+  }
+
+  /** Selects an update target that no Planning entity row represents, such as a Team. */
+  const handleSelectUpdateTarget = (target: PlanningUpdateTargetView) => {
+    if (isAiOperationPendingRef.current) return
+    setSelectedUpdateTarget(target)
+    onSelectUpdateTarget?.(target)
   }
 
   useEffect(() => {
@@ -878,6 +901,15 @@ export function PlanningScreen({
                   onSelectEntity={handleSelectEntity}
                 />
               ) : null}
+              {activeView === 'portfolio' && directoryTeams && directoryTeams.length > 0 ? (
+                <TeamUpdateTargetsPanel
+                  isAiOperationPending={isAiOperationPending}
+                  labels={labels}
+                  onSelectTarget={handleSelectUpdateTarget}
+                  teams={directoryTeams}
+                  updateTargetDetails={updateTargetDetails}
+                />
+              ) : null}
               {activeEntities.length > 0 && activeView === 'portfolio' ? (
                 <PortfolioView
                   labels={labels}
@@ -959,6 +991,8 @@ export function PlanningScreen({
                   ? (draft) => onSaveUpdateCadence(resolvedSelectedUpdateTarget, draft)
                   : undefined}
                 onRetryHistory={onRetryUpdateHistory}
+                template={updateTemplate}
+                templateLoadState={updateTemplateLoadState}
               />
             ) : null}
           </div>
@@ -2047,6 +2081,63 @@ function PortfolioView({
           </tbody>
         </table>
       </div>
+    </section>
+  )
+}
+
+/**
+ * Lists the Teams that can submit a Team-level health update, with their latest update state.
+ *
+ * @param props - Visible Teams, update projections, labels, and the selection handler.
+ * @returns A compact table whose rows open one Team's update pane.
+ */
+function TeamUpdateTargetsPanel({
+  isAiOperationPending = false,
+  labels,
+  onSelectTarget,
+  teams,
+  updateTargetDetails,
+}: {
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
+  /** Localized Planning labels. */
+  labels: PlanningLabels
+  /** Opens one Team target. */
+  onSelectTarget: (target: PlanningUpdateTargetView) => void
+  /** Permission-filtered Workspace Teams. */
+  teams: readonly CrossProjectTimelineDirectoryTeam[]
+  /** Update projections for the configured targets. */
+  updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
+}) {
+  return (
+    <section className="workbench-panel overflow-hidden" data-testid="planning-team-updates">
+      <PlanningSectionHeader title={labels.teamUpdatesTitle} description={labels.teamUpdatesDescription} />
+      <ul className="divide-y divide-[var(--workbench-border)] border-t border-[var(--workbench-border)]">
+        {teams.map((team) => {
+          const target: PlanningUpdateTargetView = { type: 'team', teamId: team.id }
+          const updateView = resolvePlanningUpdateTargetDetail(updateTargetDetails, target)?.updateView ??
+            createMissingPlanningTargetUpdateView(target)
+          return (
+            <li className="flex flex-wrap items-center justify-between gap-3 px-5 py-4" data-testid={`planning-team-update-${team.id}`} key={team.id}>
+              <div className="grid min-w-0 gap-2">
+                <span className="truncate text-sm font-semibold text-[var(--workbench-text)]">{team.name}</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                </div>
+                <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+              </div>
+              <button
+                className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isAiOperationPending}
+                onClick={() => onSelectTarget(target)}
+                type="button"
+              >
+                {labels.openTeamUpdates}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
     </section>
   )
 }

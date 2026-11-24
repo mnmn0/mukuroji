@@ -306,6 +306,8 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
+  // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
+  { method: '*', pathPattern: '/api/time-periods/*', permission: 'workspace.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/automation/*', permission: 'automation.read' },
   { method: '*', pathPattern: '/api/automation/*', permission: 'automation.manage' },
@@ -644,6 +646,29 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
     permission: 'projects.write',
   },
+  // Saving a Team's portfolio snapshot captures every Project of the Team, so it needs the Team
+  // manage permission; reading the portfolio falls through to `teams.read` below.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/portfolio/snapshots/:month',
+    permission: 'teams.manage',
+  },
+  {
+    // Rendering a PDF reads the Project; the POST only carries the report to render.
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-report/pdf',
+    permission: 'projects.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares*',
+    permission: 'projects.write',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
@@ -730,6 +755,11 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
+  // Workload and personal time across Teams: each Team is then checked like its Team route, so a
+  // Team-scoped grant reaches only its Teams and never needs a Workspace-wide permission.
+  { method: 'GET', pathPattern: '/api/workload', permission: 'teams.read' },
+  { method: 'GET', pathPattern: '/api/time-tracking/my-timesheet', permission: 'teams.read' },
+  { method: 'POST', pathPattern: '/api/time-tracking/my-timesheet/submit', permission: 'teams.write' },
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
   // A member's own agent credentials: reading and revoking change nothing shared, while
@@ -769,6 +799,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // Members read and rename themselves; the service refuses directory-managed names.
+  {
+    method: '*',
+    pathPattern: '/api/me/profile',
     permission: 'workspace.read',
   },
   // Push availability and the caller's own device registration change no shared Workspace data.
@@ -1692,6 +1728,7 @@ function shouldEvaluateEnterpriseProjectScopes(
   if (/^\/api\/collections(?:\/|$)/u.test(path)) {
     return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
   }
+  if (/^\/api\/(?:workload|time-tracking\/my-timesheet)(?:\/|$)/u.test(path)) return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }
@@ -1983,6 +2020,13 @@ async function resolvePlanningUpdateAuthorizationResource(
       targetId: target.projectId.trim(),
       parentTeamId: target.teamId.trim(),
     }
+  }
+  if (
+    target.type === 'team' &&
+    typeof target.teamId === 'string' &&
+    target.teamId.trim()
+  ) {
+    return { workspaceId, kind: 'team', targetId: target.teamId.trim() }
   }
   if (
     target.type !== 'initiative' ||

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { triggerDeveloperExportDownload } from '../src/developer-platform/ui/developerExportDownload'
+import { triggerDeveloperExportDownload } from '../src/shared/lib/files/fileDownload'
 
 describe('Developer Platform export download', () => {
   test('clicks before deferring object URL cleanup', () => {

@@ -88,7 +88,11 @@ import {
 import { createWorkspaceSearchContext } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceCalendarSettingsOf } from '../shared/workspace-calendar'
-import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+import {
+  projectAccessAllows,
+  readWorkspaceMemberNamesForDisplay,
+  toWorkspaceAccessErrorResponse,
+} from '../shared/workspace-access'
 
 /** Analytics が一つの entity query で読む audit event page size です。 */
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
@@ -270,7 +274,10 @@ async function readAnalyticsExportNames(
 /**
  * Reads the display names of the members of the given Projects.
  *
- * Stops reading Projects once every wanted member has a name.
+ * Only members found on a readable Project get a name, so a filter on someone outside the
+ * principal's Projects never prints that person's name. Renamed members keep their old name on
+ * Project rows (ADR 0074), so the Workspace member row's name comes first; when the Workspace read
+ * fails, the Project row's name is used. Stops reading Projects once every wanted member is found.
  *
  * @param principal - Authenticated principal.
  * @param teams - Visible Teams with their readable Projects.
@@ -286,8 +293,10 @@ async function readAnalyticsExportMemberNames(
     team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
   )
   const names = new Map<string, string>()
+  const found = new Set<string>()
+  const workspaceNames = await readWorkspaceMemberNamesForDisplay(principal.directoryId)
   for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
-    if ([...memberKeys].every((key) => names.has(key))) break
+    if ([...memberKeys].every((key) => found.has(key))) break
     const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
     const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
       workspaceDependencies.projectDirectory.getProjectMembers(
@@ -299,8 +308,13 @@ async function readAnalyticsExportMemberNames(
     for (const response of responses) {
       if (response.status !== 'fulfilled') continue
       for (const member of response.value.members) {
-        const name = member.name?.trim()
-        if (name && memberKeys.has(member.id) && !names.has(member.id)) names.set(member.id, name)
+        if (!memberKeys.has(member.id) || found.has(member.id)) continue
+        const normalizedKey = member.id.trim().toLowerCase()
+        const name = workspaceNames?.has(normalizedKey)
+          ? workspaceNames.get(normalizedKey)
+          : member.name?.trim()
+        if (workspaceNames?.has(normalizedKey) || name) found.add(member.id)
+        if (name) names.set(member.id, name)
       }
     }
   }

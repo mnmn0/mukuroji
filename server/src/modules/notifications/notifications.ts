@@ -159,8 +159,8 @@ export type NotificationItem = {
   commentId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
-  /** Scheduled health update の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled health update の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled health update の canonical target ID です。 */
   planningTargetId?: string
   /** Current Planning target を再検証する record key です。 */
@@ -896,6 +896,19 @@ export function requiresCurrentWorkItemAssignee(notification: Pick<NotificationI
   )
 }
 
+/**
+ * Identifies notifications that only tell a member they joined a Work Item as a contributor.
+ *
+ * Such a notification stops being shown or delivered once the member no longer holds a
+ * contributor share of the Work Item, just as owner-only notifications follow the current owner.
+ *
+ * @param notification - Recipient-specific reasons shared by Inbox and external delivery.
+ * @returns Whether the recipient must still be a current contributor.
+ */
+export function requiresCurrentWorkItemContributor(notification: Pick<NotificationItem, 'reasons'>): boolean {
+  return notification.reasons.length > 0 && notification.reasons.every((reason) => reason === 'contributor')
+}
+
 /** Workspace/member を Notifications table の recipient partition key に変換します。 */
 export function createNotificationRecipientKey(workspaceId: string, memberKey: string) {
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`
@@ -1549,8 +1562,8 @@ function readStringArray(value: unknown) {
 }
 
 /** Reads a validated Planning health update target type. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning health update notification kind. */

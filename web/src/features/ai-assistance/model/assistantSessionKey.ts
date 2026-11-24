@@ -42,6 +42,8 @@ export function createAiAssistantSessionKey(
           teamId: source.target.teamId,
           type: source.target.type,
         }
+      : source.target.type === 'team'
+      ? { teamId: source.target.teamId, type: source.target.type }
       : {
           entityId: source.target.entityId,
           type: source.target.type,

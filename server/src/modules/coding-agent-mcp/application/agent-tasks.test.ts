@@ -28,6 +28,7 @@ const catalog: AgentCatalog = {
       { id: 'canceled', name: 'Canceled', category: 'canceled', sortOrder: 4 },
     ],
   } }],
+  templates: [],
 }
 
 /** Scope shared by tests unless a test needs another instance or Project. */

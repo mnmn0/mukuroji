@@ -1236,6 +1236,38 @@ export async function requireTeamPermission(
 }
 
 /**
+ * Lists the Teams on which the principal holds at least the given role.
+ *
+ * The directory and the principal's Project access list are read once for all Teams; Teams the
+ * principal cannot access are left out.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param minimumRole - Minimum role the principal must hold on each Team.
+ * @returns Each permitted Team with its permission context, in directory order.
+ */
+export async function listPermittedTeams(
+  principal: ProjectPrincipal,
+  minimumRole: ProjectRole,
+): Promise<TeamPermissionContext[]> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
+  const readContext: TeamPermissionReadContext = {
+    directory,
+    readProjectAccesses: () => projectAccesses ??= getEffectiveProjectScopeAccessList(principal),
+  }
+  const permitted: TeamPermissionContext[] = []
+  for (const team of directory.teams) {
+    try {
+      permitted.push(await requireTeamPermission(principal, team.id, minimumRole, readContext))
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.status === 403) continue
+      throw error
+    }
+  }
+  return permitted
+}
+
+/**
  * Requires the principal to hold at least the given role on the Work Item's assigned Project.
  *
  * @param principal - Authenticated Workspace principal.

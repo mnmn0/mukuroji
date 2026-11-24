@@ -178,6 +178,37 @@ export type TimePeriodClose = {
   closedAt: string
 }
 
+/** One Team's close state for a month, read by a Workspace administrator. */
+export type WorkspaceTimePeriodTeamState = {
+  /** Team identifier. */
+  teamId: string
+  /** Team name from the Workspace directory, when the server knows it. */
+  name?: string
+  /** The Team's close of the month; absent while the month is open for the Team. */
+  close?: TimePeriodClose
+}
+
+/** Outcome of a Workspace-wide close or reopen for one Team. */
+export type WorkspaceTimePeriodTeamResult = {
+  /** Team identifier. */
+  teamId: string
+  /**
+   * `closed` or `reopened` when this request changed the Team, `already-closed` or `not-closed`
+   * when the Team was already in the requested state, and `failed` when the Team needs a retry.
+   */
+  status: 'closed' | 'already-closed' | 'reopened' | 'not-closed' | 'failed'
+}
+
+/** Result of closing or reopening one month for every Team of a Workspace. */
+export type WorkspaceTimePeriodResult = {
+  /** Month as `YYYY-MM`. */
+  month: string
+  /** Outcome for each Team, in Team order. */
+  results: WorkspaceTimePeriodTeamResult[]
+  /** Whether any Team failed and needs a retry. */
+  partialFailure: boolean
+}
+
 /** A budget for a Team or Project and optional local-date period. */
 export type TimeBudget = {
   /** Contract schema version. */
@@ -284,4 +315,71 @@ export type TimeSheet = {
    * manages and entries without a Project.
    */
   canManageTeam: boolean
+}
+
+/** The caller's own time in one Team of the personal timesheet. */
+export type MyTimesheetTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team display name. */
+  name: string
+  /** The caller's own daily and weekly totals in the Team. */
+  timesheet: TimeSheet
+  /** The caller's own entries in the period, without money fields. */
+  entries: TimeEntry[]
+}
+
+/** The caller's own time across every Team they can view, for one period. */
+export type MyTimesheet = {
+  /** IANA timezone used to split intervals. */
+  timeZone: string
+  /** One row per Team, in directory order. */
+  teams: MyTimesheetTeam[]
+}
+
+/** Result of submitting one Team's part of the personal timesheet. */
+export type MyTimesheetSubmitTeamResult = {
+  /** Team identifier. */
+  teamId: string
+  /** Entries submitted in the Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+  /**
+   * Whether the Team could not be processed at all, for example after losing access; every entry
+   * sent for it is then in `failedEntryIds`.
+   */
+  failed?: boolean
+}
+
+/** One time entry a cross-Team submission names. */
+export type MyTimesheetSubmitEntry = {
+  /** Team the entry is stored in. */
+  teamId: string
+  /** Time entry identifier. */
+  entryId: string
+  /** Revision of the entry the member saw; a newer entry is not submitted. */
+  expectedRevision: number
+}
+
+/** Request body of `POST /api/time-tracking/my-timesheet/submit`. */
+export type MyTimesheetSubmitRequest = {
+  /** Inclusive period start as an ISO 8601 instant. */
+  from: string
+  /** Exclusive period end as an ISO 8601 instant. */
+  to: string
+  /** Entries to submit, 1 to 500; only these are submitted. */
+  entries: MyTimesheetSubmitEntry[]
+}
+
+/** Result of submitting the caller's draft and rejected time in every Team at once. */
+export type MyTimesheetSubmitResult = {
+  /** Entries submitted across every Team. */
+  count: number
+  /** Entries that could not be submitted and need a retry. */
+  failedEntryIds: string[]
+  /** Whether any entry failed. */
+  partialFailure: boolean
+  /** Per-Team results, in the order the Teams first appear in the request. */
+  teams: MyTimesheetSubmitTeamResult[]
 }

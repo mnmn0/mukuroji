@@ -32,6 +32,7 @@
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `InboxDigestDeliveryEnabled` | no | `true`（既定）なら、メンバーが「受信トレイのダイジェスト設定」で同意した Update の日次・週次ダイジェストを scheduled-jobs Lambda が15分おきに受信トレイへ配ります。`false` にすると同意は保存されたまま何も配りません。[ADR 0066](../docs/adr/0066-inbox-digest-scheduled-job.md) を参照してください。 |
 | `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
 | `CognitoEmailSesIdentity` | no | `CognitoEmailSender` を認可する SES の検証済み identity（アドレスかドメイン）。既定値は空で、空なら `CognitoEmailSender` のアドレス自体を使います。ドメインを検証した場合はそのドメインを指定します。 |
 | `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
@@ -982,6 +983,7 @@ credential 再発行を伴う独立した運用として実施してください
 この script は user pool / client / owner を検証し、不足している mutable custom attribute `directory_id` と `workspace_id` を追加して、owner の `custom:directory_id` / `custom:workspace_id` を同じ Workspace ID に設定します。Cognito schema へ追加した custom attribute は削除できないため、値と対象 account を先に確認してください。再実行は同じ値へ収束します。
 
 team 作成・team archive など system-admin 操作も初期 owner に許可する場合は、`SystemAdminGroups` に指定する group へ owner を追加します。Workspace owner row は system-admin group の代替ではありません。
+2 人目以降の追加と交代は、Workspace owner がメンバー管理画面の **システム管理者にする** / **システム管理者を外す** で行えます（ADR 0067）。API は `SystemAdminGroups` の先頭の group へ追加し、解除では設定したすべての group から外します。
 
 ```sh
 export SYSTEM_ADMIN_GROUP=mukuroji-system-admins

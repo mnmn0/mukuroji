@@ -24,6 +24,14 @@ export type WorkItemAcceptanceCriterionInput = {
   satisfied?: boolean
 }
 
+/** One acceptance criterion sent with a new Work Item; the server assigns its ID. */
+export type WorkItemAcceptanceCriterionCreateInput = {
+  /** Condition text. */
+  text: string
+  /** Whether the condition is already met; omitted means not met. */
+  satisfied?: boolean
+}
+
 /** Marks one existing acceptance criterion met or unmet without restating the rest of the list. */
 export type WorkItemAcceptanceCriterionMark = {
   /** ID of an existing criterion. */
