@@ -8,6 +8,7 @@ import {
   reopenTeamTimePeriod,
 } from '../src/features/time-tracking/api/timePeriods'
 import { TimePeriodClosePanel, type TimePeriodClosePanelProps } from '../src/features/time-tracking/ui/TimePeriodClosePanel'
+import { WorkspaceTimePeriodPanel } from '../src/features/time-tracking/ui/WorkspaceTimePeriodPanel'
 import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -67,16 +68,10 @@ function renderPanel(overrides: Partial<TimePeriodClosePanelProps>): string {
       formatMonth={(month) => `M:${month}`}
       formatters={createTimeTrackingFormatters('en')}
       onCloseMonth={reject}
-      onCloseWorkspaceMonth={reject}
       onReopenMonth={reject}
-      onReopenWorkspaceMonth={reject}
       onRetry={() => undefined}
-      onRetryWorkspace={() => undefined}
-      onWorkspaceMonthChange={() => undefined}
       t={t}
-      teamNames={{ 'team-1': 'Growth', 'team-2': 'Platform' }}
       timeZone="Asia/Tokyo"
-      workspaceMonth="2026-07"
       {...overrides}
     />,
   )
@@ -88,12 +83,8 @@ afterEach(() => {
 
 describe('month close API', () => {
   test('reads a Team list with its permissions and rejects a malformed close', async () => {
-    respondWith({ closedPeriods: [julyClose], canManagePeriods: true, canManageWorkspacePeriods: false })
-    expect(await getTeamTimePeriods('token', 'team-1')).toEqual({
-      closedPeriods: [julyClose],
-      canManagePeriods: true,
-      canManageWorkspacePeriods: false,
-    })
+    respondWith({ closedPeriods: [julyClose], canManagePeriods: true })
+    expect(await getTeamTimePeriods('token', 'team-1')).toEqual({ closedPeriods: [julyClose], canManagePeriods: true })
     respondWith({ closedPeriods: [{ ...julyClose, month: 7 }] })
     await expect(getTeamTimePeriods('token', 'team-1')).rejects.toThrow()
   })
@@ -124,18 +115,20 @@ describe('month close API', () => {
     await expect(closeWorkspaceTimePeriod('token', '2026-07', 'UTC')).rejects.toThrow()
   })
 
-  test('reads each Team of a Workspace month', async () => {
-    respondWith({ month: '2026-07', teams: [{ teamId: 'team-1', close: julyClose }, { teamId: 'team-2' }] })
+  test('reads each Team of a Workspace month with its name', async () => {
+    respondWith({ month: '2026-07', teams: [{ teamId: 'team-1', name: 'Growth', close: julyClose }, { teamId: 'team-2' }] })
     expect(await getWorkspaceTimePeriod('token', '2026-07')).toEqual({
       month: '2026-07',
-      teams: [{ teamId: 'team-1', close: julyClose }, { teamId: 'team-2' }],
+      teams: [{ teamId: 'team-1', name: 'Growth', close: julyClose }, { teamId: 'team-2' }],
     })
+    respondWith({ month: '2026-07', teams: [{ teamId: 'team-1', name: 7 }] })
+    await expect(getWorkspaceTimePeriod('token', '2026-07')).rejects.toThrow()
   })
 })
 
 describe('month close view', () => {
   test('a whole-Team manager sees the close form and a reopen action for each closed month', () => {
-    const markup = renderPanel({ periods: { closedPeriods: [julyClose], canManagePeriods: true, canManageWorkspacePeriods: false } })
+    const markup = renderPanel({ periods: { closedPeriods: [julyClose], canManagePeriods: true } })
     expect(markup).toContain('Close this month')
     expect(markup).toContain('type="month"')
     expect(markup).toContain('M:2026-07')
@@ -145,18 +138,27 @@ describe('month close view', () => {
   })
 
   test('another member sees the closed months without actions', () => {
-    const markup = renderPanel({ periods: { closedPeriods: [julyClose], canManagePeriods: false, canManageWorkspacePeriods: false } })
+    const markup = renderPanel({ periods: { closedPeriods: [julyClose], canManagePeriods: false } })
     expect(markup).toContain('Only a manager of the whole Team can close and reopen months.')
     expect(markup).toContain('M:2026-07')
     expect(markup).not.toContain('Close this month')
     expect(markup).not.toContain('Reopen M:2026-07')
   })
 
-  test('a Workspace administrator sees every Team of the month', () => {
-    const markup = renderPanel({
-      periods: { closedPeriods: [], canManagePeriods: false, canManageWorkspacePeriods: true },
-      workspaceState: { month: '2026-07', teams: [{ teamId: 'team-1', close: julyClose }, { teamId: 'team-2' }] },
-    })
+  test('a Workspace administrator sees every Team of the month without any Team access', () => {
+    const reject = async () => { throw new Error('not called') }
+    const markup = renderToStaticMarkup(
+      <WorkspaceTimePeriodPanel
+        onCloseWorkspaceMonth={reject}
+        onReopenWorkspaceMonth={reject}
+        onRetryWorkspace={() => undefined}
+        onWorkspaceMonthChange={() => undefined}
+        t={t}
+        timeZone="Asia/Tokyo"
+        workspaceMonth="2026-07"
+        workspaceState={{ month: '2026-07', teams: [{ teamId: 'team-1', name: 'Growth', close: julyClose }, { teamId: 'team-2', name: 'Platform' }] }}
+      />,
+    )
     expect(markup).toContain('Close for every Team')
     expect(markup).toContain('Reopen for every Team')
     expect(markup).toContain('1 of 2 Teams closed')

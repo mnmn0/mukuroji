@@ -35,7 +35,7 @@ function createFixture(scope: { canManage: boolean; wholeTeam: boolean; workspac
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,
     canManageWorkspacePeriods: async () => scope.workspaceAdmin === true,
-    listWorkspaceTeamIds: async () => scope.teamIds ?? ['team-1', 'team-2'],
+    listWorkspaceTeams: async () => (scope.teamIds ?? ['team-1', 'team-2']).map((teamId) => ({ teamId, name: `Name ${teamId}` })),
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,
@@ -143,10 +143,10 @@ describe('time period close routes', () => {
     expect(await returned.json()).toMatchObject({ entry: { status: 'rejected' } })
   })
 
-  test('the Team list tells whether the caller may close the Team and the whole Workspace', async () => {
+  test('the Team list tells whether the caller may close the Team', async () => {
     const { router } = createFixture({ canManage: true, wholeTeam: false, workspaceAdmin: true })
     const listed = await router.request('/api/teams/team-1/time-periods', { headers })
-    expect(await listed.json()).toEqual({ closedPeriods: [], canManagePeriods: false, canManageWorkspacePeriods: true })
+    expect(await listed.json()).toEqual({ closedPeriods: [], canManagePeriods: false })
   })
 
   test('a Workspace administrator closes and reopens a month for every Team', async () => {
@@ -168,7 +168,10 @@ describe('time period close routes', () => {
     const state = await router.request('/api/time-periods/2026-07', { headers })
     expect(await state.json()).toMatchObject({
       month: '2026-07',
-      teams: [{ teamId: 'team-1', close: { month: '2026-07' } }, { teamId: 'team-2', close: { month: '2026-07' } }],
+      teams: [
+        { teamId: 'team-1', name: 'Name team-1', close: { month: '2026-07' } },
+        { teamId: 'team-2', name: 'Name team-2', close: { month: '2026-07' } },
+      ],
     })
 
     const blocked = await router.request('/api/teams/team-1/time-entries', {

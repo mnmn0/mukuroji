@@ -48,7 +48,7 @@ function createFixture(initial: FixtureScope) {
     getAccessibleProjectIds: async () => undefined,
     canManageWholeTeam: async () => scope.wholeTeam,
     canManageWorkspacePeriods: async () => false,
-    listWorkspaceTeamIds: async () => [],
+    listWorkspaceTeams: async () => [],
     getManagedProjectIds: async () => undefined,
     ...(initial.defaultCurrency ? { readDefaultCurrency: async () => scope.defaultCurrency ?? 'JPY' } : {}),
     verifyProject: async () => {},

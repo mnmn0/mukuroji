@@ -30,6 +30,14 @@ export type TimeTrackingPrincipal = {
   userKey: string
 }
 
+/** A Team covered by a Workspace-wide month close. */
+export type WorkspacePeriodTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team name shown to the administrator. */
+  name: string
+}
+
 /** Dependencies injected into the time tracking HTTP adapter. */
 export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincipal> = {
   /** Reads the bearer token from a request. */
@@ -56,11 +64,12 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
   /**
    * Returns whether the principal may close and reopen months for every Team of the Workspace:
-   * a system administrator or a Workspace owner or administrator.
+   * a system administrator, an Enterprise assignment with `workspace.manage`, or otherwise a
+   * Workspace owner or administrator.
    */
   canManageWorkspacePeriods(principal: Principal): Promise<boolean>
   /** Lists every Team of the principal's Workspace that a Workspace-wide month close covers. */
-  listWorkspaceTeamIds(principal: Principal): Promise<readonly string[]>
+  listWorkspaceTeams(principal: Principal): Promise<readonly WorkspacePeriodTeam[]>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /**
@@ -348,7 +357,6 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       return context.json({
         closedPeriods,
         canManagePeriods: canManage && await dependencies.canManageWholeTeam(principal, teamId),
-        canManageWorkspacePeriods: await dependencies.canManageWorkspacePeriods(principal),
       })
     })
   })
@@ -357,12 +365,21 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withAuthenticated(context, dependencies, async (principal) => {
       await requireWorkspacePeriodManager(dependencies, principal)
       const month = readRequiredString(context.req.param('month'), 'Month')
+      const workspaceTeams = await dependencies.listWorkspaceTeams(principal)
+      const names = new Map(workspaceTeams.map((team) => [team.teamId, team.name]))
       const teams = await dependencies.getTimeTracking().listWorkspacePeriodCloses(
         principal.directoryId,
-        await dependencies.listWorkspaceTeamIds(principal),
+        workspaceTeams.map((team) => team.teamId),
         month,
       )
-      return context.json({ month, teams })
+      // Names come from the Workspace directory, because an administrator may not read every Team.
+      return context.json({
+        month,
+        teams: teams.map((team) => {
+          const name = names.get(team.teamId)
+          return name === undefined ? team : { ...team, name }
+        }),
+      })
     })
   })
 
@@ -372,7 +389,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const body = asRecord(await dependencies.readJson(context.req))
       const result = await dependencies.getTimeTracking().closeWorkspacePeriod({
         workspaceId: principal.directoryId,
-        teamIds: await dependencies.listWorkspaceTeamIds(principal),
+        teamIds: (await dependencies.listWorkspaceTeams(principal)).map((team) => team.teamId),
         month: readRequiredString(context.req.param('month'), 'Month'),
         timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
         actorUserId: principal.userKey,
@@ -389,7 +406,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const body = asRecord(await dependencies.readJson(context.req))
       const result = await dependencies.getTimeTracking().reopenWorkspacePeriod({
         workspaceId: principal.directoryId,
-        teamIds: await dependencies.listWorkspaceTeamIds(principal),
+        teamIds: (await dependencies.listWorkspaceTeams(principal)).map((team) => team.teamId),
         month: readRequiredString(context.req.param('month'), 'Month'),
         actorUserId: principal.userKey,
         reason: typeof body.reason === 'string' ? body.reason : '',

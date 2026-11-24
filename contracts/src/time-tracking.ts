@@ -182,6 +182,8 @@ export type TimePeriodClose = {
 export type WorkspaceTimePeriodTeamState = {
   /** Team identifier. */
   teamId: string
+  /** Team name from the Workspace directory, when the server knows it. */
+  name?: string
   /** The Team's close of the month; absent while the month is open for the Team. */
   close?: TimePeriodClose
 }

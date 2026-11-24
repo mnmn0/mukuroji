@@ -166,10 +166,6 @@ export function TeamTimeTrackingPage() {
     return names
   }, [projectMembers.data?.members])
   const teamProjects = activeTeam?.projects ?? emptyTeamProjects
-  const teamNames = useMemo(
-    () => Object.fromEntries(workspace.teams.map((team) => [team.id, team.name])),
-    [workspace.teams],
-  )
   const projectNames = useMemo(
     () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
     [teamProjects],
@@ -296,7 +292,6 @@ export function TeamTimeTrackingPage() {
               key={`${teamId}:periods`}
               locale={workspace.locale}
               teamId={teamId}
-              teamNames={teamNames}
               timeZone={workspace.timeZone ?? resolveBrowserTimeZone()}
             />
           ) : view === 'monthly-summary' ? (

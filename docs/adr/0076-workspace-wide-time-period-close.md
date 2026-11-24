@@ -21,7 +21,12 @@ Workspace の所有者・管理者とシステム管理者は、`POST /api/time-
 - 月と timezone は、どの Team を変える前にも検証する。
 - 結果は Team ごとに `closed` / `already-closed` / `reopened` / `not-closed` / `failed` を返す。締め済みの Team はそのまま残し、
   失敗した Team があっても残りの Team は処理する。もう一度実行すると残りだけが変わるので、Idempotency-Key は受けない。
-- 権限は Workspace role（owner / admin）かシステム管理者で判定する。Team ごとの締めの権限（Team 全体の manager）は変えない。
+- 権限は Workspace role（owner / admin）かシステム管理者で判定する。Enterprise の割り当てがある利用者は、Workspace role ではなく
+  Workspace に付いた `workspace.manage` で判定し、route の権限表でも `/api/time-periods/*` に `workspace.manage` を求める。
+  Team ごとの締めの権限（Team 全体の manager）は変えない。
+- 各 Team の締め・解除の transaction に、実行者の Workspace membership の ConditionCheck を入れる。途中で権限が変わると、
+  残りの Team は書き込まれず `failed` になる。
+- 画面は Team の工数画面ではなく Workspace 設定に置く。Team の権限を持たない管理者も締められるようにするため。
 
 ## 理由
 

@@ -1,4 +1,4 @@
-import type { TimePeriodClose, WorkspaceTimePeriodResult } from '@mukuroji/contracts'
+import type { TimePeriodClose } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
@@ -15,12 +15,6 @@ const julyClose: TimePeriodClose = {
   closedAt: '2026-08-02T03:00:00.000Z',
 }
 
-const augustWorkspaceClose: WorkspaceTimePeriodResult = {
-  month: '2026-08',
-  results: [{ teamId: 'core-team', status: 'closed' }, { teamId: 'growth-team', status: 'already-closed' }],
-  partialFailure: false,
-}
-
 /** Metadata of the month close stories. */
 const meta = {
   title: 'Application/Time Tracking/Month Close',
@@ -32,16 +26,10 @@ const meta = {
     formatMonth: (month: string) => `${month.slice(0, 4)}年${Number(month.slice(5))}月`,
     timeZone: 'Asia/Tokyo',
     defaultMonth: '2026-08',
-    periods: { closedPeriods: [julyClose], canManagePeriods: true, canManageWorkspacePeriods: false },
+    periods: { closedPeriods: [julyClose], canManagePeriods: true },
     onRetry: fn(),
     onCloseMonth: fn(async () => julyClose),
     onReopenMonth: fn(async () => julyClose),
-    workspaceMonth: '2026-08',
-    onWorkspaceMonthChange: fn(),
-    onRetryWorkspace: fn(),
-    teamNames: { 'core-team': 'コア開発', 'growth-team': 'グロース' },
-    onCloseWorkspaceMonth: fn(async () => augustWorkspaceClose),
-    onReopenWorkspaceMonth: fn(async () => ({ month: '2026-08', results: [], partialFailure: false })),
   },
 } satisfies Meta<typeof TimePeriodClosePanel>
 
@@ -63,24 +51,7 @@ export const Reopen: Story = {
 /** A member who manages only some Projects sees the closed months without actions. */
 export const ReadOnly: Story = {
   args: {
-    periods: { closedPeriods: [julyClose], canManagePeriods: false, canManageWorkspacePeriods: false },
-  },
-}
-
-/** A Workspace administrator closes August for every Team. */
-export const Workspace: Story = {
-  args: {
-    periods: { closedPeriods: [], canManagePeriods: true, canManageWorkspacePeriods: true },
-    workspaceState: {
-      month: '2026-08',
-      teams: [{ teamId: 'core-team' }, { teamId: 'growth-team', close: { ...julyClose, teamId: 'growth-team', month: '2026-08' } }],
-    },
-  },
-  play: async ({ args, canvasElement }) => {
-    const canvas = within(canvasElement)
-    await userEvent.click(canvas.getByRole('button', { name: '全 Team で締める' }))
-    await expect(args.onCloseWorkspaceMonth).toHaveBeenCalledWith('2026-08')
-    await expect(await canvas.findByText('1 Team を締めました（締め済みだった Team: 1）。')).toBeInTheDocument()
+    periods: { closedPeriods: [julyClose], canManagePeriods: false },
   },
 }
 

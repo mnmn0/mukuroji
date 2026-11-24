@@ -18,8 +18,6 @@ export type TeamTimePeriods = {
   closedPeriods: TimePeriodClose[]
   /** Whether the caller manages the whole Team and may close or reopen its months. */
   canManagePeriods: boolean
-  /** Whether the caller may close or reopen a month for every Team of the Workspace. */
-  canManageWorkspacePeriods: boolean
 }
 
 /** One month's close state across the Workspace's Teams. */
@@ -108,7 +106,6 @@ export async function getTeamTimePeriods(accessToken: string, teamId: string): P
   return {
     closedPeriods: closedPeriods.filter((close) => close !== undefined),
     canManagePeriods: data.canManagePeriods === true,
-    canManageWorkspacePeriods: data.canManageWorkspacePeriods === true,
   }
 }
 
@@ -177,13 +174,15 @@ export async function getWorkspaceTimePeriod(accessToken: string, month: string)
   const teams: WorkspaceTimePeriodTeamState[] = []
   for (const team of data.teams) {
     if (!isRecord(team) || typeof team.teamId !== 'string') throw createInvalidTimeTrackingResponseError('Workspace time period')
+    if (team.name !== undefined && typeof team.name !== 'string') throw createInvalidTimeTrackingResponseError('Workspace time period')
+    const named = typeof team.name === 'string' ? { teamId: team.teamId, name: team.name } : { teamId: team.teamId }
     if (team.close === undefined) {
-      teams.push({ teamId: team.teamId })
+      teams.push(named)
       continue
     }
     const close = readTimePeriodClose(team.close)
     if (!close) throw createInvalidTimeTrackingResponseError('Workspace time period')
-    teams.push({ teamId: team.teamId, close })
+    teams.push({ ...named, close })
   }
   return { month: data.month, teams }
 }
