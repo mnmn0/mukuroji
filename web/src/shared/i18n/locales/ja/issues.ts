@@ -118,5 +118,9 @@ export const issuesMessages = {
   'issues.error.update': 'Issue を更新できませんでした',
   'issues.error.conflict': '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。',
   'issues.error.openChildren': '完了かキャンセルになっていない子 Work Item があるため、このチームでは完了にできません。先に子を完了かキャンセルにしてください。',
+  'issues.error.workflowRule.actor': 'この状態への変更は {roles} だけが Web から行えます。',
+  'issues.error.workflowRule.fields': 'この状態に移すには次の項目を入力してください: {fields}',
+  'issues.error.workflowRule.or': '、',
+  'issues.error.workflowRule.separator': '、',
   'issues.error.comment': 'コメントを追加できませんでした',
 } as const

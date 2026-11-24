@@ -51,6 +51,7 @@ import {
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import {
   WorkItemCompletionGateError,
+  WorkflowRuleError,
   WorkItemConfigurationError,
   getWorkItemTypeCustomFieldDefinitions,
   previewWorkItemTypeChange,
@@ -207,7 +208,10 @@ import {
   readWorkItemEffortChange,
   withWorkItemPlannedEffort,
 } from '../shared/work-item-effort'
-import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
+import {
+  CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
+  prepareConfiguredCreateWorkItem,
+} from '../shared/work-item-configuration'
 import { applySharedCalendarToSchedule, readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -923,6 +927,7 @@ async function createCanonicalPublicWorkItem(
     teamId,
     body,
     resolvedConfiguration,
+    CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
   )
   const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
@@ -1138,6 +1143,7 @@ export async function updateCanonicalPublicWorkItem(
     detail.issue,
     body,
     resolvedConfiguration,
+    CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
     // Marks bypass the normalized body, so the completion Gate reads them from the request.
     'acceptanceCriteriaMarks' in input ? { acceptanceCriteriaMarks: input.acceptanceCriteriaMarks } : {},
   )
@@ -2389,6 +2395,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           detail.issue,
           body,
           configuration,
+          CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
         )
         const idempotencyTransaction: WorkItemIdempotencyTransaction | undefined =
           developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite
@@ -2873,6 +2880,7 @@ async function validatePublicImport(
         input.teamId,
         normalized,
         configuration,
+        CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configured)
       let assigneeValidation = assigneeValidations.get(assigneeUserId)
@@ -3465,6 +3473,30 @@ function mapPublicApiAdapterError(error: unknown) {
       error.status >= 500 ? 'temporarily_unavailable' : 'validation_failed',
       error.message,
       error.status >= 500,
+    )
+  }
+  if (error instanceof WorkflowRuleError) {
+    // An actor rule is `forbidden` and a required field `conflict`; each unmet rule is one entry.
+    const forbidden = error.status === 403
+    return new PublicApiServiceError(
+      forbidden ? 403 : 409,
+      forbidden ? 'forbidden' : 'conflict',
+      error.message,
+      false,
+      error.unmetConditions.map((condition) => ({
+        // The pointer names the field to fill, so an agent can act on it without reading the message.
+        pointer: condition.rule === 'transition-actor'
+          ? '/workflowStatusId'
+          : condition.rule === 'required-custom-field'
+            ? `/customFieldValues/${condition.customFieldId}`
+            : condition.field === 'due-date' ? '/schedule' : '/acceptanceCriteria',
+        code: condition.rule === 'transition-actor' ? 'transition_actor_denied' : 'status_field_required',
+        message: `${condition.rule === 'required-custom-field'
+          ? condition.customFieldId
+          : condition.rule === 'required-field'
+            ? condition.field
+            : condition.allowedActorRoles.join(',')}: ${condition.message}`,
+      })),
     )
   }
   if (error instanceof WorkItemCompletionGateError) {

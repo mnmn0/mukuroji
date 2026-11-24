@@ -83,6 +83,11 @@ agent は次の順で操作します。
    `heartbeat` で作業中であることを知らせる。状態を進めるときは `move_task`。
 4. **完了**: `complete_task` でタスクを完了にし、`finish_run` で Run を終える（中断・失敗の場合もここで記録する）。
 
+Team のワークフローで実行できる役割を限った遷移（例: 「承認済み」へ）は、agent からは実行できません。
+`move_task` や `complete_task` が拒否されたら、人に状態の変更を頼みます。状態ごとの必須項目が空で拒否されたときは、
+足りない項目（`/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）がエラーに示されるので、
+`update_task` で埋めてから新しい `idempotencyKey` でやり直します。
+
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
 `get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
 agent は `read_document` で本文を Markdown として読みます。

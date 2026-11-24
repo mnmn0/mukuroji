@@ -283,9 +283,11 @@ import {
   summarizeAccessibleWorkItems,
 } from '../shared/work-item-aggregate-read'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   getWorkItemConfigurationTableName,
   prepareConfiguredCreateWorkItem,
+  type WorkflowRulePrincipal,
 } from '../shared/work-item-configuration'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
@@ -1268,6 +1270,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  decider: WorkflowRulePrincipal,
 ): Promise<FileApprovalCompletionTransition | undefined> {
   try {
     return await resolveFileApprovalCompletionTransition(
@@ -1275,6 +1278,7 @@ async function resolveFileApprovalCompletionTransitionForDecision(
       teamId,
       workItem,
       completionTransition,
+      decider,
     )
   } catch (error) {
     if (
@@ -3884,6 +3888,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         conversion.target.teamId,
         conversionInput,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, teamContext),
         { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
       )
       const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
@@ -4773,6 +4778,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         teamId,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
       const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
       await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
@@ -5228,6 +5234,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         detail.issue,
         body,
         resolvedConfiguration,
+        createPersonWorkflowRulePrincipal(principal, context),
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
@@ -5973,11 +5980,15 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const resolveCompletionTransition: FileApprovalCompletionTransitionResolver = async (
         completionTransition,
       ) => {
+        // The decider changes the status, so the workflow's transition actor roles apply to them.
+        // A reviewer may only view the Team, so the context is read at the lowest role.
+        const deciderContext = await requireTeamPermission(principal, scope.teamId, 'viewer')
         const resolved = await resolveFileApprovalCompletionTransitionForDecision(
           principal.directoryId,
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
+          createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
         resolvedCompletionTransition = resolved
         return resolved

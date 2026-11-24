@@ -1,3 +1,4 @@
+import { describeWorkflowRuleRejection } from '../model/workflowRuleErrors'
 import type {
   TeamTaskViewScope,
   WorkItemActionContext,
@@ -931,6 +932,7 @@ export function TeamIssueScreen({
         failed: t('taskViews.action.failed'),
         unavailable: teamActionDisabledReasons.unavailable,
         openChildren: t('issues.error.openChildren'),
+          describeWorkflowRule: (error) => describeWorkflowRuleRejection(error, t),
       },
     ) ?? createFailedTaskActionResult(
       context.actionId,

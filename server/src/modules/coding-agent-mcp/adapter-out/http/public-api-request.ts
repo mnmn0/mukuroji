@@ -5,8 +5,28 @@ import { AgentTaskError } from '../../application/work-item-api'
 
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
-  errors: z.array(z.object({ code: z.string() })).max(20).optional(),
+  errors: z.array(z.object({ code: z.string(), pointer: z.string().max(300).optional() })).max(20).optional(),
 })
+
+/** Field pointers a workflow status can require; only these are forwarded, never remote text. */
+const REQUIRED_FIELD_POINTER = /^\/(?:schedule|acceptanceCriteria|customFieldValues\/[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)$/i
+
+/**
+ * Builds safe guidance for a status change the Team's workflow rules rejected.
+ *
+ * @param errors - Problem violations, already bounded by the schema.
+ * @returns Guidance, or `undefined` when no workflow rule was reported.
+ */
+function describeWorkflowRuleProblem(errors: readonly { code: string, pointer?: string }[] | undefined) {
+  if (errors?.some((error) => error.code === 'transition_actor_denied')) {
+    return 'The Team\'s workflow lets only a person with the required role (Project manager or assignee) make this status change; agents and API credentials cannot. Ask the user to move the task.'
+  }
+  const fields = (errors ?? [])
+    .filter((error) => error.code === 'status_field_required' && error.pointer !== undefined && REQUIRED_FIELD_POINTER.test(error.pointer))
+    .map((error) => error.pointer)
+  if (fields.length === 0) return undefined
+  return `The target status requires fields that are empty: ${fields.join(', ')}. Fill them with update_task (or ask the user) and change the status again with a new idempotencyKey.`
+}
 /** Safe guidance for Agent Run fence reasons; remote detail text is never forwarded. */
 const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string> = {
   agent_run_conflict: 'Another agent instance holds this task. Inspect it with get_task and ask the user before continuing; take it over only when the user asks and its run is stalled.',
@@ -52,10 +72,12 @@ async function readProblem(response: Response) {
     const parsed = problemSchema.safeParse(JSON.parse(await readBody(response, 64 * 1024)))
     if (!parsed.success || parsed.data.status !== response.status) return undefined
     const reason = AGENT_RUN_PROBLEM_REASONS.find((candidate) => parsed.data.errors?.some((error) => error.code === candidate))
+    const workflowRule = describeWorkflowRuleProblem(parsed.data.errors)
     return {
       idempotencyConflict: response.status === 409 && parsed.data.code === 'idempotency_conflict',
       retryable: parsed.data.retryable,
       ...(reason === undefined ? {} : { reason }),
+      ...(workflowRule === undefined ? {} : { workflowRule }),
     }
   } catch {
     return undefined
@@ -147,6 +169,9 @@ export function createPublicApiRequest(
         const retrySeconds = retry && /^\d{1,6}$/.test(retry) ? Number(retry) : undefined
         if (problem?.reason) {
           throw new AgentTaskError(problem.reason, `Public API returned HTTP ${response.status}. ${reasonMessages[problem.reason]}`)
+        }
+        if (problem?.workflowRule) {
+          throw new AgentTaskError(response.status === 403 ? 'forbidden' : 'conflict', `Public API returned HTTP ${response.status}. ${problem.workflowRule}`)
         }
         const idempotencyRetry = problem?.idempotencyConflict === true && problem.retryable
         const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'forbidden' :

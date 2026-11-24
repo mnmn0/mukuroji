@@ -23,6 +23,7 @@ import type { MutationAuditContext } from '../../modules/audit/audit'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { projectWorkItemSearchDocumentBestEffort } from '../shared/document-access'
 import { prepareConfiguredUpdateWorkItem } from '../shared/file-approval-access'
+import { CREDENTIAL_WORKFLOW_RULE_PRINCIPAL } from '../shared/work-item-configuration'
 import {
   createPlanningCallerAuthorizationConditionChecks,
   readPlanningWorkItemState,
@@ -453,7 +454,16 @@ async function replaceImportAcceptanceCriteria(
     expectedRevision: detail.issue.revision,
   }
   const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(directoryId, teamId)
-  const configuredBody = await prepareConfiguredUpdateWorkItem(directoryId, teamId, detail.issue, body, resolvedConfiguration)
+  const configuredBody = await prepareConfiguredUpdateWorkItem(
+    directoryId,
+    teamId,
+    detail.issue,
+    body,
+    resolvedConfiguration,
+    // The import writes acceptance criteria only and never changes a status, so the import is judged
+    // like any non-interactive caller.
+    CREDENTIAL_WORKFLOW_RULE_PRINCIPAL,
+  )
   const acceptanceCriteria = readAcceptanceCriteriaChange(configuredBody, existing, false)
   const response = await workItemDependencies.teamIssues.updateTeamIssue(
     directoryId,

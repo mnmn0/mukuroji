@@ -5,6 +5,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyedMutator } from 'swr'
+import { describeWorkflowRuleRejection } from '../../issues/model/workflowRuleErrors'
 import { TeamIssuesApiError, updateTeamIssue } from '../../issues/api'
 import {
   confirmParentCompletion,
@@ -218,7 +219,8 @@ export function useWorkspaceTaskStatusMutation({
           setErrorMessage(t('issues.error.openChildren'))
         }
       } else {
-        setErrorMessage(t('workspace.myTasks.moveError'))
+        // A workflow rule rejection says which role or field is missing instead of a generic failure.
+        setErrorMessage(describeWorkflowRuleRejection(error, t) ?? t('workspace.myTasks.moveError'))
       }
 
       throw error

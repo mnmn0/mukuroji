@@ -182,6 +182,8 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
+  createPersonWorkflowRulePrincipal,
   prepareConfiguredCreateWorkItem,
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
@@ -1058,6 +1060,7 @@ function createApiBulkOperationAdapter(
             principal.directoryId,
             loaded.item.teamId,
           ),
+          createPersonWorkflowRulePrincipal(principal, loaded.context),
         )
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
@@ -1326,6 +1329,7 @@ function createApiBulkOperationAdapter(
               principal.directoryId,
               item.teamId,
             ),
+            createPersonWorkflowRulePrincipal(principal, loaded.context),
           )
       if ('assigneeUserId' in configuredBody) {
         await requireActiveWorkspaceAssignee(
@@ -1779,6 +1783,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
     ),
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     { relationDependencies: dependencies },
   )
   if ('assigneeUserId' in configuredBody) {
@@ -2038,6 +2043,7 @@ async function executeAutomationWorkItemCreate(
       context.execution.workspaceId,
       teamId,
     ),
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(

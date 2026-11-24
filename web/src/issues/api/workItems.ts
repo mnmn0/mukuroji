@@ -38,6 +38,7 @@ import {
   defaultIssuesApiErrorMessage,
   readApiError,
   readJson,
+  readWorkflowRuleConditions,
 } from './http'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -577,7 +578,7 @@ async function requestJson<TResponse>(
   if (!response.ok) {
     const error = readApiError(data)
 
-    throw new TeamIssuesApiError(response.status, error.message, error.code)
+    throw new TeamIssuesApiError(response.status, error.message, error.code, readWorkflowRuleConditions(data))
   }
 
   return data as TResponse

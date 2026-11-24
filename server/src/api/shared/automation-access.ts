@@ -36,6 +36,7 @@ import {
 } from './work-item-access'
 import {
   assertWorkItemConfigurationUsage,
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
@@ -397,6 +398,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         team,
       ),
       { configuration },
+      AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     )
     await requireActiveWorkspaceAssignee(
       directoryId,

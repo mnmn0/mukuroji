@@ -229,6 +229,27 @@ Configuration の `completionGate` は、Work Item が completed category の st
 
 CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、Web の設定画面と達成状況の表示、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
 
+### 遷移を実行できる役割と状態ごとの必須項目
+
+Workflow の transition は任意の `allowedActorRoles`（`project-manager`、`assignee`）を、status は任意の `requiredFields`（`due-date`、`acceptance-criteria`）と `requiredCustomFieldIds` を持てる。どれも省略または空のとき従来どおり何も検証しない（空の配列は保存時に取り除く）。`requiredCustomFieldIds` は configuration の custom field を指し、数式 field は指せない。どの Work Item にも担当者がいるので、担当者は必須項目に含めない（[ADR 0085](adr/0085-workflow-transition-actor-roles-and-status-requirements.md)）。
+
+| 規則 | 満たす状態 |
+| --- | --- |
+| `allowedActorRoles` | 人が Web から操作し、次のどれかに当たる。`project-manager`: Work Item の Project（Project を移す更新では移す前と後の両方）の manager。Project のない Work Item では Team の manager（いずれかの Project の manager か `teams.manage`）。system admin は満たす。`assignee`: 変更前の担当者。同じ更新で自分を担当者にしても満たさない。 |
+| `requiredFields` / `requiredCustomFieldIds` | 同じ更新で送る値を反映した後に、期限（schedule の期限か終了日）がある・受け入れ条件が 1 件以上ある・custom field に空でない値がある。 |
+
+判定は status が変わるときだけ行う。同じ status のままの編集は止めない。遷移の分からない変更（初期状態以外での作成、別 workflow の Type への変更）は、その status に入る transition のうち最も制限の弱いものを使う。制限のない transition が 1 本でもあれば誰でも入れ、どの transition も入らない status は制限しない。初期状態での作成は status の変更ではないので、必須項目も判定しない。
+
+自動化（Automation の action、Project template の展開）と developer credential（Public API、MCP、agent）は、credential の持ち主が manager でも `allowedActorRoles` を満たさない。人が判断する工程を表すための設定だからである。Web の一括操作とその取り消しは操作した人として判定し、承認の決定で status が変わるときは決定した人として判定する（承認の依頼は status を変えないので判定しない）。
+
+拒否したときの応答は経路で形が異なる。
+
+- Team の API は役割の不足を `403` と `code: "WorkflowTransitionActorDenied"`、必須項目の不足を `409` と `code: "WorkflowStatusRequirementsNotMet"` で返す。どちらも `unmetConditions`（`rule` が `transition-actor` / `required-field` / `required-custom-field` の配列、役割の不足を先に置く）を持つ（`WorkflowRuleErrorResponse`）。役割と必須項目の両方が足りないときは `403` に両方を入れる。
+- Public API は共通の error 形式に写し、役割の不足は `403`、`code: "forbidden"`、必須項目の不足は `409`、`code: "conflict"` を返す（`retryable: false`）。満たされない規則ごとに `errors[]` へ `code: "transition_actor_denied"`（`pointer: "/workflowStatusId"`）または `code: "status_field_required"`（`pointer` は `/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）を入れる。`ApiProblem.code` の enum は広げない。
+- MCP は remote の文言を転送せず、`transition_actor_denied` なら人に頼むよう案内し、`status_field_required` なら形式を確かめた `pointer` だけを示す。
+
+判定に使う役割は request の認可で読んだ Team の権限 context から求め、更新の transaction は既存の認可 snapshot と configuration guard で固定する。規則の変更は他の configuration と同じく監査に残る（workflow の policy hash に含まれる）。
+
 ### Reciprocal transaction と graph CAS
 
 Team scope の `RELATION_GRAPH` row は `schemaVersion=1`、単調増加 `revision`、Team の directed relation row 数 `edgeCount` を持つ。Row が無い graph は revision `0` と解釈する。Relation list response は `graphRevision` を返し、作成/削除 input は `expectedGraphRevision` を必須にする。

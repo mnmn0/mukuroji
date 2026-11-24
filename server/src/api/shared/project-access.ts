@@ -39,6 +39,7 @@ import {
   createWorkspaceMutationContextForActor,
   findTeamProjectAccess,
   projectAccessAllows,
+  projectAccessAppliesToTeam,
   type TeamPermissionContext,
   type TeamPermissionReadContext,
   toWorkspaceAccessErrorResponse,
@@ -1286,6 +1287,47 @@ export function canAccessAssignedProject(
   const projectAccess = findTeamProjectAccess(context, assignedProjectId)
 
   return projectAccess !== undefined && projectAccessAllows(projectAccess, minimumRole)
+}
+
+/**
+ * Checks whether the principal manages a Work Item for workflow transition rules.
+ *
+ * A Work Item in a Project needs the manager role on that Project. A Work Item without a Project needs
+ * the manager role on the Team, which is a manager role on any of its Projects or the enterprise
+ * `teams.manage` permission. The context may have been resolved for a lower role, so the enterprise
+ * permission is read from the principal again.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Team permission context of the principal.
+ * @param projectId - Project the Work Item is assigned to, if any.
+ * @returns `true` when the principal manages the Work Item.
+ */
+export function principalManagesTeamWorkItem(
+  principal: ProjectPrincipal,
+  context: TeamPermissionContext,
+  projectId: string | undefined,
+): boolean {
+  if (principal.isSystemAdmin) return true
+  const teamId = context.team.id
+  if (
+    principal.enterpriseTeamAccesses?.some((access) =>
+      access.teamId === teamId && access.permissions.includes('teams.manage')) ||
+    principal.enterpriseRouteAuthorizedAtResource &&
+      (
+        principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+        principal.enterpriseAuthorizationResource?.kind === 'team' &&
+          principal.enterpriseAuthorizationResource.targetId === teamId
+      ) &&
+      principal.enterprisePermissions?.includes('teams.manage')
+  ) {
+    return true
+  }
+  if (projectId) {
+    const access = findTeamProjectAccess(context, projectId)
+    return access !== undefined && projectAccessAllows(access, 'manager')
+  }
+  return context.projectAccesses?.some((access) =>
+    projectAccessAppliesToTeam(access, teamId) && projectAccessAllows(access, 'manager')) ?? false
 }
 
 /**
