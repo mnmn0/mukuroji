@@ -55,7 +55,10 @@ const settingsPanelLabelKeys: Record<SettingsPanelId, MessageKey> = {
   'developer-platform': 'workspace.settings.panel.developer-platform',
   'automation': 'workspace.settings.panel.automation',
   'audit-log': 'workspace.settings.panel.audit-log',
+  'team-profile': 'workspace.settings.panel.team-profile',
   'work-item-configuration': 'workspace.settings.panel.work-item-configuration',
+  'work-calendar': 'workspace.settings.panel.work-calendar',
+  'work-item-key-prefix': 'workspace.settings.panel.work-item-key-prefix',
   'agent-settings': 'workspace.settings.panel.agent-settings',
 }
 

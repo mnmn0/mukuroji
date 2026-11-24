@@ -63,7 +63,10 @@ export type SettingsPanelId =
   | 'developer-platform'
   | 'automation'
   | 'audit-log'
+  | 'team-profile'
   | 'work-item-configuration'
+  | 'work-calendar'
+  | 'work-item-key-prefix'
   | 'agent-settings'
 
 /**

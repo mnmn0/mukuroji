@@ -30,7 +30,8 @@ export type WeeklyReportReaderSources = {
   /** Lists a Workspace's Team rosters from the Project Directory. */
   readTeamRosters(workspaceId: string): Promise<WeeklyReportTeamRoster[]>
   /**
-   * Reads active members' display names by lower-cased member key; undefined means no name.
+   * Reads members' display names, deactivated members included, by lower-cased member key;
+   * undefined means no name.
    * Project member rows keep the name they were written with, so these names replace them.
    */
   readMemberNames?(workspaceId: string): Promise<ReadonlyMap<string, string | undefined>>
@@ -66,6 +67,29 @@ export function createWeeklyReportReader(sources: WeeklyReportReaderSources): Sc
       return new Set([...weeks].flatMap(([memberKey, week]) => week.submissionCount > 0 ? [memberKey] : []))
     },
   }
+}
+
+/**
+ * Builds the weekly report reader's member name source from the Workspace member rows.
+ *
+ * Deactivated members are read too: a Project member row can outlive the Workspace membership, and
+ * that writer must still be named by its current name rather than the one the Project row kept.
+ *
+ * @param workspaceAccess - Workspace member store.
+ * @returns Reader of display names by lower-cased member key; undefined means no name.
+ */
+export function createWorkspaceMemberNameReader(
+  workspaceAccess: {
+    /** Lists every member row of a Workspace, deactivated members included. */
+    listMembers(workspaceId: string): Promise<readonly { memberKey: string; name?: string }[]>
+  },
+): (workspaceId: string) => Promise<ReadonlyMap<string, string | undefined>> {
+  return async (workspaceId) => new Map(
+    (await workspaceAccess.listMembers(workspaceId)).map((member) => [
+      member.memberKey.trim().toLowerCase(),
+      member.name?.trim() || undefined,
+    ]),
+  )
 }
 
 /**

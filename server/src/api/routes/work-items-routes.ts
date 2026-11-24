@@ -3235,8 +3235,10 @@ async function readIssueAssigneeProfiles(directoryId: string, issues: TeamIssueR
 }
 
 /**
- * Reads Cognito profiles for assignee IDs, skipping users that no longer exist.
+ * Reads Cognito profiles for assignee IDs, skipping users that no longer exist, with the display
+ * names from the Workspace member rows. Neither read fails the caller.
  *
+ * @param directoryId - Workspace ID, whose member rows hold the display names.
  * @param assigneeIds - Assignee user IDs, possibly repeated.
  * @returns Profiles keyed by assignee ID.
  */
@@ -3261,10 +3263,22 @@ async function readAssigneeProfiles(directoryId: string, assigneeIds: readonly s
   if (profiles.size === 0) return profiles
 
   // Members rename themselves on their Workspace member row (ADR 0074), so Cognito keeps the name
-  // from sign-up. The member row's name wins, and a cleared name falls back to the email.
-  const workspaceNames = await readWorkspaceMemberNames(directoryId)
+  // from sign-up. The member row's name wins, and a cleared name falls back to the email. Create
+  // and update responses read this after the change is saved, so a failed read must not turn a
+  // saved change into an error: the assignees then show by email instead of a possibly stale name.
+  const workspaceNames = await readWorkspaceMemberNames(directoryId).catch((error: unknown) => {
+    console.warn('Failed to read Workspace member names for issue assignees:', {
+      code: error instanceof WorkspaceAccessError ? error.code : error instanceof Error ? error.name : 'Unknown',
+    })
+    return undefined
+  })
   for (const [userId, profile] of profiles) {
     const key = profile.email.trim().toLowerCase()
+    if (workspaceNames === undefined) {
+      const { name: _staleName, ...withoutName } = profile
+      profiles.set(userId, withoutName)
+      continue
+    }
     if (!workspaceNames.has(key)) continue
     const name = workspaceNames.get(key)
     const next: CognitoUserProfile = { ...profile }

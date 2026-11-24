@@ -90,7 +90,7 @@ import { isRecord } from '../shared/value-guards'
 import { readWorkspaceCalendarSettingsOf } from '../shared/workspace-calendar'
 import {
   projectAccessAllows,
-  readWorkspaceMemberNames,
+  readWorkspaceMemberNamesForDisplay,
   toWorkspaceAccessErrorResponse,
 } from '../shared/workspace-access'
 
@@ -274,7 +274,10 @@ async function readAnalyticsExportNames(
 /**
  * Reads the display names of the members of the given Projects.
  *
- * Stops reading Projects once every wanted member has a name.
+ * Only members found on a readable Project get a name, so a filter on someone outside the
+ * principal's Projects never prints that person's name. Renamed members keep their old name on
+ * Project rows (ADR 0074), so the Workspace member row's name comes first; when the Workspace read
+ * fails, the Project row's name is used. Stops reading Projects once every wanted member is found.
  *
  * @param principal - Authenticated principal.
  * @param teams - Visible Teams with their readable Projects.
@@ -290,18 +293,10 @@ async function readAnalyticsExportMemberNames(
     team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
   )
   const names = new Map<string, string>()
-  // Renamed members keep their old name on Project rows, so the Workspace member row comes first.
-  const resolved = new Set<string>()
-  const workspaceNames = await readWorkspaceMemberNames(principal.directoryId)
-  for (const memberKey of memberKeys) {
-    const normalizedKey = memberKey.trim().toLowerCase()
-    if (!workspaceNames.has(normalizedKey)) continue
-    resolved.add(memberKey)
-    const name = workspaceNames.get(normalizedKey)
-    if (name) names.set(memberKey, name)
-  }
+  const found = new Set<string>()
+  const workspaceNames = await readWorkspaceMemberNamesForDisplay(principal.directoryId)
   for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
-    if ([...memberKeys].every((key) => resolved.has(key) || names.has(key))) break
+    if ([...memberKeys].every((key) => found.has(key))) break
     const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
     const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
       workspaceDependencies.projectDirectory.getProjectMembers(
@@ -313,10 +308,13 @@ async function readAnalyticsExportMemberNames(
     for (const response of responses) {
       if (response.status !== 'fulfilled') continue
       for (const member of response.value.members) {
-        const name = member.name?.trim()
-        if (name && memberKeys.has(member.id) && !resolved.has(member.id) && !names.has(member.id)) {
-          names.set(member.id, name)
-        }
+        if (!memberKeys.has(member.id) || found.has(member.id)) continue
+        const normalizedKey = member.id.trim().toLowerCase()
+        const name = workspaceNames?.has(normalizedKey)
+          ? workspaceNames.get(normalizedKey)
+          : member.name?.trim()
+        if (workspaceNames?.has(normalizedKey) || name) found.add(member.id)
+        if (name) names.set(member.id, name)
       }
     }
   }

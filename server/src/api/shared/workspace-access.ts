@@ -308,3 +308,24 @@ export async function readWorkspaceMemberNames(
     member.name?.trim() || undefined,
   ]))
 }
+
+/**
+ * Reads Workspace member names for a display that can still be shown without them.
+ *
+ * A failed read (for example a throttled Query) yields undefined so the caller keeps the names it
+ * already has. Invalid stored member rows still throw, because they are a data error rather than an
+ * outage, and hiding them would show names the Workspace no longer holds.
+ *
+ * @param directoryId - Workspace ID.
+ * @returns Name per member as in {@link readWorkspaceMemberNames}, or undefined when the read failed.
+ */
+export async function readWorkspaceMemberNamesForDisplay(
+  directoryId: string,
+): Promise<Map<string, string | undefined> | undefined> {
+  try {
+    return await readWorkspaceMemberNames(directoryId)
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError && error.code === 'InvalidWorkspaceAccessData') throw error
+    return undefined
+  }
+}

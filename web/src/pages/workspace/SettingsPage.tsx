@@ -62,6 +62,7 @@ export function SettingsPage() {
             auditLog: workspace.canReadAuditLog || workspace.canExportAuditLog,
             workspaceConfiguration: workspace.canManageWorkspaceConfiguration,
             softwareFactory: workspace.softwareFactoryEnabled,
+            teamManagement: workspace.canManageTeams,
           })}
           t={t}
         />
@@ -223,7 +224,9 @@ export function SettingsPage() {
         {section === 'team' && workspace.accessToken ? (
           <>
             {workspace.canManageTeams ? (
-              <TeamProfilePanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
+              <SettingsPanelAnchor panel="team-profile">
+                <TeamProfilePanelContainer accessToken={workspace.accessToken} locale={workspace.locale} />
+              </SettingsPanelAnchor>
             ) : null}
             <SettingsPanelAnchor panel="work-item-configuration">
               <WorkItemConfigurationPanelContainer
@@ -236,16 +239,20 @@ export function SettingsPage() {
                 teams={workspace.teams}
               />
             </SettingsPanelAnchor>
-            <WorkCalendarPanelContainer
-              accessToken={workspace.accessToken}
-              locale={workspace.locale}
-              teams={workspace.teams}
-            />
-            <WorkItemKeyPrefixPanelContainer
-              accessToken={workspace.accessToken}
-              locale={workspace.locale}
-              teams={workspace.teams}
-            />
+            <SettingsPanelAnchor panel="work-calendar">
+              <WorkCalendarPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
+            <SettingsPanelAnchor panel="work-item-key-prefix">
+              <WorkItemKeyPrefixPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
             {workspace.softwareFactoryEnabled ? (
               <SettingsPanelAnchor panel="agent-settings">
                 <AgentSettingsPanelContainer
@@ -275,6 +282,8 @@ type SettingsPanelAvailability = {
   workspaceConfiguration: boolean
   /** Whether the Software factory is enabled. */
   softwareFactory: boolean
+  /** Whether the member manages Teams, which shows the Team profile panel. */
+  teamManagement: boolean
 }
 
 /**
@@ -310,7 +319,10 @@ function listSettingsPanels(
           signedIn && available.auditLog && 'audit-log',
         ]
       : [
+          signedIn && available.teamManagement && 'team-profile',
           signedIn && 'work-item-configuration',
+          signedIn && 'work-calendar',
+          signedIn && 'work-item-key-prefix',
           signedIn && available.softwareFactory && 'agent-settings',
         ]
   return panels.filter((panel) => panel !== false).map((panel) => ({ panel, section }))

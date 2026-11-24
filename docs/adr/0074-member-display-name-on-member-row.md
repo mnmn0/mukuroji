@@ -31,6 +31,13 @@ directory（SCIM）連携の member は、reconcile のたびに directory の�
 - 応答が届かず同じ `Idempotency-Key` で再送された変更は、同じ transaction で書いた audit event
   （ID は idempotency key から決まり、request fingerprint は名前と `expectedVersion` を含む）で検出し、409 にせず保存後の member を返す。
   同じ key で別の名前を送った場合は 409 `WorkspaceIdempotencyConflict` にする。
+  今と同じ名前を送った変更も member row は変えずに、version の ConditionCheck と項目の変更がない
+  audit event を書き、key を入力に結び付ける。
+- 名前を表示に足すだけの読み取り（Work Item の担当者、Factory board、Analytics の export）は、
+  Workspace member row を読めなかったときも応答を失敗にしない。Work Item と board の担当者は
+  古いかもしれない Cognito の名前を出さずメールで、export は Project row の名前で出す。
+  export が名前を出すのは閲覧できる Project にいる member だけにする。
+- 週報の roster は無効化された member の名前も Workspace member row から読む。
 - 名前は前後の空白を除いて 128 文字まで、制御文字を含めない。空は名前を消し、メールで表示する。
 - Cognito の `name` 属性は変えない。ログインで上書きされず、Cognito への書き込みと IAM 権限を増やさずに済む。
 - 変更は監査ログに `member.renamed` として書く。名前は既存の member 監査と同じく伏せる。

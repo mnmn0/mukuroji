@@ -7,7 +7,7 @@ import {
 import { DynamoDbTenantAdministrationClient } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWeeklyReportStore } from '../../modules/weekly-reports'
-import { createWeeklyReportReader } from './weekly-report-reminders'
+import { createWeeklyReportReader, createWorkspaceMemberNameReader } from './weekly-report-reminders'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
 import { createTimesheetReader } from './timesheet-reminders'
@@ -105,12 +105,7 @@ export function createProductionNotificationScheduleHandler() {
         documentClient,
         tableName: projectDirectoryTableName,
       }),
-      readMemberNames: async (workspaceId) => new Map(
-        (await workspaceAccess.listActiveMembers(workspaceId)).map((member) => [
-          member.memberKey.trim().toLowerCase(),
-          member.name?.trim() || undefined,
-        ]),
-      ),
+      readMemberNames: createWorkspaceMemberNameReader(workspaceAccess),
     }),
   )
   return createRetentionAwareNotificationScheduleHandler(

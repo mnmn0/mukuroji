@@ -1472,6 +1472,26 @@ test('falls back to the assignee email when the Workspace member cleared the nam
   ])
 })
 
+test('answers with the Work Items and shows assignees by email when the member names cannot be read', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+    workspaceMemberListFails: true,
+  })
+
+  const list = await app.request('/api/work-items?limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  // Create and update responses read names after saving, so a failed read must not fail them.
+  expect(list.status).toBe(200)
+  const assigned = (await list.json()).workItems
+    .filter((workItem: { assigneeUserId?: string }) => workItem.assigneeUserId === 'sato@example.com')
+  expect(assigned.length).toBeGreaterThan(0)
+  expect(assigned.every((workItem: { assigneeName?: string; assigneeEmail?: string }) =>
+    workItem.assigneeName === undefined && workItem.assigneeEmail === 'sato@example.com')).toBe(true)
+})
+
 test('creates a team-owned issue after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 

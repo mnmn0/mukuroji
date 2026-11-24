@@ -2597,7 +2597,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    if (name === target.name) return target
+    if (name === target.name) {
+      return await this.recordUnchangedMemberRename(normalizedWorkspaceId, actor, target, input, isSelf, auditContext)
+    }
 
     const nowIso = this.clock().toISOString()
     const nextMember = {
@@ -2664,8 +2666,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     } catch (error) {
       if (isConditionalTransactionCancellation(error)) {
         const current = await this.getMember(normalizedWorkspaceId, target.memberKey)
+        // The event can exist at the expected version when the key was first used for an unchanged name.
         const replayed = current
-          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext)
+          ? await this.findReplayedMemberRename(normalizedWorkspaceId, current, input, auditContext, true)
           : undefined
         if (replayed) return replayed
         await this.classifyMemberUpdateConflict(
@@ -2681,6 +2684,72 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
+   * Answers a rename to the name the member already has. Nothing on the member row changes, but the
+   * request's audit event is still written, with no field changes, so its idempotency key stays
+   * bound to this input: the same key sent later with another name is refused rather than applied.
+   *
+   * @param workspaceId - Normalized Workspace ID.
+   * @param actor - Active actor as read.
+   * @param target - Member as read, already at the expected version.
+   * @param input - Requested change.
+   * @param isSelf - Whether members rename themselves.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The unchanged member.
+   * @throws WorkspaceAccessError 409 when the member or actor changed, or the key was used for another change.
+   */
+  private async recordUnchangedMemberRename(
+    workspaceId: string,
+    actor: WorkspaceMember,
+    target: WorkspaceMember,
+    input: UpdateWorkspaceMemberNameInput,
+    isSelf: boolean,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<WorkspaceMember> {
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: workspaceId,
+      eventType: 'member.renamed',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(workspaceId, target.memberKey),
+      action: 'renamed',
+      occurredAt: this.clock().toISOString(),
+      changes: [],
+      metadata: {
+        kind: 'workspace-member',
+        expectedVersion: input.expectedVersion,
+        unchanged: true,
+        ...(isSelf ? { source: 'self' } : {}),
+      },
+      sequence: 0,
+    })
+    if (!auditPut) return target
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    if (!isSelf) transactItems.push(this.actorCondition(workspaceId, actor))
+    transactItems.push({
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: createMemberRecordKey(target.memberKey) },
+        ConditionExpression: 'attribute_exists(workspaceId) AND version = :expectedVersion',
+        ExpressionAttributeValues: { ':expectedVersion': input.expectedVersion },
+      },
+    })
+    transactItems.push(auditPut)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return target
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        const current = await this.getMember(workspaceId, target.memberKey)
+        const replayed = current
+          ? await this.findReplayedMemberRename(workspaceId, current, input, auditContext, true)
+          : undefined
+        if (replayed) return replayed
+        await this.classifyMemberUpdateConflict(workspaceId, actor, target, input.expectedVersion, false)
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /**
    * Recognizes a retry of a rename that already committed, so that a lost response does not turn
    * a saved name into a version conflict. The rename's audit event has an ID derived from the
    * request's idempotency key and records the version the change started from; finding it proves
@@ -2690,6 +2759,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param current - Member row as it is now.
    * @param input - Requested change, with the version it was based on.
    * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @param atAnyVersion - Also look when the member is still at the expected version, which only an
+   *   unchanged-name request leaves behind; otherwise such a member cannot have been renamed yet.
    * @returns The current member when the request already committed, otherwise undefined.
    * @throws WorkspaceAccessError 409 when the same idempotency key was used for another change.
    */
@@ -2698,8 +2769,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     current: WorkspaceMember,
     input: UpdateWorkspaceMemberNameInput,
     auditContext: MutationAuditContext | undefined,
+    atAnyVersion = false,
   ): Promise<WorkspaceMember | undefined> {
-    if (!this.auditTableName || !auditContext || current.version <= input.expectedVersion) return undefined
+    if (!this.auditTableName || !auditContext) return undefined
+    if (!atAnyVersion && current.version <= input.expectedVersion) return undefined
     const entityId = this.createMemberAuditEntityId(workspaceId, current.memberKey)
     const eventId = createAuditEventId(auditContext, 'member.renamed', { type: 'member', id: entityId }, 0)
     const response = await this.documentClient.send(new GetCommand({

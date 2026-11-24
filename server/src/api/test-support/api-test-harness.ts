@@ -1455,6 +1455,8 @@ function configureFakeProjectClients(
     guestWorkspaceMemberKeys?: string[]
     /** Display names on Workspace member rows that differ from Cognito; null clears the name. */
     workspaceMemberNames?: Record<string, string | null>
+    /** Makes listing every Workspace member row fail, as a throttled Query would. */
+    workspaceMemberListFails?: boolean
     /** Job roles returned by the resolved Work Item configuration. */
     jobRoles?: WorkItemJobRoleDefinition[]
     /** Custom fields returned by the resolved Work Item configuration. */
@@ -2823,6 +2825,7 @@ function configureFakeProjectClients(
         ].filter((member) => member.status === 'active')
       },
       async listMembers() {
+        if (options.workspaceMemberListFails) throw new Error('Workspace member Query was throttled.')
         return [
           createWorkspaceMember('demo@example.com'),
           createWorkspaceMember('sato@example.com'),

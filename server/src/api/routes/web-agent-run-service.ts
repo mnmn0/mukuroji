@@ -58,7 +58,7 @@ import {
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readAgentRunUsage } from '../shared/agent-run-usage-access'
-import { readWorkspaceMemberNames, type TeamPermissionContext } from '../shared/workspace-access'
+import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Checks whether the principal manages the Team.
@@ -475,6 +475,35 @@ async function readBoardAssigneeProfiles(
 }
 
 /**
+ * Reads the Workspace member names the board shows for assignees, within the same deadline as the
+ * profile lookups. A failed or late read yields undefined, so the board still returns and shows
+ * those assignees by email or member ID; a name lookup never fails or stalls the board.
+ *
+ * @param log - Request correlation ID and Team, logged with a failed read.
+ * @param directoryId - Workspace ID.
+ * @returns Name per lower-cased member key, or undefined when the names were not read in time.
+ */
+async function readBoardWorkspaceNames(
+  log: { correlationId: string | undefined; teamId: string },
+  directoryId: string,
+): Promise<Map<string, string | undefined> | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), boardProfileDeadlineMs)
+  })
+  const read = readWorkspaceMemberNamesForDisplay(directoryId).catch((error: unknown) => {
+    const code = error instanceof Error ? error.name : 'Unknown'
+    console.warn('Failed to read Factory board assignee names:', { ...log, code })
+    return undefined
+  })
+  try {
+    return await Promise.race([read, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
  * of runs that finished within the completed-lane window, and the `started` Work Items among the most
  * recently updated ones, each with its active or newest run and that run's latest report. Only Work
@@ -526,19 +555,26 @@ export async function listWebTeamAgentRunBoard(
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
   const boardItems = items.flatMap((item) => item ? [item] : [])
-  const profiles = await readBoardAssigneeProfiles({ correlationId, teamId }, boardItems.map((item) => item.workItem.assigneeUserId))
-  // Members rename themselves on their Workspace member row (ADR 0074); Cognito keeps the
-  // sign-up name, so the member row's name wins and a cleared one shows the email.
-  const workspaceNames = profiles.size > 0
-    ? await readWorkspaceMemberNames(principal.directoryId)
-    : new Map<string, string | undefined>()
+  const log = { correlationId, teamId }
+  const assigneeIds = boardItems.map((item) => item.workItem.assigneeUserId)
+  const [profiles, workspaceNames] = await Promise.all([
+    readBoardAssigneeProfiles(log, assigneeIds),
+    assigneeIds.some((userId) => userId !== '')
+      ? readBoardWorkspaceNames(log, principal.directoryId)
+      : Promise.resolve(new Map<string, string | undefined>()),
+  ])
   return {
     generatedAt: now.toISOString(),
     items: boardItems.map((item) => {
       const profile = profiles.get(item.workItem.assigneeUserId)
       if (!profile) return item
+      // Members rename themselves on their Workspace member row (ADR 0074); Cognito keeps the
+      // sign-up name, so the member row's name wins and a cleared one shows the email. Without
+      // the member rows the sign-up name could be stale, so the assignee shows by email.
       const memberKey = profile.email.trim().toLowerCase()
-      const name = workspaceNames.has(memberKey) ? workspaceNames.get(memberKey) : profile.name
+      const name = workspaceNames === undefined
+        ? undefined
+        : workspaceNames.has(memberKey) ? workspaceNames.get(memberKey) : profile.name
       return {
         ...item,
         workItem: {
