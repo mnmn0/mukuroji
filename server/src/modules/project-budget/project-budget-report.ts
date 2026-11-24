@@ -297,6 +297,8 @@ function listBuckets(from: string, to: string, interval: ProjectBudgetReportInte
     const end = interval === 'day' ? date : addDays(date, 6 - ((dayOfWeek(date) + 6) % 7))
     const endDate = end < to ? end : to
     buckets.push({ date, endDate })
+    // Stop at the last bucket instead of stepping past `to`, which may be the last valid date.
+    if (endDate === to) break
     date = addDays(endDate, 1)
   }
   return buckets

@@ -165,4 +165,10 @@ describe('createProjectBudgetReport', () => {
     expect(report.earnedValue?.money?.costPerformanceIndex).toBe(0)
     expect(report.earnedValue?.money?.estimateAtCompletionMinor).toBeUndefined()
   })
+
+  test('ends the series on the last valid date without stepping past it', () => {
+    const report = createProjectBudgetReport(input({ from: '9999-12-30', to: '9999-12-31', today: '2026-01-07' }))
+
+    expect(report.points.map((point) => point.date)).toEqual(['9999-12-30', '9999-12-31'])
+  })
 })
