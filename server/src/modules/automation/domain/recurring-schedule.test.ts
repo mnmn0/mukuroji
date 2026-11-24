@@ -144,6 +144,8 @@ describe('business-day wake-ups', () => {
       { ...schedule, monthlyDay: 'day-of-month' },
       new Date('2026-08-03T01:00:00.000Z'),
     )?.toISOString()).toBe('2026-09-03T00:00:00.000Z')
+    expect(getFirstRecurringWakeUp(schedule, new Date('2026-08-01T01:00:00.000Z'))?.toISOString())
+      .toBe('2026-08-03T00:00:00.000Z')
   })
 
   test('wakes daily while the business-day run is in the current month, and on day n otherwise', () => {
@@ -152,6 +154,11 @@ describe('business-day wake-ups', () => {
       new Date('2026-08-03T01:00:00.000Z'),
       new Date('2026-08-05T00:00:00.000Z'),
     ).toISOString()).toBe('2026-08-04T00:00:00.000Z')
+    expect(getBusinessDayWakeUp(
+      schedule,
+      new Date('2026-08-01T01:00:00.000Z'),
+      new Date('2026-08-05T00:00:00.000Z'),
+    ).toISOString()).toBe('2026-08-03T00:00:00.000Z')
     expect(getBusinessDayWakeUp(
       schedule,
       new Date('2026-08-20T01:00:00.000Z'),
