@@ -28,6 +28,7 @@ import {
   type FileArtifactScope,
   useFileArtifacts,
 } from '../../files/mutations/useFileArtifacts'
+import { useProjectDeliverables } from '../../files/queries/useProjectDeliverables'
 import {
   createTranslator,
   getInitialLocale,
@@ -234,7 +235,7 @@ function useWorkItemFileScope(issueId?: string, teamId?: string) {
  * @returns A stable Project file scope, or undefined when no Team is selected.
  */
 function useProjectFileScope(projectId: string, teamId?: string) {
-  return useMemo<FileArtifactScope | undefined>(() =>
+  return useMemo<Extract<FileArtifactScope, { kind: 'project' }> | undefined>(() =>
     teamId ? { kind: 'project', projectId, teamId } : undefined,
   [projectId, teamId])
 }
@@ -868,6 +869,7 @@ export function TaskPage() {
     scope: hasUnavailableCommentOwner ? undefined : issueFileScope,
   })
   const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
+  const projectDeliverables = useProjectDeliverables(accessToken, projectFileScope)
   const collaborationOwnerMatchesLive = !liveCommentOwner || (
     liveCommentOwnerInProjectList &&
     selectedIssueDetailIsInScope &&
@@ -2268,6 +2270,7 @@ export function TaskPage() {
       onBulkRetry={canMutateProjectTasks && workspaceId ? handleBulkRetry : undefined}
       onBulkUndo={canMutateProjectTasks && workspaceId ? handleBulkUndo : undefined}
       projectId={projectId}
+      projectDeliverables={projectDeliverables}
       projectFiles={projectFiles}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}

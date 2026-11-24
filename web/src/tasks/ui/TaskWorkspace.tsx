@@ -32,6 +32,7 @@ import type {
 } from '../../bulk-operations/ui/BulkOperationToolbar'
 import type { ProjectTaskDirectScheduleHandle } from '../../task-views/model/projectTaskDirectActionRequest'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
+import type { ProjectDeliverablesController } from '../../files/queries/useProjectDeliverables'
 import type {
   ProjectDirectoryTeam,
   ProjectMember,
@@ -151,6 +152,8 @@ export type TaskWorkspaceProps = {
   planningSnapshot?: PlanningSnapshot
   /** File controller scoped to the current project and Team. */
   projectFiles: FileArtifactsController
+  /** Deliverables of the current project and its readable Work Items. */
+  projectDeliverables?: ProjectDeliverablesController
   /** Current project members. */
   projectMembers: ProjectMember[]
   /** Project member query error shown by the permissions view. */
@@ -338,6 +341,7 @@ export function TaskWorkspace({
   workItemTypeFilter,
   projectId,
   planningSnapshot,
+  projectDeliverables,
   projectFiles,
   projectMembers,
   projectMembersErrorMessage,
@@ -508,7 +512,9 @@ export function TaskWorkspace({
       <TaskFileView
         currentWorkspaceMemberKey={currentWorkspaceMemberKey}
         locale={locale}
+        projectDeliverables={projectDeliverables}
         projectFiles={projectFiles}
+        projectId={projectId}
         t={t}
         workspaceMembers={workspaceMembers}
       />

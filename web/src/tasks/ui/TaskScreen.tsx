@@ -44,6 +44,7 @@ import {
 } from '../../bulk-operations/model/bulkOperationTaskAction'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
+import type { ProjectDeliverablesController } from '../../files/queries/useProjectDeliverables'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import {
@@ -532,6 +533,8 @@ export type TaskScreenProps = {
   artifacts?: FileArtifactsController
   /** File controller scoped to the current Project. */
   projectFiles: FileArtifactsController
+  /** Deliverables of the current Project and its readable Work Items. */
+  projectDeliverables?: ProjectDeliverablesController
   /** Workspace members used by mention, actor, and person-field controls. */
   workspaceMembers?: WorkspaceMember[]
   /** Current Workspace member key used by collaboration and file approvals. */
@@ -684,6 +687,7 @@ export function TaskScreen({
   isSystemAdmin = false,
   isLoading = false,
   projectMembers = emptyProjectMembers,
+  projectDeliverables,
   projectFiles,
   projectMembersErrorMessage,
   projectUserQuery = '',
@@ -3946,6 +3950,7 @@ export function TaskScreen({
                 personOptions={personOptions}
                 priorityFilter={priorityFilter}
                 workItemTypeFilter={workItemTypeFilter}
+                projectDeliverables={projectDeliverables}
                 projectFiles={projectFiles}
                 projectId={projectId}
                 projectMembers={projectMembers}

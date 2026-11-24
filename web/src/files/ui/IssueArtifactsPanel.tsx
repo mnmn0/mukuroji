@@ -229,11 +229,11 @@ function IssueArtifactsPanelContent({
         )}
       </div>
 
-      {controller.scope?.kind === 'work-item' ? (
+      {controller.scope ? (
         <ApprovalSection
           approvals={controller.approvals}
           controller={controller}
-          completionTransitions={completionTransitions}
+          completionTransitions={controller.scope.kind === 'work-item' ? completionTransitions : []}
           currentMemberKey={currentMemberKey}
           error={approvalError}
           files={visibleFiles}
@@ -312,6 +312,11 @@ function FileRow({
           {file.targetType === 'comment' ? ` · ${t('files.target.comment')}` : ''}
           {file.guestAccess ? ` · ${t('files.guestAccess')}` : ''}
         </p>
+        {file.unresolvedAnnotationCount ? (
+          <span className="workbench-badge-warning mt-1 inline-flex" data-testid={`file-unresolved-${file.id}`}>
+            {t('files.unresolvedBadge').replace('{count}', String(file.unresolvedAnnotationCount))}
+          </span>
+        ) : null}
       </div>
       <span className="text-xs font-semibold text-[var(--workbench-muted)]">
         {t('files.version.label').replace('{number}', String(version.number))}
@@ -650,6 +655,11 @@ function ApprovalCard({
           <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">
             {t('approval.requestedByValue').replace('{name}', requesterLabel)}
           </p>
+          {approval.unresolvedAnnotationCount ? (
+            <span className="workbench-badge-warning mt-1 inline-flex" data-testid={`approval-unresolved-${approval.id}`}>
+              {t('files.unresolvedBadge').replace('{count}', String(approval.unresolvedAnnotationCount))}
+            </span>
+          ) : null}
         </div>
         <span className={resolveApprovalBadgeClassName(approval.status)}>{t(`approval.status.${approval.status}`)}</span>
       </div>

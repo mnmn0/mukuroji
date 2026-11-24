@@ -7,9 +7,11 @@ import {
   createFileAnnotation,
   createProjectFileUpload,
   createWorkItemFileUpload,
+  deleteFileAnnotation,
   getFileVersionAccess,
   FilesApiError,
   putPresignedFile,
+  setFileAnnotationResolution,
 } from '../src/files/api'
 
 const originalFetch = globalThis.fetch
@@ -108,9 +110,10 @@ describe('file artifacts API', () => {
       { anchor: { kind: 'pdf', pageNumber: 2, x: 0.2, y: 0.4 }, bodyMarkdown: 'Check' },
       mutationContext,
     )
+    const workItem = { kind: 'work-item', teamId: 'core', issueId: 'issue/1' } as const
+    const project = { kind: 'project', teamId: 'core', projectId: 'project/1' } as const
     await createApprovalRequest(
-      'core',
-      'issue/1',
+      workItem,
       'token',
       {
         dueAt: '2026-07-15T00:00:00.000Z',
@@ -121,21 +124,33 @@ describe('file artifacts API', () => {
       mutationContext,
     )
     await createApprovalDecision(
-      'core',
-      'issue/1',
+      workItem,
       'approval/1',
       'token',
       { decision: 'request-changes', expectedRevision: 3 },
       mutationContext,
     )
     await cancelApprovalRequest(
-      'core',
-      'issue/1',
+      workItem,
       'approval/1',
       'token',
       { expectedRevision: 4 },
       mutationContext,
     )
+    await createApprovalRequest(
+      project,
+      'token',
+      {
+        dueAt: '2026-07-15T00:00:00.000Z',
+        fileId: 'file/1',
+        reviewerMemberKeys: ['member/1'],
+        versionId: 'version/1',
+      },
+      mutationContext,
+    )
+    await setFileAnnotationResolution(project, 'file/1', 'version/1', 'note/1', true, 'token', mutationContext)
+    await setFileAnnotationResolution(workItem, 'file/1', 'version/1', 'note/1', false, 'token', mutationContext)
+    await deleteFileAnnotation(project, 'file/1', 'version/1', 'note/1', 'token', mutationContext)
 
     expect(requests.map((request) => [request.init.method ?? 'GET', request.url])).toEqual([
       ['GET', '/api/teams/core/issues/issue%2F1/files/file%2F1/versions/version%2F1/access?disposition=inline'],
@@ -143,6 +158,10 @@ describe('file artifacts API', () => {
       ['POST', '/api/teams/core/issues/issue%2F1/approvals'],
       ['POST', '/api/teams/core/issues/issue%2F1/approvals/approval%2F1/decisions'],
       ['POST', '/api/teams/core/issues/issue%2F1/approvals/approval%2F1/cancel'],
+      ['POST', '/api/teams/core/projects/project%2F1/approvals'],
+      ['POST', '/api/teams/core/projects/project%2F1/files/file%2F1/versions/version%2F1/annotations/note%2F1/resolve'],
+      ['POST', '/api/teams/core/issues/issue%2F1/files/file%2F1/versions/version%2F1/annotations/note%2F1/reopen'],
+      ['DELETE', '/api/teams/core/projects/project%2F1/files/file%2F1/versions/version%2F1/annotations/note%2F1'],
     ])
     expect(JSON.parse(String(requests[3]?.init.body))).toEqual({
       decision: 'request-changes',

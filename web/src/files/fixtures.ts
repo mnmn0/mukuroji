@@ -2,8 +2,10 @@ import type {
   ApprovalRequest,
   FileAnnotation,
   FileAttachment,
+  ProjectDeliverable,
 } from '@mukuroji/contracts'
 import type { FileArtifactsController } from './mutations/useFileArtifacts'
+import type { ProjectDeliverablesController } from './queries/useProjectDeliverables'
 
 /**
  * Storybook と unit test で共有する image file fixture です。
@@ -141,7 +143,19 @@ export const fileAnnotationFixtures = [
     bodyMarkdown: '**CTA** のコントラストを最終確認してください。',
     authorMemberKey: 'sato@example.com',
     createdAt: '2026-07-12T02:10:00.000Z',
-    capabilities: { canResolve: true },
+    capabilities: { canResolve: true, canDelete: false },
+  },
+  {
+    id: 'annotation-2',
+    fileId: imageFileFixture.id,
+    versionId: imageFileFixture.currentVersion.id,
+    anchor: { kind: 'image', x: 0.7, y: 0.62 },
+    bodyMarkdown: '余白を 8px 広げました。',
+    authorMemberKey: 'demo@example.com',
+    createdAt: '2026-07-12T02:12:00.000Z',
+    resolvedAt: '2026-07-12T02:40:00.000Z',
+    resolvedByMemberKey: 'sato@example.com',
+    capabilities: { canResolve: true, canDelete: true },
   },
 ] satisfies FileAnnotation[]
 
@@ -164,6 +178,7 @@ export const approvalRequestFixture = {
   requestedByKind: 'member',
   createdAt: '2026-07-12T02:15:00.000Z',
   updatedAt: '2026-07-12T02:20:00.000Z',
+  unresolvedAnnotationCount: 1,
   capabilities: { canCancel: false, canDecide: true },
 } satisfies ApprovalRequest
 
@@ -192,11 +207,80 @@ export const fileArtifactsControllerFixture = {
     bodyMarkdown: input.bodyMarkdown,
     authorMemberKey: 'demo@example.com',
     createdAt: '2026-07-12T02:30:00.000Z',
-    capabilities: { canResolve: true },
+    capabilities: { canResolve: true, canDelete: true },
   }),
+  setAnnotationResolution: async (_file, _version, annotation, resolved) => resolved
+    ? {
+        ...annotation,
+        resolvedAt: '2026-07-12T02:45:00.000Z',
+        resolvedByMemberKey: 'demo@example.com',
+      }
+    : { ...annotation, resolvedAt: undefined, resolvedByMemberKey: undefined },
+  deleteAnnotation: async () => true,
   requestApproval: async () => true,
   decideApproval: async () => true,
   cancelApproval: async () => true,
   deleteFile: async () => true,
   refresh: async () => undefined,
 } satisfies FileArtifactsController
+
+/**
+ * Project 成果物一覧の Storybook と unit test で共有する行です。
+ */
+export const projectDeliverableFixtures = [
+  {
+    file: { ...imageFileFixture, unresolvedAnnotationCount: 1 },
+    owner: {
+      kind: 'work-item',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      key: 'CORE-12',
+      title: '初回オンボーディングの離脱要因を減らす',
+    },
+    approvalState: 'pending',
+    approvalId: approvalRequestFixture.id,
+    unresolvedAnnotationCount: 1,
+  },
+  {
+    file: {
+      ...scanningPdfFileFixture,
+      id: 'file-project-plan',
+      name: 'project-plan.pdf',
+      targetType: 'project',
+      targetId: 'refero',
+      currentVersion: { ...scanningPdfFileFixture.currentVersion, scanStatus: 'available' },
+      unresolvedAnnotationCount: 0,
+    },
+    owner: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+    approvalState: 'approved',
+    approvalId: 'approval-project-plan',
+    unresolvedAnnotationCount: 0,
+  },
+  {
+    file: { ...blockedVideoFileFixture, unresolvedAnnotationCount: 0 },
+    owner: {
+      kind: 'work-item',
+      teamId: 'core-team',
+      issueId: 'walkthrough',
+      title: 'Walkthrough video',
+    },
+    approvalState: 'none',
+    unresolvedAnnotationCount: 0,
+  },
+] satisfies ProjectDeliverable[]
+
+/**
+ * API に接続せず Project 成果物一覧を表示できる controller です。
+ */
+export const projectDeliverablesControllerFixture = {
+  deliverables: projectDeliverableFixtures,
+  filters: { approval: 'all', unresolvedOnly: false },
+  setFilters: () => undefined,
+  isLoading: false,
+  isLoadingMore: false,
+  hasError: false,
+  hasMore: true,
+  loadMore: () => undefined,
+  refresh: async () => undefined,
+  loadAll: async () => projectDeliverableFixtures,
+} satisfies ProjectDeliverablesController
