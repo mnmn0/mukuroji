@@ -144,6 +144,16 @@ describe('Email digest delivery', () => {
     expect(f.digests).toHaveLength(1)
     expect(f.digests[0]).toHaveLength(3)
   })
+  test('renews every digest row for long enough to record the shared outcome after the send', async () => {
+    const f = digestFixture(2)
+    const leases: Array<number | undefined> = []
+    const dependencies: ChannelDeliveryDependencies = {
+      ...f.dependencies,
+      store: { ...f.dependencies.store, renew: async (_delivery, _token, _now, leaseMs) => { leases.push(leaseMs); return true } },
+    }
+    expect(await deliverDueEmailNotifications(dependencies)).toBe(3)
+    expect(leases).toEqual([120_000, 120_000, 120_000])
+  })
   test('hands every row back without sending when the renewals outlast the budget for the send', async () => {
     const f = digestFixture(2)
     let clock = Date.parse('2026-09-26T12:00:00.000Z')

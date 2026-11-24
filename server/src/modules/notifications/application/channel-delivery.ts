@@ -111,8 +111,11 @@ export interface ChannelDeliveryStore {
    * shared row version that each channel's final fence checks.
    */
   claim(delivery: ChannelDelivery, token: string, leaseUntil: Date, now?: Date): Promise<boolean>
-  /** Renews an unexpired claim immediately before the external side effect. */
-  renew(delivery: ChannelDelivery, token: string, now: Date): Promise<boolean>
+  /**
+   * Renews an unexpired claim immediately before the external side effect, for `leaseMs`
+   * (60 seconds when omitted).
+   */
+  renew(delivery: ChannelDelivery, token: string, now: Date, leaseMs?: number): Promise<boolean>
   /** Releases an owned, unsent claim without consuming an attempt. */
   release(delivery: ChannelDelivery, token: string, now: Date): Promise<void>
   /** Finalizes or reschedules only the token's claim, preserving Inbox fields. */
@@ -157,9 +160,15 @@ export type ChannelDigestDependencies = {
 export const MAX_DIGEST_NOTIFICATIONS = 50
 
 /**
- * Longest the digest may spend renewing its rows. A renewal grants 60 seconds and the transport
- * allows itself 30, so finishing the renewals within 25 seconds keeps every included lease valid,
- * with a margin, until the send has finished.
+ * Lease a digest row gets right before the send. It covers the renewal budget, the transport's
+ * 30 seconds, and recording the shared outcome on every row, with a margin.
+ */
+const DIGEST_SEND_LEASE_MS = 120_000
+
+/**
+ * Longest the digest may spend renewing its rows. Within it, the first renewal's lease still has
+ * at least 95 seconds left when the send starts: 30 for the transport and the rest for recording
+ * the outcome on every row before any lease can expire.
  */
 const DIGEST_RENEWAL_BUDGET_MS = 25_000
 
@@ -334,11 +343,12 @@ async function checkClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise
  * Renews a checked claim immediately before the external side effect, releasing it when lost.
  * @param run - Invocation state.
  * @param claimed - Checked claim.
+ * @param leaseMs - Lease length from now; the store's 60 seconds when omitted.
  * @returns Whether this invocation still owns the delivery.
  */
-async function renewClaimed(run: DeliveryRun, claimed: ClaimedDelivery): Promise<boolean> {
+async function renewClaimed(run: DeliveryRun, claimed: ClaimedDelivery, leaseMs?: number): Promise<boolean> {
   try {
-    if (await run.dependencies.store.renew(claimed.delivery, claimed.token, run.dependencies.now())) return true
+    if (await run.dependencies.store.renew(claimed.delivery, claimed.token, run.dependencies.now(), leaseMs)) return true
     await run.dependencies.store.release(claimed.delivery, claimed.token, run.dependencies.now())
     return false
   } catch {
@@ -458,7 +468,7 @@ async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies
   // The first renewal's lease expires first, so the renewals and the send must both fit inside it.
   const renewalStartedAt = run.dependencies.now().getTime()
   for (const claimed of checked) {
-    if (await renewClaimed(run, claimed)) ready.push(claimed)
+    if (await renewClaimed(run, claimed, DIGEST_SEND_LEASE_MS)) ready.push(claimed)
   }
   if (ready.length > 0 && run.dependencies.now().getTime() - renewalStartedAt > DIGEST_RENEWAL_BUDGET_MS) {
     // Too slow to keep every lease through the send: hand the rows back untouched for the next run.
@@ -470,9 +480,11 @@ async function deliverDigest(run: DeliveryRun, digest: ChannelDigestDependencies
     try {
       result = await digest.send(ready.map((claimed) => claimed.delivery))
     } catch {
-      for (const claimed of ready) await finishUnavailable(run, claimed)
+      await Promise.all(ready.map((claimed) => finishUnavailable(run, claimed)))
     }
-    if (result) for (const claimed of ready) await completeClaimed(run, claimed, result)
+    // The rows are recorded together, so the outcome lands well inside the shortest lease.
+    const outcome = result
+    if (outcome) await Promise.all(ready.map((claimed) => completeClaimed(run, claimed, outcome)))
   }
   return candidates.map(deliveryIdentity)
 }

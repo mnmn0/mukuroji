@@ -178,7 +178,7 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
   }
 
   /** Fences slow authorization reads before sending and renews the transport lease. */
-  async renew(delivery: ChannelDelivery, token: string, now: Date): Promise<boolean> {
+  async renew(delivery: ChannelDelivery, token: string, now: Date, leaseMs = 60_000): Promise<boolean> {
     const names = this.#names
     try {
       await this.#client.send(new UpdateCommand({
@@ -188,7 +188,7 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
         ExpressionAttributeNames: { '#version': 'version' },
         ExpressionAttributeValues: {
           ':token': token, ':now': now.toISOString(),
-          ':lease': new Date(now.getTime() + 60_000).toISOString(),
+          ':lease': new Date(now.getTime() + leaseMs).toISOString(),
           ':claimedVersion': delivery.version + 1, ':one': 1,
         },
       }))
