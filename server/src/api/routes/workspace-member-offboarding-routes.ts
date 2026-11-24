@@ -13,6 +13,7 @@ import {
   isMemberAccessExpired,
   readMemberAccessExpiry,
   requirePrivateDocumentManagerContinuity,
+  type WorkspaceRole,
 } from '../../modules/workspace-access'
 import {
   developerPlatformDependencies,
@@ -26,6 +27,20 @@ import {
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { readWorkspaceEmail, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+
+/**
+ * Allows a credential revocation only on a member the administrator may manage, as for role
+ * changes and deactivation: owners act on everyone, admins on members and guests.
+ *
+ * @param actorRole - Workspace role of the signed-in administrator.
+ * @param targetRole - Workspace role of the member whose credentials are revoked.
+ * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not manage the target.
+ */
+function requireCanManageMember(actorRole: WorkspaceRole, targetRole: WorkspaceRole) {
+  if (actorRole === 'owner') return
+  if (actorRole === 'admin' && (targetRole === 'member' || targetRole === 'guest')) return
+  throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'The Workspace role cannot manage this member.')
+}
 
 /** Access expiry change read from a request body. */
 type MemberAccessExpiryChange = {
@@ -221,6 +236,7 @@ export function registerWorkspaceMemberOffboardingRoutes(routeApp: Hono): void {
       if (!member) {
         throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
       }
+      requireCanManageMember(principal.workspaceRole, member.role)
       return c.json(await revokeMemberCredentials(
         developerPlatformDependencies,
         principal.directoryId,

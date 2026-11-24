@@ -134,6 +134,60 @@ test('revokes only the leaver credentials before deactivation', async () => {
   await expect(platform.apiKeys.authenticateApiKey({ credential: ownKey.secret })).rejects.toThrow()
 })
 
+test('refuses an admin revoking the credentials of an owner', async () => {
+  configureFakeProjectClients(true, { projectAccesses: [], workspaceRole: 'admin' })
+  const { platform, ownKey } = await createDeveloperPlatformWithCredentials()
+  const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({
+    apiKeys: platform.apiKeys,
+    oauthCredentials: platform.oauthCredentials,
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getMember(memberWorkspaceId, memberKey) {
+        const member = await workspaceAccess.getMember(memberWorkspaceId, memberKey)
+        return member && memberKey === 'sato@example.com' ? { ...member, role: 'owner' } : member
+      },
+    },
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com/credentials/revoke', {
+    method: 'POST',
+    headers,
+  })
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
+  const apiKeys = await platform.apiKeys.listApiKeys(workspaceId)
+  expect(apiKeys.find((apiKey) => apiKey.id === ownKey.apiKey.id)?.status).toBe('active')
+})
+
+test('reactivating a deactivated member does not bring back their old credentials', async () => {
+  const calls = configureFakeProjectClients(true, {
+    projectAccesses: [],
+    inactiveWorkspaceMemberKeys: ['sato@example.com'],
+  })
+  // The access expiry job deactivates a member without revoking their credentials.
+  const { platform, ownKey, otherKey } = await createDeveloperPlatformWithCredentials()
+  setTestAppDependencies({
+    apiKeys: platform.apiKeys,
+    oauthCredentials: platform.oauthCredentials,
+  })
+
+  const response = await app.request('/api/workspace/members/sato%40example.com', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedVersion: 1, status: 'active' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.workspaceMemberUpdates).toEqual([
+    expect.objectContaining({ memberKey: 'sato@example.com', status: 'active' }),
+  ])
+  const apiKeys = await platform.apiKeys.listApiKeys(workspaceId)
+  expect(apiKeys.find((apiKey) => apiKey.id === ownKey.apiKey.id)?.status).toBe('revoked')
+  expect(apiKeys.find((apiKey) => apiKey.id === otherKey.apiKey.id)?.status).toBe('active')
+})
+
 test('sets and clears a member access expiry with validated input', async () => {
   configureFakeProjectClients(true, { projectAccesses: [] })
   const updates: Array<{ memberKey: string, input: UpdateWorkspaceMemberAccessExpiryInput }> = []

@@ -71,6 +71,10 @@
   - Public API の request ごとに member row を 1 回、強整合で読みます。
   - 自動停止の job は Cognito の global sign-out を呼びません。`signInsRevokedAt` を記録し、読み取り時の判定で止めます。
   - 自動の job は資格情報を失効しません。作成者の確認で止まります。管理者は一覧から失効できます。
+    利用停止中のメンバーを再有効化するときは、更新の前に本人の資格情報を失効します。
+    これで、job が利用停止したメンバーを戻しても、以前の API キーは使えないままです。
+  - 資格情報の失効は、ロールの変更と同じく、操作する人が管理できるメンバーにだけ行えます
+    （owner は全員、admin は member と guest）。
 - 今回は扱わないもの:
   - Project member 単位の期限。
   - Automation rule・保存済み view・承認待ち・実行中タイマーの引き継ぎ一覧。所有者の field がないか、

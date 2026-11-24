@@ -922,6 +922,24 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
             )
           : undefined
 
+      if (status === 'active') {
+        const current = await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, memberKey)
+        // Only a reactivation the actor may make revokes anything; the update refuses the rest.
+        const actorMayReactivate = principal.workspaceRole === 'owner' ||
+          (principal.workspaceRole === 'admin' && (current?.role === 'member' || current?.role === 'guest'))
+        if (current?.status === 'deactivated' && actorMayReactivate) {
+          // The access expiry job deactivates without revoking, so a member comes back without
+          // the credentials they had before (ADR 0095). Revoking first keeps a failed
+          // reactivation safe to repeat.
+          await revokeMemberCredentials(
+            developerPlatformDependencies,
+            principal.directoryId,
+            current.memberKey,
+            principal.userKey,
+          )
+        }
+      }
+
       const member = await workspaceDependencies.workspaceAccess.updateMember(
         principal.directoryId,
         principal.userKey,
