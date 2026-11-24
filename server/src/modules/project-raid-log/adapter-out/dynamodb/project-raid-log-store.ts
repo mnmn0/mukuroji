@@ -533,13 +533,24 @@ function describeUpdateAction(previous: ProjectRaidEntry, next: ProjectRaidEntry
 }
 
 /**
- * Converts an entry to the plain record compared for audit changes.
+ * Converts an entry to the plain record compared for audit changes. The deciding member is left
+ * out of the decision: the audit event's actor already records who decided, and a member key must
+ * not be kept in the changes.
  *
  * @param entry - Entry.
  * @returns The entry fields as a record.
  */
 function toAuditRecord(entry: ProjectRaidEntry): Record<string, unknown> {
-  return { ...entry }
+  const { decision } = entry
+  if (decision === undefined) return { ...entry }
+  return {
+    ...entry,
+    decision: {
+      outcome: decision.outcome,
+      decidedAt: decision.decidedAt,
+      ...(decision.baselineId === undefined ? {} : { baselineId: decision.baselineId }),
+    },
+  }
 }
 
 /**

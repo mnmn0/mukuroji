@@ -116,6 +116,11 @@ describe('change request schedule changes and decisions', () => {
     expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [move, move] }).ok).toBe(false)
     expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '2026-02-30' } }] }).ok).toBe(false)
     expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'replace' } }] }).ok).toBe(false)
+    // Dates must be ones a Work Item schedule accepts, so that approval can apply them.
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '0999-12-10' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'resize', endDate: '0999-12-31' } }] }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'move', targetDate: '1000-01-01' } }] }).ok).toBe(true)
+    expect(parseProjectRaidEntryInput({ ...base, scheduleChanges: [{ ...move, operation: { type: 'resize', endDate: '9999-12-31' } }] }).ok).toBe(true)
   })
 
   test('reads stored schedule changes whatever order their keys are in', () => {

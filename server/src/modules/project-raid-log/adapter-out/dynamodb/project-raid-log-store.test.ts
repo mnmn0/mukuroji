@@ -203,6 +203,40 @@ test('records that the title changed on an update without keeping either text', 
   expect(auditItem).not.toContain(next.title)
 })
 
+test('records a decision without the deciding member key', async () => {
+  const sent: SentCommand[] = []
+  const previous: ProjectRaidEntry = { ...entry, kind: 'change-request' }
+  const next: ProjectRaidEntry = {
+    ...previous,
+    status: 'closed',
+    revision: 2,
+    updatedAt: '2026-11-20T00:00:00.000Z',
+    decision: {
+      outcome: 'approved',
+      decidedAt: '2026-11-20T00:00:00.000Z',
+      decidedByMemberId: 'decider@example.com',
+      baselineId: 'baseline-1',
+    },
+  }
+  const store = new DynamoDbProjectRaidLogStore('planning', fakeClient({ row: entryRow(previous), sent }), 'audit')
+  await store.update({
+    ...scope,
+    now: next.updatedAt,
+    callerAuthorization,
+    auditContext,
+    previous,
+    next,
+    updateReceipt: 'r1',
+    updateKey: 'k1',
+  })
+  const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
+  const items = write?.input.TransactItems
+  const auditItem = JSON.stringify(Array.isArray(items) ? items.at(-1) : undefined)
+  expect(auditItem).toContain('raid_change_request_approved')
+  expect(auditItem).toContain('baseline-1')
+  expect(auditItem).not.toContain('decider@example.com')
+})
+
 test('reads every page of a log', async () => {
   const sent: SentCommand[] = []
   const second = { ...entry, id: 'e2' }

@@ -52,11 +52,13 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
       )
+      const canEdit = await canEditProjectRaidLog(principal, teamId, projectId)
       return c.json({
         ...log,
         viewer: {
-          canEdit: await canEditProjectRaidLog(principal, teamId, projectId),
-          canDecide: await canDecideProjectChangeRequests(principal, teamId, projectId),
+          canEdit,
+          // The manager role is read only for those who may edit, as deciding requires both.
+          canDecide: canEdit && await managesProjectChangeRequests(principal, teamId, projectId),
         },
       } satisfies ProjectRaidLogResponse)
     } catch (error) {
@@ -178,6 +180,20 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
  * Tells whether the principal may approve or reject change requests: a Project member who also
  * manages the Project, as capturing the baseline an approval replaces requires.
  *
+ * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Whether the principal may decide.
+ */
+async function canDecideProjectChangeRequests(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  return await canEditProjectRaidLog(principal, teamId, projectId) &&
+    await managesProjectChangeRequests(principal, teamId, projectId)
+}
+
+/**
+ * Tells whether the principal manages the Project, the role that deciding a change request
+ * needs on top of editing the log.
+ *
  * Enterprise principals need `projects.manage` at the Project. For others, a direct Team grant
  * read at viewer level reports every Project role as viewer, so the roles are read again at
  * manager level before refusing.
@@ -185,10 +201,9 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
  * @param principal - Authenticated principal.
  * @param teamId - Team that owns the Project.
  * @param projectId - Project ID.
- * @returns Whether the principal may decide.
+ * @returns Whether the principal manages the Project.
  */
-async function canDecideProjectChangeRequests(principal: WorkspacePrincipal, teamId: string, projectId: string) {
-  if (!await canEditProjectRaidLog(principal, teamId, projectId)) return false
+async function managesProjectChangeRequests(principal: WorkspacePrincipal, teamId: string, projectId: string) {
   // The route authorization of a log request proves only `projects.read` or `projects.write`, so
   // Enterprise principals are evaluated for `projects.manage` at this Project, as baseline
   // capture requires.

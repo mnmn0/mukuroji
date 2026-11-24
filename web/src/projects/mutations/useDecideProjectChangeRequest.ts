@@ -64,6 +64,8 @@ function truncate(text: string, maxLength: number) {
  * @param teamId - Team that owns the Work Item.
  * @param projectId - Project of the change request; the Work Item must still belong to it.
  * @param change - Requested change.
+ * @param affected - Collects the Teams and Projects the cascade reaches, whose views are refreshed
+ * afterwards.
  * @returns Whether the change could be applied now; `false` when it conflicts with the plan as
  * it stands, which another requested change may still resolve.
  * @throws ProjectChangeRequestWorkItemMovedError when the Work Item left the Project.
@@ -73,6 +75,7 @@ async function applyScheduleChange(
   teamId: string,
   projectId: string,
   change: ProjectRaidScheduleChange,
+  affected: AffectedScopes,
 ): Promise<boolean> {
   const { issue } = await getTeamIssueDetail(teamId, change.workItemId, accessToken)
   if (issue.assignedProjectId !== projectId) throw new ProjectChangeRequestWorkItemMovedError(change.workItemId)
@@ -86,6 +89,12 @@ async function applyScheduleChange(
     return false
   }
   if (preview.impacts.length === 0) return true
+  // Recorded before confirming, so that a confirm that fails after the change was saved still
+  // refreshes every view it may have changed.
+  for (const reached of preview.affectedProjects) {
+    affected.teamIds.add(reached.teamId)
+    affected.projectIds.add(reached.projectId)
+  }
   await confirmTeamIssueSchedule(
     teamId,
     change.workItemId,
@@ -116,18 +125,20 @@ async function applyScheduleChange(
  * @param teamId - Team that owns the Work Items.
  * @param projectId - Project of the change request.
  * @param changes - Requested changes.
+ * @param affected - Collects the Teams and Projects the cascade reaches.
  * @throws ProjectChangeRequestScheduleConflictError when the requested dates cannot all hold.
  * @throws ProjectChangeRequestWorkItemMovedError when a Work Item left the Project.
  */
-async function applyScheduleChanges(
+export async function applyScheduleChanges(
   accessToken: string,
   teamId: string,
   projectId: string,
   changes: readonly ProjectRaidScheduleChange[],
+  affected: AffectedScopes,
 ) {
   for (let round = 0; round <= changes.length; round += 1) {
     for (const change of changes) {
-      await applyScheduleChange(accessToken, teamId, projectId, change)
+      await applyScheduleChange(accessToken, teamId, projectId, change, affected)
     }
     const pending: ProjectRaidScheduleChange[] = []
     for (const change of changes) {
@@ -139,6 +150,43 @@ async function applyScheduleChanges(
     if (first === undefined) return
     if (round === changes.length) throw new ProjectChangeRequestScheduleConflictError(first.workItemId)
   }
+}
+
+/** Teams and Projects whose Work Item views a decision may have changed. */
+export type AffectedScopes = {
+  /** Teams whose Work Item details are refreshed. */
+  teamIds: Set<string>
+  /** Projects whose Work Item lists are refreshed. */
+  projectIds: Set<string>
+}
+
+/**
+ * Builds the cache filter for the views a decision may have changed, so that dates moved by the
+ * cascade show everywhere they appear.
+ *
+ * @param accessToken - Bearer token of the current session.
+ * @param teamId - Team that owns the Project of the request.
+ * @param projectId - Project of the request.
+ * @param affected - Teams and Projects the cascade reached, including the request's own.
+ * @returns A filter that accepts the SWR keys to revalidate.
+ */
+export function createDecisionRefreshFilter(
+  accessToken: string,
+  teamId: string,
+  projectId: string,
+  affected: AffectedScopes,
+): (key: unknown) => boolean {
+  return (key: unknown) => Array.isArray(key) && (
+    // Dependency conflicts and the critical path come from the Planning snapshot.
+    (key[0] === 'planning-snapshot' && key[1] === accessToken) ||
+    // Work Item details of the Teams reached. The cascade can move successors that the request
+    // does not list, and a detail kept from before would bring their old dates back into the list.
+    ((key[0] === 'project-issue-detail' || key[0] === 'team-issue-detail') && affected.teamIds.has(key[2])) ||
+    (key[0] === 'project-issues' && affected.projectIds.has(key[2])) ||
+    (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId) ||
+    // Baseline comparisons across Projects, such as the table's baseline delay column.
+    key[0] === WORK_ITEM_SCHEDULE_BASELINES_KEY
+  )
 }
 
 /** A decision request whose outcome is not known yet, kept to send again unchanged. */
@@ -219,20 +267,13 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
     options: ProjectChangeRequestDecisionOptions,
   ) => {
     if (!accessToken || !teamId) return
+    // The cascade can reach successors in other Projects and Teams, which are added as the
+    // previews report them.
+    const affected: AffectedScopes = { teamIds: new Set([teamId]), projectIds: new Set([projectId]) }
     /** Revalidates the views the decision may have changed. */
     const refresh = () => Promise.all([
       mutate(projectRaidLogKey(accessToken, teamId, projectId)),
-      mutate((key: unknown) => Array.isArray(key) && (
-        // Dependency conflicts and the critical path come from the Planning snapshot.
-        (key[0] === 'planning-snapshot' && key[1] === accessToken) ||
-        // Work Item details of the Team. The cascade can move successors that the request does not
-        // list, and a detail kept from before would bring their old dates back into the list.
-        ((key[0] === 'project-issue-detail' || key[0] === 'team-issue-detail') && key[2] === teamId) ||
-        (key[0] === 'project-issues' && key[2] === projectId) ||
-        (key[0] === PROJECT_SCHEDULE_BASELINE_KEY && key[2] === teamId && key[3] === projectId) ||
-        // Baseline comparisons across Projects, such as the table's baseline delay column.
-        key[0] === WORK_ITEM_SCHEDULE_BASELINES_KEY
-      )),
+      mutate(createDecisionRefreshFilter(accessToken, teamId, projectId, affected)),
     ])
     const entryKey = JSON.stringify([teamId, projectId, entry.id, entry.revision])
     // A decision whose outcome is unknown is sent again as it was, with its own outcome, before
@@ -245,7 +286,7 @@ export function useDecideProjectChangeRequest({ accessToken, teamId, projectId }
       try {
         if (outcome === 'approved') {
           await requireOpenAtRevision(accessToken, teamId, projectId, entry)
-          await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [])
+          await applyScheduleChanges(accessToken, teamId, projectId, entry.scheduleChanges ?? [], affected)
           if (options.replaceBaseline) {
             const captured = await captureProjectScheduleBaseline(
               teamId,

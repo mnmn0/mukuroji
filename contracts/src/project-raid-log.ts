@@ -1,3 +1,5 @@
+import { WORK_ITEM_SCHEDULE_MIN_YEAR } from './work-items'
+
 /** Kinds of entries kept in a Project's risk, issue, and change request log. */
 export type ProjectRaidEntryKind = 'risk' | 'issue' | 'change-request'
 
@@ -471,9 +473,20 @@ function readScheduleChanges(
  */
 function readScheduleChangeOperation(value: unknown): ProjectRaidScheduleChangeOperation | undefined {
   if (!isRecord(value)) return undefined
-  if (value.type === 'move' && isCalendarDate(value.targetDate)) return { type: 'move', targetDate: value.targetDate }
-  if (value.type === 'resize' && isCalendarDate(value.endDate)) return { type: 'resize', endDate: value.endDate }
+  if (value.type === 'move' && isScheduleChangeDate(value.targetDate)) return { type: 'move', targetDate: value.targetDate }
+  if (value.type === 'resize' && isScheduleChangeDate(value.endDate)) return { type: 'resize', endDate: value.endDate }
   return undefined
+}
+
+/**
+ * Tells whether a value is a date a Work Item schedule accepts, so that a request can always be
+ * applied when it is approved: a real `YYYY-MM-DD` date from {@link WORK_ITEM_SCHEDULE_MIN_YEAR}.
+ *
+ * @param value - Candidate date.
+ * @returns Whether the value is a schedulable calendar date.
+ */
+function isScheduleChangeDate(value: unknown): value is string {
+  return isCalendarDate(value) && Number(value.slice(0, 4)) >= WORK_ITEM_SCHEDULE_MIN_YEAR
 }
 
 /**

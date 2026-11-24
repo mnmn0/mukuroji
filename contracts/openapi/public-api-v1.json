@@ -2685,34 +2685,59 @@
             "type": "string"
           },
           "decision": {
-            "description": "Decision that closed a change request.",
-            "properties": {
-              "baselineId": {
-                "maxLength": 128,
-                "type": "string"
-              },
-              "decidedAt": {
-                "format": "date-time",
-                "type": "string"
-              },
-              "decidedByMemberId": {
-                "maxLength": 254,
-                "type": "string"
-              },
-              "outcome": {
-                "enum": [
-                  "approved",
-                  "rejected"
+            "description": "Decision that closed a change request. Only an approval names the baseline it replaced.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "baselineId": {
+                    "maxLength": 128,
+                    "type": "string"
+                  },
+                  "decidedAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "decidedByMemberId": {
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "const": "approved",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "decidedAt",
+                  "decidedByMemberId"
                 ],
-                "type": "string"
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "decidedAt": {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  "decidedByMemberId": {
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "const": "rejected",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "outcome",
+                  "decidedAt",
+                  "decidedByMemberId"
+                ],
+                "type": "object"
               }
-            },
-            "required": [
-              "outcome",
-              "decidedAt",
-              "decidedByMemberId"
-            ],
-            "type": "object"
+            ]
           },
           "description": {
             "maxLength": 2000,

@@ -12,7 +12,11 @@ import {
   isScheduleChangeInPlace,
   ProjectChangeRequestWorkItemMovedError,
 } from '../src/projects/model/projectChangeRequestDecision'
-import { useDecideProjectChangeRequest } from '../src/projects/mutations/useDecideProjectChangeRequest'
+import {
+  applyScheduleChanges,
+  createDecisionRefreshFilter,
+  useDecideProjectChangeRequest,
+} from '../src/projects/mutations/useDecideProjectChangeRequest'
 import { projectRaidLogKey } from '../src/projects/queries/useProjectRaidLog'
 
 /** One Work Item of the fake server. */
@@ -66,6 +70,9 @@ function changeRequest(scheduleChanges: ProjectRaidScheduleChange[]): ProjectRai
   }
 }
 
+/** Projects in other Teams that the fake previews report as reached by the cascade. */
+let extraAffectedProjects: Array<{ teamId: string; projectId: string }> = []
+
 /** Calls seen by the fake server. */
 type FakeCalls = {
   /** Confirmed schedule changes, as `id:date`. */
@@ -107,7 +114,7 @@ function installFakeApi(
       if (issue[3] === 'preview') {
         const preview: WorkItemScheduleChangePreview = {
           affectedMilestoneIds: [],
-          affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
+          affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }, ...extraAffectedProjects],
           conflicts: blocked
             ? [{ code: 'dependency-violation', dependencyId: 'a-b', workItem: { teamId: 'core-team', workItemId: id } }]
             : [],
@@ -314,6 +321,29 @@ describe('approving a change request', () => {
     expect(calls.confirms).toEqual([])
     expect(calls.captures).toBe(0)
     expect(calls.decisions).toEqual([])
+  })
+
+  test('refreshes the Work Items of every Team and Project the cascade reaches', async () => {
+    const items = { a: { assignedProjectId: 'refero', schedule: due('2026-11-20'), revision: 1 } }
+    installFakeApi(items, [])
+    extraAffectedProjects = [{ teamId: 'side-team', projectId: 'side-project' }]
+    const affected = { teamIds: new Set(['core-team']), projectIds: new Set(['refero']) }
+    try {
+      await applyScheduleChanges('token', 'core-team', 'refero', [
+        { workItemId: 'a', operation: { type: 'move', targetDate: '2026-11-25' } },
+      ], affected)
+    } finally {
+      extraAffectedProjects = []
+    }
+    expect([...affected.teamIds].sort()).toEqual(['core-team', 'side-team'])
+    expect([...affected.projectIds].sort()).toEqual(['refero', 'side-project'])
+
+    const refreshes = createDecisionRefreshFilter('token', 'core-team', 'refero', affected)
+    expect(refreshes(['project-issues', 'token', 'side-project', false, null, null])).toBe(true)
+    expect(refreshes(['team-issue-detail', 'token', 'side-team', 'b'])).toBe(true)
+    expect(refreshes(['project-issue-detail', 'token', 'side-team', 'b'])).toBe(true)
+    expect(refreshes(['project-issues', 'token', 'unrelated', false, null, null])).toBe(false)
+    expect(refreshes(['team-issue-detail', 'token', 'unrelated-team', 'c'])).toBe(false)
   })
 
   test('shows the closed request even when the log cannot be reloaded', async () => {
