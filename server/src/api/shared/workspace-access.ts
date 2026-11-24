@@ -309,23 +309,55 @@ export async function readWorkspaceMemberNames(
   ]))
 }
 
+/** AWS SDK error names of storage reads that can succeed when tried again. */
+const TRANSIENT_STORAGE_ERROR_NAMES = new Set([
+  'ProvisionedThroughputExceededException',
+  'ThrottlingException',
+  'RequestLimitExceeded',
+  'InternalServerError',
+  'ServiceUnavailable',
+  'TimeoutError',
+  'RequestTimeout',
+  'RequestTimeoutException',
+])
+
+/** Node.js network error codes of a connection that broke during a read. */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE'])
+
+/**
+ * Tells whether a storage read failed for a reason that passes on its own, such as throttling or
+ * a dropped connection, rather than a configuration or data problem.
+ *
+ * @param error - Error the read threw.
+ * @returns Whether the failure is transient.
+ */
+function isTransientStorageReadFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if (TRANSIENT_STORAGE_ERROR_NAMES.has(error.name)) return true
+  const code = 'code' in error ? error.code : undefined
+  return typeof code === 'string' && TRANSIENT_NETWORK_ERROR_CODES.has(code)
+}
+
 /**
  * Reads Workspace member names for a display that can still be shown without them.
  *
- * A failed read (for example a throttled Query) yields undefined so the caller keeps the names it
- * already has. Invalid stored member rows still throw, because they are a data error rather than an
- * outage, and hiding them would show names the Workspace no longer holds.
+ * A transient failure (throttling, a timeout, a dropped connection) yields undefined so the caller
+ * keeps the names it already has. Any other failure, such as denied access or invalid stored member
+ * rows, still throws: it will not pass on its own, and hiding it would keep showing names the
+ * Workspace no longer holds.
  *
  * @param directoryId - Workspace ID.
- * @returns Name per member as in {@link readWorkspaceMemberNames}, or undefined when the read failed.
+ * @param read - Name reader; tests replace it.
+ * @returns Name per member as in {@link readWorkspaceMemberNames}, or undefined after a transient failure.
  */
 export async function readWorkspaceMemberNamesForDisplay(
   directoryId: string,
+  read: typeof readWorkspaceMemberNames = readWorkspaceMemberNames,
 ): Promise<Map<string, string | undefined> | undefined> {
   try {
-    return await readWorkspaceMemberNames(directoryId)
+    return await read(directoryId)
   } catch (error) {
-    if (error instanceof WorkspaceAccessError && error.code === 'InvalidWorkspaceAccessData') throw error
-    return undefined
+    if (isTransientStorageReadFailure(error)) return undefined
+    throw error
   }
 }

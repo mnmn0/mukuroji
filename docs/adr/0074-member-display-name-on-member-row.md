@@ -35,7 +35,8 @@ directory（SCIM）連携の member は、reconcile のたびに directory の�
   audit event を書き、key を入力に結び付ける。
 - 名前を表示に足すだけの読み取り（Work Item の担当者、Factory board、Analytics の export）は、
   Workspace member row を読めなかったときも応答を失敗にしない。Work Item と board の担当者は
-  古いかもしれない Cognito の名前を出さずメールで、export は Project row の名前で出す。
+  古いかもしれない Cognito の名前を出さずメールで出す。export が Project row の名前に戻るのは
+  throttling・timeout・接続断のような一時的な失敗だけで、権限不足や不正な row はエラーにする。
   export が名前を出すのは閲覧できる Project にいる member だけにする。
 - 週報の roster は無効化された member の名前も Workspace member row から読む。
 - 名前は前後の空白を除いて 128 文字まで、制御文字を含めない。空は名前を消し、メールで表示する。
