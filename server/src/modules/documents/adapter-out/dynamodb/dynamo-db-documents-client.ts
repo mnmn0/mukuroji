@@ -112,7 +112,7 @@ import {
   DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_COMMENT_MAX_LENGTH,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
-  DOCUMENT_THREAD_PARTICIPANT_PAGE_LIMIT,
+  DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
   DOCUMENT_MAX_TREE_DEPTH,
@@ -573,6 +573,27 @@ type StoredDocumentCommentReceiptItem = {
   authorUserId: string
   /** Timestamp を除いた comment input fingerprint です。 */
   fingerprint: string
+}
+
+/**
+ * Participant index row of one comment thread: one row per member who wrote in it, so reply
+ * notifications read the thread's participants without scanning the Document's comments.
+ */
+type StoredDocumentCommentParticipantItem = {
+  /** Canonical Workspace partition key. */
+  workspaceId: string
+  /** Sort key from the Document, the root comment, and the member. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-comment-participant'
+  /** Document that owns the thread. */
+  documentId: string
+  /** Root comment of the thread. */
+  rootCommentId: string
+  /** Normalized member key of the participant. */
+  memberKey: string
+  /** Whether the member wrote the root; this row marks a thread whose index is complete. */
+  rootAuthor: boolean
 }
 
 /**
@@ -3068,10 +3089,30 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         .map(({ userId }) => normalizeCommentMemberKey(userId))
         .filter((memberKey) => memberKey !== actorMemberKey),
     )
-    const threadParticipants = storedParent === undefined
-      ? []
-      : (await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent))
-          .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
+    const threadRead = storedParent === undefined
+      ? undefined
+      : await this.readThreadParticipants(input.workspaceId, input.documentId, storedParent)
+    const threadParticipants = (threadRead?.participants ?? [])
+      .filter((memberKey) => memberKey !== actorMemberKey && !mentionedMemberKeys.has(memberKey))
+    // The participant index of the thread: the root author marks a new root, and a reply adds its
+    // author and backfills an older thread.
+    const rootCommentId = storedParent?.id ?? id
+    const rootAuthor = normalizeCommentMemberKey(storedParent?.authorUserId ?? input.access.memberKey)
+    const participantPuts = [...new Set([...(threadRead?.backfill ?? []), actorMemberKey])]
+      .map((memberKey) => ({
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            workspaceId: input.workspaceId,
+            recordKey: commentParticipantKey(input.documentId, rootCommentId, memberKey),
+            entryType: 'document-comment-participant',
+            documentId: input.documentId,
+            rootCommentId,
+            memberKey,
+            rootAuthor: memberKey === rootAuthor,
+          } satisfies StoredDocumentCommentParticipantItem,
+        },
+      }))
     const notificationCandidates = [
       ...[...mentionedMemberKeys].map((memberKey) => ({
         memberKey,
@@ -3169,6 +3210,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         },
       },
       createCommentWindowAction(),
+      ...participantPuts,
       ...(auditPut === undefined ? [] : [auditPut]),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
@@ -3734,22 +3776,35 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   /**
    * Reads the members who wrote in one comment thread: the root author and every replier.
    *
-   * The scan of the Document's comment rows is bounded; past the bound the thread keeps the
-   * participants found so far, because the notification is best effort.
+   * A thread whose root was written with the participant index reads only its index rows. An
+   * older thread has no root marker in the index, so every page of the Document's comments is
+   * read; its participants are then returned for backfill, so the next reply reads the index.
+   * No page is skipped either way.
    *
    * @param workspaceId - Workspace that owns the Document.
    * @param documentId - Document that owns the thread.
    * @param root - Root comment of the thread.
-   * @returns Normalized member keys of the thread participants.
+   * @returns Normalized participant member keys, and those to write to the index.
    */
   private async readThreadParticipants(
     workspaceId: string,
     documentId: string,
     root: StoredDocumentCommentItem,
-  ): Promise<string[]> {
-    const participants = new Set([normalizeCommentMemberKey(root.authorUserId)])
+  ): Promise<{ participants: string[]; backfill: string[] }> {
+    const rootAuthor = normalizeCommentMemberKey(root.authorUserId)
+    const participants = new Set([rootAuthor])
+    let indexed = false
+    for (const item of await this.queryAllPages(
+      workspaceId,
+      commentParticipantPrefix(documentId, root.id),
+    )) {
+      const row = readStoredCommentParticipant(item, workspaceId, documentId, root.id)
+      participants.add(row.memberKey)
+      if (row.rootAuthor) indexed = true
+    }
+    if (indexed) return { participants: [...participants], backfill: [] }
     let exclusiveStartKey: Record<string, unknown> | undefined
-    for (let page = 0; page < DOCUMENT_THREAD_PARTICIPANT_PAGE_LIMIT; page += 1) {
+    do {
       const result = await this.client.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
@@ -3761,17 +3816,45 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           ':rootCommentId': root.id,
           ':entryType': 'document-comment',
         },
+        ConsistentRead: true,
         ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
       }))
       for (const item of result.Items ?? []) {
-        if (typeof item.authorUserId === 'string' && item.authorUserId) {
-          participants.add(normalizeCommentMemberKey(item.authorUserId))
-        }
+        if (typeof item.authorUserId !== 'string' || !item.authorUserId) throw invalidStoredDocumentData()
+        participants.add(normalizeCommentMemberKey(item.authorUserId))
       }
       exclusiveStartKey = result.LastEvaluatedKey
-      if (exclusiveStartKey === undefined) break
+    } while (exclusiveStartKey !== undefined)
+    const all = [...participants]
+    return {
+      participants: all,
+      // A thread with more participants than one transaction can index keeps the full read.
+      backfill: all.length <= DOCUMENT_THREAD_PARTICIPANT_BACKFILL_LIMIT ? all : [],
     }
-    return [...participants]
+  }
+
+  /**
+   * Reads every page of one key prefix in a Workspace partition.
+   *
+   * @param workspaceId - Workspace partition.
+   * @param prefix - Sort key prefix.
+   * @returns All items under the prefix.
+   */
+  private async queryAllPages(workspaceId: string, prefix: string): Promise<Record<string, unknown>[]> {
+    const items: Record<string, unknown>[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': prefix },
+        ConsistentRead: true,
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }))
+      items.push(...(result.Items ?? []))
+      exclusiveStartKey = result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return items
   }
 
   /** Presence lease を更新します。 */
@@ -6800,6 +6883,69 @@ function commentKey(documentId: string, createdAt: string, commentId: string): s
 /** Builds the deterministic sort key for one Document comment-window fence row. */
 function commentWindowKey(documentId: string): string {
   return `COMMENT_WINDOW#${encodeKeyPart(documentId)}`
+}
+
+/**
+ * Builds the sort key prefix of one thread's participant index.
+ *
+ * @param documentId - Document that owns the thread.
+ * @param rootCommentId - Root comment of the thread.
+ * @returns The prefix shared by the thread's participant rows.
+ */
+function commentParticipantPrefix(documentId: string, rootCommentId: string): string {
+  return `COMMENT_PARTICIPANT#${encodeKeyPart(documentId)}#${encodeKeyPart(rootCommentId)}#`
+}
+
+/**
+ * Builds the sort key of one thread participant row.
+ *
+ * @param documentId - Document that owns the thread.
+ * @param rootCommentId - Root comment of the thread.
+ * @param memberKey - Normalized participant member key.
+ * @returns The participant row sort key.
+ */
+function commentParticipantKey(documentId: string, rootCommentId: string, memberKey: string): string {
+  return `${commentParticipantPrefix(documentId, rootCommentId)}${encodeKeyPart(memberKey)}`
+}
+
+/**
+ * Validates one stored thread participant row.
+ *
+ * @param value - Raw DynamoDB item.
+ * @param workspaceId - Expected Workspace partition.
+ * @param documentId - Expected Document.
+ * @param rootCommentId - Expected root comment.
+ * @returns The validated row.
+ * @throws DocumentError when the row is malformed or crosses a boundary.
+ */
+function readStoredCommentParticipant(
+  value: unknown,
+  workspaceId: string,
+  documentId: string,
+  rootCommentId: string,
+): StoredDocumentCommentParticipantItem {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.entryType !== 'document-comment-participant' ||
+    value.documentId !== documentId ||
+    value.rootCommentId !== rootCommentId ||
+    typeof value.memberKey !== 'string' ||
+    !value.memberKey ||
+    value.recordKey !== commentParticipantKey(documentId, rootCommentId, value.memberKey) ||
+    typeof value.rootAuthor !== 'boolean'
+  ) {
+    throw invalidStoredDocumentData()
+  }
+  return {
+    workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'document-comment-participant',
+    documentId,
+    rootCommentId,
+    memberKey: value.memberKey,
+    rootAuthor: value.rootAuthor,
+  }
 }
 
 /**

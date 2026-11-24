@@ -1,8 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { SWRConfig, unstable_serialize } from 'swr'
 import type { DocumentComment } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
 import { replaceLoadedDocumentComment } from '../src/documents/model/comments'
+import { useDocumentCommentChanges } from '../src/documents/mutations/useDocumentCommentChanges'
 import { convertMarkdownToDocument } from '../src/documents/model/markdownImport'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { DocumentEditor, DocumentReadOnlyContent } from '../src/documents/ui/DocumentEditor'
@@ -10,6 +12,11 @@ import { DocumentShareDialog } from '../src/documents/ui/DocumentShareDialog'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const t = createTranslator('en')
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 /**
  * Builds the fixture page with the given blocks.
@@ -99,6 +106,34 @@ describe('Document editing and comments (#422)', () => {
     // A thread without the comment, or one not read yet, is left as it is.
     expect(replaceLoadedDocumentComment([root], edited)).toEqual([root])
     expect(replaceLoadedDocumentComment(undefined, edited)).toBeUndefined()
+  })
+
+  test('puts an edited comment into the cached thread opened by a deep link', async () => {
+    const root = createComment({ id: 'root' })
+    const reply = createComment({ id: 'reply', parentCommentId: 'root', body: 'Before' })
+    const edited = { ...reply, body: 'After', editedAt: '2026-11-02T00:00:00.000Z' }
+    const threadKey = ['document-comment-thread', 'token', documentRecordFixture.id, 'root', 'reply']
+    // SWR keeps each entry's original key under `_k`, which key matchers read.
+    const cache = new Map<string, object>([[unstable_serialize(threadKey), { data: [root, reply], _k: threadKey }]])
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${String(input)}`)
+      return Response.json({ comment: edited })
+    }) as typeof fetch
+    let actions: ReturnType<typeof useDocumentCommentChanges> | undefined
+    /** Captures the mutation actions inside the test SWR cache. */
+    function Probe() {
+      actions = useDocumentCommentChanges('token')
+      return null
+    }
+    renderToStaticMarkup(<SWRConfig value={{ provider: () => cache }}><Probe /></SWRConfig>)
+    if (!actions) throw new Error('The mutation hook did not render.')
+
+    expect(await actions.editComment(documentRecordFixture.id, 'reply', { body: 'After', mentions: [] })).toEqual(edited)
+    expect(requests).toEqual([
+      `PATCH /api/documents/${encodeURIComponent(documentRecordFixture.id)}/comments/reply`,
+    ])
+    expect(cache.get(unstable_serialize(threadKey))).toMatchObject({ data: [root, edited] })
   })
 
   test('shows Mermaid source as source and no longer offers Mermaid for a text diagram', () => {

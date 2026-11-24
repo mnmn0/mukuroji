@@ -1521,14 +1521,81 @@ function escapeMarkdownText(value: string): string {
   return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
 }
 
+/** The start of a raw HTML tag, comment, declaration, or processing instruction. */
+const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
+
+/** An opening or closing code fence line. */
+const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/u
+
 /**
- * Escapes the angle brackets of raw HTML in Markdown, leaving other Markdown syntax as written.
+ * Escapes the `<` that would start raw HTML in Markdown, so the exported file never carries
+ * runnable HTML. Blockquote markers, autolinks, other Markdown, and the contents of code spans
+ * and fenced code stay as written, so the text imports back with the same rendering.
  *
  * @param value - Markdown text.
  * @returns Markdown whose HTML tags are shown as text.
  */
 function escapeMarkdownHtml(value: string): string {
-  return value.replace(/([<>])/gu, '\\$1')
+  let fence: string | undefined
+  return value.split('\n').map((line) => {
+    const marker = line.match(CODE_FENCE_LINE)?.[1]
+    if (fence !== undefined) {
+      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined
+      return line
+    }
+    if (marker !== undefined) {
+      fence = marker
+      return line
+    }
+    return escapeRawHtmlOutsideCodeSpans(line)
+  }).join('\n')
+}
+
+/**
+ * Escapes raw HTML starts in one line, outside its code spans.
+ *
+ * @param line - One Markdown line outside fenced code.
+ * @returns The line with `<` escaped where it would start raw HTML.
+ */
+function escapeRawHtmlOutsideCodeSpans(line: string): string {
+  let result = ''
+  let index = 0
+  while (index < line.length) {
+    const open = line.indexOf('`', index)
+    if (open === -1) break
+    let runEnd = open
+    while (line[runEnd] === '`') runEnd += 1
+    const run = line.slice(open, runEnd)
+    const close = findClosingBacktickRun(line, runEnd, run.length)
+    if (close === -1) {
+      // An unclosed backtick run is literal text; keep scanning after it.
+      result += line.slice(index, runEnd).replace(RAW_HTML_START, '\\<')
+      index = runEnd
+      continue
+    }
+    result += line.slice(index, open).replace(RAW_HTML_START, '\\<') + line.slice(open, close + run.length)
+    index = close + run.length
+  }
+  return result + line.slice(index).replace(RAW_HTML_START, '\\<')
+}
+
+/**
+ * Finds the backtick run of exactly the given length that closes a code span.
+ *
+ * @param line - Markdown line.
+ * @param from - Index after the opening run.
+ * @param length - Length of the opening run.
+ * @returns Start index of the closing run, or -1 when the span is not closed.
+ */
+function findClosingBacktickRun(line: string, from: number, length: number): number {
+  let index = line.indexOf('`', from)
+  while (index !== -1) {
+    let end = index
+    while (line[end] === '`') end += 1
+    if (end - index === length) return index
+    index = line.indexOf('`', end)
+  }
+  return -1
 }
 
 /**

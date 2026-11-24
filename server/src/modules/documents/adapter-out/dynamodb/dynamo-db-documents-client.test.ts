@@ -4570,6 +4570,99 @@ test('notifies thread participants of replies and lets authors edit and delete o
   expect(listed.comments.find(({ id }) => id === 'reply-2')).toMatchObject({ body: '', deletedAt: expect.any(String) })
 })
 
+test('notifies every thread participant through the participant index, backfilling older threads', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Long thread',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+  })
+  const reply = async (memberKey: string, commentId: string) => client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: { ...ownerAccess, memberKey },
+    body: `Reply from ${memberKey}`,
+    mentions: [],
+    parentCommentId: 'root',
+    commentId,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: memberKey, kind: 'user', displayName: memberKey },
+      idempotencyKey: commentId,
+      request: { method: 'POST', path: `/api/documents/${document.id}/comments`, body: { commentId } },
+      source: { kind: 'api' },
+    }),
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Root',
+    mentions: [],
+    commentId: 'root',
+  })
+  // Many unrelated comments push the early repliers past the old ten-page bound.
+  for (let index = 0; index < 30; index += 1) {
+    await client.createComment({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      body: `Other ${index}`,
+      mentions: [],
+      commentId: `other-${index}`,
+    })
+  }
+  await reply('mina@example.com', 'reply-1')
+  // Simulates a thread written before the participant index existed.
+  for (const item of memory.items()) {
+    if (item.entryType === 'document-comment-participant') {
+      memory.remove(String(item.workspaceId), String(item.recordKey))
+    }
+  }
+  memory.setQueryPageSize(2)
+  /**
+   * Reads the reply notification candidates of one reply.
+   *
+   * @param commentId - Reply comment ID.
+   * @returns Member keys notified because of the reply.
+   */
+  const replyCandidates = (commentId: string) => {
+    const event = memory.items().find(({ eventType, metadata }) =>
+      eventType === 'document.comment.replied' &&
+      typeof metadata === 'object' && metadata !== null &&
+      'commentId' in metadata && metadata.commentId === commentId)
+    if (!event || typeof event.metadata !== 'object' || event.metadata === null) return undefined
+    return 'notificationCandidates' in event.metadata ? event.metadata.notificationCandidates : undefined
+  }
+
+  await reply('kai@example.com', 'reply-2')
+  expect(replyCandidates('reply-2')).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+  ])
+  // The older thread was backfilled, so the next reply reads only its index.
+  expect(memory.items()
+    .filter((item) => item.entryType === 'document-comment-participant')
+    .map(({ memberKey, rootAuthor }) => [memberKey, rootAuthor])
+    .sort()).toEqual([
+    ['kai@example.com', false],
+    ['mina@example.com', false],
+    [ownerAccess.memberKey.toLowerCase(), true],
+  ])
+  memory.remove('workspace-1', String(memory.items().find(({ id }) => id === 'reply-1')?.recordKey))
+  await reply('ren@example.com', 'reply-3')
+  expect(replyCandidates('reply-3')).toEqual([
+    { memberKey: ownerAccess.memberKey.toLowerCase(), reason: 'reply' },
+    { memberKey: 'kai@example.com', reason: 'reply' },
+    { memberKey: 'mina@example.com', reason: 'reply' },
+  ])
+})
+
 test('replays an idempotent comment edit or delete without rewriting a newer change', async () => {
   const memory = createMemoryDocumentClient()
   let clock = Date.parse('2026-07-18T00:00:00.000Z')
@@ -5359,6 +5452,8 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
     blocks: [
       { id: 'block-a', type: 'paragraph', text: '<script>alert(1)</script>' },
       { id: 'block-m', type: 'paragraph', text: '**bold** and \\*literal\\*' },
+      { id: 'block-q', type: 'paragraph', text: '> quoted <b>tag</b> and `a<b>c` and <https://example.com>' },
+      { id: 'block-f', type: 'paragraph', text: '```html\n<div>kept</div>\n```' },
       {
         id: 'block-b',
         type: 'table',
@@ -5370,7 +5465,10 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   const markdown = renderDocumentExport(page, 'markdown')
   const json = renderDocumentExport(page, 'json')
   expect(markdown.fileName).toBe('Export - document.md')
-  expect(markdown.content).toContain('\\<script\\>alert(1)\\</script\\>')
+  expect(markdown.content).toContain('\\<script>alert(1)\\</script>')
+  // Only raw HTML is escaped: the blockquote marker, an autolink, and code keep their text.
+  expect(markdown.content).toContain('\n> quoted \\<b>tag\\</b> and `a<b>c` and <https://example.com>\n')
+  expect(markdown.content).toContain('\n```html\n<div>kept</div>\n```\n')
   // Paragraph text is Markdown, so it is exported as written and imports back unchanged.
   expect(markdown.content).toContain('\n**bold** and \\*literal\\*\n')
   expect(markdown.content).toContain('A\\|B')

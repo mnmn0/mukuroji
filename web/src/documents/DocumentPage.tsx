@@ -63,7 +63,6 @@ import {
   createDocument,
   createDocumentComment,
   createDocumentShare,
-  deleteDocumentComment,
   deleteDocumentPresence,
   deleteDocumentShare,
   exportDocument,
@@ -77,7 +76,6 @@ import {
   instantiateDocument,
   markDocumentRecent,
   resolveDocumentComment,
-  updateDocumentComment,
   restoreDocument,
   restoreDocumentVersion,
   unfavoriteDocument,
@@ -133,6 +131,7 @@ import type {
 } from './model/builtInTemplates'
 import { replaceLoadedDocumentComment } from './model/comments'
 import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
+import { useDocumentCommentChanges } from './mutations/useDocumentCommentChanges'
 import { useMarkdownDocumentImport } from './mutations/useMarkdownDocumentImport'
 import type {
   MarkdownDocumentImportRequest,
@@ -584,6 +583,7 @@ export function DocumentPage() {
     [],
   )
   const accessToken = session?.accessToken
+  const commentChanges = useDocumentCommentChanges(accessToken)
   const documentId = params.documentId
   const routeContext = searchParams.get('context')
   const initialContextTab: DocumentContextTab | undefined =
@@ -730,7 +730,6 @@ export function DocumentPage() {
   const {
     data: focusedThreadComments = emptyComments,
     isLoading: isFocusedThreadLoading,
-    mutate: mutateFocusedThread,
   } = useDocumentCommentThread(
     accessToken,
     selectedDocument?.id,
@@ -1359,44 +1358,34 @@ export function DocumentPage() {
   }
 
   /**
-   * Replaces one loaded comment with the server's copy in older pages and the focused thread,
-   * then reloads the first page and the focused thread.
+   * Edits one comment; the mutation reconciles the cached pages and threads, and the page puts
+   * the server's copy into the older pages it keeps.
    *
-   * @param changed - Comment returned by an edit or delete.
+   * @param selectedId - Document that owns the comment.
+   * @param commentId - Comment to edit.
+   * @param input - New body and mentions.
    */
-  const replaceLoadedComment = async (changed: DocumentComment) => {
-    setOlderComments((current) => replaceLoadedDocumentComment(current, changed))
-    await Promise.all([
-      mutateComments(),
-      mutateFocusedThread((current) => replaceLoadedDocumentComment(current, changed)),
-    ])
-  }
-
   const handleEditComment = async (
     selectedId: string,
     commentId: string,
     input: { body: string; mentions: DocumentMention[] },
   ) => {
-    if (!accessToken) return
-    const edited = await mutationRunner.run(
-      `document:comment:edit:${selectedId}:${commentId}`,
-      JSON.stringify(input),
-      (context) => updateDocumentComment(accessToken, selectedId, commentId, input, context),
-    )
-    await replaceLoadedComment(edited)
+    const edited = await commentChanges.editComment(selectedId, commentId, input)
+    if (edited) setOlderComments((current) => replaceLoadedDocumentComment(current, edited))
   }
 
+  /**
+   * Deletes one comment and puts its placeholder into the older pages the page keeps.
+   *
+   * @param selectedId - Document that owns the comment.
+   * @param commentId - Comment to delete.
+   */
   const handleDeleteComment = async (
     selectedId: string,
     commentId: string,
   ) => {
-    if (!accessToken) return
-    const deleted = await mutationRunner.run(
-      `document:comment:delete:${selectedId}:${commentId}`,
-      commentId,
-      (context) => deleteDocumentComment(accessToken, selectedId, commentId, context),
-    )
-    await replaceLoadedComment(deleted)
+    const deleted = await commentChanges.deleteComment(selectedId, commentId)
+    if (deleted) setOlderComments((current) => replaceLoadedDocumentComment(current, deleted))
   }
 
   const handleRestoreVersion = async (

@@ -114,8 +114,11 @@ Comment は root / reply、block・text・whiteboard object anchor を保持し�
 への reply は、reply 保存 transaction 内でも root の未解決状態を condition check して拒否します。
 Mention は active Workspace member を検証し、comment と同じ transaction で audit event を保存
 します。Reply の通知は mention された member に加え、thread の root の作成者とそれまでの返信者
-（reply 作成者自身を除く）にも届きます。返信者は Document の comment row を最大 10 page まで
-読んで集め、それを超える古い返信者は通知から漏れることがあります。Comment の作成者は自分の
+（reply 作成者自身を除く）にも届きます。参加者は thread ごとの index row
+（`COMMENT_PARTICIPANT#<documentId>#<rootCommentId>#<memberKey>`）に comment と同じ transaction で
+書き、返信時はその thread の row だけを全 page 読みます。index ができる前の thread（root 作成者の
+row がない）は Document の comment row を全 page 読んで参加者を集め、25 人以下なら同じ返信の
+transaction で index に書き足します。どちらも page を途中で打ち切りません。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
 し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
 thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の
@@ -251,8 +254,9 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - 段落・リスト・引用・リンク・画像・HTML は、backslash escape も含めて Markdown のまま paragraph
   block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
   描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
-  描画しません。Markdown 書き出しも paragraph の text をそのまま書くため、書き出したページを
-  取り込み直しても段落は変わりません。この変更より前に取り込んだ段落は escape を外して保存
+  描画しません。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の開始
+  `<` だけを escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。
+  そのため書き出したページを取り込み直しても段落の表示は変わりません。この変更より前に取り込んだ段落は escape を外して保存
   しているため、`*` などを含むと強調として表示されることがあります。
 - folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
 
