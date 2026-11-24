@@ -48,6 +48,8 @@ export type PortfolioDashboardViewProps = {
   showAgentRuns: boolean
   /** Whether Planning health could not be read, so every row shows unknown health. */
   isPlanningUnavailable: boolean
+  /** Whether the OrgUnit structure could not be read, so the OrgUnit roll-up and filter are missing. */
+  isOrgStructureUnavailable?: boolean
   /** Compared month as `YYYY-MM`, or undefined for no comparison. */
   compareMonth?: string
   /** Months offered for comparison, newest first. */
@@ -64,7 +66,7 @@ export type PortfolioDashboardViewProps = {
   onSaveSnapshot: () => void
   /** Opens a Project overview. */
   onOpenProject: (teamId: string, projectId: string) => void
-  /** Reads the failed Teams, snapshots, and Agent Run counts again. */
+  /** Reads the failed Teams, snapshots, Agent Run counts, and OrgUnit structure again. */
   onRetry: () => void
 }
 
@@ -194,6 +196,7 @@ export function PortfolioDashboardView({
   compareMonth,
   compareMonthOptions,
   isPlanningUnavailable,
+  isOrgStructureUnavailable = false,
   isSavingSnapshot,
   locale,
   model,
@@ -303,6 +306,7 @@ export function PortfolioDashboardView({
     showAgentRuns && model.agentRunsIncomplete ? t('portfolioDashboard.error.agentRuns') : undefined,
     model.utilizationUnavailable ? t('portfolioDashboard.error.utilization') : undefined,
     isPlanningUnavailable ? t('workspace.planningUpdate.error.loading') : undefined,
+    isOrgStructureUnavailable ? t('portfolioDashboard.error.orgStructure') : undefined,
   ].filter((notice) => notice !== undefined)
   const hiddenNotices = [
     model.hiddenProjectCount > 0 ? format(t('portfolioDashboard.hidden.projects'), { count: model.hiddenProjectCount }) : undefined,

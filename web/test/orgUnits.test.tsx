@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import type { OrgStructure, PortfolioProjectMetrics, TeamPortfolioResponse } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
@@ -11,6 +11,7 @@ import {
 } from '../src/features/portfolio-dashboard/model/portfolioDashboard'
 import { PortfolioDashboardView } from '../src/features/portfolio-dashboard/ui/PortfolioDashboardView'
 import type { ProjectDirectoryTeam } from '../src/projects/api'
+import { ProjectDirectoryApiError } from '../src/projects/api/errors'
 import {
   addOrgUnit,
   assignTeamToOrgUnit,
@@ -21,6 +22,7 @@ import {
   renameOrgUnit,
   type OrgStructureDraft,
 } from '../src/projects/model/orgStructure'
+import { readOrgStructureForDisplay } from '../src/projects/queries/useOrgStructure'
 import { OrgStructurePanel } from '../src/projects/ui/OrgStructurePanel'
 import { createWorkspaceSecurityScopeOptions } from '../src/security/model/workspaceSecurityScopes'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -212,6 +214,62 @@ describe('OrgUnit portfolio roll-up', () => {
     expect(html).toContain('data-testid="portfolio-org-units"')
     expect(html).toContain('data-testid="portfolio-filter-org-unit"')
     expect(html).toContain('所属なし')
+  })
+})
+
+describe('OrgUnit structure read failures', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  /**
+   * Replaces fetch with one that answers every request with a status and JSON body.
+   *
+   * @param status - HTTP status.
+   * @param body - JSON body.
+   */
+  function answerWith(status: number, body: unknown) {
+    const fakeFetch: typeof fetch = async () => Response.json(body, { status })
+    globalThis.fetch = fakeFetch
+  }
+
+  test('shows a refused reader no OrgUnits, but keeps a server or network failure as an error', async () => {
+    answerWith(403, { code: 'WorkspaceRoleDenied', message: 'Guests cannot read the OrgUnit structure.' })
+    expect(await readOrgStructureForDisplay('token')).toEqual({ orgUnits: [], teamAssignments: [], revision: 0 })
+
+    answerWith(503, { code: 'OrgStructureUnavailable', message: 'Unavailable' })
+    await expect(readOrgStructureForDisplay('token')).rejects.toBeInstanceOf(ProjectDirectoryApiError)
+
+    const failingFetch: typeof fetch = async () => {
+      throw new TypeError('Failed to fetch')
+    }
+    globalThis.fetch = failingFetch
+    await expect(readOrgStructureForDisplay('token')).rejects.toBeInstanceOf(TypeError)
+  })
+
+  test('tells the reader the OrgUnit roll-up is missing and offers the retry', () => {
+    const html = renderToStaticMarkup(
+      <PortfolioDashboardView
+        canSaveSnapshot={false}
+        compareMonthOptions={[]}
+        isOrgStructureUnavailable
+        isPlanningUnavailable={false}
+        isSavingSnapshot={false}
+        locale="en"
+        model={model}
+        showAgentRuns={false}
+        t={createTranslator('en')}
+        teams={teams}
+        onCompareMonthChange={() => undefined}
+        onOpenProject={() => undefined}
+        onRetry={() => undefined}
+        onSaveSnapshot={() => undefined}
+      />,
+    )
+    expect(html).toContain(createTranslator('en')('portfolioDashboard.error.orgStructure'))
+    expect(html).toContain('data-testid="portfolio-retry"')
+    expect(html).not.toContain('portfolio-org-units')
   })
 })
 

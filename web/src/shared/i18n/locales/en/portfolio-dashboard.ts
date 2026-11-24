@@ -15,6 +15,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.error.snapshots': 'The compared month’s snapshot could not be loaded for: {teams}',
   'portfolioDashboard.error.agentRuns': 'Agent Run counts could not be loaded for some Teams.',
   'portfolioDashboard.error.utilization': 'Member utilization could not be loaded.',
+  'portfolioDashboard.error.orgStructure': 'OrgUnits could not be loaded, so the OrgUnit totals and filter are not shown.',
   'portfolioDashboard.hidden.projects': '{count} Projects you cannot view are not shown.',
   'portfolioDashboard.hidden.costs': '{count} Projects have a budget and cost you cannot view.',
   'portfolioDashboard.hidden.snapshot': '{count} Projects of the compared snapshot that you cannot view are not shown.',

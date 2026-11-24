@@ -15,6 +15,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.error.snapshots': '次の Team の比較月 snapshot を読み込めませんでした: {teams}',
   'portfolioDashboard.error.agentRuns': '一部の Team は Agent Run の件数を読み込めませんでした。',
   'portfolioDashboard.error.utilization': '要員の稼働率を読み込めませんでした。',
+  'portfolioDashboard.error.orgStructure': '部門を読み込めなかったため、部門別の集計と絞り込みを表示していません。',
   'portfolioDashboard.hidden.projects': '閲覧権限のない Project {count}件は表示していません。',
   'portfolioDashboard.hidden.costs': '予算・コストの閲覧権限がない Project が {count}件あります。',
   'portfolioDashboard.hidden.snapshot': '比較月 snapshot のうち閲覧権限のない Project {count}件は表示していません。',

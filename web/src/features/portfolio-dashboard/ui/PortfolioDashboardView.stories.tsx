@@ -190,3 +190,8 @@ export const ByOrgUnit: Story = {
     },
   },
 }
+
+/** OrgUnits failed to load, so the roll-up is missing and the notice offers a retry. */
+export const OrgUnitsUnavailable: Story = {
+  args: { isOrgStructureUnavailable: true },
+}
