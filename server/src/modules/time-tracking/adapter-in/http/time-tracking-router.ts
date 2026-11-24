@@ -377,6 +377,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
         actorUserId: principal.userKey,
         authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
+        ...readCorrelationId(context.req.header('X-Correlation-Id')),
       })
       return context.json(result)
     })
@@ -393,6 +394,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         actorUserId: principal.userKey,
         reason: typeof body.reason === 'string' ? body.reason : '',
         authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
+        ...readCorrelationId(context.req.header('X-Correlation-Id')),
       })
       return context.json(result)
     })
@@ -1280,4 +1282,15 @@ function readCategory(value: unknown): TimeEntryCategory {
     throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'category must be a work category key.')
   }
   return category
+}
+
+/**
+ * Reads the request's correlation ID, which the common middleware always sets, for failure logs.
+ *
+ * @param header - `X-Correlation-Id` header value.
+ * @returns The correlation ID as an input field, or nothing when the header is empty.
+ */
+function readCorrelationId(header: string | undefined): { correlationId?: string } {
+  const correlationId = header?.trim()
+  return correlationId ? { correlationId } : {}
 }

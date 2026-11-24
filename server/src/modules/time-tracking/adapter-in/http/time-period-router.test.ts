@@ -225,7 +225,8 @@ describe('time period close routes', () => {
     }
     const service = new TimeTrackingService(new FailingTeamRepository(), { now: () => new Date('2026-08-02T12:00:00.000Z') })
     const originalError = console.error
-    console.error = () => undefined
+    const logs: unknown[] = []
+    console.error = (line: unknown) => { logs.push(line) }
     try {
       expect(await service.closeWorkspacePeriod({
         workspaceId: 'workspace-1',
@@ -233,6 +234,7 @@ describe('time period close routes', () => {
         month: '2026-07',
         timeZone: 'UTC',
         actorUserId: 'admin-1',
+        correlationId: 'correlation-1',
       })).toEqual({
         month: '2026-07',
         results: [{ teamId: 'team-1', status: 'failed' }, { teamId: 'team-2', status: 'closed' }],
@@ -241,6 +243,16 @@ describe('time period close routes', () => {
     } finally {
       console.error = originalError
     }
+    // The log names the failed Team and the request, and leaves out the error message.
+    expect(logs.map((line) => JSON.parse(String(line)))).toEqual([{
+      event: 'workspace-time-period.team-failed',
+      action: 'close',
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      correlationId: 'correlation-1',
+      errorCode: 'UnexpectedError',
+    }])
     expect(await service.listClosedPeriods('workspace-1', 'team-2')).toMatchObject([{ month: '2026-07' }])
   })
 })

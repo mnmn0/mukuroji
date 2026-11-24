@@ -572,6 +572,8 @@ export type CloseWorkspaceTimePeriodInput = {
    * caller whose Workspace role changed during the loop stops closing the remaining Teams.
    */
   authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
+  /** Correlation ID of the request, written to the log of each Team that fails. */
+  correlationId?: string
 }
 
 /** A request to reopen one month for every listed Team of a Workspace. */
@@ -591,6 +593,8 @@ export type ReopenWorkspaceTimePeriodInput = {
    * caller whose Workspace role changed during the loop stops reopening the remaining Teams.
    */
   authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
+  /** Correlation ID of the request, written to the log of each Team that fails. */
+  correlationId?: string
 }
 
 /** Configuration for appending time-tracking mutations to the shared audit table. */
@@ -1877,7 +1881,7 @@ export class TimeTrackingService {
         if (error instanceof TimeTrackingError && error.code === 'TimePeriodAlreadyClosed') {
           results.push({ teamId, status: 'already-closed' })
         } else {
-          logWorkspacePeriodFailure('close', workspaceId, teamId, month, error)
+          logWorkspacePeriodFailure('close', { workspaceId, teamId, month, correlationId: input.correlationId }, error)
           results.push({ teamId, status: 'failed' })
         }
       }
@@ -1912,7 +1916,7 @@ export class TimeTrackingService {
         if (error instanceof TimeTrackingError && error.code === 'TimePeriodNotClosed') {
           results.push({ teamId, status: 'not-closed' })
         } else {
-          logWorkspacePeriodFailure('reopen', workspaceId, teamId, month, error)
+          logWorkspacePeriodFailure('reopen', { workspaceId, teamId, month, correlationId: input.correlationId }, error)
           results.push({ teamId, status: 'failed' })
         }
       }
@@ -3493,26 +3497,22 @@ function periodAuthorizationChangedError(): TimeTrackingError {
  * Logs one Team that a Workspace-wide close or reopen could not change, with identifiers only.
  *
  * @param action - Close or reopen.
- * @param workspaceId - Workspace identifier.
- * @param teamId - Team that failed.
- * @param month - Month as `YYYY-MM`.
- * @param error - Failure; only its name and stable code are logged.
+ * @param target - Workspace, failed Team, month, and the request's correlation ID.
+ * @param error - Failure; only its stable code, or the error class name, is logged.
  */
 function logWorkspacePeriodFailure(
   action: 'close' | 'reopen',
-  workspaceId: string,
-  teamId: string,
-  month: string,
+  target: { workspaceId: string; teamId: string; month: string; correlationId: string | undefined },
   error: unknown,
 ): void {
   console.error(JSON.stringify({
     event: 'workspace-time-period.team-failed',
     action,
-    workspaceId,
-    teamId,
-    month,
-    errorName: error instanceof Error ? error.name : 'Unknown',
-    ...(error instanceof TimeTrackingError ? { errorCode: error.code } : {}),
+    workspaceId: target.workspaceId,
+    teamId: target.teamId,
+    month: target.month,
+    ...(target.correlationId ? { correlationId: target.correlationId } : {}),
+    errorCode: error instanceof TimeTrackingError ? error.code : 'UnexpectedError',
   }))
 }
 
