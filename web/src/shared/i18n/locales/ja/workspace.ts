@@ -485,6 +485,35 @@ export const workspaceMessages = {
   'workspace.help.agentGuideTitle': 'coding agent 利用者ガイド',
   'workspace.help.agentGuideDescription':
     'token の発行、クライアントへの登録、agent の作業の流れ、Factory board での確認。',
+  'workspace.help.featureGuidesTitle': '機能別の案内',
+  'workspace.help.featureGuidesDescription':
+    '主な画面の役割を短く説明します。「画面を開く」でその画面へ、「ガイドを読む」で利用者ガイドの該当箇所へ移動します。',
+  'workspace.help.featureOpen': '画面を開く',
+  'workspace.help.featureGuide': 'ガイドを読む',
+  'workspace.help.featureProjectsTitle': 'プロジェクト',
+  'workspace.help.featureProjectsDescription':
+    'Project を作り、憲章・メンバー・WBS を整えます。タスクの親子が WBS になり、ガントで日程と依存関係を確認します。',
+  'workspace.help.featurePlanningTitle': '計画',
+  'workspace.help.featurePlanningDescription':
+    'Phase・Milestone・Cycle などの計画を置き、タイムラインで依存とクリティカルパス、Project 横断の予定を確認します。',
+  'workspace.help.featureUpdatesTitle': 'アップデート',
+  'workspace.help.featureUpdatesDescription':
+    '毎週の近況（健全性・リスク・要約・次のアクション）を読み、コメントや確認を付けます。公開は Project の更新欄から行います。',
+  'workspace.help.featureReportsTitle': 'レポート',
+  'workspace.help.featureReportsDescription':
+    'Throughput、バーンダウン、期限超過、完了予測などのウィジェットでレポートを作り、定期配信を設定します。',
+  'workspace.help.featureMyTasksTitle': 'マイタスク',
+  'workspace.help.featureMyTasksDescription':
+    '自分が担当・参加するタスクをボード・テーブル・ガント・カレンダーで確認し、ドラッグで状態を進めます。',
+  'workspace.help.featureFocusTitle': 'フォーカス',
+  'workspace.help.featureFocusDescription':
+    'いま対応すべきことだけを理由と解消条件つきで優先度順に並べます。スヌーズで後回しにできます。',
+  'workspace.help.featureInboxTitle': '受信箱',
+  'workspace.help.featureInboxDescription':
+    '担当への追加、メンション、期限、督促などの通知を受け取り、既読・スヌーズ・アーカイブで整理します。',
+  'workspace.help.featureSettingsTitle': '設定',
+  'workspace.help.featureSettingsDescription':
+    '個人設定と、管理者向けの Workspace・Team・権限・Work Item・オートメーション・エージェントの設定を行います。',
   'workspace.help.buildTitle': '稼働中の Web build',
   'workspace.help.buildDescription':
     '問題を報告するときはこの commit を伝えてください。運用者はこれを手がかりに Web を前の release へ戻します。',
