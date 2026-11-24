@@ -3729,6 +3729,18 @@ function aggregateCalendarEntries(
     .map((group) => toSummaryGroup(group, includeCosts))
 }
 
+/**
+ * Splits a time entry at local midnight the way time reports do, so another report can count
+ * an entry that crosses midnight on each day it covers.
+ *
+ * @param entry - Entry to split.
+ * @param timeZone - IANA timezone that defines the days.
+ * @returns One segment per local date with its whole minutes and its share of the entry.
+ */
+export function splitTimeEntryByLocalDate(entry: TimeEntry, timeZone: string): Array<{ date: string; minutes: number; ratio: number }> {
+  return splitEntryByLocalDate(entry, timeZone, entry.startAt, entry.endAt)
+}
+
 /** Splits one interval at timezone-aware local midnight boundaries. */
 function splitEntryByLocalDate(entry: TimeEntry, timeZone: string, from: string, to: string): Array<{ date: string; minutes: number; ratio: number }> {
   const start = Math.max(Date.parse(entry.startAt), Date.parse(from))

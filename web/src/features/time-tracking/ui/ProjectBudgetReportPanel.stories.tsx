@@ -24,6 +24,7 @@ const meta = {
 
 export default meta
 
+/** Story type of the Project budget report stories. */
 type Story = StoryObj<typeof meta>
 
 /** A Project behind schedule and slightly over cost. */

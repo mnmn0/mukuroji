@@ -8,6 +8,7 @@ import {
   type WorkItemEffortFields,
   type WorkItemProgressMode,
 } from '@mukuroji/contracts'
+import { splitTimeEntryByLocalDate } from '../../time-tracking'
 import {
   createProjectBudgetReport,
   type ProjectBudgetTimeEntry,
@@ -45,6 +46,8 @@ export type ProjectBudgetReportRequest = {
 export type ProjectBudgetWorkItem = WorkItemEffortFields & {
   /** Work Item ID. */
   id: string
+  /** Project the Work Item belongs to now, if any. */
+  assignedProjectId?: string
 }
 
 /** One page of a Team's Work Items, archived ones included. */
@@ -153,7 +156,7 @@ export async function loadProjectBudgetReport(
     budget: budget ?? null,
     baseline,
     workItems,
-    entries: entries.map((entry) => toBudgetEntry(entry, timeZone)),
+    entries: entries.flatMap((entry) => toBudgetEntries(entry, timeZone)),
   })
 }
 
@@ -190,7 +193,9 @@ async function readWorkItemProgress(
       )
     }
     for (const issue of page.issues) {
-      if (!ids.has(issue.id)) continue
+      // A Work Item moved to another Project earns nothing here, like a deleted one, so the report
+      // never reads the state of work the Project no longer owns.
+      if (!ids.has(issue.id) || issue.assignedProjectId !== request.projectId) continue
       result.set(issue.id, {
         canceled: issue.statusCategory === 'canceled',
         progressPercent: deriveWorkItemProgressPercent(issue, progressMode) ?? 0,
@@ -205,19 +210,28 @@ async function readWorkItemProgress(
 }
 
 /**
- * Converts a time entry to what the report reads: its start date in the report timezone.
+ * Converts a time entry to what the report reads: one part per local date it covers in the
+ * report timezone, split at midnight the way time reports split it. Each part keeps its share of
+ * the cost: the rate times its minutes when the entry has a rate, else the cost split by time.
  *
  * @param entry - Stored time entry.
  * @param timeZone - Report timezone.
- * @returns The report entry.
+ * @returns The report entries.
  */
-function toBudgetEntry(entry: TimeEntry, timeZone: string): ProjectBudgetTimeEntry {
-  return {
-    localDate: localDateAt(Date.parse(entry.startAt), timeZone),
-    durationMinutes: entry.durationMinutes,
-    currency: entry.currency,
-    ...(entry.actualCostMinor === undefined ? {} : { actualCostMinor: entry.actualCostMinor }),
-  }
+function toBudgetEntries(entry: TimeEntry, timeZone: string): ProjectBudgetTimeEntry[] {
+  return splitTimeEntryByLocalDate(entry, timeZone).map((segment) => {
+    const actualCostMinor = entry.actualCostMinor === undefined
+      ? undefined
+      : entry.hourlyRateMinor === undefined
+        ? Math.round(entry.actualCostMinor * segment.ratio)
+        : Math.round((segment.minutes / 60) * entry.hourlyRateMinor)
+    return {
+      localDate: segment.date,
+      durationMinutes: segment.minutes,
+      currency: entry.currency,
+      ...(actualCostMinor === undefined ? {} : { actualCostMinor }),
+    }
+  })
 }
 
 /** Cached local date formatters by timezone. */

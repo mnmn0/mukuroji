@@ -1,7 +1,7 @@
 import type { ProjectBudgetReport, ProjectBudgetReportPoint } from '@mukuroji/contracts'
 import { useId, type ReactNode } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
-import { formatPerformanceIndex, isProjectBudgetReportRangeValid } from '../model/projectBudgetReport'
+import { formatPerformanceIndex, isProjectBudgetReportRangeValid, listIsolatedPoints } from '../model/projectBudgetReport'
 import { formatMinutes } from '../model/timePeriod'
 import { formatCostsByCurrency, formatMinorAmount, type TimeReportRange } from '../model/timeReport'
 import { interpolate, type TimeTrackingTranslator } from './timeTrackingText'
@@ -314,16 +314,26 @@ function CumulativeChart({ locale, report, t }: { locale: Locale; report: Projec
             </g>
           ))}
           {series.map((line) => (
-            <path
-              d={createPath(line.values, xAt, yAt)}
-              fill="none"
-              key={line.label}
-              strokeDasharray={line.dashed ? '6 4' : undefined}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="2"
-              style={{ stroke: line.color }}
-            />
+            <g key={line.label}>
+              <path
+                d={createPath(line.values, xAt, yAt)}
+                fill="none"
+                strokeDasharray={line.dashed ? '6 4' : undefined}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                style={{ stroke: line.color }}
+              />
+              {listIsolatedPoints(line.values).map((index) => (
+                <circle
+                  cx={xAt(index)}
+                  cy={yAt(line.values[index] ?? 0)}
+                  key={index}
+                  r="3"
+                  style={{ fill: line.color }}
+                />
+              ))}
+            </g>
           ))}
         </svg>
       </div>

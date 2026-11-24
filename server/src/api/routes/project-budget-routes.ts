@@ -133,12 +133,24 @@ function readReportQuery(c: Context): ReportQuery {
   if (!isTimeZone(timeZone)) throw invalidRequest('timeZone must be an IANA timezone.')
   const interval = c.req.query('interval') ?? 'day'
   if (!isProjectBudgetReportInterval(interval)) throw invalidRequest('interval must be day or week.')
-  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS) + 1
-  const points = interval === 'day' ? days : Math.ceil(days / 7) + 1
+  const points = interval === 'day'
+    ? Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS) + 1
+    : Math.round((mondayOf(to) - mondayOf(from)) / (7 * DAY_MS)) + 1
   if (points > PROJECT_BUDGET_REPORT_MAX_POINTS) {
     throw invalidRequest(`The range must hold at most ${PROJECT_BUDGET_REPORT_MAX_POINTS} ${interval === 'day' ? 'days' : 'weeks'}.`)
   }
   return { from, to, timeZone, interval }
+}
+
+/**
+ * Finds the Monday that starts the week of a local date, the way the report buckets weeks.
+ *
+ * @param date - `YYYY-MM-DD` local date.
+ * @returns Epoch milliseconds of that Monday at UTC midnight.
+ */
+function mondayOf(date: string): number {
+  const time = Date.parse(`${date}T00:00:00Z`)
+  return time - ((new Date(time).getUTCDay() + 6) % 7) * DAY_MS
 }
 
 /**

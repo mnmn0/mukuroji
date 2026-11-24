@@ -42,7 +42,10 @@ export function chooseProjectBudgetReportInterval(range: TimeReportRange): Proje
  */
 export function isProjectBudgetReportRangeValid(range: TimeReportRange): boolean {
   const days = countLocalDaysBetween(range.from, range.to)
-  return days !== undefined && days >= 0 && Math.ceil((days + 1) / 7) + 1 <= PROJECT_BUDGET_REPORT_MAX_POINTS
+  if (days === undefined || days < 0) return false
+  // Weeks start on Monday, so count the Monday-based weeks the range touches, as the server does.
+  const mondayOffset = (new Date(`${range.from}T00:00:00Z`).getUTCDay() + 6) % 7
+  return Math.floor((mondayOffset + days) / 7) + 1 <= PROJECT_BUDGET_REPORT_MAX_POINTS
 }
 
 /**
@@ -53,4 +56,19 @@ export function isProjectBudgetReportRangeValid(range: TimeReportRange): boolean
  */
 export function formatPerformanceIndex(value: number | undefined): string {
   return value === undefined ? '—' : value.toFixed(2)
+}
+
+/**
+ * Lists the points that a line cannot show because no known neighbour joins them, such as a
+ * one-day range or a value between two missing ones, so they can be drawn as dots.
+ *
+ * @param values - Value per point.
+ * @returns Indices of the isolated known values.
+ */
+export function listIsolatedPoints(values: ReadonlyArray<number | null>): number[] {
+  return values.flatMap((value, index) => {
+    if (value === null) return []
+    const joined = (index > 0 && values[index - 1] !== null) || (index < values.length - 1 && values[index + 1] !== null)
+    return joined ? [] : [index]
+  })
 }

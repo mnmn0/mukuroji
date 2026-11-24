@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { createTranslator, type Locale } from '../../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../../../shared/routing/paths'
-import { downloadProjectBudgetReportCsv } from '../api/projectBudgetReport'
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import {
   chooseProjectBudgetReportInterval,
@@ -11,6 +10,7 @@ import {
 } from '../model/projectBudgetReport'
 import { resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import type { TimeReportRange } from '../model/timeReport'
+import { useProjectBudgetReportExport } from '../mutations/useProjectBudgetReportExport'
 import { useProjectBudgetReport } from '../queries/useProjectBudgetReport'
 import { ProjectBudgetReportPanel } from './ProjectBudgetReportPanel'
 
@@ -37,21 +37,6 @@ type ScopedRange = {
 }
 
 /**
- * Offers a CSV body as a file download.
- *
- * @param blob - CSV body.
- * @param fileName - Offered file name.
- */
-function triggerCsvDownload(blob: Blob, fileName: string): void {
-  const objectUrl = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = objectUrl
-  anchor.download = fileName
-  anchor.click()
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-}
-
-/**
  * Connects the Project budget report panel to its API.
  *
  * The first read uses the 90 days up to today; when the Project budget has a period, the section
@@ -69,8 +54,7 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   const scope = `${teamId ?? ''}/${projectId ?? ''}`
   const [pickedState, setPickedState] = useState<ScopedRange>()
   const [budgetState, setBudgetState] = useState<ScopedRange>()
-  const [isExporting, setIsExporting] = useState(false)
-  const [hasExportError, setHasExportError] = useState(false)
+  const csvExport = useProjectBudgetReportExport(accessToken, teamId, projectId)
   const pickedRange = pickedState?.scope === scope ? pickedState.range : undefined
   const budgetRange = budgetState?.scope === scope ? budgetState.range : undefined
   const range = pickedRange ?? budgetRange ?? resolveProjectBudgetReportRange(undefined, today)
@@ -92,21 +76,13 @@ export function ProjectBudgetReportSection({ accessToken, enabled, locale, proje
   return (
     <ProjectBudgetReportPanel
       budgetEditPath={createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy: 'project' })}
-      hasExportError={hasExportError}
+      hasExportError={csvExport.hasExportError}
       hasLoadError={Boolean(report.error)}
-      isExporting={isExporting}
+      isExporting={csvExport.isExporting}
       isLoading={report.isLoading}
       locale={locale}
       onChangeRange={(next) => setPickedState({ scope, range: next })}
-      onExport={() => {
-        if (!accessToken) return
-        setIsExporting(true)
-        setHasExportError(false)
-        void downloadProjectBudgetReportCsv(accessToken, teamId, projectId, input)
-          .then((blob) => triggerCsvDownload(blob, `project-budget-${projectId}-${range.from}-${range.to}.csv`))
-          .catch(() => setHasExportError(true))
-          .finally(() => setIsExporting(false))
-      }}
+      onExport={() => csvExport.exportCsv(input)}
       onRetry={() => { void report.mutate().catch(() => undefined) }}
       range={range}
       renderLink={(path, children) => <Link className="workbench-button-secondary inline-flex min-h-9 items-center px-3" to={path}>{children}</Link>}

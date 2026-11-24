@@ -88,8 +88,8 @@ describe('loadProjectBudgetReport', () => {
   test('reads the Team-scoped data and counts time by its local start date', async () => {
     const calls: string[] = []
     const report = await loadProjectBudgetReport(request, ports([
-      { issues: [{ id: 'other', statusCategory: 'completed', schedule: {} }], nextStartAfterIssueId: 'other' },
-      { issues: [{ id: 'a', statusCategory: 'completed', schedule: {} }] },
+      { issues: [{ id: 'other', statusCategory: 'completed', schedule: {}, assignedProjectId: 'p' }], nextStartAfterIssueId: 'other' },
+      { issues: [{ id: 'a', statusCategory: 'completed', schedule: {}, assignedProjectId: 'p' }] },
     ], calls), 100)
 
     expect(calls).toEqual([
@@ -103,7 +103,7 @@ describe('loadProjectBudgetReport', () => {
 
   test('fails closed when the Team has more Work Items than one report may evaluate', async () => {
     await expect(loadProjectBudgetReport(request, ports([
-      { issues: [{ id: 'a', statusCategory: 'completed', schedule: {} }], evaluatedCount: 3 },
+      { issues: [{ id: 'a', statusCategory: 'completed', schedule: {}, assignedProjectId: 'p' }], evaluatedCount: 3 },
     ]), 2)).rejects.toMatchObject({ status: 413, code: 'WorkItemListLimitExceeded' })
   })
 
@@ -112,5 +112,29 @@ describe('loadProjectBudgetReport', () => {
       { issues: [], nextStartAfterIssueId: 'x' },
       { issues: [], nextStartAfterIssueId: 'x' },
     ]), 100)).rejects.toMatchObject({ status: 503, code: 'WorkItemListReadStalled' })
+  })
+
+  test('splits time that crosses local midnight and keeps each part of the cost', async () => {
+    const base = ports([{ issues: [{ id: 'a', statusCategory: 'started', schedule: {}, assignedProjectId: 'p' }] }])
+    const report = await loadProjectBudgetReport(request, {
+      ...base,
+      // 14:00Z on 01-05 is 23:00 in Tokyo, so 60 of the 120 minutes fall on each day.
+      listEntries: async () => [{ ...entry('2026-01-05T14:00:00.000Z', 120), hourlyRateMinor: 6_000, actualCostMinor: 12_000 }],
+    }, 100)
+
+    expect(report.points.map((point) => [point.date, point.actualMinutes, point.actualCostMinor])).toEqual([
+      ['2026-01-05', 60, undefined],
+      ['2026-01-06', 120, undefined],
+    ])
+    expect(report.actualMinutes).toBe(120)
+    expect(report.actualCostByCurrency).toEqual({ JPY: 12_000 })
+  })
+
+  test('earns nothing for a baseline Work Item that now belongs to another Project', async () => {
+    const report = await loadProjectBudgetReport(request, ports([
+      { issues: [{ id: 'a', statusCategory: 'completed', schedule: {}, assignedProjectId: 'other' }] },
+    ]), 100)
+
+    expect(report.earnedValue).toMatchObject({ budgetAtCompletionMinutes: 600, earnedValueMinutes: 0 })
   })
 })

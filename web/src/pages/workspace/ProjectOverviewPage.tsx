@@ -318,6 +318,7 @@ export function ProjectOverviewPage() {
         {team && project ? (
           <div className="mt-5">
             <ProjectBudgetReportSection
+              key={`${team.id}/${project.id}`}
               accessToken={workspace.accessToken}
               enabled={canRead}
               locale={workspace.locale}

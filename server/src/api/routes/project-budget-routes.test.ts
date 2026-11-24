@@ -195,6 +195,18 @@ test('rejects an invalid range', async () => {
   }
 })
 
+test('accepts exactly 400 Monday-based weeks and rejects the 401st', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const path = `/api/teams/core-team/projects/${base.assignedProjectId ?? ''}/budget-report?interval=week`
+
+  // 2026-01-05 is a Monday, so through Sunday 2033-09-04 is 400 weeks and the next day is the 401st.
+  expect((await request(`${path}&from=2026-01-05&to=2033-09-04`)).status).toBe(200)
+  const rejected = await request(`${path}&from=2026-01-05&to=2033-09-05`)
+  expect(rejected.status).toBe(400)
+  expect(await rejected.json()).toMatchObject({ code: 'InvalidProjectBudgetReportRequest' })
+})
+
 test('does not let a manager of the same Project ID in another Team change this Team\'s Project budget', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',

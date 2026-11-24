@@ -24,9 +24,11 @@ Work Item の進捗（Team の `progressMode`）はすでに保存されてい�
    - PV は各 baseline Work Item の予定工数を、計画開始日〜終了日の暦日に均等に配る。終了日だけなら終了日に全量、
      終了日がなければどの日にも置かない（BAC には含め、`unscheduledEffortMinutes` として返す）。
    - EV は baseline の予定工数 × 各 Work Item の現在の進捗（`deriveWorkItemProgressPercent` と Team の `progressMode`）。
-     archive 済みの Work Item も読み、削除済みは 0 とする。
-   - AC は Project に付いた工数 entry（状態を問わない）の分を、entry の開始日（report の timezone）で数える。
-     期間は `from` から `asOf`（今日と `to` の早い方）まで。
+     archive 済みの Work Item も読み、削除済みと、いまは別の Project に属する Work Item は 0 とする（他 Project の状態を読まない）。
+   - AC は Project に付いた工数 entry（状態を問わない、中止した Work Item の分も含む）の分を、report の timezone の日付で数える。
+     日付をまたぐ entry は工数の集計と同じく 0 時で分け、コストも分けた分数で按分する。
+     `asOf` は今日を `from`〜`to` に収めた日で、今日が `from` より前なら `from` とし、そのときは実績を数えない。
+     期間は `from` から `asOf` まで。
    - 金額は予算額 ÷ BAC（工数）を 1 分あたりの単価として PV・EV を換算し、AC は予算通貨の実績コストだけを使う。
      単価のない entry は工数にだけ入る。他通貨は換算しない。
    - SPI = EV / PV、CPI = EV / AC、EAC = BAC / CPI、ETC = EAC − AC、VAC = BAC − EAC。分母が 0 のときは返さない。実績があって出来高が 0 なら CPI は 0 とし、EAC・ETC・VAC は返さない。
@@ -38,7 +40,8 @@ Work Item の進捗（Team の `progressMode`）はすでに保存されてい�
 - 日次の EVM snapshot を worker で保存する: 過去の EV を正確に残せるが、worker・table 設計・backfill が要る。
   まずは都度計算にし、Analytics の snapshot に EVM metric を足す段で過去値の再現を扱う。
 - 金額の PV を Work Item ごとの単価（単価表 #398）で積み上げる: 担当者が決まっていない計画には単価がない。
-  予算額を BAC で割る方式なら予算を持つ Project で必ず計算でき、予算と PV の合計が一致する。
+  予算額を BAC で割る方式なら予算を持つ Project で必ず計算できる。BAC の全量に終了日があれば PV の合計は予算と一致し、
+  終了日のない工数は BAC に入っても PV に配らないので、その分だけ PV の合計が予算を下回る。
 - 工数だけの版を一般メンバーにも返す: Project なし・Work Item なしの他人の工数を含むため、ADR 0027 の
   「一般メンバーには本人分だけ」と矛盾する。manager 限定にした。
 - 予算 key を projectId のまま、読み取り側で Team を照合する: 別 Team の書き込みで上書きされる問題が残る。

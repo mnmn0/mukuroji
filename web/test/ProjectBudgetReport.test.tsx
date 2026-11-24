@@ -5,6 +5,7 @@ import {
   chooseProjectBudgetReportInterval,
   formatPerformanceIndex,
   isProjectBudgetReportRangeValid,
+  listIsolatedPoints,
   resolveProjectBudgetReportRange,
 } from '../src/features/time-tracking/model/projectBudgetReport'
 import { projectBudgetReportFixture } from '../src/features/time-tracking/reportFixtures'
@@ -56,8 +57,13 @@ describe('Project budget report', () => {
     expect(isProjectBudgetReportRangeValid({ from: '2026-01-02', to: '2026-01-01' })).toBe(false)
     expect(isProjectBudgetReportRangeValid({ from: '2020-01-01', to: '2026-12-31' })).toBe(true)
     expect(isProjectBudgetReportRangeValid({ from: '2010-01-01', to: '2026-12-31' })).toBe(false)
+    // 2026-01-05 is a Monday: 400 Monday-based weeks fit, one more day starts the 401st.
+    expect(isProjectBudgetReportRangeValid({ from: '2026-01-05', to: '2033-09-04' })).toBe(true)
+    expect(isProjectBudgetReportRangeValid({ from: '2026-01-05', to: '2033-09-05' })).toBe(false)
     expect(formatPerformanceIndex(undefined)).toBe('—')
     expect(formatPerformanceIndex(0.9234)).toBe('0.92')
+    expect(listIsolatedPoints([5])).toEqual([0])
+    expect(listIsolatedPoints([1, null, 3, 4, null, 6])).toEqual([0, 5])
   })
 
   test('shows the indices, the money estimate, and the notes', () => {
