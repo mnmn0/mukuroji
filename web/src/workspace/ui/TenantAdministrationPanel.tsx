@@ -445,7 +445,7 @@ export function TenantAdministrationPanel({
             t={t}
           />
           <PlanningUpdateTemplateFields
-            disabled={tenantLifecycleLocked}
+            disabled={isSaving || tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, planningUpdateTemplate: next })}
             settings={planningUpdateTemplate}
             t={t}

@@ -632,6 +632,7 @@ export function PlanningPage() {
       createPlanningUpdateTargetKey(selectedUpdateTarget),
       update.version,
       body,
+      mentionMemberKeys,
     ])
     const commentId = pendingAcknowledgementIds.get(retryKey) ??
       createPlanningClientId('planning-update-acknowledgement')

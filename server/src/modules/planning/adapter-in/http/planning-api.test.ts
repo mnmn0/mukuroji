@@ -4446,6 +4446,25 @@ test('publishes a Team update and lets only the cadence reviewer acknowledge it 
     expect(duplicate.status).toBe(409)
     expect(await duplicate.json()).toMatchObject({ code: 'PlanningUpdateAlreadyAcknowledged' })
 
+    // A lost response still replays after the reviewer changes; only new acknowledgements are refused.
+    expect((await configure('lead@example.com', 3)).status).toBe(200)
+    const replayAfterReviewerChange = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-2', body: '確認しました', acknowledgement: true },
+      'team-ack-request-3',
+    )
+    expect(replayAfterReviewerChange.status).toBe(201)
+    expect(replayAfterReviewerChange.headers.get('Idempotency-Replayed')).toBe('true')
+    const formerReviewer = await planningApiRequest(
+      `/api/planning/updates/1/comments${query}`,
+      'POST',
+      { id: 'team-ack-4', body: 'もう一度', acknowledgement: true },
+      'team-ack-request-5',
+    )
+    expect(formerReviewer.status).toBe(403)
+    expect(await formerReviewer.json()).toMatchObject({ code: 'PlanningUpdateAcknowledgementForbidden' })
+
     const history = await planningApiRequest(`/api/planning/updates${query}`)
     expect(history.status).toBe(200)
     expect(await history.json()).toMatchObject({

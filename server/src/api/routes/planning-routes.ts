@@ -3778,18 +3778,6 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         principal.directoryId,
         await readPlanningWorkItemState(principal),
       )
-      if (acknowledgement) {
-        requirePlanningUpdateReviewer(
-          snapshot,
-          readPlanningUpdateTargetQuery(
-            c.req.query('targetType'),
-            c.req.query('teamId'),
-            c.req.query('projectId'),
-            c.req.query('entityId'),
-          ),
-          principal.userKey,
-        )
-      }
       return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
         targetType: c.req.query('targetType'),
         teamId: c.req.query('teamId'),
@@ -3809,6 +3797,9 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           ...(acknowledgement ? { acknowledgement: true as const } : {}),
         }),
         mutate: async ({ target, updateVersion, transaction, authorizationConditionChecks }) => {
+          // Checked after the receipt lookup so a lost response still replays when the reviewer
+          // changed since; the snapshot revision condition below keeps new acknowledgements safe.
+          if (acknowledgement) requirePlanningUpdateReviewer(snapshot, target, principal.userKey)
           const update = await readPlanningUpdateByVersion(principal.directoryId, target, updateVersion)
           return workItemDependencies.planning.createUpdateComment(
             principal.directoryId,

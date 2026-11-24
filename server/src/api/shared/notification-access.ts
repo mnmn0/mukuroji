@@ -787,6 +787,8 @@ export async function createNotificationVisibilityFilter(
       } else {
         delete notification.projectId
       }
+      // A Team target has no Work Item of its own to read: the Planning checks above decide.
+      if (notification.planningTargetType === 'team') return true
     }
     if (notification.eventType.startsWith('document.')) {
       if (!notification.entityId) return false
