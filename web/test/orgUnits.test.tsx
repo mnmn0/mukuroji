@@ -24,6 +24,7 @@ import {
 } from '../src/projects/model/orgStructure'
 import { readOrgStructureForDisplay } from '../src/projects/queries/useOrgStructure'
 import { OrgStructurePanel } from '../src/projects/ui/OrgStructurePanel'
+import { OrgUnitScopesUnavailableNotice } from '../src/security/ui/OrgUnitScopesUnavailableNotice'
 import { createWorkspaceSecurityScopeOptions } from '../src/security/model/workspaceSecurityScopes'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -270,6 +271,12 @@ describe('OrgUnit structure read failures', () => {
     expect(html).toContain(createTranslator('en')('portfolioDashboard.error.orgStructure'))
     expect(html).toContain('data-testid="portfolio-retry"')
     expect(html).not.toContain('portfolio-org-units')
+  })
+
+  test('tells an administrator that OrgUnits are missing from the scope choices', () => {
+    const html = renderToStaticMarkup(<OrgUnitScopesUnavailableNotice locale="ja" onRetry={() => undefined} />)
+    expect(html).toContain(createTranslator('ja')('security.scope.orgUnitsUnavailable'))
+    expect(html).toContain(createTranslator('ja')('security.action.retryLoad'))
   })
 })
 

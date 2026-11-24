@@ -269,6 +269,7 @@ export const securityMessages = {
   'security.scope.team': 'Team',
   'security.scope.project': 'Project',
   'security.scope.org-unit': '部門',
+  'security.scope.orgUnitsUnavailable': '部門を読み込めなかったため、割り当て先の候補に部門を出していません。',
   'security.access.column.group': 'Directory group',
   'security.access.column.scope': '適用範囲',
   'security.access.column.role': 'ロール',

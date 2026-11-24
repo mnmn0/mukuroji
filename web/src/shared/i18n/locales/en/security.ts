@@ -272,6 +272,7 @@ export const securityMessages = {
   'security.scope.team': 'Team',
   'security.scope.project': 'Project',
   'security.scope.org-unit': 'OrgUnit',
+  'security.scope.orgUnitsUnavailable': 'OrgUnits could not be loaded, so they are not offered as scopes.',
   'security.access.column.group': 'Directory group',
   'security.access.column.scope': 'Scope',
   'security.access.column.role': 'Role',
