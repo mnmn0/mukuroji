@@ -4341,6 +4341,37 @@ test.describe('authenticated task page', () => {
     await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
   })
 
+  test('Issue #349: 予定を読む権限がなくなったら、読み込み済みの予定もレポートから外す', async ({ page }) => {
+    await page.clock.install()
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({ json: { teamId: 'core-team', projectId: 'refero', entries: [] } })
+    })
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/status-shares$/, async (route) => {
+      await route.fulfill({ json: { shares: [] } })
+    })
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+    await page.getByTestId('project-overview-status-report').click()
+    const dialog = page.getByTestId('project-status-report-dialog')
+    await expect(dialog.getByTestId('project-status-report-schedule')).toBeVisible()
+
+    // The permission is removed after the first read; SWR keeps the earlier data with the error.
+    let deniedReads = 0
+    await page.route(/.*\/api\/planning(?:\?.*)?$/, async (route) => {
+      deniedReads += 1
+      await route.fulfill({ status: 403, json: { code: 'Forbidden', message: 'Forbidden.' } })
+    })
+    await page.clock.fastForward(15_000)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => deniedReads).toBeGreaterThan(0)
+    await expect(dialog.getByTestId('project-status-report-schedule')).toHaveCount(0)
+    await expect(dialog.getByTestId('project-status-report').getByRole('heading', { level: 1 })).toContainText('Refero')
+    await expect(dialog.getByTestId('project-status-report-export-markdown')).toBeEnabled()
+  })
+
   test('Issue #349: 読む権限のない Work Item は進捗欄を外してレポートを出す', async ({ page }) => {
     await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
       await route.fulfill({ json: { nodes: [] } })
