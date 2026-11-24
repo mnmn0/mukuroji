@@ -79,6 +79,16 @@ describe('Web Push notification sender', () => {
     expect(await sender([], {}).send(delivery)).toMatchObject({ suppressed: true, code: 'PushNoDevices' })
   })
 
+  test('retries instead of suppressing when a gone device cannot be removed', async () => {
+    const gone = device('gone')
+    const send = createWebPushNotificationSender({
+      appOrigin: 'https://app.example.test', loadKeys: async () => keys,
+      post: async () => ({ status: 410, headers: { get: () => null } }),
+      devices: { listDevices: async () => [gone], removeGoneDevice: async () => { throw new Error('throttled') } },
+    })
+    expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'PushCleanupUnavailable' })
+  })
+
   test('counts the notification as sent once any device accepts it', async () => {
     const f = sender([device('a'), device('b')], { [device('a').endpoint]: 503 })
     expect(await f.send(delivery)).toEqual({ succeeded: true, retryable: false })
