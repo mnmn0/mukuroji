@@ -26,6 +26,7 @@ import {
   WorkspaceAccessError,
   type WorkspaceMember,
 } from '../../modules/workspace-access/workspace-access'
+import { isActivePlanningEntityOwnedBy } from '../../modules/workspace-access/domain/member-deactivation-blockers'
 import { type NotificationItem } from '../../modules/notifications/notifications'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import {
@@ -489,7 +490,7 @@ export async function requireWorkspaceMemberHasNoOwnedPlanningEntities(
 ) {
   const authorizationState = await workItemDependencies.planning.getAuthorizationState(directoryId)
   const ownedEntity = authorizationState.entities.find(
-    (entity) => !entity.archivedAt && entity.ownerMemberKey === memberKey,
+    (entity) => isActivePlanningEntityOwnedBy(entity, memberKey),
   )
   if (ownedEntity) {
     throw new WorkspaceAccessError(

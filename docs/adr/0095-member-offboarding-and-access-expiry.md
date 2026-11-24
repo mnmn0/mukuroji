@@ -23,6 +23,8 @@
   - 利用停止できるかどうか。
 
   権限は `members.manage` です。引き継ぎ自体は、既存の Project member API と Planning entity API で行います。
+  - 一覧は workspace-access の use case `readMemberOffboarding` が組み立てます。利用停止を止める項目の判定
+    （`member-deactivation-blockers`）と private Document の確認は、手動の利用停止と期限切れの job と共通です。
   それぞれの権限確認と revision 確認がそのまま効きます。
 - **資格情報の失効**: 手動の利用停止に成功したら、本人が作った API キーと OAuth アプリを失効します。
   - 失効は冪等です。利用停止のあとで失効に失敗した場合は、`POST /api/workspace/members/:memberKey/credentials/revoke` で

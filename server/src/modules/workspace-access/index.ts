@@ -7,9 +7,20 @@ export {
   readMemberAccessExpiry,
 } from './domain/member-access-expiry'
 export {
+  isActivePlanningEntityOwnedBy,
+  isManagerProjectAccess,
+  listMemberDeactivationBlockers,
+  type MemberDeactivationBlocker,
+  type MemberDeactivationBlockerState,
+} from './domain/member-deactivation-blockers'
+export {
   requirePrivateDocumentManagerContinuity,
   type DocumentManagerLifecycleDependencies,
 } from './document-manager-lifecycle'
+export {
+  readMemberOffboarding,
+  type MemberOffboardingPorts,
+} from './application/member-offboarding'
 export {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,

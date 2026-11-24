@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createMutationAuditContext, type MutationAuditContext } from '../../audit'
 import {
-  requirePrivateDocumentManagerContinuity,
+  readPrivateDocumentManagerContinuity,
   type DocumentManagerLifecycleDependencies,
 } from '../document-manager-lifecycle'
 import {
@@ -10,6 +10,10 @@ import {
   type WorkspaceMember,
 } from '../workspace-access'
 import { isMemberAccessExpired } from '../domain/member-access-expiry'
+import {
+  isActivePlanningEntityOwnedBy,
+  type MemberDeactivationBlocker,
+} from '../domain/member-deactivation-blockers'
 
 /** Planning reference the expiry job reads to find entities the member still owns. */
 export type MemberAccessExpiryPlanningEntity = {
@@ -59,11 +63,8 @@ export type MemberAccessExpiryPorts = {
   now: () => Date
 }
 
-/** Why an expired member was left active by one run. */
-export type MemberAccessExpiryBlocker =
-  | 'manages-projects'
-  | 'owns-planning-entities'
-  | 'manages-private-documents'
+/** Why an expired member was left active by one run; the same policy as a manual deactivation. */
+export type MemberAccessExpiryBlocker = MemberDeactivationBlocker
 
 /** Outcome of one scheduled run. */
 export type MemberAccessExpiryResult = {
@@ -144,25 +145,21 @@ async function readExpiryFences(
   | { blocker: MemberAccessExpiryBlocker }
   | { expectedPlanningRevision: number; expectedDocumentAuthorizationRevision: number }
 > {
+  // Each read stops at the first blocker, in the order of listMemberDeactivationBlockers.
   if (await ports.projectManagerGuard.hasManagedProject(workspaceId, memberKey)) {
     return { blocker: 'manages-projects' }
   }
   const planning = await ports.planning.getAuthorizationState(workspaceId)
-  if (planning.entities.some((entity) => !entity.archivedAt && entity.ownerMemberKey === memberKey)) {
+  if (planning.entities.some((entity) => isActivePlanningEntityOwnedBy(entity, memberKey))) {
     return { blocker: 'owns-planning-entities' }
   }
-  try {
-    const expectedDocumentAuthorizationRevision = await requirePrivateDocumentManagerContinuity(
-      ports,
-      workspaceId,
-      memberKey,
-    )
-    return { expectedPlanningRevision: planning.revision, expectedDocumentAuthorizationRevision }
-  } catch (error) {
-    if (error instanceof WorkspaceAccessError && error.code === 'WorkspaceMemberManagesPrivateDocuments') {
-      return { blocker: 'manages-private-documents' }
-    }
-    throw error
+  const documents = await readPrivateDocumentManagerContinuity(ports, workspaceId, memberKey)
+  if (documents.managesPrivateDocuments) {
+    return { blocker: 'manages-private-documents' }
+  }
+  return {
+    expectedPlanningRevision: planning.revision,
+    expectedDocumentAuthorizationRevision: documents.authorizationRevision,
   }
 }
 
