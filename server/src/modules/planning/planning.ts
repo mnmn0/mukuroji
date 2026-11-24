@@ -510,7 +510,6 @@ export type PlanningEntityDuplication = DuplicatePlanningEntityInput & {
   targetId: string
 }
 
-/** Planning domain を読み書きする client contract です。 */
 /**
  * Team / Project envelope whose Work Items and links a scoped read loads. An omitted Team means the
  * whole Workspace (a Workspace-scoped Portfolio).
@@ -542,6 +541,7 @@ type PlanningScopedRead = {
   usage: PlanningLiveGraphUsage
 }
 
+/** Planning domain を読み書きする client contract です。 */
 export type PlanningClient = {
   /** Reads bounded compact activity without scanning immutable updates or annotations.
    * @param workspaceId - Authenticated Workspace.
