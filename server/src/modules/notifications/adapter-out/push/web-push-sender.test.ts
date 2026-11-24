@@ -99,9 +99,12 @@ describe('Web Push notification sender', () => {
     expect(none.requests).toEqual([])
   })
 
-  test('honors a Retry-After longer than an hour', async () => {
+  test('honors a Retry-After longer than an hour, up to the end of the notification retention', async () => {
     expect(await sender([device('a')], { [device('a').endpoint]: 429 }, { retryAfter: '7200' }).send(delivery))
       .toMatchObject({ retryable: true, retryAfterMs: 7_200_000 })
+    const remaining = delivery.expiresAt * 1_000 - Date.parse('2026-11-24T00:00:00Z')
+    expect(await sender([device('a')], { [device('a').endpoint]: 429 }, { retryAfter: '9999999999' }).send(delivery))
+      .toMatchObject({ retryable: true, retryAfterMs: remaining })
   })
 
   test('counts the notification as sent once any device accepts it', async () => {

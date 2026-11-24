@@ -266,7 +266,7 @@ worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対で
 
 ### 宛先
 
-送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません（読み直しと送信の間に残る隙間は1回の読み取りの時間だけです）。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
+送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません。push service への送信は所有者の変更と原子的にはできないため、読み直しから送信の開始まで（暗号化と request の開始の間）に所有者が変わると、変わる前の所有者宛ての通知がその browser に届くことがあります。同じ browser を別の member が登録し直したのがその短い間に重なった場合に限られるため、この残りのリスクは受け入れています。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
 
 ### 配信の規則
 
@@ -280,7 +280,7 @@ push service の応答は次のように扱います。
 | --- | --- |
 | `2xx` | その端末は受け付け済み |
 | `404` / `410` | 購読が失効。送った時点の `updatedAt` を条件にその購読の行を削除する（その間に登録し直した行は消さない） |
-| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（不正な値に備えて 31 日で頭打ち） |
+| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（通知の保持期限を越える指定は保持期限までで、その時点で期限切れとして終わる） |
 | `400` / `401` / `403` / `413` | VAPID 鍵や payload の問題として失敗にする（`PushDeliveryRejected`） |
 | `404` / `410` で購読を消せなかった（DynamoDB の一時障害など） | 受け付けた端末がなければ再試行し、そのときに消し直す（`PushCleanupUnavailable`） |
 | （送る前）保存された endpoint か鍵が使えない | 購読を消さずに失敗にし、運用者が調べられるよう残す（`PushSubscriptionInvalid`） |
