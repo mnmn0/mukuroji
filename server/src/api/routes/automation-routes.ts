@@ -1670,7 +1670,7 @@ function createBulkUndoPayload(
   action: BulkOperationRequest['action'],
   issue: TeamIssueResponseItem,
 ): Record<string, AutomationValue> {
-  if (action.type === 'reassign-member') return createBulkReassignMemberUndoPayload(issue)
+  if (action.type === 'reassign-member') return createBulkReassignMemberUndoPayload(issue, action)
   if (action.type === 'move') {
     return { assignedProjectId: issue.assignedProjectId ?? null }
   }

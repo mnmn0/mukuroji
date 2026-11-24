@@ -101,14 +101,21 @@ export function isBulkReassignMemberApplied(
 /**
  * Builds the Bulk undo payload that restores a Work Item's owner and contributors.
  *
+ * The owner is stored only when the handover moves it. A handover that moves only shares leaves
+ * the owner alone, so its undo does not write the owner back or check them as a new assignee.
+ *
  * @param workItem - Work Item before the handover.
- * @returns The owner and contributors as Automation values.
+ * @param action - Normalized reassignment action.
+ * @returns The owner, when it moves, and the contributors as Automation values.
  */
 export function createBulkReassignMemberUndoPayload(
   workItem: BulkReassignMemberWorkItem,
+  action: Pick<BulkReassignMemberAction, 'fromMemberUserId'>,
 ): Record<string, AutomationValue> {
   return {
-    assigneeUserId: workItem.assigneeUserId,
+    ...(workItem.assigneeUserId.trim().toLowerCase() === action.fromMemberUserId
+      ? { assigneeUserId: workItem.assigneeUserId }
+      : {}),
     contributorAssignments: (workItem.contributorAssignments ?? []).map(toAutomationContributorAssignment),
   }
 }

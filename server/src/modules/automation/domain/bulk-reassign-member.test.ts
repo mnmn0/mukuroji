@@ -96,7 +96,9 @@ test('restores a merged-away share and recognizes the undo by value', () => {
       share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 30 }),
     ],
   }
-  const payload = createBulkReassignMemberUndoPayload(before)
+  const payload = createBulkReassignMemberUndoPayload(before, { fromMemberUserId: 'leaver@example.com' })
+  // Only shares move, so the owner is left out and the undo does not write or check them.
+  expect(payload).not.toHaveProperty('assigneeUserId')
   const afterMerge = { contributorAssignments: [share('a2', { memberUserId: 'successor@example.com', plannedEffortMinutes: 90 })] }
   expect(listBulkReassignMemberRemovedShares(before.contributorAssignments, afterMerge)).toEqual([
     share('a1', { memberUserId: 'leaver@example.com', plannedEffortMinutes: 60 }),
@@ -109,7 +111,12 @@ test('restores a merged-away share and recognizes the undo by value', () => {
     ],
   }
   expect(isBulkReassignMemberUndoApplied(undone, payload)).toBe(true)
-  expect(isBulkReassignMemberUndoApplied({ ...undone, assigneeUserId: 'successor@example.com' }, payload)).toBe(false)
+  const ownerPayload = createBulkReassignMemberUndoPayload(
+    { ...before, assigneeUserId: 'Leaver@example.com' },
+    { fromMemberUserId: 'leaver@example.com' },
+  )
+  expect(ownerPayload).toMatchObject({ assigneeUserId: 'Leaver@example.com' })
+  expect(isBulkReassignMemberUndoApplied({ ...undone, assigneeUserId: 'successor@example.com' }, ownerPayload)).toBe(false)
   expect(isBulkReassignMemberUndoApplied(before, payload)).toBe(true)
   expect(isBulkReassignMemberUndoApplied({ ...before, contributorAssignments: before.contributorAssignments.slice(1) }, payload))
     .toBe(false)

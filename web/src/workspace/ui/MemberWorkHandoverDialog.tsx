@@ -72,6 +72,8 @@ export function MemberWorkHandoverDialog({
 
   const items = loadState.status === 'loaded' ? loadState.items : []
   const selectedItems = items.filter((item) => !deselected.has(itemKey(item)))
+  // While an operation is shown, its request stays fixed so it can still be resumed, retried, or undone.
+  const inputsLocked = busy !== undefined || operation !== undefined
   const ownerCount = items.filter((item) => item.owner).length
   const contributorCount = items.filter((item) => item.contributor).length
 
@@ -96,6 +98,8 @@ export function MemberWorkHandoverDialog({
   const startPreview = () => run('preview', async () => {
     const nextRequest = createMemberWorkHandoverRequest(workspaceId, selectedItems, member.memberKey, successorKey)
     setOperation(undefined)
+    // A failed preview must not leave the previous one able to apply the new request.
+    setPreview(undefined)
     setRequest(nextRequest)
     setPreview(await handlers.preview(nextRequest))
   })
@@ -158,7 +162,7 @@ export function MemberWorkHandoverDialog({
                         <input
                           checked={!deselected.has(key)}
                           className="mt-1"
-                          disabled={busy !== undefined}
+                          disabled={inputsLocked}
                           type="checkbox"
                           onChange={(event) => {
                             const next = new Set(deselected)
@@ -197,7 +201,7 @@ export function MemberWorkHandoverDialog({
                 <select
                   className="workbench-input min-h-10 px-3"
                   data-testid="member-work-handover-successor"
-                  disabled={busy !== undefined}
+                  disabled={inputsLocked}
                   value={successorKey}
                   onChange={(event) => {
                     setSuccessorKey(event.target.value)

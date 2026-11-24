@@ -200,7 +200,10 @@ export const ResumeRunningHandover: Story = {
     await userEvent.selectOptions(canvas.getByTestId('member-work-handover-successor'), 'suzuki@example.com')
     await userEvent.click(canvas.getByTestId('member-work-handover-preview'))
     await userEvent.click(await canvas.findByRole('button', { name: '適用' }))
-    await userEvent.click(await canvas.findByTestId('bulk-resume'))
+    // The running operation keeps its request, so the inputs that built it stay locked.
+    await expect(await canvas.findByTestId('bulk-resume')).toBeVisible()
+    await expect(canvas.getByTestId('member-work-handover-successor')).toBeDisabled()
+    await userEvent.click(canvas.getByTestId('bulk-resume'))
     await expect(args.handlers.apply).toHaveBeenCalledTimes(2)
   },
 }

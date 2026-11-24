@@ -672,6 +672,41 @@ test('hands a member\'s ownership over through a bulk reassignment', async () =>
   })
 })
 
+test('leaves an unchanged inactive owner out of a share-only handover undo', async () => {
+  configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['sato@example.com'],
+    issueContributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+    ],
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const request = {
+    action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'demo@example.com' },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview = await previewResponse.json() as { operationToken: string }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as { id: string }
+  const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
+  // The owner did not move, so the undo neither writes them back nor checks them as a new assignee.
+  expect(stored?.items[0]?.undoPayload).not.toHaveProperty('assigneeUserId')
+})
+
 test('refuses a bulk reassignment to the same member and fails items the member is not on', async () => {
   configureFakeProjectClients(true)
   setTestAppDependencies({

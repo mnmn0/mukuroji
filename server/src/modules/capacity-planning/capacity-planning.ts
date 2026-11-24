@@ -595,19 +595,23 @@ export class CapacityPlanningService {
       input.teamId,
       state,
     )
+    // Another Team's estimates, such as one over the Work Item read limit, must not fail this
+    // Team's view. Without them the Workspace totals would be too low, so they are left out.
+    const teamEstimates = await this.readTeamEstimates(
+      input.workspaceId,
+      teamStates,
+      { teamId: input.teamId, estimates },
+    ).catch(() => undefined)
     return buildWorkloadSnapshot(
       state,
       entries,
       estimates,
-      {
-        ...input,
-        workspaceTeamStates: withContributorReservations(
-          teamStates,
-          await this.readTeamEstimates(input.workspaceId, teamStates, { teamId: input.teamId, estimates }),
-          input.workspaceId,
-          generatedAt,
-        ),
-      },
+      teamEstimates === undefined
+        ? input
+        : {
+            ...input,
+            workspaceTeamStates: withContributorReservations(teamStates, teamEstimates, input.workspaceId, generatedAt),
+          },
       generatedAt,
     )
   }
@@ -622,6 +626,7 @@ export class CapacityPlanningService {
     validateDateRange(input.fromDate, input.toDate)
     const teamStates = filterActiveTeamStates(await this.repository.listStates(input.workspaceId), input.activeTeamIds)
     const generatedAt = this.now().toISOString()
+    // A Team whose estimates cannot be read fails the read instead of leaving its shares out.
     return buildWorkspaceWorkloadSnapshot(
       withContributorReservations(
         teamStates,

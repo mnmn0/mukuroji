@@ -1037,6 +1037,35 @@ describe('Workspace-wide workload', () => {
     })
   })
 
+  test('keeps a Team view when another Team\'s estimates cannot be read, and fails the Workspace read', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') throw new Error('Too many Work Items.')
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300 })
+    // Totals that would miss team-2's shares are left out rather than shown too low.
+    expect(teamSnapshot.members[0]?.cells[0]).not.toHaveProperty('workspaceAllocatedMinutes')
+
+    await expect(service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })).rejects.toThrow('Too many Work Items.')
+  })
+
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
     const service = await createWorkspaceService(twoTeams())
 

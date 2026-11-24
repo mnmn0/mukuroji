@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
@@ -31,6 +32,7 @@ function workItem(
     priority: 'medium',
     relationIds: [],
     revision: 3,
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     source: 'dynamodb',
     statusCategory: 'started',
