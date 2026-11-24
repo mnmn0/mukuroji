@@ -2897,6 +2897,59 @@ test('fails closed when automation targets a Project outside the owner Team', as
   expect(calls.issueCreates).toHaveLength(0)
 })
 
+test('creates automation Work Items with template acceptance criteria as new unmet criteria', async () => {
+  const creates: unknown[] = []
+  configureFakeProjectClients(true, {
+    issueCreateHook: (input) => {
+      creates.push(input.acceptanceCriteria)
+    },
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-create-criteria',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-create-criteria:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const executor = createAutomationActionExecutor()
+  const values = {
+    teamId: 'core-team',
+    title: 'Release check',
+    assigneeUserId: 'sato@example.com',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+  }
+
+  await runWithTestAppDependencies(() =>
+    executor.execute({ type: 'create', values: { ...values, acceptanceCriteria: ['Tests pass', 'Docs updated'] } }, context)
+  )
+  expect(creates).toEqual([[
+    { id: expect.stringMatching(/^[0-9a-f]{32}$/u), text: 'Tests pass', satisfied: false },
+    { id: expect.stringMatching(/^[0-9a-f]{32}$/u), text: 'Docs updated', satisfied: false },
+  ]])
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({ type: 'create', values: { ...values, acceptanceCriteria: ['  '] } }, context)
+  )).rejects.toMatchObject({ code: 'InvalidAcceptanceCriteria', status: 400 })
+  expect(creates).toHaveLength(1)
+})
+
 test('checks template contributors with the worker dependencies outside a request', async () => {
   const calls = configureFakeProjectClients(true)
   const context = {

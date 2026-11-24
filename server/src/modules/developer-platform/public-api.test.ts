@@ -160,6 +160,9 @@ function createDefaultWorkItemService(
         workItemTypes: [],
       }
     },
+    async listWorkItemTemplates(_credential, teamId) {
+      return { teamId, templates: [] }
+    },
     async previewTypeChange() {
       return {
         expectedRevision: 1,

@@ -12,6 +12,8 @@ Rule は `schemaVersion`、論理 `id`、単調増加 `version` / `revision`、`
 
 Template を参照する create action は保存時点の enabled Work Item template version を server が固定する。Client が送る version は信用しない。Actions を明示更新した場合だけ current template へ再固定し、名前・停止など actions と無関係な更新では既存の固定 version を保持する。
 
+Work Item template の payload は `acceptanceCriteria`（文言の配列、Work Item と同じ 20 件・1 件 1024 文字の上限）を持てる。create action と繰り返し作業は、各文言を未達成の新しい受け入れ条件として作成し、ID は server が振る。有効な Work Item template は Workspace の読み取り権限で一覧でき、Web の作成フォームと Public API の作成用 catalog（`templates`）、`POST /api/v1/work-items` の `templateId` からも使う。`payload.teamId` を持つ template はその Team でだけ使える。
+
 Trigger は次を扱う。
 
 - status

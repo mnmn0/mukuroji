@@ -213,7 +213,7 @@ admin は member と guest の表示名を直せます。表示名は担当者�
 | --- | --- |
 | ルール | 「トリガー」「条件（任意）」「アクション」を組み合わせたルール。作成直後は停止状態なので **有効化** する |
 | Webhook | 外部からルールや Triage を起動する受信 endpoint。署名用 secret は作成時に一度だけ表示される |
-| テンプレート | Work Item / Project / Workflow のひな形。**複製**・**適用**。Work Item のひな形には `contributorAssignments`（ジョブロールと予定工数など）も書け、作る Work Item に最初から Contributor が入る |
+| テンプレート | Work Item / Project / Workflow のひな形。**複製**・**適用**。Work Item のひな形には `contributorAssignments`（ジョブロールと予定工数など）も書け、作る Work Item に最初から Contributor が入る。有効な Work Item テンプレートはメンバーの作成フォームと coding agent の `create_task` でも選べる |
 | 繰り返し作業 | 毎日 / 毎週 / 毎月 の定期作成。止まっていた間の分は スキップ / 最新の1件だけ / すべて から選ぶ |
 | 実行履歴 | 各ルールの実行結果。失敗したものは **再試行** できる |
 
@@ -224,6 +224,10 @@ admin は member と guest の表示名を直せます。表示名は担当者�
 変更は両方の Work Item に記録されるので、たとえば「blocker の解除」は block されていた側の Work Item でだけ動きます。アクションは 担当者を割り当て、状態の移動、
 フィールドを更新、Work Item を作成、コメントを追加、通知を送信、承認を依頼、Webhook を送信 です。
 暴走を防ぐため「最大試行回数」と「1分あたりの最大実行数」を必ず確認してください。
+
+Work Item テンプレートの Payload（JSON）に `"acceptanceCriteria": ["テストが通る", "手順書を更新する"]` のように
+文字列の配列を入れると、そのテンプレートから作った Work Item が受け入れ条件を持って始まります（20 件まで、1 件 1024 文字まで）。
+`teamId` を入れたテンプレートは、その Team の作成フォームにだけ出ます。
 
 Project テンプレートには WBS（作業の木）を書けます。「WBS」欄に 1 行 1 作業で
 `タイトル | 開始（稼働日） | 日数（稼働日）` と書き、子の作業は行頭に半角スペース 2 つずつ足して字下げします。

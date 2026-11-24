@@ -80,6 +80,24 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 全Project共通のfieldと指定Projectに適用されるfieldだけを返します。
 この追加制約は管理者にも適用し、他Projectだけのfield名・選択肢・既定値・必須条件は返しません。
 
+## Work Item template 一覧
+
+`GET /api/v1/work-item-templates?teamId={teamId}` は、その Team で使える有効な Work Item template（`teamId` のないものと
+その Team 用のもの）を `templates` に名前順で返します。scope は `work-items:read` で、Team の閲覧権限が要ります。
+ゲストなど Workspace の業務データを読めない主体には空の一覧を返します。
+各要素は `id`・`version`・`name`・`title` と、作成時に埋める `description`・`workItemTypeId`・`workflowStatusId`・`priority`・
+`acceptanceCriteria`（文言の配列）です。template の担当者・Project・日程は作成 body が決めるので返しません。
+
+## Template からの Work Item 作成
+
+`POST /api/v1/work-items` に `templateId` を送ると、その template から作ります。body に書いた値が優先で、template は
+省略された説明・Type・状態・優先度を埋め、custom field は template の値の上に body の値を重ね、受け入れ条件は未達成の
+新しい条件として付けます。`priority` を省略すると template の優先度、それもなければ `medium` です。
+template が無い・停止中・別 Team 用・Work Item template ではない場合は `404 not_found` で、何も作りません。
+同じ `Idempotency-Key` の再送は、送った body（`templateId` を含む）で同じ request と判断するので、途中で template を
+変えても二重に作られません。最初の作成が済んでいれば、その後に template を停止・削除しても再送は `404` にならず、
+作成済みの Work Item を返します。
+
 ## Cursor pagination
 
 ### Work Item comments

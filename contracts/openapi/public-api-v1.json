@@ -1451,6 +1451,7 @@
             "description": "Deadline for a Work Item created without schedule; it gets a due-date schedule under the Workspace working calendar. Cannot be combined with schedule."
           },
           "priority": {
+            "description": "Priority of the Work Item. When it is left out, the template priority is used, else medium.",
             "enum": [
               "high",
               "medium",
@@ -1469,6 +1470,10 @@
           "teamId": {
             "type": "string"
           },
+          "templateId": {
+            "description": "Work Item template to start from, listed by GET /api/v1/work-item-templates. Body fields win; the template fills an omitted description, workItemTypeId, workflowStatusId, and priority, adds its custom field values under the sent ones, and gives the Work Item its acceptance criteria as new unmet criteria. An unknown, disabled, or other-Team template returns 404.",
+            "type": "string"
+          },
           "title": {
             "maxLength": 256,
             "minLength": 1,
@@ -1484,8 +1489,7 @@
         "required": [
           "teamId",
           "title",
-          "assigneeUserId",
-          "priority"
+          "assigneeUserId"
         ],
         "type": "object"
       },
@@ -3040,6 +3044,82 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTemplate": {
+        "additionalProperties": false,
+        "description": "Work Item template offered for creation. Its assignee, Project, and schedule are left out because the create body sets them.",
+        "properties": {
+          "acceptanceCriteria": {
+            "description": "Acceptance criteria texts the new Work Item starts with; empty when none.",
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Template ID to send as templateId.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
+          "workflowStatusId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "name",
+          "title",
+          "acceptanceCriteria"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTemplateList": {
+        "additionalProperties": false,
+        "description": "Work Item templates a Team can create from.",
+        "properties": {
+          "teamId": {
+            "type": "string"
+          },
+          "templates": {
+            "description": "Enabled Work Item templates that can create a Work Item in this Team, by name.",
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkItemTemplate"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teamId",
+          "templates"
         ],
         "type": "object"
       },
@@ -10719,6 +10799,87 @@
         "summary": "Resolve a Work Item key",
         "tags": [
           "Directory"
+        ]
+      }
+    },
+    "/api/v1/work-item-templates": {
+      "get": {
+        "description": "指定 Team で使える有効な Work Item テンプレートを名前順に返します。Workspace の業務データを読めない主体（ゲストなど）には空の一覧を返します。",
+        "operationId": "listPublicWorkItemTemplates",
+        "parameters": [
+          {
+            "description": "テンプレートを取得する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTemplateList"
+                }
+              }
+            },
+            "description": "Work Item テンプレートの一覧です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Work Item 作成に使えるテンプレートを取得する",
+        "tags": [
+          "Work Items"
         ]
       }
     },

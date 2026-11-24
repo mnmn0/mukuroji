@@ -387,6 +387,11 @@ export type AutomationProjectTemplateTone = 'blue' | 'purple' | 'green' | 'yello
 
 /** Work Item template の作成 payload です。 */
 export type AutomationWorkItemTemplatePayload = {
+  /**
+   * Acceptance criteria texts a Work Item created from the template starts with, in order; each is
+   * created as not met. At most `WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT` entries.
+   */
+  acceptanceCriteria?: string[]
   /** Work Item を割り当てる Project ID です。 */
   assignedProjectId?: string | null
   /** Work Item の担当者 user ID です。 */

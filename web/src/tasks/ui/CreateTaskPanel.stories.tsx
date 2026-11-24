@@ -1,4 +1,5 @@
 import {
+  AUTOMATION_SCHEMA_VERSION,
   type CreateWorkItemInput,
   DEFAULT_WORK_ITEM_TYPE,
   type WorkItemConfiguration,
@@ -8,6 +9,7 @@ import { useState } from 'react'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import type { ProjectMember } from '../../projects/api'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
+import { createWorkItemTemplateDraft, type WorkItemTemplate } from '../../issues/model/workItemDuplicate'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import {
@@ -443,9 +445,9 @@ export const ModeRoundTripRetainsDraft: Story = {
 
     await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
     await userEvent.click(canvas.getByRole('button', { name: '登録' }))
-    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeVisible()
+    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeVisible()
     await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
-    await expect(canvas.queryByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeNull()
+    await expect(canvas.queryByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeNull()
     fireEvent.submit(canvas.getByTestId('create-task-form'))
     await waitFor(() => expect(canvas.getByText('最大値以下で入力してください。')).toBeVisible())
   },
@@ -639,5 +641,110 @@ export const MutationError: Story = {
     ).toBeVisible()
     await expect(canvas.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
     await expect(canvas.getByRole('button', { name: '登録' })).toBeEnabled()
+  },
+}
+
+/** Work Item template offered by the template stories. */
+const releaseCheckTemplate: WorkItemTemplate = {
+  schemaVersion: AUTOMATION_SCHEMA_VERSION,
+  id: 'release-check',
+  workspaceId: 'workspace-1',
+  kind: 'work-item',
+  name: 'リリース確認',
+  enabled: true,
+  version: 1,
+  revision: 1,
+  payload: {
+    title: 'リリースを確認する',
+    description: 'リリース前に確認する項目です。',
+    priority: 'high',
+    acceptanceCriteria: ['テストが通る', '手順書を更新する'],
+    schedule: createDefaultUnscheduledTaskSchedule(),
+  },
+  createdAt: '2026-11-01T00:00:00.000Z',
+  updatedAt: '2026-11-01T00:00:00.000Z',
+}
+
+/**
+ * Hosts the panel the way the task screen does: picking a template restarts the panel from it.
+ *
+ * @param props - Panel props.
+ * @returns The panel with a template-backed draft.
+ */
+function TemplateCreateTaskPanel(props: CreateTaskPanelProps) {
+  const [context, setContext] = useState<TaskCreateContext>({ projectId: 'refero', source: 'header' })
+  return (
+    <CreateTaskPanel
+      {...props}
+      context={context}
+      key={JSON.stringify(context)}
+      onApplyTemplate={(template, schedule) => setContext({
+        projectId: 'refero',
+        source: 'header',
+        ...(schedule ? { schedule } : {}),
+        ...(template ? { duplicate: createWorkItemTemplateDraft(template) } : {}),
+      })}
+      templates={[releaseCheckTemplate]}
+    />
+  )
+}
+
+/** Picking a template fills the form and saves its acceptance criteria with the new Work Item. */
+export const StartsFromTemplate: Story = {
+  args: {
+    initialMode: 'detailed',
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
+      void input
+    }),
+  },
+  render: (args) => <TemplateCreateTaskPanel {...args} />,
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'スケジュール種別' }), 'due-date')
+    await userEvent.type(canvas.getByLabelText('期限のみ'), '2026-12-04')
+    await userEvent.selectOptions(canvas.getByTestId('create-task-template'), 'release-check')
+    await expect(await canvas.findByLabelText('期限のみ')).toHaveValue('2026-12-04')
+    await expect(await canvas.findByText('テンプレート「リリース確認」の内容を下書きに入れました。保存するまで作成されません。')).toBeVisible()
+    await expect(canvas.getByDisplayValue('リリースを確認する')).toBeVisible()
+    await expect(canvas.getByDisplayValue('テストが通る')).toBeVisible()
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '担当者' }), 'sato@example.com')
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Customer impact' }), 'ReleaseIsSafeToShip')
+    await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+
+    await waitFor(() => expect(args.onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'リリースを確認する',
+      description: 'リリース前に確認する項目です。',
+      priority: 'high',
+      acceptanceCriteria: [
+        { text: 'テストが通る', satisfied: false },
+        { text: '手順書を更新する', satisfied: false },
+      ],
+    })))
+  },
+}
+
+/** Acceptance criteria typed in detailed mode keep quick capture from dropping them on submit. */
+export const AcceptanceCriteriaRequireDetailedSubmit: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+    initialMode: 'detailed',
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
+      void input
+    }),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.type(canvas.getByRole('textbox', { name: 'タスク名' }), 'Criteria draft')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '担当者' }), 'sato@example.com')
+    await userEvent.click(canvas.getByRole('button', { name: '受け入れ条件を編集' }))
+    await userEvent.click(canvas.getByRole('button', { name: '条件を追加' }))
+    await userEvent.type(canvas.getByRole('textbox', { name: '条件 1' }), 'Tests pass')
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+
+    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目・受け入れ条件を確認するため/u)).toBeVisible()
+    await expect(args.onSubmit).not.toHaveBeenCalled()
   },
 }

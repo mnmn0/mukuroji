@@ -1,6 +1,8 @@
 import {
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   isWorkItemRelationEventType,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
+  WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
   WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -131,6 +133,7 @@ export function parseAutomationTemplatePayload(value: string):
   if (!isRecord(parsed)) return { error: 'object-required' }
   if (!isAutomationValueCompatible(parsed)) return { error: 'invalid-value' }
   const allowedFields = new Set([
+    'acceptanceCriteria',
     'assignedProjectId',
     'assigneeUserId',
     'contributorAssignments',
@@ -174,6 +177,12 @@ export function parseAutomationTemplatePayload(value: string):
   ) {
     return { error: 'invalid-value' }
   }
+  const acceptanceCriteria = parsed.acceptanceCriteria === undefined
+    ? undefined
+    : readTemplateAcceptanceCriteria(parsed.acceptanceCriteria)
+  if (parsed.acceptanceCriteria !== undefined && acceptanceCriteria === undefined) {
+    return { error: 'invalid-value' }
+  }
   const schedule = readAutomationWorkItemSchedule(parsed.schedule)
   if (!schedule) return { error: 'invalid-value' }
   const contributorAssignments = parsed.contributorAssignments === undefined
@@ -191,6 +200,7 @@ export function parseAutomationTemplatePayload(value: string):
   return {
     payload: {
       title: parsed.title,
+      ...(acceptanceCriteria === undefined || acceptanceCriteria.length === 0 ? {} : { acceptanceCriteria }),
       ...(parsed.assignedProjectId === undefined
         ? {}
         : { assignedProjectId: parsed.assignedProjectId }),
@@ -211,6 +221,23 @@ export function parseAutomationTemplatePayload(value: string):
         : { workflowStatusId: parsed.workflowStatusId }),
     },
   }
+}
+
+/**
+ * Reads the acceptance criteria texts of a Work Item template payload with the server's limits.
+ *
+ * @param value - Parsed `acceptanceCriteria` value.
+ * @returns Trimmed texts, or undefined when the value is not a valid list.
+ */
+function readTemplateAcceptanceCriteria(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT) return undefined
+  const texts: string[] = []
+  for (const entry of value) {
+    const text = typeof entry === 'string' ? entry.trim() : ''
+    if (!text || text.length > WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH) return undefined
+    texts.push(text)
+  }
+  return texts
 }
 
 /**

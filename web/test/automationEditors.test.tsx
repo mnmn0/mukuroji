@@ -228,6 +228,28 @@ describe('Automation editors', () => {
     })
   })
 
+  test('keeps Work Item template acceptance criteria within the Work Item limits', () => {
+    const payload = (acceptanceCriteria: unknown) => JSON.stringify({
+      acceptanceCriteria,
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        mode: 'unscheduled',
+      },
+      title: 'Release',
+    })
+
+    expect(parseAutomationTemplatePayload(payload([' Tests pass ', 'Docs updated'])))
+      .toMatchObject({ payload: { acceptanceCriteria: ['Tests pass', 'Docs updated'] } })
+    expect(parseAutomationTemplatePayload(payload([]))).not.toHaveProperty('payload.acceptanceCriteria')
+    for (const invalid of ['Tests pass', ['  '], ['x'.repeat(1025)], [1], Array.from({ length: 21 }, (_, index) => `C${index}`)]) {
+      expect(parseAutomationTemplatePayload(payload(invalid))).toEqual({ error: 'invalid-value' })
+    }
+  })
+
   test('rejects a date range beyond the server planning horizon', () => {
     const startDate = '2000-01-01'
     const endDate = new Date(

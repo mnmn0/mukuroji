@@ -192,6 +192,7 @@ import {
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
 import { createDependencyFencedWorkItemAuthorizationSnapshot } from '../shared/work-item-schedule'
+import { readNewWorkItemAcceptanceCriteria } from '../shared/work-item-acceptance-criteria'
 import {
   createActiveMemberFence,
   readContributorAssignmentChange,
@@ -2164,6 +2165,7 @@ async function executeAutomationWorkItemCreate(
     {
       ...configuredBody,
       ...withContributorAssignmentChange(configuredBody, contributorChange),
+      acceptanceCriteria: readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria),
       ...newWorkItemProjectFence,
     },
     `automation:${context.execution.ruleId}`,
