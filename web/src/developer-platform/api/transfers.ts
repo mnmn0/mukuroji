@@ -5,6 +5,8 @@ import type {
   CursorPage,
   ImportDryRunReport,
   ImportJob,
+  ImportJobProgress,
+  ImportJobStatus,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
@@ -53,6 +55,93 @@ export function createDeveloperImport(
     accessToken,
     createJsonMutation('POST', input, mutationContext),
   )
+}
+
+/**
+ * Reads how many rows and links an import job has processed.
+ *
+ * @param accessToken - Access token for the Authorization header.
+ * @param jobId - Import job.
+ * @returns The job's progress.
+ */
+export async function getDeveloperImportProgress(accessToken: string, jobId: string): Promise<ImportJobProgress> {
+  return readImportJobProgress(await requestJson<unknown>(
+    `/developer/imports/${encodeURIComponent(jobId)}/progress`,
+    accessToken,
+  ))
+}
+
+/** Import job statuses the progress endpoint can report. */
+const importJobStatuses: ReadonlySet<string> = new Set<ImportJobStatus>([
+  'queued',
+  'validating',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+])
+
+/**
+ * Checks an import progress response and builds its typed value.
+ *
+ * @param value - Parsed response body.
+ * @returns The job's progress.
+ * @throws DeveloperPlatformApiError with `InvalidDeveloperPlatformResponse` when the body is not a progress value.
+ */
+function readImportJobProgress(value: unknown): ImportJobProgress {
+  if (typeof value === 'object' && value !== null) {
+    const jobId: unknown = Reflect.get(value, 'jobId')
+    const status: unknown = Reflect.get(value, 'status')
+    const totalRows = readOptionalCount(Reflect.get(value, 'totalRows'))
+    const processedRows = readOptionalCount(Reflect.get(value, 'processedRows'))
+    const totalLinks = readOptionalCount(Reflect.get(value, 'totalLinks'))
+    const processedLinks = readOptionalCount(Reflect.get(value, 'processedLinks'))
+    if (
+      typeof jobId === 'string' &&
+      typeof status === 'string' &&
+      isImportJobStatus(status) &&
+      totalRows !== null &&
+      totalLinks !== null &&
+      typeof processedRows === 'number' &&
+      typeof processedLinks === 'number'
+    ) {
+      return {
+        jobId,
+        status,
+        processedRows,
+        processedLinks,
+        ...(totalRows === undefined ? {} : { totalRows }),
+        ...(totalLinks === undefined ? {} : { totalLinks }),
+      }
+    }
+  }
+  throw new DeveloperPlatformApiError(
+    200,
+    'Developer Platform API returned an invalid import progress.',
+    'InvalidDeveloperPlatformResponse',
+    false,
+  )
+}
+
+/**
+ * Reports whether a text is an import job status.
+ *
+ * @param value - Status text from a response.
+ * @returns Whether it is one of the import job statuses.
+ */
+function isImportJobStatus(value: string): value is ImportJobStatus {
+  return importJobStatuses.has(value)
+}
+
+/**
+ * Reads an optional count from a response field.
+ *
+ * @param value - Field value.
+ * @returns The count, `undefined` when the field is absent, or `null` when it is not a count.
+ */
+function readOptionalCount(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
 /**

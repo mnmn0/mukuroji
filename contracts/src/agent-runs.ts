@@ -126,6 +126,47 @@ export type AgentRunView = AgentRun & {
    * `AgentRun` schema is closed, so only the Web view and the resume response carry the link.
    */
   resumedFromRunId?: string
+  /**
+   * Tokens and estimated cost that agent telemetry attributed to this run. Absent when no telemetry
+   * arrived for the run's member and instance while it was active.
+   */
+  usage?: AgentRunUsage
+}
+
+/** Event name of the Claude Code OpenTelemetry log record that carries one model request's usage. */
+export const AGENT_TELEMETRY_API_REQUEST_EVENT = 'claude_code.api_request'
+
+/** Resource attribute that names the MCP agent instance in OpenTelemetry exports. */
+export const AGENT_TELEMETRY_INSTANCE_ATTRIBUTE = 'mukuroji.agent_instance'
+
+/** Largest number of usage buckets one run's usage read returns before it reports `hasMore`. */
+export const AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN = 2_000
+
+/**
+ * Token and estimated cost totals that agent telemetry attributed to one Agent Run, or to the runs
+ * of one Work Item. Telemetry is attributed by time: a minute of usage belongs to the run that the
+ * same member and agent instance had active at the start of that minute.
+ */
+export type AgentRunUsage = {
+  /** Uncached input tokens. */
+  inputTokens: number
+  /** Output tokens. */
+  outputTokens: number
+  /** Input tokens read from the prompt cache. */
+  cacheReadTokens: number
+  /** Input tokens written to the prompt cache. */
+  cacheCreationTokens: number
+  /** Model requests the totals cover. */
+  requestCount: number
+  /**
+   * Estimated cost in millionths of US dollars, as the agent runtime estimated it. Only Team managers
+   * receive it.
+   */
+  estimatedCostMicroUsd?: number
+  /** Models that served the requests, sorted. */
+  models: string[]
+  /** True when more usage existed than one read returns, so the totals are a lower bound. */
+  hasMore: boolean
 }
 
 /** Request body that claims a Work Item and moves it to a started status. */
@@ -498,6 +539,8 @@ export type WorkItemAgentRunsResponse = {
   items: AgentRunView[]
   /** Whether older runs exist beyond the returned ones. */
   hasMore: boolean
+  /** Usage of the returned runs added together; absent when none of them has usage. */
+  usageTotal?: AgentRunUsage
 }
 
 /** Hours a run that finished as `completed` stays in the Factory board's completed lane. */
@@ -729,11 +772,52 @@ export type FactoryAnalyticsRuntimeSummary = FactoryAnalyticsRunSummary & {
   runtime: AgentRunRuntime
 }
 
+/** Largest number of finished runs whose telemetry usage one Factory analytics response adds up, newest first. */
+export const FACTORY_ANALYTICS_MAX_USAGE_RUNS = 300
+
+/** Number of Work Items with the most tokens that Factory analytics lists. */
+export const FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS = 10
+
+/** Telemetry usage of the period's runs in one Project, or outside any Project. */
+export type FactoryAnalyticsProjectUsage = {
+  /** Project of the runs' Work Items; absent for Work Items without a Project. */
+  projectId?: string
+  /** Usage added together. */
+  usage: AgentRunUsage
+}
+
+/** Telemetry usage of the period's runs of one Work Item. */
+export type FactoryAnalyticsWorkItemUsage = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Work Item title. */
+  title: string
+  /** Project of the Work Item, when it has one. */
+  projectId?: string
+  /** Usage added together. */
+  usage: AgentRunUsage
+}
+
+/**
+ * Telemetry usage of the runs that finished in the period, on Work Items the viewer can see. The
+ * estimated cost is included only for Team managers.
+ */
+export type FactoryAnalyticsUsage = {
+  /** Usage of every evaluated run. */
+  total: AgentRunUsage
+  /** Usage per Project, most tokens first. */
+  projects: FactoryAnalyticsProjectUsage[]
+  /** The {@link FACTORY_ANALYTICS_USAGE_TOP_WORK_ITEMS} Work Items with the most tokens, most first. */
+  workItems: FactoryAnalyticsWorkItemUsage[]
+  /** Whether finished runs beyond {@link FACTORY_ANALYTICS_MAX_USAGE_RUNS} were left out. */
+  runsHasMore: boolean
+}
+
 /**
  * Factory analytics of one Team for a period, returned by
  * `GET /api/teams/{teamId}/agent-runs/analytics?from=...&to=...`. It counts the runs that finished in
- * the period on Work Items the viewer can see, from the stored runs and structured reports; token and
- * cost usage is not part of it. Every read is bounded and a `...HasMore` flag says when the counts
+ * the period on Work Items the viewer can see, from the stored runs and structured reports, and adds up
+ * the telemetry usage of those runs (ADR 0061). Every read is bounded and a `...HasMore` flag says when the counts
  * leave runs out.
  */
 export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
@@ -757,4 +841,6 @@ export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
    * was cut.
    */
   historyHasMore: boolean
+  /** Telemetry usage of the period's runs; absent when none of them has usage. */
+  usage?: FactoryAnalyticsUsage
 }

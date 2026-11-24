@@ -3,6 +3,7 @@ import {
   createWorkloadAssignment,
   createWorkloadRequest,
   previewWorkloadAssignment,
+  reviewWorkloadTimeOff,
   saveWorkloadProfile,
   saveWorkloadTimeOff,
   updateWorkloadAssignment,
@@ -32,6 +33,7 @@ describe('workload API', () => {
     await saveWorkloadProfile('token', 'team/1', 'member/1', {
       displayName: 'Hanako',
       skills: ['typescript'],
+      calendarSource: 'workspace',
       timeZone: 'Asia/Tokyo',
       schedule,
       holidays: [],
@@ -77,6 +79,11 @@ describe('workload API', () => {
       expectedRevision: 2,
       expectedTeamRevision: 9,
     })
+    await reviewWorkloadTimeOff('token', 'team/1', 'member/1', 'time-off/1', {
+      status: 'rejected',
+      expectedRevision: 2,
+      expectedTeamRevision: 10,
+    })
 
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       ['PUT', '/api/teams/team%2F1/workload/profiles/member%2F1'],
@@ -85,7 +92,13 @@ describe('workload API', () => {
       ['POST', '/api/teams/team%2F1/workload/assignments'],
       ['PATCH', '/api/teams/team%2F1/workload/assignments/assignment%2F1'],
       ['PATCH', '/api/teams/team%2F1/workload/requests/request%2F1'],
+      ['PATCH', '/api/teams/team%2F1/workload/profiles/member%2F1/time-off/time-off%2F1'],
     ])
+    expect(JSON.parse(requests[6]?.body ?? '{}')).toEqual({
+      status: 'rejected',
+      expectedRevision: 2,
+      expectedTeamRevision: 10,
+    })
     expect(JSON.parse(requests[5]?.body ?? '{}')).toEqual({
       status: 'canceled',
       expectedRevision: 2,
@@ -95,6 +108,55 @@ describe('workload API', () => {
       expectedRevision: 1,
       expectedTeamRevision: 8,
     })
+  })
+
+  test('rejects a snapshot whose cells lack the pending time-off and tentative totals', async () => {
+    installFetchRecorder([], {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      fromDate: '2026-08-10',
+      toDate: '2026-08-10',
+      granularity: 'day',
+      members: [{
+        memberId: 'member-1',
+        skills: [],
+        timeZone: 'UTC',
+        schedule: Object.fromEntries(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+          .map((day) => [day, { enabled: true, minutes: 480 }])),
+        holidays: [],
+        profileRevision: 1,
+        timeOff: [{ id: 'pto-1', fromDate: '2026-08-10', toDate: '2026-08-10', status: 'planned', revision: 1 }],
+        cells: [{
+          fromDate: '2026-08-10', toDate: '2026-08-10', label: '2026-08-10', capacityMinutes: 480,
+          allocatedMinutes: 0, plannedEffortMinutes: 0, actualMinutes: 0, remainingEffortMinutes: 0,
+          utilizationPercent: 0, varianceMinutes: 480, status: 'under',
+        }],
+        capacityMinutes: 480,
+        allocatedMinutes: 0,
+        plannedEffortMinutes: 0,
+        actualMinutes: 0,
+        remainingEffortMinutes: 0,
+        overloaded: false,
+      }],
+      requests: [],
+      assignments: [],
+      redactedAssignmentCount: 0,
+      redactedRequestCount: 0,
+      revision: 1,
+      generatedAt: '2026-08-02T00:00:00.000Z',
+    })
+
+    await expect(previewWorkloadAssignment('token', 'team-1', {
+      fromDate: '2026-08-10',
+      toDate: '2026-08-10',
+      granularity: 'day',
+      memberId: 'member-1',
+      assignmentFromDate: '2026-08-10',
+      assignmentToDate: '2026-08-10',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+    })).rejects.toMatchObject({ status: 502 })
   })
 
   test('returns a validated what-if snapshot', async () => {

@@ -51,7 +51,12 @@ import {
   isCancelledTeamIssueUpdate,
   type CancelledTeamIssueUpdate,
 } from '../../issues/model/teamIssueUpdateOutcome'
-import { createWorkItemDuplicateDraft } from '../../issues/model/workItemDuplicate'
+import {
+  createWorkItemDuplicateDraft,
+  createWorkItemTemplateDraft,
+  listWorkItemTemplatesForTeam,
+} from '../../issues/model/workItemDuplicate'
+import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -739,6 +744,14 @@ export function TaskScreen({
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const [localActiveTab, setLocalActiveTab] = useState<TaskTab>(initialTab)
+  // A link that asks for a tab while the screen stays mounted, such as one from a Work Item to its
+  // Project log, switches to it once per change of the requested tab. Losing the request, which
+  // falls back to the default table tab, leaves the current tab alone.
+  const [requestedTab, setRequestedTab] = useState<TaskTab>(initialTab)
+  if (requestedTab !== initialTab) {
+    setRequestedTab(initialTab)
+    if (initialTab !== 'table') setLocalActiveTab(initialTab)
+  }
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilter>('all')
   const [localDefinitionFilter, setLocalDefinitionFilter] = useState<WorkItemDefinitionFilter>({
@@ -766,6 +779,12 @@ export function TaskScreen({
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
+  const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateTaskOpen && Boolean(onCreateTask))
+  const createTemplateTeamId = createTaskContext?.teamId ?? activeProjectTeamId
+  const teamCreateTemplates = useMemo(
+    () => listWorkItemTemplatesForTeam(createTemplates.templates, createTemplateTeamId),
+    [createTemplates.templates, createTemplateTeamId],
+  )
   const [createTaskError, setCreateTaskError] = useState<string>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [taskAction, setTaskAction] = useState<TaskActionState>()
@@ -1705,6 +1724,8 @@ export function TaskScreen({
     if (item.status !== 'succeeded') return false
     if (action.type === 'move') return action.targetProjectId !== projectId
     if (action.type === 'archive') return action.archived
+    // Handing a member's work over changes owners and contributors, never the Project.
+    if (action.type === 'reassign-member') return false
     return action.patch.assignedProjectId !== undefined &&
       action.patch.assignedProjectId !== projectId
   }, [projectId])
@@ -3710,7 +3731,26 @@ export function TaskScreen({
                 isSubmissionDisabled={!onCreateTask}
                 isSubmitting={isCreatingTask}
                 locale={locale}
+                onApplyTemplate={(template, schedule) => {
+                  // Restarting from a template replaces what the member typed, so ask first.
+                  if (createTaskDirtyRef.current && !globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
+                    return
+                  }
+                  setCreateTaskError(undefined)
+                  setCreateTaskContext((current) => {
+                    // A panel opened from the header has no context yet; it starts as one.
+                    const context: TaskCreateContext = { ...(current ?? { source: 'header' }) }
+                    // A template draft replaces the previous draft; no template clears it.
+                    delete context.duplicate
+                    // The restarted form keeps the dates the member entered.
+                    if (schedule) context.schedule = schedule
+                    return template ? { ...context, duplicate: createWorkItemTemplateDraft(template) } : context
+                  })
+                }}
                 onDirtyChange={reportCreateTaskDirty}
+                templateLoadFailed={createTemplates.hasLoadError}
+                onRetryTemplates={createTemplates.retry}
+                templates={teamCreateTemplates}
                 onCancel={() => {
                   if (!confirmCreateTaskDiscard()) return
                   taskActionCompletion.cancel('create')

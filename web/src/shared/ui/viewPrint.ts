@@ -8,7 +8,7 @@ export type TaskViewPrintPaper = 'a3' | 'a4'
 export const taskViewPrintPapers: readonly TaskViewPrintPaper[] = ['a3', 'a4']
 
 /** Views that print on their own (task views and the Planning timeline), named by `data-print-root` on the view root. */
-export type TaskViewPrintTarget = 'planning-timeline' | 'task-gantt' | 'task-table' | 'team-issue-table'
+export type TaskViewPrintTarget = 'planning-timeline' | 'portfolio-dashboard' | 'task-gantt' | 'task-table' | 'team-issue-table'
 
 /** Printable width in CSS pixels of each landscape paper size, inside 8mm margins. */
 const taskViewPrintableWidths: Readonly<Record<TaskViewPrintPaper, number>> = {

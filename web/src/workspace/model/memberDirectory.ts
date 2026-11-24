@@ -1,4 +1,4 @@
-import { escapeSpreadsheetCell } from './spreadsheetCell'
+import { escapeSpreadsheetCell } from '../../shared/lib/spreadsheetCell'
 import type { WorkspaceMember, WorkspaceMemberStatus, WorkspaceRole } from '../api/access'
 
 /** Filter of the Workspace member list. */

@@ -10,6 +10,7 @@ import {
   type PlanningUpdateReaction,
   type PlanningUpdateReactionPage,
   type PlanningUpdateTargetSummary,
+  type PlanningReadScope,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import {
@@ -484,7 +485,31 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
     isPlanningCriticalPath(value.criticalPath) &&
     isWorkItemDependencySummary(value.workItemDependencySummary) &&
     isPlanningCapacity(value.capacity) &&
-    isOptionalString(value.updatedAt)
+    isOptionalString(value.updatedAt) &&
+    (value.readScope === undefined || isPlanningReadScope(value.readScope))
+}
+
+/**
+ * Returns whether a value is the Team, Project, or Portfolio a scoped snapshot was read for.
+ *
+ * @param value - Unknown read scope candidate.
+ * @returns Whether the value is a canonical read scope.
+ */
+function isPlanningReadScope(value: unknown): value is PlanningReadScope {
+  if (!isRecord(value)) return false
+  if (value.type === 'portfolio') return isNonEmptyText(value.portfolioId)
+  if (value.type === 'team') return isNonEmptyText(value.teamId)
+  return value.type === 'project' && isNonEmptyText(value.teamId) && isNonEmptyText(value.projectId)
+}
+
+/**
+ * Returns whether a value is a non-empty string.
+ *
+ * @param value - Unknown value.
+ * @returns Whether the value is a string with at least one character.
+ */
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
 }
 
 /**

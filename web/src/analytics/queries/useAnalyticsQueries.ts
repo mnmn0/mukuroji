@@ -1,4 +1,7 @@
 import useSWR from 'swr'
+import useSWRInfinite from 'swr/infinite'
+import type { AnalyticsDeliveryListResponse } from '@mukuroji/contracts'
+import { getRecentAnalyticsDeliveries } from '../api/deliveries'
 import { getAnalyticsReports } from '../api/reports'
 
 const analyticsQueryConfig = {
@@ -25,6 +28,41 @@ export function useAnalyticsReports(accessToken?: string, enabled = true) {
   )
 
   return { ...query, key }
+}
+
+/**
+ * Reads the scheduled deliveries to the current user, newest first, one page at a time.
+ *
+ * The server leaves out deliveries of reports the user can no longer read, so a page can be empty
+ * while older deliveries remain; `hasMore` stays true and `loadMore` reads on.
+ *
+ * @param accessToken - Analytics API access token.
+ * @param enabled - Whether to read once the current user is known.
+ * @returns The deliveries read so far, whether more remain, the error, and the load and retry actions.
+ */
+export function useAnalyticsDeliveries(accessToken?: string, enabled = true) {
+  const query = useSWRInfinite(
+    (pageIndex, previousPage: AnalyticsDeliveryListResponse | null) => {
+      if (!accessToken || !enabled) return null
+      if (pageIndex > 0 && !previousPage?.nextCursor) return null
+      return [
+        'analytics-deliveries',
+        accessToken,
+        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
+      ] satisfies [string, string, string]
+    },
+    ([, token, cursor]) => getRecentAnalyticsDeliveries(token, cursor || undefined),
+    { ...analyticsQueryConfig, revalidateFirstPage: true },
+  )
+  const pages = query.data
+  const deliveriesError: unknown = query.error
+  return {
+    deliveries: pages?.flatMap((page) => page.deliveries),
+    error: deliveriesError,
+    hasMore: Boolean(pages?.at(-1)?.nextCursor),
+    loadMore: () => query.setSize(query.size + 1),
+    retry: () => query.mutate(),
+  }
 }
 
 /**

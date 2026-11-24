@@ -12,8 +12,10 @@ import { TimeTrackingError } from '../../modules/time-tracking'
 import { requireAppDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
+import { canManageWorkspaceTimePeriods } from '../shared/time-period-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
+  listPermittedTeams,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -96,9 +98,18 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
     requireTeamPermission: async (principal, teamId, minimum) => {
       await requireTeamPermission(principal, teamId, minimum)
     },
+    listTimeTrackingTeams: async (principal, minimum) =>
+      (await listPermittedTeams(principal, minimum)).map((context) => ({
+        teamId: context.team.id,
+        name: context.team.name,
+      })),
     canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
     canManageWholeTeam: async (principal, teamId) =>
       principal.isSystemAdmin || (await readTeamManagerContext(principal, teamId))?.directTeamGrant === true,
+    canManageWorkspacePeriods: async (principal) => canManageWorkspaceTimePeriods(principal),
+    listWorkspaceTeams: async (principal) =>
+      (await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'en', true)).teams
+        .map((team) => ({ teamId: team.id, name: team.name })),
     getAccessibleProjectIds: async (principal, teamId) => {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined

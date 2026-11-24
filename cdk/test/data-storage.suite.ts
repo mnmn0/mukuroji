@@ -87,6 +87,10 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
       }),
     ]),
   }));
+  // Agent telemetry usage rows and export receipts expire; run rows never carry the attribute.
+  expect(resources.AgentRunsTableB0DA56A7.Properties).toEqual(expect.objectContaining({
+    TimeToLiveSpecification: { AttributeName: 'usageExpiresAt', Enabled: true },
+  }));
 
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
@@ -502,6 +506,8 @@ test('planning data uses retained storage with a sparse update schedule due inde
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+        { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
       DeletionProtectionEnabled: true,
@@ -510,6 +516,13 @@ test('planning data uses retained storage with a sparse update schedule due inde
         KeySchema: [
           { AttributeName: 'updateScheduleShard', KeyType: 'HASH' },
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }, {
+        IndexName: 'InboxDigestDueIndex',
+        KeySchema: [
+          { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+          { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }],
@@ -673,13 +686,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
       { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
     ]],
   };
-  const webOrigins = {
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      [{ 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] }, distributionOrigin],
-      [distributionOrigin],
-    ],
-  };
+  const webOrigins = [distributionOrigin];
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {

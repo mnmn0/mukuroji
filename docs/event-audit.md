@@ -104,6 +104,36 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 
 これらの event type は Automation の `relation` trigger（[Automation](./automation.md#rule-model)）と webhook の event type（[Public API の Signed webhook](./public-api.md#signed-webhook)）でも使う。判断の経緯は [ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)。
 
+### 監査ログに残る操作
+
+#430 で、監査ログに出ていなかった次の操作を記録するようにした。sign-in と `document.exported` 以外は変更と同じ DynamoDB transaction で書く。どの event も secret、token、Webhook の URL、Document の本文を含まない。
+
+| event type | 記録する操作 | entity / target | 主な `changes` / `metadata` |
+| --- | --- | --- | --- |
+| `planning-entity.dependency-added` / `planning-entity.dependency-removed` | 計画どうしの依存関係の追加・削除 | 先行と後続の両方の `planning-entity` に 1 件ずつ（sequence 0, 1）。target は `planning-dependency` | `changes` は `type`・`lagDays`・`constraint`。`metadata` は `dependencyId`、`dependencyRole`（`predecessor` / `successor`）、`relatedEntityId`、記録した側の `teamId` / `projectId` |
+| `document.created` | Document の作成（テンプレートからの作成を含む） | `document` | `title`・`parentId`・`scope`・`permission`。テンプレートからは `metadata.sourceTemplateId` |
+| `document.updated` / `document.moved` / `document.permission.updated` | タイトル・位置の変更 / 親や scope の変更 / 権限の変更（メンバーへの共有と解除を含む） | `document` | 変わった項目の前後。権限と移動を同時に変えた場合は `document.permission.updated` 1 件にまとめる |
+| `document.archived` / `document.restored` | archive と archive からの復元 | `document` | `archivedAt` |
+| `document.version.restored` | 過去の版への復元 | `document`、target は `document-version` | `metadata.versionId` |
+| `document.public-link.created` / `document.public-link.revoked` | 公開 link の作成と失効 | `document`、target は `document-public-link` | `metadata.shareId`、作成時は `expiresAt`・`allowExport`。token は含まない |
+| `document.exported` | Document の export | `document` | `metadata.format`。読み取りだけの操作なので event だけを書き、書けないときは export を返さない。同じ Idempotency-Key の再送は同じ形式・同じ revision なら1件にまとめ、Document が変わった後の再送は別の export として記録する |
+| `oauth-app.created` / `oauth-app.rotated` / `oauth-app.revoked` | OAuth app の登録・client secret の差し替え・失効 | `oauth-app` | `metadata` は `ownerUserId`、`name`、`clientId`、`grantTypes`、`scopes`、`expiresAt` |
+| `webhook-subscription.created` / `webhook-subscription.rotated` / `webhook-subscription.updated` / `webhook-subscription.deleted` | Webhook の送信先の作成・署名 secret の差し替え・変更・削除（無効化） | `webhook-subscription` | 変更は `name`・`status`・`eventTypes`・`scopes` の前後。URL は受信側の token を含みうるので記録せず、変わったときだけ `metadata.urlChanged: true` |
+| `workload.profile.created` / `workload.profile.updated` | 稼働プロフィール（勤務予定・スキル・休日・カレンダー）の登録と変更 | `team-workload`（Team ID）、target は `workload-profile`（member ID） | `displayName`・`role`・`skills`・`calendarSource`・`timeZone`・`schedule`・`holidays`。休暇は下の `workload.time-off.*` に別に残す。`metadata` は `teamId`、`memberId` |
+| `workload.time-off.*` / `workload.request.*` / `workload.assignment.*` | 休暇の申請・承認・却下、リソース要求、要員の割り当て（#390 で追加） | `team-workload`、target は `workload-time-off` / `resource-request` / `resource-assignment` | 休暇の理由と機密の要求のタイトルは値を残さない |
+| `collection.created` / `collection.updated` / `collection.deleted` / `collection.item-added` / `collection.item-removed` | コレクションの作成・名前と説明の変更・削除、Work Item の追加と削除 | `collection` | `name`・`description`・`itemCount` の前後。項目の追加と削除は `metadata.teamId`・`metadata.issueId` |
+| `customer.*` / `customer-contact.*` / `customer-request.*` / `customer-view.*`（`created` / `updated` / `deleted` / `merged`） | 顧客・連絡先・顧客の要望・保存ビューの作成・変更・削除・統合 | 各 record | 書き込みの前後の graph を比べて作る。連絡先の `name`・`email`・`phone` と顧客の `notes`、要望の本文（`originalMessage`）・送信元の参照と link・外部参照は値を `[REDACTED]` にする（変わったことだけが残る）。顧客の削除・統合に伴う連絡先と要望の削除・付け替えは顧客の event 1 件にまとめ、統合は顧客・連絡先・要望とも `metadata.mergedIntoId`。1 回の書き込みで 3 件を超えるときは 3 件目に `metadata.additionalChanges` |
+| `auth.signed-in` | sign-in の完了（パスワード、MFA、パスワード再設定後、MFA の初回設定、SSO） | `sign-in`（Cognito の sub） | `metadata.authenticationMethods`。token の refresh は記録しない |
+| `auth.sign-in-failed` | パスワードまたは MFA コードの誤り | `sign-in`（`email:<pseudonym>`、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` による HMAC。鍵がない deploy では記録しない） | `metadata.signInFailure`（`invalid-credentials` / `invalid-mfa-code`）と `emailDomain`。actor は `system:sign-in` |
+
+Document の event は通知の候補（`notificationCandidates`）を持たないので、通知は増えない。本文の編集は Document の版（`/api/documents/:documentId/versions`）が記録するので audit event にはしない。Planning の依存関係の event は計画の活動（`/api/planning/entities/:entityId/activity`）にも出て、相手の計画が閲覧者に見えないときは `relatedEntityId` を返さない。API キーの発行・差し替え・失効は以前から `api-key.*` として記録している。
+
+監査ログ画面と export の公開 view は metadata を allowlist で絞っており、上の表の ID・列挙値（`customerId`、`issueId`、`requestId`、`assignmentId`、`timeOffId`、`mergedIntoId`、`additionalChanges`、`dependencyId`、`dependencyRole`、`shareId`、`versionId`、`format`、`urlChanged`、`authenticationMethods`、`signInFailure`、`emailDomain`）を含める。`relatedEntityId` は計画の活動 API だけが、閲覧者に見える相手のときに返す。
+
+要員計画とコレクションの event は状態の書き込みと同じ transaction で書く。顧客の event は同じく書き込みの transaction に入れ、顧客の削除・統合のように何回かに分けて書く操作では最初の transaction に入れる。そのため顧客の 1 回の書き込みに入る record は、audit を付けるとき最大 96 件になる。
+
+sign-in の event は session を発行した後に別に書き、書けなくても sign-in は止めない（失敗はログに出す）。失敗の event は、未認証の宛先の Workspace を引かずに済むよう、deploy が 1 Workspace に固定されている（`MUKUROJI_WORKSPACE_DIRECTORY_ID` がある）ときだけ書く。宛先はメールアドレスではなく、Workspace audit pseudonym key による Workspace ごとの HMAC pseudonym で示す（未キーの digest は候補アドレスから計算できるため使わない）。総当たりで書き込みが増えないよう、同じ宛先・接続元・理由の失敗は 10 分の枠ごとに同じ event ID になり、各 server instance は書いた枠と書き込み中の枠を覚えて 2 回目以降は書かない。
+
 ### Runtime control の切り替え event
 
 operator が `bun run runtime-control:*`（GitHub Actions の deploy workflow を含む）で runtime control を切り替えると、

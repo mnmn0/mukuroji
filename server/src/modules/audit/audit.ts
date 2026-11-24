@@ -1584,24 +1584,44 @@ export function toAuditEventView(value: unknown) {
 const publicAuditMetadataFields = new Set([
   'adapter',
   'acceptedCommentId',
+  // Number of further Customer graph changes folded into one event; a count only.
+  'additionalChanges',
+  'assignmentId',
+  // Session authentication methods of a sign-in, such as `pwd` or `SOFTWARE_TOKEN_MFA`.
+  'authenticationMethods',
   'commentId',
   'contextItemId',
+  'customerId',
+  'dependencyId',
+  'dependencyRole',
+  // Domain part only of a rejected sign-in address; the address itself is never stored.
+  'emailDomain',
   'eventCount',
   'exportId',
   'filtered',
   'filtersDigest',
+  'format',
   'fromPart',
+  'issueId',
   'kind',
   'memberId',
   'memberKey',
+  'mergedIntoId',
   'partCount',
   'projectId',
+  'requestId',
   'roleId',
   'rootCommentId',
   // Operator runtime-control switches (scripts/runtime-control.ts); holds no secret or tenant data.
   'runtimeControl',
   'scopeKind',
+  'shareId',
+  // Enumerated cause of a rejected sign-in (`invalid-credentials` / `invalid-mfa-code`).
+  'signInFailure',
   'teamId',
+  'timeOffId',
+  'urlChanged',
+  'versionId',
 ])
 
 function createAuditMetadataView(metadata: AuditObject | undefined) {
@@ -2525,6 +2545,28 @@ function limitAuditText(value: string) {
 
 function canonicalString(value: unknown) {
   return JSON.stringify(toAuditValue(value, new Set<object>(), false))
+}
+
+/**
+ * Derives the audit context of one part of a mutation that writes several independent events,
+ * such as one grant of a Team-wide member add. The part keeps the mutation's correlation, actor,
+ * and request, and gets an idempotency identity bound to the part, so its event ID stays stable
+ * on retries however the other parts change.
+ *
+ * @param context - Audit context of the whole mutation.
+ * @param part - Stable identifier of the part, such as a Project ID.
+ * @returns The audit context of the part.
+ */
+export function deriveMutationAuditPartContext(
+  context: MutationAuditContext,
+  part: string,
+): MutationAuditContext {
+  return {
+    ...context,
+    idempotencyKeyHash: hashText(
+      `audit-idempotency-part-v1\0${context.idempotencyKeyHash}\0${requireText(part, 'Audit part')}`,
+    ),
+  }
 }
 
 function hashCanonical(value: unknown) {

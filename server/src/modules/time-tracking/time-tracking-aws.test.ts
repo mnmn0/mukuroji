@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
-import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryHistory, TimePeriodClose } from '@mukuroji/contracts'
 import {
   DynamoDbTimeTrackingRepository,
   TimeTrackingService,
@@ -150,7 +150,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{ Items: [] }, {}], commands),
+        createDocumentClient([{ Items: [] }, {}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -181,9 +181,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
 
     // The first command reads the Team's closed months before the entry is written.
     expect(commands[0]?.input.ExpressionAttributeValues).toMatchObject({ ':prefix': 'TIME_CLOSE#team-1#' })
-    // The open month is rechecked in the transaction so a close that lands after the read cancels it.
-    expect(commands[1]?.input.TransactItems).toHaveLength(4)
-    const transactionItems = commands[1]?.input.TransactItems
+    // The second command reads the Team's time entry policy. The open month is rechecked in the
+    // transaction so a close that lands after the read cancels it.
+    expect(commands[2]?.input.TransactItems).toHaveLength(4)
+    const transactionItems = commands[2]?.input.TransactItems
     expect(Array.isArray(transactionItems)).toBe(true)
     if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
     expect(transactionItems[0]).toEqual({
@@ -285,6 +286,48 @@ describe('DynamoDbTimeTrackingRepository', () => {
       .rejects.toMatchObject({ status: 409, code: 'TimeEntryRevisionConflict' })
   })
 
+  test('fences a month close and reopen with the administrator membership check', async () => {
+    const close: TimePeriodClose = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      timeZone: 'Asia/Tokyo',
+      closedBy: 'member-1',
+      closedAt: '2026-08-02T03:00:00.000Z',
+    }
+    const commands: CommandWithInput[] = []
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}], commands))
+    await repository.createPeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    await repository.deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck])
+    for (const command of commands) {
+      const items = command.input.TransactItems
+      expect(Array.isArray(items) ? items[1] : undefined).toEqual(ownerMembershipCheck)
+    }
+
+    /** Builds a repository whose transactions fail with the given cancellation reasons. */
+    const createFailingRepository = (reasons: readonly string[]) => {
+      const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+      Object.defineProperty(client, 'send', {
+        configurable: true,
+        value: async (): Promise<unknown> => {
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: reasons.map((Code) => ({ Code })),
+          })
+        },
+      })
+      return new DynamoDbTimeTrackingRepository('analytics-table', client)
+    }
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    await expect(createFailingRepository(['None', 'ConditionalCheckFailed']).deletePeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ status: 409, code: 'TimePeriodAuthorizationChanged' })
+    // A month someone else already closed still reports the close conflict.
+    await expect(createFailingRepository(['ConditionalCheckFailed', 'None']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
+      .rejects.toMatchObject({ code: 'TimePeriodAlreadyClosed' })
+  })
+
   test('refuses a stored entry with neither a Work Item nor a category', async () => {
     const { workItemId: _workItemId, ...entry } = createEntry('project-1')
     const repository = new DynamoDbTimeTrackingRepository(
@@ -320,7 +363,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{ Items: [] }, {}, {}], commands),
+        createDocumentClient([{ Items: [] }, {}, {}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -344,8 +387,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
 
     // An entry saved without a rate reads the Team rate card before it is written.
     expect(commands[1]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_RATE_CARD#team-1' })
-    expect(commands[2]?.input.TransactItems).toHaveLength(4)
-    expect(JSON.stringify(commands[2]?.input.TransactItems)).toContain('developer-platform-table')
+    // Then the Team's time entry policy.
+    expect(commands[2]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_POLICY#team-1' })
+    expect(commands[3]?.input.TransactItems).toHaveLength(4)
+    expect(JSON.stringify(commands[3]?.input.TransactItems)).toContain('developer-platform-table')
     expect(completed).toBe(0)
   })
 
@@ -483,7 +528,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       recordKey: 'TIME_CLOSE#team-1#2026-07',
     }
     const service = new TimeTrackingService(
-      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}, {}], commands)),
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}, {}, {}], commands)),
       { now: () => new Date('2026-08-02T12:00:00.000Z'), createId: () => 'entry-1' },
     )
 
@@ -501,7 +546,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       source: 'manual',
     }, false)
 
-    const items = commands[2]?.input.TransactItems
+    const items = commands[3]?.input.TransactItems
     if (!Array.isArray(items)) throw new Error('Expected transaction items.')
     expect(items.slice(0, 2)).toEqual([
       {
@@ -529,9 +574,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
       configurable: true,
       value: async (): Promise<unknown> => {
         calls += 1
+        // The closed months, the Team rate card, and the Team's time entry policy are read before
+        // the write; there is no rate card and no policy.
         if (calls === 1) return { Items: [] }
-        // The second read finds no rate card.
-        if (calls === 2) return {}
+        if (calls <= 3) return {}
         throw Object.assign(new Error('Transaction cancelled'), {
           name: 'TransactionCanceledException',
           CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
@@ -554,6 +600,38 @@ describe('DynamoDbTimeTrackingRepository', () => {
       currency: 'USD',
       source: 'manual',
     }, false)).rejects.toMatchObject({ status: 409, code: 'TimePeriodClosed' })
+  })
+
+  test('stores the Team time entry policy in one row and fails closed on an invalid stored mode', async () => {
+    const commands: CommandWithInput[] = []
+    const stored = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      overlap: 'warn',
+      dailyLimit: 'reject',
+      dailyLimitMinutes: 480,
+      revision: 1,
+      updatedBy: 'manager-1',
+      updatedAt: '2026-08-02T12:00:00.000Z',
+    } as const
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([
+      {},
+      { Item: { ...stored, recordKey: 'TIME_POLICY#team-1' } },
+      { Item: { ...stored, overlap: 'block', recordKey: 'TIME_POLICY#team-1' } },
+      { Item: { ...stored, teamId: 'team-2', recordKey: 'TIME_POLICY#team-1' } },
+    ], commands))
+
+    await repository.saveEntryPolicy({ ...stored }, 0)
+    expect(commands[0]?.input.Item).toMatchObject({ recordKey: 'TIME_POLICY#team-1', overlap: 'warn' })
+    expect(commands[0]?.input.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+    expect(await repository.getEntryPolicy('workspace-1', 'team-1')).toEqual(stored)
+    expect(commands[1]?.input).toMatchObject({ Key: { workspaceId: 'workspace-1', recordKey: 'TIME_POLICY#team-1' }, ConsistentRead: true })
+    await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+    // A row whose payload names another Team is never used for this Team.
+    await expect(repository.getEntryPolicy('workspace-1', 'team-1'))
+      .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
   })
 
   test('rejects a stored month close whose payload month differs from its key', async () => {

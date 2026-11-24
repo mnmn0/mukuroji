@@ -23,7 +23,7 @@ import {
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError, type ProjectDirectoryResponse } from '../../modules/directory'
 import { getConfiguredDynamoDbEndpoint } from '../../modules/audit/audit'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
@@ -56,6 +56,7 @@ import {
   readFocusWorkItemWindow,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
+  type FocusProjectLogSource,
   type FocusRelationGraphSource,
   type FocusScheduleBaselineSource,
   type FocusSnoozeRecord,
@@ -108,6 +109,7 @@ import {
   getEffectiveProjectAccessList,
   readLegacyProjectScopeAccesses,
   requireTeamPermission,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -126,6 +128,8 @@ import {
   createWorkItemScheduleIdempotencyWorkspaceId,
 } from '../shared/work-item-schedule'
 import { projectAccessAllows, type TeamPermissionContext } from '../shared/workspace-access'
+import { filterReadableProjectDirectory } from '../shared/project-directory-visibility'
+import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
 
 /** Maximum notification page size accepted by the durable Inbox port. */
 const FOCUS_NOTIFICATION_PAGE_LIMIT = 50
@@ -1535,6 +1539,7 @@ async function readFocusQueue(
   )
   const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
   const projectTitlesPromise = readFocusProjectTitlesByKey(principal)
+  const projectLogSourcesPromise = readFocusProjectLogSources(principal)
   const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
   const legacyUpdateTargetScopePromise = readFocusLegacyUpdateTargetScope(principal)
   const planningPromise = Promise.all([
@@ -1586,6 +1591,7 @@ async function readFocusQueue(
     projectTitlesByKey,
     scheduleBaselines,
     acknowledgedUpdateKeys,
+    projectLog,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1599,6 +1605,7 @@ async function readFocusQueue(
       projectTitlesPromise,
       scheduleBaselinesPromise,
       acknowledgedUpdateKeysPromise,
+      projectLogSourcesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
     now,
@@ -1608,6 +1615,8 @@ async function readFocusQueue(
     projectTitlesByKey,
     initiativeTitlesById,
     acknowledgedUpdateKeys,
+    projectLogSources: projectLog.sources,
+    ...(projectLog.incomplete ? { projectLogIncomplete: true } : {}),
     relationGraphs,
     scheduleBaselines,
     reviewerApprovals,
@@ -1871,7 +1880,7 @@ function createFocusPlanningWorkItemState(
  */
 function canReadFocusScopedSource(
   principal: WorkspacePrincipal,
-  permission: 'planning.read' | 'files.read',
+  permission: 'planning.read' | 'files.read' | 'projects.read',
   teamId?: string,
   projectId?: string,
 ): boolean {
@@ -2225,6 +2234,108 @@ async function readFocusLegacyUpdateTargetScope(
     )),
     workspaceReadable: principal.workspaceRole !== 'guest',
   }
+}
+
+/** Most Project logs one Focus read queries at the same time. */
+const FOCUS_PROJECT_LOG_READ_CONCURRENCY = 8
+
+/** Most Project logs one Focus read queries in all; Projects beyond it make the result incomplete. */
+const FOCUS_PROJECT_LOG_MAX_PROJECTS = 100
+
+/** Owned open Project log entries, and whether any Project log could not be read. */
+type FocusProjectLogRead = {
+  /** Entries with their Team, Project, and Project name. */
+  sources: FocusProjectLogSource[]
+  /** True when a Project log failed or was left out by the limit, so `sources` may miss entries. */
+  incomplete: boolean
+}
+
+/**
+ * Reads the open Project log entries the viewer owns, from every Project whose log the viewer may
+ * read. Enterprise access is evaluated as `projects.read` on each Project of the directory, since
+ * the Project accesses of a Focus request come from its own `work-items.read` and would leave out
+ * a Project granted only `projects.read`. Other viewers keep their Project roles, as an owner
+ * must be a member of the Project.
+ *
+ * Up to {@link FOCUS_PROJECT_LOG_MAX_PROJECTS} such Projects are read, a few at a time, in
+ * directory order. A log that cannot be read, or a Project beyond that limit, is reported as an
+ * incomplete result instead of an empty one, so the rest of the Focus queue still loads and the
+ * viewer is told that some entries may be missing.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Owned open entries, and whether any Project log failed or was left out.
+ */
+async function readFocusProjectLogSources(
+  principal: WorkspacePrincipal,
+): Promise<FocusProjectLogRead> {
+  // The Project log GET refuses guests, so Focus does not show them log entries either.
+  if (!canReadWorkspaceBusinessData(principal)) return { sources: [], incomplete: false }
+  const fullDirectory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const readableProjects = principal.enterpriseAuthorizationEvaluation !== undefined && !principal.isSystemAdmin
+    ? fullDirectory.teams.flatMap((team) => team.projects
+      .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+      .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
+    : await readLegacyFocusProjectLogProjects(principal, fullDirectory)
+  const projects = readableProjects.slice(0, FOCUS_PROJECT_LOG_MAX_PROJECTS)
+  let incomplete = readableProjects.length > projects.length
+  const sources = await mapInOrderWithConcurrency(projects, FOCUS_PROJECT_LOG_READ_CONCURRENCY, async (project) => {
+    try {
+      const entries = await workItemDependencies.projectRaidLogs.listOpenOwnedBy(
+        { workspaceId: principal.directoryId, teamId: project.teamId, projectId: project.projectId },
+        normalizeProjectMemberKey(principal.userKey),
+      )
+      return entries.map((entry) => ({ ...project, entry }))
+    } catch (error) {
+      console.warn('Focus could not read a Project log.', {
+        teamId: project.teamId,
+        projectId: project.projectId,
+        error,
+      })
+      incomplete = true
+      return []
+    }
+  })
+  return { sources: sources.flat(), incomplete }
+}
+
+/**
+ * Tells whether the principal passes the Workspace business-read restriction, which keeps guests
+ * away from Project data such as the Project log.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Whether {@link requireWorkspaceBusinessRead} accepts the principal.
+ */
+function canReadWorkspaceBusinessData(principal: WorkspacePrincipal): boolean {
+  try {
+    requireWorkspaceBusinessRead(principal)
+    return true
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError) return false
+    throw error
+  }
+}
+
+/**
+ * Lists the Projects whose log a viewer without Enterprise authorization may read: Projects of the
+ * visible directory where the viewer holds a Project role.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param fullDirectory - Whole Project directory of the Workspace.
+ * @returns Team, Project, and Project name of each readable Project log.
+ */
+async function readLegacyFocusProjectLogProjects(
+  principal: WorkspacePrincipal,
+  fullDirectory: ProjectDirectoryResponse,
+): Promise<Array<Omit<FocusProjectLogSource, 'entry'>>> {
+  const directory = await filterReadableProjectDirectory(principal, fullDirectory)
+  const accesses = (await getEffectiveProjectAccessList(principal))
+    .filter((access) => projectAccessAllows(access, 'viewer'))
+  return directory.teams.flatMap((team) => team.projects
+    .filter((project) => accesses.some((access) =>
+      access.projectId === project.id && (access.teamId === undefined || access.teamId === team.id)
+    ))
+    .map((project) => ({ teamId: team.id, projectId: project.id, projectTitle: project.name })))
+    .filter((project) => canReadFocusScopedSource(principal, 'projects.read', project.teamId, project.projectId))
 }
 
 /**

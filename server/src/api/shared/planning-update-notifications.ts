@@ -1,7 +1,9 @@
-import type {
-  PlanningUpdate,
-  PlanningUpdateComment,
-  PlanningUpdateTarget,
+import {
+  createNotificationMessage,
+  formatNotificationMessage,
+  type PlanningUpdate,
+  type PlanningUpdateComment,
+  type PlanningUpdateTarget,
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
@@ -106,6 +108,10 @@ export function createPlanningUpdatePublishAuditEvent(
       ? [{ memberKey: reviewerMemberKey, reason: 'update-reviewer' }]
       : []),
   ]
+  const message = createNotificationMessage(
+    degraded ? 'planning-update.health-changed' : 'planning-update.published',
+    { health: update.health, excerpt: excerpt(update.summary) },
+  )
   return {
     directoryId: input.workspaceId,
     eventType: degraded
@@ -119,10 +125,9 @@ export function createPlanningUpdatePublishAuditEvent(
     changes: degraded
       ? [{ field: 'health', before: previousHealth ?? 'unknown', after: update.health }]
       : [],
-    summary: degraded
-      ? `Health changed to ${update.health}: ${excerpt(update.summary)}`
-      : `Health update published (${update.health}): ${excerpt(update.summary)}`,
+    summary: formatNotificationMessage(message, 'en'),
     metadata: {
+      notificationMessage: message,
       actorMemberKey: update.authorMemberKey,
       ...planningTargetMetadata(update.target, update.contextSnapshot.scope),
       updateVersion: update.version,

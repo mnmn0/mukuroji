@@ -209,6 +209,7 @@ const enterpriseRoutePermissionRules = [
   { method: 'POST', pathPattern: '/api/analytics/evidence', permission: 'work-items.read' },
   { method: 'POST', pathPattern: '/api/analytics/export', permission: 'work-items.read' },
   { method: 'GET', pathPattern: '/api/analytics/reports', permission: 'work-items.read' },
+  { method: 'GET', pathPattern: '/api/analytics/deliveries', permission: 'work-items.read' },
   {
     method: 'GET',
     pathPattern: '/api/analytics/reports/:reportId/snapshots',
@@ -297,8 +298,16 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/workspace/members/sign-in-security',
     permission: 'members.manage',
   },
+  // Applying or previewing a Workspace calendar change rewrites Work Item schedules (ADR 0058).
+  {
+    method: '*',
+    pathPattern: '/api/workspace/work-calendar/*',
+    permission: 'workspace.manage',
+  },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
+  // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
+  { method: '*', pathPattern: '/api/time-periods/*', permission: 'workspace.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/automation/*', permission: 'automation.read' },
   { method: '*', pathPattern: '/api/automation/*', permission: 'automation.manage' },
@@ -339,6 +348,9 @@ const enterpriseRoutePermissionRules = [
   { method: 'PUT', pathPattern: '/api/planning/update-feed/digest', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/digest/inbox', permission: 'planning.read' },
   { method: 'POST', pathPattern: '/api/planning/update-feed/digest/preview', permission: 'planning.read' },
+  // Watching a Milestone only subscribes the caller to what the caller can already read.
+  { method: 'PUT', pathPattern: '/api/planning/entities/:entityId/watch', permission: 'planning.read' },
+  { method: 'DELETE', pathPattern: '/api/planning/entities/:entityId/watch', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -510,6 +522,16 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-calendar',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/work-calendar*',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
     pathPattern: '/api/teams/:teamId/work-item-configuration*',
     permission: 'work-items.read',
   },
@@ -624,6 +646,29 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
     permission: 'projects.write',
   },
+  // Saving a Team's portfolio snapshot captures every Project of the Team, so it needs the Team
+  // manage permission; reading the portfolio falls through to `teams.read` below.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/portfolio/snapshots/:month',
+    permission: 'teams.manage',
+  },
+  {
+    // Rendering a PDF reads the Project; the POST only carries the report to render.
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-report/pdf',
+    permission: 'projects.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares*',
+    permission: 'projects.write',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
@@ -670,6 +715,23 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/project-order',
     permission: 'teams.manage',
   },
+  // Changing the key prefix of a Team's new Work Items is a Team setting.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/work-item-key-prefix',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/profile',
+    permission: 'teams.manage',
+  },
+  // Adding a member to every Project of a Team is a Team-wide administration, like a rename.
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/members',
+    permission: 'teams.manage',
+  },
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId',
@@ -693,6 +755,11 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
+  // Workload and personal time across Teams: each Team is then checked like its Team route, so a
+  // Team-scoped grant reaches only its Teams and never needs a Workspace-wide permission.
+  { method: 'GET', pathPattern: '/api/workload', permission: 'teams.read' },
+  { method: 'GET', pathPattern: '/api/time-tracking/my-timesheet', permission: 'teams.read' },
+  { method: 'POST', pathPattern: '/api/time-tracking/my-timesheet/submit', permission: 'teams.write' },
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
   // A member's own agent credentials: reading and revoking change nothing shared, while
@@ -732,6 +799,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // Members read and rename themselves; the service refuses directory-managed names.
+  {
+    method: '*',
+    pathPattern: '/api/me/profile',
     permission: 'workspace.read',
   },
   // Push availability and the caller's own device registration change no shared Workspace data.
@@ -1655,6 +1728,7 @@ function shouldEvaluateEnterpriseProjectScopes(
   if (/^\/api\/collections(?:\/|$)/u.test(path)) {
     return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
   }
+  if (/^\/api\/(?:workload|time-tracking\/my-timesheet)(?:\/|$)/u.test(path)) return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }

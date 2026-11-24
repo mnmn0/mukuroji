@@ -16,7 +16,6 @@ const {
   setTestAppDependencies,
   withTestEnvironment,
 } = createApiTestHarness()
-import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration'
 import {
   InMemoryPlanningClient,
   PlanningError,
@@ -34,6 +33,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
+import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
@@ -60,6 +60,59 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Replaces the tenant profile with an in-memory one, since test Workspaces have no tenant table.
+ *
+ * @param saved - Whether the Workspace already has a profile.
+ * @returns The `workspaceId:ownerMemberKey` pairs tenant initialization ran for.
+ */
+function useTenantProfileStub(saved: boolean): string[] {
+  const initialized: string[] = []
+  let profileSaved = saved
+  const workspace = getTestAppDependencies().workspace
+  const snapshot = (workspaceId: string, ownerMemberKey: string) =>
+    createDefaultTenantAdministrationSnapshot(workspaceId, ownerMemberKey, '2026-11-01T00:00:00.000Z')
+  setTestAppDependencies({
+    tenantLifecycleEnforcement: workspace.tenantLifecycleEnforcement,
+    tenantAdministration: new Proxy(workspace.tenantAdministration, {
+      get(target, property, receiver) {
+        if (property === 'getProfile') {
+          return async (workspaceId: string) => profileSaved ? snapshot(workspaceId, 'owner').profile : undefined
+        }
+        if (property === 'ensureSnapshot') {
+          return async (workspaceId: string, ownerMemberKey: string) => {
+            initialized.push(`${workspaceId}:${ownerMemberKey}`)
+            profileSaved = true
+            return snapshot(workspaceId, ownerMemberKey)
+          }
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+  })
+  return initialized
+}
+
+test('opting into Inbox digests creates a missing tenant profile once, from the Workspace owner', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: true, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 1, preferences: { ...preferences, enabled: false } })).status).toBe(200)
+  expect(initialized).toHaveLength(1)
+  expect(initialized[0]).toEndWith(':demo@example.com')
+})
+
+test('withdrawing Inbox consent never initializes the tenant profile', async () => {
+  configureFakeProjectClients(true)
+  const initialized = useTenantProfileStub(false)
+  const path = '/api/planning/update-feed/digest/inbox'
+  const preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences })).status).toBe(200)
+  expect(initialized).toEqual([])
+})
+
 test('manual digest preferences and preview use authenticated identity and reject guests', async () => {
   configureFakeProjectClients(true)
   const path = '/api/planning/update-feed/digest'
@@ -82,6 +135,7 @@ test('manual digest preferences and preview use authenticated identity and rejec
 
 test('both digest settings bind owned custom definitions and reject deleted selections without reflecting IDs', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const savedPath = '/api/planning/update-feed/saved'
   const feed: SavedUpdateFeed = { id: 'private-custom-id', name: 'Personal filter', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
   expect((await planningApiRequest(savedPath, 'PUT', { expectedRevision: 0, feeds: [feed] })).status).toBe(200)
@@ -102,6 +156,7 @@ test('both digest settings bind owned custom definitions and reject deleted sele
 
 test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const path = '/api/planning/update-feed/digest/inbox'
   expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
   const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, workspaceId: 'attacker', memberKey: 'attacker' }
@@ -116,6 +171,7 @@ test('Inbox consent defaults off, stays separate from previews, ignores client i
 
 test('Inbox metadata HTTP boundary preserves stable storage failure categories without private details', async () => {
   configureFakeProjectClients(true)
+  useTenantProfileStub(true)
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
   let failure: unknown
   let item: Record<string, unknown> | undefined
@@ -898,6 +954,184 @@ test('filters legacy Planning entities and dependencies by Project, Team, and Wo
   )).toBe(true)
 })
 
+test('lets a reader watch a visible Milestone and nothing else', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const calls: { method: string; input: Record<string, unknown> }[] = []
+  const watch = { subscribed: false, explicit: false, automatic: false, reasons: [], watcherCount: 0 }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({
+      async getWatcherState(input) {
+        calls.push({ method: 'get', input })
+        return watch
+      },
+      async subscribe(input) {
+        calls.push({ method: 'subscribe', input: { ...input } })
+        return { ...watch, subscribed: true, explicit: true, reasons: ['manual'], watcherCount: 1 }
+      },
+      async unsubscribe(input) {
+        calls.push({ method: 'unsubscribe', input: { ...input } })
+        return watch
+      },
+    }),
+  })
+  const entityKey = 'user#demo@example.com#planning-entity#refero-milestone'
+
+  const read = await planningApiRequest('/api/planning/entities/refero-milestone/watch')
+  expect(read.status).toBe(200)
+  expect(await read.json()).toEqual({ watch })
+  const watched = await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'PUT')
+  expect(watched.status).toBe(200)
+  expect((await watched.json()).watch.subscribed).toBe(true)
+  expect((await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'DELETE')).status).toBe(200)
+  expect(calls.map(({ method, input }) => [method, input.entityKey])).toEqual([
+    ['get', entityKey],
+    ['subscribe', entityKey],
+    ['unsubscribe', entityKey],
+  ])
+  expect(calls[1]?.input).toMatchObject({
+    planningEntityId: 'refero-milestone',
+    teamId: 'core-team',
+    projectId: 'refero',
+    memberKey: 'demo@example.com',
+  })
+
+  // A Milestone in a Project the reader cannot see is not found, and only Milestones are watched.
+  expect((await planningApiRequest('/api/planning/entities/private-milestone/watch')).status).toBe(404)
+  expect((await planningApiRequest('/api/planning/entities/private-milestone/watch', 'PUT')).status).toBe(404)
+  expect((await planningApiRequest('/api/planning/entities/refero-phase/watch', 'PUT')).status).toBe(400)
+  expect(calls).toHaveLength(3)
+})
+
+test('lets a guest who can read a Milestone watch it', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const watched = { subscribed: true, explicit: true, automatic: false, reasons: ['manual'], watcherCount: 1 }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({ subscribe: async () => watched, unsubscribe: async () => watched }),
+  })
+
+  const response = await planningApiRequest('/api/planning/entities/refero-milestone/watch', 'PUT')
+  expect(response.status).toBe(200)
+  expect((await response.json()).watch.subscribed).toBe(true)
+})
+
+test('reports a changed authorization fence on a Milestone watch as a conflict', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const conflict = () => {
+    throw new CollaborationError(409, 'CollaborationAuthorizationChanged', 'Authorization changed.')
+  }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({ subscribe: async () => conflict(), unsubscribe: async () => conflict() }),
+  })
+
+  for (const method of ['PUT', 'DELETE'] as const) {
+    const response = await planningApiRequest('/api/planning/entities/refero-milestone/watch', method)
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'CollaborationAuthorizationChanged' })
+  }
+})
+
+test('reads one Project, one Team, or one Portfolio of Planning', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'refero', role: 'viewer' },
+      { teamId: 'core-team', projectId: 'private-project', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const project = await planningApiRequest('/api/planning?teamId=core-team&projectId=refero')
+  expect(project.status).toBe(200)
+  const projectBody: PlanningSnapshot = await project.json()
+  expect(projectBody.readScope).toEqual({ type: 'project', teamId: 'core-team', projectId: 'refero' })
+  expect(projectBody.entities.map((entity) => entity.id)).toEqual([
+    'refero-milestone',
+    'refero-phase',
+    'team-roadmap',
+    'ws-portfolio',
+    'ws-roadmap',
+  ])
+  // Dependencies to the other Project's entities belong to the Team and Workspace reads.
+  expect(projectBody.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+  expect(projectBody.capacity.liveRowCount).toBeGreaterThan(0)
+
+  const team = await planningApiRequest('/api/planning?teamId=core-team')
+  expect(team.status).toBe(200)
+  const teamBody: PlanningSnapshot = await team.json()
+  expect(teamBody.entities.map((entity) => entity.id)).toContain('private-milestone')
+  expect(teamBody.dependencies.map((dependency) => dependency.id)).toContain('private-phase-to-refero')
+
+  const portfolio = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+  expect(portfolio.status).toBe(200)
+  expect((await portfolio.json() as PlanningSnapshot).readScope)
+    .toEqual({ type: 'portfolio', portfolioId: 'ws-portfolio' })
+
+  for (const path of [
+    '/api/planning?projectId=refero',
+    '/api/planning?teamId=core-team&teamId=other',
+    '/api/planning?portfolioId=ws-portfolio&teamId=core-team',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'PlanningReadScopeInvalid' })
+  }
+  for (const path of [
+    '/api/planning?portfolioId=ws-roadmap',
+    '/api/planning?portfolioId=missing',
+  ]) {
+    const response = await planningApiRequest(path)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+  }
+})
+
+test('answers an unreadable Portfolio like a missing one', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning?portfolioId=ws-portfolio')
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'PlanningEntityNotFound' })
+})
+
 test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',
@@ -1211,6 +1445,97 @@ test('records Planning entity changes in audit and returns them as entity activi
     expect(isRecord(teamBody) && Array.isArray(teamBody.events)
       ? teamBody.events.map((event) => isRecord(event) ? event.eventType : undefined)
       : undefined).toEqual(['planning-entity.restored', 'planning-entity.archived'])
+  })
+})
+
+test('records a dependency change on both Planning entities in the same transaction', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const events: AuditEventV1[] = []
+    /** Stores both audit writes a route-supplied dependency transaction prepares. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown>; rebaseSafe?: boolean } | undefined) => {
+      expect(transaction?.rebaseSafe).toBe(true)
+      return transaction && {
+        rebaseSafe: transaction.rebaseSafe,
+        /**
+         * Prepares the wrapped transaction and captures its audit events.
+         *
+         * @param result - Committed Planning mutation result.
+         * @returns The wrapped transaction's contribution.
+         */
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          const items = isRecord(contribution)
+            ? [contribution.transactWriteItem, ...(Array.isArray(contribution.additionalTransactWriteItems)
+                ? contribution.additionalTransactWriteItems
+                : [])]
+            : []
+          for (const item of items) {
+            if (isRecord(item) && isRecord(item.Put)) {
+              expect(item.Put.TableName).toBe('AuditEventsTable')
+              events.push(normalizeAuditEvent(item.Put.Item))
+            }
+          }
+          return contribution
+        },
+      }
+    }
+    const createDependency = planning.createDependency.bind(planning)
+    planning.createDependency = (workspaceId, input, state, transaction) =>
+      createDependency(workspaceId, input, state, record(transaction))
+    const deleteDependency = planning.deleteDependency.bind(planning)
+    planning.deleteDependency = (workspaceId, dependencyId, input, state, transaction) =>
+      deleteDependency(workspaceId, dependencyId, input, state, record(transaction))
+    setTestAppDependencies({ planning })
+
+    for (const [index, id] of ['audited-a', 'audited-b'].entries()) {
+      expect((await planningApiRequest('/api/planning/entities', 'POST', {
+        ...createServerAssignedPortfolioInput(index, id),
+        id,
+      })).status).toBe(201)
+    }
+    expect((await planningApiRequest('/api/planning/dependencies', 'POST', {
+      id: 'audited-dependency',
+      predecessorId: 'audited-a',
+      successorId: 'audited-b',
+      type: 'finish-to-start',
+      lagDays: 2,
+      expectedRevision: 2,
+    })).status).toBe(201)
+    expect((await planningApiRequest('/api/planning/dependencies/audited-dependency', 'DELETE', {
+      expectedRevision: 3,
+    })).status).toBe(200)
+
+    expect(events.map((event) => [event.eventType, event.entity.id])).toEqual([
+      ['planning-entity.dependency-added', 'audited-a'],
+      ['planning-entity.dependency-added', 'audited-b'],
+      ['planning-entity.dependency-removed', 'audited-a'],
+      ['planning-entity.dependency-removed', 'audited-b'],
+    ])
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(4)
+    expect(events[0]).toMatchObject({
+      action: 'dependency-added',
+      target: { type: 'planning-dependency', id: 'audited-dependency' },
+      summary: 'Added a successor dependency on portfolio: audited-a',
+      changes: [
+        { field: 'lagDays', after: 2 },
+        { field: 'type', after: 'finish-to-start' },
+      ],
+      metadata: {
+        actorMemberKey: 'demo@example.com',
+        dependencyRole: 'predecessor',
+        relatedEntityId: 'audited-b',
+        planningRevision: 3,
+      },
+    })
+    expect(events[3]).toMatchObject({
+      changes: [
+        { field: 'lagDays', before: 2 },
+        { field: 'type', before: 'finish-to-start' },
+      ],
+      metadata: { dependencyRole: 'successor', relatedEntityId: 'audited-a', planningRevision: 4 },
+    })
   })
 })
 

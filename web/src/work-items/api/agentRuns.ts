@@ -9,12 +9,14 @@ import {
   type AgentRunOutcome,
   type AgentRunReport,
   type AgentRunRuntime,
+  type AgentRunUsage,
   type AgentRunVerification,
   type AgentRunView,
   type FactoryAnalyticsOutcomeCounts,
   type FactoryAnalyticsRunSummary,
   type FactoryAnalyticsRuntimeSummary,
   type FactoryAnalyticsStageLeadTime,
+  type FactoryAnalyticsUsage,
   type FactoryBoardItem,
   type FactoryBoardReportSummary,
   type FactoryBoardWorkItem,
@@ -51,12 +53,47 @@ export async function listWorkItemAgentRuns(
     accessToken,
   )
   const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunView) : undefined
-  if (!isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean') {
+  const usageTotal = isRecord(data) && data.usageTotal !== undefined ? readAgentRunUsage(data.usageTotal) : undefined
+  if (
+    !isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean' ||
+    (data.usageTotal !== undefined && usageTotal === undefined)
+  ) {
     throw new WorkItemConfigurationApiError(502, 'Agent Run history returned an unexpected response.')
   }
   return {
     items: items.filter((item): item is AgentRunView => item !== undefined),
     hasMore: data.hasMore,
+    ...(usageTotal === undefined ? {} : { usageTotal }),
+  }
+}
+
+/**
+ * Reads token usage attributed to a run or a Work Item.
+ *
+ * @param value - Untrusted value.
+ * @returns The usage, or undefined when it is malformed.
+ */
+function readAgentRunUsage(value: unknown): AgentRunUsage | undefined {
+  if (!isRecord(value)) return undefined
+  const { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, requestCount, estimatedCostMicroUsd, models, hasMore } = value
+  if (
+    !isNonnegativeSafeInteger(inputTokens) || !isNonnegativeSafeInteger(outputTokens) ||
+    !isNonnegativeSafeInteger(cacheReadTokens) || !isNonnegativeSafeInteger(cacheCreationTokens) ||
+    !isNonnegativeSafeInteger(requestCount) || typeof hasMore !== 'boolean' ||
+    (estimatedCostMicroUsd !== undefined && !isNonnegativeSafeInteger(estimatedCostMicroUsd)) ||
+    !Array.isArray(models) || !models.every((model): model is string => typeof model === 'string')
+  ) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    requestCount,
+    ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }),
+    models,
+    hasMore,
   }
 }
 
@@ -226,6 +263,8 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
   const validStages = stageLeadTimes.filter((stage): stage is FactoryAnalyticsStageLeadTime => stage !== undefined)
   const validRuntimes = runtimes.filter((runtime): runtime is FactoryAnalyticsRuntimeSummary => runtime !== undefined)
   if (validStages.length !== stageLeadTimes.length || validRuntimes.length !== runtimes.length) return undefined
+  const usage = value.usage === undefined ? undefined : readFactoryAnalyticsUsage(value.usage)
+  if (value.usage !== undefined && usage === undefined) return undefined
   return {
     generatedAt,
     from,
@@ -236,7 +275,47 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
     finishedRunsHasMore,
     workItemsHasMore,
     historyHasMore,
+    ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/**
+ * Validates the telemetry usage part of a Factory analytics response.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The usage, or undefined when any part is malformed.
+ */
+function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | undefined {
+  if (!isRecord(value) || !Array.isArray(value.projects) || !Array.isArray(value.workItems) || typeof value.runsHasMore !== 'boolean') {
+    return undefined
+  }
+  const total = readAgentRunUsage(value.total)
+  if (!total) return undefined
+  const projects: FactoryAnalyticsUsage['projects'] = []
+  for (const project of value.projects) {
+    if (!isRecord(project) || (project.projectId !== undefined && typeof project.projectId !== 'string')) return undefined
+    const usage = readAgentRunUsage(project.usage)
+    if (!usage) return undefined
+    projects.push({ ...(project.projectId === undefined ? {} : { projectId: project.projectId }), usage })
+  }
+  const workItems: FactoryAnalyticsUsage['workItems'] = []
+  for (const item of value.workItems) {
+    if (
+      !isRecord(item) || typeof item.workItemId !== 'string' || typeof item.title !== 'string' ||
+      (item.projectId !== undefined && typeof item.projectId !== 'string')
+    ) {
+      return undefined
+    }
+    const usage = readAgentRunUsage(item.usage)
+    if (!usage) return undefined
+    workItems.push({
+      workItemId: item.workItemId,
+      title: item.title,
+      ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
+      usage,
+    })
+  }
+  return { total, projects, workItems, runsHasMore: value.runsHasMore }
 }
 
 /**
@@ -413,6 +492,8 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const finishedAt = value.finishedAt === undefined ? undefined : time('finishedAt')
   const finishedBy = value.finishedBy === undefined ? undefined : text('finishedBy')
   const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
+  const usage = value.usage === undefined ? undefined : readAgentRunUsage(value.usage)
+  if (value.usage !== undefined && usage === undefined) return undefined
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
@@ -445,6 +526,7 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     reportCount: value.reportCount,
     canRelease: value.canRelease,
     ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
+    ...(usage === undefined ? {} : { usage }),
   }
 }
 

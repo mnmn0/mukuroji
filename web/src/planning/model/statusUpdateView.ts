@@ -15,6 +15,11 @@ import type {
 } from '@mukuroji/contracts'
 import { PLANNING_UPDATE_CONTENT_VERSION } from '@mukuroji/contracts'
 import {
+  findMemberMentionRanges,
+  type MentionableMember,
+  type MentionSuggestionsFailure,
+} from '../../shared/lib/memberMentions'
+import {
   createPlanningDependencyPath,
   createPlanningPath,
   createTeamIssuesPath,
@@ -245,12 +250,41 @@ export function extractPlanningUpdateCommentMentions(bodyMarkdown: string): stri
 }
 
 /**
+ * Resolves every member an update comment mentions, by a display-name token picked in the composer
+ * or by a typed `@member@example.com` token.
+ *
+ * An email-shaped token inside a display-name token, such as a duplicate name's discriminator, is
+ * not counted twice.
+ *
+ * @param bodyMarkdown - Comment body typed by the member.
+ * @param selectedMemberKeys - Member keys picked from the composer's suggestions.
+ * @param members - Mention candidates used to validate the picked tokens.
+ * @returns Sorted, deduplicated member keys of at most 320 characters, at most 20 keys.
+ */
+export function resolvePlanningUpdateCommentMentions(
+  bodyMarkdown: string,
+  selectedMemberKeys: readonly string[],
+  members: readonly MentionableMember[],
+): string[] {
+  const ranges = findMemberMentionRanges(bodyMarkdown, selectedMemberKeys, members)
+  const keys = new Set(ranges.map((range) => range.memberKey)
+    .filter((key) => key.length <= maxPlanningUpdateCommentMentionLength))
+  const textOutsideNames = ranges.reduceRight(
+    (text, range) => `${text.slice(0, range.offset)}${' '.repeat(range.length)}${text.slice(range.offset + range.length)}`,
+    bodyMarkdown,
+  )
+  for (const key of extractPlanningUpdateCommentMentions(textOutsideNames)) keys.add(key)
+  return [...keys].sort().slice(0, maxPlanningUpdateCommentMentions)
+}
+
+/**
  * Clears one comment form only after its append-only mutation succeeds.
  *
  * @param submit - Comment mutation supplied by the production controller.
  * @param updateId - Immutable update identifier receiving the comment.
  * @param bodyMarkdown - Validated non-empty comment body.
  * @param reset - Form reset action to invoke after successful persistence.
+ * @param mentionMemberKeys - Member keys picked from the composer's suggestions.
  * @returns A promise that rejects without resetting when persistence fails.
  */
 export async function submitPlanningUpdateCommentAndReset(
@@ -258,8 +292,9 @@ export async function submitPlanningUpdateCommentAndReset(
   updateId: string,
   bodyMarkdown: string,
   reset: () => void,
+  mentionMemberKeys: readonly string[] = [],
 ) {
-  await submit(updateId, bodyMarkdown)
+  await submit(updateId, bodyMarkdown, mentionMemberKeys)
   reset()
 }
 
@@ -373,13 +408,26 @@ export type PlanningUpdateCollaborationController = {
   onToggleWatch?: () => void | Promise<void>
   /** Exports all immutable history for the selected target. */
   onExport?: () => void | Promise<void>
-  /** Adds a comment to one immutable update. */
-  onAddComment?: (updateId: string, bodyMarkdown: string) => void | Promise<void>
+  /** Members offered by display name after `@` in the comment composer. */
+  mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load, so the composer offers a retry. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Adds a comment to one immutable update with the members picked in the composer. */
+  onAddComment?: (
+    updateId: string,
+    bodyMarkdown: string,
+    mentionMemberKeys: readonly string[],
+  ) => void | Promise<void>
   /**
    * Records the current viewer's reviewer acknowledgement on one unacknowledged update, with the
-   * optional remark as the acknowledgement comment. Rejects when the acknowledgement fails.
+   * optional remark and the members picked in the composer as the acknowledgement comment.
+   * Rejects when the acknowledgement fails.
    */
-  onAcknowledge?: (updateId: string, bodyMarkdown?: string) => void | Promise<void>
+  onAcknowledge?: (
+    updateId: string,
+    bodyMarkdown?: string,
+    mentionMemberKeys?: readonly string[],
+  ) => void | Promise<void>
   /** Toggles one supported reaction on an immutable update. */
   onToggleReaction?: (updateId: string, reaction: string) => void | Promise<void>
 }

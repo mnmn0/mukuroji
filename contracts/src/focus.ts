@@ -1,3 +1,4 @@
+import type { ProjectRaidEntryKind, ProjectRaidSeverity } from './project-raid-log'
 import type { CanonicalWorkItem } from './work-items'
 import type { PlanningHealth } from './planning'
 
@@ -478,6 +479,41 @@ export type FocusUpdateReview = {
   deepLink: string
 }
 
+/**
+ * Why a Project log entry the viewer owns needs attention: its review date has passed, or it is
+ * a change request still waiting for a decision.
+ */
+export type FocusProjectLogReason = 'review-overdue' | 'decision-pending'
+
+/**
+ * Open risk, issue, or change request the current viewer owns that needs attention. It
+ * disappears once the review date is moved to today or later, or once the entry is closed.
+ */
+export type FocusProjectLogEntry = {
+  /** Stable identifier made from the Team, Project, and entry. */
+  id: string
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project the log belongs to. */
+  projectId: string
+  /** Display name of the Project when the server can resolve it. */
+  projectTitle?: string
+  /** Entry ID within the Project log. */
+  entryId: string
+  /** Whether the entry is a risk, an issue, or a change request. */
+  kind: ProjectRaidEntryKind
+  /** Entry title. */
+  title: string
+  /** Severity derived from probability and impact. */
+  severity: ProjectRaidSeverity
+  /** Why the entry is listed. */
+  reason: FocusProjectLogReason
+  /** Review date in `YYYY-MM-DD`, when the entry has one. */
+  reviewDueDate?: string
+  /** Authorized application-relative link to the Project log. */
+  deepLink: string
+}
+
 /** Policy scopes the current viewer may update from the Focus queue. */
 export type FocusPolicyCapabilities = {
   /** Whether the current viewer may replace their personal policy layer. */
@@ -506,6 +542,16 @@ export type FocusQueueResponse = {
    * oldest first. Absent only in responses from servers that predate the field.
    */
   updateReviews?: FocusUpdateReview[]
+  /**
+   * Open Project log entries the viewer owns whose review is overdue or whose decision is pending,
+   * most severe first. Absent only in responses from servers that predate the field.
+   */
+  projectLogEntries?: FocusProjectLogEntry[]
+  /**
+   * True when the log of at least one Project could not be read, so `projectLogEntries` may be
+   * missing entries. Absent when every log was read.
+   */
+  projectLogIncomplete?: boolean
   /** Effective policies referenced by the returned items. */
   effectivePolicies: FocusEffectivePolicy[]
   /** Accessible stored Team overrides used by the policy editor. */

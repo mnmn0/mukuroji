@@ -9,6 +9,7 @@ import {
   createCustomerRecord,
   createCustomerRequestRecord,
 } from '../../domain/customer'
+import { createMutationAuditContext } from '../../../audit'
 import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
 
 /** Stable DynamoDB adapter test instant. */
@@ -125,6 +126,8 @@ type HarnessOptions = {
   directoryIndexRows?: readonly unknown[]
   /** Maximum number of rows returned by one test Query response. */
   queryPageSize?: number
+  /** Audit table written with audited mutations, when the test needs one. */
+  auditTableName?: string
 }
 
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
@@ -324,6 +327,7 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
       bootstrapLocalTable: false,
       now: () => new Date(NOW),
       id: () => 'generated-id',
+      ...(options.auditTableName ? { auditTableName: options.auditTableName } : {}),
     }),
     commands,
     rows,
@@ -443,6 +447,35 @@ test('persists and replays a keyed Customer creation', async () => {
     expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer')).toHaveLength(1)
     expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer-idempotency-receipt')).toHaveLength(1)
     expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(1)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not attribute an implicit retention redaction to the member who mutates the graph', async () => {
+  const expired = ['customer-a', 'customer-b', 'customer-c'].map((id) =>
+    createCustomerRow(id, `Expired ${id}`, {}, '2026-07-01T00:00:00.000Z'))
+  const harness = createHarness(expired, { auditTableName: 'AuditTable' })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'create-customer',
+      request: { method: 'POST', path: '/customers', body: {} },
+      source: { kind: 'api' },
+    }))
+    const created = await client.createCustomer('workspace-1', 'member-1', {
+      name: 'New Customer', tier: 'enterprise', size: 'enterprise', status: 'active', health: 'healthy',
+    })
+    const auditEvents = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item] : []
+      })
+    expect(auditEvents.map((event) => [event.eventType, isRecord(event.entity) ? event.entity.id : undefined]))
+      .toEqual([['customer.created', created.id]])
   } finally {
     harness.restore()
   }
@@ -1151,6 +1184,45 @@ test('splits a large Customer merge while retaining a resumable merge marker', a
   }
 })
 
+test('records a resumed Customer merge once when a later request retries it', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const contactRows = Array.from({ length: 100 }, (_, index) => createContactRow(source.id, `contact-${index + 1}`))
+  const harness = createHarness([
+    { workspaceId: source.workspaceId, recordKey: `CUSTOMER#${source.id}`, entityType: 'customer', customer: source },
+    { workspaceId: target.workspaceId, recordKey: `CUSTOMER#${target.id}`, entityType: 'customer', customer: target },
+    ...contactRows,
+  ], { auditTableName: 'AuditTable', failTransactionAt: 3 })
+  /** Binds the client to the audit context of one merge request with a fixed retry key. */
+  const audited = () => harness.client.withAuditContext(createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+    idempotencyKey: 'merge-customer-source',
+    request: { method: 'POST', path: `/customers/${source.id}/merge`, body: {} },
+    source: { kind: 'api' },
+  }))
+  try {
+    const input = { targetCustomerId: target.id, sourceExpectedRevision: source.revision, targetExpectedRevision: target.revision }
+    await audited().beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(audited().completeCustomerMerge('workspace-1', source.id, 'member-1', input))
+      .rejects.toThrow('Injected Customer transaction failure.')
+    await expect(audited().completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    const auditEventTypes = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item.eventType] : []
+      })
+    expect(auditEventTypes).toEqual(['customer.merged'])
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
 test('splits retention writes into resumable DynamoDB-sized batches', async () => {
   const requestRows = Array.from({ length: 105 }, (_, index) =>
     createRequestRow(createRequest(`request-${index + 1}`)),
@@ -1182,6 +1254,29 @@ test('splits retention writes into resumable DynamoDB-sized batches', async () =
         }),
       }),
     ]))
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not record a retention redaction in the audit log of the request that resumes it', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`)),
+  )
+  const harness = createHarness(requestRows, { auditTableName: 'AuditTable' })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'retention-reader',
+      request: { method: 'GET', path: '/customers', body: {} },
+      source: { kind: 'api' },
+    }))
+    await expect(client.redactExpired('workspace-1')).resolves.toMatchObject({ requestsRedacted: 105 })
+    const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
+    expect(transactions.map((command) => Array.isArray(command.input.TransactItems) ? command.input.TransactItems.length : -1))
+      .toEqual([100, 7])
+    expect(JSON.stringify(transactions)).not.toContain('AuditTable')
   } finally {
     harness.restore()
   }
@@ -1234,6 +1329,69 @@ test('resumes Customer retention after a later transaction fails', async () => {
     })
     expect(harness.rows.get('META')).toMatchObject({ revision: 6 })
     expect(harness.rows.get('META')).not.toHaveProperty('retention')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('records one Customer deletion event when the HTTP deletion commits to the customer phase', async () => {
+  const customer = createCustomerRow().customer
+  const contactRow = createContactRow(customer.id, 'contact-1')
+  const harness = createHarness([createCustomerRow(), contactRow, createRequestRow(createRequest('request-1', '2027-08-01T00:00:00.000Z'))], {
+    auditTableName: 'AuditTable',
+  })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'delete-customer-1',
+      request: { method: 'DELETE', path: `/customers/${customer.id}`, body: {} },
+      source: { kind: 'api' },
+    }))
+    await client.beginCustomerDeletion('workspace-1', customer.id, 'member-1', customer.revision)
+    await client.completeCustomerDeletion('workspace-1', customer.id, 'member-1')
+
+    const auditPuts = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .map((command) => command.input.TransactItems)
+      .map((items) => (Array.isArray(items) ? items : []).flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item] : []
+      }))
+    expect(auditPuts.map((items) => items.map((item) => item.eventType))).toEqual([[], ['customer.deleted'], []])
+    expect(JSON.stringify(auditPuts)).not.toContain('Contact contact-1')
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps the Customer deletion event when another request finishes the deletion', async () => {
+  const customer = createCustomerRow().customer
+  const harness = createHarness([createCustomerRow()], { auditTableName: 'AuditTable', failTransactionAt: 3 })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'delete-customer-2',
+      request: { method: 'DELETE', path: `/customers/${customer.id}`, body: {} },
+      source: { kind: 'api' },
+    }))
+    await client.beginCustomerDeletion('workspace-1', customer.id, 'member-1', customer.revision)
+    // The first deletion batch fails after the move to the customer phase has committed.
+    await expect(client.completeCustomerDeletion('workspace-1', customer.id, 'member-1'))
+      .rejects.toThrow('Injected Customer transaction failure.')
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+    const auditEventTypes = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item.eventType] : []
+      })
+    expect(auditEventTypes).toEqual(['customer.deleted'])
   } finally {
     harness.restore()
   }

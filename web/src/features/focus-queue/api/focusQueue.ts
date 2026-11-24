@@ -23,6 +23,9 @@ import {
   type FocusSignalType,
   type FocusUpdateDeadline,
   type FocusUpdateReview,
+  type FocusProjectLogEntry,
+  isProjectRaidEntryKind,
+  PROJECT_RAID_SEVERITIES,
   type UpdateFocusPolicyInput,
   type UpdateFocusPolicyResponse,
   type UpdateFocusSnoozeInput,
@@ -263,6 +266,11 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
       value.updateReviews !== undefined &&
       (!Array.isArray(value.updateReviews) || !value.updateReviews.every(isFocusUpdateReview))
     ) ||
+    (
+      value.projectLogEntries !== undefined &&
+      (!Array.isArray(value.projectLogEntries) || !value.projectLogEntries.every(isFocusProjectLogEntry))
+    ) ||
+    (value.projectLogIncomplete !== undefined && value.projectLogIncomplete !== true) ||
     !Array.isArray(value.effectivePolicies) ||
     !value.effectivePolicies.every(isFocusEffectivePolicy) ||
     !Array.isArray(value.teamPolicies) ||
@@ -320,6 +328,23 @@ function isFocusUpdateDeadline(value: unknown): value is FocusUpdateDeadline {
     (value.title === undefined || typeof value.title === 'string') &&
     (value.state === 'due-soon' || value.state === 'overdue') &&
     isCanonicalUtcTimestamp(value.dueAt) &&
+    typeof value.deepLink === 'string' &&
+    isSafeApplicationPath(value.deepLink)
+}
+
+/** Returns whether an unknown value is one Project log entry the viewer owns. */
+function isFocusProjectLogEntry(value: unknown): value is FocusProjectLogEntry {
+  return isRecord(value) &&
+    isNonemptyTrimmedString(value.id) &&
+    isNonemptyTrimmedString(value.teamId) &&
+    isNonemptyTrimmedString(value.projectId) &&
+    (value.projectTitle === undefined || typeof value.projectTitle === 'string') &&
+    isNonemptyTrimmedString(value.entryId) &&
+    isProjectRaidEntryKind(value.kind) &&
+    typeof value.title === 'string' &&
+    PROJECT_RAID_SEVERITIES.some((severity) => severity === value.severity) &&
+    (value.reason === 'review-overdue' || value.reason === 'decision-pending') &&
+    (value.reviewDueDate === undefined || typeof value.reviewDueDate === 'string') &&
     typeof value.deepLink === 'string' &&
     isSafeApplicationPath(value.deepLink)
 }

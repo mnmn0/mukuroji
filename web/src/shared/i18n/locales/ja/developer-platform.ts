@@ -20,4 +20,7 @@ export const developerPlatformMessages = {
   'developerPlatform.webhookEvents.relationRemoved.description': '関連または重複の link が外れたとき。',
   'developerPlatform.webhookEvents.siblingOrderChanged.label': '並び順の変更',
   'developerPlatform.webhookEvents.siblingOrderChanged.description': '同じ親の中で Work Item の並び順が変わったとき。',
+  'developerPlatform.importProgress.summary': '{totalRows} 行中 {rows} 行を作成、{totalLinks} 件中 {links} 件の親子・依存・関連を設定しました。',
+  'developerPlatform.importProgress.loadFailed': '進捗を読み込めませんでした。',
+  'developerPlatform.importProgress.retry': 'もう一度読み込む',
 } as const

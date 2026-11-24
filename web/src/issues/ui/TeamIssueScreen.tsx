@@ -99,6 +99,8 @@ import { isCancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
 import {
   createWorkItemDuplicateDraft,
+  createWorkItemTemplateDraft,
+  listWorkItemTemplatesForTeam,
   type WorkItemDuplicateDraft,
 } from '../model/workItemDuplicate'
 import { IssueBoard } from './TeamIssueBoard'
@@ -142,6 +144,7 @@ import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
+import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
 
 /** Message shown when a hierarchy move cannot be made. */
@@ -264,7 +267,14 @@ export function TeamIssueScreen({
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
+  // Due date entered before a template was picked or cleared, so the restarted form keeps it.
+  const [createKeptDueDate, setCreateKeptDueDate] = useState<string>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
+  const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateOpen && Boolean(onCreateIssue))
+  const teamCreateTemplates = useMemo(
+    () => listWorkItemTemplatesForTeam(createTemplates.templates, teamId),
+    [createTemplates.templates, teamId],
+  )
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
     createTaskViewSelectionState,
@@ -428,6 +438,7 @@ export function TeamIssueScreen({
     setCreateWorkflowStatusId(undefined)
     setCreateWorkItemTypeId(undefined)
     setCreateDuplicateDraft(undefined)
+    setCreateKeptDueDate(undefined)
     setIsCreateOpen(false)
   }, [])
 
@@ -437,6 +448,7 @@ export function TeamIssueScreen({
     setCreateWorkflowStatusId(context?.workflowStatusId)
     setCreateWorkItemTypeId(context?.workItemTypeId)
     setCreateDuplicateDraft(context?.duplicateDraft)
+    setCreateKeptDueDate(undefined)
     setIsCreateOpen(true)
   }, [])
 
@@ -1598,7 +1610,17 @@ export function TeamIssueScreen({
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
+                    initialDueDate={createKeptDueDate}
                     errorMessage={createErrorMessage}
+                    onApplyTemplate={(template, dueDate) => {
+                      setCreateErrorMessage(undefined)
+                      // The restarted form keeps the due date the member entered, with or without a template.
+                      setCreateKeptDueDate(dueDate)
+                      setCreateDuplicateDraft(template ? createWorkItemTemplateDraft(template) : undefined)
+                    }}
+                    templateLoadFailed={createTemplates.hasLoadError}
+                    onRetryTemplates={createTemplates.retry}
+                    templates={teamCreateTemplates}
                     workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}
                     locale={locale}
@@ -1854,6 +1876,7 @@ export function TeamIssueScreen({
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       t={t}
                       tasks={visibleIssues}
+                      workingCalendar={workingCalendar}
                     />
                   ) : viewMode === 'gantt' ? (
                     <TaskGanttView

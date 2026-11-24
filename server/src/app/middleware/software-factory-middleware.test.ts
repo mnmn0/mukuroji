@@ -34,6 +34,7 @@ const WBS_REQUESTS: readonly (readonly [method: string, path: string])[] = [
   ['GET', '/api/v1/me'],
   ['GET', '/api/v1/teams'],
   ['GET', '/api/v1/projects/project-1/members'],
+  ['GET', '/api/v1/projects/project-1/raid-log'],
   ['GET', '/api/v1/work-item-keys/ABC-1'],
   ['GET', '/api/developer/me/agent-connection'],
   ['POST', '/api/developer/me/api-keys'],

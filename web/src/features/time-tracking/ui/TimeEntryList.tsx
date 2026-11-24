@@ -14,6 +14,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of a member's own time entry list. */
 export type TimeEntryListProps = {
@@ -63,6 +64,7 @@ export function TimeEntryList({
   workItemOptions,
   workItemTitles,
 }: TimeEntryListProps) {
+  const categories = useTimeEntryCategories()
   // The entry as it was when editing began; saving sends its revision so a change made elsewhere
   // in the meantime comes back as a revision conflict instead of being overwritten.
   const [editingEntry, setEditingEntry] = useState<TimeEntry>()
@@ -185,7 +187,7 @@ export function TimeEntryList({
             </div>
             {workItemTitles || isIndirect ? (
               <p className="truncate text-sm font-medium text-[var(--workbench-text)]">
-                {describeTimeEntrySubject(t, entry, workItemTitles ?? {})}
+                {describeTimeEntrySubject(t, entry, workItemTitles ?? {}, categories)}
               </p>
             ) : null}
             {entry.description ? (

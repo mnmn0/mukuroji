@@ -17,6 +17,8 @@ import {
   type AiPlanningStatusUpdateAdoptionContext,
 } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
+import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import {
@@ -204,6 +206,8 @@ export type PlanningUpdateLabels = {
   addComment: string
   /** Comment composer placeholder. */
   commentPlaceholder: string
+  /** Accessible name of the comment composer's mention suggestions. */
+  mentionSuggestions: string
   /** Reaction control accessible label. */
   reaction: string
   /** Formats the target watcher count. */
@@ -1583,7 +1587,8 @@ export function PlanningStatusUpdateLedger({
   const collaborationIsLoading = collaboration?.isLoading ?? false
   const collaborationErrorMessage = collaboration?.errorMessage
   return (
-    <section className="workbench-panel overflow-hidden" data-testid="planning-status-update-history">
+    // Not clipped, so a comment composer's mention suggestions can extend below the last update.
+    <section className="workbench-panel" data-testid="planning-status-update-history">
       <div className="px-5 py-4">
         <h2 className="text-base font-semibold text-[var(--workbench-text)]">
           {labels.historyTitle}
@@ -1593,7 +1598,7 @@ export function PlanningStatusUpdateLedger({
         </p>
       </div>
       {errorMessage ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4" role="alert">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4 last:rounded-b-[7px]" role="alert">
           <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.historyError}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
@@ -1776,72 +1781,21 @@ export function PlanningStatusUpdateLedger({
                 </div>
               ) : null}
               {onAddComment || onAcknowledge ? (
-                <form
-                  className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    const form = event.currentTarget
-                    const bodyMarkdown = readOptionalText(
-                      new FormData(form).get('comment'),
-                    )
-                    if (bodyMarkdown && onAddComment) {
-                      void submitPlanningUpdateCommentAndReset(
-                        onAddComment,
-                        update.id,
-                        bodyMarkdown,
-                        () => form.reset(),
-                      ).catch(() => undefined)
-                    }
-                  }}
-                >
-                  <textarea
-                    aria-label={labels.commentPlaceholder}
-                    className="workbench-input min-h-20 p-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    name="comment"
-                    placeholder={labels.commentPlaceholder}
-                    required
-                  />
-                  <button
-                    className="workbench-button-secondary min-h-9 px-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    type="submit"
-                  >
-                    {labels.addComment}
-                  </button>
-                  {acknowledgement && !acknowledgement.acknowledgedAt && onAcknowledge ? (
-                    <button
-                      className="workbench-button-primary min-h-9 px-3"
-                      data-testid="planning-update-acknowledge"
-                      disabled={
-                        collaborationIsPending ||
-                        collaborationIsLoading ||
-                        Boolean(collaborationErrorMessage)
-                      }
-                      onClick={(event) => {
-                        // The reviewer's remark in the comment box becomes the acknowledgement comment.
-                        const form = event.currentTarget.form
-                        const bodyMarkdown = form
-                          ? readOptionalText(new FormData(form).get('comment'))
-                          : undefined
-                        void Promise.resolve(onAcknowledge(update.id, bodyMarkdown))
-                          .then(() => form?.reset())
-                          .catch(() => undefined)
-                      }}
-                      type="button"
-                    >
-                      {labels.acknowledge}
-                    </button>
-                  ) : null}
-                </form>
+                <PlanningUpdateCommentForm
+                  disabled={
+                    collaborationIsPending ||
+                    collaborationIsLoading ||
+                    Boolean(collaborationErrorMessage)
+                  }
+                  labels={labels}
+                  members={collaboration?.mentionMembers ?? []}
+                  onAcknowledge={acknowledgement && !acknowledgement.acknowledgedAt
+                    ? onAcknowledge
+                    : undefined}
+                  suggestionsFailure={collaboration?.mentionSuggestionsFailure}
+                  updateId={update.id}
+                  onAddComment={onAddComment}
+                />
               ) : null}
             </article>
             )
@@ -2002,4 +1956,104 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
 function readOptionalText(value: FormDataEntryValue | null) {
   const text = typeof value === 'string' ? value.trim() : ''
   return text || undefined
+}
+
+/** Props of {@link PlanningUpdateCommentForm}. */
+type PlanningUpdateCommentFormProps = {
+  /** Whether the form is disabled while collaboration state loads, saves, or failed. */
+  disabled: boolean
+  /** Localized ledger labels. */
+  labels: Pick<
+    PlanningUpdateLabels,
+    'acknowledge' | 'addComment' | 'commentPlaceholder' | 'mentionSuggestions'
+  >
+  /** Members offered by display name after `@`. */
+  members: readonly MentionableMember[]
+  /** Set when the candidates failed to load. */
+  suggestionsFailure?: MentionSuggestionsFailure
+  /** Immutable update receiving the comment. */
+  updateId: string
+  /** Saves the comment with the members picked in the composer; absent hides the comment button. */
+  onAddComment?: PlanningUpdateCollaborationController['onAddComment']
+  /**
+   * Records the viewer's reviewer acknowledgement with the drafted remark; absent hides the
+   * acknowledge button.
+   */
+  onAcknowledge?: PlanningUpdateCollaborationController['onAcknowledge']
+}
+
+/**
+ * Comment form of one immutable update, with display-name mention suggestions.
+ *
+ * @param props - Update, candidates, labels, and save callback.
+ * @returns The comment form; its draft is kept when saving fails.
+ */
+function PlanningUpdateCommentForm({
+  disabled,
+  labels,
+  members,
+  onAcknowledge,
+  onAddComment,
+  suggestionsFailure,
+  updateId,
+}: PlanningUpdateCommentFormProps) {
+  const [draft, setDraft] = useState<MemberMentionDraft>({ body: '', mentionMemberKeys: [] })
+  const resetDraft = () => setDraft({ body: '', mentionMemberKeys: [] })
+  return (
+    <form
+      className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const bodyMarkdown = draft.body.trim()
+        if (!bodyMarkdown || !onAddComment) return
+        void submitPlanningUpdateCommentAndReset(
+          onAddComment,
+          updateId,
+          bodyMarkdown,
+          resetDraft,
+          draft.mentionMemberKeys,
+        ).catch(() => undefined)
+      }}
+    >
+      <MemberMentionTextarea
+        ariaLabel={labels.commentPlaceholder}
+        className="workbench-input min-h-20 w-full p-3"
+        disabled={disabled}
+        draft={draft}
+        members={members}
+        name="comment"
+        placeholder={labels.commentPlaceholder}
+        required
+        suggestionsFailure={suggestionsFailure}
+        suggestionsLabel={labels.mentionSuggestions}
+        onDraftChange={setDraft}
+      />
+      {onAddComment ? (
+        <button
+          className="workbench-button-secondary min-h-9 px-3"
+          disabled={disabled}
+          type="submit"
+        >
+          {labels.addComment}
+        </button>
+      ) : null}
+      {onAcknowledge ? (
+        <button
+          className="workbench-button-primary min-h-9 px-3"
+          data-testid="planning-update-acknowledge"
+          disabled={disabled}
+          onClick={() => {
+            // The reviewer's remark in the comment box becomes the acknowledgement comment.
+            const bodyMarkdown = draft.body.trim() || undefined
+            void Promise.resolve(onAcknowledge(updateId, bodyMarkdown, draft.mentionMemberKeys))
+              .then(resetDraft)
+              .catch(() => undefined)
+          }}
+          type="button"
+        >
+          {labels.acknowledge}
+        </button>
+      ) : null}
+    </form>
+  )
 }

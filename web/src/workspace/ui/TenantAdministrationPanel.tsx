@@ -5,6 +5,7 @@ import {
 import {
   DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS,
   DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_CURRENCY,
   isWorkspaceWeekStartDay,
@@ -20,6 +21,8 @@ import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields
 import { PlanningUpdateTemplateFields } from './PlanningUpdateTemplateFields'
 import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
+import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
+import { TimeEntryCategoryFields } from './TimeEntryCategoryFields'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
@@ -285,6 +288,7 @@ export function TenantAdministrationPanel({
   const calendar = profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
   const weeklyReportReminders = profile.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
   const planningUpdateTemplate = profile.planningUpdateTemplate ?? DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS
+  const timeEntryCategories = profile.timeEntryCategories ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
   return (
@@ -446,9 +450,16 @@ export function TenantAdministrationPanel({
             settings={planningUpdateTemplate}
             t={t}
           />
+          <TimeEntryCategoryFields
+            disabled={tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, timeEntryCategories: next })}
+            settings={timeEntryCategories}
+            t={t}
+          />
           <button
             className="workbench-button-primary mt-5"
-            disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders)}
+            disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders) ||
+              hasTimeEntryCategoryProblem(timeEntryCategories)}
             onClick={onSaveProfile}
             type="button"
           >
