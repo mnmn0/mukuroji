@@ -39,6 +39,7 @@ import {
   countTaskSchedulePolicyWorkingDays,
   resolveTaskScheduleEndDate,
   resolveTaskScheduleStartDate,
+  cloneTaskScheduleCalendarPolicy,
 } from '../model/taskSchedule'
 
 /** Interaction mode shown by the task creation panel. */
@@ -928,11 +929,7 @@ function createDetailedSchedule(
  * @returns A calendar policy copy safe to place in a new Work Item payload.
  */
 function cloneCreateScheduleCalendarPolicy(schedule: WorkItemSchedule) {
-  return {
-    holidays: [...schedule.calendarPolicy.holidays],
-    timeZone: schedule.calendarPolicy.timeZone,
-    workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
-  }
+  return cloneTaskScheduleCalendarPolicy(schedule.calendarPolicy)
 }
 
 /**

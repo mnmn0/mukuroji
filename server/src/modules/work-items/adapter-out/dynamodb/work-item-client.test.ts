@@ -7,6 +7,7 @@ const {
 } = createApiTestHarness()
 import {
   createWorkItemNotificationCandidates,
+  createContributorNotificationCandidates,
   DynamoDbTeamIssuesClient,
 } from './work-item-client'
 import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
@@ -1956,6 +1957,75 @@ test('DynamoDB idempotent Work Item create conflicts when the contributor list d
     createIdempotentContributorCreateBody([
       { assignmentId: 'a'.repeat(32), memberUserId: 'suzuki@example.com', status: 'planned' },
     ]),
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
+test('DynamoDB idempotent Work Item create replays a shared-calendar schedule after the calendar changed', async () => {
+  const client = createIdempotentReplayClient()
+  /**
+   * Builds the create body on the given shared calendar rules.
+   *
+   * @param holidays - Days off the shared calendar resolved for this attempt.
+   * @returns A create request bound to one caller-selected resource ID.
+   */
+  const body = (holidays: string[]) => ({
+    ...createIdempotentContributorCreateBody([]),
+    schedule: {
+      ...createDueDateSchedule('2026-08-14'),
+      calendarPolicy: { ...createDueDateSchedule('2026-08-14').calendarPolicy, holidays, calendarSource: 'shared' },
+    },
+  })
+  const created = await client.createTeamIssue('workspace-1', 'core-team', body([]), 'demo@example.com')
+
+  // The retry resolves the shared calendar again after a day off was added to it (ADR 0058).
+  const replay = await client.createTeamIssue('workspace-1', 'core-team', body(['2026-08-10']), 'demo@example.com')
+
+  expect(replay).toEqual(created)
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    { ...body([]), schedule: { ...body([]).schedule, dueDate: '2026-08-17' } },
+    'demo@example.com',
+  )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
+})
+
+test('DynamoDB idempotent Work Item create replays a shared date range whose end date the calendar moved', async () => {
+  const client = createIdempotentReplayClient()
+  /**
+   * Builds a one-day shared date-range create.
+   *
+   * @param startDate - First day of the range.
+   * @param endDate - Last day the shared calendar placed for this attempt.
+   * @param holidays - Days off the shared calendar resolved for this attempt.
+   * @returns A create request bound to one caller-selected resource ID.
+   */
+  const body = (startDate: string, endDate: string, holidays: string[]) => ({
+    ...createIdempotentContributorCreateBody([]),
+    dueDate: endDate,
+    schedule: {
+      mode: 'date-range',
+      startDate,
+      endDate,
+      durationDays: 1,
+      calendarPolicy: { ...createDueDateSchedule('2026-08-14').calendarPolicy, holidays, calendarSource: 'shared' },
+    },
+  })
+  const created = await client.createTeamIssue('workspace-1', 'core-team', body('2026-08-10', '2026-08-10', []), 'demo@example.com')
+
+  // Monday became a day off before the retry, so keeping the duration moved the end date (ADR 0058).
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body('2026-08-10', '2026-08-11', ['2026-08-10']),
+    'demo@example.com',
+  )
+
+  expect(replay).toEqual(created)
+  await expect(client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    body('2026-08-11', '2026-08-11', []),
     'demo@example.com',
   )).rejects.toMatchObject({ code: 'ConditionalCheckFailedException', status: 409 })
 })
@@ -4228,6 +4298,37 @@ test('Work Item change candidates add the creator only for notifiable changes', 
     { memberKey: 'owner@example.com', reason: 'archive-change' },
     { memberKey: 'creator@example.com', reason: 'creator' },
   ])
+})
+
+test('Work Item change candidates notify only newly added contributors, apart from the owner', () => {
+  const before = {
+    assigneeUserId: 'owner@example.com',
+    workflowStatusId: 'todo',
+    schedule: createDueDateSchedule('2026-07-20'),
+    creatorMemberKey: 'creator@example.com',
+    contributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'kept@example.com', status: 'planned' as const },
+    ],
+  }
+
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    contributorAssignments: [
+      ...before.contributorAssignments,
+      { assignmentId: 'b'.repeat(32), memberUserId: 'added@example.com', status: 'planned' as const },
+      { assignmentId: 'c'.repeat(32), memberUserId: 'owner@example.com', status: 'planned' as const },
+      { assignmentId: 'd'.repeat(32), memberUserId: 'finished@example.com', status: 'done' as const },
+      { assignmentId: 'e'.repeat(32), jobRoleId: 'design', status: 'planned' as const },
+    ],
+  })).toEqual([
+    { memberKey: 'added@example.com', reason: 'contributor' },
+  ])
+  expect(createContributorNotificationCandidates({
+    assigneeUserId: 'owner@example.com',
+    contributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'new@example.com', status: 'in-progress' },
+    ],
+  }, [])).toEqual([{ memberKey: 'new@example.com', reason: 'contributor' }])
 })
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {

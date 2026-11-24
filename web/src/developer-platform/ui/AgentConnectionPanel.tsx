@@ -4,6 +4,9 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   AGENT_CONNECTION_CLIENTS,
   buildAgentConnectionSnippet,
+  buildAgentUsageSnippet,
+  isValidUsageInstanceId,
+  supportsAgentUsage,
   buildChecksumCommand,
   buildTokenEnvironmentCommand,
   MCP_RELEASE_URL,
@@ -40,6 +43,8 @@ export type AgentConnectionChoices = {
   shell: AgentConnectionShell
   /** Absolute path of `mcp.mjs` typed by the member. */
   mcpPath: string
+  /** Instance ID for sending token usage; empty or omitted leaves usage out. */
+  usageInstanceId?: string
 }
 
 /** Values of the token issuance form. */
@@ -408,8 +413,10 @@ function PersonalKeyRow(
 function ConfigurationStep(props: AgentConnectionPanelProps & { overview: PersonalAgentCredentialOverview }) {
   const { t, overview, choices, onChoicesChange, teams, origin, profile } = props
   const pathInputId = useId()
+  const usageInputId = useId()
+  const usageHintId = useId()
   const readsWorkspace = profile === 'workspace'
-  const snippet = buildAgentConnectionSnippet({
+  const connectionSettings = {
     profile,
     origin,
     teamId: choices.teamId || 'your-team-id',
@@ -417,7 +424,13 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
     client: choices.client,
     mcpPath: choices.mcpPath,
     shell: choices.shell,
-  })
+    usageInstanceId: choices.usageInstanceId,
+  }
+  const snippet = buildAgentConnectionSnippet(connectionSettings)
+  const offersUsage = supportsAgentUsage(choices.client, profile)
+  const typedInstanceId = choices.usageInstanceId?.trim() ?? ''
+  const invalidInstanceId = typedInstanceId !== '' && !isValidUsageInstanceId(typedInstanceId)
+  const usageSnippet = buildAgentUsageSnippet(connectionSettings)
   const runsCommand = choices.client === 'claude-code'
   return (
     <Step number={3} title={t('agents.connect.configTitle')}>
@@ -482,6 +495,27 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
             value={choices.mcpPath}
           />
         </div>
+        {offersUsage ? (
+          <div className="grid gap-1.5 min-[760px]:col-span-2">
+            <label className="text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={usageInputId}>
+              {t('agents.connect.usageInstanceLabel')}
+            </label>
+            <input
+              aria-describedby={usageHintId}
+              aria-invalid={invalidInstanceId}
+              className="workbench-input min-h-10 px-3 font-mono text-sm"
+              data-testid="agent-connection-usage-instance"
+              id={usageInputId}
+              onChange={(event) => onChoicesChange({ ...choices, usageInstanceId: event.target.value })}
+              placeholder="laptop-claude-1"
+              spellCheck={false}
+              value={choices.usageInstanceId ?? ''}
+            />
+            <p className={`text-xs leading-5 ${invalidInstanceId ? 'text-fg-red-700' : 'text-[var(--workbench-muted)]'}`} id={usageHintId}>
+              {t(invalidInstanceId ? 'agents.connect.usageInstanceInvalid' : 'agents.connect.usageInstanceHint')}
+            </p>
+          </div>
+        ) : null}
       </div>
       <dl className="grid gap-3 text-xs min-[760px]:grid-cols-2">
         <div className="min-w-0">
@@ -505,6 +539,20 @@ function ConfigurationStep(props: AgentConnectionPanelProps & { overview: Person
       <p className="text-xs leading-5 text-[var(--workbench-muted)]">{t(`agents.connect.clientNote.${choices.client}`)}</p>
       {choices.shell === 'powershell' ? (
         <p className="text-xs leading-5 text-[var(--workbench-muted)]">{t('agents.connect.windowsNote')}</p>
+      ) : null}
+      {usageSnippet ? (
+        <div className="grid gap-2" data-testid="agent-connection-usage">
+          <CopyBlock
+            label={t('agents.connect.usageSnippetLabel').replace('{location}', usageSnippet.location)}
+            t={t}
+            tall
+            value={usageSnippet.content}
+          />
+          <p className="text-xs leading-5 text-[var(--workbench-muted)]">{t('agents.connect.usageNote')}</p>
+          {choices.shell === 'powershell' ? (
+            <p className="text-xs leading-5 text-[var(--workbench-muted)]">{t('agents.connect.usageWindowsNote')}</p>
+          ) : null}
+        </div>
       ) : null}
     </Step>
   )

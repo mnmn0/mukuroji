@@ -45,7 +45,7 @@ export type WorkItemAggregateReadScope = {
 }
 
 /** Server-side filter applied after the caller's access filter. */
-export type WorkItemAggregateFilter = Omit<WorkspaceWorkItemListFilter, 'involvement'> & {
+export type WorkItemAggregateFilter = Omit<WorkspaceWorkItemListFilter, 'involvement' | 'memberUserId'> & {
   /** Normalized member keys; a Work Item matches when its owner or a contributor is one of them. */
   involvedMemberKeys?: readonly string[]
 }
@@ -630,6 +630,10 @@ export function readWorkspaceWorkItemListQuery(
   if (involvement !== undefined && involvement !== 'mine') {
     throw invalidWorkItemListQuery('involvement must be "mine".')
   }
+  const memberUserId = readOptionalIdQuery(readQuery('member'), 'member')?.toLowerCase()
+  if (memberUserId !== undefined && involvement !== undefined) {
+    throw invalidWorkItemListQuery('member cannot be combined with involvement.')
+  }
   const teamId = readOptionalIdQuery(readQuery('teamId'), 'teamId')
   const projectId = readOptionalIdQuery(readQuery('projectId'), 'projectId')
   const statusCategories = (readQueries('statusCategory') ?? [])
@@ -664,6 +668,7 @@ export function readWorkspaceWorkItemListQuery(
       ...(involvement === 'mine'
         ? { involvedMemberKeys: [...new Set([principal.userKey, principal.actorId])] }
         : {}),
+      ...(memberUserId === undefined ? {} : { involvedMemberKeys: [memberUserId] }),
     },
   }
 }

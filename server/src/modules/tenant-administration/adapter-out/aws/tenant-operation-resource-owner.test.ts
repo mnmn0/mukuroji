@@ -1480,8 +1480,8 @@ describe('AwsTenantOperationResourceOwner', () => {
         operationId: 'operation-1',
         step: 'export',
         cursor: {
-          // 22 tables, 4 file namespaces, and 6 trailing tables precede the completion index.
-          targetIndex: 32,
+          // 22 tables, 4 file namespaces, and 7 trailing tables precede the completion index.
+          targetIndex: 33,
           phase: 'snapshot',
           processedCount: 12,
           snapshotRunId: runId,
@@ -1725,7 +1725,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 25, processedCount: 25 },
+      cursor: { targetIndex: 26, processedCount: 25 },
     }
 
     try {
@@ -1939,7 +1939,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 25, processedCount: 25 },
+      cursor: { targetIndex: 26, processedCount: 25 },
     }
 
     try {
@@ -2003,6 +2003,13 @@ describe('AwsTenantOperationResourceOwner', () => {
                         }),
                       },
                     },
+                    {
+                      workspaceId: { S: 'workspace-1' },
+                      recordKey: { S: 'WORK_CALENDAR#TEAM#core-team#' },
+                      entryType: { S: 'work-calendar' },
+                      revision: { N: '2' },
+                      updatedBy: { S: 'user#calendar@example.com' },
+                    },
                   ],
                 })),
                 headers: {},
@@ -2065,8 +2072,10 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(serializedWrites).toContain('deleted+')
       expect(serializedWrites).not.toContain('owner@example.com')
       expect(serializedWrites).not.toContain('admin@example.com')
+      // A work calendar row keeps its actor on the row rather than in a payload.
+      expect(serializedWrites).not.toContain('calendar@example.com')
       expect(serializedWrites).toContain('executor:tenant-export')
-      expect(writtenItems).toHaveLength(3)
+      expect(writtenItems).toHaveLength(4)
     } finally {
       documentClient.destroy()
       s3Client.destroy()

@@ -62,6 +62,8 @@ export type DashboardWorkspaceViewProps = {
   planningUpdatesErrorMessage?: string
   /** Opens the selected Project's Planning update detail. */
   onOpenPlanningUpdate?: (teamId: string, projectId: string) => void
+  /** Opens the Workspace portfolio dashboard that compares every Project. */
+  onOpenPortfolioDashboard?: () => void
 }
 
 /** Existing badge tokens used for update-delivery freshness. */
@@ -125,6 +127,7 @@ export function DashboardWorkspaceView({
   isFocusUnavailable = false,
   onOpenTask,
   onOpenPlanningUpdate,
+  onOpenPortfolioDashboard,
   planningUpdateTargets = [],
   planningUpdatesErrorMessage,
   summary,
@@ -185,6 +188,19 @@ export function DashboardWorkspaceView({
         >
           {planningUpdatesErrorMessage}
         </p>
+      ) : null}
+
+      {onOpenPortfolioDashboard ? (
+        <div className="flex justify-end">
+          <button
+            className="workbench-button min-h-10 px-4 text-sm font-semibold"
+            data-testid="dashboard-open-portfolio"
+            type="button"
+            onClick={onOpenPortfolioDashboard}
+          >
+            {t('portfolioDashboard.openFromDashboard')}
+          </button>
+        </div>
       ) : null}
 
       <section className="workbench-table overflow-hidden">

@@ -1,10 +1,14 @@
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
+  isWorkloadCalendarSource,
   type CapacityPlanningGranularity,
+  type WorkloadCalendarSource,
   type ResourceAssignmentStatus,
   type WorkloadMemberSummary,
   type WorkloadHoliday,
   type WorkloadSnapshot,
+  type WorkloadTimeOff,
+  type WorkloadTimeOffStatus,
   type WorkingSchedule,
 } from '@mukuroji/contracts'
 import { isRecord } from '../shared/api/jsonValidation'
@@ -31,7 +35,9 @@ export type SaveWorkloadProfileRequest = {
   role?: string
   /** Skill identifiers used by resource matching. */
   skills: string[]
-  /** IANA timezone used for local capacity dates. */
+  /** Whether the profile inherits the Workspace calendar or keeps its own. */
+  calendarSource: WorkloadCalendarSource
+  /** IANA timezone used for local capacity dates when the profile keeps its own calendar. */
   timeZone: string
   /** Recurring weekday schedule. */
   schedule: WorkingSchedule
@@ -54,8 +60,18 @@ export type SaveWorkloadTimeOffRequest = {
   /** Optional explanation. */
   reason?: string
   /** Approval state. */
-  status: 'planned' | 'approved' | 'canceled'
+  status: WorkloadTimeOffStatus
   /** Expected profile revision. */
+  expectedRevision: number
+  /** Expected Team workload revision. */
+  expectedTeamRevision: number
+}
+
+/** Input sent when a manager approves or rejects time off, or a member withdraws their own. */
+export type ReviewWorkloadTimeOffRequest = {
+  /** New review state. */
+  status: WorkloadTimeOffStatus
+  /** Expected revision of the time off itself. */
   expectedRevision: number
   /** Expected Team workload revision. */
   expectedTeamRevision: number
@@ -101,6 +117,8 @@ export type UpdateWorkloadRequestRequest = {
   confidential?: boolean
   /** Set to `canceled` to withdraw the request. */
   status?: 'canceled'
+  /** With `status: "canceled"`, also cancel the assignments that still fill the request. */
+  cancelAssignments?: boolean
   /** Expected request revision. */
   expectedRevision: number
   /** Expected Team workload revision. */
@@ -179,7 +197,8 @@ export type WorkloadWhatIfRequest = {
   plannedEffortMinutes: number
 }
 
-const workloadApiBaseUrl = resolveApiBaseUrl()
+/** Base URL of the workload API routes. */
+export const workloadApiBaseUrl = resolveApiBaseUrl()
 
 /**
  * Fetches a Team workload snapshot for a local date range.
@@ -266,6 +285,30 @@ export async function saveWorkloadTimeOff(
     accessToken,
     `/teams/${encodeURIComponent(teamId)}/workload/profiles/${encodeURIComponent(memberId)}/time-off/${encodeURIComponent(timeOffId)}`,
     { id: timeOffId, ...input },
+  )
+}
+
+/**
+ * Approves, rejects, reopens, or withdraws one member's time off without changing its dates.
+ *
+ * @param accessToken - Authenticated Workspace access token.
+ * @param teamId - Team containing the member.
+ * @param memberId - Member whose time off is reviewed.
+ * @param timeOffId - Time-off identifier.
+ * @param input - New status and optimistic-concurrency values.
+ */
+export async function reviewWorkloadTimeOff(
+  accessToken: string,
+  teamId: string,
+  memberId: string,
+  timeOffId: string,
+  input: ReviewWorkloadTimeOffRequest,
+): Promise<void> {
+  await sendWorkloadMutation(
+    accessToken,
+    `/teams/${encodeURIComponent(teamId)}/workload/profiles/${encodeURIComponent(memberId)}/time-off/${encodeURIComponent(timeOffId)}`,
+    input,
+    'PATCH',
   )
 }
 
@@ -415,11 +458,14 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
   return value.members.every((member): member is WorkloadMemberSummary => isRecord(member) &&
     typeof member.memberId === 'string' &&
     typeof member.timeZone === 'string' &&
+    (member.effectiveTimeZone === undefined || typeof member.effectiveTimeZone === 'string') &&
+    (member.calendarSource === undefined || isWorkloadCalendarSource(member.calendarSource)) &&
     Array.isArray(member.skills) && member.skills.every((skill) => typeof skill === 'string') &&
     isWorkingSchedule(member.schedule) &&
     Array.isArray(member.holidays) && member.holidays.every(isWorkloadHoliday) &&
     typeof member.profileRevision === 'number' &&
     Number.isSafeInteger(member.profileRevision) && member.profileRevision >= 0 &&
+    Array.isArray(member.timeOff) && member.timeOff.every(isWorkloadTimeOff) &&
     Array.isArray(member.cells) && member.cells.every(isWorkloadCell) &&
     isNonNegativeSafeInteger(member.capacityMinutes) &&
     isNonNegativeSafeInteger(member.allocatedMinutes) &&
@@ -427,7 +473,23 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
     isNonNegativeSafeInteger(member.actualMinutes) &&
     isNonNegativeSafeInteger(member.remainingEffortMinutes) &&
     typeof member.overloaded === 'boolean') &&
-    value.requests.every(isResourceRequest) && value.assignments.every(isResourceAssignment)
+    value.requests.every(isResourceRequest) && value.assignments.every(isResourceAssignment) &&
+    (value.viewer === undefined || (isRecord(value.viewer) &&
+      typeof value.viewer.memberId === 'string' && typeof value.viewer.canManage === 'boolean'))
+}
+
+/** Checks one time-off row returned in a member summary. */
+function isWorkloadTimeOff(value: unknown): value is WorkloadTimeOff {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && isIsoDate(value.fromDate) && isIsoDate(value.toDate) &&
+    value.fromDate <= value.toDate &&
+    (value.minutesPerDay === undefined || isNonNegativeSafeInteger(value.minutesPerDay)) &&
+    (value.reason === undefined || typeof value.reason === 'string') &&
+    (value.status === 'planned' || value.status === 'approved' || value.status === 'rejected' || value.status === 'canceled') &&
+    (value.submittedAt === undefined || typeof value.submittedAt === 'string') &&
+    (value.reviewedBy === undefined || typeof value.reviewedBy === 'string') &&
+    (value.reviewedAt === undefined || typeof value.reviewedAt === 'string') &&
+    isPositiveSafeInteger(value.revision)
 }
 
 /** Checks the required numeric and date fields of one workload cell. */
@@ -436,13 +498,30 @@ function isWorkloadCell(value: unknown): boolean {
   return isIsoDate(value.fromDate) && isIsoDate(value.toDate) && value.fromDate <= value.toDate &&
     typeof value.label === 'string' &&
     isNonNegativeSafeInteger(value.capacityMinutes) &&
+    isNonNegativeSafeInteger(value.pendingTimeOffMinutes) &&
     isNonNegativeSafeInteger(value.allocatedMinutes) &&
+    isNonNegativeSafeInteger(value.tentativeAllocatedMinutes) &&
     isNonNegativeSafeInteger(value.plannedEffortMinutes) &&
     isNonNegativeSafeInteger(value.actualMinutes) &&
     isNonNegativeSafeInteger(value.remainingEffortMinutes) &&
     isNonNegativeSafeInteger(value.utilizationPercent) &&
     typeof value.varianceMinutes === 'number' && Number.isSafeInteger(value.varianceMinutes) &&
-    (value.status === 'under' || value.status === 'balanced' || value.status === 'over' || value.status === 'unavailable')
+    isCellStatus(value.status) &&
+    (value.workspaceCapacityMinutes === undefined || isNonNegativeSafeInteger(value.workspaceCapacityMinutes)) &&
+    (value.workspaceAllocatedMinutes === undefined || isNonNegativeSafeInteger(value.workspaceAllocatedMinutes)) &&
+    isCellStatus(value.workspaceStatus, true)
+}
+
+/**
+ * Checks a cell status, allowing it to be absent when `optional` is set.
+ *
+ * @param value - Value from a response.
+ * @param optional - Whether an absent status is accepted.
+ * @returns Whether the value is a known status, or absent and allowed to be.
+ */
+export function isCellStatus(value: unknown, optional = false): boolean {
+  if (value === undefined) return optional
+  return value === 'under' || value === 'balanced' || value === 'over' || value === 'unavailable'
 }
 
 /** Checks one resource request returned by a workload snapshot. */
@@ -492,8 +571,13 @@ function isWorkloadHoliday(value: unknown): value is WorkloadHoliday {
     (value.label === undefined || typeof value.label === 'string')
 }
 
-/** Checks a non-negative safe integer at the workload API boundary. */
-function isNonNegativeSafeInteger(value: unknown): value is number {
+/**
+ * Checks a non-negative safe integer at the workload API boundary.
+ *
+ * @param value - Value from a response.
+ * @returns Whether the value is a non-negative safe integer.
+ */
+export function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
@@ -502,23 +586,38 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
-/** Checks a Gregorian calendar date at the workload API boundary. */
-function isIsoDate(value: unknown): value is string {
+/**
+ * Checks a Gregorian calendar date at the workload API boundary.
+ *
+ * @param value - Value from a response.
+ * @returns Whether the value is a `YYYY-MM-DD` date that exists.
+ */
+export function isIsoDate(value: unknown): value is string {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
   const parsed = Date.parse(`${value}T00:00:00Z`)
   return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value
 }
 
-/** Reads a safe API error message. */
-function readErrorMessage(value: unknown): string {
+/**
+ * Reads a safe API error message.
+ *
+ * @param value - Error response body.
+ * @returns The server message, or a generic one.
+ */
+export function readErrorMessage(value: unknown): string {
   return typeof value === 'object' && value !== null &&
     'message' in value && typeof value.message === 'string'
     ? value.message
     : 'Workload data could not be loaded.'
 }
 
-/** Reads a JSON response body without assuming its runtime shape. */
-async function readJson(response: Response): Promise<unknown> {
+/**
+ * Reads a JSON response body without assuming its runtime shape.
+ *
+ * @param response - Fetch response.
+ * @returns The parsed body.
+ */
+export async function readJson(response: Response): Promise<unknown> {
   const text = await response.text()
   if (!text) return {}
   try {

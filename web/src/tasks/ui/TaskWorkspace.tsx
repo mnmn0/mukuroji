@@ -849,6 +849,7 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          workingCalendar={workingCalendar}
           {...(scheduleWindowNavigation
             ? {
                 month: scheduleWindowNavigation.calendarMonth,

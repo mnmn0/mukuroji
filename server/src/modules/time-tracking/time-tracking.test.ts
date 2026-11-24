@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS } from '@mukuroji/contracts'
 import {
   InMemoryTimeTrackingRepository,
   TimeTrackingError,
   TimeTrackingService,
+  type TimeTrackingCategorySource,
   type TimeTrackingIdempotencyPort,
 } from './time-tracking'
 
@@ -35,7 +37,7 @@ function createIdempotencyStore(): TimeTrackingIdempotencyPort {
 }
 
 /** Creates an isolated service fixture with deterministic IDs and clock values. */
-function createFixture() {
+function createFixture(categories?: TimeTrackingCategorySource) {
   let id = 0
   const repository = new InMemoryTimeTrackingRepository()
   /** Canonical Work Item estimates keyed by Workspace, Team, and Work Item. */
@@ -51,6 +53,7 @@ function createFixture() {
         ))
       },
     },
+    ...(categories ? { categories } : {}),
   })
   return { repository, service, plannedEffort }
 }
@@ -184,6 +187,62 @@ describe('TimeTrackingService', () => {
     ])
     expect(sheet.weeks).toHaveLength(1)
     expect(sheet.costsRedacted).toBe(true)
+  })
+
+  test('starts weekly timesheet and report buckets on the Workspace week start day', async () => {
+    const { service } = createFixture({
+      readCategories: async () => DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+      readWeekStartDay: async () => 0,
+    })
+    for (const [startAt, endAt] of [
+      ['2026-08-01T01:00:00.000Z', '2026-08-01T02:00:00.000Z'],
+      ['2026-08-02T01:00:00.000Z', '2026-08-02T03:00:00.000Z'],
+    ] as const) {
+      await service.createEntry({
+        workspaceId: 'workspace-1',
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        userId: 'member-1',
+        startAt,
+        endAt,
+        billable: true,
+        currency: 'USD',
+        source: 'manual',
+      }, false)
+    }
+    const input = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-07-26',
+      to: '2026-08-08',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'week',
+      includeCosts: false,
+    } as const
+    const sheet = await service.createTimesheet(input)
+    expect(sheet.weeks.map((week) => [week.key, week.minutes])).toEqual([
+      ['2026-07-26', 60],
+      ['2026-08-02', 120],
+    ])
+    const summary = await service.createSummary(input)
+    expect(summary.groups.map((group) => [group.key, group.minutes])).toEqual([
+      ['2026-07-26', 60],
+      ['2026-08-02', 120],
+    ])
+
+    const monday = createFixture()
+    await monday.service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T01:00:00.000Z',
+      endAt: '2026-08-02T02:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      source: 'manual',
+    }, false)
+    expect((await monday.service.createTimesheet(input)).weeks.map((week) => week.key)).toEqual(['2026-07-27'])
   })
 
   test('compares canonical Work Item estimates with project grouped actual time', async () => {
@@ -556,6 +615,95 @@ describe('TimeTrackingService', () => {
     })
     expect(timed.durationOnly).toBeUndefined()
     expect(timed.category).toBe('review')
+  })
+
+  test('records time only under categories the Workspace offers and names them in reports', async () => {
+    let id = 0
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: {
+        readCategories: async () => ({
+          categories: [
+            { key: 'meeting', label: '打ち合わせ', active: true },
+            { key: 'custom-sales', label: '営業支援', active: true },
+            { key: 'leave', active: false },
+          ],
+        }),
+      },
+    })
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 60, timeZone: 'Asia/Tokyo' },
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    const sales = await service.createEntry({ ...base, category: 'custom-sales' }, false)
+    expect(sales.category).toBe('custom-sales')
+    // A retired category and one the Workspace does not define are both refused for new time.
+    for (const category of ['leave', 'design']) {
+      await expect(service.createEntry({ ...base, category }, false)).rejects.toMatchObject({
+        status: 400,
+        code: 'InvalidTimeEntryCategory',
+      })
+    }
+    await expect(service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: sales.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: 'leave',
+    })).rejects.toMatchObject({ status: 400, code: 'InvalidTimeEntryCategory' })
+
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      { key: 'custom-sales', label: '営業支援', minutes: 60 },
+    ])
+  })
+
+  test('keeps a category the Workspace retired after the entry was recorded', async () => {
+    let active = true
+    let id = 0
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-03T09:00:00.000Z'),
+      createId: () => `id-${++id}`,
+      categories: { readCategories: async () => ({ categories: [{ key: 'custom-sales', label: '営業支援', active }, { key: 'meeting', active: true }] }) },
+    })
+    const entry = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 60, timeZone: 'Asia/Tokyo' },
+      category: 'custom-sales',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+    active = false
+    const edited = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: 'custom-sales',
+      description: 'Proposal review',
+    })
+    expect(edited).toMatchObject({ category: 'custom-sales', description: 'Proposal review' })
   })
 
   test('rejects invalid date-and-minutes entries', async () => {

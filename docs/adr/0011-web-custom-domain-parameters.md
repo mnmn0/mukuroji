@@ -1,6 +1,6 @@
 # 0011. 独自 domain を CloudFormation parameter で受け、正規 URL を stack が決める
 
-- 状態: 提案
+- 状態: 置き換え済み（0056）
 - 日付: 2026-11-19
 - 関連: Issue #439、ADR 0005
 

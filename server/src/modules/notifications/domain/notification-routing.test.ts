@@ -17,6 +17,7 @@ const classificationCases: Array<[{ eventType: string, reasons: string[] }, Noti
     [{ eventType: 'approval.completed', reasons: ['creator'] }, 'approval'],
     [{ eventType: 'work-item.updated', reasons: ['assignment', 'status-change'] }, 'assignment'],
     [{ eventType: 'triage.assigned', reasons: ['triage-assignment'] }, 'assignment'],
+    [{ eventType: 'workload.assignment.confirmed', reasons: ['workload-assignment'] }, 'assignment'],
     [{ eventType: 'work-item.updated', reasons: ['creator', 'status-change'] }, 'status'],
     [{ eventType: 'work-item.blocker-removed', reasons: ['watcher'] }, 'status'],
     [{ eventType: 'work-item.updated', reasons: ['schedule-change'] }, 'due'],
@@ -31,6 +32,7 @@ const classificationCases: Array<[{ eventType: string, reasons: string[] }, Noti
     [{ eventType: 'timesheet.submission-reminder', reasons: ['timesheet'] }, 'reminder'],
     [{ eventType: 'weekly-report.submission-escalation', reasons: ['weekly-report-escalation'] }, 'reminder'],
     [{ eventType: 'analytics.report.delivered', reasons: ['recipient'] }, 'other'],
+    [{ eventType: 'work-item.updated', reasons: ['contributor'] }, 'assignment'],
 ]
 
 describe('classifyNotificationCategory', () => {

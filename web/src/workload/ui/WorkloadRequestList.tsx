@@ -20,6 +20,8 @@ export type WorkloadRequestListProps = {
     /** Display name. */
     name: string
   }[]
+  /** Number of visible, not-canceled assignments filling each request, keyed by request ID. */
+  activeAssignmentCounts?: ReadonlyMap<string, number>
   /** Whether any planning mutation is in flight. */
   isSaving: boolean
   /** Saves a change to one request and resolves to whether it succeeded. */
@@ -34,7 +36,7 @@ export type WorkloadRequestListProps = {
  * @param props - Requests, Project names, mutation state, and localized labels.
  * @returns The request list with inline edit and cancel controls.
  */
-export function WorkloadRequestList({ isSaving, onUpdate, projects, redactedCount, requests, t }: WorkloadRequestListProps) {
+export function WorkloadRequestList({ activeAssignmentCounts, isSaving, onUpdate, projects, redactedCount, requests, t }: WorkloadRequestListProps) {
   const [editingId, setEditingId] = useState<string>()
   const [confirmingId, setConfirmingId] = useState<string>()
   const projectNames = new Map(projects.map((project) => [project.id, project.name]))
@@ -59,6 +61,7 @@ export function WorkloadRequestList({ isSaving, onUpdate, projects, redactedCoun
       <ul className="grid gap-2">
         {sorted.map((request) => {
           const canceled = request.status === 'canceled'
+          const assignmentCount = activeAssignmentCounts?.get(request.id) ?? 0
           return (
             <li key={request.id} className={`grid min-w-0 gap-2 border border-[var(--workbench-border)] px-3 py-2 ${canceled ? 'opacity-60' : ''}`}>
               <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
@@ -88,9 +91,20 @@ export function WorkloadRequestList({ isSaving, onUpdate, projects, redactedCoun
               ) : null}
               {!canceled && confirmingId === request.id ? (
                 <div className="grid gap-2" role="group" aria-label={t('workload.controls.requests.cancel')}>
-                  <p className="text-xs font-semibold leading-5 text-fg-9f3f3f">{t('workload.controls.requests.cancelConfirm')}</p>
+                  <p className="text-xs font-semibold leading-5 text-fg-9f3f3f">
+                    {assignmentCount > 0
+                      ? t('workload.controls.requests.cancelWithAssignmentsConfirm').replace('{count}', String(assignmentCount))
+                      : t('workload.controls.requests.cancelConfirm')}
+                  </p>
                   <div className="flex flex-wrap gap-2">
-                    <button className={buttonClass} disabled={isSaving} type="button" onClick={() => { void update(request, { status: 'canceled' }) }}>{t('workload.controls.requests.cancelConfirmAction')}</button>
+                    <button
+                      className={buttonClass}
+                      disabled={isSaving}
+                      type="button"
+                      onClick={() => { void update(request, assignmentCount > 0 ? { status: 'canceled', cancelAssignments: true } : { status: 'canceled' }) }}
+                    >
+                      {t(assignmentCount > 0 ? 'workload.controls.requests.cancelWithAssignmentsAction' : 'workload.controls.requests.cancelConfirmAction')}
+                    </button>
                     <button autoFocus className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => setConfirmingId(undefined)}>{t('workload.controls.requests.keep')}</button>
                   </div>
                 </div>

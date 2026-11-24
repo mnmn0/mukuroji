@@ -6,7 +6,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 
 `PlanningTable` は `workspaceId` / `recordKey` を primary key とし、次の row を保存します。
 
-- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version、Workspace graph revision、Work Item による revision 前進を数える counter（`sourceRevisionCount`、`structureRevision`、`structureSourceRevisionCount`）
+- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version、Workspace graph revision、Work Item による revision 前進を数える counter（`sourceRevisionCount`、`structureRevision`、`structureSourceRevisionCount`）、直近の Planning commit が測った live graph の row 数と byte 数（`liveRowCount`、`liveByteCount`。下の「単位ごとの読み取り」）
 - `ENTITY#<id>`: planning entity
 - `DEPENDENCY#<id>`: directed scheduling dependency
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
@@ -56,7 +56,35 @@ DynamoDB client は、デコード済みの graph を META の `revision` と `u
 4. 不要な entity dependency と Work Item schedule dependency を解除します
 5. 容量超過中も row を増やさない変更は保存できるため、上の操作は `full` の状態でも実行できます
 
-Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の live graph から計算します。退避済みの entity と参照は計算に含めません。
+### 単位ごとの読み取り
+
+`GET /api/planning` は query を付けると、Workspace 全体ではなく 1 つの Team / Project / Portfolio だけの snapshot を返します（Issue #641、[ADR 0070](adr/0070-planning-scoped-reads.md)）。Response の `readScope` が読んだ範囲を示し、query がなければ従来どおり Workspace 全体です。
+
+| Query | `readScope` | Entity | Work Item と link |
+| --- | --- | --- | --- |
+| `teamId` | `{ type: 'team', teamId }` | Workspace scope、その Team scope、その Team の全 Project scope | その Team の Work Item と link |
+| `teamId` + `projectId` | `{ type: 'project', teamId, projectId }` | Workspace scope、その Team scope、その Project scope | その Project の Work Item と、その Work Item の link |
+| `portfolioId` | `{ type: 'portfolio', portfolioId }` | その Portfolio と子孫 | Portfolio の scope（Project / Team / Workspace）の Work Item と link |
+
+- 子の scope は親の scope 以下なので、Team / Project の読み取りには entity の祖先がすべて入ります。Workspace scope の entity（Portfolio、Roadmap、戦略 Goal など）は常に含みます
+- Entity dependency は両端が読み取り範囲にある edge だけを返します。別 Project の entity との dependency（cross-Project dependency）は Project の読み取りには含めず、両方の Project を含む Team の読み取りか、Workspace 全体の読み取りで返します
+- Work Item schedule dependency は、従来どおり両端の Work Item が snapshot にある edge だけを返します。Project の読み取りでは両端がその Project の Work Item の edge だけです
+- Link は範囲外の entity への参照（`cycleId` / `milestoneId` / `goalIds`）を外し、参照が残らない link は返しません
+- Critical path と roll-up（progress、`linkedWorkItemCount`、`rollupHealth`）は範囲内の entity・dependency・link・Work Item だけで計算します。Project の読み取りでは、Project の entity の roll-up は Workspace 全体の読み取りと同じ値になり、Workspace / Team scope の entity（祖先や Team の Cycle）の roll-up はその Project の Work Item の分だけになります
+- Update target は、Project target が範囲の Team / Project に入るもの、Initiative target が範囲の entity のものです
+- `capacity` は範囲にかかわらず Workspace 全体の使用量です
+- 呼び出し元の権限による絞り込み（`filterPlanningSnapshotForPrincipal`）は Workspace 全体の読み取りと同じです。読めない Portfolio と存在しない Portfolio は、どちらも `404 PlanningEntityNotFound` です。Portfolio 以外の entity ID を `portfolioId` に渡した場合も同じです
+- `projectId` だけの指定、同じ query の重複、`portfolioId` と `teamId` / `projectId` の同時指定は `400 PlanningReadScopeInvalid` です
+
+DynamoDB の読み方は次のとおりです。Key 設計は変えていません。
+
+- `ENTITY#`・`DEPENDENCY#`・`WORK_ITEM_DEPENDENCY#`・`UPDATE_TARGET#` は全体を強整合 Query します。階層の検証と祖先・Portfolio の scope の解決に要るためで、量は人が作る分に限られます
+- Link は Team なら `LINK#<teamId>#` の prefix Query、Project ならその Project の Work Item の key だけを `BatchGetItem`（ConsistentRead、100 key ずつ、未処理の key は最大 5 回まで再要求）で読みます。Workspace scope の Portfolio は配下が Team をまたぐため、`LINK#` 全体を読みます
+- Work Item は範囲の Team / Project だけを読みます
+- 前後の `META` 強整合 read で revision を挟み、間に revision が進んだ場合は最大3回まで読み直す契約は Workspace 全体の読み取りと同じです。Snapshot の `revision` はそのまま mutation の `expectedRevision` に使えます
+- `capacity` は Planning の commit が `META` に書いた `liveRowCount` / `liveByteCount` から返します。通知 schedule worker が `UPDATE_TARGET#` の due index 属性を書いた分の byte 差は、次の Planning commit まで反映されません。`META` に値がない場合（Planning 以外の writer が `META` を置き換えた直後など）と、Lambda の graph cache が当たる場合は、全体を読んで数えます
+
+Web の Project 概要は Team 単位の読み取りを使い、Workspace 全体を読みません（未完了の blocker の件数に、同じ Team の別 Project の Work Item の状態が要るためです）。Planning 画面（timeline / roadmap / portfolio）と Work Item 画面は、従来どおり Workspace 全体の snapshot を読みます。退避済みの entity と参照は、どの読み取りでも計算に含めません。
 
 #### Entity ID の採番
 
@@ -136,6 +164,16 @@ Automation は呼び出し元の権限なしで `/next` と rollover を実行�
 `POST /api/planning/cycles/:cycleId/work-items` は `{ action: 'add' | 'remove', workItems: [{ teamId, workItemId }], expectedRevision }` で、49件までの Work Item を1回で Cycle に入れる、または外します。Cycle と、移動元の Cycle の member 権限と、各 Work Item の member 権限が必要です（Enterprise permission は他の `/api/planning/cycles*` と違い `planning.manage` ではなく `planning.write` です。`/next` と rollover は `planning.manage` のままです）。入れるときは既存の Milestone / Goal の link を保ち、外したときに他の参照がなければ link を削除します。Capacity を超える場合は全体を拒否します。
 
 Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
+
+## Cycle の schedule baseline
+
+設計の判断は [ADR 0059](adr/0059-cycle-schedule-baselines.md) にあります（Project の baseline は [ADR 0043](adr/0043-named-schedule-baselines.md)）。
+
+`POST /api/planning/cycles/:cycleId/schedule-baselines`（body は任意の `{ name }`、Cycle の manager 権限）は、呼び出した人の Planning snapshot でその Cycle に link されている Work Item の、今の予定開始日・予定終了日・予定工数を名前付きの baseline として保存し、`201` で `{ cycleId, revision, baseline, savedBaselines }` を返します。名前は前後の空白を除いて 80 文字までで、制御文字は `400` です。1 baseline は 1000 件までで、超えると `413 CycleScheduleBaselineTooLarge` です。Cycle ごとに新しい順に 10 件残り、11 件目を保存すると最も古いものが消えます。保存は一覧の行の revision・権限の ConditionCheck・audit event `cycle.schedule_baseline_captured` と同じ transaction で書き、Work Item を読む前に Planning の revision を読んで固定し、読み終えた graph の revision が違えば保存せず、固定した revision を同じ transaction で確かめるので（Work Item の書き込みも revision を進めるため、古い予定と新しい graph の組み合わせは保存されない）、その間に Cycle の移動などで Planning が変わった場合も含め、競合や権限の変化は `409 CycleScheduleBaselineConflict` です。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい baseline になります（Web は自動再送しません）。
+
+`GET` 同じ path（`?baselineId=` で古いもの）は、読む人に Cycle が見えるときだけ最新の baseline と一覧を返し（見えない・Cycle でない・無い ID は `404`）、entries は読む人に見える Work Item だけに絞ります。`entryCount` は見えない分も数えます。
+
+追加・除外・終了予定の遅れ・予定工数の増減は、Web の Cycle の計画が今の snapshot と比べて出します（`web/src/planning/model/cycleBaselines.ts`）。
 
 ## Project / Initiative health update
 
@@ -255,11 +293,11 @@ Update の publish とコメントは、Planning の書き込みと同じ transa
 
 - publish（`planning-update.published`）: target の watcher、cadence の escalation 先、Project target なら現在の Project member（viewer / member / manager）
 - health が at-risk / off-track に悪化した publish（`planning-update.health-degraded`）: 上に加えて update 担当（cadence の owner）。悪化は前回の update（初回の Initiative は entity）の health と比べて判定します
-- コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件、Web では本文の `@member@example.com`）で mention された member
+- コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件。Web では composer の候補から選んだ `@表示名` と、本文に打った `@member@example.com`）で mention された member
 
-どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Event は update が記録した Team / Project scope と `UPDATE_TARGET` の record key を持ちます。Projection、Slack 配信、Inbox 表示のたびに target を強整合で読み直し、target が消えたか archive されていれば通知しません。Recipient は記録時の scope と、Initiative が別 Project へ移った後の現在の scope の両方を閲覧できる必要があります。Watcher だけが理由の通知は、現在も target を watch している場合に限ります。Enterprise の権限は Planning の閲覧（`planning.read` か `work-items.read`）で判定し、Work Item の閲覧権限は求めません。Directory group に割り当てた role も効くよう、snapshot に group への割り当てがあるときは projection でも recipient の現在の Cognito group を読みます。前回の health と悪化の判定、cadence の担当と escalation 先は publish の use case が commit する state から決め、通知 event はその結果だけを使います。Milestone の完了・予定変更の通知はまだありません。
+どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Event は update が記録した Team / Project scope と `UPDATE_TARGET` の record key を持ちます。Projection、Slack 配信、Inbox 表示のたびに target を強整合で読み直し、target が消えたか archive されていれば通知しません。Recipient は記録時の scope と、Initiative が別 Project へ移った後の現在の scope の両方を閲覧できる必要があります。Watcher だけが理由の通知は、現在も target を watch している場合に限ります。Enterprise の権限は Planning の閲覧（`planning.read` か `work-items.read`）で判定し、Work Item の閲覧権限は求めません。Directory group に割り当てた role も効くよう、snapshot に group への割り当てがあるときは projection でも recipient の現在の Cognito group を読みます。前回の health と悪化の判定、cadence の担当と escalation 先は publish の use case が commit する state から決め、通知 event はその結果だけを使います。
 
-Entity の作成・複製・更新・移動・archive・復元と、次の Cycle の作成（`POST /api/planning/cycles/:cycleId/next`、`created` で metadata に元の `previousCycleId`）・Cycle の rollover（`POST /api/planning/cycles/:cycleId/rollover`、元の Cycle を完了させたときの `updated`）も、Planning の書き込みと同じ transaction で audit event を 1 件保存します。Event type は `planning-entity.created` / `.duplicated` / `.updated` / `.moved` / `.archived` / `.restored`、audit の entity は `{ type: 'planning-entity', id: <entity ID> }` です。`changes` は変更前後の stored field（`createdAt` / `updatedAt` を除く）の差分で、作成と複製は全 field の `after`、archive と復元は `archivedAt` の付け外しになります。Metadata は操作者の member key、entity type、commit した Planning revision、現在の Team / Project scope、複製元 ID（複製）、scope が一緒に移った子孫の件数（移動）です。Audit write は commit の試行ごとに作り直すので、Work Item の更新だけで進んだ revision を越える rebase（ADR 0012）はそのまま効きます。Audit table が無い環境では書き込みません。どの event も通知や webhook の対象ではありません。退避の続き（archive 済み entity の再 archive）は event を作りません。Schedule worker が実行する Cycle の自動処理（`runCycleAutomationStep`）は、system の audit context と schedule Lambda への audit table 権限が要るため、まだ audit event を作りません。
+Entity の作成・複製・更新・移動・archive・復元と、次の Cycle の作成（`POST /api/planning/cycles/:cycleId/next`、`created` で metadata に元の `previousCycleId`）・Cycle の rollover（`POST /api/planning/cycles/:cycleId/rollover`、元の Cycle を完了させたときの `updated`）も、Planning の書き込みと同じ transaction で audit event を 1 件保存します。Event type は `planning-entity.created` / `.duplicated` / `.updated` / `.moved` / `.archived` / `.restored`、audit の entity は `{ type: 'planning-entity', id: <entity ID> }` です。`changes` は変更前後の stored field（`createdAt` / `updatedAt` を除く）の差分で、作成と複製は全 field の `after`、archive と復元は `archivedAt` の付け外しになります。Metadata は操作者の member key、entity type、commit した Planning revision、現在の Team / Project scope、複製元 ID（複製）、scope が一緒に移った子孫の件数（移動）です。Audit write は commit の試行ごとに作り直すので、Work Item の更新だけで進んだ revision を越える rebase（ADR 0012）はそのまま効きます。Audit table が無い環境では書き込みません。Milestone の完了・日付変更の通知（下記）を除き、どの event も通知や webhook の対象ではありません。退避の続き（archive 済み entity の再 archive）は event を作りません。Schedule worker が実行する Cycle の自動処理（`runCycleAutomationStep`）は、system の audit context と schedule Lambda への audit table 権限が要るため、まだ audit event を作りません。
 
 `GET /api/planning/entities/:entityId/activity?limit=&cursor=&direction=` は 1 entity の audit event を新しい順に返します（audit の entity index を読みます）。Live graph で呼び出し元に見える entity なら閲覧者が読め、live graph から退避済みの entity は、退避一覧と同じく復元できる manager だけが読めます。見えない entity は `404 PlanningEntityNotFound` です。さらに event ごとに、記録した Team / Project scope（移動の event は移動元の scope も）を immutable update の記録時 scope と同じ規則で閲覧できるか確かめ、読めない event は返しません。別の Project から移ってきた entity の、移動前の履歴は移動先の閲覧者には見えません。Enterprise 認可では update 履歴と同じく、呼び出し元のすべての Project 単位の付与を読み込んで各 scope を評価します。Workspace 全体だった頃の event は、Workspace を resource として `planning.read` を評価し直します。退避済み entity は退避先の scope を認可対象の resource とします。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。各 event は他の audit 応答と同じ public projection で返し、`actorUserId` は含めません。Planning snapshot と同じく、呼び出し元に見えない entity への参照は隠します。`parentId` / `nextCycleId` の変更は値を redaction marker に置き換えて `redacted: true` を付け、metadata の `sourceEntityId` / `previousCycleId` は取り除きます。応答の metadata は audit 共通の allowlist を通るため、現状は `teamId` / `projectId` だけが返ります。
 
@@ -270,6 +308,7 @@ Entity の作成・複製・更新・移動・archive・復元と、次の Cycle
 - `GET /api/planning/updates`: cursor-paginated immutable history
 - `GET /api/planning/updates/export`: versioned JSON export
 - `GET|PUT|DELETE /api/planning/update-watch`: current member の watch state
+- `GET|PUT|DELETE /api/planning/entities/:entityId/watch`: Milestone の watch state。完了と日付の変更が watcher に届きます（[通知](./notifications.md#milestone-の-watch)）
 - `GET|POST /api/planning/updates/:updateVersion/comments`: append-only comments
 - `GET|PUT|DELETE /api/planning/updates/:updateVersion/reactions`: member reactions
 
@@ -279,7 +318,7 @@ Comment / reaction mutation は caller ごとの durable `Idempotency-Key` を�
 
 Dependency は predecessor / successor の directed edge で、self edge、重複 edge、循環を拒否する。Scheduling type は `finish-to-start`、`start-to-start`、`finish-to-finish`、`start-to-finish` の4種である。`lagDays` は signed calendar day とし、正数を lag、負数を lead として扱う。必要な場合は successor の `start` または `finish` に `on`、`not-before`、`not-after` の明示 constraint を設定できる。
 
-Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）の inclusive calendar day 数、dependency、lead / lag から DAG の最長経路を算出する。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはない。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含める。
+Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）を Workspace の稼働カレンダーで数えた稼働日数（最小 1）、dependency、lead / lag から DAG の最長経路を算出する（ADR 0058）。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはない。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含める。
 
 ## Work Item schedule dependency
 

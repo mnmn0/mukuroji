@@ -737,6 +737,36 @@
         ],
         "type": "object"
       },
+      "AgentTelemetryExportLogsRequest": {
+        "description": "OpenTelemetry `ExportLogsServiceRequest` in the OTLP/HTTP JSON encoding.",
+        "properties": {
+          "resourceLogs": {
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 2000,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AgentTelemetryExportLogsResponse": {
+        "description": "OpenTelemetry `ExportLogsServiceResponse`.",
+        "properties": {
+          "partialSuccess": {
+            "properties": {
+              "errorMessage": {
+                "type": "string"
+              },
+              "rejectedLogRecords": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "ApiKeyOneTimeSecretOutput": {
         "additionalProperties": false,
         "properties": {
@@ -2617,6 +2647,135 @@
           "items": {
             "items": {
               "$ref": "#/components/schemas/PublicProjectMember"
+            },
+            "type": "array"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "projectId",
+          "items"
+        ],
+        "type": "object"
+      },
+      "PublicProjectRaidEntry": {
+        "description": "One risk, issue, or change request of a Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "closedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "impact": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "risk",
+              "issue",
+              "change-request"
+            ],
+            "type": "string"
+          },
+          "ownerMemberId": {
+            "description": "Project member responsible for the entry.",
+            "maxLength": 254,
+            "type": "string"
+          },
+          "probability": {
+            "description": "Likelihood; only a risk has one.",
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "relatedWorkItemIds": {
+            "items": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "maxItems": 10,
+            "type": "array"
+          },
+          "response": {
+            "description": "Mitigation, resolution, or decision.",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "reviewDueDate": {
+            "format": "date",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "impact",
+          "status",
+          "severity",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "PublicProjectRaidLog": {
+        "description": "Risks, issues, and change requests of one Project. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PublicProjectRaidEntry"
             },
             "type": "array"
           },
@@ -9988,6 +10147,83 @@
         ]
       }
     },
+    "/api/v1/agent-telemetry/v1/logs": {
+      "post": {
+        "description": "OTLP/HTTP JSON logs receiver for coding agent telemetry. Point `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` at this path. Only `claude_code.api_request` records are read, and only their token counts, estimated cost, model, time, and the `mukuroji.agent_instance` attribute; every other attribute, including prompts, is dropped. Usage is attributed to the credential owner's Agent Runs by time when read.",
+        "operationId": "exportPublicAgentTelemetryLogs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTelemetryExportLogsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTelemetryExportLogsResponse"
+                }
+              }
+            },
+            "description": "Usage added. `partialSuccess` counts usage records the receiver refused; a retried export adds nothing.",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "description": "The body is not OTLP/HTTP JSON (`Content-Type: application/json`)."
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Receive coding agent token usage as OpenTelemetry logs",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
     "/api/v1/me": {
       "get": {
         "description": "Returns the Workspace member that owns the credential, so a client can refer to the owner without being told the member ID separately.",
@@ -10241,6 +10477,91 @@
           }
         ],
         "summary": "List the active members of a Project",
+        "tags": [
+          "Directory"
+        ]
+      }
+    },
+    "/api/v1/projects/{projectId}/raid-log": {
+      "get": {
+        "description": "Lists every risk, issue, and change request of a Project, open and closed, newest first, with each entry's severity. The credential owner needs viewer access to the Project, as in the Web log panel.",
+        "operationId": "listPublicProjectRaidLog",
+        "parameters": [
+          {
+            "description": "Project ID です。",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProjectRaidLog"
+                }
+              }
+            },
+            "description": "Project log",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List a Project's risks, issues, and change requests",
         "tags": [
           "Directory"
         ]

@@ -45,6 +45,23 @@ describe('Email notification sender', () => {
       expect(text).not.toContain('evil')
     }
   })
+  test('prefixes the Work Item key and links its key page', () => {
+    const rendered = renderEmailNotification({
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'CORE-12' },
+    }, 'https://app.example.test/ignored')
+    expect(rendered.subject).toBe('[mukuroji] CORE-12 Review')
+    expect(rendered.text.split('\n')[0]).toBe('CORE-12 Review')
+    expect(rendered.text).toContain('CORE-12: https://app.example.test/browse/CORE-12')
+  })
+  test('ignores a stored key that is not canonical', () => {
+    const rendered = renderEmailNotification({
+      ...delivery,
+      notification: { ...delivery.notification, title: 'Review', workItemKey: 'core-12' },
+    }, 'https://app.example.test')
+    expect(rendered.subject).toBe('[mukuroji] Review')
+    expect(rendered.text).not.toContain('/browse/')
+  })
   test('suppresses missing and unverified recipients and retries identity failures', async () => {
     expect(await sender({ kind: 'missing' }).send(delivery)).toMatchObject({ suppressed: true, code: 'EmailRecipientMissing' })
     expect(await sender({ kind: 'unverified' }).send(delivery)).toMatchObject({ suppressed: true, code: 'EmailRecipientUnverified' })
@@ -69,5 +86,34 @@ describe('Email notification sender', () => {
     expect(await sender(verified, named('MessageRejected')).send(delivery)).toEqual({ succeeded: false, retryable: false, code: 'EmailDeliveryRejected' })
     expect(await sender(verified, named('TooManyRequestsException')).send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailRateLimited' })
     expect(await sender(verified, new Error('socket hang up')).send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailDeliveryUnavailable' })
+  })
+  test('writes a coded summary in the recipient language and keeps a plain stored summary', async () => {
+    const coded: ChannelDelivery = { ...delivery, notification: { ...delivery.notification, title: undefined,
+      summary: 'Work Item "Release" is overdue.', message: { code: 'work-item.overdue', params: { title: 'Release' } } } }
+    const english = renderEmailNotification(coded, 'https://app.example.test', 'en')
+    const japanese = renderEmailNotification(coded, 'https://app.example.test', 'ja')
+    expect(english.subject).toBe('[mukuroji] Work Item "Release" is overdue.')
+    expect(japanese.subject).toBe('[mukuroji] 「Release」は期限を過ぎています。')
+    expect(japanese.text).toContain('「Release」は期限を過ぎています。')
+    expect(renderEmailNotification(coded, 'https://app.example.test').text).toContain('「Release」は期限を過ぎています。')
+    expect(renderEmailNotification(delivery, 'https://app.example.test', 'en').text).toContain('Please review')
+    const messages: EmailMessage[] = []
+    const send = createEmailNotificationSender({
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test',
+      readRecipient: async () => ({ kind: 'verified', address: 'member@example.test' }),
+      readLocale: async (recipient) => recipient.memberKey === 'member@example.test' ? 'en' : 'ja',
+      sendEmail: async (message) => { messages.push(message) },
+    })
+    expect(await send(coded)).toEqual({ succeeded: true, retryable: false })
+    expect(messages[0]?.text).toContain('Work Item "Release" is overdue.')
+  })
+  test('retries without sending when the recipient language cannot be read', async () => {
+    const send = createEmailNotificationSender({
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test',
+      readRecipient: async () => ({ kind: 'verified', address: 'member@example.test' }),
+      readLocale: async () => { throw new Error('directory unavailable') },
+      sendEmail: async () => { throw new Error('Must not send') },
+    })
+    expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
   })
 })

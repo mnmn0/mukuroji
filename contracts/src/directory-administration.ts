@@ -10,6 +10,15 @@ export const DIRECTORY_REORDER_MAX_ITEMS = 90
 /** Longest Japanese or English Team or Project name that creating or renaming stores. */
 export const DIRECTORY_DISPLAY_NAME_MAX_LENGTH = 500
 
+/** Longest Team description that a Team profile update stores. */
+export const DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH = 2000
+
+/** Project roles that adding a member to every Project of a Team can grant. */
+export const DIRECTORY_TEAM_MEMBER_ROLES = ['manager', 'member', 'viewer'] as const
+
+/** Project role that adding a member to every Project of a Team grants. */
+export type DirectoryTeamMemberRole = typeof DIRECTORY_TEAM_MEMBER_ROLES[number]
+
 /** Project row shown to Workspace administrators, including an archived Project. */
 export type DirectoryAdministrationProject = {
   /** Stable Project identifier. It never changes when the Project is renamed. */
@@ -34,6 +43,12 @@ export type DirectoryAdministrationTeam = {
   nameEn: string
   /** ISO 8601 time the Team was archived, when it is archived. */
   archivedAt?: string
+  /** Free-text description of the Team, when one is set. */
+  description?: string
+  /** Member key of the Team leader, when one is set. */
+  leaderMemberKey?: string
+  /** Revision of the description and leader, 0 before the first change. */
+  profileRevision?: number
   /** Projects of the Team in display order, archived ones included. */
   projects: DirectoryAdministrationProject[]
 }
@@ -60,6 +75,51 @@ export type RenameDirectoryProjectInput = {
   nameEn?: string
   /** Sidebar color. The current color is kept when omitted. */
   tone?: DirectoryProjectTone
+}
+
+/** Request body that replaces the description and leader of an active Team. */
+export type UpdateDirectoryTeamProfileInput = {
+  /** New description. An empty value clears it. Line breaks and tabs are kept. */
+  description: string
+  /** Member key of an active Workspace member who leads the Team, or null for no leader. */
+  leaderMemberKey: string | null
+  /** Profile revision the editor loaded; a newer stored revision refuses the change. */
+  expectedProfileRevision: number
+}
+
+/** Response of a Team profile update. */
+export type UpdateDirectoryTeamProfileResponse = {
+  /** Updated Team identifier. */
+  teamId: string
+  /** Stored description, when one is set. */
+  description?: string
+  /** Stored leader, when one is set. */
+  leaderMemberKey?: string
+  /**
+   * Profile revision now stored. An unchanged profile keeps its revision, so the editor sends
+   * this value, not a guess, as the expected revision of its next save.
+   */
+  profileRevision: number
+}
+
+/** Request body that adds one Workspace member to every active Project of a Team. */
+export type AddDirectoryTeamMemberInput = {
+  /** Member key of an active Workspace member. */
+  memberKey: string
+  /** Project role granted on each Project the member does not belong to yet. */
+  role: DirectoryTeamMemberRole
+}
+
+/** Response of adding a member to every active Project of a Team. */
+export type AddDirectoryTeamMemberResponse = {
+  /** Team identifier. */
+  teamId: string
+  /** Member key the roles were granted to. */
+  memberKey: string
+  /** Projects the member was added to. */
+  addedProjectIds: string[]
+  /** Projects the member already belonged to, whose roles were left unchanged. */
+  existingProjectIds: string[]
 }
 
 /** Request body that sets the display order of every active Team. */
@@ -197,6 +257,9 @@ function isDirectoryAdministrationTeam(value: unknown): value is DirectoryAdmini
     typeof value.nameJa === 'string' &&
     typeof value.nameEn === 'string' &&
     (value.archivedAt === undefined || typeof value.archivedAt === 'string') &&
+    (value.description === undefined || typeof value.description === 'string') &&
+    (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+    (value.profileRevision === undefined || Number.isSafeInteger(value.profileRevision)) &&
     Array.isArray(value.projects) &&
     value.projects.every(isDirectoryAdministrationProject)
 }
@@ -263,4 +326,49 @@ function isCount(value: unknown): value is number {
  */
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Returns whether a value is a Project role that adding a member to a Team can grant.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value is one of the Project roles.
+ */
+export function isDirectoryTeamMemberRole(value: unknown): value is DirectoryTeamMemberRole {
+  return DIRECTORY_TEAM_MEMBER_ROLES.some((role) => role === value)
+}
+
+/**
+ * Returns whether a value is the response of a Team profile update.
+ *
+ * @param value - Untrusted response body.
+ * @returns Whether the response has the expected shape.
+ */
+export function isUpdateDirectoryTeamProfileResponse(
+  value: unknown,
+): value is UpdateDirectoryTeamProfileResponse {
+  return isObject(value) &&
+    typeof value.teamId === 'string' &&
+    (value.description === undefined || typeof value.description === 'string') &&
+    (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+    Number.isSafeInteger(value.profileRevision) &&
+    Number(value.profileRevision) >= 0
+}
+
+/**
+ * Returns whether a value is the response of adding a member to every Project of a Team.
+ *
+ * @param value - Untrusted response body.
+ * @returns Whether the response has the expected shape.
+ */
+export function isAddDirectoryTeamMemberResponse(
+  value: unknown,
+): value is AddDirectoryTeamMemberResponse {
+  return isObject(value) &&
+    typeof value.teamId === 'string' &&
+    typeof value.memberKey === 'string' &&
+    Array.isArray(value.addedProjectIds) &&
+    value.addedProjectIds.every((id) => typeof id === 'string') &&
+    Array.isArray(value.existingProjectIds) &&
+    value.existingProjectIds.every((id) => typeof id === 'string')
 }

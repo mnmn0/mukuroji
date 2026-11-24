@@ -7,6 +7,7 @@ import {
 import { createTeamIssue } from '../../issues/api'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MyTasksQuickCreateInput } from '../model/myTasksQuickCreate'
+import { revalidateWorkItemKeyPrefixes } from '../../issues/queries/workItemKeyPrefixesCache'
 
 /** Inputs for creating one Work Item from the My Tasks quick create form. */
 export type CreateMyTasksQuickCreateWorkItemOptions = {
@@ -64,5 +65,6 @@ export async function createMyTasksQuickCreateWorkItem({
   ))
   // The Work Item exists once the create succeeds; a failed read must not invite a duplicate
   // submit, so the list is left to its next revalidation.
+  void revalidateWorkItemKeyPrefixes()
   await refreshWorkItems().catch(() => undefined)
 }

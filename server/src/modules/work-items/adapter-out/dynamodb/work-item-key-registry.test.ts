@@ -3,7 +3,10 @@ import { TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  changeTeamWorkItemKeyPrefix,
   isWorkItemKeyRegistryRecord,
+  listWorkItemKeyPrefixes,
+  readTeamWorkItemKeyPrefixState,
   readWorkItemKeyLocation,
 } from './work-item-key-registry'
 
@@ -48,18 +51,65 @@ function createRegistryTable() {
         return { Attributes: structuredClone(row) }
       }
       if (command.constructor.name === 'TransactWriteCommand') {
-        const items: Array<{ Put: { Item: Row } }> = Object(input).TransactItems
-        const reasons = items.map(({ Put }) => ({
-          Code: rows.has(id(Put.Item)) ? 'ConditionalCheckFailed' : 'None',
-        }))
+        /** One transaction item in the shapes the registry sends. */
+        type Item = {
+          /** Row to create only when its key is free. */
+          Put?: { Item: Row }
+          /** Counter update guarded by its expected prefix. */
+          Update?: { Key: Row; ExpressionAttributeValues: Record<string, unknown> }
+          /** Check that a row still belongs to the expected Team. */
+          ConditionCheck?: { Key: Row; ExpressionAttributeValues: Record<string, unknown> }
+        }
+        const items: Item[] = Object(input).TransactItems
+        /**
+         * Reports whether one transaction item's condition holds.
+         *
+         * @param item - Transaction item.
+         * @returns Whether the condition holds.
+         */
+        const passes = (item: Item) => {
+          if (item.Put) return !rows.has(id(item.Put.Item))
+          if (item.Update) {
+            const row = rows.get(id(item.Update.Key))
+            const values = item.Update.ExpressionAttributeValues
+            return row?.entryType === values[':counter'] && row?.keyPrefix === values[':expected']
+          }
+          if (item.ConditionCheck) {
+            return rows.get(id(item.ConditionCheck.Key))?.teamId === item.ConditionCheck.ExpressionAttributeValues[':teamId']
+          }
+          return true
+        }
+        const reasons = items.map((item) => ({ Code: passes(item) ? 'None' : 'ConditionalCheckFailed' }))
         if (reasons.some((reason) => reason.Code !== 'None')) {
           throw Object.assign(new Error('Transaction cancelled.'), {
             name: 'TransactionCanceledException',
             CancellationReasons: reasons,
           })
         }
-        for (const { Put } of items) rows.set(id(Put.Item), structuredClone(Put.Item))
+        for (const item of items) {
+          if (item.Put) rows.set(id(item.Put.Item), structuredClone(item.Put.Item))
+          const update = item.Update
+          if (update) {
+            const row = rows.get(id(update.Key))
+            if (row) row.keyPrefix = update.ExpressionAttributeValues[':keyPrefix']
+          }
+        }
         return {}
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        // Pages of one row exercise the continuation loop.
+        const values = Object(input.ExpressionAttributeValues)
+        const matches = [...rows.values()]
+          .filter((row) => row.directoryTeamId === values[':partition'] &&
+            String(row.issueId).startsWith(String(values[':prefix'])))
+          .sort((left, right) => String(left.issueId).localeCompare(String(right.issueId)))
+        const after = input.ExclusiveStartKey === undefined ? undefined : String(Object(input.ExclusiveStartKey).issueId)
+        const remaining = matches.filter((row) => after === undefined || String(row.issueId) > after)
+        const page = remaining.slice(0, 1)
+        return {
+          Items: page.map((row) => structuredClone(row)),
+          ...(remaining.length > 1 ? { LastEvaluatedKey: { directoryTeamId: page[0]?.directoryTeamId, issueId: page[0]?.issueId } } : {}),
+        }
       }
       throw new Error(`Unexpected command: ${command.constructor.name}`)
     },
@@ -184,6 +234,81 @@ describe('Work Item key allocation', () => {
 
     await expect(allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW))
       .rejects.toMatchObject({ status: 503, code: 'InvalidWorkItemKeyRegistry' })
+  })
+})
+
+describe('Work Item key prefix listing', () => {
+  test('lists every reserved prefix of the Workspace with its Team', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'product-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'other-ws', 'design', NOW)
+
+    expect(await listWorkItemKeyPrefixes(table.client, TABLE, 'ws')).toEqual([
+      { keyPrefix: 'BACK', teamId: 'backend' },
+      { keyPrefix: 'PT', teamId: 'platform-team' },
+      { keyPrefix: 'PT2', teamId: 'product-team' },
+    ])
+  })
+
+  test('fails closed on a malformed prefix row', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    const row = table.rows.get('ws#work-item-key-registry\0prefix#PT')
+    if (row) row.keyPrefix = 'pt'
+
+    await expect(listWorkItemKeyPrefixes(table.client, TABLE, 'ws')).rejects.toMatchObject({
+      code: 'InvalidWorkItemKeyRegistry',
+    })
+  })
+})
+
+describe('Team key prefix change', () => {
+  /** Changes the prefix of a Team with no extra transaction items. */
+  const change = (table: ReturnType<typeof createRegistryTable>, teamId: string, keyPrefix: string, expectedKeyPrefix: string | null) =>
+    changeTeamWorkItemKeyPrefix(table.client, TABLE, {
+      directoryId: 'ws', teamId, keyPrefix, expectedKeyPrefix, now: NOW, transactItems: [],
+    })
+
+  test('gives new Work Items the new prefix, keeps numbering, and keeps old keys resolvable', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+
+    expect(await change(table, 'platform-team', 'PLAT', 'PT')).toEqual({
+      keyPrefix: 'PLAT', lastNumber: 2, previousPrefixes: ['PT'],
+    })
+    expect((await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)).key).toBe('PLAT-3')
+    // Going back to an earlier prefix continues the number, so PT-1 and PT-2 are never reused.
+    await change(table, 'platform-team', 'PT', 'PLAT')
+    expect((await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)).key).toBe('PT-4')
+    expect(await readTeamWorkItemKeyPrefixState(table.client, TABLE, 'ws', 'platform-team')).toEqual({
+      keyPrefix: 'PT', lastNumber: 4, previousPrefixes: ['PLAT'],
+    })
+    for (const row of table.rows.values()) expect(isWorkItemKeyRegistryRecord(row)).toBe(true)
+  })
+
+  test('sets the first prefix of a Team before its first key', async () => {
+    const table = createRegistryTable()
+
+    expect(await change(table, 'platform-team', 'CORE', null)).toEqual({
+      keyPrefix: 'CORE', lastNumber: 0, previousPrefixes: [],
+    })
+    expect((await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)).key).toBe('CORE-1')
+  })
+
+  test('refuses a prefix held by another Team, a stale expected prefix, and an invalid prefix', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW)
+
+    await expect(change(table, 'backend', 'PT', 'BACK')).rejects.toMatchObject({ status: 409, code: 'WorkItemKeyPrefixTaken' })
+    await expect(change(table, 'backend', 'API', 'OLD')).rejects.toMatchObject({ status: 409, code: 'WorkItemKeyPrefixChanged' })
+    await expect(change(table, 'backend', 'api', 'BACK')).rejects.toMatchObject({ status: 400 })
+    // A retry of a change that already landed succeeds.
+    await change(table, 'backend', 'API', 'BACK')
+    expect((await change(table, 'backend', 'API', 'BACK')).keyPrefix).toBe('API')
   })
 })
 
