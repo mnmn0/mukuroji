@@ -25,11 +25,14 @@ import { getEnv } from './runtime-config'
 import { decodeJwtPayload, readNumericClaim, readUserAttribute } from './token-claims'
 
 /**
- * Links a refreshed token set to the access token it replaces.
+ * Marks a token set as a refresh of an existing sign-in, linked to the access token it replaces.
  */
 export type AuthenticationSessionContinuation = {
-  /** Access token the client used before the refresh; it may already be expired. */
-  previousAccessToken: string
+  /**
+   * Access token the client used before the refresh; it may already be expired. Absent when the
+   * client did not send one, so nothing carries over.
+   */
+  previousAccessToken?: string
 }
 
 /**
@@ -40,7 +43,7 @@ export type AuthenticationSessionContinuation = {
  * @param requestBody - Login request body.
  * @param requestAuditContext - Audit context of the login request.
  * @param verifiedAuthenticationMethods - Authentication methods verified for the session.
- * @param continuation - Previous access token when the token set came from a refresh.
+ * @param continuation - Set when the token set came from a refresh, which is not a new sign-in.
  * @param loadedUser - Cognito user already read with the same access token, if any.
  * @returns The HTTP response carrying the session tokens.
  */
@@ -89,7 +92,10 @@ export async function createAuthenticationResponse(
       email: readUserAttribute(user, 'email') ?? principal.userKey,
       name: readUserAttribute(user, 'name'),
     }, auditContext)
-    const claims = decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
+    if (!continuation) {
+      await recordMemberSignIn(principal.directoryId, principal.userKey)
+    }
+    const claims =decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
     const authenticatedAt = readNumericClaim(claims?.auth_time) ??
       readNumericClaim(claims?.iat) ??
       Math.floor(Date.now() / 1_000)
@@ -102,7 +108,7 @@ export async function createAuthenticationResponse(
       ]),
     ]
     const sessionId = createHash('sha256').update(tokens.AccessToken).digest('base64url')
-    const continued = continuation
+    const continued = continuation?.previousAccessToken
       ? await continueAuthenticationSession(
         principal.directoryId,
         continuation.previousAccessToken,
@@ -128,6 +134,24 @@ export async function createAuthenticationResponse(
     refreshToken: tokens.RefreshToken,
     expiresAt: Date.now() + (tokens.ExpiresIn ?? 3600) * 1000,
     tokenType: tokens.TokenType ?? 'Bearer',
+  }
+}
+
+/**
+ * Records a new sign-in as the member's last sign-in. A token refresh is not a sign-in and does
+ * not call this. Failing to record never fails the sign-in, because the time is only shown to
+ * administrators for reference.
+ *
+ * @param workspaceId - Workspace of the member.
+ * @param memberKey - Member that signed in.
+ */
+async function recordMemberSignIn(workspaceId: string, memberKey: string) {
+  const { workspaceAccess } = workspaceDependencies
+  if (!workspaceAccess.recordMemberSignIn) return
+  try {
+    await workspaceAccess.recordMemberSignIn(workspaceId, memberKey)
+  } catch (error) {
+    console.error(error)
   }
 }
 

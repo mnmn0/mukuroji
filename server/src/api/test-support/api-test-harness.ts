@@ -728,6 +728,7 @@ function createWorkspaceAccessFake(
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
     revokeMemberSignIns: async () => undefined,
+    recordMemberSignIn: async () => undefined,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
@@ -1895,6 +1896,7 @@ function configureFakeProjectClients(
       name?: string
     }>,
     workspaceReconciliations: [] as string[],
+    workspaceSignIns: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
       code: string
@@ -3027,6 +3029,9 @@ function configureFakeProjectClients(
         }
 
         return createWorkspaceMember(input.memberKey)
+      },
+      async recordMemberSignIn(_workspaceId, memberKey) {
+        calls.workspaceSignIns.push(memberKey)
       },
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
         calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })

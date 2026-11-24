@@ -729,6 +729,8 @@ test('retries membership reconcile on normal login after password completion suc
     'demo@example.com',
     'demo@example.com',
   ])
+  // Only the sign-in that reached the member row is kept as the last sign-in.
+  expect(calls.workspaceSignIns).toEqual(['demo@example.com'])
   expectStableWorkspaceMutationAuditContexts(
     calls.workspaceMutationAuditContexts.slice(0, 1),
     {

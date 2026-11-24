@@ -725,7 +725,7 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         {},
         undefined,
         [],
-        previousAccessToken ? { previousAccessToken } : undefined,
+        previousAccessToken ? { previousAccessToken } : {},
       ))
     } catch (error) {
       return toRefreshErrorResponse(c, error)

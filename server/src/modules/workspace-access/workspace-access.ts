@@ -220,12 +220,23 @@ export type WorkspaceAccessCapabilities = {
   canManageAdmins: boolean
 }
 
+/**
+ * Member row of the administration snapshot, with what only administrators may see.
+ */
+export type WorkspaceAccessMember = WorkspaceMember & {
+  /**
+   * When the member last signed in (ISO 8601), shown to owners and admins only. Absent when no
+   * sign-in has been recorded since the time was first kept, or for other viewers.
+   */
+  lastSignedInAt?: string
+}
+
 /** Workspace access 画面用の snapshot response です。 */
 export type WorkspaceAccessResponse = {
   /** ログイン中ユーザーの active membership です。 */
   currentMember: WorkspaceMember
   /** Workspace の member 一覧です。 */
-  members: WorkspaceMember[]
+  members: WorkspaceAccessMember[]
   /** Workspace の invitation 一覧です。 */
   invitations: WorkspaceInvitation[]
   /** ログイン中 member の操作権限です。 */
@@ -613,6 +624,14 @@ export interface WorkspaceAccessClient {
    * @param memberKey - Member that was signed out.
    */
   revokeMemberSignIns?(workspaceId: string, memberKey: string): Promise<void>
+  /**
+   * Records the time of an active member's new sign-in, which administrators see as the last
+   * sign-in. It does not change the member's version, so it never conflicts with an update.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that signed in.
+   */
+  recordMemberSignIn?(workspaceId: string, memberKey: string): Promise<void>
   /** Directory authority から owner 以外の member を冪等に停止します。 */
   deprovisionDirectoryMember?(
     workspaceId: string,
@@ -824,6 +843,38 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
   }
 
+  /**
+   * Records the time of an active member's new sign-in on the member row.
+   *
+   * The time only moves forward and the member's `version` and `updatedAt` stay as they are, so
+   * a concurrent role or name change is not refused because of a sign-in.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that signed in.
+   */
+  async recordMemberSignIn(workspaceId: string, memberKey: string) {
+    await this.ensureLocalTable()
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizeRequired(workspaceId, 'Workspace ID'),
+          recordKey: createMemberRecordKey(normalizeMemberKey(memberKey)),
+        },
+        UpdateExpression: 'SET lastSignedInAt = :now',
+        ConditionExpression:
+          'attribute_exists(recordKey) AND #status = :active AND ' +
+          '(attribute_not_exists(lastSignedInAt) OR lastSignedInAt < :now)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active', ':now': this.clock().toISOString() },
+      }))
+    } catch (error) {
+      // A missing or deactivated member has no sign-in to show, and a later time already kept wins.
+      if (isAwsError(error, 'ConditionalCheckFailedException')) return
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
   /** Builds a commit-time guard for one currently active Workspace member.
    *
    * @param workspaceId Owning Workspace identifier.
@@ -881,9 +932,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   /** 管理画面用の Workspace access snapshot を取得します。 */
   async getAccessSnapshot(workspaceId: string, actorMemberKey: string) {
     const items = await this.queryItems(workspaceId)
-    const members = items
-      .filter((item) => isRecord(item) && item.entryType === 'workspace-member')
-      .map(toWorkspaceMember)
+    const memberItems = items.filter((item) => isRecord(item) && item.entryType === 'workspace-member')
+    const members = memberItems.map(toWorkspaceMember)
     const invitations = items
       .filter((item) => isRecord(item) && item.entryType === 'workspace-invitation')
       .map((item) => toWorkspaceInvitation(item, this.clock()))
@@ -894,9 +944,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
     }
 
+    const canSeeSignIns = currentMember.role === 'owner' || currentMember.role === 'admin'
+    const listedMembers: WorkspaceAccessMember[] = members.map((member, index) => {
+      const lastSignedInAt = canSeeSignIns ? readLastSignedInAt(memberItems[index]) : undefined
+      return lastSignedInAt ? { ...member, lastSignedInAt } : member
+    })
+
     return {
       currentMember,
-      members: members.sort(compareWorkspaceMembers),
+      members: listedMembers.sort(compareWorkspaceMembers),
       invitations: invitations.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
       capabilities: capabilitiesForRole(currentMember.role),
     } satisfies WorkspaceAccessResponse
@@ -4144,6 +4200,21 @@ function readSignInCutoff(value: unknown) {
   const time = Date.parse(value)
   if (Number.isNaN(time) || new Date(time).toISOString() !== value) throw invalidWorkspaceDataError()
   return value
+}
+
+/**
+ * Reads the recorded last sign-in of a member item. A missing or malformed value reads as no
+ * record instead of failing the member list, because it is only shown for reference.
+ *
+ * @param item - Stored member item.
+ * @returns The canonical UTC timestamp, or undefined.
+ */
+function readLastSignedInAt(item: unknown) {
+  if (!isRecord(item) || typeof item.lastSignedInAt !== 'string') return undefined
+  const time = Date.parse(item.lastSignedInAt)
+  return Number.isNaN(time) || new Date(time).toISOString() !== item.lastSignedInAt
+    ? undefined
+    : item.lastSignedInAt
 }
 
 function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {

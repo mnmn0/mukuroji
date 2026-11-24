@@ -49,6 +49,7 @@ import { sendBulkWorkspaceInvitations, type BulkInvitationOutcome } from '../mut
 import {
   createWorkspaceMemberCsv,
   emptyWorkspaceMemberFilter,
+  workspaceMemberSorts,
   filterWorkspaceMembers,
   type WorkspaceMemberFilter,
 } from '../model/memberDirectory'
@@ -950,6 +951,7 @@ function WorkspaceMemberLedger({
       <WorkspaceMemberFilterBar
         filter={filter}
         members={visibleMembers}
+        showSignIns={access.capabilities.canManageMembers}
         t={t}
         totalCount={access.members.length}
         onChange={setFilter}
@@ -1050,6 +1052,19 @@ function WorkspaceMemberLedger({
                       <p className="mt-1 text-xs font-medium text-[var(--workbench-muted-soft)]">
                         {t('workspace.access.updatedAt').replace('{date}', formatAccessDate(member.updatedAt, locale))}
                       </p>
+                      {access.capabilities.canManageMembers ? (
+                        <p
+                          className="mt-0.5 text-xs font-medium text-[var(--workbench-muted-soft)]"
+                          data-testid={`workspace-member-last-sign-in-${createAccessTestId(member.memberKey)}`}
+                        >
+                          {t('workspace.access.lastSignedInAt').replace(
+                            '{date}',
+                            member.lastSignedInAt
+                              ? formatAccessDate(member.lastSignedInAt, locale)
+                              : t('workspace.access.lastSignedInAt.none'),
+                          )}
+                        </p>
+                      ) : null}
                     </div>
                   </td>
                   <td className="px-4 py-4 max-[760px]:py-2">
@@ -1182,6 +1197,7 @@ function downloadCsv(csv: string, fileName: string) {
 function WorkspaceMemberFilterBar({
   filter,
   members,
+  showSignIns,
   t,
   totalCount,
   onChange,
@@ -1190,6 +1206,8 @@ function WorkspaceMemberFilterBar({
   filter: WorkspaceMemberFilter
   /** Members the filter keeps, which the export writes. */
   members: readonly WorkspaceMember[]
+  /** Whether the viewer sees last sign-ins, which offers the order by last sign-in. */
+  showSignIns: boolean
   /** Translates a message key. */
   t: (key: MessageKey) => string
   /** Number of members before filtering. */
@@ -1202,6 +1220,7 @@ function WorkspaceMemberFilterBar({
       createdAt: t('workspace.access.export.createdAt'),
       deactivatedAt: t('workspace.access.export.deactivatedAt'),
       email: t('workspace.access.export.email'),
+      lastSignedInAt: t('workspace.access.export.lastSignedInAt'),
       name: t('workspace.access.export.name'),
       role: t('workspace.access.export.role'),
       status: t('workspace.access.export.status'),
@@ -1256,6 +1275,24 @@ function WorkspaceMemberFilterBar({
           {workspaceRoles.map((role) => (
             <option key={role} value={role}>{t(`workspace.access.role.${role}`)}</option>
           ))}
+        </select>
+      </label>
+      <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+        {t('workspace.access.sort.label')}
+        <select
+          className="workbench-input min-h-10 px-3 text-sm"
+          data-testid="workspace-member-sort"
+          value={filter.sort}
+          onChange={(event) => {
+            const sort = workspaceMemberSorts.find((value) => value === event.target.value)
+            if (sort) onChange({ ...filter, sort })
+          }}
+        >
+          {workspaceMemberSorts
+            .filter((sort) => showSignIns || sort !== 'last-sign-in')
+            .map((sort) => (
+              <option key={sort} value={sort}>{t(`workspace.access.sort.${sort}`)}</option>
+            ))}
         </select>
       </label>
       <button

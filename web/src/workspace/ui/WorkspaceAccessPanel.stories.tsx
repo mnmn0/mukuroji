@@ -8,6 +8,7 @@ const ownerMember = {
   createdAt: '2026-07-01T00:00:00.000Z',
   email: 'owner@example.com',
   id: 'member-owner',
+  lastSignedInAt: '2026-07-11T07:45:00.000Z',
   memberKey: 'owner@example.com',
   name: 'Owner User',
   role: 'owner',
@@ -58,6 +59,7 @@ const standardAccess = {
       createdAt: '2026-07-02T00:00:00.000Z',
       email: 'admin@example.com',
       id: 'member-admin',
+      lastSignedInAt: '2026-07-08T00:30:00.000Z',
       memberKey: 'admin@example.com',
       name: 'Admin User',
       role: 'admin',
@@ -81,6 +83,7 @@ const standardAccess = {
       deactivatedAt: '2026-07-10T06:00:00.000Z',
       email: 'guest@example.com',
       id: 'member-guest',
+      lastSignedInAt: '2026-07-09T02:00:00.000Z',
       memberKey: 'guest@example.com',
       name: 'Guest User',
       role: 'guest',
@@ -333,5 +336,25 @@ export const MemberSearch: Story = {
     await expect(canvas.queryByTestId('workspace-member-member-example-com')).toBeNull()
     await userEvent.selectOptions(canvas.getByTestId('workspace-member-role-filter'), 'guest')
     await expect(canvas.getByTestId('workspace-member-filter-empty')).toBeVisible()
+  },
+}
+
+/**
+ * An administrator lists the members who have not signed in for the longest time first; a member
+ * without a recorded sign-in comes first.
+ */
+export const MemberLastSignIn: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('workspace-member-last-sign-in-member-example-com'))
+      .toHaveTextContent('最終ログイン: 記録なし')
+    await userEvent.selectOptions(canvas.getByTestId('workspace-member-sort'), 'last-sign-in')
+    const rows = within(canvas.getByTestId('workspace-member-ledger')).getAllByRole('row').slice(1)
+    await expect(rows.map((row) => row.getAttribute('data-testid'))).toEqual([
+      'workspace-member-member-example-com',
+      'workspace-member-admin-example-com',
+      'workspace-member-guest-example-com',
+      'workspace-member-owner-example-com',
+    ])
   },
 }

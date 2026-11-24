@@ -3689,3 +3689,75 @@ test('lists every member row, deactivated members included, for name readers', a
     ])
   expect((await client.listActiveMembers(workspaceId)).map((member) => member.memberKey)).toEqual(['sato@example.com'])
 })
+
+test('records a new sign-in without changing the member version, keeping a later time and ignoring others', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  let refused = false
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      if (refused) {
+        throw Object.assign(new Error('The conditional request failed'), {
+          name: 'ConditionalCheckFailedException',
+        })
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+  )
+
+  await client.recordMemberSignIn(workspaceId, 'Sato@Example.com')
+  refused = true
+  await expect(client.recordMemberSignIn(workspaceId, 'gone@example.com')).resolves.toBeUndefined()
+
+  expect(inputs[0]).toEqual({
+    TableName: 'WorkspaceAccessTable',
+    Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+    UpdateExpression: 'SET lastSignedInAt = :now',
+    ConditionExpression:
+      'attribute_exists(recordKey) AND #status = :active AND ' +
+      '(attribute_not_exists(lastSignedInAt) OR lastSignedInAt < :now)',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':active': 'active', ':now': now.toISOString() },
+  })
+})
+
+test('shows the last sign-in in the access snapshot to owners and admins only', async () => {
+  const signedInAt = '2026-07-10T09:30:00.000Z'
+  const createClient = (actorRole: WorkspaceMember['role']) => new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({
+      Items: [
+        toMemberItem(createWorkspaceMember('demo@example.com', actorRole)),
+        { ...toMemberItem(createWorkspaceMember('sato@example.com', 'member')), lastSignedInAt: signedInAt },
+        { ...toMemberItem(createWorkspaceMember('suzuki@example.com', 'member')), lastSignedInAt: 'yesterday' },
+      ],
+    })),
+    undefined,
+    false,
+    () => now,
+  )
+  const lastSignIns = async (actorRole: WorkspaceMember['role']) =>
+    (await createClient(actorRole).getAccessSnapshot(workspaceId, 'demo@example.com')).members
+      .map((member) => [member.memberKey, member.lastSignedInAt])
+  const administratorRoles: WorkspaceMember['role'][] = ['owner', 'admin']
+  const otherRoles: WorkspaceMember['role'][] = ['member', 'guest']
+
+  for (const role of administratorRoles) {
+    expect(await lastSignIns(role)).toEqual([
+      ['demo@example.com', undefined],
+      ['sato@example.com', signedInAt],
+      // A malformed stored value reads as no record instead of failing the list.
+      ['suzuki@example.com', undefined],
+    ])
+  }
+  for (const role of otherRoles) {
+    expect((await lastSignIns(role)).every(([, value]) => value === undefined)).toBe(true)
+  }
+  // Other readers of member rows never carry the time.
+  expect(await createClient('owner').getActiveMember(workspaceId, 'sato@example.com'))
+    .not.toHaveProperty('lastSignedInAt')
+})
