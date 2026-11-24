@@ -327,6 +327,7 @@ export const automationMessages = {
   'automation.team.description':
     'Rules, templates, recurring work, and runs owned by the Team. A manager of every Project in the Team can create and change them, and they act only on the Team\'s Work Items. Webhooks and Workspace-wide definitions are managed in Workspace settings.',
   'automation.team.select': 'Team',
+  'automation.team.retryScopes': 'Retry',
   'automation.team.loadScopes': 'Could not load what you can manage.',
   'automation.ownerTeam': 'Team: {team}',
 } as const

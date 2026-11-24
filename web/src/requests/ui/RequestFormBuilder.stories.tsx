@@ -51,6 +51,21 @@ export const Default: Story = {
   render: (args) => <InteractiveRequestFormBuilderStory {...args} />,
 }
 
+/**
+ * Team manager が自分の Team の form だけを編集し、Workspace scope を選べない状態です。
+ */
+export const TeamScopeOnly: Story = {
+  args: {
+    allowWorkspaceScope: false,
+    model: {
+      ...normalizeRequestForm(requestFormFixture),
+      scope: { type: 'team', teamId: projectDirectoryFixtures[0]?.id ?? 'core-team' },
+    },
+    teams: projectDirectoryFixtures.slice(0, 1),
+  },
+  render: (args) => <InteractiveRequestFormBuilderStory {...args} />,
+}
+
 function InteractiveRequestFormBuilderStory(args: RequestFormBuilderProps) {
   const [model, setModel] = useState(args.model)
 

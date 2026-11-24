@@ -323,6 +323,7 @@ export const automationMessages = {
   'automation.team.description':
     'Team が持つルール、テンプレート、繰り返し作業と実行履歴です。Team の全 Project の manager が作成・変更でき、その Team の Work Item だけを扱います。Webhook と Workspace 全体の定義は Workspace の設定で管理します。',
   'automation.team.select': 'Team',
+  'automation.team.retryScopes': '再読み込み',
   'automation.team.loadScopes': '管理できる範囲を読み込めませんでした。',
   'automation.ownerTeam': 'Team: {team}',
 } as const

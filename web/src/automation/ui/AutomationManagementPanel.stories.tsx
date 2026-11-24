@@ -146,3 +146,14 @@ export const Loading: Story = {
     isLoading: true,
   },
 }
+
+/** Team の設定で、所有 Team の定義だけを Webhook なしで管理している状態です。 */
+export const TeamOwnedDefinitions: Story = {
+  args: {
+    canViewWebhooks: false,
+    rules: [{ ...activeAutomationRuleFixture, ownerTeamId: 'core-team' }],
+    templates: [{ ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],
+    templateOptions: [workItemAutomationTemplateFixture, { ...workItemAutomationTemplateFixture, ownerTeamId: 'core-team' }],
+    webhooks: [],
+  },
+}

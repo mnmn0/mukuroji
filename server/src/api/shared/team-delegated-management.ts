@@ -8,12 +8,13 @@ import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-a
 import { workspaceDependencies } from './app-dependencies'
 import {
   hasEnterpriseWorkspacePermission,
+  listPermittedTeams,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
   type WorkspacePrincipal,
 } from './project-access'
-import { projectAccessAllows } from './workspace-access'
+import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
 
 /**
  * Returns whether the principal administers the whole Workspace's definitions.
@@ -67,12 +68,7 @@ export async function requireDelegatedManagement(
   }
   requireWorkspaceBusinessWrite(principal)
   const context = await requireTeamPermission(principal, ownerTeamId, 'manager')
-  const managedProjectIds = new Set(
-    context.projectAccesses
-      ?.filter((access) => projectAccessAllows(access, 'manager'))
-      .map((access) => access.projectId) ?? [],
-  )
-  if (!context.team.projects.every((project) => managedProjectIds.has(project.id))) {
+  if (!managesEveryTeamProject(context)) {
     throw new WorkspaceAccessError(
       403,
       'WorkspacePermissionDenied',
@@ -97,29 +93,26 @@ export async function listDelegatedManagementScopes(
   principal: WorkspacePrincipal,
   managePermission?: EnterprisePermissionId,
 ): Promise<AutomationManagementScopes> {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
-    principal.directoryId,
-    'ja',
-  )
-  if (managePermission !== undefined && principal.enterprisePermissions !== undefined) {
-    return hasEnterpriseWorkspacePermission(principal, managePermission)
-      ? { workspace: true, teamIds: directory.teams.map((team) => team.id) }
-      : { workspace: false, teamIds: [] }
+  if (
+    managePermission !== undefined && principal.enterprisePermissions !== undefined
+      ? hasEnterpriseWorkspacePermission(principal, managePermission)
+      : canAdministerWorkspace(principal)
+  ) {
+    return { workspace: true, teamIds: await listWorkspaceTeamIds(principal.directoryId) }
   }
-  if (canAdministerWorkspace(principal)) {
-    return { workspace: true, teamIds: directory.teams.map((team) => team.id) }
+  if (principal.enterprisePermissions !== undefined) return { workspace: false, teamIds: [] }
+  try {
+    requireWorkspaceBusinessWrite(principal)
+  } catch (error) {
+    if (isAccessDenied(error)) return { workspace: false, teamIds: [] }
+    throw error
   }
-  const teamIds: string[] = []
-  for (const team of directory.teams) {
-    try {
-      await requireDelegatedManagement(principal, team.id)
-      teamIds.push(team.id)
-    } catch (error) {
-      if (error instanceof AutomationError) throw error
-      if (!isAccessDenied(error)) throw error
-    }
+  // One directory read and one access-list read cover every Team (listPermittedTeams).
+  const managedTeams = await listPermittedTeams(principal, 'manager')
+  return {
+    workspace: false,
+    teamIds: managedTeams.filter(managesEveryTeamProject).map((context) => context.team.id),
   }
-  return { workspace: false, teamIds }
 }
 
 /**
@@ -178,6 +171,33 @@ async function requireAutomationOwnerTeam(workspaceId: string, ownerTeamId: stri
     )
   }
   return team
+}
+
+/**
+ * Lists every Team of the Workspace, all of which a Workspace administrator manages.
+ *
+ * @param workspaceId - Workspace whose Teams are listed.
+ * @returns Team identifiers in directory order.
+ */
+async function listWorkspaceTeamIds(workspaceId: string): Promise<string[]> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
+  return directory.teams.map((team) => team.id)
+}
+
+/**
+ * Tests whether a Team permission context manages every Project of the Team, because a Team
+ * definition acts on all of the Team's Work Items (ADR 0087).
+ *
+ * @param context - Team permission context of the principal.
+ * @returns Whether every Project of the Team is managed.
+ */
+function managesEveryTeamProject(context: TeamPermissionContext): boolean {
+  const managedProjectIds = new Set(
+    context.projectAccesses
+      ?.filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId) ?? [],
+  )
+  return context.team.projects.every((project) => managedProjectIds.has(project.id))
 }
 
 /**
