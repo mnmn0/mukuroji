@@ -1875,6 +1875,7 @@ export function TeamIssueScreen({
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       t={t}
                       tasks={visibleIssues}
+                      workingCalendar={workingCalendar}
                     />
                   ) : viewMode === 'gantt' ? (
                     <TaskGanttView

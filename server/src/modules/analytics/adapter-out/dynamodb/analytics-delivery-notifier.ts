@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { PutCommand } from '@aws-sdk/lib-dynamodb'
+import { createNotificationMessage, formatNotificationMessage } from '@mukuroji/contracts'
 import {
   calculateAuditExpiresAt,
   createAuditEvent,
@@ -109,6 +110,7 @@ export function createAnalyticsDeliveryAuditEvent(
       route: analyticsScheduleRoute,
     },
   })
+  const reportDeliveredMessage = createNotificationMessage('analytics.report-delivered')
   return createAuditEvent({
     context,
     eventType: ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,
@@ -116,11 +118,16 @@ export function createAnalyticsDeliveryAuditEvent(
     target: { type: 'analytics-snapshot', id: snapshotId },
     action: 'delivered',
     changes: [],
-    summary: 'A scheduled report snapshot is ready.',
+    summary: formatNotificationMessage(reportDeliveredMessage, 'en'),
     metadata: {
       actorMemberKey: 'system',
-      // Team reports carry their Team so external delivery re-checks the recipient's Team access.
-      ...(report.visibility === 'team' && report.teamId ? { teamId: report.teamId } : {}),
+      notificationMessage: reportDeliveredMessage,
+      // Team and Project reports carry their scope so external delivery re-checks the recipient's
+      // access to that Team or Project.
+      ...((report.visibility === 'team' || report.visibility === 'project') && report.teamId
+        ? { teamId: report.teamId }
+        : {}),
+      ...(report.visibility === 'project' && report.projectId ? { projectId: report.projectId } : {}),
       deepLink: createAnalyticsSnapshotDeepLink(report.id, snapshotId),
       notificationTitle: report.name,
       analyticsSnapshotId: snapshotId,

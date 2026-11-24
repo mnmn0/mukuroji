@@ -744,6 +744,14 @@ export function TaskScreen({
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const [localActiveTab, setLocalActiveTab] = useState<TaskTab>(initialTab)
+  // A link that asks for a tab while the screen stays mounted, such as one from a Work Item to its
+  // Project log, switches to it once per change of the requested tab. Losing the request, which
+  // falls back to the default table tab, leaves the current tab alone.
+  const [requestedTab, setRequestedTab] = useState<TaskTab>(initialTab)
+  if (requestedTab !== initialTab) {
+    setRequestedTab(initialTab)
+    if (initialTab !== 'table') setLocalActiveTab(initialTab)
+  }
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilter>('all')
   const [localDefinitionFilter, setLocalDefinitionFilter] = useState<WorkItemDefinitionFilter>({
@@ -1716,6 +1724,8 @@ export function TaskScreen({
     if (item.status !== 'succeeded') return false
     if (action.type === 'move') return action.targetProjectId !== projectId
     if (action.type === 'archive') return action.archived
+    // Handing a member's work over changes owners and contributors, never the Project.
+    if (action.type === 'reassign-member') return false
     return action.patch.assignedProjectId !== undefined &&
       action.patch.assignedProjectId !== projectId
   }, [projectId])

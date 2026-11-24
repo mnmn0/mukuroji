@@ -1,6 +1,10 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   isWorkItemProgressPercent,
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
+  WORK_ITEM_IMPORT_MAX_BYTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -15,6 +19,7 @@ import {
   type PublicDocumentContent,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
+  type PublicProjectRaidLog,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
   type PublicWorkItemDocument,
@@ -49,6 +54,7 @@ import {
   type ImportFieldMapping,
   type ImportDryRunReport,
   type ImportJob,
+  type ImportJobProgress,
   type ImportSource,
   type PublicWorkItemTemplateList,
   type PublicWorkItemTypeCatalog,
@@ -445,6 +451,17 @@ export interface PublicWorkItemService {
     job: ImportJob,
     write: boolean,
   ): Promise<void>
+  /**
+   * Reads how many rows and links an authorized import job has processed.
+   *
+   * @param principal - Caller that already passed the job's authorization.
+   * @param job - Import job.
+   * @returns The job's progress.
+   */
+  getImportProgress(
+    principal: DeveloperManagementPrincipal,
+    job: ImportJob,
+  ): Promise<ImportJobProgress>
   /** Worker と協調して未完了 import を cancel し、cancelled retry は成功扱いにします。 */
   cancelImport(
     principal: DeveloperManagementPrincipal,
@@ -458,6 +475,7 @@ export interface PublicWorkItemService {
     continuation: string | undefined,
     limit: number,
     includeStructure?: boolean,
+    filters?: PublicWorkItemExportFilters,
   ): Promise<{
     /** Export page に含まれる Work Items です。 */
     items: CanonicalWorkItem[]
@@ -466,6 +484,22 @@ export interface PublicWorkItemService {
     /** 次 page の store-bound opaque continuation です。 */
     nextContinuation?: string
   }>
+}
+
+/** Optional filters that narrow a Work Item export to one Team, Project, or field value. */
+export type PublicWorkItemExportFilters = {
+  /** Only Work Items owned by this Team. */
+  teamId?: string
+  /** Only Work Items assigned to this Project. */
+  assignedProjectId?: string
+  /** Only Work Items with this assignee. */
+  assigneeUserId?: string
+  /** Only Work Items in this workflow status. */
+  workflowStatusId?: string
+  /** Only Work Items of this Work Item Type. */
+  workItemTypeId?: string
+  /** Only Work Items updated after this timestamp. */
+  updatedAfter?: string
 }
 
 /** Filters for listing a Team's Agent Runs. */
@@ -515,6 +549,18 @@ export interface PublicDirectoryService {
     projectId: string,
   ): Promise<PublicProjectMemberList>
   /**
+   * Lists the risks, issues, and change requests of a Project, when the owner can view it.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project ID.
+   * @returns Every log entry, newest first, with its severity.
+   */
+  listProjectRaidLog(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    projectId: string,
+  ): Promise<PublicProjectRaidLog>
+  /**
    * Resolves a Work Item key to the Work Item it names; answers 404 alike for every key that names
    * no Work Item the owner can read.
    * @param credential - Authenticated developer credential.
@@ -563,6 +609,25 @@ export interface PublicDocumentService {
     workItemId: string,
     documentId: string,
   ): Promise<PublicDocumentContent>
+}
+
+/** Result of one accepted OTLP logs export. */
+export type PublicAgentTelemetryIngestResult = {
+  /** Usage records the export carried that the receiver refused. */
+  rejectedRecords: number
+  /** Whether the same export had already been added, as after an exporter retry. */
+  duplicate: boolean
+}
+
+/** Receiver of coding agent OpenTelemetry usage, attributed to the credential owner. */
+export interface PublicAgentTelemetryService {
+  /**
+   * Adds the model request usage of one OTLP/HTTP JSON logs export to the credential owner's totals.
+   * @param credential - Authenticated developer credential.
+   * @param body - Parsed `ExportLogsServiceRequest`.
+   * @returns How many usage records were refused and whether the export was a retry.
+   */
+  ingestLogs(credential: AuthenticatedDeveloperCredential, body: unknown): Promise<PublicAgentTelemetryIngestResult>
 }
 
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
@@ -891,6 +956,8 @@ export type PublicApiDependencies = {
   workItems: PublicWorkItemService
   /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
   agentRuns?: PublicAgentRunService
+  /** Agent telemetry receiver; telemetry routes report unavailable when it is not configured. */
+  agentTelemetry?: PublicAgentTelemetryService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
   /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
@@ -1155,6 +1222,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     c.header('Cache-Control', 'private, no-store')
     return c.json(await requireDirectoryService(dependencies).listProjectMembers(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('projectId'), 'Project ID'),
+    ))
+  })
+
+  router.get('/v1/projects/:projectId/raid-log', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireDirectoryService(dependencies).listProjectRaidLog(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('projectId'), 'Project ID'),
@@ -1495,6 +1572,26 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readAgentRunId(c.req.param('runId'), '/runId'),
     ))
+  })
+
+  router.post('/v1/agent-telemetry/v1/logs', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const contentType = (c.req.header('Content-Type') ?? '').split(';')[0]?.trim().toLowerCase()
+    if (contentType !== 'application/json') {
+      // OTLP/HTTP exporters send protobuf by default; only the JSON encoding is accepted.
+      throw new PublicApiServiceError(415, 'invalid_request', 'Set OTEL_EXPORTER_OTLP_PROTOCOL=http/json; only OTLP/HTTP JSON is accepted.')
+    }
+    const telemetry = requireAgentTelemetryService(dependencies)
+    const result = await telemetry.ingestLogs(credential, await readJson(c))
+    // OTLP partial success: the exporter must not retry refused records.
+    return c.json(result.rejectedRecords === 0
+      ? {}
+      : {
+          partialSuccess: {
+            rejectedLogRecords: String(result.rejectedRecords),
+            errorMessage: 'Some usage records were malformed or outside the accepted time window.',
+          },
+        })
   })
 
   router.post('/v1/agent-runs/:runId/heartbeat', async (c) => {
@@ -2780,6 +2877,18 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
   })
 
+  router.get('/developer/imports/:jobId/progress', async (c) => {
+    const principal = await requireManagementCapability(c, dependencies, 'canImport')
+    const job = await requireAuthorizedImportJob(
+      dependencies.imports,
+      dependencies.workItems,
+      principal,
+      readRouteId(c.req.param('jobId'), 'Import job ID'),
+      false,
+    )
+    return c.json(await dependencies.workItems.getImportProgress(principal, job))
+  })
+
   router.get('/developer/imports/:jobId/report', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     const job = await requireAuthorizedImportJob(
@@ -2808,12 +2917,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/exports', { format }),
+      managementCursorScope(principal, '/developer/exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit),
+        dependencies.workItems.export(principal, format, continuation, limit, false, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -2823,12 +2933,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/work-item-exports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canExport')
     const format = readExportFormat(c.req.query('format'))
+    const filters = readWorkItemExportFilters(c)
     return c.json(await createSignedContinuationPage(
       c,
       dependencies,
-      managementCursorScope(principal, '/developer/work-item-exports', { format }),
+      managementCursorScope(principal, '/developer/work-item-exports', { format, ...filters }),
       (continuation, limit) =>
-        dependencies.workItems.export(principal, format, continuation, limit, true),
+        dependencies.workItems.export(principal, format, continuation, limit, true, filters),
       (item) => item.updatedAt,
     ))
   })
@@ -4210,11 +4321,11 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
       `Import source mediaType must be ${expectedMediaType} for ${format}.`,
     )
   }
-  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > 200) {
+  if (!Array.isArray(body.mapping) || body.mapping.length === 0 || body.mapping.length > WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import mapping must contain between 1 and 200 fields.',
+      `Import mapping must contain between 1 and ${WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES} fields.`,
     )
   }
   const sourceFields = new Set<string>()
@@ -4228,6 +4339,14 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
     )
     const sourceField = readRequiredString(field.sourceField, 'Import sourceField')
     const targetField = readRequiredString(field.targetField, 'Import targetField')
+    // Bounds the mapping, which travels beside the source in the same Lambda payload.
+    if (sourceField.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH || targetField.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        `Import mapping ${index + 1} fields must be at most ${WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH} characters.`,
+      )
+    }
     if (sourceFields.has(sourceField) || targetFields.has(targetField)) {
       throw new PublicApiServiceError(
         400,
@@ -4305,17 +4424,28 @@ function readImportFileName(value: unknown) {
   return fileName
 }
 
+/**
+ * Reads the import source text from a request body.
+ *
+ * The size is counted with `measureWorkItemImportContentBytes`, after the escaping the request
+ * body and the Lambda event add, so that the request stays within the 6 MB synchronous Lambda
+ * payload.
+ *
+ * @param value - `source.content` from the request body.
+ * @returns The source text.
+ * @throws PublicApiServiceError when the text is empty, too large, or contains NUL.
+ */
 function readImportContent(value: unknown) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > 2 * 1024 * 1024 ||
+    measureWorkItemImportContentBytes(value) > WORK_ITEM_IMPORT_MAX_BYTES ||
     value.includes('\u0000')
   ) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
-      'Import content must contain between 1 byte and 2 MiB of UTF-8 text.',
+      `Import content must contain between 1 byte and ${WORK_ITEM_IMPORT_MAX_BYTES / (1024 * 1024)} MiB of UTF-8 text, counted after JSON string escaping in the request and the event.`,
     )
   }
   return value
@@ -4776,14 +4906,25 @@ function readPageLimit(value: string | undefined) {
 }
 
 function readWorkItemFilters(c: Context) {
-  const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+  return {
+    teamId: readRequiredQuery(c.req.query('teamId'), 'teamId'),
+    ...readWorkItemFieldFilters(c),
+  }
+}
+
+/**
+ * Reads the Project, assignee, status, type, and update-time filters of a Work Item list.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemFieldFilters(c: Context) {
   const assignedProjectId = c.req.query('assignedProjectId')
   const assigneeUserId = c.req.query('assigneeUserId')
   const workflowStatusId = c.req.query('workflowStatusId')
   const workItemTypeId = c.req.query('workItemTypeId')
   const updatedAfter = c.req.query('updatedAfter')
   return {
-    teamId,
     ...(assignedProjectId
       ? { assignedProjectId: readIdentifier(assignedProjectId, 'assignedProjectId') }
       : {}),
@@ -4799,6 +4940,20 @@ function readWorkItemFilters(c: Context) {
     ...(updatedAfter
       ? { updatedAfter: readIsoTimestamp(updatedAfter, 'updatedAfter') }
       : {}),
+  }
+}
+
+/**
+ * Reads the optional Team, Project, and field filters of a Work Item export.
+ *
+ * @param c - Request context.
+ * @returns The filters that the query names.
+ */
+function readWorkItemExportFilters(c: Context): PublicWorkItemExportFilters {
+  const teamId = c.req.query('teamId')
+  return {
+    ...(teamId !== undefined ? { teamId: readIdentifier(teamId, 'teamId') } : {}),
+    ...readWorkItemFieldFilters(c),
   }
 }
 
@@ -5209,6 +5364,19 @@ function requireDocumentService(dependencies: PublicApiDependencies): PublicDocu
     throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Documents are not configured.', true)
   }
   return dependencies.documents
+}
+
+/**
+ * Returns the agent telemetry receiver or reports that it is unavailable.
+ *
+ * @param dependencies - Public API dependencies.
+ * @returns The receiver.
+ */
+function requireAgentTelemetryService(dependencies: PublicApiDependencies): PublicAgentTelemetryService {
+  if (!dependencies.agentTelemetry) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Agent telemetry is not configured.', true)
+  }
+  return dependencies.agentTelemetry
 }
 
 /**

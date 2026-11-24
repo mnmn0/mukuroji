@@ -13,6 +13,7 @@ import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import {
+  describeSavedTimeEntry,
   describeTimeEntrySubject,
   describeTimeTrackingFailure,
   interpolate,
@@ -20,6 +21,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of the member's weekly timesheet. */
 export type PersonalTimesheetProps = {
@@ -100,6 +102,7 @@ export function PersonalTimesheet({
   workItemTitles,
 }: PersonalTimesheetProps) {
   const id = useId()
+  const categories = useTimeEntryCategories()
   const [creating, setCreating] = useState<'work-item' | 'indirect'>()
   const canRecordIndirect = indirectTargets !== undefined &&
     (indirectTargets.allowNoProject || indirectTargets.projects.length > 0)
@@ -111,6 +114,16 @@ export function PersonalTimesheet({
   const submittableCount = counts.draft + counts.rejected
   const weekTotal = sumTimeEntryMinutesInDays(entries, week.days)
   const defaultDate = week.days.includes(today) ? today : week.days[0] ?? today
+
+  /**
+   * Announces a saved entry together with the Team checks it broke.
+   *
+   * @param successText - Text announcing the save.
+   * @param saved - Save result that may carry warnings.
+   */
+  const announceSaved = (successText: string, saved: unknown) => {
+    setMessage({ tone: 'status', text: describeSavedTimeEntry(t, formatters, successText, saved) })
+  }
 
   /** Submits the whole week and reports entries that still need a retry. */
   const submitWeek = async () => {
@@ -194,9 +207,9 @@ export function PersonalTimesheet({
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
           onSave={async (input) => {
-            await onCreateEntry(input)
+            const saved = await onCreateEntry(input)
             setCreating(undefined)
-            setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+            announceSaved(t('timeTracking.entry.created'), saved)
           }}
           t={t}
           workItemOptions={workItemOptions}
@@ -207,9 +220,9 @@ export function PersonalTimesheet({
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
           onSave={async (input) => {
-            await onCreateIndirectEntry(input)
+            const saved = await onCreateIndirectEntry(input)
             setCreating(undefined)
-            setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+            announceSaved(t('timeTracking.entry.created'), saved)
           }}
           t={t}
           targets={indirectTargets}
@@ -244,7 +257,7 @@ export function PersonalTimesheet({
               {rows.map((row) => (
                 <tr className="border-t border-[var(--workbench-border)]" key={row.key}>
                   <th className="sticky left-0 max-w-[220px] truncate bg-surface px-3 py-2 text-left font-medium text-[var(--workbench-text)]" scope="row">
-                    {describeTimeEntrySubject(t, row, workItemTitles)}
+                    {describeTimeEntrySubject(t, row, workItemTitles, categories)}
                   </th>
                   {week.days.map((date) => (
                     <td className="px-2 py-2 text-right tabular-nums text-[var(--workbench-text)]" key={date}>
@@ -283,8 +296,12 @@ export function PersonalTimesheet({
               setMessage({ tone: 'status', text: t('timeTracking.entry.deleted') })
             }}
             onSubmit={onSubmitEntry}
-            onUpdate={onUpdateEntry}
-            onUpdateIndirect={onUpdateIndirectEntry}
+            onUpdate={async (entry, input) => {
+              announceSaved(t('timeTracking.entry.updated'), await onUpdateEntry(entry, input))
+            }}
+            onUpdateIndirect={async (entry, input) => {
+              announceSaved(t('timeTracking.entry.updated'), await onUpdateIndirectEntry(entry, input))
+            }}
             {...(rejectionReasons ? { rejectionReasons } : {})}
             t={t}
             workItemOptions={workItemOptions}

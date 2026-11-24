@@ -176,6 +176,8 @@ test('keeps project members available when Cognito profile hydration fails', asy
       {
         id: 'demo@example.com',
         email: 'demo@example.com',
+        // Without Cognito the name still comes from the Workspace member row.
+        name: 'Demo User',
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
         workspaceStatus: 'active',

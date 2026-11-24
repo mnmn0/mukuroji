@@ -139,3 +139,16 @@ export function createAgentRunCommitConflictError(): AgentRunError {
     'The Agent Run change conflicted with a concurrent request. Retry with the same arguments and idempotency key.',
   )
 }
+
+/**
+ * Reports that storing agent usage failed for a reason that may pass on retry, such as throttling
+ * or a competing transaction. OTLP exporters retry only on 429, 502, 503, and 504, so this maps to 503.
+ *
+ * @returns Retryable unavailable error; resending the same export is safe.
+ */
+export function createAgentUsageUnavailableError(): AgentRunError {
+  return new AgentRunError(
+    'temporarily_unavailable',
+    'Agent usage storage is temporarily unavailable. Retry the same export.',
+  )
+}

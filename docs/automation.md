@@ -159,6 +159,10 @@ Operation 状態は `running`、`succeeded`、`partial`、`failed`、`undone` �
 
 Operation ID と downstream mutation key は開始 actor に束縛する。Retry/undo は operation を開始した member だけが実行でき、管理者 override は設けない。各再実行では owner の現在の Team/Project 権限も再検証する。同じ apply の再配送で durable operation が `running` の場合は残った `ready` item から CAS 付きで再開する。Item mutation または undo の commit 後に応答が失われた場合は、保存済み before snapshot、deterministic mutation key、期待 revision のちょうど 1 増加、適用後 state の一致を確認して成功を回収する。
 
+`reassign-member` action は、ある member の責任者と `done` でない Contributor 分担を別の member へ移す（member の無効化・Team 異動の引き継ぎ用）。`fromMemberUserId` と `toMemberUserId` は trim・小文字化し、同じ member は `InvalidAutomationInput` で拒否する。どちらも持たない Work Item は `BulkReassignMemberNotInvolved` の失敗になる。移し先の検証、合併の規則、undo の扱いは [Work Items の「責任者と Contributor」](work-items.md#責任者と-contributor) のとおり。undo payload は元の `assigneeUserId` と `contributorAssignments` で、合併で消えた assignment ID は新しい分担として戻す。
+
+Work Item template の payload は `contributorAssignments` を持てる。保存時は形（member か job role の少なくとも一方、予定工数 0〜60,000、status、最大 20 件）だけを確かめ、Work Item を作るときに通常の作成と同じく job role と active member を検証する。
+
 Archive は hard delete ではなく reversible archive metadata を Work Item に保存する。通常 list/search は archived item を除外し、audit/detail/undo は保持する。未 archive の子を持つ親の archive は `WorkItemActiveChildren`、親が archive 済みの Work Item の復元は `WorkItemParentArchived` の conflict として item 単位で失敗する。確認の後に親子が変わって fence で書き込めなかった item は `WorkItemHierarchyChanged` になる。この 3 つの失敗は retryable で、階層を直した後の retry で確認し直す（Web の単体 archive は自動では retry せず、失敗を表示した後の次のクリックで retry する）。親子をまとめた archive・復元は通る。preview は同じ operation の同じ Team の item を相手として数えず、適用は archive なら子から親、復元なら親から子の順に item を並べ替えて、先に確定した item の状態で確認する（Bulk adapter の `orderItems`。retry も同じ順、Undo は逆順。[Work Items](work-items.md#archive復元と階層633)）。
 
 ## API

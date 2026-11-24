@@ -4,6 +4,7 @@ import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicWorkItemService } from './api-router'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 import { createDefaultTenantAdministrationSnapshot } from '../modules/tenant-administration'
+import { readWorkspaceWorkloadCalendarPolicy } from './shared/workspace-calendar'
 
 const {
   configureFakeProjectClients,
@@ -85,6 +86,7 @@ const workspaceCalendar: WorkspaceCalendarSettings = {
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
   holidays: ['2026-12-29'],
   publicHolidays: 'japan',
+  timeZone: 'Asia/Tokyo',
 }
 
 test('gives a Public API Work Item without a schedule the Workspace working calendar', async () => {
@@ -122,6 +124,20 @@ test('uses only company holidays when the Workspace turned national holidays off
   await createWorkItem({}, 'without-national-holidays')
 
   expect(readHolidays(schedules[0])).toEqual(['2026-12-29'])
+})
+
+test('keeps every Workspace day off for workload profiles inheriting the calendar', async () => {
+  // 512 company holidays far from today plus the national holidays exceed what a Work Item keeps.
+  const companyHolidays = Array.from({ length: 512 }, (_, index) =>
+    new Date(Date.UTC(1990, 0, 1 + index)).toISOString().slice(0, 10))
+  configureWorkspaceCalendar({ ...workspaceCalendar, holidays: companyHolidays, timeZone: 'America/New_York' })
+
+  const policy = await runWithTestAppDependencies(() => readWorkspaceWorkloadCalendarPolicy(credential.workspaceId))
+
+  expect(policy.timeZone).toBe('America/New_York')
+  expect(policy.workingWeekdays).toEqual(workspaceCalendar.workingWeekdays)
+  expect(policy.holidays).toEqual(expect.arrayContaining([...companyHolidays, '2026-11-23', '2027-01-01']))
+  expect(policy.holidays.length).toBeGreaterThan(512)
 })
 
 /**

@@ -1,11 +1,20 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError, type TeamSearchSource } from '../../modules/directory'
+import {
+  addMemberToTeamProjectsUseCase,
+  ProjectDataError,
+  type TeamSearchSource,
+} from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
-import { workspaceDependencies } from '../shared/app-dependencies'
+import { createTeamMemberGrantPorts } from '../../app/composition/team-member-grant'
+import { deriveMutationAuditPartContext } from '../../modules/audit/audit'
+import { isDirectoryTeamMemberRole } from '@mukuroji/contracts'
+import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { isRecord } from '../shared/value-guards'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   requireWorkspaceAdministration,
   toProjectDataErrorResponse,
 } from '../shared/project-access'
@@ -80,6 +89,88 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       )
       await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team rename')
       return renamed
+    })
+  })
+
+  /** Replaces the description and leader of an active Team. */
+  routeApp.patch('/api/teams/:teamId/profile', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) => {
+      const teamId = readRouteIdentifier(c, 'teamId')
+      const body = await readJson<unknown>(c.req)
+      const leaderMemberKey = isRecord(body) && typeof body.leaderMemberKey === 'string'
+        ? await readActiveWorkspaceMemberKey(principal.directoryId, body.leaderMemberKey)
+        : undefined
+      const input = isRecord(body) && leaderMemberKey !== undefined ? { ...body, leaderMemberKey } : body
+      return await workspaceDependencies.projectDirectory.updateTeamProfile(
+        principal.directoryId,
+        teamId,
+        input,
+        createApiMutationContext(c, principal, { teamId, body: input }),
+        createDirectoryAuthorizationChecks(principal),
+      )
+    })
+  })
+
+  /**
+   * Adds one Workspace member to every active Project of an active Team. Projects the member
+   * already belongs to keep their role, so a retry after a partial failure adds only the rest.
+   */
+  routeApp.post('/api/teams/:teamId/members', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) => {
+      const teamId = readRouteIdentifier(c, 'teamId')
+      const body = await readJson<unknown>(c.req)
+      if (!isRecord(body) || typeof body.memberKey !== 'string' || !isDirectoryTeamMemberRole(body.role)) {
+        throw new ProjectDataError(400, 'InvalidProjectWrite', 'memberKey and role are required.')
+      }
+      const profile = await readMemberProfile(body.memberKey)
+      const auditContext = createApiMutationContext(c, principal, {
+        teamId,
+        memberKey: profile.id,
+        role: body.role,
+      })
+      return await addMemberToTeamProjectsUseCase(
+        createTeamMemberGrantPorts(
+          workspaceDependencies.projectDirectory,
+          workspaceDependencies.workspaceAccess,
+          {
+            // Granting a Project role needs `projects.manage` on that Project, the same as the
+            // Project member route, so a role limited to Team management cannot grant access.
+            canManageProject: (projectTeamId, projectId) =>
+              principal.enterprisePermissions === undefined ||
+              hasEnterprisePermissionAtResource(principal, 'projects.manage', {
+                workspaceId: principal.directoryId,
+                kind: 'project',
+                targetId: projectId,
+                parentTeamId: projectTeamId,
+              }),
+            // Every grant shares the request's correlation, with an audit identity bound to its
+            // Project so a retry keeps each event ID however the Team's Projects change.
+            createAuditContext: (projectId) => deriveMutationAuditPartContext(auditContext, projectId),
+            // A retry under the same key with another role is refused instead of mixing roles.
+            grantRequest: {
+              idempotencyKeyHash: auditContext.idempotencyKeyHash,
+              requestFingerprint: auditContext.requestFingerprint,
+            },
+          },
+        ),
+        {
+          workspaceId: principal.directoryId,
+          teamId,
+          member: { id: profile.id, email: profile.email, name: profile.name },
+          role: body.role,
+          caller: {
+            ...(principal.principalKind === 'service-account'
+              ? {}
+              : {
+                  membership: {
+                    memberKey: principal.workspaceMember.memberKey,
+                    version: principal.workspaceMember.version,
+                  },
+                }),
+            fences: createDirectoryAuthorizationChecks(principal),
+          },
+        },
+      )
     })
   })
 
@@ -211,7 +302,12 @@ async function handleDirectoryAdministration(
 const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 409 | 413 | 503>> = {
   InvalidDirectoryOrder: 400,
   InvalidProjectWrite: 400,
+  WorkspaceMemberInactive: 409,
+  WorkspaceMemberVersionConflict: 409,
   DirectoryAuthorizationChanged: 403,
+  TeamProjectsManageDenied: 403,
+  TeamProfileConflict: 409,
+  TeamProjectIdShared: 409,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
   ProjectNotArchived: 409,
@@ -236,6 +332,63 @@ function createDirectoryAuthorizationChecks(principal: DirectoryAdministrationPr
     [],
     principal.principalKind !== 'service-account',
   )
+}
+
+/**
+ * Resolves a member key to the identity of an active Workspace member.
+ *
+ * @param directoryId - Workspace identifier.
+ * @param memberKey - Untrusted member key from the request.
+ * @returns The stored member key of the active member.
+ */
+async function readActiveWorkspaceMemberKey(directoryId: string, memberKey: string) {
+  const profile = await readMemberProfile(memberKey)
+  await requireActiveWorkspaceMember(directoryId, profile.id)
+  return profile.id
+}
+
+/**
+ * Reads the Cognito profile of a member chosen by an administrator. An unknown or malformed
+ * member is refused like an inactive one, so it is never answered as a failed sign-in.
+ *
+ * @param memberKey - Untrusted member key from the request.
+ * @returns The member profile.
+ */
+async function readMemberProfile(memberKey: string) {
+  try {
+    return await authenticationDependencies.cognito.getUserProfile(memberKey)
+  } catch (error) {
+    if (
+      error instanceof CognitoServiceError &&
+      (error.code === 'UserNotFoundException' || error.code === 'InvalidParameterException')
+    ) {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can lead a Team or be added to its Projects.',
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Reads an active Workspace member, refusing a deactivated or missing one.
+ *
+ * @param directoryId - Workspace identifier.
+ * @param memberKey - Stored member key.
+ * @returns The active member.
+ */
+async function requireActiveWorkspaceMember(directoryId: string, memberKey: string) {
+  const member = await workspaceDependencies.workspaceAccess.getActiveMember(directoryId, memberKey)
+  if (!member) {
+    throw new ProjectDataError(
+      409,
+      'WorkspaceMemberInactive',
+      'Only active Workspace members can lead a Team or be added to its Projects.',
+    )
+  }
+  return member
 }
 
 /**

@@ -45,6 +45,7 @@ import {
   type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicAgentRunService,
+  type PublicAgentTelemetryService,
   type PublicDocumentService,
   type PublicDirectoryService,
   type PublicWorkItemService,
@@ -204,6 +205,9 @@ function createDefaultWorkItemService(
       return createImportJob('import-commit', false)
     },
     async authorizeImportJob() {},
+    async getImportProgress(_principal, job) {
+      return { jobId: job.id, status: job.status, totalRows: 2, processedRows: 1, totalLinks: 0, processedLinks: 0 }
+    },
     async cancelImport(_principal, job) {
       return { ...job, status: 'cancelled' }
     },
@@ -238,6 +242,8 @@ function createTestRouter(input: {
   workItems?: PublicWorkItemService
   /** Agent Run service used by Agent Run route tests. */
   agentRuns?: PublicAgentRunService
+  /** Agent telemetry receiver used by telemetry route tests. */
+  agentTelemetry?: PublicAgentTelemetryService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
   /** Directory service used by Team, Project member, and key route tests. */
@@ -270,6 +276,7 @@ function createTestRouter(input: {
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
+    ...(input.agentTelemetry ? { agentTelemetry: input.agentTelemetry } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
     ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
@@ -814,6 +821,10 @@ describe('public API router', () => {
           calls.push(`members:${teamId}/${projectId}`)
           return { schemaVersion: 1, teamId, projectId, items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }] }
         },
+        async listProjectRaidLog(_credential, teamId, projectId) {
+          calls.push(`raid:${teamId}/${projectId}`)
+          return { schemaVersion: 1, teamId, projectId, items: [] }
+        },
         async lookupWorkItemKey(_credential, key) {
           calls.push(`key:${key}`)
           if (key !== 'ABC-1') throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
@@ -830,6 +841,8 @@ describe('public API router', () => {
     const badLocale = await router.request('http://localhost/v1/teams?locale=fr', { headers })
     const members = await router.request('http://localhost/v1/projects/project-1/members?teamId=team-1', { headers })
     const membersWithoutTeam = await router.request('http://localhost/v1/projects/project-1/members', { headers })
+    const raidLog = await router.request('http://localhost/v1/projects/project-1/raid-log?teamId=team-1', { headers })
+    const raidLogWithoutTeam = await router.request('http://localhost/v1/projects/project-1/raid-log', { headers })
     const key = await router.request('http://localhost/v1/work-item-keys/ABC-1', { headers })
     const hiddenKey = await router.request('http://localhost/v1/work-item-keys/ABC-2', { headers })
     const paddedKey = await router.request('http://localhost/v1/work-item-keys/%20ABC-1', { headers })
@@ -854,6 +867,10 @@ describe('public API router', () => {
       items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }],
     })
     expect(membersWithoutTeam.status).toBe(400)
+    expect(raidLog.status).toBe(200)
+    expect(raidLog.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await raidLog.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', projectId: 'project-1', items: [] })
+    expect(raidLogWithoutTeam.status).toBe(400)
     expect(key.status).toBe(200)
     expect(await key.json()).toEqual({ schemaVersion: 1, key: 'ABC-1', teamId: 'team-1', workItemId: 'work-item-1' })
     expect(hiddenKey.status).toBe(404)
@@ -861,7 +878,7 @@ describe('public API router', () => {
     expect(longKey.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(calls.filter((call) => !call.startsWith('me:'))).toEqual([
-      'teams:en', 'members:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
+      'teams:en', 'members:team-1/project-1', 'raid:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
     ])
   })
 
@@ -2369,6 +2386,64 @@ describe('public API router', () => {
     expect(validations).toBe(3)
   })
 
+  test('accepts an import source up to the import byte limit and rejects a larger one', async () => {
+    const platform = new InMemoryDeveloperPlatformStorage(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
+      () => new Date(NOW),
+    )
+    const validatedBytes: number[] = []
+    const workItems = createDefaultWorkItemService({
+      async dryRunImport(_principal, input) {
+        validatedBytes.push(new TextEncoder().encode(input.source.content).byteLength)
+        return { valid: true, totalRows: 1, validRows: 1, invalidRows: 0, errors: [], sample: [] }
+      },
+    })
+    const { router } = createTestRouter({ platform, workItems })
+    /** Sends a dry-run whose source holds the given number of bytes, padded with `filler`. */
+    const dryRun = (bytes: number, key: string, filler = 'x') => router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: {
+          fileName: 'work-items.csv',
+          mediaType: 'text/csv',
+          content: `Title\n${filler.repeat(bytes - 'Title\n'.length)}`,
+        },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      }),
+    })
+
+    expect((await dryRun(3 * 1024 * 1024, 'dry-run-3-mib')).status).toBe(200)
+    expect(validatedBytes).toEqual([3 * 1024 * 1024])
+    expect((await dryRun(4 * 1024 * 1024 + 1, 'dry-run-over-limit')).status).toBe(400)
+    // Quotes are escaped in the request body and again in the Lambda event, so 1.5 MiB of them count as 6 MiB.
+    expect((await dryRun(1.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
+
+    const longField = await router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'dry-run-long-mapping',
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: { fileName: 'work-items.csv', mediaType: 'text/csv', content: 'Title\nx' },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'T'.repeat(257), targetField: 'title' }],
+      }),
+    })
+    expect(longField.status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
+  })
+
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
     const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -2551,6 +2626,46 @@ describe('public API router', () => {
       expect(detail.status).toBe(404)
       expect(await detail.json()).toMatchObject({ code: 'not_found' })
     }
+  })
+
+  test('returns the progress of the caller\'s own import job only', async () => {
+    const { platform, router } = createTestRouter()
+    const own = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+    const foreign = await platform.createImportJob({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-2',
+      input: {
+        format: 'csv',
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'Title', targetField: 'title' }],
+      },
+    })
+
+    const progress = await router.request(`http://localhost/developer/imports/${own.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(progress.status).toBe(200)
+    expect(await progress.json()).toEqual({
+      jobId: own.id,
+      status: own.status,
+      totalRows: 2,
+      processedRows: 1,
+      totalLinks: 0,
+      processedLinks: 0,
+    })
+
+    const hidden = await router.request(`http://localhost/developer/imports/${foreign.id}/progress`, {
+      headers: { Authorization: 'Bearer session-token' },
+    })
+    expect(hidden.status).toBe(404)
   })
 
   test('retains the local connector credential when provider disconnect fails', async () => {
@@ -3772,6 +3887,40 @@ describe('public Agent Run routes', () => {
     const unconfigured = createTestRouter({ platform })
     expect((await unconfigured.router.request('/v1/agent-context?teamId=team-1', { headers })).status).toBe(503)
     expect((await unconfigured.router.request('/v1/agent-settings?teamId=team-1', { headers })).status).toBe(503)
+  })
+
+  test('receives OTLP JSON logs with work-items:write and reports partial success', async () => {
+    const received: unknown[] = []
+    const { platform, router } = createTestRouter({ agentTelemetry: {
+      async ingestLogs(_credential, body) {
+        received.push(body)
+        if (received.length === 3) throw new AgentRunError('temporarily_unavailable', 'Throttled.')
+        return { rejectedRecords: received.length === 1 ? 0 : 2, duplicate: false }
+      },
+    } })
+    const body = JSON.stringify({ resourceLogs: [] })
+    const telemetryKey = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${telemetryKey.secret}`, 'Content-Type': 'application/json' }
+    const accepted = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(accepted.status).toBe(200)
+    expect(await accepted.json()).toEqual({})
+    const partial = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(await partial.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } })
+    // OTLP exporters retry only 429, 502, 503, and 504, so a transient storage failure is a 503.
+    const throttled = await router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })
+    expect(throttled.status).toBe(503)
+    const protobuf = await router.request('/v1/agent-telemetry/v1/logs', {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/x-protobuf' }, body: 'binary',
+    })
+    expect(protobuf.status).toBe(415)
+    const readOnlyKey = await createApiKey(platform, ['work-items:read'])
+    const unscoped = await router.request('/v1/agent-telemetry/v1/logs', {
+      method: 'POST', headers: { ...headers, Authorization: `Bearer ${readOnlyKey.secret}` }, body,
+    })
+    expect(unscoped.status).toBe(403)
+    expect(received).toHaveLength(3)
+    const unconfigured = createTestRouter({ platform })
+    expect((await unconfigured.router.request('/v1/agent-telemetry/v1/logs', { method: 'POST', headers, body })).status).toBe(503)
   })
 
   test('lists runs for one instance by hash and rejects unknown states', async () => {

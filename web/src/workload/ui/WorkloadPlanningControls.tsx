@@ -1,10 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import type { WorkloadHoliday, WorkloadSnapshot, WorkingSchedule } from '@mukuroji/contracts'
+import type { WorkloadHoliday, WorkloadSnapshot, WorkloadTimeOff, WorkloadTimeOffStatus, WorkingSchedule } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createWorkloadAssignment,
   createWorkloadRequest,
   previewWorkloadAssignment,
+  reviewWorkloadTimeOff,
   saveWorkloadProfile,
   saveWorkloadTimeOff,
   updateWorkloadRequest,
@@ -14,6 +15,7 @@ import {
   type SaveWorkloadProfileRequest,
 } from '../api'
 import { WorkloadRequestList, type WorkloadRequestChange } from './WorkloadRequestList'
+import { WorkloadTimeOffList } from './WorkloadTimeOffList'
 
 /** A Team member option used by workload planning controls. */
 export type WorkloadPlanningMemberOption = {
@@ -111,6 +113,19 @@ export function WorkloadPlanningControls({
     () => members.find((member) => member.id === selectedMemberId)?.name ?? selectedMemberId,
     [members, selectedMemberId],
   )
+  const memberNames = useMemo(() => new Map([
+    ...(snapshot?.members ?? []).map((member) => [member.memberId, member.displayName ?? member.memberId] as const),
+    ...members.map((member) => [member.id, member.name] as const),
+  ]), [members, snapshot?.members])
+  const activeAssignmentCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const assignment of snapshot?.assignments ?? []) {
+      if (assignment.requestId && assignment.status !== 'canceled') {
+        counts.set(assignment.requestId, (counts.get(assignment.requestId) ?? 0) + 1)
+      }
+    }
+    return counts
+  }, [snapshot?.assignments])
 
   if (members.length === 0) return null
 
@@ -144,6 +159,16 @@ export function WorkloadPlanningControls({
     return await runMutation(() => updateWorkloadRequest(accessToken, teamId, request.id, {
       ...change,
       expectedRevision: request.revision,
+      expectedTeamRevision: teamRevision,
+    }))
+  }
+
+  /** Approves, rejects, reopens, or withdraws one absence at its current revision. */
+  const reviewTimeOff = async (memberId: string, timeOff: WorkloadTimeOff, status: WorkloadTimeOffStatus): Promise<boolean> => {
+    if (!accessToken || !teamId) return false
+    return await runMutation(() => reviewWorkloadTimeOff(accessToken, teamId, memberId, timeOff.id, {
+      status,
+      expectedRevision: timeOff.revision,
       expectedTeamRevision: teamRevision,
     }))
   }
@@ -308,7 +333,18 @@ export function WorkloadPlanningControls({
       </div>
 
       {snapshot ? (
+        <WorkloadTimeOffList
+          isSaving={isSaving}
+          memberNames={memberNames}
+          onReview={reviewTimeOff}
+          snapshot={snapshot}
+          t={t}
+        />
+      ) : null}
+
+      {snapshot ? (
         <WorkloadRequestList
+          activeAssignmentCounts={activeAssignmentCounts}
           isSaving={isSaving}
           onUpdate={updateRequest}
           projects={projects}
@@ -358,10 +394,16 @@ function ProfileForm({
   teamId,
   teamRevision,
 }: ProfileFormProps) {
+  // A new profile inherits the Workspace calendar; one saved before inheritance keeps its own.
+  const [inheritsWorkspace, setInheritsWorkspace] = useState(() =>
+    profile ? profile.calendarSource === 'workspace' : true)
   const [timeZone, setTimeZone] = useState(() => profile?.timeZone ?? 'UTC')
   const [role, setRole] = useState(() => profile?.role ?? '')
   const [skills, setSkills] = useState(() => profile?.skills.join(', ') ?? '')
-  const [hours, setHours] = useState(() => String((profile?.schedule.monday.minutes ?? 480) / 60))
+  // The hours shown are those of the first working weekday, so a member off on Monday still sees
+  // their saved hours; the schedule changes only when these hours are edited.
+  const [initialHours] = useState(() => readProfileDailyHours(profile?.schedule))
+  const [hours, setHours] = useState(initialHours)
   const [holidayDates, setHolidayDates] = useState(() => profile?.holidays.map((holiday) => holiday.date).join(', ') ?? '')
 
   /** Saves the selected member's recurring availability profile. */
@@ -371,10 +413,15 @@ function ProfileForm({
       displayName: memberLabel,
       ...(role.trim() ? { role: role.trim() } : {}),
       skills: splitList(skills),
+      calendarSource: inheritsWorkspace ? 'workspace' : 'custom',
       timeZone: timeZone.trim() || 'UTC',
-      schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60
-        ? profile.schedule
-        : createSchedule(hours),
+      // A saved profile keeps its weekdays, so a member's own days off survive a change of hours
+      // or of calendar; only a new profile gets a fresh schedule.
+      schedule: profile
+        ? hours === initialHours
+          ? profile.schedule
+          : applyScheduleHours(profile.schedule, hours)
+        : createSchedule(hours, inheritsWorkspace),
       holidays: createHolidays(holidayDates, profile?.holidays ?? []),
       expectedRevision: profileRevision,
       expectedTeamRevision: teamRevision,
@@ -385,11 +432,24 @@ function ProfileForm({
   return (
     <ControlCard title={t('workload.controls.profile.title')} description={t('workload.controls.profile.description')}>
       <div className="grid gap-3">
-        <Field label={t('workload.controls.profile.timezone')} value={timeZone} onChange={setTimeZone} placeholder="Asia/Tokyo" />
+        <label className="flex items-start gap-2 text-xs font-semibold text-[var(--workbench-text)]">
+          <input
+            checked={inheritsWorkspace}
+            className="mt-0.5"
+            data-testid="workload-profile-inherit-workspace"
+            type="checkbox"
+            onChange={(event) => setInheritsWorkspace(event.target.checked)}
+          />
+          <span className="grid gap-1">
+            {t('workload.controls.profile.inheritWorkspace')}
+            <span className="font-normal leading-5 text-[var(--workbench-muted)]">{t('workload.controls.profile.inheritWorkspaceHint')}</span>
+          </span>
+        </label>
+        {inheritsWorkspace ? null : <Field label={t('workload.controls.profile.timezone')} value={timeZone} onChange={setTimeZone} placeholder="Asia/Tokyo" />}
         <Field label={t('workload.controls.profile.hours')} value={hours} onChange={setHours} type="number" min="0" max="24" step="0.5" />
         <Field label={t('workload.controls.profile.role')} value={role} onChange={setRole} />
         <Field label={t('workload.controls.profile.skills')} value={skills} onChange={setSkills} placeholder={t('workload.controls.profile.skillsPlaceholder')} />
-        <Field label={t('workload.controls.profile.holidays')} value={holidayDates} onChange={setHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
+        <Field label={t(inheritsWorkspace ? 'workload.controls.profile.personalHolidays' : 'workload.controls.profile.holidays')} value={holidayDates} onChange={setHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
         <button className={buttonClass} disabled={isSaving} type="button" onClick={saveProfile}>{t('workload.controls.profile.save')}</button>
       </div>
     </ControlCard>
@@ -413,12 +473,83 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
   return <p className="border border-tone-c9d8f0 bg-tone-f5f8ff px-3 py-2 text-xs font-semibold leading-5 text-fg-526381">{t('workload.controls.assignment.previewResult').replace('{member}', memberLabel).replace('{allocated}', formatHours(member.allocatedMinutes)).replace('{capacity}', formatHours(member.capacityMinutes))}</p>
 }
 
-/** Creates a weekday schedule from the submitted daily hours. */
-function createSchedule(hoursValue: string): WorkingSchedule {
+/**
+ * Reads the daily minutes typed in the form.
+ *
+ * @param hoursValue - Daily hours typed in the form.
+ * @returns Minutes from 0 to 1440; 0 when the text is not a number.
+ */
+function readScheduleMinutes(hoursValue: string): number {
   const hours = Number(hoursValue)
-  const minutes = Number.isFinite(hours)
-    ? Math.max(0, Math.min(1_440, Math.round(hours * 60)))
-    : 0
+  return Number.isFinite(hours) ? Math.max(0, Math.min(1_440, Math.round(hours * 60))) : 0
+}
+
+/**
+ * Reads the daily hours a profile form starts with.
+ *
+ * @param schedule - Saved schedule, or undefined for a new profile.
+ * @returns The hours of the first enabled weekday, Monday's hours when none is enabled, or eight
+ *   hours for a new profile.
+ */
+function readProfileDailyHours(schedule: WorkingSchedule | undefined): string {
+  if (!schedule) return '8'
+  const day = [
+    schedule.monday,
+    schedule.tuesday,
+    schedule.wednesday,
+    schedule.thursday,
+    schedule.friday,
+    schedule.saturday,
+    schedule.sunday,
+  ].find((candidate) => candidate.enabled) ?? schedule.monday
+  return String(day.minutes / 60)
+}
+
+/**
+ * Sets new daily hours on the weekdays a saved schedule works, keeping its days off.
+ *
+ * @param schedule - Saved schedule.
+ * @param hoursValue - Daily hours typed in the form.
+ * @returns A schedule with the same working weekdays and the new hours.
+ */
+function applyScheduleHours(schedule: WorkingSchedule, hoursValue: string): WorkingSchedule {
+  const minutes = readScheduleMinutes(hoursValue)
+  const apply = (day: WorkingSchedule['monday']) => day.enabled ? { enabled: true, minutes } : { ...day }
+  return {
+    monday: apply(schedule.monday),
+    tuesday: apply(schedule.tuesday),
+    wednesday: apply(schedule.wednesday),
+    thursday: apply(schedule.thursday),
+    friday: apply(schedule.friday),
+    saturday: apply(schedule.saturday),
+    sunday: apply(schedule.sunday),
+  }
+}
+
+/**
+ * Creates a working schedule from the submitted daily hours.
+ *
+ * @param hoursValue - Daily hours typed in the form.
+ * @param inheritsWorkspace - Whether the profile follows the Workspace calendar. Every weekday then
+ *   has the hours, and the server keeps only the Workspace working weekdays; otherwise only Monday
+ *   to Friday do.
+ * @returns The schedule to save.
+ */
+function createSchedule(hoursValue: string, inheritsWorkspace: boolean): WorkingSchedule {
+  const minutes = readScheduleMinutes(hoursValue)
+  if (inheritsWorkspace) {
+    // Weekdays stay enabled even at zero hours, so raising the hours later brings them back.
+    const day = { enabled: true, minutes }
+    return {
+      monday: { ...day },
+      tuesday: { ...day },
+      wednesday: { ...day },
+      thursday: { ...day },
+      friday: { ...day },
+      saturday: { ...day },
+      sunday: { ...day },
+    }
+  }
   return {
     monday: { ...defaultWorkingSchedule.monday, minutes },
     tuesday: { ...defaultWorkingSchedule.tuesday, minutes },

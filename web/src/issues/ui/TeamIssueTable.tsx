@@ -6,6 +6,8 @@ import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
 import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
 import { TaskViewPrintButtons } from '../../tasks/ui/TaskViewPrintButtons'
+import { TaskViewExportButtons } from '../../tasks/ui/TaskViewExportButtons'
+import { createTaskTableExportTable } from '../../tasks/model/taskTableExport'
 import { useTaskViewTablePrint } from '../../shared/ui/viewPrint'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
@@ -544,7 +546,32 @@ export function IssueTable({
           {t('issues.count').replace('{count}', String(issues.length))}
         </span>
         {issues.length > 0 ? (
-          <TaskViewPrintButtons onPrint={printTable} t={t} testId="team-issue-table-print" />
+          <div className="flex flex-wrap items-center gap-2">
+            <TaskViewExportButtons
+              createTable={() => createTaskTableExportTable(
+                displayOrderedIssues,
+                tableColumnPlacements.map((placement) => placement.column.field),
+                {
+                  columnLabel: (field) => resolveIssueTableColumnLabel(field, configuration, t),
+                  configurationFor: () => configuration,
+                  ...(scheduleBaselineFor ? { scheduleBaselineFor } : {}),
+                  locale,
+                  personLabels,
+                  t,
+                  // The Team table names the Project and shows the plain due date.
+                  cellOverride: (field, issue) => {
+                    if (field === 'project') return resolveAssignedProjectName(issue, activeTeam, t)
+                    if (field === 'dueDate') return issue.dueDate ?? ''
+                    return undefined
+                  },
+                },
+              )}
+              fileBaseName={activeTeam?.name ?? activeTeam?.id ?? 'work-items'}
+              t={t}
+              testId="team-issue-table-export"
+            />
+            <TaskViewPrintButtons onPrint={printTable} t={t} testId="team-issue-table-print" />
+          </div>
         ) : null}
       </div>
     </section>

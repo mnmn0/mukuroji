@@ -17,10 +17,13 @@ import {
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
   type ImportJob,
+  type ImportJobProgress,
   type ImportReport,
   type ImportRowError,
   type UpdatePublicWorkItemRequest,
+  type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
+  haveSameWorkCalendarRules,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -117,6 +120,7 @@ import {
   type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicMutationContext,
+  type PublicWorkItemExportFilters,
   type PublicWorkItemService,
 } from '../../modules/developer-platform/public-api'
 import {
@@ -204,6 +208,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
+import { createCanonicalPublicAgentTelemetryService } from './public-agent-telemetry-service'
 import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
@@ -213,7 +218,7 @@ import {
   withWorkItemPlannedEffort,
 } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import { applySharedCalendarToSchedule, readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   rejectInternalWorkItemCreateFields,
@@ -312,6 +317,7 @@ async function requireWebhookTeamPermission(
  * @param limit - Largest number of Work Items in the page.
  * @param includeStructure - Whether rows keep contributors and acceptance criteria, as the
  *   structured export endpoint returns them.
+ * @param filters - Team, Project, and field filters that narrow the export.
  * @returns The page and the continuation of the next one.
  */
 async function readAccessibleWorkItemExportPage(
@@ -319,17 +325,26 @@ async function readAccessibleWorkItemExportPage(
   continuation: string | undefined,
   limit: number,
   includeStructure: boolean,
+  filters: PublicWorkItemExportFilters = {},
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
     : await getEffectiveProjectScopeAccessList(principal)
+  const { teamId: teamFilter, ...fieldFilters } = filters
+  // A Team or Project the caller cannot view yields an empty export, so the filter does not
+  // reveal whether it exists.
   const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
+    if (teamFilter !== undefined && team.id !== teamFilter) return []
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
     const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
       .filter((access) => projectAccessAllows(access, 'viewer'))
+    if (
+      fieldFilters.assignedProjectId !== undefined &&
+      !teamProjectAccesses.some((access) => access.projectId === fieldFilters.assignedProjectId)
+    ) return []
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []
@@ -364,6 +379,7 @@ async function readAccessibleWorkItemExportPage(
       limit,
       ...(decoded?.workItemCursor ? { cursor: decoded.workItemCursor } : {}),
       ...(accessibleProjectIds ? { accessibleProjectIds } : {}),
+      ...fieldFilters,
     },
   )
   const nextTeam = page.nextCursor ? context : contexts[teamIndex + 1]
@@ -679,6 +695,7 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
 function projectPublicWorkItemSchedule(
   schedule: CanonicalWorkItem['schedule'],
 ): CanonicalWorkItem['schedule'] {
+  // The v1 schema has no calendar source; an update with the same rules keeps it (ADR 0058).
   const calendarPolicy = {
     timeZone: schedule.calendarPolicy.timeZone,
     workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
@@ -817,16 +834,33 @@ function rejectInternalPublicCreateWorkItemFields(input: PublicCreateWorkItemInp
  * stored as sent. The new schedule is due on `dueDate`, or unscheduled without one.
  *
  * @param directoryId - Workspace directory that owns the new Work Item.
+ * @param teamId - Team of the new Work Item.
  * @param input - Create input from the client.
+ * @param keepScheduleCalendar - Whether a given schedule keeps its calendar as it is, for import rows
+ *   whose calendar was pinned when the job was staged.
  * @returns The input with a complete canonical schedule and no `dueDate`.
  */
 async function completePublicCreateWorkItemSchedule(
   directoryId: string,
+  teamId: string,
   input: PublicCreateWorkItemInput,
+  keepScheduleCalendar = false,
 ): Promise<CreateWorkItemInput> {
   const { schedule, dueDate, ...fields } = input
-  if (schedule) return { ...fields, schedule }
-  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(directoryId)
+  const projectId = typeof input.assignedProjectId === 'string' && input.assignedProjectId.trim()
+    ? input.assignedProjectId.trim()
+    : undefined
+  if (schedule && keepScheduleCalendar) return { ...fields, schedule }
+  if (schedule) {
+    return {
+      ...fields,
+      schedule: await applySharedCalendarToSchedule(directoryId, { teamId, ...(projectId ? { projectId } : {}) }, schedule),
+    }
+  }
+  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
+    directoryId,
+    { teamId, ...(projectId ? { projectId } : {}) },
+  )
   return {
     ...fields,
     schedule: dueDate === undefined
@@ -835,6 +869,44 @@ async function completePublicCreateWorkItemSchedule(
   }
 }
 
+/**
+ * Keeps a Work Item on the shared calendar when a Public API update sends the same calendar rules.
+ *
+ * The v1 schema cannot carry `calendarSource`, so a client that sends back the schedule it read
+ * would otherwise turn the Work Item into one with its own calendar (ADR 0058).
+ *
+ * @param schedule - Schedule the update writes.
+ * @param stored - Schedule stored before the update.
+ * @returns The schedule, marked as shared when the stored one was shared with the same rules.
+ */
+function keepSharedCalendarSource<TSchedule extends { calendarPolicy: WorkItemScheduleCalendarPolicy }>(
+  schedule: TSchedule,
+  stored: WorkItemSchedule,
+): TSchedule {
+  if (
+    stored.calendarPolicy.calendarSource !== 'shared' ||
+    schedule.calendarPolicy.calendarSource === 'shared' ||
+    !haveSameWorkCalendarRules(schedule.calendarPolicy, stored.calendarPolicy)
+  ) {
+    return schedule
+  }
+  return { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, calendarSource: 'shared' } }
+}
+
+/**
+ * Creates a Work Item through the canonical Public API create path.
+ *
+ * @param principal - Member who creates the Work Item.
+ * @param teamId - Team of the new Work Item.
+ * @param input - Create input.
+ * @param context - Request identity of the mutation.
+ * @param requestPath - Path recorded in the audit context.
+ * @param idempotentCreate - Deterministic identity of a replayable create.
+ * @param authorizationSnapshot - Authorization the create is fenced on.
+ * @param keepScheduleCalendar - Whether a given schedule keeps its calendar instead of taking the
+ *   target's shared calendar.
+ * @returns The created Work Item.
+ */
 async function createCanonicalPublicWorkItem(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -843,12 +915,13 @@ async function createCanonicalPublicWorkItem(
   requestPath: string,
   idempotentCreate?: IdempotentWorkItemCreate,
   authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+  keepScheduleCalendar = false,
 ) {
   rejectInternalPublicCreateWorkItemFields(input)
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(
-    await completePublicCreateWorkItemSchedule(principal.directoryId, input),
+    await completePublicCreateWorkItemSchedule(principal.directoryId, teamId, input, keepScheduleCalendar),
     permission.team,
   )
   const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
@@ -1170,9 +1243,12 @@ export async function updateCanonicalPublicWorkItem(
         workItemId,
         { consistentIssueRead: true, includeEvents: false },
       )
-      const body = plannedEffortMinutes === undefined
+      const updated = plannedEffortMinutes === undefined
         ? normalized
         : { ...normalized, schedule: withWorkItemPlannedEffort(detail.issue.schedule, plannedEffortMinutes) }
+      const body = updated.schedule === undefined
+        ? updated
+        : { ...updated, schedule: keepSharedCalendarSource(updated.schedule, detail.issue.schedule) }
       requireAssignedProjectPermission(
         principal,
         permission,
@@ -2152,7 +2228,10 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       }
       await requirePublicImportPermission(principal, input)
       // Read before the job exists, so a failed read leaves nothing to fail and the client can retry.
-      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
+      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
+        principal.directoryId,
+        { teamId: input.teamId },
+      )
       const jobId = createWorkItemImportJobId(
         principal.directoryId,
         principal.userKey,
@@ -2235,6 +2314,19 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       )
     },
 
+    async getImportProgress(managementPrincipal, job) {
+      const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
+        permission: 'work-items.read',
+        teamId: job.teamId,
+        ...(job.assignedProjectId ? { projectId: job.assignedProjectId } : {}),
+        evaluateProjectScopes: true,
+      })
+      const execution = job.dryRun
+        ? undefined
+        : await developerPlatformDependencies.workItemImportExecutions.get(principal.directoryId, job.id)
+      return createImportJobProgress(job, execution)
+    },
+
     async cancelImport(managementPrincipal, job) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.write',
@@ -2274,7 +2366,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       return requireImportJob(principal.directoryId, job.id)
     },
 
-    async export(managementPrincipal, _format, continuation, limit, includeStructure = false) {
+    async export(managementPrincipal, _format, continuation, limit, includeStructure = false, filters = {}) {
       const principal = await resolveDeveloperManagementPrincipal(managementPrincipal, {
         permission: 'work-items.read',
         evaluateProjectScopes: true,
@@ -2285,6 +2377,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         continuation,
         limit,
         includeStructure,
+        filters,
       )
     },
   }
@@ -2923,7 +3016,7 @@ async function validatePublicImport(
     input.format,
     input.source.content,
     input.mapping,
-    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId, { teamId: input.teamId }),
   )
   const errorsByRow = new Map<number, ImportRowError[]>(
     preview.rows.map((row) => [row.row, [...row.errors]]),
@@ -3346,6 +3439,8 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             requestDigest: request.requestDigest,
           },
           authorization.authorizationSnapshot,
+          // Rows keep the Team calendar pinned when the job was staged (ADR 0058).
+          true,
         )
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
@@ -3393,6 +3488,43 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     },
     now: () => new Date(),
     createLeaseOwner: randomUUID,
+    queue: developerPlatformDependencies.workItemImportQueue,
+  }
+}
+
+/**
+ * Builds the progress of an import from its durable execution.
+ *
+ * Steps are numbered rows first and then links, so the checkpoint splits into the two counts.
+ * A completed job counts every step even when its execution has already expired.
+ *
+ * @param job - Public import job.
+ * @param execution - Worker execution of the job, if one exists.
+ * @returns The job's progress.
+ */
+function createImportJobProgress(
+  job: ImportJob,
+  execution: WorkItemImportExecution | undefined,
+): ImportJobProgress {
+  const planned = execution?.plannedSteps ??
+    (job.report ? { rows: job.report.totalRows, links: undefined } : undefined)
+  const checkpoint = execution?.checkpointRow ?? 0
+  const completed = job.status === 'completed' && !job.dryRun
+  const totalRows = planned?.rows
+  const totalLinks = planned?.links
+  const processedRows = completed && totalRows !== undefined
+    ? totalRows
+    : Math.min(checkpoint, totalRows ?? checkpoint)
+  const processedLinks = completed && totalLinks !== undefined
+    ? totalLinks
+    : totalRows === undefined ? 0 : Math.max(0, checkpoint - totalRows)
+  return {
+    jobId: job.id,
+    status: job.status,
+    ...(totalRows !== undefined ? { totalRows } : {}),
+    processedRows,
+    ...(totalLinks !== undefined ? { totalLinks } : {}),
+    processedLinks,
   }
 }
 
@@ -3639,6 +3771,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
+      agentTelemetry: createCanonicalPublicAgentTelemetryService(),
       documents: createCanonicalPublicDocumentService(),
       directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,

@@ -1,7 +1,17 @@
-import { describe, expect, test } from 'bun:test'
-import type { ProjectRaidEntry } from '@mukuroji/contracts'
+import { afterEach, describe, expect, test } from 'bun:test'
+import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  type CuratedContextItem,
+  type ProjectRaidEntry,
+  type ProjectRaidEntryInput,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { SWRConfig, unstable_serialize } from 'swr'
+import { projectRaidLogKey } from '../src/projects/queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from '../src/projects/ui/ProjectRaidLogPanel'
+import { useSaveProjectRaidEntry } from '../src/projects/mutations/useSaveProjectRaidEntry'
+import { usePromoteProjectRisk } from '../src/projects/mutations/usePromoteProjectRisk'
+import { createProjectRaidLogCsv } from '../src/projects/model/projectRaidLogExport'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const t = createTranslator('ja')
@@ -79,5 +89,202 @@ describe('ProjectRaidLogPanel entry details', () => {
     const markup = render([entry({ description: '主要部品の納期が未確定', response: '代替ベンダーと交渉' })], false)
     expect(markup).toContain('主要部品の納期が未確定')
     expect(markup).toContain('代替ベンダーと交渉')
+  })
+})
+
+describe('ProjectRaidLogPanel owner and related Work Items', () => {
+  test('names the owner and related Work Items, falling back to the stored ID', () => {
+    const markup = renderToStaticMarkup(
+      <ProjectRaidLogPanel
+        canEdit={false}
+        entries={[entry({ ownerMemberId: 'member-1', relatedWorkItemIds: ['item-1', 'item-gone'] })]}
+        hasLoadError={false}
+        isLoading={false}
+        ownerOptions={[{ id: 'member-1', label: '佐藤' }]}
+        t={t}
+        today="2026-11-19"
+        workItemOptions={[{ id: 'item-1', label: 'CT-1 設計レビュー' }]}
+        onReload={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+    expect(markup).toContain('担当: 佐藤')
+    expect(markup).toContain('関連: CT-1 設計レビュー / item-gone')
+    expect(markup).toContain('CSV を書き出す')
+  })
+})
+
+describe('ProjectRaidLogPanel Work Item candidates', () => {
+  test('explains a failed candidate load and offers a retry', () => {
+    const markup = renderToStaticMarkup(
+      <ProjectRaidLogPanel
+        canEdit
+        entries={[entry()]}
+        hasLoadError={false}
+        hasWorkItemOptionsError
+        isLoading={false}
+        t={t}
+        today="2026-11-19"
+        onReload={() => undefined}
+        onReloadWorkItemOptions={() => undefined}
+        onSave={async () => undefined}
+      />,
+    )
+    expect(markup).toContain('関連 Work Item の候補を読み込めませんでした。')
+    expect(markup).toContain('data-testid="project-raid-log-work-items-error"')
+    expect(markup).toContain('再読み込み')
+    expect(render([entry()])).not.toContain('project-raid-log-work-items-error')
+  })
+})
+
+describe('createProjectRaidLogCsv', () => {
+  test('writes one row per entry with labels and escapes formulas', () => {
+    const csv = createProjectRaidLogCsv(
+      [entry({ title: '=HYPERLINK("x")', ownerMemberId: 'member-1', relatedWorkItemIds: ['item-1'], reviewDueDate: '2026-12-01' })],
+      {
+        headers: {
+          kind: '種類', title: 'タイトル', status: '状態', severity: '重大度', probability: '確率', impact: '影響',
+          owner: '担当者', reviewDueDate: '見直し期限', relatedWorkItems: '関連', description: '内容', response: '対応',
+          createdAt: '登録', updatedAt: '更新', closedAt: 'クローズ',
+        },
+        kind: () => 'リスク',
+        status: () => '未解決',
+        severity: (severity) => severity,
+      },
+      [{ id: 'member-1', label: '佐藤' }],
+      [{ id: 'item-1', label: 'CT-1 設計' }],
+    )
+    const [header, row] = csv.split('\r\n')
+    expect(header).toBe('"種類","タイトル","状態","重大度","確率","影響","担当者","見直し期限","関連","内容","対応","登録","更新","クローズ"')
+    expect(row).toBe(`"リスク","'=HYPERLINK(""x"")","未解決","high","4","4","佐藤","2026-12-01","CT-1 設計","","","2026-11-19T00:00:00.000Z","2026-11-19T00:00:00.000Z",""`)
+  })
+})
+
+describe('saving Project log entries', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test('keeps the Idempotency-Key of each failed save when another save runs in between', async () => {
+    const keys: string[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+      return new Response('{}', { status: 503 })
+    }
+    let save: ReturnType<typeof useSaveProjectRaidEntry> | undefined
+
+    /**
+     * Captures the save function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      save = useSaveProjectRaidEntry({ accessToken: 'token', teamId: 'core-team', projectId: 'refero' })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    /**
+     * Builds an open risk with a title.
+     *
+     * @param title - Entry title.
+     * @returns The input.
+     */
+    const risk = (title: string): ProjectRaidEntryInput => ({ kind: 'risk', title, probability: 3, impact: 3, status: 'open' })
+    await expect(save?.(undefined, risk('A'))).rejects.toThrow()
+    await expect(save?.(undefined, risk('B'))).rejects.toThrow()
+    await expect(save?.(undefined, risk('A'))).rejects.toThrow()
+    expect(keys).toHaveLength(3)
+    expect(keys[0]).not.toBe('')
+    expect(keys[1]).not.toBe(keys[0])
+    expect(keys[2]).toBe(keys[0])
+  })
+
+  test('joins a running promotion of the same risk instead of sending another request', async () => {
+    const posts: string[] = []
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === 'POST') {
+        posts.push(String(input))
+        await held
+        return new Response('{}', { status: 503 })
+      }
+      return new Response('{}', { status: 503 })
+    }
+    let promote: NonNullable<ReturnType<typeof usePromoteProjectRisk>>['promote'] | undefined
+
+    /**
+     * Captures the promote function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      promote = usePromoteProjectRisk({ accessToken: 'token', teamId: 'core-team', projectId: 'refero', workItemId: 'wi-1' })?.promote
+      return null
+    }
+
+    const fallback = {
+      [unstable_serialize(projectRaidLogKey('token', 'core-team', 'refero'))]: {
+        teamId: 'core-team',
+        projectId: 'refero',
+        entries: [],
+        viewer: { canEdit: true },
+      },
+    }
+    renderToStaticMarkup(<SWRConfig value={{ fallback, provider: () => new Map() }}><Probe /></SWRConfig>)
+    if (!promote) throw new Error('Expected the promote function.')
+    const item: CuratedContextItem = {
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id: 'risk-a',
+      teamId: 'core-team',
+      workItemId: 'wi-1',
+      kind: 'risk',
+      state: 'active',
+      title: 'A',
+      body: '',
+      mentionMemberKeys: [],
+      createdBy: { id: 'demo@example.com', displayName: 'Demo User' },
+      createdAt: '2026-06-07T09:00:00.000Z',
+      updatedBy: { id: 'demo@example.com', displayName: 'Demo User' },
+      updatedAt: '2026-06-07T09:00:00.000Z',
+      revision: 1,
+    }
+    const first = promote(item)
+    const second = promote(item)
+    release()
+    await expect(first).rejects.toThrow()
+    await expect(second).rejects.toThrow()
+    expect(posts).toHaveLength(1)
+  })
+
+  test('gives distinct operations with the same input their own Idempotency-Key', async () => {
+    const keys: string[] = []
+    globalThis.fetch = async (_input, init) => {
+      keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+      return new Response('{}', { status: 503 })
+    }
+    let save: ReturnType<typeof useSaveProjectRaidEntry> | undefined
+
+    /**
+     * Captures the save function.
+     *
+     * @returns Nothing visible.
+     */
+    function Probe() {
+      save = useSaveProjectRaidEntry({ accessToken: 'token', teamId: 'core-team', projectId: 'refero' })
+      return null
+    }
+
+    renderToStaticMarkup(<Probe />)
+    const input: ProjectRaidEntryInput = { kind: 'risk', title: '同じ文面', probability: 3, impact: 3, status: 'open' }
+    await expect(save?.(undefined, input, 'promote-risk:a')).rejects.toThrow()
+    await expect(save?.(undefined, input, 'promote-risk:b')).rejects.toThrow()
+    await expect(save?.(undefined, input, 'promote-risk:a')).rejects.toThrow()
+    expect(keys[1]).not.toBe(keys[0])
+    expect(keys[2]).toBe(keys[0])
   })
 })

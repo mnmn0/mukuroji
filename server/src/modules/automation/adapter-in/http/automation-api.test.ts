@@ -47,6 +47,7 @@ import {
   normalizeWorkItemSchedule,
 } from '../../../work-items'
 import { InMemoryPlanningClient, PlanningError } from '../../../planning/planning'
+import { ambientAutomationActionExecutorDependencies } from '../../../../api/shared/app-dependencies'
 import {
   createActiveAgentRun,
   InMemoryAgentRunStore,
@@ -74,6 +75,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  type AutomationValue,
   createDefaultDueDateWorkItemSchedule,
   createWorkItemHierarchyRankBetween,
   DEFAULT_WORK_ITEM_TYPE,
@@ -606,6 +608,337 @@ test('fences a bulk Project move with the Planning revision', async () => {
   expect(await applyResponse.json()).toMatchObject({ status: 'succeeded' })
   expect(calls.issueUpdates).toHaveLength(1)
   expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ planningRevision: 0 })
+})
+
+test('hands a member\'s ownership over through a bulk reassignment', async () => {
+  const updateChecks: unknown[][] = []
+  const calls = configureFakeProjectClients(true, {
+    issueUpdateHook: async (input) => {
+      updateChecks.push([...(input.authorizationConditionChecks ?? [])])
+    },
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const detailResponse = await app.request('/api/teams/core-team/issues/onboarding-friction', { headers })
+  const detail = await detailResponse.json() as { issue: { assigneeUserId: string, revision: number } }
+  const request = {
+    action: {
+      type: 'reassign-member',
+      fromMemberUserId: detail.issue.assigneeUserId,
+      toMemberUserId: 'demo@example.com',
+    },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: detail.issue.revision,
+    }],
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview = await previewResponse.json() as { operationToken: string, canApply: boolean }
+  expect(preview.canApply).toBe(true)
+
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as { id: string }
+  expect(applied).toMatchObject({
+    status: 'succeeded',
+    items: [{
+      status: 'succeeded',
+      undoable: true,
+    }],
+  })
+  expect(calls.issueUpdates).toHaveLength(1)
+  // The new owner must still be an active member when the write commits.
+  expect(JSON.stringify(updateChecks.at(-1))).toContain('MEMBER#demo@example.com')
+  const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
+  expect(stored?.items[0]?.undoPayload).toEqual({
+    assigneeUserId: detail.issue.assigneeUserId,
+    contributorAssignments: [],
+  })
+})
+
+test('leaves an unchanged inactive owner out of a share-only handover undo', async () => {
+  configureFakeProjectClients(true, {
+    inactiveWorkspaceMemberKeys: ['sato@example.com'],
+    issueContributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+    ],
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const request = {
+    action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'demo@example.com' },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview = await previewResponse.json() as { operationToken: string }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  const applied = await applyResponse.json() as { id: string }
+  const stored = await automationFake.client.getBulkOperation('user#demo@example.com', applied.id)
+  // The owner did not move, so the undo neither writes them back nor checks them as a new assignee.
+  expect(stored?.items[0]?.undoPayload).not.toHaveProperty('assigneeUserId')
+
+  const runUndo = async (undoPayload: Record<string, AutomationValue>) => {
+    configureFakeProjectClients(true, {
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys: ['sato@example.com'],
+      issueContributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'demo@example.com', plannedEffortMinutes: 60, status: 'planned' },
+      ],
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-share-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'demo@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload,
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, { method: 'POST', headers })
+    expect(response.status).toBe(200)
+    return response.json()
+  }
+  const contributorAssignments = [
+    { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+  ]
+  expect(await runUndo({ contributorAssignments })).toMatchObject({ status: 'undone' })
+  // A payload that wrote the inactive owner back would fail the same undo.
+  expect(await runUndo({ assigneeUserId: 'sato@example.com', contributorAssignments }))
+    .not.toMatchObject({ status: 'undone' })
+})
+
+test('refuses a bulk reassignment to the same member and fails items the member is not on', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const items = [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }]
+  const sameMember = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      action: { type: 'reassign-member', fromMemberUserId: 'a@example.com', toMemberUserId: 'A@example.com' },
+      items,
+    }),
+  })
+  expect(sameMember.status).toBe(400)
+
+  const notInvolved = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      action: { type: 'reassign-member', fromMemberUserId: 'nobody@example.com', toMemberUserId: 'demo@example.com' },
+      items,
+    }),
+  })
+  expect(notInvolved.status).toBe(200)
+  expect(await notInvolved.json()).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', errorCode: 'BulkReassignMemberNotInvolved' }],
+  })
+})
+
+test('checks a successor whose existing share absorbs the handed-over share', async () => {
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const preview = async (inactiveWorkspaceMemberKeys: string[]) => {
+    configureFakeProjectClients(true, {
+      inactiveWorkspaceMemberKeys,
+      issueContributorAssignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', plannedEffortMinutes: 60, status: 'planned' },
+        { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', status: 'done' },
+      ],
+    })
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake().client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request('/api/bulk-operations/preview', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' },
+        items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+      }),
+    })
+    expect(response.status).toBe(200)
+    return response.json()
+  }
+
+  expect(await preview([])).toMatchObject({ canApply: true, items: [{ status: 'ready' }] })
+  // The membership failure is reported as a generic action failure, like any other item.
+  expect(await preview(['successor@example.com'])).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', retryable: false }],
+  })
+})
+
+test('undoes a merged handover with the original share and its archived job role', async () => {
+  const runUndo = async (inactiveWorkspaceMemberKeys: string[]) => {
+    const calls = configureFakeProjectClients(true, {
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys,
+      issueContributorAssignments: [
+        { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', plannedEffortMinutes: 90, status: 'planned' },
+      ],
+      jobRoles: [{ id: 'legacy-writer', name: 'Legacy writer', archived: true }],
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'leaver@example.com', toMemberUserId: 'successor@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload: {
+          assigneeUserId: 'sato@example.com',
+          contributorAssignments: [
+            { assignmentId: 'a'.repeat(32), memberUserId: 'leaver@example.com', jobRoleId: 'legacy-writer', plannedEffortMinutes: 60, status: 'planned' },
+            { assignmentId: 'b'.repeat(32), memberUserId: 'successor@example.com', plannedEffortMinutes: 30, status: 'planned' },
+          ],
+        },
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    })
+    expect(response.status).toBe(200)
+    return { body: await response.json(), calls }
+  }
+
+  // The merged-away share comes back under its own ID, so its archived role stays allowed.
+  const restored = await runUndo([])
+  expect(restored.body).toMatchObject({ status: 'undone' })
+  expect(restored.calls.issueUpdates).toHaveLength(1)
+
+  // The member it brings back is still checked as newly assigned.
+  const inactive = await runUndo(['leaver@example.com'])
+  expect(inactive.body.status).not.toBe('undone')
+  expect(inactive.calls.issueUpdates).toHaveLength(0)
+})
+
+test('checks the restored owner when an owner-only handover is undone', async () => {
+  const runUndo = async (inactiveWorkspaceMemberKeys: string[]) => {
+    const updateChecks: unknown[][] = []
+    const calls = configureFakeProjectClients(true, {
+      detailAssigneeUserId: 'demo@example.com',
+      detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+      inactiveWorkspaceMemberKeys,
+      issueUpdateHook: async (input) => {
+        updateChecks.push([...(input.authorizationConditionChecks ?? [])])
+      },
+    })
+    const operation: BulkOperation = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'bulk-owner-handover-undo',
+      workspaceId: 'user#demo@example.com',
+      actorMemberKey: 'demo@example.com',
+      revision: 1,
+      status: 'succeeded',
+      action: { type: 'reassign-member', fromMemberUserId: 'sato@example.com', toMemberUserId: 'demo@example.com' },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+        resultingRevision: 2,
+        status: 'succeeded',
+        retryable: false,
+        undoable: true,
+        undoPayload: { assigneeUserId: 'sato@example.com', contributorAssignments: [] },
+      }],
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:01:00.000Z',
+    }
+    setTestAppDependencies({
+      bulkOperations: createBulkOperationAutomationFake(operation).client,
+      planning: new InMemoryPlanningClient(),
+    })
+    const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    })
+    expect(response.status).toBe(200)
+    return { body: await response.json(), calls, updateChecks }
+  }
+
+  // The owner it brings back must still be an active member when the write commits.
+  const restored = await runUndo([])
+  expect(restored.body).toMatchObject({ status: 'undone' })
+  expect(restored.calls.issueUpdates).toHaveLength(1)
+  expect(JSON.stringify(restored.updateChecks.at(-1))).toContain('MEMBER#sato@example.com')
+
+  const inactive = await runUndo(['sato@example.com'])
+  expect(inactive.body.status).not.toBe('undone')
+  expect(inactive.calls.issueUpdates).toHaveLength(0)
 })
 
 test('fences bulk Project-move undo with the Planning revision', async () => {
@@ -2615,6 +2948,49 @@ test('creates automation Work Items with template acceptance criteria as new unm
     executor.execute({ type: 'create', values: { ...values, acceptanceCriteria: ['  '] } }, context)
   )).rejects.toMatchObject({ code: 'InvalidAcceptanceCriteria', status: 400 })
   expect(creates).toHaveLength(1)
+})
+
+test('checks template contributors with the worker dependencies outside a request', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-contributor-create',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-contributor-create:action:0000',
+  } satisfies AutomationActionExecutionContext
+  // Workers pass explicit dependencies and bind no request context.
+  const dependencies = runWithTestAppDependencies(() => ({ ...ambientAutomationActionExecutorDependencies }))
+
+  await expect(createAutomationActionExecutor(dependencies).execute({
+    type: 'create',
+    values: {
+      teamId: 'core-team',
+      title: 'Release review',
+      assigneeUserId: 'demo@example.com',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
+      contributorAssignments: [{ memberUserId: 'sato@example.com', plannedEffortMinutes: 60 }],
+    },
+  }, context)).resolves.toBeUndefined()
+  expect(calls.issueCreates).toHaveLength(1)
 })
 
 test('fails closed before an automation comment targets a removed Team', async () => {

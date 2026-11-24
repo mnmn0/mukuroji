@@ -207,6 +207,14 @@ export function buildDataStores(
     sortKey: { name: 'nextNotificationAtRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
+  // Sparse: only members who opted into Inbox digests carry these attributes. The worker
+  // rereads each row strongly, so the index projects keys only (ADR 0066).
+  planningTable.addGlobalSecondaryIndex({
+    indexName: 'InboxDigestDueIndex',
+    partitionKey: { name: 'inboxDigestShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'inboxDigestDueAt', type: dynamodb.AttributeType.NUMBER },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
 
   const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
@@ -551,6 +559,8 @@ export function buildDataStores(
     encryption: dynamodb.TableEncryption.AWS_MANAGED,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    // Only agent telemetry usage rows and their export receipts carry this attribute (ADR 0061).
+    timeToLiveAttribute: 'usageExpiresAt',
   });
 
   agentRunsTable.addGlobalSecondaryIndex({

@@ -28,6 +28,37 @@ describe('Automation management validation domain', () => {
     )
   })
 
+  test('keeps the contributors a Work Item template starts with and rejects malformed ones', () => {
+    const schedule = createDefaultUnscheduledWorkItemSchedule()
+    const template = (contributorAssignments: unknown) => validateCreateAutomationTemplateInput({
+      kind: 'work-item',
+      name: 'Release template',
+      enabled: true,
+      payload: { title: 'Release', schedule, contributorAssignments },
+    })
+
+    expect(template([
+      { jobRoleId: 'qa', plannedEffortMinutes: 240 },
+      { memberUserId: ' Dev@Example.com ', status: 'in-progress' },
+    ]).payload).toMatchObject({
+      contributorAssignments: [
+        { jobRoleId: 'qa', plannedEffortMinutes: 240 },
+        { memberUserId: 'dev@example.com', status: 'in-progress' },
+      ],
+    })
+    expect(template([]).payload).not.toHaveProperty('contributorAssignments')
+    for (const invalid of [
+      [{}],
+      [{ jobRoleId: 'qa', plannedEffortMinutes: -1 }],
+      [{ jobRoleId: 'qa', status: 'blocked' }],
+      [{ jobRoleId: 'qa', assignmentId: 'a'.repeat(32) }],
+      Array.from({ length: 21 }, () => ({ jobRoleId: 'qa' })),
+      'qa',
+    ]) {
+      expect(() => template(invalid)).toThrow()
+    }
+  })
+
   test('normalizes template and application inputs without persistence state', () => {
     const schedule = createDefaultUnscheduledWorkItemSchedule()
     expect(validateCreateAutomationTemplateInput({

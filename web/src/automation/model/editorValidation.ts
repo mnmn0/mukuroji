@@ -3,6 +3,8 @@ import {
   isWorkItemRelationEventType,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
   WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
+  WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -17,6 +19,7 @@ import {
   type AutomationWorkItemTemplatePayload,
   type CreateAutomationRuleInput,
   type CreateAutomationTemplateInputForKind,
+  type WorkItemContributorAssignmentCreateInput,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
@@ -133,6 +136,7 @@ export function parseAutomationTemplatePayload(value: string):
     'acceptanceCriteria',
     'assignedProjectId',
     'assigneeUserId',
+    'contributorAssignments',
     'customFieldValues',
     'description',
     'priority',
@@ -181,6 +185,12 @@ export function parseAutomationTemplatePayload(value: string):
   }
   const schedule = readAutomationWorkItemSchedule(parsed.schedule)
   if (!schedule) return { error: 'invalid-value' }
+  const contributorAssignments = parsed.contributorAssignments === undefined
+    ? undefined
+    : readTemplateContributorAssignments(parsed.contributorAssignments)
+  if (parsed.contributorAssignments !== undefined && contributorAssignments === undefined) {
+    return { error: 'invalid-value' }
+  }
   const customFieldValues = parsed.customFieldValues === undefined
     ? undefined
     : cloneAutomationValueRecord(parsed.customFieldValues)
@@ -197,6 +207,7 @@ export function parseAutomationTemplatePayload(value: string):
       ...(parsed.assigneeUserId === undefined
         ? {}
         : { assigneeUserId: parsed.assigneeUserId }),
+      ...(contributorAssignments === undefined ? {} : { contributorAssignments }),
       ...(customFieldValues === undefined ? {} : { customFieldValues }),
       ...(parsed.description === undefined ? {} : { description: parsed.description }),
       ...(parsed.priority === undefined ? {} : { priority: parsed.priority }),
@@ -227,6 +238,45 @@ function readTemplateAcceptanceCriteria(value: unknown): string[] | undefined {
     texts.push(text)
   }
   return texts
+}
+
+/**
+ * Reads the contributors of a Work Item template payload.
+ *
+ * Each entry names a member, a job role, or both, with optional planned effort and status. The
+ * server checks the job roles and members when a Work Item is created from the template.
+ *
+ * @param value - Parsed `contributorAssignments` value.
+ * @returns The contributors, or undefined when the value is malformed.
+ */
+function readTemplateContributorAssignments(
+  value: unknown,
+): WorkItemContributorAssignmentCreateInput[] | undefined {
+  if (!Array.isArray(value) || value.length > WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT) return undefined
+  const result: WorkItemContributorAssignmentCreateInput[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined
+    if (Object.keys(entry).some((key) =>
+      key !== 'memberUserId' && key !== 'jobRoleId' && key !== 'plannedEffortMinutes' && key !== 'status'
+    )) return undefined
+    const { memberUserId, jobRoleId, plannedEffortMinutes, status } = entry
+    if (memberUserId !== undefined && (typeof memberUserId !== 'string' || !memberUserId.trim())) return undefined
+    if (jobRoleId !== undefined && (typeof jobRoleId !== 'string' || !jobRoleId.trim())) return undefined
+    if (memberUserId === undefined && jobRoleId === undefined) return undefined
+    if (
+      plannedEffortMinutes !== undefined &&
+      (typeof plannedEffortMinutes !== 'number' || !Number.isSafeInteger(plannedEffortMinutes) ||
+        plannedEffortMinutes < 0 || plannedEffortMinutes > WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)
+    ) return undefined
+    if (status !== undefined && status !== 'planned' && status !== 'in-progress' && status !== 'done') return undefined
+    result.push({
+      ...(typeof memberUserId === 'string' ? { memberUserId: memberUserId.trim() } : {}),
+      ...(typeof jobRoleId === 'string' ? { jobRoleId: jobRoleId.trim() } : {}),
+      ...(typeof plannedEffortMinutes === 'number' ? { plannedEffortMinutes } : {}),
+      ...(status === undefined ? {} : { status }),
+    })
+  }
+  return result
 }
 
 /** 検証済み payload を template 作成 API input へ変換します。 */
@@ -554,9 +604,10 @@ function readAutomationWorkItemSchedule(value: unknown): WorkItemSchedule | unde
 function readAutomationScheduleCalendarPolicy(
   value: unknown,
 ): WorkItemScheduleCalendarPolicy | undefined {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['holidays', 'timeZone', 'workingWeekdays'])) {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['holidays', 'timeZone', 'workingWeekdays', 'calendarSource'])) {
     return undefined
   }
+  if (value.calendarSource !== undefined && value.calendarSource !== 'shared') return undefined
   if (
     typeof value.timeZone !== 'string' ||
     !value.timeZone ||
@@ -603,6 +654,7 @@ function readAutomationScheduleCalendarPolicy(
     holidays: [...holidays],
     timeZone: value.timeZone,
     workingWeekdays: [...workingWeekdays],
+    ...(value.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
   }
 }
 
