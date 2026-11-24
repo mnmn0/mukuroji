@@ -4120,10 +4120,16 @@ function readExternalLinkFields(body: Record<string, unknown>) {
   if (!['inbound', 'outbound', 'bidirectional', 'none'].includes(syncDirection)) {
     throw new PublicApiServiceError(400, 'validation_failed', 'syncDirection is invalid.')
   }
-  // A calendar link may omit the event, which Mukuroji then creates (ADR 0089).
-  const createsResource = resourceType === 'calendar-event' &&
-    body.externalId === undefined &&
-    body.externalUrl === undefined
+  // Mukuroji creates the event of a calendar link (ADR 0089). It finds its events by a private
+  // property, so an existing event linked by ID would never sync.
+  const createsResource = resourceType === 'calendar-event'
+  if (createsResource && (body.externalId !== undefined || body.externalUrl !== undefined)) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'Omit externalId and externalUrl for calendar-event; Mukuroji creates the event.',
+    )
+  }
   return {
     installationId: readIdentifier(body.installationId, 'installationId'),
     resourceType,

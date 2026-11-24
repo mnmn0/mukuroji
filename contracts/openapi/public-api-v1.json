@@ -1218,11 +1218,11 @@
             "type": "string"
           },
           "externalId": {
-            "description": "Provider resource ID. Omit both externalId and externalUrl for calendar-event to create the event on the connected calendar from the Work Item dates.",
+            "description": "Provider resource ID. Required except for calendar-event, which must omit it: Mukuroji creates the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
-            "description": "HTTPS URL of the resource in the provider UI. Omitted together with externalId for a new calendar-event.",
+            "description": "HTTPS URL of the resource in the provider UI. Required except for calendar-event, which must omit it.",
             "format": "uri",
             "type": "string"
           },
@@ -1369,11 +1369,11 @@
             "type": "string"
           },
           "externalId": {
-            "description": "Provider resource ID. Omit both externalId and externalUrl for calendar-event to create the event on the connected calendar from the Work Item dates.",
+            "description": "Provider resource ID. Required except for calendar-event, which must omit it: Mukuroji creates the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
-            "description": "HTTPS URL of the resource in the provider UI. Omitted together with externalId for a new calendar-event.",
+            "description": "HTTPS URL of the resource in the provider UI. Required except for calendar-event, which must omit it.",
             "format": "uri",
             "type": "string"
           },

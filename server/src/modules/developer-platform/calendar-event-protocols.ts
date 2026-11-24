@@ -27,6 +27,16 @@ const GRAPH_MANAGED_PROPERTY_ID =
 const GRAPH_ORIGIN_PROPERTY_ID =
   `String {00020329-0000-0000-C000-000000000046} Name ${ORIGIN_PROPERTY}`
 
+/** Private extended property that records the IANA time zone of the event's dates. */
+const TIME_ZONE_PROPERTY = 'mukurojiTimeZone'
+
+/** Microsoft Graph id of the time-zone extended property. */
+const GRAPH_TIME_ZONE_PROPERTY_ID =
+  `String {00020329-0000-0000-C000-000000000046} Name ${TIME_ZONE_PROPERTY}`
+
+/** Asks Graph to return every date-time in UTC, which the time-zone property converts back. */
+const GRAPH_UTC_PREFERENCE = { Prefer: 'outlook.timezone="UTC"' }
+
 /** Longest event title Mukuroji writes. */
 const TITLE_MAX_LENGTH = 1_024
 
@@ -100,7 +110,8 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
   }
 
   /**
-   * Writes the Work Item title and dates to its event, restoring an event the user deleted.
+   * Writes the Work Item title and dates to its event. The write is conditional on the event's
+   * ETag, so an event changed since the last read is not overwritten.
    *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents.
@@ -112,9 +123,11 @@ export class GoogleCalendarEventProtocol implements ConnectorResourceProtocol {
       method: 'PATCH',
       path: `calendars/primary/events/${encodeURIComponent(readEventId(mutation.externalId))}`,
       body: createGoogleEventBody(mutation),
-      allowedStatuses: [404, 410],
+      ...ifMatch(mutation.expectedExternalVersion),
+      allowedStatuses: [404, 410, 412],
     })
     if (response.status === 404 || response.status === 410) throw missingEvent()
+    if (response.status === 412) throw eventChanged()
     return readGoogleEvent(response.payload)
   }
 
@@ -175,11 +188,13 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
         ? {
             $filter:
               `singleValueExtendedProperties/Any(ep: ep/id eq '${GRAPH_MANAGED_PROPERTY_ID}' and ep/value eq '1')`,
-            $expand: `singleValueExtendedProperties($filter=id eq '${GRAPH_ORIGIN_PROPERTY_ID}')`,
+            $expand:
+              `singleValueExtendedProperties($filter=id eq '${GRAPH_ORIGIN_PROPERTY_ID}' or id eq '${GRAPH_TIME_ZONE_PROPERTY_ID}')`,
             $select: 'id,subject,webLink,lastModifiedDateTime,start,end,isAllDay,isCancelled',
             $top: '50',
           }
         : readGraphCursor(cursor),
+      headers: GRAPH_UTC_PREFERENCE,
     })
     const payload = requireObject(response.payload, 'Microsoft Graph event list')
     const items = payload.value ?? []
@@ -196,7 +211,8 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
   }
 
   /**
-   * Writes the Work Item title and dates to its event.
+   * Writes the Work Item title and dates to its event, on the condition that the event's ETag has
+   * not changed since the last read.
    *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents.
@@ -208,9 +224,16 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
       method: 'PATCH',
       path: `me/events/${encodeURIComponent(readEventId(mutation.externalId))}`,
       body: createGraphEventBody(mutation),
-      allowedStatuses: [404, 410],
+      headers: {
+        ...GRAPH_UTC_PREFERENCE,
+        ...(mutation.expectedExternalVersion === undefined
+          ? {}
+          : { 'If-Match': readVersion(mutation.expectedExternalVersion) }),
+      },
+      allowedStatuses: [404, 410, 412],
     })
     if (response.status === 404 || response.status === 410) throw missingEvent()
+    if (response.status === 412) throw eventChanged()
     return readGraphEvent(response.payload)
   }
 
@@ -231,6 +254,7 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
         ...createGraphEventBody(mutation),
         transactionId: `mukuroji-${hashOperation(mutation.operationId).slice(0, 40)}`,
       },
+      headers: GRAPH_UTC_PREFERENCE,
     })
     return readGraphEvent(response.payload)
   }
@@ -280,6 +304,7 @@ function createGraphEventBody(mutation: ConnectorCreateMutation) {
     singleValueExtendedProperties: [
       { id: GRAPH_MANAGED_PROPERTY_ID, value: '1' },
       { id: GRAPH_ORIGIN_PROPERTY_ID, value: mutation.originMarker },
+      { id: GRAPH_TIME_ZONE_PROPERTY_ID, value: timeZone },
     ],
   }
 }
@@ -300,7 +325,7 @@ function readGoogleEvent(value: unknown): ConnectorExternalRecord {
     externalId: readEventId(event.id),
     resourceType: 'calendar-event',
     externalUrl: readHttpsUrl(event.htmlLink),
-    externalVersion: readTimestamp(event.updated),
+    externalVersion: readVersion(event.etag),
     ...(typeof event.summary === 'string' ? { title: event.summary } : {}),
     schedule: readEventSchedule(
       readGoogleEventTime(event.start, 'start'),
@@ -322,21 +347,17 @@ function readGraphEvent(value: unknown): ConnectorExternalRecord {
   const properties = Array.isArray(event.singleValueExtendedProperties)
     ? event.singleValueExtendedProperties
     : []
-  const origin = properties.find((property) =>
-    isObject(property) &&
-    typeof property.id === 'string' &&
-    property.id.toLowerCase() === GRAPH_ORIGIN_PROPERTY_ID.toLowerCase()
-  )
-  const originValue = isObject(origin) ? origin.value : undefined
+  const originValue = readGraphProperty(properties, GRAPH_ORIGIN_PROPERTY_ID)
+  const timeZone = readTimeZone(readGraphProperty(properties, GRAPH_TIME_ZONE_PROPERTY_ID))
   return {
     externalId: readEventId(event.id),
     resourceType: 'calendar-event',
     externalUrl: readHttpsUrl(event.webLink),
-    externalVersion: readTimestamp(event.lastModifiedDateTime),
+    externalVersion: readVersion(event['@odata.etag']),
     ...(typeof event.subject === 'string' ? { title: event.subject } : {}),
     schedule: readEventSchedule(
-      { value: readGraphDateTime(event.start, 'start'), allDay: event.isAllDay === true },
-      { value: readGraphDateTime(event.end, 'end'), allDay: event.isAllDay === true },
+      { value: readGraphDateTime(event.start, 'start', timeZone), allDay: event.isAllDay === true },
+      { value: readGraphDateTime(event.end, 'end', timeZone), allDay: event.isAllDay === true },
     ),
     metadata: { calendar: 'default' },
     ...(typeof originValue === 'string' && originValue !== ''
@@ -368,18 +389,81 @@ function readGoogleEventTime(value: unknown, label: string): EventTime {
 }
 
 /**
- * Reads a Microsoft Graph `dateTimeTimeZone` value.
+ * Reads a Microsoft Graph `dateTimeTimeZone` value as a local date-time. Graph answers in UTC
+ * (the requests ask for it), so a UTC value is converted to the event's recorded time zone: an
+ * all-day November 30 event in Asia/Tokyo arrives as November 29 15:00 UTC.
  *
  * @param value - `{ dateTime, timeZone }`.
  * @param label - Field name for errors.
+ * @param timeZone - IANA time zone the event's dates were written in, if recorded.
  * @returns The local date-time string.
  */
-function readGraphDateTime(value: unknown, label: string) {
+function readGraphDateTime(value: unknown, label: string, timeZone: string | undefined) {
   const time = requireObject(value, `Microsoft Graph event ${label}`)
   if (typeof time.dateTime !== 'string') {
     throw malformed(`Microsoft Graph event ${label} has no date-time.`)
   }
-  return time.dateTime
+  const zone = typeof time.timeZone === 'string' ? time.timeZone : 'UTC'
+  if (zone.toUpperCase() !== 'UTC' || timeZone === undefined) return time.dateTime
+  const instant = Date.parse(`${time.dateTime.slice(0, 19)}Z`)
+  if (Number.isNaN(instant)) throw malformed(`Microsoft Graph event ${label} date-time is invalid.`)
+  return toLocalDateTime(instant, timeZone)
+}
+
+/**
+ * Formats an instant as a `YYYY-MM-DDTHH:MM:SS` local date-time in a time zone.
+ *
+ * @param instant - Milliseconds since the epoch.
+ * @param timeZone - IANA time zone.
+ * @returns The local date-time.
+ */
+function toLocalDateTime(instant: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(instant))
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? '00'
+  return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}`
+}
+
+/**
+ * Finds a single-value extended property of a Graph event.
+ *
+ * @param properties - `singleValueExtendedProperties` of the event.
+ * @param id - Property id; Graph may change its letter case.
+ * @returns The string value, if present.
+ */
+function readGraphProperty(properties: readonly unknown[], id: string) {
+  const property = properties.find((candidate) =>
+    isObject(candidate) &&
+    typeof candidate.id === 'string' &&
+    candidate.id.toLowerCase() === id.toLowerCase()
+  )
+  const value = isObject(property) ? property.value : undefined
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * Accepts a recorded IANA time zone that the runtime knows.
+ *
+ * @param value - Recorded time zone.
+ * @returns The time zone, or `undefined` when it is missing or unknown.
+ */
+function readTimeZone(value: string | undefined) {
+  if (value === undefined || value.length > 64) return undefined
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: value })
+    return value
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -459,15 +543,40 @@ function requireSchedule(schedule: ConnectorEventSchedule | undefined) {
 }
 
 /**
- * Normalizes a provider modification time so versions compare in time order.
+ * Validates a provider ETag, which is the event version: it changes on every modification and
+ * makes updates conditional.
  *
- * @param value - RFC 3339 timestamp.
- * @returns ISO 8601 timestamp in UTC with milliseconds.
+ * @param value - Google `etag` or Graph `@odata.etag`.
+ * @returns The ETag.
  */
-function readTimestamp(value: unknown) {
-  const time = typeof value === 'string' ? Date.parse(value) : Number.NaN
-  if (Number.isNaN(time)) throw malformed('Calendar event modification time is invalid.')
-  return new Date(time).toISOString()
+function readVersion(value: unknown) {
+  if (typeof value !== 'string' || value === '' || value.length > 512 || hasControlCharacter(value)) {
+    throw malformed('Calendar event ETag is invalid.')
+  }
+  return value
+}
+
+/**
+ * Builds the `If-Match` header of a conditional update.
+ *
+ * @param version - ETag read last, if any.
+ * @returns Request headers, or nothing for an unconditional write.
+ */
+function ifMatch(version: string | undefined) {
+  return version === undefined ? {} : { headers: { 'If-Match': readVersion(version) } }
+}
+
+/**
+ * Error for an event that changed since Mukuroji last read it. The next poll reads the change and
+ * records a conflict when the Work Item changed too.
+ *
+ * @returns A non-retryable runtime error.
+ */
+function eventChanged() {
+  return new ConnectorRuntimeError(
+    'ConnectorExternalVersionChanged',
+    'The calendar event changed since it was last read.',
+  )
 }
 
 /**

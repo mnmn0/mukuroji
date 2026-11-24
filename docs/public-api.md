@@ -290,8 +290,8 @@ Public API の external link は
 scope、および対象 Team の current RBAC を必要とする。
 
 `resourceType: "calendar-event"` は category が `calendar` の installation（Google Calendar、Outlook Calendar）
-だけで使える。`externalId` と `externalUrl` を両方省くと、接続先の既定カレンダーに Work Item の日付で
-終日の予定を作ってからリンクする。同じ `Idempotency-Key` で再送しても予定は 1 つだけになる。
+だけで使える。`externalId` と `externalUrl` は送らない（送ると `400`）。接続先の既定カレンダーに Work Item の日付で
+終日の予定を作ってからリンクする。既存の予定はリンクできない。同じ `Idempotency-Key` で再送しても予定は 1 つだけになる。
 日付のない Work Item には作れない。同期するのは日付だけで、題名は同期しない（ADR 0089）。
 `resourceType` は今後も増えることがある。consumer は知らない `resourceType` のリンクを無視する。
 

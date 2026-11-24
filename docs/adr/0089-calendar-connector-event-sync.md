@@ -28,7 +28,8 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   - 日付のない Work Item には予定を作らない。outbound の同期でも skip する。
 - Mukuroji が作った予定には private な extended property `mukurojiManaged=1` を付ける。poll ではこの property で
   絞り、自分が作った予定だけを読む。outbound の origin marker も `mukurojiOrigin` に入れる。
-- 外部リンクの作成で `externalId` を省くと、Work Item の日付で予定を作ってからリンクする。
+- `calendar-event` のリンクは Mukuroji が作った予定だけにする。作成では `externalId` と `externalUrl` を受け付けず
+  （`400`）、Work Item の日付で予定を作ってからリンクする。既存の予定は印がなく poll で読めないため。
   - Google では event ID を操作 ID の sha256 から決め、再送で 409 が返ったら同じ ID に PATCH する。
   - Outlook では `transactionId` を同じ値にする。
   - 予定の作成後にリンクの作成が失敗すると、予定だけが残ることがある。これは許容する。
@@ -38,6 +39,11 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
     `ConnectorCalendarDatesInvalid` で拒否する。
   - 日付のない Work Item は、予定が 1 日なら期限、複数日なら期間にする。
 - 両側で日付が変わった場合は、既存の競合の記録で `schedule` の差分として残し、利用者に解決してもらう。
+- 予定の version は provider の ETag（Google の `etag`、Graph の `@odata.etag`）とし、更新は `If-Match` で条件付きにする。
+  最後に読んだ後で予定が動いていれば `412` になり、outbound は書かずに skip する。次の poll がその変更を読み、
+  Work Item も変わっていれば競合として記録する。競合の解決中に予定が動いた場合も、解決をやり直してもらう。
+- Graph は日時を UTC で返すよう `Prefer: outlook.timezone="UTC"` を送り、予定を書いたときの IANA time zone を
+  extended property `mukurojiTimeZone` に記録して、読むときにその time zone の日付へ戻す。
 
 ## 検討した選択肢
 

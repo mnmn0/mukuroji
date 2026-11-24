@@ -41,6 +41,12 @@ type FakeGoogleEvent = Record<string, unknown> & {
  */
 function createFakeGoogle(clock: () => Date) {
   const events = new Map<string, FakeGoogleEvent>()
+  let revision = 0
+  /** Returns a new ETag, as Google does on every change. */
+  const nextEtag = () => {
+    revision += 1
+    return `"etag-${revision}"`
+  }
   const requests: Array<{ method: string, url: URL, authorization: string | null, body?: Record<string, unknown> }> = []
   const fetcher = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
@@ -51,17 +57,19 @@ function createFakeGoogle(clock: () => Date) {
     const prefix = '/calendar/v3/calendars/primary/events'
     if (!url.pathname.startsWith(prefix)) return new Response('not found', { status: 404 })
     const id = decodeURIComponent(url.pathname.slice(prefix.length + 1))
-    const stamp = () => ({ updated: clock().toISOString(), htmlLink: `https://calendar.google.com/event?eid=${id || String(body?.id)}` })
+    const stamp = () => ({ updated: clock().toISOString(), etag: nextEtag(), htmlLink: `https://calendar.google.com/event?eid=${id || String(body?.id)}` })
     if (method === 'POST') {
       const eventId = String(body?.id)
       if (events.has(eventId)) return Response.json({ error: 'duplicate' }, { status: 409 })
-      const event = { ...body, id: eventId, updated: clock().toISOString(), htmlLink: `https://calendar.google.com/event?eid=${eventId}` }
+      const event = { ...body, id: eventId, updated: clock().toISOString(), etag: nextEtag(), htmlLink: `https://calendar.google.com/event?eid=${eventId}` }
       events.set(eventId, event)
       return Response.json(event)
     }
     if (method === 'PATCH') {
       const current = events.get(id)
       if (!current) return Response.json({ error: 'missing' }, { status: 404 })
+      const expected = headers.get('If-Match')
+      if (expected !== null && expected !== current.etag) return Response.json({ error: 'changed' }, { status: 412 })
       const next = { ...current, ...body, ...stamp(), id }
       events.set(id, next)
       return Response.json(next)
@@ -321,6 +329,7 @@ describe('calendar connectors (ADR 0089)', () => {
       end: { date: '2026-12-09' },
       summary: 'Renamed in the calendar',
       updated: new Date(NOW.getTime() + 60_000).toISOString(),
+      etag: '"moved-in-calendar"',
     })
     const moved = await fixture.engine.pollInstallation({
       workspaceId: 'workspace-1',
@@ -344,6 +353,65 @@ describe('calendar connectors (ADR 0089)', () => {
     expect(fixture.patches).toHaveLength(1)
   })
 
+  test('does not overwrite an event moved since the last read', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-11' }, end: { date: '2026-12-12' }, etag: '"moved-in-calendar"' })
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: 9,
+      schedule: { startDate: '2026-12-10', endDate: '2026-12-10', timeZone: 'Asia/Tokyo' },
+    })
+    const pushed = await fixture.engine.processOutbound({ workspaceId: 'workspace-1', link, operationId: 'push-stale' })
+    expect(pushed).toEqual({ kind: 'skipped', linkId: link.id, reason: 'stale' })
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-11' } })
+    // The next poll reads the move and records a conflict, since the Work Item changed too.
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(polled.results).toMatchObject([{ kind: 'conflict' }])
+  })
+
+  test('keeps an undated Work Item when its conflict is resolved with the local value', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture)
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const { schedule: _schedule, ...undated } = fixture.getWorkItem()
+    fixture.setWorkItem({ ...undated, revision: 9 })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-11' }, end: { date: '2026-12-12' }, etag: '"moved-in-calendar"' })
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    const result = polled.results[0]
+    if (result?.kind !== 'conflict') throw new Error(`Expected a conflict, got ${result?.kind}`)
+    const requestsBefore = fixture.google.requests.length
+    const resolved = await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      result.conflict.id,
+      { resolution: 'use-local' },
+    )
+    expect(resolved.status).toBe('resolved')
+    // Nothing is written to the calendar for a Work Item without dates.
+    expect(fixture.google.requests.slice(requestsBefore).some((request) => request.method === 'PATCH')).toBe(false)
+  })
+
   test('records a schedule conflict when both sides moved', async () => {
     const fixture = await createCalendarFixture()
     const link = await linkNewEvent(fixture)
@@ -365,6 +433,7 @@ describe('calendar connectors (ADR 0089)', () => {
       start: { date: '2026-12-11' },
       end: { date: '2026-12-12' },
       updated: new Date(NOW.getTime() + 60_000).toISOString(),
+      etag: '"moved-in-calendar"',
     })
     const result = await fixture.engine.pollInstallation({
       workspaceId: 'workspace-1',
@@ -442,19 +511,20 @@ describe('Microsoft Graph calendar protocol', () => {
     }
   }
 
-  /** A Graph all-day event. */
+  /** A Graph all-day November 30 event in Asia/Tokyo, returned in UTC as Graph does. */
   const graphEvent = {
+    '@odata.etag': 'W/"DwAAABYAAAA="',
     id: 'AAMkAGI2T_abc=',
     subject: 'Ship the release',
     webLink: 'https://outlook.office365.com/owa/?itemid=AAMkAGI2T',
     lastModifiedDateTime: '2026-11-24T01:02:03.4567890Z',
     isAllDay: true,
-    start: { dateTime: '2026-11-30T00:00:00.0000000', timeZone: 'Asia/Tokyo' },
-    end: { dateTime: '2026-12-01T00:00:00.0000000', timeZone: 'Asia/Tokyo' },
-    singleValueExtendedProperties: [{
-      id: 'String {00020329-0000-0000-c000-000000000046} Name mukurojiOrigin',
-      value: 'v1.origin.marker',
-    }],
+    start: { dateTime: '2026-11-29T15:00:00.0000000', timeZone: 'UTC' },
+    end: { dateTime: '2026-11-30T15:00:00.0000000', timeZone: 'UTC' },
+    singleValueExtendedProperties: [
+      { id: 'String {00020329-0000-0000-c000-000000000046} Name mukurojiOrigin', value: 'v1.origin.marker' },
+      { id: 'String {00020329-0000-0000-c000-000000000046} Name mukurojiTimeZone', value: 'Asia/Tokyo' },
+    ],
   }
 
   test('reads managed events page by page through the configured origin', async () => {
@@ -474,7 +544,7 @@ describe('Microsoft Graph calendar protocol', () => {
       externalId: 'AAMkAGI2T_abc=',
       resourceType: 'calendar-event',
       externalUrl: 'https://outlook.office365.com/owa/?itemid=AAMkAGI2T',
-      externalVersion: '2026-11-24T01:02:03.456Z',
+      externalVersion: 'W/"DwAAABYAAAA="',
       title: 'Ship the release',
       schedule: { startDate: '2026-11-30', endDate: '2026-11-30' },
       metadata: { calendar: 'default' },
@@ -482,6 +552,8 @@ describe('Microsoft Graph calendar protocol', () => {
     }])
     expect(first.nextCursor).toBe('?$skip=50&$top=50')
     expect(requests[0]?.query?.$filter).toContain('mukurojiManaged')
+    // Graph answers in UTC; the recorded time zone turns 15:00 UTC back into the Tokyo date.
+    expect(requests[0]?.headers).toEqual({ Prefer: 'outlook.timezone="UTC"' })
     await protocol.pull(request, 'calendar-event', first.nextCursor)
     expect(requests[1]).toMatchObject({ path: 'me/events', query: { $skip: '50', $top: '50' } })
   })
@@ -491,6 +563,7 @@ describe('Microsoft Graph calendar protocol', () => {
     const { request, requests } = createRequester([
       { status: 201, payload: graphEvent },
       { status: 404, payload: undefined },
+      { status: 412, payload: undefined },
     ])
     const mutation = {
       resourceType: 'calendar-event' as const,
@@ -507,8 +580,16 @@ describe('Microsoft Graph calendar protocol', () => {
       end: { dateTime: '2026-12-03T00:00:00', timeZone: 'Asia/Tokyo' },
     })
     expect(String(requests[0]?.body?.transactionId)).toMatch(/^mukuroji-[0-9a-f]{40}$/)
-    expect(protocol.push(request, { ...mutation, externalId: 'gone' }))
+    expect(requests[0]?.body?.singleValueExtendedProperties).toContainEqual({
+      id: 'String {00020329-0000-0000-C000-000000000046} Name mukurojiTimeZone',
+      value: 'Asia/Tokyo',
+    })
+    await expect(protocol.push(request, { ...mutation, externalId: 'gone' }))
       .rejects.toMatchObject({ code: 'ConnectorExternalResourceMissing' })
+    // An event changed since the last read is not overwritten.
+    await expect(protocol.push(request, { ...mutation, externalId: 'moved', expectedExternalVersion: 'W/"old"' }))
+      .rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
+    expect(requests[2]?.headers).toMatchObject({ 'If-Match': 'W/"old"' })
   })
 
   test('reads a timed event as the days it covers', async () => {
@@ -518,6 +599,7 @@ describe('Microsoft Graph calendar protocol', () => {
       payload: {
         value: [{
           ...graphEvent,
+          singleValueExtendedProperties: [],
           isAllDay: false,
           start: { dateTime: '2026-12-01T09:00:00.0000000', timeZone: 'UTC' },
           end: { dateTime: '2026-12-03T00:00:00.0000000', timeZone: 'UTC' },

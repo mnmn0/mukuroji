@@ -1945,6 +1945,27 @@ describe('public API router', () => {
     const link = await created.json() as { id: string }
     expect(link.id).toBeString()
 
+    // A calendar event link is always created by Mukuroji, so an existing event ID is refused.
+    const existingEvent = await router.request(
+      'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
+      {
+        method: 'POST',
+        headers: {
+          ...authorization,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'link-existing-calendar-event',
+        },
+        body: JSON.stringify({
+          installationId: installation.id,
+          resourceType: 'calendar-event',
+          externalId: 'existing-event',
+          externalUrl: 'https://calendar.google.com/event?eid=existing-event',
+          syncDirection: 'inbound',
+        }),
+      },
+    )
+    expect(existingEvent.status).toBe(400)
+
     const list = await router.request(
       'http://localhost/v1/work-items/work-item-1/external-links?teamId=team-1',
       { headers: authorization },

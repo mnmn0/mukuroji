@@ -669,12 +669,22 @@ export class ConnectorSyncEngine {
       this.originSigningSecret,
       persisted?.lastExternalVersion,
     )
-    const record = await this.withConnectorCredential(
-      input.workspaceId,
-      installation,
-      installationSnapshot.lifecycleRevision,
-      async (adapter, credential) => adapter.push(credential, mutation),
-    )
+    let record: ConnectorExternalRecord
+    try {
+      record = await this.withConnectorCredential(
+        input.workspaceId,
+        installation,
+        installationSnapshot.lifecycleRevision,
+        async (adapter, credential) => adapter.push(credential, mutation),
+      )
+    } catch (error) {
+      // The event moved since the last read. Nothing is written; the next poll reads the move and
+      // records a conflict because the Work Item changed too.
+      if (isExternalVersionChanged(error)) {
+        return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+      }
+      throw error
+    }
     validateLinkRecordBinding(link, record)
     await this.commitSyncedState(
       input.workspaceId,
@@ -986,7 +996,11 @@ export class ConnectorSyncEngine {
       }
       synchronizedWorkItem = applied.workItem
     }
-    if (resolution.resolution === 'use-local' || resolution.resolution === 'merge') {
+    const keepsUndatedLocal = link.resourceType === 'calendar-event' &&
+      resolution.resolution === 'use-local' &&
+      !synchronizedWorkItem.schedule
+    // Keeping a Work Item without dates leaves its event as it is, like an outbound sync does.
+    if (!keepsUndatedLocal && (resolution.resolution === 'use-local' || resolution.resolution === 'merge')) {
       const mutation = createOutboundMutation(
         link,
         synchronizedWorkItem,
@@ -995,13 +1009,28 @@ export class ConnectorSyncEngine {
         stored.externalRecord.externalVersion,
       )
       outboundOriginMarker = mutation.originMarker
-      synchronizedRecord = await this.withConnectorCredential(
-        actor.workspaceId,
-        installation,
-        installationSnapshot.lifecycleRevision,
-        async (adapter, credential) =>
-          adapter.push(credential, mutation),
-      )
+      try {
+        synchronizedRecord = await this.withConnectorCredential(
+          actor.workspaceId,
+          installation,
+          installationSnapshot.lifecycleRevision,
+          async (adapter, credential) =>
+            adapter.push(credential, mutation),
+        )
+      } catch (error) {
+        if (!isExternalVersionChanged(error)) throw error
+        // The resource changed after the conflict was detected; the user resolves again with the
+        // newer value once the next poll records it.
+        await this.persistence.releaseConflictResolution(
+          actor.workspaceId,
+          conflictId,
+          operationId,
+        )
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncConflictChanged',
+          'The external resource changed after this sync conflict was detected.',
+        )
+      }
     }
     const persisted = await this.persistence.getLinkState(
       actor.workspaceId,
@@ -1589,7 +1618,11 @@ function createOutboundMutation(
       originSigningSecret,
     ),
     operationId,
-    ...(expectedExternalVersion ? { expectedExternalVersion } : {}),
+    // A calendar write is conditional only when both sides sync: an outbound-only link is meant to
+    // overwrite the event, and a refused write would never be read back.
+    ...(expectedExternalVersion && (!calendar || link.syncDirection === 'bidirectional')
+      ? { expectedExternalVersion }
+      : {}),
   }
 }
 
@@ -1790,6 +1823,16 @@ function isConnectorCredentialCasConflict(error: unknown) {
       error.code === 'DeveloperPlatformConcurrentMutation' ||
       error.code === 'ConnectorReauthorizationStateRequired'
     )
+}
+
+/**
+ * Returns whether a provider refused a conditional write because the resource changed.
+ *
+ * @param error - Thrown error.
+ * @returns Whether the error is `ConnectorExternalVersionChanged`.
+ */
+function isExternalVersionChanged(error: unknown) {
+  return error instanceof ConnectorRuntimeError && error.code === 'ConnectorExternalVersionChanged'
 }
 
 function readSupportedProvider(provider: ConnectorInstallation['provider']) {
