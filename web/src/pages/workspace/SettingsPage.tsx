@@ -5,6 +5,8 @@ import { AutomationManagementPanelContainer } from '../../automation/ui/Automati
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
+import { resolveBrowserTimeZone } from '../../features/time-tracking/model/timePeriod'
+import { WorkspaceTimePeriodContainer } from '../../features/time-tracking/ui/WorkspaceTimePeriodContainer'
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
@@ -64,6 +66,7 @@ export function SettingsPage() {
             workspaceConfiguration: workspace.canManageWorkspaceConfiguration,
             softwareFactory: workspace.softwareFactoryEnabled,
             teamManagement: workspace.canManageTeams,
+            workspaceTimePeriods: workspace.canManageWorkspaceTimePeriods,
           })}
           t={t}
         />
@@ -196,6 +199,15 @@ export function SettingsPage() {
                     />
                   </SettingsPanelAnchor>
                 ) : null}
+                {workspace.canManageWorkspaceTimePeriods ? (
+                  <SettingsPanelAnchor panel="time-periods">
+                    <WorkspaceTimePeriodContainer
+                      accessToken={workspace.accessToken}
+                      locale={workspace.locale}
+                      timeZone={workspace.timeZone ?? resolveBrowserTimeZone()}
+                    />
+                  </SettingsPanelAnchor>
+                ) : null}
                 <SettingsPanelAnchor panel="developer-platform">
                   <DeveloperPlatformSettingsPanelContainer
                     accessToken={workspace.accessToken}
@@ -291,6 +303,8 @@ type SettingsPanelAvailability = {
   softwareFactory: boolean
   /** Whether the member manages Teams, which shows the Team profile panel. */
   teamManagement: boolean
+  /** Whether the member closes months for every Team. */
+  workspaceTimePeriods: boolean
 }
 
 /**
@@ -321,6 +335,7 @@ function listSettingsPanels(
           signedIn && 'members',
           signedIn && available.workspaceConfiguration && 'tenant',
           signedIn && available.workspaceConfiguration && 'directory',
+          signedIn && available.workspaceTimePeriods && 'time-periods',
           signedIn && 'developer-platform',
           signedIn && 'automation',
           signedIn && available.auditLog && 'audit-log',
