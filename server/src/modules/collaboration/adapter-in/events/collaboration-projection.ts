@@ -59,6 +59,7 @@ import {
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
   requiresCurrentWorkItemAssignee,
+  requiresCurrentWorkItemContributor,
   isSlackNotificationEligible,
   isNotificationRoutedToChannel,
   type PlanningScheduledNotificationKind,
@@ -430,6 +431,8 @@ export type CurrentWorkItemNotificationScope = {
   projectId?: string
   /** 現在の担当 Workspace member key です。 */
   assigneeMemberKey?: string
+  /** Member keys currently holding a contributor share of the Work Item. */
+  contributorMemberKeys?: string[]
   /** 現在の date-only 期限です。 */
   dueDate?: string
   /** 現在の標準 workflow status category です。 */
@@ -2830,11 +2833,15 @@ export async function authorizeNotificationDelivery(
   }
   const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
-  if (currentScope.checked && requiresCurrentWorkItemAssignee({
+  const recipientReasons = {
     reasons: sourceEvent.notificationCandidates
       .filter((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey)
       .map((candidate) => candidate.reason),
-  }) && currentScope.assigneeMemberKey !== memberKey) return false
+  }
+  if (currentScope.checked && requiresCurrentWorkItemAssignee(recipientReasons) &&
+    currentScope.assigneeMemberKey !== memberKey) return false
+  if (currentScope.checked && requiresCurrentWorkItemContributor(recipientReasons) &&
+    !currentScope.contributorMemberKeys?.includes(memberKey)) return false
   const scoped = refreshScheduledNotificationEvent(
     currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
     currentScope,
@@ -3024,6 +3031,10 @@ async function readCurrentWorkItemScope(
     exists: true,
     projectId: item.assignedProjectId,
     assigneeMemberKey: normalizeMemberKey(item.assigneeUserId),
+    contributorMemberKeys: (item.contributorAssignments ?? []).flatMap((assignment) => {
+      const memberKey = normalizeMemberKey(assignment.memberUserId)
+      return memberKey === undefined ? [] : [memberKey]
+    }),
     dueDate: normalizeStoredDateOnly(item.dueDate),
     statusCategory: item.statusCategory,
     updatedAt: item.updatedAt,

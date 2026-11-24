@@ -53,6 +53,7 @@ import {
   type WorkspaceMemberFilter,
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
+import { MemberWorkHandoverDialogContainer } from './MemberWorkHandoverDialogContainer'
 
 function shouldRetainWorkspaceMutationContext(error: unknown) {
   return !(error instanceof WorkspaceAccessApiError)
@@ -66,6 +67,10 @@ type WorkspaceAccessPanelContainerProps = {
    * Workspace access API の Authorization header に使う access token です。
    */
   accessToken: string
+  /**
+   * Workspace ID used to hand a member's work over; without it the handover is not offered.
+   */
+  workspaceId?: string
   /**
    * パネルの表示 locale です。
    */
@@ -161,6 +166,15 @@ type WorkspaceAccessPanelProps = {
     memberKey: string,
     action: WorkspaceMemberCredentialAction,
   ) => Promise<void>
+  /**
+   * Session used to hand a member's open Work Items to another member; absent hides the action.
+   */
+  memberHandover?: {
+    /** Access token for the Work Item and bulk operation APIs. */
+    accessToken: string
+    /** Workspace that scopes the handover request. */
+    workspaceId: string
+  }
 }
 
 /**
@@ -300,6 +314,7 @@ const workspaceRoles = ['owner', 'admin', 'member', 'guest'] as const satisfies 
 export function WorkspaceAccessPanelContainer({
   accessToken,
   locale,
+  workspaceId,
 }: WorkspaceAccessPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateCache } = useSWRConfig()
@@ -475,6 +490,7 @@ export function WorkspaceAccessPanelContainer({
       signInSecurity={signInSecurity}
       signInSecurityLoadFailed={Boolean(signInSecurityError)}
       onRetrySignInSecurity={() => void mutateSignInSecurity()}
+      {...(workspaceId ? { memberHandover: { accessToken, workspaceId } } : {})}
     />
   )
 }
@@ -500,8 +516,10 @@ export function WorkspaceAccessPanel({
   signInSecurity,
   signInSecurityLoadFailed = false,
   onRetrySignInSecurity,
+  memberHandover,
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const [handoverMember, setHandoverMember] = useState<WorkspaceMember>()
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member')
   const [isInviting, setIsInviting] = useState(false)
   const [operationErrorMessage, setOperationErrorMessage] = useState<string | undefined>()
@@ -813,7 +831,18 @@ export function WorkspaceAccessPanel({
           onRenameMember={onRenameMember}
           onRequestAction={requestAction}
           onRetrySignInSecurity={onRetrySignInSecurity}
+          {...(memberHandover ? { onOpenHandover: setHandoverMember } : {})}
         />
+        {memberHandover && handoverMember ? (
+          <MemberWorkHandoverDialogContainer
+            accessToken={memberHandover.accessToken}
+            member={handoverMember}
+            members={access.members}
+            t={t}
+            workspaceId={memberHandover.workspaceId}
+            onClose={() => setHandoverMember(undefined)}
+          />
+        ) : null}
 
         <WorkspaceInvitationLedger
           access={access}
@@ -888,6 +917,7 @@ function WorkspaceMemberLedger({
   onRenameMember,
   onRequestAction,
   onRetrySignInSecurity,
+  onOpenHandover,
 }: {
   access: WorkspaceAccess
   canResetCredentials: boolean
@@ -898,6 +928,8 @@ function WorkspaceMemberLedger({
   onRenameMember?: (memberKey: string, name: string | undefined, expectedVersion: number) => Promise<void>
   onRequestAction: (action: WorkspaceAccessAction) => void
   onRetrySignInSecurity?: () => void
+  /** Opens the handover of a member's open Work Items; absent hides the action. */
+  onOpenHandover?: (member: WorkspaceMember) => void
 }) {
   const activeOwners = access.members.filter(
     (member) => member.role === 'owner' && member.status === 'active',
@@ -1075,6 +1107,16 @@ function WorkspaceMemberLedger({
                           onClick={() => onRequestAction({ kind: 'member-credential', member, action: 'mfa-reset' })}
                         >
                           {t('memberSecurity.action.mfaReset')}
+                        </button>
+                      ) : null}
+                      {onOpenHandover && canManage ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-handover-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onOpenHandover(member)}
+                        >
+                          {t('workspace.access.action.handover')}
                         </button>
                       ) : null}
                       <button

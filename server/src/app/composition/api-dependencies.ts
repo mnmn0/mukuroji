@@ -224,8 +224,10 @@ import {
   createProductionTenantWorkspaceAccess,
 } from './tenant-administration'
 import {
+  CapacityPlanningError,
   CapacityPlanningService,
   DynamoDbCapacityPlanningRepository,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
@@ -439,10 +441,19 @@ function createCapacityPlanningDataSource(
       }))
     },
     async listEstimates(workspaceId, teamId) {
-      return (await listTeamWorkItemEffort(workspaceId, teamId)).map((effort) => ({
+      const efforts = await listTeamWorkItemEffort(workspaceId, teamId).catch((error: unknown) => {
+        if (error instanceof ProjectDataError && error.code === 'WorkItemListLimitExceeded') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, error.message)
+        }
+        throw error
+      })
+      return efforts.map((effort) => ({
         workItemId: effort.workItemId,
         ...(effort.plannedEffortMinutes === undefined ? {} : { estimateMinutes: effort.plannedEffortMinutes }),
         ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
+        ...(effort.projectId ? { projectId: effort.projectId } : {}),
+        ...(effort.window ? { window: effort.window } : {}),
+        ...(effort.contributors ? { contributors: effort.contributors } : {}),
       }))
     },
   }

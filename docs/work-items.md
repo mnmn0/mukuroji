@@ -216,12 +216,13 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - Focus は [Focus queue の「責任者と参加」](./focus.md#責任者と参加) のとおり `involvement` で区別する。
 - My Tasks は、利用者が責任者の Work Item に加えて、`contributorAssignments` に member として入っている Work Item を表示する。後者のカードにだけ「参加」の badge を付け、担当者の表示はこれまでどおり責任者を示す。対象の判定は Focus と同じで、責任者が Contributor の一覧にも入っている場合は責任者として扱い、自分の分担が `done` の Contributor は進行中の Work Item から外れ、完了・キャンセル済みの Work Item には残る。ロールだけの分担はどの利用者の My Tasks にも入らない。判定は Web が取得済みの Work Item から行い、状態の移動などの操作可否はこれまでどおり Work Item の書き込み権限で決まる。
 
-まだ実装していない範囲は次のとおり。
+通知、引き継ぎ、負荷、テンプレートは次のとおり扱う。
 
-- workload / capacity への planned effort の集計
-- automation、template、bulk action からの設定
-- member 無効化や Team 移動時の再割り当て
-- 通知の分離
+- 通知: 新しく Contributor になった member（責任者と、最初から `done` の分担を除く）に `contributor` reason の通知を1件送る。種類は `assignment`。状態・日程・archive・期限の通知は責任者だけ、承認は reviewer、購読は watcher の reason で届き、Contributor の追加では作成者への `creator` 通知も出さない。`contributor` だけの通知は、受信者が今も Contributor のときだけ Inbox に出て配信される（[Notifications](./notifications.md)）。
+- 引き継ぎ: member の無効化や Team の異動では、Bulk operation の `reassign-member` action（`fromMemberUserId` → `toMemberUserId`）で責任者と、`done` でない分担を移す。`done` の分担は記録として残す。移し先がすでに Contributor なら、移す分担の予定工数を移し先の分担に足し（上限 60,000 分）、その分担が `done` なら `in-progress` に戻す。移し先は通常の更新と同じく active な non-guest member であることを検証し、commit 時に fence する。Work Item ごとに preview・revision 確認・retry・undo ができ、undo は元の責任者と Contributor を戻す（無効化済みの member へは戻せないので失敗する）。対象の一覧は `GET /api/work-items?member=<memberKey>&open=true` で読む。`member` は `involvement` と併用できず、閲覧できる範囲を狭めるだけである。Web は Workspace 管理のメンバー一覧の「担当の引き継ぎ」から使う（[Automation](./automation.md#bulk-operation)）。
+- 責任者の不在・無効の検出: 「担当の引き継ぎ」は利用停止した member にも開け、その人が責任者のまま残っている未完了の Work Item を一覧する。
+- 負荷: decided member の `done` でない分担の予定工数を、Team の workload snapshot に読み取り専用で数える（[Capacity planning](./capacity-planning.md#contributor-の予定工数)）。capacity planning には保存しない。
+- テンプレート: Work Item template の payload に `contributorAssignments`（`memberUserId`・`jobRoleId`・`plannedEffortMinutes`・`status`、最大 20 件）を書ける。ジョブロールと member は、template から Work Item を作るとき（Automation の create action と繰り返し作業）と Work Item configuration の保存時の参照検査で、通常の作成と同じ規則で検証する。
 
 ## Read model
 
@@ -250,6 +251,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - 順序は Team ID、次に Work Item ID。cursor は filter と `includeArchived` に結び付いており、別の filter で使うと `400 InvalidWorkItemPageCursor` になる。
 - filter はどれも閲覧できる範囲を狭めるだけで広げない。
   - `involvement=mine`: 責任者（`assigneeUserId`）または Contributor が自分の Work Item
+  - `member=<memberKey>`: 責任者または Contributor が指定した member の Work Item（引き継ぎ用。`involvement` とは併用できない）
   - `teamId`: その Team の partition だけを読む
   - `projectId`: その Project に割り当てた Work Item
   - `statusCategory`: 繰り返し指定またはカンマ区切り（`backlog` / `unstarted` / `started` / `completed` / `canceled`）

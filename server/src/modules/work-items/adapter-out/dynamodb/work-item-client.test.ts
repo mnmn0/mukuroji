@@ -7,6 +7,7 @@ const {
 } = createApiTestHarness()
 import {
   createWorkItemNotificationCandidates,
+  createContributorNotificationCandidates,
   DynamoDbTeamIssuesClient,
 } from './work-item-client'
 import { withWorkItemKeyCounter } from '../../../../api/test-support/work-item-key-allocation'
@@ -4297,6 +4298,37 @@ test('Work Item change candidates add the creator only for notifiable changes', 
     { memberKey: 'owner@example.com', reason: 'archive-change' },
     { memberKey: 'creator@example.com', reason: 'creator' },
   ])
+})
+
+test('Work Item change candidates notify only newly added contributors, apart from the owner', () => {
+  const before = {
+    assigneeUserId: 'owner@example.com',
+    workflowStatusId: 'todo',
+    schedule: createDueDateSchedule('2026-07-20'),
+    creatorMemberKey: 'creator@example.com',
+    contributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'kept@example.com', status: 'planned' as const },
+    ],
+  }
+
+  expect(createWorkItemNotificationCandidates(before, {
+    ...before,
+    contributorAssignments: [
+      ...before.contributorAssignments,
+      { assignmentId: 'b'.repeat(32), memberUserId: 'added@example.com', status: 'planned' as const },
+      { assignmentId: 'c'.repeat(32), memberUserId: 'owner@example.com', status: 'planned' as const },
+      { assignmentId: 'd'.repeat(32), memberUserId: 'finished@example.com', status: 'done' as const },
+      { assignmentId: 'e'.repeat(32), jobRoleId: 'design', status: 'planned' as const },
+    ],
+  })).toEqual([
+    { memberKey: 'added@example.com', reason: 'contributor' },
+  ])
+  expect(createContributorNotificationCandidates({
+    assigneeUserId: 'owner@example.com',
+    contributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'new@example.com', status: 'in-progress' },
+    ],
+  }, [])).toEqual([{ memberKey: 'new@example.com', reason: 'contributor' }])
 })
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {

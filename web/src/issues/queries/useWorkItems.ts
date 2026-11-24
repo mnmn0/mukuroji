@@ -439,6 +439,7 @@ export function useWorkspaceWorkItemSummary(
 function createWorkspaceWorkItemFilterKey(filter: WorkspaceWorkItemListFilter) {
   return JSON.stringify([
     filter.involvement ?? null,
+    filter.memberUserId ?? null,
     filter.teamId ?? null,
     filter.projectId ?? null,
     [...(filter.statusCategories ?? [])].sort(),

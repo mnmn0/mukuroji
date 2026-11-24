@@ -17,6 +17,7 @@ import {
   InMemoryCapacityPlanningRepository,
   pruneCapacityPlanningState,
   upgradeLegacyTimeOff,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
@@ -314,6 +315,56 @@ describe('capacity planning calculations', () => {
     expect(unestimated.members.map((member) => member.remainingEffortMinutes)).toEqual([600, 600])
   })
 
+  test('counts Work Item contributor shares in member workload without doubling planned work', () => {
+    const secondMember = createProfile('member-2', 'UTC')
+    const state = createState([profile, secondMember], [
+      // member-2 already plans their part of work-item-1, so their contributor share is not counted again.
+      { ...createAssignment('assignment-b', false), memberId: 'member-2', workItemId: 'work-item-1', plannedEffortMinutes: 120, allocationMinutes: 120 },
+    ])
+    const snapshot = buildWorkloadSnapshot(state, [], [
+      {
+        workItemId: 'work-item-1',
+        estimateMinutes: 480,
+        window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+        contributors: [
+          { assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-2', memberId: 'member-2', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-3', memberId: 'outside-team', plannedEffortMinutes: 60 },
+        ],
+      },
+      {
+        workItemId: 'unscheduled',
+        contributors: [{ assignmentId: 'share-4', memberId: 'member-1', plannedEffortMinutes: 60 }],
+      },
+    ], createInput())
+
+    expect(snapshot.contributorShares).toEqual([{
+      workItemId: 'work-item-1',
+      assignmentId: 'share-1',
+      memberId: 'member-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      plannedEffortMinutes: 360,
+    }])
+    expect(snapshot.assignments.map((assignment) => assignment.id)).toEqual(['assignment-b'])
+    expect(snapshot.members.map((member) => member.allocatedMinutes)).toEqual([360, 120])
+    expect(snapshot.members.map((member) => member.plannedEffortMinutes)).toEqual([360, 120])
+    // The Work Item estimate is shared by planned effort and never added on top of it.
+    expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([360, 120])
+  })
+
+  test('leaves out contributor shares of a Project the reader cannot see', () => {
+    const snapshot = buildWorkloadSnapshot(createState([profile]), [], [{
+      workItemId: 'work-item-1',
+      projectId: 'secret',
+      window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+      contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 60 }],
+    }], createInput({ visibleProjectIds: new Set(['public']) }))
+
+    expect(snapshot.contributorShares).toEqual([])
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+  })
+
   test('bounds the snapshot time-entry query by the visible assignment horizon', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     await repository.saveState(
@@ -337,6 +388,28 @@ describe('capacity planning calculations', () => {
 
     expect(observedFrom).toBe('2026-07-31T00:00:00.000Z')
     expect(observedTo).toBe('2026-08-12T00:00:00.000Z')
+  })
+
+  test('widens the snapshot time-entry query to scheduled contributor shares', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    let observedFrom: string | undefined
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async (input) => {
+        observedFrom = input.from
+        return []
+      },
+      listEstimates: async () => [{
+        workItemId: 'work-item-1',
+        window: { fromDate: '2026-07-20', toDate: '2026-08-14' },
+        contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 600 }],
+      }],
+    })
+
+    await service.getSnapshot(createInput({ fromDate: '2026-08-10', toDate: '2026-08-10' }))
+
+    // Time logged since the share started still counts against its remaining effort.
+    expect(observedFrom).toBe('2026-07-19T00:00:00.000Z')
   })
 })
 
@@ -1263,6 +1336,190 @@ describe('Workspace-wide workload', () => {
       })
       expect(snapshot.members[0]?.workspaceOverloaded).toBe(true)
     }
+  })
+
+  test('counts contributor shares of every Team in Workspace-wide totals', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')], [
+      // This assignment already plans the member's part of work-item-planned, so its share is not counted again.
+      inTeam({ ...createAssignment('assignment-2', false, '2026-08-03', '2026-08-03', 60), workItemId: 'work-item-planned' }, 'team-2'),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [
+            {
+              workItemId: 'work-item-shared',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+            },
+            {
+              workItemId: 'work-item-planned',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-2', memberId: 'member-1', plannedEffortMinutes: 120 }],
+            },
+          ]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 660,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 660,
+      status: 'over',
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 360,
+    })
+  })
+
+  test('counts contributor shares of an active Team that never saved capacity state', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [{
+            workItemId: 'work-item-shared',
+            window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+            contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+          }]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+    const activeTeamIds = new Set(['team-1', 'team-2'])
+
+    const teamSnapshot = await service.getSnapshot({ ...createInput(), activeTeamIds })
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 600,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+      activeTeamIds,
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 600,
+      status: 'over',
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
+  test('keeps a Team view when another Team\'s estimates cannot be read, and fails the Workspace read', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300 })
+    // Totals that would miss team-2's shares are left out rather than shown too low, and say so.
+    expect(teamSnapshot.members[0]?.cells[0]).not.toHaveProperty('workspaceAllocatedMinutes')
+    expect(teamSnapshot.workspaceTotalsUnavailable).toBe(true)
+
+    await expect(service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })).rejects.toThrow('Too many Work Items.')
+  })
+
+  test('fails a Team view when another Team\'s estimates fail for an unexpected reason', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') throw new Error('Storage unavailable.')
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
+  })
+
+  test('reports an unexpected failure even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
+        if (teamId === 'team-3') {
+          // Fails after the limit error, so a fail-fast read would never see it.
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          throw new Error('Storage unavailable.')
+        }
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
+  })
+
+  test('reports a failure without a reason even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          return Promise.reject(new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.'))
+        }
+        // oxlint-disable-next-line prefer-promise-reject-errors -- the case under test is a rejection without a reason.
+        if (teamId === 'team-3') return Promise.reject(undefined)
+        return Promise.resolve([])
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const outcome = await service.getSnapshot(createInput()).then(
+      () => 'resolved',
+      (reason: unknown) => reason === undefined ? 'rejected without a reason' : 'rejected with a reason',
+    )
+    expect(outcome).toBe('rejected without a reason')
   })
 
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {

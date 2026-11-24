@@ -6,6 +6,7 @@ export {
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
+  requiresCurrentWorkItemContributor,
   isSlackNotificationEligible,
   isEmailNotificationEligible,
   isNotificationRoutedToChannel,
