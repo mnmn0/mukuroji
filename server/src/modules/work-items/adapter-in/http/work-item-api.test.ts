@@ -1420,6 +1420,78 @@ test('summarizes accessible Work Items per Team and Project', async () => {
   ])
 })
 
+test('labels Work Item assignees with the name on their Workspace member row', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+  })
+
+  const summary = await app.request('/api/work-items/summary', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const list = await app.request('/api/work-items?limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(summary.status).toBe(200)
+  expect((await summary.json()).buckets[0].assignees).toEqual([{ id: 'sato@example.com', label: '佐藤 改名' }])
+  expect(list.status).toBe(200)
+  const assigned = (await list.json()).workItems
+    .filter((workItem: { assigneeUserId?: string }) => workItem.assigneeUserId === 'sato@example.com')
+  expect(assigned.length).toBeGreaterThan(0)
+  expect(assigned.every((workItem: { assigneeName?: string }) => workItem.assigneeName === '佐藤 改名')).toBe(true)
+})
+
+test('lists assignee candidates with the name on their Workspace member row', async () => {
+  configureFakeProjectClients(true, {
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+  })
+
+  const response = await app.request('/api/projects/refero/users', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const users: Array<{ id: string; name?: string }> = (await response.json()).users
+  expect(users.find((user) => user.id === 'sato@example.com')?.name).toBe('佐藤 改名')
+})
+
+test('falls back to the assignee email when the Workspace member cleared the name', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': null },
+  })
+
+  const summary = await app.request('/api/work-items/summary', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(summary.status).toBe(200)
+  expect((await summary.json()).buckets[0].assignees).toEqual([
+    { id: 'sato@example.com', label: 'sato@example.com' },
+  ])
+})
+
+test('answers with the Work Items and shows assignees by email when the member names cannot be read', async () => {
+  configureFakeProjectClients(true, {
+    teamIssueCount: 4,
+    workspaceMemberNames: { 'sato@example.com': '佐藤 改名' },
+    workspaceMemberListFails: true,
+  })
+
+  const list = await app.request('/api/work-items?limit=50', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  // Create and update responses read names after saving, so a failed read must not fail them.
+  expect(list.status).toBe(200)
+  const assigned = (await list.json()).workItems
+    .filter((workItem: { assigneeUserId?: string }) => workItem.assigneeUserId === 'sato@example.com')
+  expect(assigned.length).toBeGreaterThan(0)
+  expect(assigned.every((workItem: { assigneeName?: string; assigneeEmail?: string }) =>
+    workItem.assigneeName === undefined && workItem.assigneeEmail === 'sato@example.com')).toBe(true)
+})
+
 test('creates a team-owned issue after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -3014,6 +3086,42 @@ test.each([
     code: 'WorkItemKeyNotFound',
     message: 'No readable Work Item has this key.',
   })
+})
+
+test('lists only the key prefixes of Teams the caller can read', async () => {
+  configureFakeProjectClients(true, {
+    workItemKeyPrefixes: [
+      { keyPrefix: 'CT', teamId: 'core-team' },
+      { keyPrefix: 'CT2', teamId: 'core-team' },
+      { keyPrefix: 'HID', teamId: 'hidden-team' },
+    ],
+  })
+
+  const response = await app.request('/api/work-items/key-prefixes', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ prefixes: ['CT', 'CT2'] })
+})
+
+test('lists no key prefixes for a caller without Team access', async () => {
+  configureFakeProjectClients(false, {
+    workItemKeyPrefixes: [{ keyPrefix: 'CT', teamId: 'core-team' }],
+  })
+
+  const response = await app.request('/api/work-items/key-prefixes', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ prefixes: [] })
+})
+
+test('requires a bearer token to list Work Item key prefixes', async () => {
+  configureFakeProjectClients(true)
+
+  expect((await app.request('/api/work-items/key-prefixes')).status).toBe(401)
 })
 
 test('requires a bearer token to resolve a Work Item key', async () => {

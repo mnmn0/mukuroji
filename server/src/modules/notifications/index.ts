@@ -45,7 +45,7 @@ export { emailDeliveryShard } from './domain/channel-delivery'
 /** Exposes the application workflow that delivers due Email notifications. */
 export { deliverDueEmailNotifications } from './application/email-delivery'
 /** Exposes the shared delivery ports the Email composition implements. */
-export type { ChannelDelivery } from './application/channel-delivery'
+export type { ChannelDelivery, NotificationLocaleReader } from './application/channel-delivery'
 /** Exposes the verified-address Email transport factory. */
 export { createEmailNotificationSender, type EmailRecipientLookup } from './adapter-out/email/email-sender'
 /** Exposes safe per-channel delivery logs and backlog metrics. */

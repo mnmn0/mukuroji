@@ -341,6 +341,74 @@ function requestMutation<T>(
   })
 }
 
+/** Current viewer's watch state of one Milestone. */
+export type PlanningEntityWatchState = {
+  /** Whether the viewer watches the Milestone and is told when it completes or is rescheduled. */
+  subscribed: boolean
+  /** Number of members watching the Milestone. */
+  watcherCount: number
+}
+
+/**
+ * Reads whether the current viewer watches a Milestone.
+ *
+ * @param accessToken - Authorization bearer token.
+ * @param entityId - Milestone ID.
+ * @returns The validated watch state.
+ */
+export async function getPlanningEntityWatch(
+  accessToken: string,
+  entityId: string,
+): Promise<PlanningEntityWatchState> {
+  return readPlanningEntityWatchResponse(
+    await requestJson<unknown>(`${createEntityPath(entityId)}/watch`, accessToken),
+  )
+}
+
+/**
+ * Starts or stops watching a Milestone for the current viewer.
+ *
+ * @param accessToken - Authorization bearer token.
+ * @param entityId - Milestone ID.
+ * @param subscribed - True to watch, false to stop watching.
+ * @param mutationContext - Correlation and idempotency identifiers shared across retries.
+ * @returns The validated watch state after the change.
+ */
+export async function setPlanningEntityWatch(
+  accessToken: string,
+  entityId: string,
+  subscribed: boolean,
+  mutationContext: MutationRequestContext,
+): Promise<PlanningEntityWatchState> {
+  return readPlanningEntityWatchResponse(
+    await requestJson<unknown>(`${createEntityPath(entityId)}/watch`, accessToken, {
+      headers: createMutationHeaders(mutationContext),
+      method: subscribed ? 'PUT' : 'DELETE',
+    }),
+  )
+}
+
+/**
+ * Validates the watcher envelope returned by the Milestone watch API.
+ *
+ * @param value - Untrusted response body.
+ * @returns The watch state.
+ * @throws PlanningApiError when the body is malformed.
+ */
+function readPlanningEntityWatchResponse(value: unknown): PlanningEntityWatchState {
+  const watch = isRecord(value) ? value.watch : undefined
+  if (
+    !isRecord(watch) ||
+    typeof watch.subscribed !== 'boolean' ||
+    typeof watch.watcherCount !== 'number' ||
+    !Number.isSafeInteger(watch.watcherCount) ||
+    watch.watcherCount < 0
+  ) {
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningWatchResponse')
+  }
+  return { subscribed: watch.subscribed, watcherCount: watch.watcherCount }
+}
+
 function createEntityPath(entityId: string) {
   return `${planningApiBaseUrl}/planning/entities/${encodeURIComponent(entityId)}`
 }

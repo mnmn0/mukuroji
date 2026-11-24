@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { formatNotificationMessage } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification, NotificationFilter } from '../api'
@@ -418,7 +419,7 @@ function NotificationRow({
   const isPending = controller.pendingNotificationId === notification.id || controller.isBulkPending
   const eventLabel = formatNotificationEventType(notification.eventType, t)
   const title = notification.title?.trim() || eventLabel
-  const summary = resolveNotificationSummary(notification, eventLabel, t)
+  const summary = resolveNotificationSummary(notification, eventLabel, t, locale)
 
   useEffect(() => {
     if (!selected) return
@@ -485,6 +486,14 @@ function NotificationRow({
               </time>
             </span>
             <span className={`mt-1 block truncate text-sm text-[var(--workbench-text)] ${isUnread ? 'font-bold' : 'font-semibold'}`}>
+              {notification.workItemKey ? (
+                <span
+                  className="mr-1.5 font-mono text-xs font-semibold text-[var(--workbench-muted)]"
+                  data-testid={`notification-key-${createNotificationTestToken(notification.id)}`}
+                >
+                  {notification.workItemKey}
+                </span>
+              ) : null}
               {title}
             </span>
             <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
@@ -635,6 +644,12 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.startsWith('weekly-report.')) {
     return 'workspace.inbox.event.weeklyReport'
   }
+  if (normalizedEventType === 'planning-entity.milestone-completed') {
+    return 'workspace.inbox.event.milestoneCompleted'
+  }
+  if (normalizedEventType === 'planning-entity.milestone-rescheduled') {
+    return 'workspace.inbox.event.milestoneRescheduled'
+  }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
@@ -743,17 +758,20 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 }
 
 /**
- * Resolves the row summary, localizing the fixed text of scheduled report deliveries and cleared blockers.
+ * Resolves the row summary in the reader's language: the fixed text of scheduled report deliveries
+ * and cleared blockers, then the message code when the row has one, then the stored text.
  *
  * @param notification - Notification shown in the row.
  * @param eventLabel - Localized event label used by the fallback summary.
  * @param t - Message translator for the current locale.
+ * @param locale - Reader's language.
  * @returns The summary text shown under the title.
  */
 function resolveNotificationSummary(
   notification: InboxNotification,
   eventLabel: string,
   t: (key: MessageKey) => string,
+  locale: Locale,
 ) {
   if (notification.eventType === analyticsReportDeliveredEventType) {
     return t('workspace.inbox.summary.reportDelivered')
@@ -761,6 +779,8 @@ function resolveNotificationSummary(
   if (notification.eventType === 'work-item.blocker-removed') {
     return t('workspace.inbox.summary.blockerCleared')
   }
+  // The API layer keeps only messages this client can read; others fall back to the stored text.
+  if (notification.message) return formatNotificationMessage(notification.message, locale)
   return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
 

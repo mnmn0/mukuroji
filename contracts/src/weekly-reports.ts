@@ -1,4 +1,5 @@
-import { TIME_ENTRY_CATEGORIES, type TimeEntryCategory } from './time-tracking'
+import { MAX_WORKSPACE_TIME_ENTRY_CATEGORIES, readTimeEntryCategoryKey } from './time-entry-categories'
+import type { TimeEntryCategory } from './time-tracking'
 
 /** Sections of a weekly report that list Work Items. */
 export type WeeklyReportSectionName = 'completed' | 'started' | 'overdue' | 'upcoming'
@@ -335,16 +336,6 @@ function parseItemInputs(value: unknown, label: string): WeeklyReportParseResult
 }
 
 /**
- * Reports whether a value is a known time entry work category.
- *
- * @param value - Untrusted value.
- * @returns True for a category in {@link TIME_ENTRY_CATEGORIES}.
- */
-function isTimeEntryCategory(value: unknown): value is TimeEntryCategory {
-  return TIME_ENTRY_CATEGORIES.some((category) => category === value)
-}
-
-/**
  * Validates indirect-work rows, one per work category.
  *
  * @param value - Untrusted rows.
@@ -356,19 +347,20 @@ export function parseWeeklyReportIndirectTime(
   label = 'indirectTime',
 ): WeeklyReportParseResult<WeeklyReportIndirectTime[]> {
   if (!Array.isArray(value)) return { ok: false, message: `${label} must be an array.` }
-  if (value.length > TIME_ENTRY_CATEGORIES.length) {
+  if (value.length > MAX_WORKSPACE_TIME_ENTRY_CATEGORIES) {
     return { ok: false, message: `${label} may list each work category once.` }
   }
   const rows: WeeklyReportIndirectTime[] = []
   const seen = new Set<TimeEntryCategory>()
   for (const row of value) {
-    if (!isRecord(row) || !isTimeEntryCategory(row.category)) {
-      return { ok: false, message: `${label} rows need a known work category.` }
+    const category = isRecord(row) ? readTimeEntryCategoryKey(row.category) : undefined
+    if (!isRecord(row) || category === undefined) {
+      return { ok: false, message: `${label} rows need a valid work category key.` }
     }
     if (!isMinutes(row.minutes)) return { ok: false, message: `${label} minutes must be a whole number of minutes.` }
-    if (seen.has(row.category)) return { ok: false, message: `${label} may list each work category once.` }
-    seen.add(row.category)
-    rows.push({ category: row.category, minutes: row.minutes })
+    if (seen.has(category)) return { ok: false, message: `${label} may list each work category once.` }
+    seen.add(category)
+    rows.push({ category, minutes: row.minutes })
   }
   return { ok: true, value: rows }
 }

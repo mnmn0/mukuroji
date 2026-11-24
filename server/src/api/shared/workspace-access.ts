@@ -260,7 +260,7 @@ function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
  * @param directoryId - Owning Workspace directory identifier.
  * @param userId - Candidate assignee identifier.
  * @param dependencies - Ports used to read membership and identity state.
- * @returns The current Cognito profile.
+ * @returns The current Cognito profile, with the display name from the Workspace member row.
  */
 export async function requireActiveWorkspaceAssignee(
   directoryId: string,
@@ -278,5 +278,86 @@ export async function requireActiveWorkspaceAssignee(
     )
   }
 
-  return dependencies.cognito.getUserProfile(userId)
+  const profile = await dependencies.cognito.getUserProfile(userId)
+  // The member row holds the display name members set (ADR 0074); Cognito keeps the sign-up name.
+  const name = member.name?.trim()
+  const { name: _signUpName, ...identity } = profile
+  return name ? { ...identity, name } : identity
+}
+
+/**
+ * Reads the display names of a Workspace's members, deactivated ones included, keyed by lower-cased member key.
+ *
+ * Members rename themselves on their Workspace member row (ADR 0074), so Project member rows and
+ * Cognito keep the name they had when they were written. Readers that show names prefer this map
+ * and fall back to their own value only for a member missing from it.
+ *
+ * @param directoryId - Workspace ID.
+ * @returns Name per member; undefined means the member has no name and is shown by email.
+ */
+export async function readWorkspaceMemberNames(
+  directoryId: string,
+): Promise<Map<string, string | undefined>> {
+  // Deactivated members stay on Work Items and reports, so their names are read too.
+  const workspaceAccess = workspaceDependencies.workspaceAccess
+  const members = workspaceAccess.listMembers
+    ? await workspaceAccess.listMembers(directoryId)
+    : await workspaceAccess.listActiveMembers(directoryId)
+  return new Map(members.map((member) => [
+    member.memberKey.trim().toLowerCase(),
+    member.name?.trim() || undefined,
+  ]))
+}
+
+/** AWS SDK error names of storage reads that can succeed when tried again. */
+const TRANSIENT_STORAGE_ERROR_NAMES = new Set([
+  'ProvisionedThroughputExceededException',
+  'ThrottlingException',
+  'RequestLimitExceeded',
+  'InternalServerError',
+  'ServiceUnavailable',
+  'TimeoutError',
+  'RequestTimeout',
+  'RequestTimeoutException',
+])
+
+/** Node.js network error codes of a connection that broke during a read. */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE'])
+
+/**
+ * Tells whether a storage read failed for a reason that passes on its own, such as throttling or
+ * a dropped connection, rather than a configuration or data problem.
+ *
+ * @param error - Error the read threw.
+ * @returns Whether the failure is transient.
+ */
+function isTransientStorageReadFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if (TRANSIENT_STORAGE_ERROR_NAMES.has(error.name)) return true
+  const code = 'code' in error ? error.code : undefined
+  return typeof code === 'string' && TRANSIENT_NETWORK_ERROR_CODES.has(code)
+}
+
+/**
+ * Reads Workspace member names for a display that can still be shown without them.
+ *
+ * A transient failure (throttling, a timeout, a dropped connection) yields undefined so the caller
+ * keeps the names it already has. Any other failure, such as denied access or invalid stored member
+ * rows, still throws: it will not pass on its own, and hiding it would keep showing names the
+ * Workspace no longer holds.
+ *
+ * @param directoryId - Workspace ID.
+ * @param read - Name reader; tests replace it.
+ * @returns Name per member as in {@link readWorkspaceMemberNames}, or undefined after a transient failure.
+ */
+export async function readWorkspaceMemberNamesForDisplay(
+  directoryId: string,
+  read: typeof readWorkspaceMemberNames = readWorkspaceMemberNames,
+): Promise<Map<string, string | undefined> | undefined> {
+  try {
+    return await read(directoryId)
+  } catch (error) {
+    if (isTransientStorageReadFailure(error)) return undefined
+    throw error
+  }
 }

@@ -1,5 +1,5 @@
 import { childElement, childElements, escapeXml, parseXmlDocument, textContent, type XmlElement } from './xmlDocument'
-import { createZipArchive, readZipArchive } from './zipArchive'
+import { createZipArchive, readZipArchive } from '../../shared/lib/zipArchive'
 
 /** Value of one spreadsheet cell; a date cell is read as `YYYY-MM-DD` text. */
 export type SpreadsheetCell = string | number | boolean | null

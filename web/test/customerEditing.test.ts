@@ -5,10 +5,15 @@ import {
   createCustomer,
   createCustomerRequest,
   deleteCustomerContact,
+  deleteCustomerSavedView,
+  getCustomerExport,
   linkCustomerRequestProject,
+  mergeCustomer,
   unlinkCustomerRequestWorkItem,
   updateCustomer,
+  updateCustomerSavedView,
 } from '../src/customers/api'
+import { createCustomerExportFileName } from '../src/customers/ui/downloadCustomerExport'
 import {
   createCustomerContactDraft,
   createCustomerDraft,
@@ -254,6 +259,61 @@ describe('Customer editing API boundary', () => {
   test('rejects an invalid Customer response', async () => {
     installFetchRecorder([{ status: 200, body: { id: 'customer-1' } }])
     await expect(updateCustomer('token', 'customer-1', { expectedRevision: 1 })).rejects.toMatchObject({ status: 502 })
+  })
+})
+
+describe('Customer saved views, export, and merge API', () => {
+  const view = {
+    id: 'view-1',
+    workspaceId: 'workspace-1',
+    name: 'Strategic',
+    filters: { tier: 'strategic' },
+    revision: 3,
+    createdAt: customer.createdAt,
+    updatedAt: customer.updatedAt,
+  }
+
+  test('renames a saved view with the revision fence and deletes one by revision', async () => {
+    const requests = installFetchRecorder([{ status: 200, body: { ...view, name: 'Key accounts', revision: 4 } }, { status: 204 }])
+    const updated = await updateCustomerSavedView('token', 'view/1', { expectedRevision: 3, name: 'Key accounts' })
+    await deleteCustomerSavedView('token', 'view/1', 4)
+    expect(updated.name).toBe('Key accounts')
+    expect(requests.map((entry) => [entry.url, entry.init.method, entry.init.body])).toEqual([
+      ['/api/customers/views/view%2F1', 'PATCH', JSON.stringify({ expectedRevision: 3, name: 'Key accounts' })],
+      ['/api/customers/views/view%2F1?expectedRevision=4', 'DELETE', undefined],
+    ])
+  })
+
+  test('loads and validates the Workspace export', async () => {
+    const exported = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      exportedAt: '2026-11-24T01:02:03.000Z',
+      customers: [customer],
+      contacts: [contact],
+      requests: [],
+      views: [view],
+      completionNotifications: [],
+    }
+    const requests = installFetchRecorder([{ status: 200, body: exported }, { status: 200, body: { ...exported, customers: [{ id: 'x' }] } }])
+    await expect(getCustomerExport('token')).resolves.toEqual(exported)
+    await expect(getCustomerExport('token')).rejects.toMatchObject({ status: 502 })
+    expect(requests[0]?.url).toBe('/api/customers/export')
+    expect(createCustomerExportFileName(exported.exportedAt)).toBe('customers-export-2026-11-24.json')
+  })
+
+  test('merges a duplicate Customer with both revisions and keeps the server error code', async () => {
+    const detail = { customer: { ...customer, id: 'customer-2' }, contacts: [], requests: [], workItems: [], projects: [] }
+    const requests = installFetchRecorder([
+      { status: 200, body: detail },
+      { status: 409, body: { code: 'CustomerRevisionConflict', message: 'Target customer changed.' } },
+    ])
+    const input = { targetCustomerId: 'customer-2', sourceExpectedRevision: 4, targetExpectedRevision: 2 }
+    await expect(mergeCustomer('token', 'customer-1', input)).resolves.toEqual(detail)
+    await expect(mergeCustomer('token', 'customer-1', input)).rejects.toMatchObject({ status: 409, code: 'CustomerRevisionConflict' })
+    expect(requests[0]?.url).toBe('/api/customers/customer-1/merge')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(requests[0]?.init.body).toBe(JSON.stringify(input))
   })
 })
 

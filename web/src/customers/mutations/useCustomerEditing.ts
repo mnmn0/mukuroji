@@ -3,6 +3,7 @@ import type {
   CreateCustomerInput,
   Customer,
   CustomerContact,
+  CustomerDetail,
   CustomerRequest,
   CustomerRequestWorkItemLink,
   UpdateCustomerContactInput,
@@ -18,6 +19,7 @@ import {
   deleteCustomerContact,
   linkCustomerRequestProject,
   linkCustomerRequestWorkItem,
+  mergeCustomer,
   unlinkCustomerRequestProject,
   unlinkCustomerRequestWorkItem,
   updateCustomer,
@@ -27,9 +29,9 @@ import {
 } from '../api/customers'
 import { getWorkItemByKey } from '../../issues/api/workItems'
 import {
+  readCustomerMutationFailure,
   resolveCustomerMutationErrorKey,
   shouldRefreshAfterCustomerMutationFailure,
-  type CustomerMutationFailure,
 } from '../model/customerMutationErrors'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
@@ -46,6 +48,8 @@ export type UseCustomerEditingInput = {
   enabled: boolean
   /** Reloads the Customer directory and the selected Customer after a change. */
   refresh: () => Promise<unknown>
+  /** Reloads only the Customer directory. Used after a merge, when the selected Customer no longer exists. */
+  refreshDirectory: () => Promise<unknown>
 }
 
 /** Customer editing state and operations exposed to the Customer page. */
@@ -58,6 +62,8 @@ export type CustomerEditingController = {
   createCustomer: (input: CreateCustomerInput) => Promise<Customer | undefined>
   /** Updates a Customer. */
   updateCustomer: (customerId: string, input: UpdateCustomerInput) => Promise<boolean>
+  /** Merges a duplicate Customer into the Customer to keep and returns the kept Customer, or undefined when it failed. */
+  mergeCustomer: (source: Customer, target: Customer) => Promise<CustomerDetail | undefined>
   /** Adds a contact to a Customer. */
   createContact: (customerId: string, input: CreateCustomerContactInput) => Promise<boolean>
   /** Updates a contact. */
@@ -88,7 +94,7 @@ class InvalidWorkItemKeyError extends Error {}
  * @returns Editing state and the operations the Customer page wires into its view.
  */
 export function useCustomerEditing(input: UseCustomerEditingInput): CustomerEditingController {
-  const { accessToken, enabled, refresh } = input
+  const { accessToken, enabled, refresh, refreshDirectory } = input
   const [mutationRunner] = useState(() => createMutationRequestRunner())
   const [isSaving, setIsSaving] = useState(false)
   const [errorKey, setErrorKey] = useState<MessageKey>()
@@ -96,6 +102,7 @@ export function useCustomerEditing(input: UseCustomerEditingInput): CustomerEdit
   /** Runs one change, refreshes Customer data, and turns failures into a message. */
   const run = useCallback(async <Result>(
     operation: (token: string) => Promise<Result>,
+    refreshAfterSuccess: () => Promise<unknown> = refresh,
   ): Promise<{ ok: true; value: Result } | { ok: false }> => {
     if (!accessToken || !enabled) return { ok: false }
     setIsSaving(true)
@@ -103,14 +110,14 @@ export function useCustomerEditing(input: UseCustomerEditingInput): CustomerEdit
     try {
       const value = await operation(accessToken)
       // The change is saved; a failed reload must not report it as a failed save.
-      await refresh().catch(() => undefined)
+      await refreshAfterSuccess().catch(() => undefined)
       return { ok: true, value }
     } catch (error) {
       if (error instanceof InvalidWorkItemKeyError) {
         setErrorKey('customers.edit.issue.workItemKeyInvalid')
         return { ok: false }
       }
-      const failure = readFailure(error)
+      const failure = readCustomerMutationFailure(error)
       setErrorKey(resolveCustomerMutationErrorKey(failure))
       if (shouldRefreshAfterCustomerMutationFailure(failure)) await refresh().catch(() => undefined)
       return { ok: false }
@@ -139,6 +146,14 @@ export function useCustomerEditing(input: UseCustomerEditingInput): CustomerEdit
     },
     updateCustomer: async (customerId, update) =>
       (await run((token) => updateCustomer(token, customerId, update))).ok,
+    mergeCustomer: async (source, target) => {
+      const result = await run((token) => mergeCustomer(token, source.id, {
+        targetCustomerId: target.id,
+        sourceExpectedRevision: source.revision,
+        targetExpectedRevision: target.revision,
+      }), refreshDirectory)
+      return result.ok ? result.value : undefined
+    },
     createContact: async (customerId, contactInput) =>
       (await runIdempotent(`customer-contact.create:${customerId}`, contactInput, (token, context) =>
         createCustomerContact(token, customerId, contactInput, context))).ok,
@@ -172,13 +187,5 @@ export function useCustomerEditing(input: UseCustomerEditingInput): CustomerEdit
       (await run((token) => linkCustomerRequestProject(token, request.id, projectId))).ok,
     unlinkProject: async (request, projectId) =>
       (await run((token) => unlinkCustomerRequestProject(token, request.id, projectId, request.revision))).ok,
-  }), [errorKey, isSaving, run, runIdempotent])
-}
-
-/** Reads the status and code from a Customer or Work Item API error without trusting its type. */
-function readFailure(error: unknown): CustomerMutationFailure {
-  if (typeof error !== 'object' || error === null) return {}
-  const status = 'status' in error && typeof error.status === 'number' ? error.status : undefined
-  const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
-  return { status, code }
+  }), [errorKey, isSaving, refreshDirectory, run, runIdempotent])
 }

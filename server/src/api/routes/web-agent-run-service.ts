@@ -7,6 +7,7 @@ import {
   FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH,
   classifyFactoryBoardItem,
   type AgentRunReport,
+  type AgentRunUsage,
   type AgentRunView,
   type AgentSettings,
   type FactoryBoardItem,
@@ -17,6 +18,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  combineAgentRunUsage,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
   createAgentRunReportCommentBody,
@@ -55,7 +57,8 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
-import type { TeamPermissionContext } from '../shared/workspace-access'
+import { readAgentRunUsage } from '../shared/agent-run-usage-access'
+import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Checks whether the principal manages the Team.
@@ -64,7 +67,7 @@ import type { TeamPermissionContext } from '../shared/workspace-access'
  * @param teamId - Team ID.
  * @returns True for Team managers and system administrators.
  */
-async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
+export async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
   try {
     await requireTeamPermission(principal, teamId, 'manager')
     return true
@@ -139,11 +142,12 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @param now - Read time.
  * @returns Run view.
  */
-function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date): AgentRunView {
+function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date, usage?: AgentRunUsage): AgentRunView {
   return {
     ...toAgentRun(run, now),
     canRelease: run.state === 'active' && canRelease,
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
+    ...(usage === undefined ? {} : { usage }),
   }
 }
 
@@ -170,13 +174,18 @@ export async function listWebWorkItemAgentRuns(
     canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
   ])
   const now = new Date()
+  // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
+  const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
+  const usageTotal = combineAgentRunUsage(usages)
   return {
-    items: page.runs.map((run) => toAgentRunView(
+    items: page.runs.map((run, index) => toAgentRunView(
       run,
       writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
       now,
+      usages[index],
     )),
     hasMore: page.nextCursor !== undefined,
+    ...(usageTotal === undefined ? {} : { usageTotal }),
   }
 }
 
@@ -466,6 +475,35 @@ async function readBoardAssigneeProfiles(
 }
 
 /**
+ * Reads the Workspace member names the board shows for assignees, within the same deadline as the
+ * profile lookups. A failed or late read yields undefined, so the board still returns and shows
+ * those assignees by email or member ID; a name lookup never fails or stalls the board.
+ *
+ * @param log - Request correlation ID and Team, logged with a failed read.
+ * @param directoryId - Workspace ID.
+ * @returns Name per lower-cased member key, or undefined when the names were not read in time.
+ */
+async function readBoardWorkspaceNames(
+  log: { correlationId: string | undefined; teamId: string },
+  directoryId: string,
+): Promise<Map<string, string | undefined> | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), boardProfileDeadlineMs)
+  })
+  const read = readWorkspaceMemberNamesForDisplay(directoryId).catch((error: unknown) => {
+    const code = error instanceof Error ? error.name : 'Unknown'
+    console.warn('Failed to read Factory board assignee names:', { ...log, code })
+    return undefined
+  })
+  try {
+    return await Promise.race([read, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
  * Lists the Factory board of a Team for anyone who can view the Team: the Work Items of active runs,
  * of runs that finished within the completed-lane window, and the `started` Work Items among the most
  * recently updated ones, each with its active or newest run and that run's latest report. Only Work
@@ -517,17 +555,31 @@ export async function listWebTeamAgentRunBoard(
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
   })
   const boardItems = items.flatMap((item) => item ? [item] : [])
-  const profiles = await readBoardAssigneeProfiles({ correlationId, teamId }, boardItems.map((item) => item.workItem.assigneeUserId))
+  const log = { correlationId, teamId }
+  const assigneeIds = boardItems.map((item) => item.workItem.assigneeUserId)
+  const [profiles, workspaceNames] = await Promise.all([
+    readBoardAssigneeProfiles(log, assigneeIds),
+    assigneeIds.some((userId) => userId !== '')
+      ? readBoardWorkspaceNames(log, principal.directoryId)
+      : Promise.resolve(new Map<string, string | undefined>()),
+  ])
   return {
     generatedAt: now.toISOString(),
     items: boardItems.map((item) => {
       const profile = profiles.get(item.workItem.assigneeUserId)
       if (!profile) return item
+      // Members rename themselves on their Workspace member row (ADR 0074); Cognito keeps the
+      // sign-up name, so the member row's name wins and a cleared one shows the email. Without
+      // the member rows the sign-up name could be stale, so the assignee shows by email.
+      const memberKey = profile.email.trim().toLowerCase()
+      const name = workspaceNames === undefined
+        ? undefined
+        : workspaceNames.has(memberKey) ? workspaceNames.get(memberKey) : profile.name
       return {
         ...item,
         workItem: {
           ...item.workItem,
-          ...(profile.name === undefined || profile.name === '' ? {} : { assigneeName: profile.name }),
+          ...(name === undefined || name === '' ? {} : { assigneeName: name }),
           ...(profile.email === '' ? {} : { assigneeEmail: profile.email }),
         },
       }

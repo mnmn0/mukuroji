@@ -1,4 +1,4 @@
-import type { AgentRunRuntime, FactoryAnalyticsStage, FactoryBoardLane } from '@mukuroji/contracts'
+import type { AgentRunRuntime, AgentRunUsage, FactoryAnalyticsStage, FactoryBoardLane } from '@mukuroji/contracts'
 import type { FactoryLineStation } from '../model/factoryLine'
 import { createTranslator, type Locale } from '../../../shared/i18n/i18n'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from '../../../work-items/ui/agentRunLabels'
@@ -284,6 +284,36 @@ export type FactoryAnalyticsLabels = {
   interventionsColumn: string
   /** Display names of runtimes. */
   runtimes: Record<AgentRunRuntime, string>
+  /** Heading of the token usage part. */
+  usageHeading: string
+  /** Explanation of where usage comes from and who sees the cost. */
+  usageHint: string
+  /** Notice shown when runs or buckets were left out of the usage. */
+  usagePartial: string
+  /** Heading of the usage per Project. */
+  usageProjectsHeading: string
+  /** Name of the group of Work Items without a Project. */
+  usageNoProject: string
+  /** Heading of the Work Items with the most tokens. */
+  usageWorkItemsHeading: string
+  /**
+   * Describes total tokens and, for managers, the estimated cost.
+   * @param usage - Usage to describe.
+   * @returns Short text.
+   */
+  formatUsageCompact: (usage: AgentRunUsage) => string
+  /**
+   * Describes the four token counts.
+   * @param usage - Usage to describe.
+   * @returns Token breakdown.
+   */
+  formatUsageTokens: (usage: AgentRunUsage) => string
+  /**
+   * Describes the request count and, for managers, the estimated cost.
+   * @param usage - Usage to describe.
+   * @returns Detail text.
+   */
+  formatUsageDetail: (usage: AgentRunUsage) => string
 }
 
 /**
@@ -294,6 +324,7 @@ export type FactoryAnalyticsLabels = {
  */
 export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLabels {
   const t = createTranslator(locale)
+  const runLabels = createWorkItemAgentRunsLabels(locale)
   return {
     title: t('factoryBoard.analytics.title'),
     description: t('factoryBoard.analytics.description'),
@@ -329,6 +360,15 @@ export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLa
     successColumn: t('factoryBoard.analytics.successColumn'),
     reworkColumn: t('factoryBoard.analytics.reworkColumn'),
     interventionsColumn: t('factoryBoard.analytics.interventionsColumn'),
-    runtimes: createWorkItemAgentRunsLabels(locale).runtimes,
+    runtimes: runLabels.runtimes,
+    usageHeading: t('factoryBoard.analytics.usageHeading'),
+    usageHint: t('factoryBoard.analytics.usageHint'),
+    usagePartial: t('factoryBoard.analytics.usagePartial'),
+    usageProjectsHeading: t('factoryBoard.analytics.usageProjectsHeading'),
+    usageNoProject: t('factoryBoard.analytics.usageNoProject'),
+    usageWorkItemsHeading: t('factoryBoard.analytics.usageWorkItemsHeading'),
+    formatUsageCompact: runLabels.formatUsageCompact,
+    formatUsageTokens: runLabels.formatUsageTokens,
+    formatUsageDetail: runLabels.formatUsageDetail,
   }
 }

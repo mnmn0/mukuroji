@@ -10,6 +10,7 @@ import {
 } from 'react'
 import { useSWRConfig } from 'swr'
 import { WORKSPACE_INVITATION_NAME_MAX_LENGTH } from '@mukuroji/contracts'
+import { WorkspaceMemberNameEditor } from './WorkspaceMemberNameEditor'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -37,6 +38,7 @@ import {
   shouldCloseCredentialResetDialog,
   useWorkspaceMemberCredentialReset,
 } from '../mutations/useWorkspaceMemberCredentialReset'
+import { useWorkspaceMemberRename } from '../mutations/useWorkspaceMemberRename'
 import {
   createWorkspaceAccessMutationSession,
   getBulkInvitationRunner,
@@ -127,6 +129,14 @@ type WorkspaceAccessPanelProps = {
   onUpdateMember?: (
     memberKey: string,
     input: UpdateWorkspaceMemberInput,
+  ) => Promise<void>
+  /**
+   * Corrects a member's display name; undefined removes it. Rejects on failure.
+   */
+  onRenameMember?: (
+    memberKey: string,
+    name: string | undefined,
+    expectedVersion: number,
   ) => Promise<void>
   /**
    * Workspace access の再取得 callback です。
@@ -332,7 +342,7 @@ export function WorkspaceAccessPanelContainer({
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
-  const refresh = async () => {
+  const refresh = async ({ keepRetainedContexts = false }: { keepRetainedContexts?: boolean } = {}) => {
     if (!accessKey) {
       return
     }
@@ -344,17 +354,23 @@ export function WorkspaceAccessPanelContainer({
       () => getWorkspaceAccess(mutationSession.accessToken),
       { revalidate: false },
     )
-    mutationRequestRunner.discardRetainedContexts()
+    if (!keepRetainedContexts) mutationRequestRunner.discardRetainedContexts()
   }
 
-  const retryLoad = async () => {
+  const retryLoad = async (options?: { keepRetainedContexts?: boolean }) => {
     try {
-      await refresh()
+      await refresh(options)
     } catch {
       // SWR が保持する既存の load error を表示したまま、click handler の
       // unhandled rejection だけを抑止します。
     }
   }
+
+  const renameMember = useWorkspaceMemberRename({
+    accessToken: mutationSession.accessToken,
+    requestRunner: mutationRequestRunner,
+    reload: retryLoad,
+  })
 
   const createInvitationMutationFingerprint = (invitationId: string) => {
     const invitation = access?.invitations.find((item) => item.id === invitationId)
@@ -444,6 +460,7 @@ export function WorkspaceAccessPanelContainer({
         )
         await refresh()
       }}
+      onRenameMember={renameMember}
       onUpdateMember={async (memberKey, input) => {
         await mutationRequestRunner.run(
           `workspace-member:update:${memberKey}`,
@@ -478,6 +495,7 @@ export function WorkspaceAccessPanel({
   onRetry,
   onRevokeInvitation,
   onUpdateMember,
+  onRenameMember,
   onResetMemberCredential,
   signInSecurity,
   signInSecurityLoadFailed = false,
@@ -792,6 +810,7 @@ export function WorkspaceAccessPanel({
           signInSecurity={signInSecurity}
           signInSecurityLoadFailed={signInSecurityLoadFailed}
           t={t}
+          onRenameMember={onRenameMember}
           onRequestAction={requestAction}
           onRetrySignInSecurity={onRetrySignInSecurity}
         />
@@ -866,6 +885,7 @@ function WorkspaceMemberLedger({
   signInSecurity,
   signInSecurityLoadFailed,
   t,
+  onRenameMember,
   onRequestAction,
   onRetrySignInSecurity,
 }: {
@@ -875,6 +895,7 @@ function WorkspaceMemberLedger({
   signInSecurity?: WorkspaceMemberSignInSecurity[]
   signInSecurityLoadFailed: boolean
   t: (key: MessageKey) => string
+  onRenameMember?: (memberKey: string, name: string | undefined, expectedVersion: number) => Promise<void>
   onRequestAction: (action: WorkspaceAccessAction) => void
   onRetrySignInSecurity?: () => void
 }) {
@@ -975,6 +996,14 @@ function WorkspaceMemberLedger({
                         ) : null}
                       </div>
                       <p className="mt-1 break-all text-sm text-[var(--workbench-muted)]">{member.email}</p>
+                      {onRenameMember && canManage && !isCurrentMember && member.provisioningSource !== 'directory' ? (
+                        <WorkspaceMemberNameEditor
+                          member={member}
+                          t={t}
+                          testId={createAccessTestId(member.memberKey)}
+                          onSave={(name, expectedVersion) => onRenameMember(member.memberKey, name, expectedVersion)}
+                        />
+                      ) : null}
                       {memberSignInSecurity ? (
                         <span
                           className="mt-1.5 inline-flex"

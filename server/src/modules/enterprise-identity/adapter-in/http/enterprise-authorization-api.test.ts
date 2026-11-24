@@ -726,6 +726,10 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
   const analyticsReportsResponse = await app.request('/api/analytics/reports', {
     headers: { Authorization: authorization },
   })
+  // The deliveries list uses the same Work Item read as the report list, without Workspace read.
+  const analyticsDeliveriesResponse = await app.request('/api/analytics/deliveries', {
+    headers: { Authorization: authorization },
+  })
   await analyticsRepository.putSnapshot({
     id: 'enterprise-project-snapshot',
     workspaceId,
@@ -868,6 +872,7 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     items: [expect.objectContaining({ workItemId: 'work-item-1', projectId: 'refero' })],
   })
   expect(analyticsReportsResponse.status).toBe(200)
+  expect(analyticsDeliveriesResponse.status).toBe(200)
   expect(await analyticsReportsResponse.json()).toMatchObject({
     reports: [expect.objectContaining({ id: analyticsReport.id })],
   })
@@ -1080,6 +1085,60 @@ test.each([
     })
   },
 )
+
+test('authorizes the Project status report routes by a Project grant', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    identity.getSnapshot = async (currentWorkspaceId) => ({
+      ...await readSnapshot(currentWorkspaceId),
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'shared-project-grant',
+        principalKind: 'member',
+        principalId: 'demo@example.com',
+        roleId: 'project:member',
+        scope: { workspaceId, kind: 'project', targetId: 'shared-launch', parentTeamId: 'core-team' },
+        source: 'direct',
+      }],
+    })
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const authorization = `Bearer ${createAccessToken([], { client_id: 'mukuroji-main-client', token_use: 'access' })}`
+    const report = {
+      schemaVersion: 1,
+      locale: 'ja',
+      projectName: 'Shared launch',
+      teamName: 'Core',
+      asOf: '2026-11-23T00:00:00.000Z',
+      progress: { totalCount: 1, openCount: 1, inProgressCount: 0, doneCount: 0, completionRate: 0, overdueCount: 0, blockedCount: 0 },
+    }
+
+    const pdf = await app.request('/api/teams/core-team/projects/shared-launch/status-report/pdf', {
+      method: 'POST',
+      headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ report }),
+    })
+    const shares = await app.request('/api/teams/core-team/projects/shared-launch/status-shares', {
+      headers: { Authorization: authorization },
+    })
+
+    expect(pdf.status).toBe(200)
+    expect(shares.status).toBe(200)
+  })
+})
 
 test('keeps the Team qualifier when the directory lists the Project only under another Team', async () => {
   await withTestEnvironment({

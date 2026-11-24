@@ -49,6 +49,8 @@ export type ProjectOverviewDocumentsError = 'load' | 'denied'
 
 /** Props for the pure Project overview view. */
 export type ProjectOverviewViewProps = {
+  /** Actions shown next to the Project name, such as opening the status report. */
+  headerActions?: ReactNode
   /** Locale used to format dates. */
   locale: Locale
   /** Resolves localized labels. */
@@ -167,6 +169,7 @@ export function ProjectOverviewView({
   agentRunsError,
   documents,
   documentsError,
+  headerActions,
   isActionItemsLoading = false,
   isAgentRunsLoading = false,
   isDocumentsLoading = false,
@@ -217,14 +220,17 @@ export function ProjectOverviewView({
   return (
     <div className="grid gap-5" data-testid="project-overview">
       <section className="workbench-panel grid gap-4 px-5 py-4">
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-[var(--workbench-muted)]">{team.name}</p>
-          <h2
-            className="mt-1 break-words text-xl font-semibold text-[var(--workbench-text)]"
-            data-testid="project-overview-name"
-          >
-            {project.name}
-          </h2>
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-[var(--workbench-muted)]">{team.name}</p>
+            <h2
+              className="mt-1 break-words text-xl font-semibold text-[var(--workbench-text)]"
+              data-testid="project-overview-name"
+            >
+              {project.name}
+            </h2>
+          </div>
+          {headerActions}
         </div>
         <dl className="grid grid-cols-1 gap-3 text-sm min-[600px]:grid-cols-2 min-[1000px]:grid-cols-4">
           <ProfileItem label={t('projects.overview.profile.code')}>

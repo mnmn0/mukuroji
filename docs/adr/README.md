@@ -37,7 +37,7 @@
 | [0008](0008-audit-stream-two-readers-and-worker-secrets.md) | AuditEvents stream の reader を 2 つに保ち、worker の secret を Secrets Manager から読む | 提案 |
 | [0009](0009-directory-display-order.md) | Team と Project の表示順を sort key から切り離し、名称変更で ID を変えない | 提案 |
 | [0010](0010-cycle-schedule-due-index.md) | Cycle の自動作成・自動繰り越しを既存の due index と scheduled-jobs で動かす | 提案 |
-| [0011](0011-web-custom-domain-parameters.md) | 独自 domain を CloudFormation parameter で受け、正規 URL を stack が決める | 提案 |
+| [0011](0011-web-custom-domain-parameters.md) | 独自 domain を CloudFormation parameter で受け、正規 URL を stack が決める | 置き換え済み（0056） |
 | [0012](0012-planning-revision-work-item-counter.md) | Planning の revision を Work Item の更新と Planning の変更で数え分ける | 提案 |
 | [0013](0013-data-migration-runner.md) | 保存済み row の schema 移行を、checkpoint 付きの共通 runner と専用の checkpoint table で行う | 提案 |
 | [0014](0014-bind-connector-oauth-callback-to-initiator.md) | Connector の OAuth callback を、flow を開始した本人の認証済み session で完了する | 採用 |
@@ -70,10 +70,27 @@
 | [0043](0043-named-schedule-baselines.md) | 名前付きの複数 schedule baseline を、基準の行と baseline ごとの行に分けて Planning table に置く | 提案 |
 | [0044](0044-runtime-control-switch-audit-events.md) | Runtime control の切り替えを operator script が Workspace の監査ログに開始・完了・失敗の 3 種類で書く | 提案 |
 | [0045](0045-relation-events-for-automation-and-webhooks.md) | Work Item relation の event を Automation trigger と webhook の event type に使い、webhook の event type は追加していく | 提案 |
+| [0047](0047-workspace-time-entry-categories.md) | 工数の作業区分を Workspace の tenant profile で定義し、区分は消さずに使用停止にする | 提案 |
+| [0048](0048-team-time-entry-overlap-and-daily-limit-checks.md) | 工数の時間帯の重複と1日の合計を Team ごとの設定で警告または拒否する | 提案 |
 | [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |
 | [0052](0052-personal-tokens-without-software-factory.md) | Software factory が off でも本人用 token を発行でき、MCP は Workspace profile で読む | 提案 |
 | [0053](0053-reflect-work-item-completion-into-documents.md) | Work Item の完了を、宿題にした Document のチェック項目と付箋へ automation の audit worker で反映する | 提案 |
 | [0054](0054-team-time-rate-card.md) | 工数の単価表を Team ごとの `TIME_RATE_CARD` row で持ち、Workspace の既定通貨を tenant profile に置く | 提案 |
+| [0055](0055-team-work-item-key-prefix-change.md) | Work Item key の prefix を Team ごとに変更でき、番号は prefix をまたいで続ける | 提案 |
+| [0056](0056-web-custom-domain-cdk-context.md) | 独自 domain を `cdk.json` の CDK context で受け、synth 時に distribution・DNS・正規 URL を決める | 提案 |
 | [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |
+| [0058](0058-team-project-shared-work-calendars.md) | Team・Project の稼働カレンダーを tenant administration table の Workspace partition に置き、Work Item は共有カレンダーの写しを持って変更時に書き換える | 提案 |
+| [0059](0059-cycle-schedule-baselines.md) | Cycle ごとの名前付き schedule baseline を、一覧の行と baseline ごとの行で Planning table に置く | 提案 |
 | [0060](0060-project-default-task-view.md) | Project の既定ビューを、その Project の管理者だけが設定できる共有の既定として持つ | 提案 |
+| [0061](0061-agent-token-usage-over-otlp.md) | Coding agent のトークン使用量を OTLP/HTTP JSON で受け取り、読み取り時に時刻で Run に割り当てる | 提案 |
+| [0062](0062-analytics-project-report-visibility.md) | Analytics report の共有範囲に Project を足し、Team と Project の組で読み書きを判定する | 提案 |
+| [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |
+| [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |
 | [0065](0065-project-budget-report-and-evm.md) | Project の予算レポートと EVM を baseline・進捗・工数から都度計算し、予算を Team と Project の組で保存する | 提案 |
+| [0068](0068-workspace-workload-across-teams.md) | 要員の負荷を Workspace の全 Team の record を合算して見せ、詳細は Team ごとの可視性で絞る | 提案 |
+| [0069](0069-team-portfolio-snapshot-row.md) | Workspace のポートフォリオを Team ごとに読み、月次 snapshot を Team と月ごとの Planning row で持つ | 提案 |
+| [0070](0070-planning-scoped-reads.md) | Planning を Team / Project / Portfolio 単位で読み、key 設計は変えずに link と Work Item だけを絞る | 提案 |
+| [0072](0072-project-status-report-share-links.md) | Project の進捗レポートを snapshot として保存し、token 付きの read-only リンクで社外に共有する | 提案 |
+| [0080](0080-team-grant-request-receipt.md) | Team の管理操作の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける | 提案 |
+| [0074](0074-member-display-name-on-member-row.md) | メンバーの表示名を member row に保存し、本人と管理者が version 条件付きの更新で変える。SCIM の member と Cognito の `name` は変えない | 提案 |
+| [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
