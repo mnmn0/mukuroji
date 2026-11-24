@@ -632,6 +632,11 @@ export class CapacityPlanningService {
       if (current.status === 'canceled') {
         throw new CapacityPlanningError(409, 'WorkloadTimeOffCanceled', 'A canceled time off cannot be reviewed.')
       }
+      // A rejection of an absence that ended past the closed-row retention would be pruned by the
+      // same write, leaving neither the decision for the member nor a row a retry could find.
+      if (input.status === 'rejected' && current.toDate < addCalendarDays(this.now().toISOString().slice(0, 10), -CLOSED_ROW_RETENTION_DAYS)) {
+        throw new CapacityPlanningError(400, 'WorkloadDateOutOfRetention', `Time off that ended more than ${CLOSED_ROW_RETENTION_DAYS} days ago cannot be rejected.`)
+      }
       const timestamp = this.now().toISOString()
       const { reviewedAt: _reviewedAt, reviewedBy: _reviewedBy, submittedAt: _submittedAt, ...unreviewed } = current
       const saved: WorkloadTimeOff = {
@@ -2252,6 +2257,8 @@ export function pruneCapacityPlanningState(state: CapacityPlanningState, today: 
  */
 function findReplayedReview(state: CapacityPlanningState, input: ReviewWorkloadTimeOffInput): WorkloadTimeOff | undefined {
   if (input.status !== 'approved' && input.status !== 'rejected') return undefined
+  // The original write moved the Team past the revision the request expected.
+  if (state.revision <= input.expectedTeamRevision) return undefined
   const current = state.profiles
     .find((profile) => profile.memberId === input.memberId)
     ?.timeOff.find((timeOff) => timeOff.id === input.timeOffId)

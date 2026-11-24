@@ -864,6 +864,8 @@ describe('capacity planning reviews and retention', () => {
       .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
     await expect(service.reviewTimeOff({ ...review, status: 'rejected', expectedRevision: 1, expectedTeamRevision: 2 }))
       .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 3 }))
+      .rejects.toMatchObject({ code: 'WorkloadTimeOffRevisionConflict' })
     const reopened = await service.reviewTimeOff({ ...review, status: 'planned', expectedRevision: 2, expectedTeamRevision: 3 })
 
     expect(approved).toMatchObject({ status: 'approved', reviewedBy: 'manager-1', reviewedAt: '2026-08-01T00:00:00.000Z', revision: 2 })
@@ -1063,6 +1065,21 @@ describe('capacity planning reviews and retention', () => {
       expectedRevision: 1, expectedTeamRevision: before.revision + 1, actorMemberId: 'manager-1',
     })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention' })
     expect((await repository.getState('workspace-1', 'team-1')).assignments.map((row) => row.id)).toEqual([assignment.id])
+  })
+
+  test('refuses to reject time off that ended past the closed-row retention', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    // 2026-08-01 minus 30 days is 2026-07-02: a rejection would be pruned by the same write.
+    await service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-old', fromDate: '2026-06-01', toDate: '2026-07-01', status: 'planned', expectedRevision: 1, expectedTeamRevision: 1,
+    })
+    const review = { workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', timeOffId: 'pto-old', actorMemberId: 'manager-1', expectedRevision: 1, expectedTeamRevision: 2 }
+
+    await expect(service.reviewTimeOff({ ...review, status: 'rejected' })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention', status: 400 })
+    expect(await service.reviewTimeOff({ ...review, status: 'approved' })).toMatchObject({ status: 'approved', revision: 2 })
   })
 
   test('reads time off saved before approval existed as approved so capacity does not change', () => {

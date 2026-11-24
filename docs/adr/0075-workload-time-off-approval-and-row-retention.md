@@ -59,7 +59,10 @@ manager が「空いていない」と判断した後に休暇が取り消され
   基盤のエラーのまま返し、記録して再試行できるようにする。
 - 応答が失われた承認・却下の再送は、休暇がその要求の revision の次の版で、同じ判断・同じ承認者になっていれば、
   保存済みの休暇を成功として返す（書き込みも audit も増やさない）。そうでなければ従来どおり revision の 409 になる。
+  Team の revision が要求の `expectedTeamRevision` より進んでいることも条件にする。
   休暇の状態そのものが durable receipt になるので、別の receipt 行は作らない。
+  終了から 30 日を過ぎた休暇の却下は、同じ書き込みで行が消えて本人も再送も結果を見つけられないため、
+  `400 WorkloadDateOutOfRetention` で断る（承認は 400 日まで残るので受け付ける）。
 - 監査を書く書き込みだけ TransactWrite にする。IAM は既存の capacity table の `PutItem` と audit table の書き込み権限で足りる。
 
 ### row の整理
