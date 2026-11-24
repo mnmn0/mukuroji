@@ -2698,7 +2698,6 @@ function configureFakeProjectClients(
           : (options.additionalTeams ?? []).find((team) => team.id === teamId)?.projects ?? []
         const project = projects.find((candidate) => candidate.id === projectId)
         if (!project) return undefined
-        if (archivedDirectoryKeys.has(teamId)) return undefined
         const key = `${teamId}/${projectId}`
         const state = structuredClone(readProjectCharterState(teamId, projectId))
         return {

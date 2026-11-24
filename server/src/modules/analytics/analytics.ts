@@ -1597,10 +1597,20 @@ export function createAnalyticsPdf(
  *
  * @param lines - Unwrapped lines; leading spaces indent a line and its continuation lines.
  * @param locale - Label locale tag, which selects the primary font; English when unknown.
+ * @param paper - Paper size; US Letter by default, as the Analytics exports use.
  * @returns PDF bytes starting with `%PDF-1.4`.
  */
-export function createAnalyticsTextPdf(lines: readonly string[], locale?: string) {
-  return renderAnalyticsTextPdf(lines, normalizeAnalyticsExportLocale(locale))
+export function createAnalyticsTextPdf(lines: readonly string[], locale?: string, paper: AnalyticsPdfPaper = 'letter') {
+  return renderAnalyticsTextPdf(lines, normalizeAnalyticsExportLocale(locale), paper)
+}
+
+/** Paper size of a text PDF: US Letter, which Analytics uses, or ISO A4. */
+type AnalyticsPdfPaper = 'letter' | 'a4'
+
+/** Page width and height in points for each paper size. */
+const PDF_PAPER_SIZES: Readonly<Record<AnalyticsPdfPaper, { width: number; height: number }>> = {
+  letter: { width: 612, height: 792 },
+  a4: { width: 595, height: 842 },
 }
 
 /**
@@ -1608,9 +1618,15 @@ export function createAnalyticsTextPdf(lines: readonly string[], locale?: string
  *
  * @param sourceLines - Unwrapped lines.
  * @param exportLocale - Normalized export locale.
+ * @param paper - Paper size; US Letter by default.
  * @returns PDF bytes.
  */
-function renderAnalyticsTextPdf(sourceLines: readonly string[], exportLocale: AnalyticsExportLocale) {
+function renderAnalyticsTextPdf(
+  sourceLines: readonly string[],
+  exportLocale: AnalyticsExportLocale,
+  paper: AnalyticsPdfPaper = 'letter',
+) {
+  const pageSize = PDF_PAPER_SIZES[paper]
   const lines = sourceLines.flatMap((line) => wrapAnalyticsPdfLine(line, exportLocale))
   const pageLines = Array.from(
     { length: Math.ceil(lines.length / PDF_LINES_PER_PAGE) },
@@ -1665,12 +1681,12 @@ function renderAnalyticsTextPdf(sourceLines: readonly string[], exportLocale: An
     (fallbackFontObjectId === undefined ? '' : ` /F2 ${fallbackFontObjectId} 0 R`)
   const pageObjectIds: number[] = []
   for (const page of pageLines) {
-    const content = createPdfPageContent(page, exportLocale)
+    const content = createPdfPageContent(page, exportLocale, pageSize.height)
     const contentObjectId = objects.push(
       `<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream`,
     )
     const pageObjectId = objects.push(
-      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageSize.width} ${pageSize.height}] ` +
       `/Resources << /Font << ${fontResources} >> >> ` +
       `/Contents ${contentObjectId} 0 R >>`,
     )
@@ -3963,15 +3979,18 @@ function escapeCsvValue(value: string | number | boolean | null | undefined) {
  *
  * @param lines - Wrapped lines of the page.
  * @param locale - Export locale, which selects the primary font.
+ * @param pageHeight - Page height in points; US Letter by default.
  * @returns The content stream source.
  */
 function createPdfPageContent(
   lines: readonly (readonly AnalyticsPdfTextRun[])[],
   locale: AnalyticsExportLocale,
+  pageHeight = PDF_PAPER_SIZES.letter.height,
 ) {
   return [
     'BT',
-    '50 760 Td',
+    // The first baseline sits 32 pt below the top edge of the page.
+    `50 ${pageHeight - 32} Td`,
     ...lines.flatMap((runs, index) => [
       ...(index === 0 ? [] : ['0 -18 Td']),
       ...runs.flatMap((run) => [

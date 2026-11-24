@@ -56,6 +56,10 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
   いずれも同じ 404 を返し、どの理由かを区別させない。応答は `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、
   `X-Robots-Tag: noindex` を付ける。
 - 期限は 1〜90 日。1 Project あたり有効なリンクは 50 件、保存する share row は取り消し済みを含めて 300 件までとする。
+  300 件に達した Project で作成するときは、取り消し済みまたは期限切れの最も古い share row と token row を同じ
+  TransactWrite で消す（条件は「まだ取り消し済みか期限切れであること」）。消した share の audit event は残る。
+- 保存済みの share row は、`schemaVersion`、期限の日時、snapshot が share の section・担当者名の設定に収まっていること
+  （伏せ直しても変わらないこと）を読み取りで確かめ、合わなければ公開せず壊れた row として扱う。
 
 ### 権限と監査
 
@@ -67,10 +71,11 @@ Issue #349 は、レポートを PDF / Markdown / PPTX で出力し、期限付�
   metadata は Team・Project・share ID・section・担当者名の有無・期限・宛先で、snapshot の本文は入れない。
 - 閲覧は 1 リンクにつき 1 分に 1 回だけ数える。公開 PDF の直接ダウンロードも閲覧として数える。`viewCount`/`lastViewedAt` の条件付き更新と audit event
   （actor は `project-status-share:<shareId>`、kind `system`）を 1 回の TransactWrite で書き、条件に外れた閲覧は記録しない。
+  閲覧を記録できなかったときは、記録のない閲覧を作らないよう 503 を返し、レポートは返さない。
 
 ### 出力形式
 
-- PDF は Analytics の PDF renderer（`createAnalyticsTextPdf`）を使って server で作る。
+- PDF は Analytics の PDF renderer（`createAnalyticsTextPdf`）を A4 の用紙で使って server で作る（Analytics の PDF は Letter のまま）。
 - Markdown と PPTX（1 Project 1 枚、16:9、東アジアのフォントは Yu Gothic）は web で作る。
 - 印刷は A4 の Document 用 print CSS を使う。
 

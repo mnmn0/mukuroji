@@ -103,6 +103,11 @@ export type ProjectStatusShareStore<TCallerCheck, TAudit> = {
     record: ProjectStatusShareRecord
     /** Revision read before the limits were checked. */
     expectedRevision: number
+    /**
+     * Oldest revoked or expired shares to delete in the same write, so that a Project at the
+     * stored-row limit can keep creating links; their audit events stay.
+     */
+    pruned: readonly ProjectStatusShareRecord[]
   }): Promise<void>
   /**
    * Revokes an open share and removes its token lookup row.
@@ -155,6 +160,8 @@ export type ProjectStatusPublicViewChecks = {
 
 /** Most share rows, including revoked and expired ones, one Project keeps. */
 const PROJECT_STATUS_SHARE_MAX_STORED = 300
+/** Most closed shares one creation deletes, which keeps its transaction small. */
+const PROJECT_STATUS_SHARE_MAX_PRUNED = 10
 /** Longest label of a share link. */
 const LABEL_MAX_LENGTH = 100
 /** Longest customer or contact ID accepted. */
@@ -229,13 +236,14 @@ export async function createProjectStatusShareUseCase<TCallerCheck, TAudit>(
   const existing = await store.list(scope)
   const nowTime = Date.parse(mutation.now)
   const open = existing.filter((share) => share.revokedAt === undefined && Date.parse(share.expiresAt) > nowTime)
-  if (open.length >= PROJECT_STATUS_SHARE_MAX_PER_PROJECT || existing.length >= PROJECT_STATUS_SHARE_MAX_STORED) {
+  if (open.length >= PROJECT_STATUS_SHARE_MAX_PER_PROJECT) {
     throw new ProjectDataError(
       413,
       'ProjectStatusShareLimitReached',
       `A Project can have at most ${PROJECT_STATUS_SHARE_MAX_PER_PROJECT} open share links. Revoke one that is no longer needed.`,
     )
   }
+  const pruned = await readSharesToPrune(store, scope, existing, nowTime)
   const report = redactProjectStatusReport(input.report, input.scope)
   if (Buffer.byteLength(JSON.stringify(report), 'utf8') > PROJECT_STATUS_REPORT_MAX_BYTES) {
     throw new ProjectDataError(413, 'ProjectStatusReportTooLarge', 'The report is too large to share.')
@@ -263,8 +271,43 @@ export async function createProjectStatusShareUseCase<TCallerCheck, TAudit>(
     auditContext: mutation.auditContext,
     record: { share, report, tokenHash: hashTokenSecret(secret) },
     expectedRevision,
+    pruned,
   })
   return { share, url: `/share/project-status/${encodeURIComponent(token)}` }
+}
+
+/**
+ * Picks the oldest closed shares to delete so that the Project keeps at most
+ * `PROJECT_STATUS_SHARE_MAX_STORED` rows after one more is created.
+ *
+ * @param store - Share persistence.
+ * @param scope - Team and Project.
+ * @param existing - Every share of the Project.
+ * @param nowTime - Creation time in epoch milliseconds.
+ * @returns The records to delete, oldest first; empty below the limit.
+ * @throws ProjectDataError 409 when a chosen share changed after the list was read.
+ */
+async function readSharesToPrune<TCallerCheck, TAudit>(
+  store: ProjectStatusShareStore<TCallerCheck, TAudit>,
+  scope: ProjectStatusShareScopeKey,
+  existing: readonly ProjectStatusShare[],
+  nowTime: number,
+): Promise<ProjectStatusShareRecord[]> {
+  const excess = Math.min(existing.length - PROJECT_STATUS_SHARE_MAX_STORED + 1, PROJECT_STATUS_SHARE_MAX_PRUNED)
+  if (excess <= 0) return []
+  // Fewer than the open limit are open, so at least `excess` closed shares exist.
+  const closed = existing
+    .filter((share) => share.revokedAt !== undefined || Date.parse(share.expiresAt) <= nowTime)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .slice(0, excess)
+  if (closed.length < excess) {
+    throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
+  }
+  const records = await Promise.all(closed.map((share) => store.get(scope, share.id)))
+  return records.map((record) => {
+    if (!record) throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
+    return record
+  })
 }
 
 /**

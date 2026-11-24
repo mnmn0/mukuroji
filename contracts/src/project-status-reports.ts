@@ -342,6 +342,40 @@ export function parseProjectStatusShareScope(
 }
 
 /**
+ * Tells whether a report holds nothing outside a share scope, that is, whether redacting it again
+ * would change nothing.
+ *
+ * @param report - Validated report.
+ * @param scope - Sections and name visibility of the share.
+ * @returns Whether the report already matches the scope.
+ */
+export function isProjectStatusReportWithinScope(
+  report: ProjectStatusReport,
+  scope: ProjectStatusShareScope,
+): boolean {
+  const canonical = (value: ProjectStatusReport) => {
+    const parsed = parseProjectStatusReport(value)
+    return parsed.ok ? JSON.stringify(parsed.value) : undefined
+  }
+  const stored = canonical(report)
+  return stored !== undefined && stored === canonical(redactProjectStatusReport(report, scope))
+}
+
+/**
+ * Tells whether a value is a UTC ISO timestamp, such as `2026-11-24T03:00:00Z`, that names a real
+ * calendar date and time.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value is a valid UTC timestamp.
+ */
+export function isProjectStatusReportTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !TIMESTAMP_PATTERN.test(value)) return false
+  const time = Date.parse(value)
+  // Date.parse accepts days past the end of a month, such as February 30, so compare the fields.
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 19) === value.slice(0, 19)
+}
+
+/**
  * Removes from a report every section outside a share scope and, unless the scope keeps them,
  * every person's name.
  *
@@ -391,6 +425,11 @@ export type ProjectStatusReportOutlineSection = {
   heading: string
   /** Lines of the section, without list markers. */
   lines: string[]
+  /**
+   * How many of the last `lines` are notes about the section, such as rows left out or Documents
+   * that could not be read, rather than report items. A shortened view keeps them.
+   */
+  noteCount: number
 }
 
 /** Report as plain text, shared by the Markdown, PDF, and slide exports. */
@@ -470,7 +509,7 @@ const OUTLINE_MESSAGES: Record<ProjectStatusReportLocale, OutlineMessages> = {
       `[${kind}・${severity}] ${item.title}${item.reviewDueDate ? `（見直し ${item.reviewDueDate}）` : ''}`,
     response: (text) => `対応: ${text}`,
     actionLine: (item) =>
-      `${item.text}${item.dueDate ? `（期限 ${item.dueDate}${item.overdue ? '・超過' : ''}）` : ''}` +
+      `${singleLine(item.text)}${item.dueDate ? `（期限 ${item.dueDate}${item.overdue ? '・超過' : ''}）` : ''}` +
       `${item.ownerName ? ` 担当: ${item.ownerName}` : ''}`,
     hidden: (count) => `ほか ${count}件`,
     incompleteActions: '一部のドキュメントを読めなかったため、ほかにも未完了の項目があるかもしれません。',
@@ -517,7 +556,7 @@ const OUTLINE_MESSAGES: Record<ProjectStatusReportLocale, OutlineMessages> = {
       `[${kind}, ${severity}] ${item.title}${item.reviewDueDate ? ` (review ${item.reviewDueDate})` : ''}`,
     response: (text) => `Response: ${text}`,
     actionLine: (item) =>
-      `${item.text}${item.dueDate ? ` (due ${item.dueDate}${item.overdue ? ', overdue' : ''})` : ''}` +
+      `${singleLine(item.text)}${item.dueDate ? ` (due ${item.dueDate}${item.overdue ? ', overdue' : ''})` : ''}` +
       `${item.ownerName ? ` - ${item.ownerName}` : ''}`,
     hidden: (count) => `${count} more`,
     incompleteActions: 'Some Documents could not be read, so other open items may be missing.',
@@ -534,8 +573,13 @@ const OUTLINE_MESSAGES: Record<ProjectStatusReportLocale, OutlineMessages> = {
 export function createProjectStatusReportOutline(report: ProjectStatusReport): ProjectStatusReportOutline {
   const messages = OUTLINE_MESSAGES[report.locale]
   const sections: ProjectStatusReportOutlineSection[] = []
-  const push = (section: ProjectStatusReportSection, lines: string[]) => {
-    sections.push({ section, heading: messages.headings[section], lines: lines.length > 0 ? lines : [messages.empty] })
+  const push = (section: ProjectStatusReportSection, lines: string[], notes: string[] = []) => {
+    sections.push({
+      section,
+      heading: messages.headings[section],
+      lines: lines.length + notes.length > 0 ? [...lines, ...notes] : [messages.empty],
+      noteCount: notes.length,
+    })
   }
   if (report.health) {
     const health = report.health
@@ -555,8 +599,7 @@ export function createProjectStatusReportOutline(report: ProjectStatusReport): P
         messages.status[item.status],
         messages.health[item.health],
       )),
-      ...(schedule.hiddenCount > 0 ? [messages.hidden(schedule.hiddenCount)] : []),
-    ])
+    ], schedule.hiddenCount > 0 ? [messages.hidden(schedule.hiddenCount)] : [])
   }
   if (report.progress) push('progress', messages.progressLines(report.progress))
   if (report.risks) {
@@ -565,15 +608,13 @@ export function createProjectStatusReportOutline(report: ProjectStatusReport): P
       messages.riskCounts(risks),
       ...risks.items.flatMap((item) => [
         messages.riskLine(item, messages.riskKind[item.kind], messages.severity[item.severity]),
-        ...(item.response ? [`  ${messages.response(item.response.replace(/\s+/gu, ' '))}`] : []),
+        ...(item.response ? [`  ${messages.response(singleLine(item.response))}`] : []),
       ]),
-      ...(risks.hiddenCount > 0 ? [messages.hidden(risks.hiddenCount)] : []),
-    ])
+    ], risks.hiddenCount > 0 ? [messages.hidden(risks.hiddenCount)] : [])
   }
   if (report.nextActions) {
     const actions = report.nextActions
-    push('nextActions', [
-      ...actions.items.map((item) => messages.actionLine(item)),
+    push('nextActions', actions.items.map((item) => messages.actionLine(item)), [
       ...(actions.hiddenCount > 0 ? [messages.hidden(actions.hiddenCount)] : []),
       ...(actions.incomplete ? [messages.incompleteActions] : []),
     ])
@@ -583,6 +624,17 @@ export function createProjectStatusReportOutline(report: ProjectStatusReport): P
     subtitle: messages.subtitle(report.teamName, formatTimestamp(report.asOf)),
     sections,
   }
+}
+
+/**
+ * Joins the lines of a free-text item into one, so that a line break inside it does not start a
+ * new list item.
+ *
+ * @param text - Item text.
+ * @returns The text with every run of whitespace replaced by one space.
+ */
+function singleLine(text: string) {
+  return text.replace(/\s+/gu, ' ').trim()
 }
 
 /**
@@ -597,9 +649,10 @@ export function renderProjectStatusReportMarkdown(report: ProjectStatusReport): 
   for (const section of outline.sections) {
     blocks.push(
       `## ${escapeMarkdown(section.heading)}`,
+      // A line break inside a line would end its list item, so each line is joined into one.
       section.lines.map((line) => line.startsWith('  ')
-        ? `  - ${escapeMarkdown(line.trim())}`
-        : `- ${escapeMarkdown(line)}`).join('\n'),
+        ? `  - ${escapeMarkdown(singleLine(line))}`
+        : `- ${escapeMarkdown(singleLine(line))}`).join('\n'),
     )
   }
   return `${blocks.join('\n\n')}\n`
@@ -879,7 +932,7 @@ function readDate(value: unknown, path: string): string {
  * @returns The timestamp.
  */
 function readTimestamp(value: unknown, path: string): string {
-  if (typeof value !== 'string' || !TIMESTAMP_PATTERN.test(value) || Number.isNaN(Date.parse(value))) {
+  if (!isProjectStatusReportTimestamp(value)) {
     throw new ReportShapeError(`${path} must be a UTC ISO timestamp.`)
   }
   return value
@@ -930,7 +983,7 @@ export function parseProjectStatusShare(value: unknown): ProjectStatusShare | un
     !text(record.teamId) ||
     !text(record.projectId) ||
     !text(record.label) ||
-    !text(record.expiresAt) ||
+    !isProjectStatusReportTimestamp(record.expiresAt) ||
     !text(record.createdAt) ||
     !text(record.createdByMemberKey) ||
     !text(record.reportAsOf) ||
@@ -1000,7 +1053,7 @@ export function parsePublicProjectStatusReportResponse(value: unknown): PublicPr
   if (typeof value !== 'object' || value === null || !('report' in value) || !('expiresAt' in value)) return undefined
   const report = parseProjectStatusReport(value.report)
   const expiresAt = value.expiresAt
-  if (!report.ok || typeof expiresAt !== 'string' || !TIMESTAMP_PATTERN.test(expiresAt)) return undefined
+  if (!report.ok || !isProjectStatusReportTimestamp(expiresAt)) return undefined
   return { report: report.value, expiresAt }
 }
 

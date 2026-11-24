@@ -1,11 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createProjectStatusReportOutline,
+  isProjectStatusReportTimestamp,
+  isProjectStatusReportWithinScope,
   parseProjectStatusReport,
   parseProjectStatusShareScope,
   parsePublicProjectStatusReportResponse,
   redactProjectStatusReport,
   renderProjectStatusReportMarkdown,
   type ProjectStatusReport,
+  type ProjectStatusShareScope,
 } from '../src/project-status-reports'
 
 /** Report with a name in the update and in an action item. */
@@ -97,4 +101,35 @@ test('renders Markdown with escaped report text', () => {
 test('validates the public response', () => {
   expect(parsePublicProjectStatusReportResponse({ report, expiresAt: '2026-12-01T00:00:00.000Z' })?.report).toEqual(report)
   expect(parsePublicProjectStatusReportResponse({ report, expiresAt: 'soon' })).toBeUndefined()
+  expect(parsePublicProjectStatusReportResponse({ report, expiresAt: '2026-13-01T00:00:00Z' })).toBeUndefined()
+})
+
+test('accepts only timestamps that name a real date and time', () => {
+  expect(isProjectStatusReportTimestamp('2026-11-24T03:00:00.000Z')).toBe(true)
+  expect(isProjectStatusReportTimestamp('2026-11-24T03:00:00Z')).toBe(true)
+  expect(isProjectStatusReportTimestamp('2026-02-30T00:00:00Z')).toBe(false)
+  expect(isProjectStatusReportTimestamp('2026-11-24T24:00:00Z')).toBe(false)
+  expect(isProjectStatusReportTimestamp('2026-11-24')).toBe(false)
+})
+
+test('tells whether a stored snapshot holds anything outside its share scope', () => {
+  const scope: ProjectStatusShareScope = { sections: ['health', 'nextActions'], showPeopleNames: false }
+  const redacted = redactProjectStatusReport(report, scope)
+  expect(isProjectStatusReportWithinScope(redacted, scope)).toBe(true)
+  expect(isProjectStatusReportWithinScope(report, scope)).toBe(false)
+  if (!redacted.health) throw new Error('The redacted report keeps the health section.')
+  expect(isProjectStatusReportWithinScope({ ...redacted, health: { ...redacted.health, authorName: '山田' } }, scope)).toBe(false)
+})
+
+test('keeps an action with a line break as one Markdown list item and marks notes', () => {
+  const multiline: ProjectStatusReport = {
+    ...report,
+    nextActions: { items: [{ text: '確認する\n- 次回の候補', overdue: false }], hiddenCount: 1, incomplete: true },
+  }
+  const markdown = renderProjectStatusReportMarkdown(multiline)
+  expect(markdown).toContain('- 確認する - 次回の候補')
+  expect(markdown).not.toContain('\n- 次回の候補')
+  const actions = createProjectStatusReportOutline(multiline).sections.find((section) => section.section === 'nextActions')
+  expect(actions?.lines).toHaveLength(3)
+  expect(actions?.noteCount).toBe(2)
 })

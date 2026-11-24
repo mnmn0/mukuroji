@@ -318,16 +318,13 @@ async function readPublicReport(c: Context) {
 }
 
 /**
- * Counts a public view; a failure is logged and does not hide the report.
+ * Counts a public view. A view that cannot be recorded fails the request, so a report is never
+ * served without its audit trail.
  *
  * @param lookup - Share that was opened.
  */
 async function recordView(lookup: Parameters<typeof recordPublicProjectStatusViewUseCase>[1]) {
-  try {
-    await recordPublicProjectStatusViewUseCase(workItemDependencies.projectStatusShares, lookup, new Date())
-  } catch (error) {
-    console.error('Project status share view was not recorded.', { shareId: lookup.share.id, error })
-  }
+  await recordPublicProjectStatusViewUseCase(workItemDependencies.projectStatusShares, lookup, new Date())
 }
 
 /**
@@ -359,7 +356,7 @@ function pdfResponse(report: ProjectStatusReport) {
       '',
     ]),
   ]
-  const body = createAnalyticsTextPdf(lines, report.locale)
+  const body = createAnalyticsTextPdf(lines, report.locale, 'a4')
   return new Response(body, {
     status: 200,
     headers: {

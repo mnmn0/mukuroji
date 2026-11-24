@@ -188,12 +188,16 @@ export function createProjectStatusReportSlides(report: ProjectStatusReport, mod
   const rightSections = outline.sections.filter((section) => section.section !== 'health' && section.section !== 'progress')
   const more = report.locale === 'ja' ? (count: number) => `ほか ${count}行` : (count: number) => `${count} more lines`
   const sectionParagraphs = (sections: typeof outline.sections) => sections.flatMap((section) => {
-    const lines = section.lines.slice(0, SLIDE_SECTION_LINE_LIMIT)
-    const left = section.lines.length - lines.length
+    // Notes, such as Documents that could not be read, are always shown and never counted as left out.
+    const items = section.lines.slice(0, section.lines.length - section.noteCount)
+    const notes = section.lines.slice(items.length)
+    const lines = items.slice(0, SLIDE_SECTION_LINE_LIMIT)
+    const left = items.length - lines.length
     return [
       paragraph(section.heading, { bold: true, size: 1400 }),
       ...lines.map((line) => paragraph(line.trim(), { size: 1100, bullet: true })),
       ...(left > 0 ? [paragraph(more(left), { size: 1000, bullet: true })] : []),
+      ...notes.map((line) => paragraph(line, { size: 1000, bullet: true })),
       paragraph('', { size: 600 }),
     ]
   })

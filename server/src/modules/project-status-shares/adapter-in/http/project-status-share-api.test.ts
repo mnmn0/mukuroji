@@ -146,7 +146,9 @@ test('creates a redacted share, serves it publicly, counts the view, and stops a
   const pdf = await app.request(`/api/public/project-status/${encodeURIComponent(token)}/pdf`)
   expect(pdf.status).toBe(200)
   expect(pdf.headers.get('Content-Type')).toBe('application/pdf')
-  expect(new TextDecoder('latin1').decode(new Uint8Array(await pdf.arrayBuffer()).slice(0, 8))).toBe('%PDF-1.4')
+  const pdfText = new TextDecoder('latin1').decode(new Uint8Array(await pdf.arrayBuffer()))
+  expect(pdfText.slice(0, 8)).toBe('%PDF-1.4')
+  expect(pdfText).toContain('/MediaBox [0 0 595 842]')
 
   // A second view within a minute is not counted again.
   await app.request(`/api/public/project-status/${encodeURIComponent(token)}`)
@@ -288,6 +290,67 @@ test('rejects invalid share input', async () => {
   ]) {
     const response = await request(path, 'POST', body)
     expect(response.status).toBe(400)
+  }
+})
+
+test('deletes the oldest closed share when a Project reaches the stored share limit', async () => {
+  const store = new InMemoryProjectStatusShareStore()
+  const scope = { workspaceId: 'ws-1', teamId: 'team-1', projectId: 'project-1' }
+  const { createProjectStatusShareUseCase } = await import('../../application/project-status-share-use-cases')
+  const create = (index: number, now: string) => createProjectStatusShareUseCase(store, scope, {
+    report,
+    label: `L${index}`,
+    sections: ['health'],
+    showPeopleNames: false,
+    expiresInDays: 1,
+  }, {
+    now,
+    callerAuthorization: [{ ConditionCheck: undefined }],
+    auditContext: undefined,
+    createdByMemberKey: 'member-1',
+    requestSecret: `request-secret-prune-${String(index).padStart(4, '0')}-000000000000`,
+    checks: { verifyCustomerContact: async () => undefined },
+  })
+  for (let index = 0; index < 300; index += 1) {
+    // Six days of 50 links each keeps every earlier day's links expired before the next day.
+    const day = String(1 + Math.floor(index / 50) * 2).padStart(2, '0')
+    const second = String(index % 50).padStart(2, '0')
+    await create(index, `2026-11-${day}T00:00:${second}.000Z`)
+  }
+  const first = (await store.list(scope)).find((share) => share.label === 'L0')
+  expect(first).toBeDefined()
+
+  const { share } = await create(300, '2026-11-20T00:00:00.000Z')
+  const stored = await store.list(scope)
+  expect(stored).toHaveLength(300)
+  expect(stored.some((candidate) => candidate.id === share.id)).toBe(true)
+  expect(stored.some((candidate) => candidate.label === 'L0')).toBe(false)
+  expect(store.auditEvents.filter((event) => event.action === 'status_share_created')).toHaveLength(301)
+})
+
+test('does not serve a public report whose view cannot be recorded', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const created = await request(`/api/teams/core-team/projects/${projectId}/status-shares`, 'POST', {
+    report,
+    label: '顧客A向け',
+    sections: ['health'],
+    showPeopleNames: false,
+    expiresInDays: 14,
+  })
+  expect(created.status).toBe(201)
+  const { url } = await created.json() as CreateProjectStatusShareResponse
+  const store = getTestAppDependencies().workItems.projectStatusShares
+  if (!(store instanceof InMemoryProjectStatusShareStore)) throw new Error('Expected the in-memory store.')
+  store.recordView = async () => {
+    throw new Error('audit table unavailable')
+  }
+  const token = url.slice('/share/project-status/'.length)
+
+  for (const suffix of ['', '/pdf']) {
+    const response = await app.request(`/api/public/project-status/${token}${suffix}`)
+    expect(response.status).toBe(503)
+    expect(await response.text()).not.toContain('基幹刷新')
   }
 })
 

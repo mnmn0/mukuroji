@@ -83,7 +83,7 @@ export function SharedProjectStatusReportScreen({
               ))}
             </select>
           </label>
-          {published ? (
+          {published && !isLoading && !hasFailed && !isUnavailable ? (
             <>
               <button className="workbench-button-secondary min-h-10 px-4" onClick={() => print(published.report)} type="button">
                 {t('projects.statusReport.public.print')}

@@ -110,3 +110,25 @@ test('writes a one-slide PowerPoint package with the report text', async () => {
   expect(slide).toContain('結合試験完了')
   expect(createProjectStatusReportFileName(report, 'pptx')).toBe('基幹刷新-status-2026-11-23.pptx')
 })
+
+test('keeps the note about unread Documents on the slide and counts only left-out actions', async () => {
+  const report = buildProjectStatusReport(source)
+  const withNotes = {
+    ...report,
+    nextActions: {
+      items: Array.from({ length: 7 }, (_, index) => ({ text: `アクション${index + 1}`, overdue: false })),
+      hiddenCount: 0,
+      incomplete: true,
+    },
+  }
+  const entries = await readZipArchive(createProjectStatusReportSlides(withNotes), {
+    maxEntries: 50,
+    maxEntryBytes: 1_000_000,
+    maxTotalBytes: 5_000_000,
+  })
+  const slide = new TextDecoder().decode(entries.get('ppt/slides/slide1.xml'))
+  expect(slide).toContain('アクション6')
+  expect(slide).not.toContain('アクション7')
+  expect(slide).toContain('ほか 1行')
+  expect(slide).toContain('一部のドキュメントを読めなかったため')
+})

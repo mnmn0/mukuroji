@@ -6,6 +6,8 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  isProjectStatusReportTimestamp,
+  isProjectStatusReportWithinScope,
   parseProjectStatusReport,
   PROJECT_STATUS_REPORT_SECTIONS,
   type ProjectStatusReportSection,
@@ -191,7 +193,7 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
   async readRevision(scope: ProjectStatusShareScopeKey): Promise<number> {
     const row = await this.readItem(scope.workspaceId, stateKey(scope))
     if (!row) return 0
-    if (row.entryType !== STATE_TYPE || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1) {
+    if (row.entryType !== STATE_TYPE || row.schemaVersion !== SCHEMA_VERSION || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1) {
       throw corruptShare()
     }
     return row.revision
@@ -253,7 +255,7 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
           UpdateExpression: 'SET #type = :type, #schemaVersion = :schemaVersion, #teamId = :teamId, #projectId = :projectId, #revision = :next, #updatedAt = :now',
           ConditionExpression: input.expectedRevision === 0
             ? 'attribute_not_exists(recordKey)'
-            : '#type = :type AND #revision = :expected',
+            : '#type = :type AND #schemaVersion = :schemaVersion AND #revision = :expected',
           ExpressionAttributeNames: {
             '#type': 'entryType',
             '#schemaVersion': 'schemaVersion',
@@ -273,6 +275,7 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
           },
         },
       },
+      ...input.pruned.flatMap((pruned) => pruneItems(this.tableName, input, pruned, input.now)),
       ...input.callerAuthorization,
       ...(audit ? [audit] : []),
     ]
@@ -329,7 +332,9 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
     } catch (error) {
       return storageFailure(error, items.length)
     }
-    return next
+    // A view may have been counted between the read and the revocation, so answer with the stored row.
+    const stored = await this.get(input, previous.id)
+    return stored?.share ?? next
   }
 
   /**
@@ -355,36 +360,35 @@ export class DynamoDbProjectStatusShareStore implements ProjectStatusShareStore 
         metadata: auditMetadata(lookup.scope, lookup.share),
       },
     )
-    try {
-      await this.client.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            Update: {
-              TableName: this.tableName,
-              Key: { workspaceId: lookup.scope.workspaceId, recordKey: shareKey(lookup.scope, lookup.share.id) },
-              UpdateExpression: 'SET #lastViewedAt = :now ADD #viewCount :one',
-              ConditionExpression: '#type = :type AND attribute_not_exists(#revokedAt) AND (attribute_not_exists(#lastViewedAt) OR #lastViewedAt < :countAfter)',
-              ExpressionAttributeNames: {
-                '#lastViewedAt': 'lastViewedAt',
-                '#viewCount': 'viewCount',
-                '#revokedAt': 'revokedAt',
-                '#type': 'entryType',
-              },
-              ExpressionAttributeValues: {
-                ':now': view.now,
-                ':one': 1,
-                ':type': SHARE_TYPE,
-                ':countAfter': view.countAfter,
-              },
-            },
+    const items: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { workspaceId: lookup.scope.workspaceId, recordKey: shareKey(lookup.scope, lookup.share.id) },
+          UpdateExpression: 'SET #lastViewedAt = :now ADD #viewCount :one',
+          ConditionExpression: '#type = :type AND attribute_not_exists(#revokedAt) AND (attribute_not_exists(#lastViewedAt) OR #lastViewedAt < :countAfter)',
+          ExpressionAttributeNames: {
+            '#lastViewedAt': 'lastViewedAt',
+            '#viewCount': 'viewCount',
+            '#revokedAt': 'revokedAt',
+            '#type': 'entryType',
           },
-          ...(audit ? [audit] : []),
-        ],
-      }))
+          ExpressionAttributeValues: {
+            ':now': view.now,
+            ':one': 1,
+            ':type': SHARE_TYPE,
+            ':countAfter': view.countAfter,
+          },
+        },
+      },
+      ...(audit ? [audit] : []),
+    ]
+    try {
+      await this.client.send(new TransactWriteCommand({ TransactItems: items }))
     } catch (error) {
       // A view inside the counting window, or of a share revoked meanwhile, is not counted.
       if (readCancellationCodes(error)?.[0] === 'ConditionalCheckFailed') return
-      storageFailure(error)
+      storageFailure(error, items.length)
     }
   }
 
@@ -479,9 +483,24 @@ export class InMemoryProjectStatusShareStore implements ProjectStatusShareStore 
     if ((this.revisions.get(revisionKey) ?? 0) !== input.expectedRevision) {
       throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
     }
+    const tokenLookupKey = JSON.stringify([input.workspaceId, input.record.tokenHash])
+    if (this.records.has(memoryKey(input, input.record.share.id)) || this.tokens.has(tokenLookupKey)) {
+      throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
+    }
+    const nowTime = Date.parse(input.now)
+    for (const pruned of input.pruned) {
+      const stored = this.records.get(memoryKey(input, pruned.share.id))
+      if (!stored || (stored.share.revokedAt === undefined && Date.parse(stored.share.expiresAt) > nowTime)) {
+        throw new ProjectDataError(409, 'ProjectStatusShareConflict', 'The share links changed. Reload and try again.')
+      }
+    }
     this.revisions.set(revisionKey, input.expectedRevision + 1)
+    for (const pruned of input.pruned) {
+      this.records.delete(memoryKey(input, pruned.share.id))
+      this.tokens.delete(JSON.stringify([input.workspaceId, pruned.tokenHash]))
+    }
     this.records.set(memoryKey(input, input.record.share.id), structuredClone(input.record))
-    this.tokens.set(JSON.stringify([input.workspaceId, input.record.tokenHash]), {
+    this.tokens.set(tokenLookupKey, {
       teamId: input.teamId,
       projectId: input.projectId,
       shareId: input.record.share.id,
@@ -654,7 +673,7 @@ function parseShareRow(row: Record<string, unknown>, scope: ProjectStatusShareSc
     !knownSections ||
     knownSections.length !== sections?.length ||
     typeof row.showPeopleNames !== 'boolean' ||
-    !text(row.expiresAt) ||
+    !isProjectStatusReportTimestamp(row.expiresAt) ||
     !text(row.createdAt) ||
     !text(row.createdByMemberKey) ||
     !text(row.reportAsOf) ||
@@ -679,7 +698,7 @@ function parseShareRow(row: Record<string, unknown>, scope: ProjectStatusShareSc
     label: row.label,
     sections: knownSections,
     showPeopleNames: row.showPeopleNames,
-    expiresAt: String(row.expiresAt),
+    expiresAt: row.expiresAt,
     createdAt: String(row.createdAt),
     createdByMemberKey: String(row.createdByMemberKey),
     reportAsOf: String(row.reportAsOf),
@@ -710,8 +729,49 @@ function parseRecord(row: Record<string, unknown>, scope: ProjectStatusShareScop
     throw corruptShare()
   }
   const report = parseProjectStatusReport(stored)
-  if (!report.ok) throw corruptShare()
+  // A snapshot holding a section or a name its share does not publish must not be served.
+  if (!report.ok || !isProjectStatusReportWithinScope(report.value, share)) throw corruptShare()
   return { share, report: report.value, tokenHash: row.tokenHash }
+}
+
+/**
+ * Builds the deletes of one closed share and its token lookup row. The share delete holds only
+ * while the share is still revoked or expired, so an open link is never removed.
+ *
+ * @param tableName - Planning table.
+ * @param scope - Workspace, Team, and Project.
+ * @param pruned - Closed share read before the write.
+ * @param now - Creation time as an ISO timestamp.
+ * @returns The transaction items.
+ */
+function pruneItems(
+  tableName: string,
+  scope: ProjectStatusShareScopeKey,
+  pruned: ProjectStatusShareRecord,
+  now: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return [
+    {
+      Delete: {
+        TableName: tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: shareKey(scope, pruned.share.id) },
+        ConditionExpression: '#type = :type AND #tokenHash = :tokenHash AND (attribute_exists(#revokedAt) OR #expiresAt <= :now)',
+        ExpressionAttributeNames: {
+          '#type': 'entryType',
+          '#tokenHash': 'tokenHash',
+          '#revokedAt': 'revokedAt',
+          '#expiresAt': 'expiresAt',
+        },
+        ExpressionAttributeValues: { ':type': SHARE_TYPE, ':tokenHash': pruned.tokenHash, ':now': now },
+      },
+    },
+    {
+      Delete: {
+        TableName: tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: tokenKey(pruned.tokenHash) },
+      },
+    },
+  ]
 }
 
 /**
