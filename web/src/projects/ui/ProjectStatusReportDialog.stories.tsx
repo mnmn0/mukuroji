@@ -131,6 +131,8 @@ export const ManyCustomers: Story = {
     await waitFor(() => expect(canvas.getByTestId('project-status-share-customer')).toHaveTextContent(secondPageCustomer.name))
     await expect(canvas.getByTestId('project-status-share-customer')).toHaveTextContent(customerFixture.name)
     await waitFor(() => expect(canvas.queryByTestId('project-status-share-customer-more')).toBeNull())
+    await userEvent.selectOptions(canvas.getByTestId('project-status-share-customer'), secondPageCustomer.id)
+    await expect(canvas.getByTestId('project-status-share-customer')).toHaveValue(secondPageCustomer.id)
   },
 }
 
