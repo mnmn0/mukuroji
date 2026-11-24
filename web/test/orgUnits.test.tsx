@@ -140,6 +140,29 @@ describe('OrgUnit structure draft', () => {
     expect(html).toContain('Remove East')
     expect(html).toContain('Sales HQ')
   })
+
+  test('locks every editing control while a save is in flight', () => {
+    /**
+     * Lists the opening tags of the panel's form controls.
+     *
+     * @param html - Rendered panel.
+     * @returns Each input, select, and button tag.
+     */
+    const controls = (html: string) => html.match(/<(input|select|button)\b[^>]*>/g) ?? []
+    const render = (isSaving: boolean) => renderToStaticMarkup(
+      <OrgStructurePanel isSaving={isSaving} structure={structure} t={createTranslator('en')} teams={teams} onSave={async () => true} />,
+    )
+
+    const saving = controls(render(true))
+    // Add form (name, parent, add), three OrgUnits (name, parent, remove), three Teams, and save.
+    expect(saving).toHaveLength(3 + 3 * 3 + teams.length + 1)
+    expect(saving.filter((tag) => !/\sdisabled=""/.test(tag))).toEqual([])
+    expect(render(true)).toContain('aria-busy="true"')
+
+    const idle = controls(render(false))
+    // Idle, only the empty add form and the unchanged save stay disabled.
+    expect(idle.filter((tag) => /\sdisabled=""/.test(tag))).toHaveLength(2)
+  })
 })
 
 describe('OrgUnit portfolio roll-up', () => {

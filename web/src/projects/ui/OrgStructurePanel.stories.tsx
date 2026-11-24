@@ -64,3 +64,8 @@ export const Conflict: Story = {
     message: { tone: 'error', text: createTranslator('en')('projects.orgUnits.error.conflict') },
   },
 }
+
+/** A save in flight, with every editing control locked until it finishes. */
+export const Saving: Story = {
+  args: { isSaving: true },
+}

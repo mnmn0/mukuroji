@@ -138,6 +138,9 @@ export type OrgStructurePanelProps = {
 /**
  * Lets a Workspace administrator edit the OrgUnit tree and which OrgUnit each Team belongs to.
  *
+ * Every editing control is disabled while a save is in flight: a successful save loads a new
+ * revision that restarts the editor, so an edit made meanwhile would be lost.
+ *
  * @param props - Stored structure, Teams, and save callback.
  * @returns The OrgUnit structure editor.
  */
@@ -162,7 +165,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
   const submitNew = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const name = newName.trim()
-    if (!name) return
+    if (isSaving || !name) return
     setDraft(addOrgUnit(draft, {
       id: createOrgUnitId(),
       name,
@@ -172,7 +175,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
   }
 
   return (
-    <section className="workbench-panel" data-testid="org-structure-panel">
+    <section aria-busy={isSaving} className="workbench-panel" data-testid="org-structure-panel">
       <SectionHeader meta={t('projects.orgUnits.description')} title={t('projects.orgUnits.title')} />
       <div className="grid gap-4 px-5 pb-5">
         {message ? (
@@ -191,6 +194,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
             <input
               className="workbench-input min-h-10 px-3 text-sm font-normal"
               data-testid="org-structure-new-name"
+              disabled={isSaving}
               maxLength={ORG_UNIT_NAME_MAX_LENGTH}
               onChange={(event) => setNewName(event.target.value)}
               value={newName}
@@ -200,6 +204,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
             {t('projects.orgUnits.parent')}
             <select
               className="workbench-input min-h-10 px-3 text-sm font-normal"
+              disabled={isSaving}
               onChange={(event) => setNewParentId(event.target.value)}
               value={newParentId}
             >
@@ -209,7 +214,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
               ))}
             </select>
           </label>
-          <button className="workbench-button-secondary min-h-10 px-4" disabled={!newName.trim()} type="submit">
+          <button className="workbench-button-secondary min-h-10 px-4" disabled={isSaving || !newName.trim()} type="submit">
             {t('projects.orgUnits.add')}
           </button>
         </form>
@@ -227,6 +232,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
                   {t('projects.orgUnits.name')}
                   <input
                     className="workbench-input min-h-9 px-3 text-sm font-normal"
+                    disabled={isSaving}
                     maxLength={ORG_UNIT_NAME_MAX_LENGTH}
                     onChange={(event) => setDraft(renameOrgUnit(draft, orgUnit.id, event.target.value))}
                     value={orgUnit.name}
@@ -236,6 +242,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
                   {t('projects.orgUnits.parent')}
                   <select
                     className="workbench-input min-h-9 px-3 text-sm font-normal"
+                    disabled={isSaving}
                     onChange={(event) => setDraft(moveOrgUnit(draft, orgUnit.id, event.target.value || undefined))}
                     value={orgUnit.parentId ?? ''}
                   >
@@ -248,6 +255,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
                 <button
                   aria-label={t('projects.orgUnits.remove').replace('{name}', orgUnit.name)}
                   className="workbench-button-secondary min-h-9 px-3"
+                  disabled={isSaving}
                   onClick={() => setDraft(removeOrgUnit(draft, orgUnit.id))}
                   type="button"
                 >
@@ -267,6 +275,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
                     {team.name}
                     <select
                       className="workbench-input min-h-9 px-3 text-sm font-normal"
+                      disabled={isSaving}
                       onChange={(event) => setDraft(assignTeamToOrgUnit(draft, team.id, event.target.value || undefined))}
                       value={draft.teamAssignments.find((assignment) => assignment.teamId === team.id)?.orgUnitId ?? ''}
                     >
