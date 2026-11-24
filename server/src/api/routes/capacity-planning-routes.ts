@@ -6,6 +6,7 @@ import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   createCapacityPlanningRouter,
+  type CapacityPlanningTeamPermission,
 } from '../../modules/capacity-planning/adapter-in/http/capacity-planning-router'
 import { CapacityPlanningError } from '../../modules/capacity-planning'
 import { requireAppDependencies, workspaceDependencies } from '../shared/app-dependencies'
@@ -13,13 +14,18 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { readWorkspaceCalendarSettingsOf, readWorkspaceWorkloadCalendarPolicy } from '../shared/workspace-calendar'
 import {
+  listPermittedTeams,
   requireTeamPermission,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
-import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+import {
+  projectAccessAllows,
+  toWorkspaceAccessErrorResponse,
+  type TeamPermissionContext,
+} from '../shared/workspace-access'
 
 const capacityPlanningDependencies = {
   get capacityPlanningService() {
@@ -45,6 +51,47 @@ async function readWorkloadProjectMemberIds(
     }
   }
   return memberIds
+}
+
+/**
+ * Rejects Workspace guests, who have no workload access.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @throws ProjectDataError for a guest.
+ */
+function requireWorkloadAccess(principal: WorkspacePrincipal): void {
+  if (principal.workspaceRole === 'guest') {
+    throw new ProjectDataError(403, 'ProjectAccessDenied', 'Guests cannot access workload planning.')
+  }
+}
+
+/**
+ * Converts a checked Team permission into the workload visibility inputs.
+ *
+ * System administrators and Workspace owners / admins see every Project and confidential record;
+ * other principals see the Projects they can view, and confidential records only when they
+ * manage a Project of the Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Team permission context returned by the Team check.
+ * @returns The workload Team permission.
+ */
+function toWorkloadTeamPermission(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+): CapacityPlanningTeamPermission {
+  const isPrivileged = principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
+  return {
+    ...(isPrivileged ? {} : {
+      visibleProjectIds: new Set(
+        (context.projectAccesses ?? [])
+          .filter((access) => projectAccessAllows(access, 'viewer'))
+          .map((access) => access.projectId),
+      ),
+    }),
+    teamProjectIds: context.team.projects.map((project) => project.id),
+    canViewConfidential: isPrivileged || (context.projectAccesses ?? []).some((access) => projectAccessAllows(access, 'manager')),
+  }
 }
 
 /** Converts capacity-planning failures to safe API responses. */
@@ -89,22 +136,21 @@ export function registerCapacityPlanningRoutes(routeApp: Hono): void {
     readWeekStartDay: async (principal) =>
       (await readWorkspaceCalendarSettingsOf(principal.directoryId)).weekStartDay,
     requireTeamPermission: async (principal, teamId, minimum) => {
-      if (principal.workspaceRole === 'guest') {
-        throw new ProjectDataError(403, 'ProjectAccessDenied', 'Guests cannot access workload planning.')
-      }
-      const context = await requireTeamPermission(principal, teamId, minimum)
-      const isPrivileged = principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
-      return {
-        ...(isPrivileged ? {} : {
-          visibleProjectIds: new Set(
-            (context.projectAccesses ?? [])
-              .filter((access) => projectAccessAllows(access, 'viewer'))
-              .map((access) => access.projectId),
-          ),
-        }),
-        teamProjectIds: context.team.projects.map((project) => project.id),
-        canViewConfidential: isPrivileged || (context.projectAccesses ?? []).some((access) => projectAccessAllows(access, 'manager')),
-      }
+      requireWorkloadAccess(principal)
+      return toWorkloadTeamPermission(principal, await requireTeamPermission(principal, teamId, minimum))
+    },
+    // The directory lists only Teams that are not archived.
+    listActiveTeamIds: async (principal) => new Set(
+      (await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')).teams
+        .map((team) => team.id),
+    ),
+    listWorkloadTeams: async (principal) => {
+      requireWorkloadAccess(principal)
+      return (await listPermittedTeams(principal, 'viewer')).map((context) => ({
+        teamId: context.team.id,
+        name: context.team.name,
+        permission: toWorkloadTeamPermission(principal, context),
+      }))
     },
     getWorkloadVisibility: async (principal, _teamId, permission) => {
       if (permission.visibleProjectIds === undefined) {

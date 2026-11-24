@@ -53,3 +53,16 @@ export function resolveCustomerMutationErrorKey(failure: CustomerMutationFailure
 export function shouldRefreshAfterCustomerMutationFailure(failure: CustomerMutationFailure): boolean {
   return failure.status === 409 || failure.status === 404
 }
+
+/**
+ * Reads the status and code from a Customer or Work Item API error without trusting its type.
+ *
+ * @param error Value thrown by a failed request.
+ * @returns The status and code, when the error carries them.
+ */
+export function readCustomerMutationFailure(error: unknown): CustomerMutationFailure {
+  if (typeof error !== 'object' || error === null) return {}
+  const status = 'status' in error && typeof error.status === 'number' ? error.status : undefined
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
+  return { status, code }
+}
