@@ -261,7 +261,7 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 
 | ツール | 用途 |
 | --- | --- |
-| `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
+| `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、設定Projectのcharter（`projectCharter`）、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
 | `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）、`relatedDocuments`（link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページ。続きは `list_task_documents`。Document endpoint のない古い server と、所有者が Document を読めない場合は `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
 | `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す |
@@ -312,6 +312,8 @@ link された Document は読むたびに credential 所有者のその時点�
 
 `work-on-next-task` promptと `mukuroji://agent/workflow` resourceにも同じ運用ガイドを公開します。
 `mukuroji://project/{projectId}/brief` resourceは、`get_configuration` の `brief` と同じくTeam briefとそのProjectのbriefを連結したMarkdownを返します。`MUKUROJI_MCP_PROJECT_ID` を設定した場合は、そのProjectだけを一覧に出し、別Projectの読み取りは `out_of_scope` で拒否します。resourcesに対応しないclientは `get_configuration` で同じ内容を得られます。
+
+`MUKUROJI_MCP_PROJECT_ID` を設定した場合、`get_configuration` の `projectCharter` にそのProjectのcharter（ライフサイクル状態、コード、説明、目的、責任者・スポンサーのmember IDと表示名、計画期間、タグ、関連リポジトリURL）が入ります。Public APIの `GET /api/v1/projects/{projectId}/charter` と同じ値です。Projectを設定していないとき、serverがcharterのendpointより古いとき、credential所有者がProjectを閲覧できないときは `null` です。charterの本文もユーザーデータとして扱います。
 Webのタスク一覧・詳細から状態とコメントを確認できます。表示の更新タイミングは既存画面の再取得に従います。
 
 ## 競合・再送・制約

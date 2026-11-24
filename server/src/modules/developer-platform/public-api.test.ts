@@ -819,6 +819,13 @@ describe('public API router', () => {
           calls.push(`raid:${teamId}/${projectId}`)
           return { schemaVersion: 1, teamId, projectId, items: [] }
         },
+        async getProjectCharter(_credential, teamId, projectId) {
+          calls.push(`charter:${teamId}/${projectId}`)
+          return {
+            schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 2,
+            code: 'ABC', owner: { memberId: 'member-1', displayName: 'Owner' }, tags: [], repositoryUrls: [],
+          }
+        },
         async lookupWorkItemKey(_credential, key) {
           calls.push(`key:${key}`)
           if (key !== 'ABC-1') throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
@@ -837,6 +844,8 @@ describe('public API router', () => {
     const membersWithoutTeam = await router.request('http://localhost/v1/projects/project-1/members', { headers })
     const raidLog = await router.request('http://localhost/v1/projects/project-1/raid-log?teamId=team-1', { headers })
     const raidLogWithoutTeam = await router.request('http://localhost/v1/projects/project-1/raid-log', { headers })
+    const charter = await router.request('http://localhost/v1/projects/project-1/charter?teamId=team-1', { headers })
+    const charterWithoutTeam = await router.request('http://localhost/v1/projects/project-1/charter', { headers })
     const key = await router.request('http://localhost/v1/work-item-keys/ABC-1', { headers })
     const hiddenKey = await router.request('http://localhost/v1/work-item-keys/ABC-2', { headers })
     const paddedKey = await router.request('http://localhost/v1/work-item-keys/%20ABC-1', { headers })
@@ -865,6 +874,13 @@ describe('public API router', () => {
     expect(raidLog.headers.get('Cache-Control')).toBe('private, no-store')
     expect(await raidLog.json()).toEqual({ schemaVersion: 1, teamId: 'team-1', projectId: 'project-1', items: [] })
     expect(raidLogWithoutTeam.status).toBe(400)
+    expect(charter.status).toBe(200)
+    expect(charter.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await charter.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', projectId: 'project-1', lifecycleState: 'active', revision: 2,
+      code: 'ABC', owner: { memberId: 'member-1', displayName: 'Owner' }, tags: [], repositoryUrls: [],
+    })
+    expect(charterWithoutTeam.status).toBe(400)
     expect(key.status).toBe(200)
     expect(await key.json()).toEqual({ schemaVersion: 1, key: 'ABC-1', teamId: 'team-1', workItemId: 'work-item-1' })
     expect(hiddenKey.status).toBe(404)
@@ -872,7 +888,7 @@ describe('public API router', () => {
     expect(longKey.status).toBe(404)
     expect(denied.status).toBe(403)
     expect(calls.filter((call) => !call.startsWith('me:'))).toEqual([
-      'teams:en', 'members:team-1/project-1', 'raid:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
+      'teams:en', 'members:team-1/project-1', 'raid:team-1/project-1', 'charter:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
     ])
   })
 

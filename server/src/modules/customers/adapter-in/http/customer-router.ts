@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono'
 import type {
+  ProjectCustomerLinkList,
   CreateCustomerContactInput,
   CreateCustomerInput,
   CreateCustomerRequestInput,
@@ -148,6 +149,28 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const views = await dependencies.getCustomers().listSavedViews(principal.directoryId)
       return context.json({ views: views.map((view) => projectSavedView(principal, view)) })
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Registered before `/api/customers/:customerId` so the path is not read as a Customer ID.
+  router.get('/api/customers/project-links', async (context) => {
+    try {
+      const principal = await dependencies.requireWorkspaceAccess(context, 'read')
+      const links = await dependencies.getCustomers().listProjectCustomerLinks(principal.directoryId)
+      const items = await mapWithConcurrency(links, PROJECT_LINK_AUTHORIZATION_CONCURRENCY, async (link) => {
+        try {
+          await dependencies.verifyProjectAccess(principal, link.projectId, 'viewer')
+          return link
+        } catch (error) {
+          if (isHiddenCustomerRelationshipError(error)) return undefined
+          throw error
+        }
+      })
+      return context.json({
+        items: items.flatMap((item) => item === undefined ? [] : [item]),
+      } satisfies ProjectCustomerLinkList)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -1725,4 +1748,26 @@ function isHiddenCustomerRelationshipError(value: unknown): boolean {
 /** Checks whether an untrusted value is a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Projects whose access is checked at once when listing Project to Customer links. */
+const PROJECT_LINK_AUTHORIZATION_CONCURRENCY = 8
+
+/** Maps values with a bounded number of concurrent calls, keeping the input order.
+ *
+ * @param values Values to map.
+ * @param concurrency Maximum number of calls in flight.
+ * @param map Asynchronous mapping for one value.
+ * @returns Mapped values in input order.
+ */
+async function mapWithConcurrency<Value, Result>(
+  values: readonly Value[],
+  concurrency: number,
+  map: (value: Value) => Promise<Result>,
+): Promise<Result[]> {
+  const results: Result[] = []
+  for (let start = 0; start < values.length; start += concurrency) {
+    results.push(...await Promise.all(values.slice(start, start + concurrency).map(map)))
+  }
+  return results
 }

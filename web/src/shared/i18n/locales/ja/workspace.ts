@@ -371,6 +371,7 @@ export const workspaceMessages = {
   'workspace.registration.tone.purple': 'ニュートラル',
   'workspace.registration.tone.green': '緑',
   'workspace.registration.tone.yellow': '黄',
+  'workspace.registration.lifecycle': '開始時のライフサイクル',
   'workspace.registration.createTeam': 'チームを登録',
   'workspace.registration.createProject': 'プロジェクトを登録',
   'workspace.registration.saving': '登録中',

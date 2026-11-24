@@ -123,7 +123,31 @@ export type ProjectCharterState = {
   updatedAt?: string
   /** What the requesting member may do, decided by the server from the effective permissions. */
   viewer?: ProjectCharterViewerCapabilities
+  /**
+   * What happened to the Project's health update owner after a charter save changed the owner.
+   * Only the charter update response carries it, and only when the owner changed.
+   */
+  updateOwnerSync?: ProjectCharterUpdateOwnerSync
 }
+
+/**
+ * Result of moving the Project's health update owner (the Planning update cadence) to the new
+ * charter owner after a charter save.
+ *
+ * - `synced`: the update owner is now the charter owner.
+ * - `unchanged`: the update owner already was the charter owner.
+ * - `not-configured`: the Project has no update cadence, so there is no owner to move.
+ * - `not-permitted`: the caller may not change the Project's update cadence.
+ * - `owner-not-eligible`: the new charter owner lacks the member access an update owner needs.
+ * - `failed`: the cadence could not be written; the charter itself was saved.
+ */
+export type ProjectCharterUpdateOwnerSync =
+  | 'synced'
+  | 'unchanged'
+  | 'not-configured'
+  | 'not-permitted'
+  | 'owner-not-eligible'
+  | 'failed'
 
 /** Charter actions the requesting member may take. */
 export type ProjectCharterViewerCapabilities = {

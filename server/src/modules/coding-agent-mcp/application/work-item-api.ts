@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicProjectCharter, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -299,6 +299,12 @@ export interface AgentWorkItemApi {
    * @returns Visible linked Documents, or `undefined` when the server predates the endpoint.
    */
   relatedDocuments(id: string, cursor?: string, limit?: number): Promise<AgentPage<AgentTaskDocument> | undefined>
+  /**
+   * Reads the charter and lifecycle state of a Project of the configured Team.
+   * @param projectId - Project ID.
+   * @returns The charter, or `undefined` when the server predates the endpoint.
+   */
+  projectCharter(projectId: string): Promise<PublicProjectCharter | undefined>
   /**
    * Reads a Document linked to a task as Markdown, when the credential owner can view both.
    * @param id - Task ID.

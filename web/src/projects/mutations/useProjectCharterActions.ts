@@ -24,6 +24,16 @@ export type UseProjectCharterActionsOptions = {
 }
 
 /**
+ * Matches the SWR keys of the Planning snapshot, which holds the Project update owners.
+ *
+ * @param key - SWR cache key.
+ * @returns Whether the key reads a Planning snapshot.
+ */
+function isPlanningSnapshotKey(key: unknown): boolean {
+  return Array.isArray(key) && key[0] === 'planning-snapshot'
+}
+
+/**
  * Loads one Project's charter and exposes its save and lifecycle actions.
  *
  * Every committed change replaces the cached charter with the server's state and revalidates the
@@ -52,6 +62,8 @@ export function useProjectCharterActions({
   ) => {
     await mutateGlobal(requestKey, next, { revalidate: false })
     await mutateGlobal(isProjectDirectoryKey)
+    // A charter owner change can also move the Project's health update owner (ADR 0084).
+    if (next.updateOwnerSync === 'synced') await mutateGlobal(isPlanningSnapshotKey)
     return next
   }, [mutateGlobal])
 

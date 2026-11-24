@@ -4,6 +4,7 @@ import {
 const {
   app,
   configureFakeProjectClients,
+  planningApiRequest,
   resetTestApp,
 } = createApiTestHarness()
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -34,7 +35,80 @@ async function send(path: string, method: string, body?: unknown) {
   })
 }
 
+/** Project update target of the Project the charter tests edit. */
+const updateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+
+/**
+ * Configures a weekly update cadence owned by the given member.
+ *
+ * @param ownerMemberKey - Member who publishes the Project updates.
+ */
+async function configureUpdateCadence(ownerMemberKey: string) {
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: updateTarget,
+    cadence: {
+      updateOwnerMemberKey: ownerMemberKey,
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  expect(response.status).toBe(200)
+}
+
+/**
+ * Reads the update owner of the Project's cadence from the Planning snapshot.
+ *
+ * @returns The member key, or undefined without a cadence.
+ */
+async function readUpdateOwner(): Promise<string | undefined> {
+  const response = await planningApiRequest('/api/planning')
+  const body: { updateTargets: Array<{ target: { projectId?: string }; cadence?: { updateOwnerMemberKey: string } }> } =
+    await response.json()
+  return body.updateTargets.find((candidate) => candidate.target.projectId === 'refero')?.cadence?.updateOwnerMemberKey
+}
+
 describe('Project charter API', () => {
+  test('moves the health update owner to a new charter owner and leaves it when the owner stays', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    await configureUpdateCadence('demo@example.com')
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ updateOwnerSync: 'synced' })
+    expect(await readUpdateOwner()).toBe('sato@example.com')
+
+    // Saving other fields with the same owner does not touch the cadence.
+    await configureUpdateCadenceOwnerDirectly('demo@example.com')
+    const unchanged = await send(charterPath, 'PUT', {
+      expectedRevision: 1,
+      charter: { ownerUserId: 'sato@example.com', purpose: '更新' },
+    })
+    expect(unchanged.status).toBe(200)
+    expect(await unchanged.json()).not.toHaveProperty('updateOwnerSync')
+    expect(await readUpdateOwner()).toBe('demo@example.com')
+  })
+
+  test('reports a Project without an update cadence and keeps the charter saved', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      charter: { owner: { userId: 'sato@example.com' } },
+      updateOwnerSync: 'not-configured',
+    })
+  })
+
+
   test('reads the default charter of a legacy Project', async () => {
     configureFakeProjectClients(true)
 
@@ -220,3 +294,24 @@ describe('Project charter API', () => {
     expect(reopened.status).toBe(200)
   })
 })
+
+/**
+ * Moves the cadence owner back through the cadence endpoint, as a person would in Planning.
+ *
+ * @param ownerMemberKey - Member who publishes the Project updates.
+ */
+async function configureUpdateCadenceOwnerDirectly(ownerMemberKey: string) {
+  const snapshot: { revision: number } = await (await planningApiRequest('/api/planning')).json()
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: updateTarget,
+    cadence: {
+      updateOwnerMemberKey: ownerMemberKey,
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: snapshot.revision,
+  })
+  expect(response.status).toBe(200)
+}

@@ -8,6 +8,7 @@ import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFa
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useProjectCustomerLinks } from '../../customers/queries/useCustomers'
 import { isActiveProjectAssignmentCandidate, ProjectDirectoryApiError } from '../../projects/api'
 import {
   findProjectOverviewUpdateTarget,
@@ -62,6 +63,7 @@ export function ProjectOverviewPage() {
     'project',
     projectId,
   )
+  const customerLinks = useProjectCustomerLinks(canRead ? workspace.accessToken : undefined, Boolean(projectId))
   const projectDocuments = useProjectDocuments(canRead ? workspace.accessToken : undefined, projectId)
   // Action items are read once the first page of Project Documents is in, so
   // a slow later page never holds the list back.
@@ -169,6 +171,9 @@ export function ProjectOverviewPage() {
     >
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <ProjectOverviewView
+          linkedCustomers={customerLinks.data
+            ? customerLinks.data.items.find((links) => links.projectId === projectId)?.customers ?? []
+            : undefined}
           actionItems={actionItems}
           actionItemsError={resolveDocumentsError(actionItemsQuery.error, projectDocuments.error)}
           agentRuns={agentRuns}

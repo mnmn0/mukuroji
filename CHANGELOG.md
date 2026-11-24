@@ -24,6 +24,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- server API: `GET /api/v1/projects/{projectId}/charter?teamId=` を追加しました。Web の charter パネルと同じ
+  ライフサイクル状態・コード・説明・目的・責任者・スポンサー・計画期間・タグ・関連リポジトリ URL を返します。
+  scope は既存の `work-items:read` で、Project の viewer 以上が読めます（#638）。
+- MCP: `get_configuration` が、設定した Project の charter を `projectCharter` で返します。Project を設定して
+  いないとき、server が古いとき、所有者が Project を閲覧できないときは `null` です（#638）。
 - server API: `POST /api/v1/agent-telemetry/v1/logs` を追加しました。Claude Code の OpenTelemetry logs
   （OTLP/HTTP JSON）からトークン数と推定費用を受け取り、同じ instance の Run に時刻で割り当てます。scope は既存の
   `work-items:write` で、今の本人用 token のまま送れます（ADR 0061）。MCP の変更はありません。

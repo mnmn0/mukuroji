@@ -2,6 +2,7 @@ import { DirectoryArchiveImpactGate } from '../../workspace/ui/DirectoryArchiveI
 import { useCallback, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useProjectCustomerLinks } from '../../customers/queries/useCustomers'
 import {
   createProjectDirectoryAssigneeOptions,
   createProjectDirectoryRows,
@@ -40,6 +41,11 @@ export function ProjectsPage() {
     workspace.canLoadWorkspaceData,
   )
   const planning = usePlanningSnapshot(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
+  // Customer links are an addition to the list: a failed read leaves the rows without them.
+  const customerLinks = useProjectCustomerLinks(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
@@ -209,6 +215,7 @@ export function ProjectsPage() {
               page={page.page}
               pageCount={page.pageCount}
               planningUpdateTargets={planning.data?.updateTargets}
+              projectCustomerLinks={customerLinks.data?.items}
               rows={page.rows}
               t={t}
               teams={routeTeamId

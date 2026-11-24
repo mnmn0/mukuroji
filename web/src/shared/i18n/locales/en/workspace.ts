@@ -371,6 +371,7 @@ export const workspaceMessages = {
   'workspace.registration.tone.purple': 'Neutral',
   'workspace.registration.tone.green': 'Green',
   'workspace.registration.tone.yellow': 'Yellow',
+  'workspace.registration.lifecycle': 'Starting lifecycle',
   'workspace.registration.createTeam': 'Create team',
   'workspace.registration.createProject': 'Create project',
   'workspace.registration.saving': 'Saving',

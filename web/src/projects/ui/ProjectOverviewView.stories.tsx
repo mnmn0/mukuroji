@@ -150,3 +150,18 @@ export const PartialFailure: Story = {
     workItemsError: 'limit',
   },
 }
+
+/** Customers linked by Customer Requests appear in the profile and open their Customer page. */
+export const WithLinkedCustomers: Story = {
+  args: {
+    linkedCustomers: [
+      { customerId: 'acme', name: 'Acme Corporation', requestCount: 2 },
+      { customerId: 'globex', name: 'Globex', requestCount: 1 },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('link', { name: 'Acme Corporation' })).toHaveAttribute('href', '/customers/acme')
+    await expect(canvas.getByRole('link', { name: 'Globex' })).toHaveAttribute('href', '/customers/globex')
+  },
+}

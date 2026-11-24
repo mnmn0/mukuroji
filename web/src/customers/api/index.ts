@@ -10,6 +10,7 @@ export {
   getCustomerSavedViews,
   getCustomers,
   getProjectCustomerImpact,
+  getProjectCustomerLinks,
   linkCustomerRequestProject,
   linkCustomerRequestWorkItem,
   unlinkCustomerRequestProject,

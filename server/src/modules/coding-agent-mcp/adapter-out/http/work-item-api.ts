@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
+  type PublicProjectCharter,
   AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
@@ -36,6 +37,16 @@ const scheduleSchema = z.discriminatedUnion('mode', [
     ...scheduleBase, mode: z.literal('milestone'), startDate: z.iso.date(), endDate: z.iso.date(), durationDays: z.literal(0),
   }),
 ])
+const charterPersonSchema = z.object({ memberId: identifier, displayName: z.string() })
+const projectCharterSchema: z.ZodType<PublicProjectCharter> = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, projectId: identifier,
+  lifecycleState: z.enum(['proposed', 'approved', 'active', 'on-hold', 'closed', 'archived']),
+  revision: z.number().int().nonnegative(), updatedAt: z.iso.datetime().optional(),
+  code: z.string().optional(), description: z.string().optional(), purpose: z.string().optional(),
+  owner: charterPersonSchema.optional(), sponsor: charterPersonSchema.optional(),
+  plannedStartDate: z.iso.date().optional(), plannedEndDate: z.iso.date().optional(),
+  tags: z.array(z.string()), repositoryUrls: z.array(z.string()),
+})
 /** Validates a Work Item as the Public API returns it. */
 export const taskSchema: z.ZodType<AgentTask> = z.object({
   id: identifier, teamId: identifier, revision: z.number().int().positive(),
@@ -389,6 +400,20 @@ export function createAgentWorkItemApi(
         if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
         throw error
       }
+    },
+    /** Reads a Project charter of the configured Team; a server older than the endpoint has none. */
+    async projectCharter(projectId) {
+      let found: PublicProjectCharter
+      try {
+        found = await request(`projects/${encodeURIComponent(projectId)}/charter`, projectCharterSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.projectId !== projectId) {
+        throw new AgentTaskError('invalid_response', 'The API returned the charter of another Project.')
+      }
+      return found
     },
     /** Reads one linked Document as Markdown. */
     async document(id, documentId) {
