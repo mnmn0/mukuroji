@@ -55,7 +55,8 @@ export function hasMemberAccessExpired(accessExpiresAt: string | undefined, now:
  * members other than the leaver.
  *
  * A member whose access expired keeps an active row until their own roles are handed over, but
- * can no longer be given a Project role, so they are not offered as a successor.
+ * can no longer work or be given a Project role, so they are not offered as a successor of
+ * Project roles, Planning ownership, or Work Items.
  *
  * @param leaverKey - Member key of the leaving member.
  * @param members - Every Workspace member.

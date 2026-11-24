@@ -5,6 +5,7 @@ import { useModalFocus } from '../../shared/ui/useModalFocus'
 import type { BulkOperationHandlers } from '../../bulk-operations/mutations/createBulkOperationHandlers'
 import { BulkOperationResultPanel } from '../../bulk-operations/ui/BulkOperationResultPanel'
 import type { WorkspaceMember } from '../api/access'
+import { listOffboardingSuccessors } from '../model/memberAccessExpiry'
 import {
   MEMBER_WORK_HANDOVER_BATCH_LIMIT,
   createMemberWorkHandoverRequest,
@@ -24,7 +25,7 @@ export type MemberWorkHandoverDialogProps = {
   workspaceId: string
   /** Member whose open work is handed over. */
   member: WorkspaceMember
-  /** Every Workspace member; active non-guest members other than `member` can take over. */
+  /** Every Workspace member; active, unexpired non-guest members other than `member` can take over. */
   members: readonly WorkspaceMember[]
   /** Localized message resolver. */
   t: (key: MessageKey) => string
@@ -64,11 +65,7 @@ export function MemberWorkHandoverDialog({
     if (!busy) onClose()
   })
 
-  const successors = members.filter((candidate) =>
-    candidate.memberKey !== member.memberKey &&
-    candidate.status === 'active' &&
-    candidate.role !== 'guest'
-  )
+  const successors = listOffboardingSuccessors(member.memberKey, members, new Date())
 
   const items = loadState.status === 'loaded' ? loadState.items : []
   const selectedItems = items.filter((item) => !deselected.has(itemKey(item)))
