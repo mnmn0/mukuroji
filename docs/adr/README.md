@@ -86,6 +86,21 @@
 | [0062](0062-analytics-project-report-visibility.md) | Analytics report の共有範囲に Project を足し、Team と Project の組で読み書きを判定する | 提案 |
 | [0063](0063-planning-milestone-watcher-key.md) | Milestone の watcher を Collaboration table の `planning-entity` namespace に置き、通知の再確認は注入した reader で行う | 提案 |
 | [0064](0064-analytics-recipient-delivery-index.md) | Analytics の定期配信を受信者ごとの索引行で持ち、「自分への配信」を 1 回の Query で読む | 提案 |
+| [0065](0065-project-budget-report-and-evm.md) | Project の予算レポートと EVM を baseline・進捗・工数から都度計算し、予算を Team と Project の組で保存する | 提案 |
+| [0066](0066-inbox-digest-scheduled-job.md) | Update の受信トレイ・ダイジェストを共有の scheduled-jobs Lambda で15分おきに配る | 提案 |
+| [0067](0067-owner-managed-system-administrator-group.md) | system administrator の付与・解除を owner が画面から行い、Cognito group を正本のまま使う | 提案 |
 | [0068](0068-workspace-workload-across-teams.md) | 要員の負荷を Workspace の全 Team の record を合算して見せ、詳細は Team ごとの可視性で絞る | 提案 |
+| [0069](0069-team-portfolio-snapshot-row.md) | Workspace のポートフォリオを Team ごとに読み、月次 snapshot を Team と月ごとの Planning row で持つ | 提案 |
+| [0070](0070-planning-scoped-reads.md) | Planning を Team / Project / Portfolio 単位で読み、key 設計は変えずに link と Work Item だけを絞る | 提案 |
+| [0071](0071-view-export-and-sliced-import.md) | 表示中の view の書き出しはブラウザで作り、大きな import は worker が時間で区切って次の message に引き継ぐ | 提案 |
+| [0072](0072-project-status-report-share-links.md) | Project の進捗レポートを snapshot として保存し、token 付きの read-only リンクで社外に共有する | 提案 |
+| [0073](0073-team-health-updates-and-reviewer-acknowledgement.md) | Team を health update の対象にし、確認者の「確認済み」を update version ごとの marker 付きコメントで記録する | 提案 |
+| [0078](0078-change-request-approval-applies-schedule-and-baseline.md) | 変更要求の承認は、日程の連鎖とベースラインの差し替えを既存の API で順に行い、判断を最後に記録する | 提案 |
 | [0080](0080-team-grant-request-receipt.md) | Team の管理操作の冪等キーを、Project Directory table の sidecar 受付行で入力に結び付ける | 提案 |
+| [0074](0074-member-display-name-on-member-row.md) | メンバーの表示名を member row に保存し、本人と管理者が version 条件付きの更新で変える。SCIM の member と Cognito の `name` は変えない | 提案 |
+| [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
+| [0076](0076-workspace-wide-time-period-close.md) | Workspace 単位の月の締めは Team ごとの締め row をまとめて作る | 提案 |
+| [0081](0081-notification-web-push-transport.md) | 通知の Web Push を自前の RFC 8291 暗号化と VAPID で送り、Email と同じ配信 queue に push channel を足す | 提案 |
+| [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
+| [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
 | [0087](0087-team-owned-automation-definitions.md) | Automation 定義と Request form に所有 Team を持たせ、Team manager に自 Team の分の管理を任せる | 提案 |

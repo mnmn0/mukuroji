@@ -140,7 +140,7 @@ export const automationMessages = {
   'automation.template.kind.workflow': 'Workflow',
   'automation.template.payload': 'Payload (JSON)',
   'automation.template.payloadHint':
-    'Enter a JSON object. Work Item templates should include required creation values such as title.',
+    'Enter a JSON object. Work Item templates should include required creation values such as title. An acceptanceCriteria array of texts gives created Work Items those acceptance criteria.',
   'automation.template.payloadInvalidJson': 'Enter valid JSON.',
   'automation.template.payloadObjectRequired': 'The top-level payload must be a JSON object.',
   'automation.template.payloadInvalidValue': 'The payload contains an unsupported JSON value or field name.',

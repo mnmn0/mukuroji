@@ -285,6 +285,70 @@ export const SignInSecurity: Story = {
 }
 
 /**
+ * An owner sees who is a system administrator and which roles are assigned to each member, and
+ * grants or revokes system administrator access after confirming it.
+ */
+export const SystemAdministrators: Story = {
+  args: {
+    memberRoleAssignments: new Map([
+      ['member@example.com', [
+        { id: 'assignment-portfolio', roleName: 'Portfolio viewer', scopeType: 'workspace' as const },
+        { id: 'assignment-project', roleName: 'Project editor', scopeType: 'project' as const },
+      ]],
+    ]),
+    onChangeSystemAdministrator: fn(async () => undefined),
+    signInSecurity: [
+      { memberKey: 'owner@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'admin@example.com', mfa: 'enrolled', passwordReset: 'available' },
+      { memberKey: 'member@example.com', mfa: 'not-enrolled', passwordReset: 'available' },
+    ],
+    systemAdministratorMemberKeys: ['owner@example.com', 'admin@example.com'],
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('workspace-member-system-admin-admin-example-com')).toBeVisible()
+    await expect(canvas.getByTestId('workspace-member-direct-roles-member-example-com')).toHaveTextContent(
+      'Portfolio viewer',
+    )
+    // Owners cannot change their own access.
+    await expect(canvas.queryByTestId('workspace-member-system-admin-toggle-owner-example-com')).toBeNull()
+    await userEvent.click(canvas.getByTestId('workspace-member-system-admin-toggle-member-example-com'))
+    await userEvent.click(within(canvas.getByRole('dialog')).getByRole('button', { name: 'システム管理者にする' }))
+    await expect(args.onChangeSystemAdministrator).toHaveBeenCalledWith('member@example.com', true)
+  },
+}
+
+/**
+ * The direct roles could not be loaded; the ledger says so instead of showing no roles.
+ */
+export const MemberRoleAssignmentsLoadError: Story = {
+  args: {
+    memberRoleAssignmentsLoadFailed: true,
+    onRetryMemberRoleAssignments: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('workspace-member-direct-roles-retry'))
+    await expect(args.onRetryMemberRoleAssignments).toHaveBeenCalledTimes(1)
+  },
+}
+
+/**
+ * The system administrator groups could not be read; the ledger says so and offers a reload.
+ */
+export const SystemAdministratorsLoadError: Story = {
+  args: {
+    systemAdministratorsLoadFailed: true,
+    onRetrySignInSecurity: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('workspace-member-system-admin-retry'))
+    await expect(args.onRetrySignInSecurity).toHaveBeenCalledTimes(1)
+  },
+}
+
+/**
  * Members' MFA enrollment could not be loaded; the ledger says so and offers a reload.
  */
 export const SignInSecurityLoadError: Story = {

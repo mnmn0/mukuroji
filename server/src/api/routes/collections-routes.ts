@@ -31,6 +31,7 @@ import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
   canWriteTaskViews,
+  createApiMutationContext,
   getEffectiveProjectScopeAccessList,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -103,8 +104,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticate(c, 'write')
       const idempotencyKey = readRequiredIdempotencyKey(c.req.header('Idempotency-Key'))
-      const input = parseCreateCollectionInput(await readJson<unknown>(c.req))
-      const collection = await createCollection(writeStore(principal), mutationContext(principal), input, idempotencyKey)
+      const body = await readJson<unknown>(c.req)
+      const input = parseCreateCollectionInput(body)
+      const collection = await createCollection(writeStore(principal), mutationContext(c, principal, body), input, idempotencyKey)
       return c.json(collection, 201)
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -116,8 +118,9 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticate(c, 'write')
       const collectionId = readCollectionIdentifier(c.req.param('collectionId'), 'InvalidCollectionId')
-      const input = parseUpdateCollectionInput(await readJson<unknown>(c.req))
-      return c.json(await updateCollection(writeStore(principal), mutationContext(principal), collectionId, input))
+      const body = await readJson<unknown>(c.req)
+      const input = parseUpdateCollectionInput(body)
+      return c.json(await updateCollection(writeStore(principal), mutationContext(c, principal, body), collectionId, input))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
     }
@@ -129,7 +132,13 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
       const principal = await authenticate(c, 'write')
       const collectionId = readCollectionIdentifier(c.req.param('collectionId'), 'InvalidCollectionId')
       const expectedRevision = parseExpectedRevisionQuery(c.req.query('expectedRevision'))
-      await deleteCollection(writeStore(principal), principal.directoryId, collectionId, expectedRevision)
+      await deleteCollection(
+        writeStore(principal),
+        principal.directoryId,
+        collectionId,
+        expectedRevision,
+        createApiMutationContext(c, principal, { expectedRevision }),
+      )
       return c.body(null, 204)
     } catch (error) {
       return toCollectionErrorResponse(c, error)
@@ -161,7 +170,7 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
       const issueId = readWorkItemReferenceIdentifier(c.req.param('issueId'))
       return c.json(await addCollectionItem(
         writeStore(principal),
-        mutationContext(principal),
+        mutationContext(c, principal, { teamId, issueId }),
         collectionId,
         teamId,
         issueId,
@@ -183,7 +192,7 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
       const issueId = readWorkItemReferenceIdentifier(c.req.param('issueId'))
       return c.json(await removeCollectionItem(
         writeStore(principal),
-        mutationContext(principal),
+        mutationContext(c, principal, { teamId, issueId }),
         collectionId,
         teamId,
         issueId,
@@ -316,13 +325,20 @@ function resolveAccessProject(
 }
 
 /**
- * Builds the caller and clock for a mutation.
+ * Builds the caller, clock, and audit context for a mutation.
  *
+ * @param context - Hono request context.
  * @param principal - Authenticated principal.
+ * @param body - Request body or identifying input, used to key the audit event.
  * @returns Mutation context.
  */
-function mutationContext(principal: WorkspacePrincipal): CollectionMutationContext {
-  return { workspaceId: principal.directoryId, actor: principal.userKey, now: new Date().toISOString() }
+function mutationContext(context: Context, principal: WorkspacePrincipal, body: unknown): CollectionMutationContext {
+  return {
+    workspaceId: principal.directoryId,
+    actor: principal.userKey,
+    now: new Date().toISOString(),
+    audit: createApiMutationContext(context, principal, body),
+  }
 }
 
 /**

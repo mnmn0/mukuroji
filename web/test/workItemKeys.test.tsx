@@ -40,6 +40,19 @@ describe('Work Item keys in text', () => {
     expect(html).not.toContain('/browse/PT-15')
     expect(html).toContain('href="https://example.com"')
   })
+
+  test('links Document paths written as text, but not inside code or other URLs', () => {
+    const html = renderToStaticMarkup(
+      <SafeCommentBody bodyMarkdown={'Spec: /documents/doc_12 (see PT-12).\n\n`/documents/doc_13`\n\nhttps://example.com/documents/doc_14 and a/documents/doc_15'} />,
+    )
+
+    expect(html).toMatch(/href="\/documents\/doc_12"[^>]*>\/documents\/doc_12<\/a>/)
+    expect(html).toContain('href="/browse/PT-12"')
+    expect(html).not.toContain('href="/documents/doc_13"')
+    expect(html).not.toContain('href="/documents/doc_14"')
+    expect(html).toContain('href="https://example.com/documents/doc_14"')
+    expect(html).not.toContain('href="/documents/doc_15"')
+  })
 })
 
 describe('Work Item key prefixes', () => {

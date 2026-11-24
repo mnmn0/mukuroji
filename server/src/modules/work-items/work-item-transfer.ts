@@ -1,4 +1,6 @@
 import {
+  WORK_ITEM_IMPORT_MAX_BYTES,
+  WORK_ITEM_IMPORT_MAX_ROWS,
   WORK_ITEM_TITLE_MAX_LENGTH,
   type CanonicalWorkItem,
   type CreateWorkItemInput,
@@ -115,11 +117,8 @@ export class WorkItemTransferError extends Error {
   }
 }
 
-/** 一度の import で受け付ける UTF-8 text の最大 byte 数です。 */
-export const WORK_ITEM_IMPORT_MAX_BYTES = 2 * 1024 * 1024
-
-/** 一度の import で dry-run できる最大 row 数です。 */
-export const WORK_ITEM_IMPORT_MAX_ROWS = 1_000
+/** 一度の import で受け付ける UTF-8 text の最大 byte 数と row 数です（所有元は contracts）。 */
+export { WORK_ITEM_IMPORT_MAX_BYTES, WORK_ITEM_IMPORT_MAX_ROWS }
 
 const requiredTargetFields = ['title', 'assigneeUserId', 'schedule'] as const
 const supportedTargetFields = new Set([

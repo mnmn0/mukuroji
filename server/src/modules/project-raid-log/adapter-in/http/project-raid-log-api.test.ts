@@ -11,7 +11,7 @@ const {
 } = createApiTestHarness()
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { InMemoryProjectRaidLogStore } from '../../adapter-out/dynamodb/project-raid-log-store'
-import type { ProjectRaidEntryResponse, ProjectRaidLogResponse } from '@mukuroji/contracts'
+import type { ProjectRaidEntryResponse, ProjectRaidLogResponse, ProjectRaidScheduleChange } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 
 afterEach(() => {
@@ -61,7 +61,7 @@ test('creates, edits, closes, and lists Project log entries', async () => {
 
   const empty = await request(path)
   expect(empty.status).toBe(200)
-  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, entries: [], viewer: { canEdit: true } })
+  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, entries: [], viewer: { canEdit: true, canDecide: true } })
 
   const created = await request(`${path}/entries`, 'POST', {
     entry: { kind: 'risk', title: ' Vendor delay ', probability: 4, impact: 4, reviewDueDate: '2026-12-01', status: 'open' },
@@ -270,6 +270,47 @@ test('refuses related Work Items from an Enterprise writer without Work Item rea
   })
 })
 
+test('lets an Enterprise Project manager decide change requests by projects.manage', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    const path = '/api/teams/core-team/projects/refero/raid-log'
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write'])
+    const writerRead = await requestAsEnterprise(path)
+    expect(await writerRead.json()).toMatchObject({ viewer: { canEdit: true, canDecide: false } })
+    const created = await requestAsEnterprise(`${path}/entries`, 'POST', {
+      entry: { kind: 'change-request', title: 'Scope', impact: 3, status: 'open' },
+    })
+    expect(created.status).toBe(201)
+    const entry = (await created.json() as ProjectRaidEntryResponse).entry
+    const refused = await requestAsEnterprise(`${path}/entries/${entry.id}/decision`, 'POST', {
+      expectedRevision: entry.revision,
+      outcome: 'rejected',
+    })
+    expect(refused.status).toBe(403)
+    const refusedHold = await requestAsEnterprise(`${path}/entries/${entry.id}/approval-hold`, 'POST', {
+      expectedRevision: entry.revision,
+    })
+    expect(refusedHold.status).toBe(403)
+
+    grantEnterpriseProjectRole('custom:raid-writer', ['projects.read', 'projects.write', 'projects.manage'])
+    const managerRead = await requestAsEnterprise(path)
+    expect(await managerRead.json()).toMatchObject({ viewer: { canEdit: true, canDecide: true } })
+    const decided = await requestAsEnterprise(`${path}/entries/${entry.id}/decision`, 'POST', {
+      expectedRevision: entry.revision,
+      outcome: 'rejected',
+    })
+    expect(decided.status).toBe(200)
+    expect((await decided.json() as ProjectRaidEntryResponse).entry).toMatchObject({
+      status: 'closed',
+      decision: { outcome: 'rejected' },
+    })
+  })
+})
+
 test('keeps an Enterprise Project viewer read-only', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(true, {
@@ -462,6 +503,109 @@ test('fences another owner once and adds no second fence when the caller owns th
     const targets = checks.map(transactionItemTarget)
     expect(new Set(targets).size).toBe(targets.length)
   }
+})
+
+test('approves a change request with the captured baseline and rejects one without changes', async () => {
+  configureFakeProjectClients(true)
+  const projectId = await readProjectId()
+  const path = `/api/teams/core-team/projects/${projectId}/raid-log`
+  const { issues } = await getTestAppDependencies().workItems.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')
+  const related = issues.find((issue) => issue.assignedProjectId === projectId)
+  if (!related) throw new Error('The fake Project has no Work Item.')
+  const scheduleChanges: ProjectRaidScheduleChange[] = [{ workItemId: related.id, operation: { type: 'move', targetDate: '2026-12-10' } }]
+
+  const misplaced = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'risk', title: 'Risk', probability: 2, impact: 2, relatedWorkItemIds: [related.id], scheduleChanges, status: 'open' },
+  }, 'cr-0')
+  expect(misplaced.status).toBe(400)
+  const unrelated = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'change-request', title: 'Move', impact: 3, scheduleChanges, status: 'open' },
+  }, 'cr-0b')
+  expect(unrelated.status).toBe(400)
+
+  const create = async (title: string, key: string) => {
+    const response = await request(`${path}/entries`, 'POST', {
+      entry: { kind: 'change-request', title, impact: 3, relatedWorkItemIds: [related.id], scheduleChanges, status: 'open' },
+    }, key)
+    expect(response.status).toBe(201)
+    return (await response.json() as ProjectRaidEntryResponse).entry
+  }
+  const rejectedRequest = await create('Add reports', 'cr-1')
+  expect(rejectedRequest.scheduleChanges).toEqual(scheduleChanges)
+  const rejected = await request(`${path}/entries/${rejectedRequest.id}/decision`, 'POST', {
+    expectedRevision: 1,
+    outcome: 'rejected',
+  }, 'decide-1')
+  expect(rejected.status).toBe(200)
+  const rejectedEntry = (await rejected.json() as ProjectRaidEntryResponse).entry
+  expect(rejectedEntry).toMatchObject({ status: 'closed', revision: 2, decision: { outcome: 'rejected', decidedByMemberId: 'demo@example.com' } })
+  const replayed = await request(`${path}/entries/${rejectedRequest.id}/decision`, 'POST', {
+    expectedRevision: 1,
+    outcome: 'rejected',
+  }, 'decide-1')
+  expect((await replayed.json() as ProjectRaidEntryResponse).entry).toEqual(rejectedEntry)
+  const again = await request(`${path}/entries/${rejectedRequest.id}/decision`, 'POST', {
+    expectedRevision: 2,
+    outcome: 'approved',
+  }, 'decide-2')
+  expect(again.status).toBe(409)
+  const edited = await request(`${path}/entries/${rejectedRequest.id}`, 'PUT', {
+    expectedRevision: 2,
+    entry: { kind: 'change-request', title: 'Add reports', impact: 3, status: 'open' },
+  }, 'edit-decided')
+  expect(edited.status).toBe(409)
+
+  const approvedRequest = await create('Move the launch', 'cr-2')
+  const unheld = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
+    expectedRevision: 1,
+    outcome: 'approved',
+  }, 'decide-unheld')
+  expect(unheld.status).toBe(409)
+  const held = await request(`${path}/entries/${approvedRequest.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-1')
+  expect(held.status).toBe(200)
+  const heldEntry = (await held.json() as ProjectRaidEntryResponse).entry
+  expect(heldEntry).toMatchObject({ status: 'open', revision: 2, approvalHold: { heldByMemberId: 'demo@example.com' } })
+  const heldRetry = await request(`${path}/entries/${approvedRequest.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-1')
+  expect((await heldRetry.json() as ProjectRaidEntryResponse).entry).toEqual(heldEntry)
+  const unknownBaseline = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
+    expectedRevision: 2,
+    outcome: 'approved',
+    baselineId: 'not-active',
+  }, 'decide-3')
+  expect(unknownBaseline.status).toBe(400)
+  // The approver captured this baseline just before deciding.
+  const activeBaselineId = 'baseline-cr-2'
+  const baselines = getTestAppDependencies().workItems.scheduleBaselines
+  setTestAppDependencies({
+    scheduleBaselines: {
+      getSaved: baselines.getSaved.bind(baselines),
+      write: baselines.write.bind(baselines),
+      async get() {
+        return { id: activeBaselineId, revision: 3, capturedAt: '2026-11-23T00:00:00.000Z', entries: [], savedBaselines: [] }
+      },
+    },
+  })
+  const approved = await request(`${path}/entries/${approvedRequest.id}/decision`, 'POST', {
+    expectedRevision: 2,
+    outcome: 'approved',
+    baselineId: activeBaselineId,
+  }, 'decide-4')
+  expect(approved.status).toBe(200)
+  const approvedEntry = (await approved.json() as ProjectRaidEntryResponse).entry
+  expect(approvedEntry.decision).toMatchObject({ outcome: 'approved', baselineId: activeBaselineId })
+  expect(approvedEntry.approvalHold).toBeUndefined()
+
+  const risk = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'risk', title: 'Risk', probability: 2, impact: 2, status: 'open' },
+  }, 'risk-1')
+  const riskEntry = (await risk.json() as ProjectRaidEntryResponse).entry
+  const notRequest = await request(`${path}/entries/${riskEntry.id}/decision`, 'POST', {
+    expectedRevision: 1,
+    outcome: 'approved',
+  }, 'decide-5')
+  expect(notRequest.status).toBe(400)
+  const notHeldRequest = await request(`${path}/entries/${riskEntry.id}/approval-hold`, 'POST', { expectedRevision: 1 }, 'hold-2')
+  expect(notHeldRequest.status).toBe(400)
 })
 
 /**

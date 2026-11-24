@@ -793,6 +793,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     Description: 'Processes durable Work Item imports with resumable row receipts.',
     Handler: 'index.workItemImportHandler',
     MemorySize: 1024,
+    RecursiveLoop: 'Allow',
     Runtime: 'nodejs22.x',
     Timeout: 15 * 60,
     Environment: {
@@ -3290,4 +3291,44 @@ test('no Lambda environment references a NoEcho parameter (#494)', () => {
     expect(secret.DeletionPolicy).toBe('Retain');
     expect(secret.UpdateReplacePolicy).toBe('Retain');
   }
+});
+
+test('Web Push notifications drain their own queue and read only the VAPID private key secret', () => {
+  const template = synthesizedTemplate;
+  const { statements } = findScheduledJobPolicy(template, 'PushNotification');
+  const serialized = JSON.stringify(statements);
+  expect(serialized).toContain('/index/PushDeliveryIndex');
+  expect(serialized).not.toContain('/index/EmailDeliveryIndex');
+  expect(serialized).not.toContain('ses:');
+  expect(serialized).not.toContain('dynamodb:Scan');
+  expect(serialized).not.toContain('dynamodb:PutItem');
+  const secretStatements = statements.filter((statement) => JSON.stringify(statement).includes('secretsmanager:'));
+  expect(secretStatements).toHaveLength(1);
+  expect(secretStatements[0]).toMatchObject({ Effect: 'Allow', Action: 'secretsmanager:GetSecretValue' });
+  expect(JSON.stringify(secretStatements[0]?.Resource)).toContain(':secret:mukuroji/web-push/vapid-private-key-??????');
+  expect(statements).toEqual(expect.arrayContaining([
+    // Gone devices are deleted; registrations are never written by the worker.
+    expect.objectContaining({
+      Effect: 'Allow', Action: ['dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: { 'Fn::GetAtt': [expect.stringMatching(/^PushSubscriptionsTable/), 'Arn'] },
+    }),
+  ]));
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
+    Environment: { Variables: Match.objectLike({
+      WEB_PUSH_VAPID_PUBLIC_KEY: { Ref: 'WebPushVapidPublicKey' },
+      WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_ID: 'mukuroji/web-push/vapid-private-key',
+      NOTIFICATION_PUSH_APP_ORIGIN: Match.anyValue(),
+    }) },
+  });
+  // The projection queues push only while a VAPID public key is configured.
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: Match.stringLikeRegexp('^Projects audit outbox events'),
+    Environment: { Variables: Match.objectLike({ WEB_PUSH_VAPID_PUBLIC_KEY: { Ref: 'WebPushVapidPublicKey' } }) },
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
+    Dimensions: [{ Name: 'Channel', Value: 'Push' }],
+    Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
+  });
 });

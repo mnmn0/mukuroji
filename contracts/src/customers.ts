@@ -272,6 +272,30 @@ export type CustomerProjectSummary = {
   requestStates: CustomerRequestStatus[]
 }
 
+/** Customer linked to a Project through at least one of its Customer Requests. */
+export type ProjectLinkedCustomer = {
+  /** Customer identifier. */
+  customerId: string
+  /** Customer display name. */
+  name: string
+  /** Number of the Customer's requests linked to the Project. */
+  requestCount: number
+}
+
+/** Customers linked to one Project by Customer Request to Project links. */
+export type ProjectCustomerLinks = {
+  /** Canonical Project identifier. */
+  projectId: string
+  /** Linked Customers ordered by name. */
+  customers: ProjectLinkedCustomer[]
+}
+
+/** Response of `GET /api/customers/project-links`. */
+export type ProjectCustomerLinkList = {
+  /** Projects the caller can view that have at least one linked Customer. */
+  items: ProjectCustomerLinks[]
+}
+
 /** Query filters for the customer directory. */
 export type CustomerListInput = {
   /** Case-insensitive name or domain search. */

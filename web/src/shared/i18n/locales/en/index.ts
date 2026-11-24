@@ -22,6 +22,7 @@ import { customersMessages } from './customers'
 import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { agentConnectionMessages } from './agent-connection'
+import { calendarFeedsMessages } from './calendar-feeds'
 import { connectorOAuthMessages } from './connector-oauth'
 import { connectorCatalogMessages } from './connector-catalog'
 import { developerPlatformMessages } from './developer-platform'
@@ -31,6 +32,7 @@ import { factoryBoardMessages } from './factory-board'
 import { timeTrackingMessages } from './time-tracking'
 import { accountSecurityMessages } from './account-security'
 import { auditLogMessages } from './audit-log'
+import { portfolioDashboardMessages } from './portfolio-dashboard'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -72,6 +74,7 @@ export const enMessages = defineMessages({
   ...codingAgentMessages,
   ...codingAgentGuideMessages,
   ...agentConnectionMessages,
+  ...calendarFeedsMessages,
   ...connectorOAuthMessages,
   ...connectorCatalogMessages,
   ...developerPlatformMessages,
@@ -81,5 +84,6 @@ export const enMessages = defineMessages({
   ...timeTrackingMessages,
   ...accountSecurityMessages,
   ...auditLogMessages,
+  ...portfolioDashboardMessages,
 })
 import { updatesMessages } from './updates'

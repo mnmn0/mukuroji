@@ -431,4 +431,41 @@ describe('Project charter persistence', () => {
     await expect(client.createNewWorkItemProjectConditionCheck(workspaceId, 'core-team', 'missing'))
       .rejects.toMatchObject({ code: 'ProjectNotFound', status: 404 })
   })
+
+  test('builds a commit-time fence that the charter still names the owner being applied', async () => {
+    const { documentClient } = createFakeDocumentClient([teamRow(), projectRow()])
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    const fence = await client.createProjectCharterOwnerConditionCheck(
+      workspaceId,
+      'core-team',
+      'refero',
+      'sato@example.com',
+    )
+
+    expect(fence).toEqual({
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: workspaceId, entryKey: '000010#000010#PROJECT#refero' },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+          'attribute_not_exists(#archivedAt) AND #charter.#owner.#userId = :ownerUserId',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#charter': 'charter',
+          '#entryType': 'entryType',
+          '#owner': 'owner',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+          '#userId': 'userId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':ownerUserId': 'sato@example.com',
+          ':projectId': 'refero',
+          ':teamId': 'core-team',
+        },
+      },
+    })
+  })
 })

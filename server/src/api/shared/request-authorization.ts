@@ -307,6 +307,8 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
+  // Closing or reopening a month for every Team is Workspace administration (ADR 0076).
+  { method: '*', pathPattern: '/api/time-periods/*', permission: 'workspace.manage' },
   { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/automation/*', permission: 'automation.read' },
   { method: '*', pathPattern: '/api/automation/*', permission: 'automation.manage' },
@@ -645,6 +647,29 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
     permission: 'projects.write',
   },
+  // Saving a Team's portfolio snapshot captures every Project of the Team, so it needs the Team
+  // manage permission; reading the portfolio falls through to `teams.read` below.
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/portfolio/snapshots/:month',
+    permission: 'teams.manage',
+  },
+  {
+    // Rendering a PDF reads the Project; the POST only carries the report to render.
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-report/pdf',
+    permission: 'projects.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/status-shares*',
+    permission: 'projects.write',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
@@ -653,6 +678,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline*',
+    permission: 'projects.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/budget-report*',
     permission: 'projects.manage',
   },
   {
@@ -775,6 +805,18 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.
+  {
+    method: '*',
+    pathPattern: '/api/me/calendar-feeds*',
+    permission: 'workspace.read',
+  },
+  // Members read and rename themselves; the service refuses directory-managed names.
+  {
+    method: '*',
+    pathPattern: '/api/me/profile',
     permission: 'workspace.read',
   },
   // Push availability and the caller's own device registration change no shared Workspace data.
@@ -1990,6 +2032,13 @@ async function resolvePlanningUpdateAuthorizationResource(
       targetId: target.projectId.trim(),
       parentTeamId: target.teamId.trim(),
     }
+  }
+  if (
+    target.type === 'team' &&
+    typeof target.teamId === 'string' &&
+    target.teamId.trim()
+  ) {
+    return { workspaceId, kind: 'team', targetId: target.teamId.trim() }
   }
   if (
     target.type !== 'initiative' ||

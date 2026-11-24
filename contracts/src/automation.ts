@@ -1,5 +1,6 @@
 import type { ScheduleDependencyType } from './schedule-dependencies'
 import type { WorkflowDefinition } from './work-item-configuration'
+import type { WorkItemContributorAssignmentCreateInput } from './work-item-contributors'
 import type {
   WorkItemRelationEventType,
   WorkItemSchedule,
@@ -393,10 +394,21 @@ export type AutomationProjectTemplateTone = 'blue' | 'purple' | 'green' | 'yello
 
 /** Work Item template の作成 payload です。 */
 export type AutomationWorkItemTemplatePayload = {
+  /**
+   * Acceptance criteria texts a Work Item created from the template starts with, in order; each is
+   * created as not met. At most `WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT` entries.
+   */
+  acceptanceCriteria?: string[]
   /** Work Item を割り当てる Project ID です。 */
   assignedProjectId?: string | null
   /** Work Item の担当者 user ID です。 */
   assigneeUserId?: string
+  /**
+   * Contributors the created Work Item starts with, such as a job role and its planned effort
+   * before a member is decided. Validated against the Team's job roles and active members when
+   * the Work Item is created.
+   */
+  contributorAssignments?: WorkItemContributorAssignmentCreateInput[]
   /** Custom field ID ごとの初期値です。 */
   customFieldValues?: Record<string, AutomationValue>
   /** Work Item の説明です。 */
@@ -1104,8 +1116,25 @@ export type BulkArchiveAction = {
   archived: boolean
 }
 
+/**
+ * Bulk action that hands one member's open responsibilities to another member.
+ *
+ * Used when a member is deactivated or leaves a Team. On each Work Item the accountable owner
+ * moves when it is `fromMemberUserId`, and every contributor share of `fromMemberUserId` that is
+ * not `done` moves to `toMemberUserId`. A `done` share stays as the record of who did the work.
+ * When `toMemberUserId` already contributes, the moved share is merged into theirs.
+ */
+export type BulkReassignMemberAction = {
+  /** Action discriminator. */
+  type: 'reassign-member'
+  /** Normalized Workspace user ID whose responsibilities move. */
+  fromMemberUserId: string
+  /** Normalized Workspace user ID of the active member who takes them over. */
+  toMemberUserId: string
+}
+
 /** Bulk operation で適用できる action です。 */
-export type BulkOperationAction = BulkEditAction | BulkMoveAction | BulkArchiveAction
+export type BulkOperationAction = BulkEditAction | BulkMoveAction | BulkArchiveAction | BulkReassignMemberAction
 
 /** Bulk preview/apply の共通 request です。 */
 export type BulkOperationRequest = {

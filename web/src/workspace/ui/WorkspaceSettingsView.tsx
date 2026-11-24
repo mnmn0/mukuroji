@@ -14,6 +14,8 @@ import {
   type MessageKey,
 } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
+import { settingsPanelAnchorId } from '../model/settingsSections'
+import { SettingsPanelAnchor } from './SettingsPanelAnchor'
 
 /**
  * Inputs for the personal settings view.
@@ -23,6 +25,8 @@ export type WorkspaceSettingsViewProps = {
   accountSections?: ReactNode
   /** Composed app installation section rendered after display preferences. */
   appInstallSection?: ReactNode
+  /** Composed calendar subscription section rendered after notifications. */
+  calendarFeedsSection?: ReactNode
   /** Currently selected font-size preference. */
   fontSizePreference: FontSizePreference
   /** Whether display preferences failed to save to the account. */
@@ -31,6 +35,8 @@ export type WorkspaceSettingsViewProps = {
   locale: Locale
   /** Composed notification settings rendered after display preferences. */
   notificationSettingsSection?: ReactNode
+  /** Composed editable profile rendered first; without it the signed-in account is shown read-only. */
+  profileSection?: ReactNode
   /** Callback that persists font-size preference changes. */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /** Callback that persists locale changes. */
@@ -80,7 +86,7 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
 
 /**
  * Renders the personal settings area: display preferences, app install, notifications,
- * account sections, the agent connection link, and the signed-in account.
+ * calendar subscriptions, account sections, the agent connection link, and the signed-in account.
  *
  * @param props - Preference data, actions, and composed section content.
  * @returns The personal settings view.
@@ -88,10 +94,12 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
 export function WorkspaceSettingsView({
   accountSections,
   appInstallSection,
+  calendarFeedsSection,
   fontSizePreference,
   isPreferencesSaveFailed = false,
   locale,
   notificationSettingsSection,
+  profileSection,
   onFontSizePreferenceChange,
   onLocaleChange,
   onRetryPreferencesSave,
@@ -107,7 +115,10 @@ export function WorkspaceSettingsView({
 
   return (
     <div className="grid gap-5">
-      <section className="workbench-panel overflow-hidden">
+      {profileSection ? (
+        <SettingsPanelAnchor panel="profile">{profileSection}</SettingsPanelAnchor>
+      ) : null}
+      <section className="workbench-panel scroll-mt-4 overflow-hidden" id={settingsPanelAnchorId('display')}>
         <SectionHeader
           title={t('workspace.settings.displayTitle')}
           meta={t('workspace.settings.displayDescription')}
@@ -251,16 +262,23 @@ export function WorkspaceSettingsView({
         </div>
       </section>
 
-      {appInstallSection}
+      {appInstallSection ? (
+        <SettingsPanelAnchor panel="install">{appInstallSection}</SettingsPanelAnchor>
+      ) : null}
 
-      {notificationSettingsSection}
+      {notificationSettingsSection ? (
+        <SettingsPanelAnchor panel="notifications">{notificationSettingsSection}</SettingsPanelAnchor>
+      ) : null}
+
+      {calendarFeedsSection}
 
       {accountSections}
 
       {showAgentConnection ? (
         <Link
-          className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+          className="workbench-panel group flex min-w-0 scroll-mt-4 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
           data-testid="agent-connection-settings-link"
+          id={settingsPanelAnchorId('agent-connection')}
           to="/settings/agent-connection"
         >
           <span className="min-w-0">
@@ -283,18 +301,24 @@ export function WorkspaceSettingsView({
         </Link>
       ) : null}
 
-      <section className="workbench-panel p-5" data-testid="settings-profile">
-        <p className="workbench-eyebrow">{t('workspace.user.label')}</p>
-        <h2 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
-          {t('workspace.settings.profileTitle')}
-        </h2>
-        <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-          {t('workspace.settings.profileDescription')}
-        </p>
-        <p className="mt-3 break-all text-sm font-medium text-[var(--workbench-muted)]">
-          {userLabel}
-        </p>
-      </section>
+      {profileSection ? null : (
+        <section
+          className="workbench-panel scroll-mt-4 p-5"
+          data-testid="settings-profile"
+          id={settingsPanelAnchorId('profile')}
+        >
+          <p className="workbench-eyebrow">{t('workspace.user.label')}</p>
+          <h2 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
+            {t('workspace.settings.profileTitle')}
+          </h2>
+          <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+            {t('workspace.settings.profileDescription')}
+          </p>
+          <p className="mt-3 break-all text-sm font-medium text-[var(--workbench-muted)]">
+            {userLabel}
+          </p>
+        </section>
+      )}
     </div>
   )
 }

@@ -11,6 +11,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 現在の producer は次の理由を metadata の `notificationCandidates` として渡します。
 
 - Work Item 作成・担当変更: `assignment`
+- Work Item の作成・更新で新しく Contributor になった member: `contributor`（責任者、最初から `done` の分担、ロールだけの分担は除く。種類は `assignment`。受信者が今も Contributor のときだけ Inbox に出て配信される）
 - Work Item status 変更: `status-change`
 - Work Item schedule 変更: `schedule-change`
 - Work Item archive / restore: `archive-change`
@@ -103,7 +104,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 
 `categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします。`categoryChannels` か `mutes` を持つ row は、ほかの項目が壊れている場合も同じです（読み替えると、ミュートした通知が届いてしまうため）。
 
-in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信)、push は VAPID 鍵を設定した環境で [Web Push 配信](#web-push-配信) がこの予定を使います。通知設定の API（`GET` / `PUT /api/notification-preferences`）は `transports: { email, push }` で、この環境が送れる channel を返します（保存の対象ではなく、`PUT` の body に含めても無視します）。設定画面は `false` の channel に「無効」と表示し、選んでも届かないことを示します。
 
 ### 種類ごとの配信先とミュート
 
@@ -139,7 +140,7 @@ POST /api/notifications/bulk
   配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`。各 ID は URL エンコードし、`#` を含む ID でも区切りがずれません）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
-  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  共有端末で前の人宛ての通知を新しく送り続けることはありません（引き継ぐ前に push service が受け付けていた通知が後から届く場合は [Web Push 配信](#web-push-配信) を参照）。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
 - 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず（`expiresAt` がない・数値でない壊れた行は数えます）、再登録では新しいデバイスとして上限を確認します。member ごとの登録 version の行が version を持たない壊れた状態なら上書きせず `503 PushSubscriptionUnavailable` にします。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
@@ -161,7 +162,7 @@ POST /api/notifications/bulk
   解除して作り直し、新しい endpoint が古いものと異なる場合は登録の前に古い行の削除を最大 3 秒待ちます（古い行がデバイス数の上限に数えられないため。止まった削除で作り直しを止めないよう待ち時間は限ります）。同じ endpoint が返った場合は登録がその行を置き換えるため削除しません（遅れて届いた削除が新しい登録を消さないため）。server が登録を拒否した場合はその場で作った購読を解除し、既存の購読を再利用した場合も server が保持できないと答えた（上限超過や競合など）なら解除して「未登録」と表示します。network の失敗では既存の購読を残します。
   push の request が期限切れや session policy 違反で失敗した場合は、通知設定と同じく Workspace の session 境界に渡して再認証へ移ります。設定の取得結果がどちらの形にも当てはまらない場合や VAPID 公開鍵が padding なし base64url の 65 byte 非圧縮 P-256 形式でない場合は「無効」とせず、再読み込みできる読み込み失敗にします。通知がブロックされている場合は、端末の設定で許可した後に状態を再確認できるボタンを表示します。有効化・停止に失敗した場合は、確認済みの状態を表示したままにします。push の購読状態や service worker を読めない場合は「未登録」や「非対応」とせず、再読み込みできる読み込み失敗として表示します。初回訪問では service worker の登録を
   最大 10 秒待ち、それでも登録がない場合は「非対応」とせず再読み込みできる読み込み失敗にします。VAPID 公開鍵は P-256 曲線上の点であることも確認し、誤った鍵では push を無効のままにします。停止では server の削除が失敗しても browser の購読を解除し、
-  失効した endpoint は配信 worker が push service の応答から削除します。
+  失効した endpoint は [配信 worker](#web-push-配信) が push service の応答から削除します。
 
 Service worker は `push` を受けると payload（`PushNotificationPayload`: `title`、`body`、`path`、`tag`）を通知として表示します。
 payload がない・壊れている場合も browser の要件どおり汎用の通知を表示します。`path` は app の deep link と同じ同一 origin path 判定を通ったものだけを使い、
@@ -250,6 +251,47 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 永続的失敗は notification row の `emailDeliveryStatus: failed` と秘密情報を含まない `emailLastCode` に残り、row を `EmailDeliveryIndex` の `email-failed#<番号>` partition へ移して `emailFailureReference` を記録します。CloudWatch の `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で対象を特定できます。ログにはメールアドレスと本文を含めません。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Email`）が15分以上の状態で3回続くと `EmailNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
 
 ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。
+
+## Web Push 配信
+
+通知設定で push を有効にしたメンバーの、[購読](#web-push-の購読)済みのデバイスへ送ります（ADR 0081）。CloudFormation parameter `WebPushVapidPublicKey` が空の環境では、projection は push の配信予定を書かず、毎分の `push-notifications` job も queue・secret を読まずに終わります。後から有効にしても、それまでの通知はまとめて送りません。
+
+### 鍵の用意
+
+1. `bun run web-push:vapid-keys` で P-256 の鍵の組を作ります（画面に出すだけで保存しません）。
+2. 秘密鍵（32 byte の scalar、padding なし base64url）を、Secrets Manager の secret `mukuroji/web-push/vapid-private-key` の値（SecretString そのもの）として保存します。
+3. 公開鍵を `WebPushVapidPublicKey` に設定して deploy します。
+
+worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対であることを確かめてから使います（違えば送らず `PushKeysUnavailable` で再試行し、約8分で5試行を終えて `failed` になると `ScheduledJobsDlqAlarm` が出ます。`PushNotificationBacklogAlarm` は期限を15分以上過ぎた配信が3回続いたときだけ出ます）。IAM はこの secret の `secretsmanager:GetSecretValue` だけを許します。鍵を変えると、以前の鍵で作った browser の購読は使えなくなり、各端末が次に Workspace を開いたときに作り直します（[購読](#web-push-の購読)）。
+
+### 宛先
+
+送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません。push service への送信は所有者の変更と原子的にはできないため、次の場合は変わる前の所有者宛ての通知がその browser に表示されることがあります。読み直しから送信の開始まで（暗号化と request の開始の間）に所有者が変わった場合と、所有者が変わる前に push service が受け付けた通知を、browser がオフラインだったなどで TTL（24時間）以内に後から受け取った場合です。service worker は受け取った通知を所有者を確かめずに表示します。サインアウトが browser の購読を取り消せた場合は、push service にたまった通知も届かなくなります。ただし取り消しは保証されません。取り消しに失敗した場合、別のアカウントが登録した購読を残した場合、セッションの期限切れでサインアウトを通らなかった場合、別のアカウントがサインアウトせずに同じ browser で通知を有効にし直した場合は、このリスクが残ります（2026-11-24 にリポジトリの持ち主が受け入れると判断しました）。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
+
+### 配信の規則
+
+queue は Email と同じ実装で、属性は `pushQueueShard`（`push#<番号>`）・`pushNextAttemptAt`・`pushDeliveryStatus`・`pushAttempts`、index は sparse GSI `PushDeliveryIndex` です。再認可・quiet hours と snooze の再確認・lease・最大5試行の再試行は Slack・Email と同じで、3 つの channel は互いの期限内の lease を待ちます。有効化時刻は server が `pushEnabledAt` として保存し、それより前のイベントは送りません。push transport の導入前から push を選んでいた設定は、最後に保存した時刻を境界にします。
+
+payload は `PushNotificationPayload`（`title`、`body`、`path`、`tag`）の JSON で、RFC 8291（`aes128gcm`）で端末ごとに暗号化し、RFC 8292 の VAPID token（ES256、`aud` は endpoint の origin、有効期限 12 時間、`sub` はアプリの origin）を付けて `TTL: 86400`・`Urgency: normal` で送ります。`title` は Work Item key とタイトル、`body` は受信者の言語の概要、`path` は Inbox と同じ deep link の同一 origin path（それ以外は `/`）、`tag` は通知 ID です。payload は 3,000 byte 以内に収め、長い本文は切り詰めます。
+
+push service の応答は次のように扱います。
+
+| 応答 | 扱い |
+| --- | --- |
+| `2xx` | その端末は受け付け済み |
+| `404` / `410` | 購読が失効。送った時点の `updatedAt` を条件にその購読の行を削除する（その間に登録し直した行は消さない） |
+| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（通知の保持期限を越える指定は保持期限までで、その時点で期限切れとして終わる） |
+| `400` / `401` / `403` / `413` | VAPID 鍵や payload の問題として失敗にする（`PushDeliveryRejected`） |
+| `404` / `410` で購読を消せなかった（DynamoDB の一時障害など） | 受け付けた端末がなければ再試行し、そのときに消し直す（`PushCleanupUnavailable`） |
+| （送る前）保存された endpoint か鍵が使えない | 購読を消さずに失敗にし、運用者が調べられるよう残す（`PushSubscriptionInvalid`） |
+
+1 台でも受け付ければ通知は送信済み（`pushDeliveryStatus: sent`）です。他の端末が一時的に失敗しても、受け付けた端末に同じ通知を 2 回出さないよう再試行しません。購読が 1 つもない・すべて失効した場合は alarm を出さずに抑止します（`suppressed`、`pushLastCode: PushNoDevices`）。購読の一覧は 5 ページまで読み、まだ続きがあるときは一部だけで判断せず、読み取り失敗（`pushLastCode: PushDevicesUnavailable`）として再試行します。TTL の削除を待つ期限切れの行は登録上限に数えないため、その分だけ一覧が長くなることがあるからです。読み取りから全端末への送信までは合計 30 秒で打ち切ります。端末へは最大 4 台ずつ同時に送るため、応答しない push service が 1 つあっても他の端末には届きます。
+
+### 失敗の調査
+
+永続的失敗は `pushDeliveryStatus: failed` と `pushLastCode` に残り、row を `PushDeliveryIndex` の `push-failed#<番号>` partition へ移します。`PushNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で特定できます。ログには endpoint と本文を含めません。`OldestDueAgeSeconds`（`Channel: Push`）が 15 分以上の状態で 3 回続くと `PushNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
+
+ローカルでは `WEB_PUSH_VAPID_PUBLIC_KEY`・`WEB_PUSH_VAPID_PRIVATE_KEY_SECRET_ID`（既定 `mukuroji/web-push/vapid-private-key`）・`NOTIFICATION_PUSH_APP_ORIGIN`・`PUSH_SUBSCRIPTIONS_TABLE_NAME` を設定すると `workers:dev` が同じ job を動かします。
 
 ## Due / overdue scan
 

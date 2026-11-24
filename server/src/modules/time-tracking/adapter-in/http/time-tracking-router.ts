@@ -30,6 +30,14 @@ export type TimeTrackingPrincipal = {
   userKey: string
 }
 
+/** A Team covered by a Workspace-wide month close. */
+export type WorkspacePeriodTeam = {
+  /** Team identifier. */
+  teamId: string
+  /** Team name shown to the administrator. */
+  name: string
+}
+
 /** Dependencies injected into the time tracking HTTP adapter. */
 export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincipal> = {
   /** Reads the bearer token from a request. */
@@ -54,6 +62,14 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
    * direct Team grant with manage permission, not a manager of only some Projects.
    */
   canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
+  /**
+   * Returns whether the principal may close and reopen months for every Team of the Workspace:
+   * a system administrator, an Enterprise assignment with `workspace.manage`, or otherwise a
+   * Workspace owner or administrator.
+   */
+  canManageWorkspacePeriods(principal: Principal): Promise<boolean>
+  /** Lists every Team of the principal's Workspace that a Workspace-wide month close covers. */
+  listWorkspaceTeams(principal: Principal): Promise<readonly WorkspacePeriodTeam[]>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /**
@@ -336,9 +352,68 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   })
 
   router.get('/api/teams/:teamId/time-periods', async (context) => {
-    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const closedPeriods = await dependencies.getTimeTracking().listClosedPeriods(principal.directoryId, teamId)
-      return context.json({ closedPeriods })
+      return context.json({
+        closedPeriods,
+        canManagePeriods: canManage && await dependencies.canManageWholeTeam(principal, teamId),
+      })
+    })
+  })
+
+  router.get('/api/time-periods/:month', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const month = readRequiredString(context.req.param('month'), 'Month')
+      const workspaceTeams = await dependencies.listWorkspaceTeams(principal)
+      const names = new Map(workspaceTeams.map((team) => [team.teamId, team.name]))
+      const teams = await dependencies.getTimeTracking().listWorkspacePeriodCloses(
+        principal.directoryId,
+        workspaceTeams.map((team) => team.teamId),
+        month,
+      )
+      // Names come from the Workspace directory, because an administrator may not read every Team.
+      return context.json({
+        month,
+        teams: teams.map((team) => {
+          const name = names.get(team.teamId)
+          return name === undefined ? team : { ...team, name }
+        }),
+      })
+    })
+  })
+
+  router.post('/api/time-periods/:month/close', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const result = await dependencies.getTimeTracking().closeWorkspacePeriod({
+        workspaceId: principal.directoryId,
+        teamIds: (await dependencies.listWorkspaceTeams(principal)).map((team) => team.teamId),
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
+        actorUserId: principal.userKey,
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
+        ...readCorrelationId(context.req.header('X-Correlation-Id')),
+      })
+      return context.json(result)
+    })
+  })
+
+  router.post('/api/time-periods/:month/reopen', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      await requireWorkspacePeriodManager(dependencies, principal)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const result = await dependencies.getTimeTracking().reopenWorkspacePeriod({
+        workspaceId: principal.directoryId,
+        teamIds: (await dependencies.listWorkspaceTeams(principal)).map((team) => team.teamId),
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        actorUserId: principal.userKey,
+        reason: typeof body.reason === 'string' ? body.reason : '',
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
+        ...readCorrelationId(context.req.header('X-Correlation-Id')),
+      })
+      return context.json(result)
     })
   })
 
@@ -824,6 +899,22 @@ async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
 }
 
 /**
+ * Requires a Workspace administrator, because a Workspace-wide close changes every Team's time.
+ *
+ * @param dependencies - Router dependencies used to read the Workspace role.
+ * @param principal - Authenticated caller.
+ * @throws TimeTrackingError with `WorkspaceTimePeriodCloseDenied` for any other caller.
+ */
+async function requireWorkspacePeriodManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+): Promise<void> {
+  if (!await dependencies.canManageWorkspacePeriods(principal)) {
+    throw new TimeTrackingError(403, 'WorkspaceTimePeriodCloseDenied', 'Only a Workspace administrator may close or reopen a month for every Team.')
+  }
+}
+
+/**
  * Requires a manager of every Project in the Team, because the rate card holds every member's
  * confidential rate.
  *
@@ -1208,4 +1299,15 @@ function readCategory(value: unknown): TimeEntryCategory {
     throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', 'category must be a work category key.')
   }
   return category
+}
+
+/**
+ * Reads the request's correlation ID, which the common middleware always sets, for failure logs.
+ *
+ * @param header - `X-Correlation-Id` header value.
+ * @returns The correlation ID as an input field, or nothing when the header is empty.
+ */
+function readCorrelationId(header: string | undefined): { correlationId?: string } {
+  const correlationId = header?.trim()
+  return correlationId ? { correlationId } : {}
 }

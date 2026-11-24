@@ -40,6 +40,7 @@ import {
   readAssignedProjectId,
   readTeamIssueAssigneeUserId,
   applyWorkItemStatusTransitionToActualDates,
+  isStoredContributorAssignmentList,
   normalizeWorkItemSchedule,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
@@ -64,7 +65,12 @@ import {
   AutomationEngine,
   AutomationError,
   applyBulkOperation,
+  createBulkReassignMemberPatch,
+  createBulkReassignMemberUndoPayload,
   deliverAutomationWebhook,
+  isBulkReassignMemberApplied,
+  isBulkReassignMemberUndoApplied,
+  listBulkReassignMemberRemovedShares,
   createAutomationCommentId,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
@@ -193,6 +199,12 @@ import {
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
 import { createDependencyFencedWorkItemAuthorizationSnapshot } from '../shared/work-item-schedule'
+import { readNewWorkItemAcceptanceCriteria } from '../shared/work-item-acceptance-criteria'
+import {
+  createActiveMemberFence,
+  readContributorAssignmentChange,
+  withContributorAssignmentChange,
+} from '../shared/work-item-contributors'
 import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
@@ -1038,6 +1050,11 @@ function createApiBulkOperationAdapter(
         configurationConditionChecks,
         ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
       }
+    } else if (action.type === 'reassign-member') {
+      body = {
+        ...createBulkReassignMemberPatch(loaded.detail.issue, action),
+        expectedRevision: loaded.item.expectedRevision,
+      }
     } else {
       body = normalizeTeamIssueInput(
         {
@@ -1054,17 +1071,31 @@ function createApiBulkOperationAdapter(
       )
     }
 
-    const configuredBody = action.type === 'archive'
+    const configuration = action.type === 'archive'
+      ? undefined
+      : await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+          principal.directoryId,
+          loaded.item.teamId,
+        )
+    const preparedBody = configuration === undefined
       ? body
       : await prepareConfiguredUpdateWorkItem(
           principal.directoryId,
           loaded.item.teamId,
           loaded.detail.issue,
           body,
-          await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-            principal.directoryId,
-            loaded.item.teamId,
-          ),
+          configuration,
+        )
+    // Only a member reassignment changes contributors; the successor is fenced in the write.
+    const configuredBody = configuration === undefined || action.type !== 'reassign-member'
+      ? preparedBody
+      : await withBulkReassignMemberFences(
+          principal.directoryId,
+          preparedBody,
+          configuration,
+          loaded.detail.issue.contributorAssignments ?? [],
+          // The successor is checked even when their existing share absorbs the moved one.
+          [action.toMemberUserId],
         )
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
@@ -1172,10 +1203,13 @@ function createApiBulkOperationAdapter(
     const resultingRevision = item.resultingRevision + 1
     if (
       loaded.detail.issue.revision !== resultingRevision ||
-      !isAutomationPatchApplied(
-        loaded.detail.issue,
-        withoutBulkUndoActualDates(item.undoPayload),
-      )
+      !(operation.action.type === 'reassign-member'
+        // A restored merged share gets a new assignment ID, so contributors compare by value.
+        ? isBulkReassignMemberUndoApplied(loaded.detail.issue, item.undoPayload)
+        : isAutomationPatchApplied(
+            loaded.detail.issue,
+            withoutBulkUndoActualDates(item.undoPayload),
+          ))
     ) return undefined
     const metadata = {
       bulkOperationId: operation.id,
@@ -1322,17 +1356,44 @@ function createApiBulkOperationAdapter(
           'member',
         )
       }
-      const configuredBody = operation.action.type === 'archive'
+      const undoConfiguration = operation.action.type === 'archive'
+        ? undefined
+        : await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+            principal.directoryId,
+            item.teamId,
+          )
+      const preparedUndoBody = undoConfiguration === undefined
         ? normalizedBody
         : await prepareConfiguredUpdateWorkItem(
             principal.directoryId,
             item.teamId,
             loaded.detail.issue,
             normalizedBody,
-            await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-              principal.directoryId,
-              item.teamId,
-            ),
+            undoConfiguration,
+          )
+      // A share the handover merged away comes back under its own ID with its own role, and every
+      // member brought back is checked as newly assigned.
+      const removedShares = operation.action.type === 'reassign-member' &&
+        isStoredContributorAssignmentList(item.undoPayload.contributorAssignments)
+        ? listBulkReassignMemberRemovedShares(item.undoPayload.contributorAssignments, loaded.detail.issue)
+        : []
+      const restoredOwner = typeof item.undoPayload.assigneeUserId === 'string' &&
+        item.undoPayload.assigneeUserId.trim().toLowerCase() !==
+          loaded.detail.issue.assigneeUserId.trim().toLowerCase()
+        ? [item.undoPayload.assigneeUserId.trim().toLowerCase()]
+        : []
+      const configuredBody = undoConfiguration === undefined || operation.action.type !== 'reassign-member'
+        ? preparedUndoBody
+        : await withBulkReassignMemberFences(
+            principal.directoryId,
+            preparedUndoBody,
+            undoConfiguration,
+            [...(loaded.detail.issue.contributorAssignments ?? []), ...removedShares],
+            // The owner it gives the Work Item back to must stay active until the write commits.
+            [
+              ...restoredOwner,
+              ...removedShares.flatMap((share) => share.memberUserId === undefined ? [] : [share.memberUserId]),
+            ],
           )
       if ('assigneeUserId' in configuredBody) {
         await requireActiveWorkspaceAssignee(
@@ -1617,6 +1678,7 @@ function createBulkUndoPayload(
   action: BulkOperationRequest['action'],
   issue: TeamIssueResponseItem,
 ): Record<string, AutomationValue> {
+  if (action.type === 'reassign-member') return createBulkReassignMemberUndoPayload(issue, action)
   if (action.type === 'move') {
     return { assignedProjectId: issue.assignedProjectId ?? null }
   }
@@ -1654,11 +1716,54 @@ function withoutBulkUndoActualDates(
   return fields
 }
 
+/**
+ * Adds a member handover's contributor change and the membership fences of the members it gives
+ * work to.
+ *
+ * Each of `members` must stay an active non-guest member until the write commits, whether they
+ * take ownership, a share, or both. A member who holds a share afterwards is already fenced by
+ * the contributor change; every other member, such as a new or restored owner, gets one fence
+ * here.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param body - Configured update body.
+ * @param configuration - Team configuration that defines the job roles.
+ * @param existing - Contributors treated as already stored on the Work Item.
+ * @param members - Normalized members the handover or its undo gives work to.
+ * @returns The update body with the contributor change and every membership fence.
+ */
+async function withBulkReassignMemberFences<Body extends UpdateTeamIssueRequestBody>(
+  directoryId: string,
+  body: Body,
+  configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
+  existing: NonNullable<TeamIssueResponseItem['contributorAssignments']>,
+  members: readonly string[],
+): Promise<Body> {
+  const change = await readContributorAssignmentChange(directoryId, body, configuration, existing, {
+    fencedMembers: members,
+  })
+  const fields = withContributorAssignmentChange(body, change)
+  const sharedMembers = new Set((change?.contributorAssignments ?? []).flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId]))
+  const unfencedMembers = [...new Set(members)].filter((member) => !sharedMembers.has(member))
+  if (unfencedMembers.length === 0) return { ...body, ...fields }
+  const memberFences = await Promise.all(unfencedMembers.map((member) => createActiveMemberFence(directoryId, member)))
+  return {
+    ...body,
+    ...fields,
+    authorizationConditionChecks: [
+      ...(fields.authorizationConditionChecks ?? body.authorizationConditionChecks ?? []),
+      ...memberFences,
+    ],
+  }
+}
+
 function isBulkActionApplied(
   issue: TeamIssueResponseItem,
   action: BulkOperationRequest['action'],
 ) {
   if (action.type === 'edit') return isAutomationPatchApplied(issue, action.patch)
+  if (action.type === 'reassign-member') return isBulkReassignMemberApplied(issue, action)
   if (action.type === 'move') {
     return automationValuesEqual(issue.assignedProjectId ?? null, action.targetProjectId)
   }
@@ -2071,6 +2176,10 @@ async function executeAutomationWorkItemCreate(
     readAssignedProjectId(normalizedBody.assignedProjectId),
     dependencies.projectDirectory,
   )
+  const configuration = await dependencies.workItemConfigurations.getTeamConfiguration(
+    context.execution.workspaceId,
+    teamId,
+  )
   const automationProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
@@ -2085,10 +2194,7 @@ async function executeAutomationWorkItemCreate(
         dependencies.workCalendarSources,
       ),
     },
-    await dependencies.workItemConfigurations.getTeamConfiguration(
-      context.execution.workspaceId,
-      teamId,
-    ),
+    configuration,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(
@@ -2096,10 +2202,23 @@ async function executeAutomationWorkItemCreate(
     assignee,
     dependencies,
   )
+  // Template contributors are checked like any create: current job roles, active members fenced in the write.
+  const contributorChange = await readContributorAssignmentChange(
+    context.execution.workspaceId,
+    configuredBody,
+    configuration,
+    [],
+    { dependencies },
+  )
   const response = await dependencies.teamIssues.createTeamIssue(
     context.execution.workspaceId,
     teamId,
-    { ...configuredBody, ...newWorkItemProjectFence },
+    {
+      ...configuredBody,
+      ...withContributorAssignmentChange(configuredBody, contributorChange),
+      acceptanceCriteria: readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria),
+      ...newWorkItemProjectFence,
+    },
     `automation:${context.execution.ruleId}`,
     createAutomationMutationContext(context, values),
   )
