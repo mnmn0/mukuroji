@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { loadOwnedAutomationExecutions } from '../src/automation/managementData'
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AutomationInboundWebhookEndpoint,
@@ -502,5 +503,25 @@ describe('automation management scopes', () => {
     expect(requests[0]).toEndWith('/automation/management-scopes')
     body = { workspace: 'yes', teamIds: [] }
     await expect(getAutomationManagementScopes('token')).rejects.toMatchObject({ code: 'InvalidAutomationResponse' })
+  })
+})
+
+describe('Team execution history', () => {
+  test('follows the execution cursor until it has the Team runs', async () => {
+    const requests: string[] = []
+    const pages = [
+      { executions: [{ ...deadLetterAutomationExecutionFixture, id: 'run-other', ownerTeamId: 'ops-team' }], nextCursor: 'cursor-2' },
+      { executions: [{ ...deadLetterAutomationExecutionFixture, id: 'run-team', ownerTeamId: 'core-team' }] },
+    ]
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify(pages[requests.length - 1]), { status: 200 })
+    }) as typeof fetch
+
+    const executions = await loadOwnedAutomationExecutions('token', 'core-team')
+
+    expect(executions.map((execution) => execution.id)).toEqual(['run-team'])
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toContain('cursor=cursor-2')
   })
 })

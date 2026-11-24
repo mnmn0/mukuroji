@@ -195,6 +195,21 @@ function requireRequestFormScopeManagement(manager: RequestFormManager, scope: R
   )
 }
 
+/**
+ * Binds a form mutation to the revision whose scope was authorized. The repository checks
+ * `expectedRevision` against its own read, so without this a concurrent scope change between
+ * the two reads could let a manager of the former Team change the moved form.
+ *
+ * @param expectedRevision - Revision the caller submitted.
+ * @param authorizedRevision - Revision of the form read for the scope check.
+ * @throws RequestIntakeError when the form changed after the scope check.
+ */
+function requireAuthorizedFormRevision(expectedRevision: number, authorizedRevision: number) {
+  if (expectedRevision !== authorizedRevision) {
+    throw new RequestIntakeError(409, 'RequestRevisionConflict', 'Request form revision changed.')
+  }
+}
+
 /** Creates admin Request Form, queue, and submission-access HTTP routes.
  *
  * @param dependencies The application and transport boundaries used by the routes.
@@ -255,6 +270,7 @@ export function createAdminRequestIntakeRouter(
       const current = await requestIntake.getForm(manager.directoryId, formId)
       requireRequestFormScopeManagement(manager, current.scope)
       if (input.scope !== undefined) requireRequestFormScopeManagement(manager, input.scope)
+      requireAuthorizedFormRevision(input.expectedRevision, current.revision)
       return context.json(await requestIntake.updateForm(
         manager.directoryId,
         formId,
@@ -274,6 +290,7 @@ export function createAdminRequestIntakeRouter(
       const requestIntake = dependencies.getRequestIntake()
       const current = await requestIntake.getForm(principal.directoryId, formId)
       requireRequestFormScopeManagement(principal, current.scope)
+      requireAuthorizedFormRevision(publishInput.expectedRevision, current.revision)
       const configurationGuardConditionChecks = await dependencies.validateFormRoutingReferences(
         principal.directoryId,
         current.draft,

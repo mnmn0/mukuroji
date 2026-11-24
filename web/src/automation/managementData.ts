@@ -38,30 +38,62 @@ export type AutomationManagementData = {
  * @param accessToken - Automation API の access token です。
  * @param teams - Workflow target を解決する Team 一覧です。
  * @param canManage - Admin-only inbound Webhook metadata を取得できるかどうかです。
+ * @param ownerTeamId - Team settings で表示する所有 Team。指定時は execution history をその Team の分だけ集めます。
  * @returns 権限に応じて redaction 済みの管理画面 data です。
  */
 export async function loadAutomationManagementData(
   accessToken: string,
   teams: ProjectDirectoryTeam[],
   canManage: boolean,
+  ownerTeamId?: string,
 ): Promise<AutomationManagementData> {
-  const [rules, webhooks, templates, recurringWork, executionPage, workflowTargets] = await Promise.all([
+  const [rules, webhooks, templates, recurringWork, executions, workflowTargets] = await Promise.all([
     getAutomationRules(accessToken),
     canManage ? getAutomationInboundWebhookEndpoints(accessToken) : Promise.resolve([]),
     getAutomationTemplates(accessToken),
     getRecurringWork(accessToken),
-    getAutomationExecutions(accessToken),
+    ownerTeamId === undefined
+      ? getAutomationExecutions(accessToken).then((page) => page.executions)
+      : loadOwnedAutomationExecutions(accessToken, ownerTeamId),
     loadAutomationWorkflowTargets(accessToken, teams),
   ])
 
   return {
-    executions: executionPage.executions,
+    executions,
     recurringWork,
     rules,
     templates,
     webhooks,
     workflowTargets,
   }
+}
+
+/** Number of Team-owned runs the Team settings view collects. */
+const OWNED_EXECUTION_LIMIT = 50
+/** Upper bound of execution pages read to collect one Team's runs. */
+const OWNED_EXECUTION_MAX_PAGES = 10
+
+/**
+ * Collects the latest runs of one Team's definitions by following the Workspace execution cursor,
+ * because the execution list is paginated before any owner filter could apply.
+ *
+ * @param accessToken - Automation API access token.
+ * @param ownerTeamId - Team whose runs are collected.
+ * @returns Up to {@link OWNED_EXECUTION_LIMIT} runs owned by the Team, newest first.
+ */
+export async function loadOwnedAutomationExecutions(
+  accessToken: string,
+  ownerTeamId: string,
+): Promise<AutomationExecution[]> {
+  const owned: AutomationExecution[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < OWNED_EXECUTION_MAX_PAGES; page += 1) {
+    const result = await getAutomationExecutions(accessToken, cursor ? { cursor } : {})
+    owned.push(...result.executions.filter((execution) => execution.ownerTeamId === ownerTeamId))
+    if (owned.length >= OWNED_EXECUTION_LIMIT || !result.nextCursor) break
+    cursor = result.nextCursor
+  }
+  return owned.slice(0, OWNED_EXECUTION_LIMIT)
 }
 
 async function loadAutomationWorkflowTargets(

@@ -2722,7 +2722,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   routeApp.get('/api/automation/management-scopes', async (c) => {
     try {
       const principal = await authenticateAutomationPrincipal(c)
-      return c.json(await listDelegatedManagementScopes(principal))
+      return c.json(await listDelegatedManagementScopes(principal, 'automation.manage'))
     } catch (error) {
       return toAutomationErrorResponse(c, error)
     }

@@ -11,15 +11,17 @@ import {
  * @param accessToken - Automation API の access token です。
  * @param teams - Workflow target解決に利用するTeam一覧です。
  * @param canManage - 管理者向けresourceを取得できるかどうかです。
+ * @param ownerTeamId - Team settings で表示する所有 Team です。
  * @returns Automation management data の SWR state です。
  */
 export function useAutomationManagement(
   accessToken: string,
   teams: ProjectDirectoryTeam[],
   canManage: boolean,
+  ownerTeamId?: string,
 ) {
   return useSWR<AutomationManagementData>(
-    ['automation-management', accessToken, canManage, teams.map((team) => team.id).join('\0')],
-    () => loadAutomationManagementData(accessToken, teams, canManage),
+    ['automation-management', accessToken, canManage, teams.map((team) => team.id).join('\0'), ownerTeamId ?? ''],
+    () => loadAutomationManagementData(accessToken, teams, canManage, ownerTeamId),
   )
 }

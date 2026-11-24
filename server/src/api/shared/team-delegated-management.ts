@@ -1,11 +1,13 @@
 import type {
   AutomationAction,
   AutomationManagementScopes,
+  EnterprisePermissionId,
 } from '@mukuroji/contracts'
 import { AutomationError } from '../../modules/automation'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { workspaceDependencies } from './app-dependencies'
 import {
+  hasEnterpriseWorkspacePermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
@@ -82,16 +84,28 @@ export async function requireDelegatedManagement(
 /**
  * Lists the definition scopes the principal can manage.
  *
+ * An Enterprise role holder reaches a read route with a read grant, which already counts as
+ * Workspace administration for that request. Pass `managePermission` to report the scopes the
+ * principal can change instead: then an Enterprise role holder manages every scope only with
+ * that Workspace grant, and none without it.
+ *
  * @param principal - Authenticated Workspace principal.
+ * @param managePermission - Enterprise permission that mutations of the definitions require.
  * @returns Whether Workspace definitions are manageable and which Teams' definitions are.
  */
 export async function listDelegatedManagementScopes(
   principal: WorkspacePrincipal,
+  managePermission?: EnterprisePermissionId,
 ): Promise<AutomationManagementScopes> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
     principal.directoryId,
     'ja',
   )
+  if (managePermission !== undefined && principal.enterprisePermissions !== undefined) {
+    return hasEnterpriseWorkspacePermission(principal, managePermission)
+      ? { workspace: true, teamIds: directory.teams.map((team) => team.id) }
+      : { workspace: false, teamIds: [] }
+  }
   if (canAdministerWorkspace(principal)) {
     return { workspace: true, teamIds: directory.teams.map((team) => team.id) }
   }

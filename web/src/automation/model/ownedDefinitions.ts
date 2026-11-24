@@ -1,3 +1,4 @@
+import type { AutomationTemplate } from '@mukuroji/contracts'
 import type { AutomationManagementData } from '../managementData'
 
 /**
@@ -22,4 +23,21 @@ export function selectOwnedAutomationData(
       target.scopeType === 'team' && target.scopeId === ownerTeamId
     ),
   }
+}
+
+/**
+ * Lists the templates a Team definition may use as input: the Team's own templates and
+ * Workspace templates, which the server accepts unless they create Work in another Team.
+ *
+ * @param templates - Workspace-wide template list.
+ * @param ownerTeamId - Team that owns the definition being edited.
+ * @returns Templates selectable in the Team's rule and recurring Work editors.
+ */
+export function selectTeamTemplateOptions(
+  templates: readonly AutomationTemplate[],
+  ownerTeamId: string,
+): AutomationTemplate[] {
+  return templates.filter((template) =>
+    template.ownerTeamId === undefined || template.ownerTeamId === ownerTeamId
+  )
 }

@@ -195,7 +195,7 @@ Create/duplicate mutation と inbound endpoint の create/rotate は `Idempotenc
 
 Rule、template、recurring Work は任意の `ownerTeamId` を持てる（[ADR 0087](adr/0087-team-owned-automation-definitions.md)）。省略は Workspace 全体の定義で、保存済みの定義はすべて省略として読む。`ownerTeamId` は作成時にだけ指定でき、更新の body で別の値を送ると `400 InvalidAutomationInput`。
 
-- 管理: Workspace 管理者と、所有 Team の Team manager。Enterprise の role を持つ member は、今までどおり Workspace の `automation.manage` が要る。`GET /api/automation/management-scopes` は `{ workspace, teamIds }` で呼び出し元が管理できる範囲を返す（Workspace 管理者は全 Team）。参照 API は今までどおり Workspace の全定義を返す。
+- 管理: Workspace 管理者と、所有 Team の Team manager。Enterprise の role を持つ member は、今までどおり Workspace の `automation.manage` が要る。`GET /api/automation/management-scopes` は `{ workspace, teamIds }` で呼び出し元が管理できる範囲を返す（Workspace 管理者は全 Team。Enterprise の role を持つ member は Workspace の `automation.manage` があれば全 Team、なければ何も管理できない）。Team の設定の実行履歴は、Workspace の実行一覧を cursor で最大10ページたどって所有 Team の分を集める。依頼フォームの更新・公開は、所有 Team を確かめた時点の revision と `expectedRevision` が一致しないと 409 にする。参照 API は今までどおり Workspace の全定義を返す。
 - Team rule が保存時に拒否するもの（`403 AutomationTeamScopeViolation`）: `form` と `webhook` の trigger、`webhook` action、別の Team の `work-item-type` trigger、`values.teamId` が別の Team の create action、別の Team の Project への move・create・update（`assignedProjectId`）、別の Team が所有する template や別の Team に作る template を使う create action。Workspace の rule は Team template を使えない。
 - Team template: Work Item template の `payload.teamId` は所有 Team か空。Project / Workflow template は所有 Team を対象にした適用・preview だけを受け付ける（適用は今までどおり Workspace 管理者）。複製は元の所有 Team を引き継ぎ、元の Team を管理できる人だけが行える。
 - Team recurring Work: `ownerTeamId` は `teamId` と同じでなければならず、Team を変える更新はできない。使う template は Workspace のものか同じ Team のもの。

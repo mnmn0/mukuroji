@@ -110,6 +110,8 @@ export type AutomationManagementPanelProps = {
   webhooks?: AutomationInboundWebhookEndpoint[]
   /** Template 一覧です。 */
   templates: AutomationTemplate[]
+  /** Recurring Work の編集で選べる template。省略時は `templates` を使います。 */
+  templateOptions?: AutomationTemplate[]
   /** Recurring Work 一覧です。 */
   recurringWork: RecurringWork[]
   /** Execution history です。 */
@@ -218,6 +220,7 @@ export function AutomationManagementPanel({
   rules,
   teams,
   templates,
+  templateOptions,
   webhooks = [],
   workflowTargets = [],
 }: AutomationManagementPanelProps) {
@@ -362,7 +365,7 @@ export function AutomationManagementPanel({
             readOnly={readOnly}
             recurringWork={recurringWork}
             teams={teams}
-            templates={templates}
+            templates={templateOptions ?? templates}
             onCreate={onCreateRecurringWork}
             onToggle={onToggleRecurringWork}
           />

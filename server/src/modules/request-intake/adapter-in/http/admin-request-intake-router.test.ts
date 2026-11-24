@@ -418,4 +418,34 @@ describe('admin request intake router', () => {
     expect(calls.filter(({ operation }) => operation === 'createForm')).toHaveLength(1)
     expect(calls.some(({ operation }) => operation === 'updateForm' || operation === 'publishForm')).toBe(false)
   })
+
+  test('binds form changes to the revision whose scope was authorized', async () => {
+    const teamForm: RequestForm = { ...form, id: 'form-team', scope: { type: 'team', teamId: 'core' } }
+    const { calls, router } = createDependencies({
+      async requireFormManagement() {
+        return { ...principal, workspace: false, teamIds: ['core'] }
+      },
+      mapError: (context, error) => {
+        expect(error).toMatchObject({ code: 'RequestRevisionConflict', status: 409 })
+        return context.json({ code: 'RequestRevisionConflict' }, 409)
+      },
+    }, {
+      getForm: async () => teamForm,
+    })
+
+    const update = await router.request('/api/request-forms/form-team', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: teamForm.revision + 1, name: 'Renamed' }),
+    })
+    const publish = await router.request('/api/request-forms/form-team/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: teamForm.revision + 1 }),
+    })
+
+    expect(update.status).toBe(409)
+    expect(publish.status).toBe(409)
+    expect(calls.some(({ operation }) => operation === 'updateForm' || operation === 'publishForm')).toBe(false)
+  })
 })

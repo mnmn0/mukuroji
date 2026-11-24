@@ -1,3 +1,5 @@
+import { listDelegatedManagementScopes } from '../../../../api/shared/team-delegated-management'
+import type { WorkspacePrincipal } from '../../../../api/shared/project-access'
 import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
@@ -5433,6 +5435,40 @@ test('lets a Workspace administrator stop a Team rule and see every Team as mana
   expect(stop.status).toBe(200)
   expect(updated).toHaveLength(1)
   expect(await scopes.json()).toEqual({ workspace: true, teamIds: ['core-team'] })
+})
+
+test('reports Enterprise management scopes from the manage grant, not the read grant', async () => {
+  configureFakeProjectClients(true)
+  const principal = (permissions: WorkspacePrincipal['enterprisePermissions']): WorkspacePrincipal => ({
+    directoryId: 'default',
+    userKey: 'enterprise-user',
+    actorId: 'enterprise-user',
+    isSystemAdmin: false,
+    groups: [],
+    enterprisePermissions: permissions,
+    enterpriseRouteAuthorizedAtResource: true,
+    enterpriseAuthorizationResource: { kind: 'workspace', targetId: 'default', workspaceId: 'default' },
+    workspaceMember: {
+      id: 'enterprise-user',
+      memberKey: 'enterprise-user',
+      email: 'enterprise@example.com',
+      role: 'member',
+      status: 'active',
+      version: 1,
+      createdAt: '2026-11-24T00:00:00.000Z',
+      updatedAt: '2026-11-24T00:00:00.000Z',
+    },
+    workspaceRole: 'member',
+    workspaceMemberStatus: 'active',
+  })
+
+  const reader = await runWithTestAppDependencies(() =>
+    listDelegatedManagementScopes(principal(['automation.read']), 'automation.manage'))
+  const manager = await runWithTestAppDependencies(() =>
+    listDelegatedManagementScopes(principal(['automation.read', 'automation.manage']), 'automation.manage'))
+
+  expect(reader).toEqual({ workspace: false, teamIds: [] })
+  expect(manager).toEqual({ workspace: true, teamIds: ['core-team'] })
 })
 
 test('rejects Team execution actions that reach another Team at run time', async () => {
