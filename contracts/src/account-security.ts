@@ -79,6 +79,28 @@ export type WorkspaceMemberSignInSecurity = {
 export type WorkspaceMembersSignInSecurityResponse = {
   /** State of each active member. */
   members: WorkspaceMemberSignInSecurity[]
+  /**
+   * Member keys of the active members who are system administrators (ADR 0067). Absent when the
+   * system administrator groups could not be read.
+   */
+  systemAdministratorMemberKeys?: string[]
+  /**
+   * True when the system administrator groups could not be read, so that the screen can say so
+   * and offer a retry instead of hiding the administrator controls without a word.
+   */
+  systemAdministratorsUnavailable?: true
+}
+
+/** Request body of `PUT /api/workspace/members/:memberKey/system-administrator`. */
+export type WorkspaceMemberSystemAdministratorRequest = {
+  /** Whether the member should be a system administrator. */
+  systemAdministrator: boolean
+}
+
+/** Response of `PUT /api/workspace/members/:memberKey/system-administrator`. */
+export type WorkspaceMemberSystemAdministratorResponse = {
+  /** Whether the member is a system administrator afterwards. */
+  systemAdministrator: boolean
 }
 
 /** MFA part of the security policy preview, present when the change turns MFA on. */
