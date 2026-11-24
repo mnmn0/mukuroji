@@ -342,6 +342,7 @@ export function TimePeriodClosePanel({
               {t('timeTracking.periods.workspaceMonth')}
               <input
                 className="workbench-input min-h-9 px-3"
+                disabled={pendingKey !== undefined}
                 id={`${id}-workspace-month`}
                 onChange={(event) => {
                   setWorkspaceFeedback(undefined)

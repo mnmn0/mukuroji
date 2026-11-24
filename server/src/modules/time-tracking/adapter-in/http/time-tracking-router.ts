@@ -376,6 +376,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         month: readRequiredString(context.req.param('month'), 'Month'),
         timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
         actorUserId: principal.userKey,
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
       })
       return context.json(result)
     })
@@ -391,6 +392,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         month: readRequiredString(context.req.param('month'), 'Month'),
         actorUserId: principal.userKey,
         reason: typeof body.reason === 'string' ? body.reason : '',
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
       })
       return context.json(result)
     })

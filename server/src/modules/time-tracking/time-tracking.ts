@@ -567,6 +567,11 @@ export type CloseWorkspaceTimePeriodInput = {
   timeZone: string
   /** Workspace administrator closing the month. */
   actorUserId: string
+  /**
+   * Read-only checks on the caller's authorization rows, committed with each Team's close so a
+   * caller whose Workspace role changed during the loop stops closing the remaining Teams.
+   */
+  authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
 }
 
 /** A request to reopen one month for every listed Team of a Workspace. */
@@ -581,6 +586,11 @@ export type ReopenWorkspaceTimePeriodInput = {
   actorUserId: string
   /** Required explanation recorded in each Team's audit event. */
   reason: string
+  /**
+   * Read-only checks on the caller's authorization rows, committed with each Team's reopen so a
+   * caller whose Workspace role changed during the loop stops reopening the remaining Teams.
+   */
+  authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
 }
 
 /** Configuration for appending time-tracking mutations to the shared audit table. */
@@ -789,9 +799,19 @@ export interface TimeTrackingRepository {
   /** Lists the closed months of a Team in month order. */
   listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]>
   /** Stores a month close and rejects a month that is already closed. */
-  createPeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  createPeriodClose(
+    close: TimePeriodClose,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
+  ): Promise<void>
   /** Removes a month close only while it is the same close that was read. */
-  deletePeriodClose(close: TimePeriodClose, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  deletePeriodClose(
+    close: TimePeriodClose,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
+  ): Promise<void>
   /** Reads a Team's time entry policy, or undefined while the Team uses the defaults. */
   getEntryPolicy(workspaceId: string, teamId: string): Promise<StoredTeamTimeEntryPolicy | undefined>
   /** Saves a Team's time entry policy with optimistic concurrency and optional audit. */
@@ -1740,6 +1760,7 @@ export class TimeTrackingService {
   private async closePeriodInternal(
     input: CloseTimePeriodInput,
     completion?: TimeTrackingIdempotencyCompletion,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<TimePeriodClose> {
     validateTimeZone(input.timeZone)
     const close: TimePeriodClose = {
@@ -1755,7 +1776,7 @@ export class TimeTrackingService {
     monthBounds(close.month, close.timeZone)
     const auditPut = this.createPeriodAuditPut(close, 'closed', close.closedBy, input.idempotencyKey ?? this.createId(), close.closedAt)
     const idempotencyPut = completion ? await completion(close) : undefined
-    await this.repository.createPeriodClose(close, auditPut, idempotencyPut)
+    await this.repository.createPeriodClose(close, auditPut, idempotencyPut, authorizationChecks)
     return close
   }
 
@@ -1781,6 +1802,7 @@ export class TimeTrackingService {
   private async reopenPeriodInternal(
     input: ReopenTimePeriodInput,
     completion?: TimeTrackingIdempotencyCompletion,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<TimePeriodClose> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const teamId = readIdentifier(input.teamId, 'Team ID')
@@ -1801,7 +1823,7 @@ export class TimeTrackingService {
       reason,
     )
     const idempotencyPut = completion ? await completion(close) : undefined
-    await this.repository.deletePeriodClose(close, auditPut, idempotencyPut)
+    await this.repository.deletePeriodClose(close, auditPut, idempotencyPut, authorizationChecks)
     return close
   }
 
@@ -1845,13 +1867,17 @@ export class TimeTrackingService {
     const results: WorkspaceTimePeriodTeamResult[] = []
     for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
       try {
-        await this.closePeriodInternal({ workspaceId, teamId, month, timeZone: input.timeZone, actorUserId })
+        await this.closePeriodInternal(
+          { workspaceId, teamId, month, timeZone: input.timeZone, actorUserId },
+          undefined,
+          input.authorizationConditionChecks,
+        )
         results.push({ teamId, status: 'closed' })
       } catch (error) {
         if (error instanceof TimeTrackingError && error.code === 'TimePeriodAlreadyClosed') {
           results.push({ teamId, status: 'already-closed' })
         } else {
-          console.error(error)
+          logWorkspacePeriodFailure('close', workspaceId, teamId, month, error)
           results.push({ teamId, status: 'failed' })
         }
       }
@@ -1876,13 +1902,17 @@ export class TimeTrackingService {
     const results: WorkspaceTimePeriodTeamResult[] = []
     for (const teamId of readWorkspaceTeamIds(input.teamIds)) {
       try {
-        await this.reopenPeriodInternal({ workspaceId, teamId, month, actorUserId, reason: input.reason })
+        await this.reopenPeriodInternal(
+          { workspaceId, teamId, month, actorUserId, reason: input.reason },
+          undefined,
+          input.authorizationConditionChecks,
+        )
         results.push({ teamId, status: 'reopened' })
       } catch (error) {
         if (error instanceof TimeTrackingError && error.code === 'TimePeriodNotClosed') {
           results.push({ teamId, status: 'not-closed' })
         } else {
-          console.error(error)
+          logWorkspacePeriodFailure('reopen', workspaceId, teamId, month, error)
           results.push({ teamId, status: 'failed' })
         }
       }
@@ -3199,11 +3229,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     return closes
   }
 
-  /** Stores a month close with a conditional put, in a transaction when audited. */
+  /** Stores a month close with a conditional put, in a transaction when audited or fenced. */
   async createPeriodClose(
     close: TimePeriodClose,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<void> {
     try {
       const put = {
@@ -3213,14 +3244,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ConditionExpression: 'attribute_not_exists(recordKey)',
         },
       }
-      if (auditPut || idempotencyPut) {
+      if (auditPut || idempotencyPut || authorizationChecks.length > 0) {
         await this.documentClient.send(new TransactWriteCommand({
-          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+          TransactItems: [
+            put,
+            ...authorizationChecks,
+            ...(auditPut ? [auditPut] : []),
+            ...(idempotencyPut ? [idempotencyPut] : []),
+          ],
         }))
       } else {
         await this.documentClient.send(new PutCommand(put.Put))
       }
     } catch (error) {
+      if (isAuthorizationCheckOnlyFailure(error, 1, authorizationChecks.length)) throw periodAuthorizationChangedError()
       throw mapConditionalWriteError(error, 'TimePeriodAlreadyClosed', `${close.month} is already closed.`)
     }
   }
@@ -3230,6 +3267,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     close: TimePeriodClose,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ): Promise<void> {
     try {
       const deletion = {
@@ -3240,14 +3278,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ExpressionAttributeValues: { ':closedAt': close.closedAt },
         },
       }
-      if (auditPut || idempotencyPut) {
+      if (auditPut || idempotencyPut || authorizationChecks.length > 0) {
         await this.documentClient.send(new TransactWriteCommand({
-          TransactItems: [deletion, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+          TransactItems: [
+            deletion,
+            ...authorizationChecks,
+            ...(auditPut ? [auditPut] : []),
+            ...(idempotencyPut ? [idempotencyPut] : []),
+          ],
         }))
       } else {
         await this.documentClient.send(new DeleteCommand(deletion.Delete))
       }
     } catch (error) {
+      if (isAuthorizationCheckOnlyFailure(error, 1, authorizationChecks.length)) throw periodAuthorizationChangedError()
       throw mapConditionalWriteError(error, 'TimePeriodCloseConflict', `${close.month} was changed by another request.`)
     }
   }
@@ -3430,6 +3474,46 @@ function historyActionFor(action: TransitionTimeEntryInput['action']): TimeEntry
     case 'lock': return 'locked'
     case 'return': return 'returned'
   }
+}
+
+/**
+ * Creates the error for a month close or reopen whose caller lost the access it was checked with.
+ *
+ * @returns A 409 error that asks the caller to reload.
+ */
+function periodAuthorizationChangedError(): TimeTrackingError {
+  return new TimeTrackingError(
+    409,
+    'TimePeriodAuthorizationChanged',
+    'Your access changed before the month was closed or reopened. Reload and try again.',
+  )
+}
+
+/**
+ * Logs one Team that a Workspace-wide close or reopen could not change, with identifiers only.
+ *
+ * @param action - Close or reopen.
+ * @param workspaceId - Workspace identifier.
+ * @param teamId - Team that failed.
+ * @param month - Month as `YYYY-MM`.
+ * @param error - Failure; only its name and stable code are logged.
+ */
+function logWorkspacePeriodFailure(
+  action: 'close' | 'reopen',
+  workspaceId: string,
+  teamId: string,
+  month: string,
+  error: unknown,
+): void {
+  console.error(JSON.stringify({
+    event: 'workspace-time-period.team-failed',
+    action,
+    workspaceId,
+    teamId,
+    month,
+    errorName: error instanceof Error ? error.name : 'Unknown',
+    ...(error instanceof TimeTrackingError ? { errorCode: error.code } : {}),
+  }))
 }
 
 /**
