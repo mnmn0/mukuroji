@@ -485,6 +485,35 @@ export const workspaceMessages = {
   'workspace.help.agentGuideTitle': 'Coding agent guide',
   'workspace.help.agentGuideDescription':
     'Issue a token, register your client, follow the agent workflow, and monitor the Factory board.',
+  'workspace.help.featureGuidesTitle': 'Features at a glance',
+  'workspace.help.featureGuidesDescription':
+    'A short summary of the main screens. Open the screen directly, or read the matching section of the user guide (in Japanese).',
+  'workspace.help.featureOpen': 'Open screen',
+  'workspace.help.featureGuide': 'Read guide',
+  'workspace.help.featureProjectsTitle': 'Projects',
+  'workspace.help.featureProjectsDescription':
+    'Create a Project and set up its charter, members, and WBS. Parent and child tasks form the WBS, and the Gantt view shows dates and dependencies.',
+  'workspace.help.featurePlanningTitle': 'Planning',
+  'workspace.help.featurePlanningDescription':
+    'Place plans such as Phases, Milestones, and Cycles, and review dependencies, the critical path, and cross-Project schedules on the timeline.',
+  'workspace.help.featureUpdatesTitle': 'Updates',
+  'workspace.help.featureUpdatesDescription':
+    'Read weekly status updates (health, risk, summary, next actions) and comment or acknowledge them. Publish them from the Project update panel.',
+  'workspace.help.featureReportsTitle': 'Reports',
+  'workspace.help.featureReportsDescription':
+    'Build reports from widgets such as throughput, burndown, overdue work, and completion forecasts, and schedule their delivery.',
+  'workspace.help.featureMyTasksTitle': 'My Tasks',
+  'workspace.help.featureMyTasksDescription':
+    'See the tasks you own or contribute to as a board, table, Gantt, or calendar, and drag them to change their state.',
+  'workspace.help.featureFocusTitle': 'Focus',
+  'workspace.help.featureFocusDescription':
+    'Lists only what needs your attention now, in priority order with the reason and how it clears. Snooze items to defer them.',
+  'workspace.help.featureInboxTitle': 'Inbox',
+  'workspace.help.featureInboxDescription':
+    'Receive assignments, mentions, due dates, and reminders, and triage them with read, snooze, and archive.',
+  'workspace.help.featureSettingsTitle': 'Settings',
+  'workspace.help.featureSettingsDescription':
+    'Personal settings, plus Workspace, Team, permission, Work Item, automation, and agent settings for administrators.',
   'workspace.help.buildTitle': 'Running Web build',
   'workspace.help.buildDescription':
     'Share this commit when reporting a problem. Operators use it to roll the Web app back to an earlier release.',
