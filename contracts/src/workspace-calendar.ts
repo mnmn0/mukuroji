@@ -122,6 +122,11 @@ export type WorkspaceCalendarSettings = {
   holidays: string[]
   /** National holidays that are days off in addition to the company holidays. */
   publicHolidays: WorkspacePublicHolidayCalendar
+  /**
+   * IANA time zone of the Workspace's local dates: due and overdue checks of new Work Items, weekly
+   * report reminder hours, and the calendar of members who inherit it.
+   */
+  timeZone: string
 }
 
 /**
@@ -137,6 +142,7 @@ export const DEFAULT_WORKSPACE_CALENDAR_SETTINGS: WorkspaceCalendarSettings = {
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
   holidays: [],
   publicHolidays: 'japan',
+  timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
 }
 
 /**
@@ -155,8 +161,9 @@ export function isWorkspaceWeekStartDay(value: unknown): value is WorkspaceWeekS
  *
  * Settings stored before working days existed carry only the fiscal year and week start, so a
  * missing `workingWeekdays` reads as Monday to Friday and missing `holidays` as none. Settings
- * stored before national holidays existed read as using the Japanese holidays. Weekdays come back
- * in Monday-first order and holidays sorted, both without duplicates.
+ * stored before national holidays existed read as using the Japanese holidays, and settings stored
+ * before the time zone existed read as Japan time. Weekdays come back in Monday-first order and
+ * holidays sorted, both without duplicates.
  *
  * @param value - Untrusted candidate, such as a request body field or a stored record.
  * @returns Settings built from the value, or undefined when any field is invalid.
@@ -177,8 +184,46 @@ export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendar
   const workingWeekdays = readWorkspaceWorkingWeekdays(Reflect.get(value, 'workingWeekdays'))
   const holidays = readWorkspaceHolidays(Reflect.get(value, 'holidays'))
   const publicHolidays = readWorkspacePublicHolidayCalendar(Reflect.get(value, 'publicHolidays'))
-  if (!workingWeekdays || !holidays || !publicHolidays) return undefined
-  return { fiscalYearStartMonth, weekStartDay, workingWeekdays, holidays, publicHolidays }
+  const timeZone = readWorkspaceTimeZone(Reflect.get(value, 'timeZone'))
+  if (!workingWeekdays || !holidays || !publicHolidays || !timeZone) return undefined
+  return { fiscalYearStartMonth, weekStartDay, workingWeekdays, holidays, publicHolidays, timeZone }
+}
+
+/** Longest IANA time zone name a Workspace accepts. */
+const WORKSPACE_TIME_ZONE_MAX_LENGTH = 64
+
+/**
+ * Checks whether a value is an IANA time zone name the runtime knows.
+ *
+ * @param value - Untrusted candidate.
+ * @returns Whether the value names a time zone, such as `Asia/Tokyo` or `UTC`.
+ */
+export function isWorkspaceTimeZone(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > WORKSPACE_TIME_ZONE_MAX_LENGTH ||
+    !/^[A-Za-z0-9_+\-/]+$/u.test(value)
+  ) {
+    return false
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Reads the time zone of untrusted calendar settings.
+ *
+ * @param value - Untrusted `timeZone` field.
+ * @returns The time zone, Japan time when the field is missing, or undefined when it is invalid.
+ */
+function readWorkspaceTimeZone(value: unknown): string | undefined {
+  if (value === undefined) return DEFAULT_WORKSPACE_CALENDAR_SETTINGS.timeZone
+  return isWorkspaceTimeZone(value) ? value : undefined
 }
 
 /**

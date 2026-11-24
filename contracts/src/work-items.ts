@@ -18,7 +18,11 @@ import {
   type WorkspaceCalendarSettings,
   type WorkspaceCalendarWeekday,
 } from './workspace-calendar'
-import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
+import type {
+  WorkItemAcceptanceCriterion,
+  WorkItemAcceptanceCriterionCreateInput,
+  WorkItemAcceptanceCriterionInput,
+} from './work-item-acceptance-criteria'
 import type {
   TriageEntryEvent,
   TriagePermissionVisibility,
@@ -110,7 +114,17 @@ export type WorkItemScheduleCalendarPolicy = {
   workingWeekdays: WorkItemScheduleWeekday[]
   /** Local `YYYY-MM-DD` dates excluded from working-duration calculations. */
   holidays: string[]
+  /**
+   * Where the rules come from (ADR 0058). `shared` means the fields are a copy of the Team or
+   * Project calendar the Work Item inherits, refreshed when that calendar changes. Omitted means
+   * the Work Item keeps its own rules (an individual override, and every row stored before shared
+   * calendars existed).
+   */
+  calendarSource?: WorkItemScheduleCalendarSource
 }
+
+/** Origin of a Work Item calendar policy: `shared` follows the Team or Project calendar. */
+export type WorkItemScheduleCalendarSource = 'shared'
 
 /**
  * Default calendar policy used when a caller creates a new Work Item schedule.
@@ -129,7 +143,8 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * The policy uses the Workspace time zone, the Workspace working weekdays, and every Workspace day
  * off: company holidays plus the national holidays when the Workspace uses them.
  *
- * @param settings - Workspace working weekdays, company holidays, and national holiday choice.
+ * @param settings - Workspace time zone, working weekdays, company holidays, and national holiday
+ *   choice; a missing time zone means Japan time.
  * @param nationalHolidayDates - National holiday dates synced from the Cabinet Office; the bundled
  *   national holidays are used when omitted.
  * @param referenceDate - Date the kept days off are nearest to when there are too many; today in
@@ -137,12 +152,13 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * @returns A new policy that shares no arrays with the settings.
  */
 export function createWorkspaceWorkItemCalendarPolicy(
-  settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'>,
+  settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'> &
+    Partial<Pick<WorkspaceCalendarSettings, 'timeZone'>>,
   nationalHolidayDates?: readonly string[],
   referenceDate?: string,
 ): WorkItemScheduleCalendarPolicy {
   return {
-    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+    timeZone: settings.timeZone ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
     workingWeekdays: [...settings.workingWeekdays],
     holidays: listWorkspaceDaysOff(settings, nationalHolidayDates, referenceDate),
   }
@@ -675,6 +691,11 @@ export type CreateWorkItemInput = {
   assigneeUserId: string
   /** Contributors to plan for the new Work Item; new assignments never carry an ID. */
   contributorAssignments?: WorkItemContributorAssignmentCreateInput[]
+  /**
+   * Acceptance criteria to start the new Work Item with, in order. Entries never carry an ID; the
+   * server assigns one to each criterion.
+   */
+  acceptanceCriteria?: WorkItemAcceptanceCriterionCreateInput[]
   /** Stable Work Item Type selected for the new Work Item. */
   workItemTypeId?: string
   /**
@@ -947,6 +968,42 @@ export type WorkItemKeyLookupResponse = {
   teamId: string
   /** Work Item ID within the Team. */
   workItemId: string
+}
+
+/**
+ * Response of `GET /api/work-items/key-prefixes`, which lists the Work Item key prefixes of the
+ * Teams the caller can read, so a client links only text whose prefix exists.
+ */
+export type WorkItemKeyPrefixesResponse = {
+  /** Distinct key prefixes, such as `ABC`, in ascending order. */
+  prefixes: string[]
+}
+
+/**
+ * Response of `GET` and `PUT /api/teams/{teamId}/work-item-key-prefix`: the key prefix a Team's
+ * new Work Items get and the prefixes it used before.
+ */
+export type TeamWorkItemKeyPrefixSettings = {
+  /** Team ID. */
+  teamId: string
+  /** Current prefix, such as `ABC`; absent before the Team's first key or prefix choice. */
+  keyPrefix?: string
+  /** Prefix the first Work Item would get when the Team has none yet. */
+  suggestedKeyPrefix?: string
+  /** Earlier prefixes whose keys still open their Work Items. */
+  previousPrefixes: string[]
+  /** Highest key number handed out so far; numbering continues across prefix changes. */
+  lastNumber: number
+  /** Whether the caller may change the prefix. */
+  canManage: boolean
+}
+
+/** Body of `PUT /api/teams/{teamId}/work-item-key-prefix`. */
+export type UpdateTeamWorkItemKeyPrefixRequest = {
+  /** New prefix: 2 to 10 letters or digits starting with a letter; lowercase is accepted. */
+  keyPrefix: string
+  /** Prefix the caller loaded, or `null` when the Team had none, to reject a concurrent change. */
+  expectedKeyPrefix: string | null
 }
 
 /**

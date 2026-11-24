@@ -6,8 +6,11 @@ import type {
   PlanningUpdateTarget,
   PlanningUpdateTargetSummary,
 } from '@mukuroji/contracts'
+import { resolvePlanningUpdateReviewerMemberKey } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import type { WorkspaceMember } from '../../workspace/api'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   canMutateWorkspaceContent,
@@ -54,12 +57,13 @@ import {
   updateWorkItemScheduleDependency,
   subscribePlanningUpdateWatch,
   unsubscribePlanningUpdateWatch,
+  PlanningApiError,
 } from '../../planning/api'
 import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
   derivePlanningUpdateAcknowledgement,
-  extractPlanningUpdateCommentMentions,
+  resolvePlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
   type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
@@ -77,6 +81,7 @@ import {
   revalidatePlanningUpdateHistoryAfterPublish,
   usePlanningUpdateAnnotations,
   usePlanningUpdates,
+  usePlanningUpdateTemplate,
   usePlanningUpdateWatch,
 } from '../../planning/queries/usePlanningUpdates'
 import { usePlanningBaselineDelays } from '../../planning/queries/usePlanningBaselineDelays'
@@ -99,6 +104,8 @@ import {
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
 import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
+import { PlanningMilestoneWatchContainer } from '../../planning/ui/PlanningMilestoneWatch'
+import { CycleScheduleBaselineContainer } from '../../planning/ui/CycleScheduleBaselinePanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -123,6 +130,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
+/** Stable empty list while Workspace members load. */
+const emptyMentionMembers: readonly WorkspaceMember[] = []
 
 /**
  * 認証済み Workspace の Planning workbench です。
@@ -135,6 +144,9 @@ export function PlanningPage() {
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   // Retries of a create or duplicate whose outcome is unknown must resend the same body and key.
   const entityCreationRetries = useRef(createPlanningEntityCreationRetryTracker()).current
+  // An unresolved acknowledgement keeps its comment ID, so retrying the same remark replays the
+  // committed request instead of sending a second acknowledgement.
+  const pendingAcknowledgementIds = useRef(new Map<string, string>()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
@@ -148,6 +160,23 @@ export function PlanningPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
+  // Offered by display name in update comments; without it typed `@email` mentions still work.
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+    mutate: reloadWorkspaceAccess,
+  } = useWorkspaceAccess(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
+  const mentionMembers = workspaceAccess?.members ?? emptyMentionMembers
+  const mentionSuggestionsFailure = workspaceAccessError && !workspaceAccess
+    ? {
+        message: t('planning.field.mentionSuggestionsError'),
+        retryLabel: t('planning.field.mentionSuggestionsRetry'),
+        onRetry: () => void reloadWorkspaceAccess(),
+      }
+    : undefined
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -218,6 +247,7 @@ export function PlanningPage() {
     selectedUpdateTarget,
     Boolean(user && !currentUserError),
   )
+  const updateTemplate = usePlanningUpdateTemplate(accessToken)
   const updateWatch = usePlanningUpdateWatch(
     accessToken,
     selectedUpdateTarget,
@@ -229,11 +259,11 @@ export function PlanningPage() {
     updateHistory.data?.updates,
     Boolean(user && !currentUserError),
   )
-  // Derive reviewer confirmation only from loaded reactions so loading never reads as unconfirmed.
-  const selectedUpdateReviewerMemberKey = selectedUpdateTarget && updateAnnotations.data
-    ? snapshot?.updateTargets.find((summary) =>
+  // Acknowledgements arrive with the history page, so a pending badge never precedes its data.
+  const selectedUpdateReviewerMemberKey = selectedUpdateTarget
+    ? resolvePlanningUpdateReviewerMemberKey(snapshot?.updateTargets.find((summary) =>
         planningUpdateTargetsAreEqual(summary.target, selectedUpdateTarget)
-      )?.cadence?.escalationMemberKey
+      )?.cadence)
     : undefined
   const updateAnnotationViews = useMemo(
     () => createPlanningUpdateAnnotationViews(
@@ -473,10 +503,15 @@ export function PlanningPage() {
   const submitPlanningUpdateComment = async (
     updateId: string,
     bodyMarkdown: string,
+    selectedMentionMemberKeys: readonly string[],
   ) => {
     const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
     if (!accessToken || !selectedUpdateTarget || !update) return
-    const mentionMemberKeys = extractPlanningUpdateCommentMentions(bodyMarkdown)
+    const mentionMemberKeys = resolvePlanningUpdateCommentMentions(
+      bodyMarkdown,
+      selectedMentionMemberKeys,
+      mentionMembers,
+    )
     const input = {
       body: bodyMarkdown,
       id: createPlanningClientId('planning-update-comment'),
@@ -572,6 +607,86 @@ export function PlanningPage() {
     }
   }
 
+  /**
+   * Records the current viewer's reviewer acknowledgement as an acknowledgement comment.
+   *
+   * @param updateId - Immutable update that the viewer acknowledges.
+   * @param bodyMarkdown - Optional reviewer remark; a standard sentence is used without one.
+   * @param selectedMentionMemberKeys - Members picked from the composer suggestions.
+   * @throws The mutation error after showing it, so the caller keeps the remark.
+   */
+  const acknowledgePlanningUpdate = async (
+    updateId: string,
+    bodyMarkdown?: string,
+    selectedMentionMemberKeys: readonly string[] = [],
+  ) => {
+    const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
+    if (!accessToken || !selectedUpdateTarget || !update || update.acknowledgement) return
+    const body = bodyMarkdown ?? t('planning.updateHistory.acknowledgeComment')
+    const mentionMemberKeys = resolvePlanningUpdateCommentMentions(
+      body,
+      bodyMarkdown === undefined ? [] : selectedMentionMemberKeys,
+      mentionMembers,
+    )
+    const retryKey = JSON.stringify([
+      createPlanningUpdateTargetKey(selectedUpdateTarget),
+      update.version,
+      body,
+      mentionMemberKeys,
+    ])
+    const commentId = pendingAcknowledgementIds.get(retryKey) ??
+      createPlanningClientId('planning-update-acknowledgement')
+    pendingAcknowledgementIds.set(retryKey, commentId)
+    const input = {
+      acknowledgement: true as const,
+      body,
+      id: commentId,
+      target: selectedUpdateTarget,
+      updateVersion: update.version,
+      ...(mentionMemberKeys.length > 0 ? { mentionMemberKeys } : {}),
+    }
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      await mutationRequestRunner.run(
+        `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:acknowledge`,
+        JSON.stringify(input),
+        (context) => createPlanningUpdateComment(accessToken, input, context),
+      )
+      pendingAcknowledgementIds.delete(retryKey)
+      try {
+        await Promise.all([
+          updateHistory.mutate(),
+          updateAnnotations.loadVersion(update.version),
+        ])
+        await updateAnnotations.mutate()
+      } catch {
+        // SWR preserves the history and annotation query errors for the recoverable alerts.
+      }
+    } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) clearAuthSession()
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      if (error instanceof PlanningApiError && error.code === 'PlanningUpdateAlreadyAcknowledged') {
+        // Another tab or a lost response already recorded it; show the recorded acknowledgement.
+        pendingAcknowledgementIds.delete(retryKey)
+        await Promise.all([updateHistory.mutate(), updateAnnotations.mutate()]).catch(() => undefined)
+        return
+      }
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+      throw error
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
   const canAnnotateSelectedUpdate = Boolean(
     canMutatePlanningContent &&
     selectedUpdateTarget &&
@@ -596,8 +711,15 @@ export function PlanningPage() {
             updateAnnotations.key && updateAnnotations.isLoading,
           ),
           isPending: isUpdateCollaborationPending,
+          mentionMembers,
+          mentionSuggestionsFailure,
           onAddComment: canAnnotateSelectedUpdate
             ? submitPlanningUpdateComment
+            : undefined,
+          onAcknowledge: canAnnotateSelectedUpdate &&
+            selectedUpdateReviewerMemberKey !== undefined &&
+            selectedUpdateReviewerMemberKey.trim().toLowerCase() === currentUserProjectKey
+            ? acknowledgePlanningUpdate
             : undefined,
           onExport: exportPlanningUpdateHistory,
           onRetry: updateWatch.error || updateAnnotations.error
@@ -665,6 +787,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBaseline={accessToken && snapshot
+            ? (cycle, canManageCycle) => (
+                <CycleScheduleBaselineContainer
+                  accessToken={accessToken}
+                  canCapture={canManagePlanning && canManageCycle}
+                  cycle={cycle}
+                  key={cycle.id}
+                  labels={labels.cycleBaseline}
+                  snapshot={snapshot}
+                  onCaptured={() => void mutatePlanning()}
+                />
+              )
+            : undefined}
           renderCycleBurndown={accessToken && snapshot
             ? (cycle) => (
                 <CycleBurndown
@@ -688,6 +823,18 @@ export function PlanningPage() {
                   labels={labels.entityActivity}
                   ownerOptions={ownerOptions}
                   revision={snapshot.revision}
+                />
+              )
+            : undefined}
+          renderMilestoneWatch={accessToken
+            ? (milestone) => (
+                <PlanningMilestoneWatchContainer
+                  accessToken={accessToken}
+                  // Everyone who can see the Milestone may watch it, including read-only members.
+                  canWatch={Boolean(user)}
+                  entityId={milestone.id}
+                  key={milestone.id}
+                  labels={labels.milestoneWatch}
                 />
               )
             : undefined}
@@ -1022,6 +1169,14 @@ export function PlanningPage() {
                 )
               }
             : undefined}
+          updateTemplate={updateTemplate.data}
+          updateTemplateLoadState={updateTemplate.data !== undefined
+            ? undefined
+            : updateTemplate.error !== undefined
+            ? { status: 'error', onRetry: () => void updateTemplate.mutate() }
+            : updateTemplate.isLoading
+            ? { status: 'loading' }
+            : undefined}
           onPublishUpdate={canMutatePlanningContent && snapshot && accessToken
             ? (target, draft) => {
                 const input = {
@@ -1116,6 +1271,10 @@ function resolveSelectedPlanningUpdateTarget(
       ? { type: 'project', projectId, teamId }
       : undefined
   }
+  if (targetType === 'team') {
+    const teamId = searchParams.get('teamId')?.trim()
+    return teamId ? { type: 'team', teamId } : undefined
+  }
   const entityId = searchParams.get('entityId')?.trim() || selectedEntityId
   if (targetType === 'initiative' && entityId) {
     return { type: 'initiative', entityId }
@@ -1189,7 +1348,7 @@ function createPlanningUpdateTargetDetails(
  * @param comments - Loaded append-only comments across the visible versions.
  * @param reactions - Loaded member reactions across the visible versions.
  * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
- * @param reviewerMemberKey - Cadence escalation member whose confirmation reaction marks an update reviewed.
+ * @param reviewerMemberKey - Cadence reviewer who has not acknowledged an update yet.
  * @returns Comment, reaction, and reviewer confirmation maps keyed by immutable update ID.
  */
 function createPlanningUpdateAnnotationViews(
@@ -1230,11 +1389,7 @@ function createPlanningUpdateAnnotationViews(
       reaction,
       reactedByViewer: aggregate.reactedByViewer,
     }))
-    const acknowledgement = derivePlanningUpdateAcknowledgement(
-      reactions,
-      update.version,
-      reviewerMemberKey,
-    )
+    const acknowledgement = derivePlanningUpdateAcknowledgement(update, reviewerMemberKey)
     if (acknowledgement) acknowledgementsByUpdateId[update.id] = acknowledgement
   }
 
@@ -1269,6 +1424,17 @@ function createPlanningUpdateTargetSummaryView(
       title: project.name,
     }
   }
+  if (target.type === 'team') {
+    const team = teams.find((candidate) => candidate.id === target.teamId)
+    if (!team) return undefined
+    return {
+      health: updateSummary?.latestUpdate?.health ?? 'unknown',
+      ownerMemberKey: updateSummary?.cadence?.updateOwnerMemberKey ?? '',
+      progress: updateSummary?.latestUpdate?.progressSnapshot.percent ?? 0,
+      target,
+      title: team.name,
+    }
+  }
   const entity = snapshot.entities.find((candidate) =>
     candidate.type === 'initiative' && candidate.id === target.entityId
   )
@@ -1299,6 +1465,8 @@ function createPlanningUpdateTargetPath(
   if (target.type === 'project') {
     parameters.set('teamId', target.teamId)
     parameters.set('projectId', target.projectId)
+  } else if (target.type === 'team') {
+    parameters.set('teamId', target.teamId)
   } else {
     parameters.set('entityId', target.entityId)
   }

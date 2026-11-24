@@ -1,9 +1,11 @@
 import { useRef, useState, type FormEvent } from 'react'
+import { WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES } from '@mukuroji/contracts'
 import type {
   ApiScope,
   DeveloperPlatformOverview,
   PersonalCredentialAdministration,
   ImportDryRunReport,
+  ImportJobProgress,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
@@ -68,6 +70,12 @@ import { WebhooksSection } from './WebhooksSection'
 export type DeveloperPlatformPanelProps = {
   /** Developer Platform aggregate resources. */
   resources?: DeveloperPlatformOverview
+  /** Rows and links the latest import has processed, read while it runs. */
+  latestImportProgress?: ImportJobProgress
+  /** Whether reading the latest import's progress failed. */
+  latestImportProgressFailed?: boolean
+  /** Reads the latest import's progress again after it failed. */
+  onRetryImportProgress?: () => void
   /** Connector providers configured in this environment; omitted while unknown, which offers none. */
   availableConnectorProviders?: readonly string[]
   /** Safe message shown when the configured connector providers cannot be loaded. */
@@ -190,6 +198,9 @@ export function DeveloperPlatformPanel({
   labels,
   loadErrorMessage,
   resources,
+  latestImportProgress,
+  latestImportProgressFailed,
+  onRetryImportProgress,
   availableConnectorProviders,
   connectorAvailabilityErrorMessage,
   isConnectorAvailabilityLoading,
@@ -548,6 +559,9 @@ export function DeveloperPlatformPanel({
     const validation = await runAction(
       'import:dry-run',
       async () => {
+        if (importMappings.length > WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) {
+          throw new Error(`The mapping can have at most ${WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES} fields.`)
+        }
         const source = await readDeveloperImportSource(importFormat, importFile)
 
         if (
@@ -993,6 +1007,9 @@ export function DeveloperPlatformPanel({
               importTeamOptions={importTeamOptions}
               labels={labels}
               latestImport={latestImport}
+              latestImportProgress={latestImportProgress}
+              latestImportProgressFailed={latestImportProgressFailed}
+              onRetryImportProgress={onRetryImportProgress}
               previewReport={previewImportReport}
               onCommit={
                 onCommitImport &&

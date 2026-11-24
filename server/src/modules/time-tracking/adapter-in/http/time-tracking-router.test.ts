@@ -66,8 +66,11 @@ function createFixture(canManageRates = false, idempotency?: TimeTrackingIdempot
     authenticate: async () => ({ directoryId: 'workspace-1', userKey: 'member-1' }),
     requireWrite: () => {},
     requireTeamPermission: async () => {},
+    listTimeTrackingTeams: async () => [{ teamId: 'team-1', name: 'Team 1' }],
     canManageRates: async () => canManageRates,
     canManageWholeTeam: async () => canManageRates,
+    canManageWorkspacePeriods: async () => false,
+    listWorkspaceTeams: async () => [],
     getAccessibleProjectIds: async () => undefined,
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
@@ -313,6 +316,70 @@ describe('createTimeTrackingRouter', () => {
       to: '2026-08-03T00:00:00.000Z',
     })
     expect(await approved.json()).toMatchObject({ count: 1, entries: [{ id: own.id, status: 'approved' }] })
+  })
+
+  test('submits the member own time of every Team at once and lists it per Team', async () => {
+    const fixture = createProjectFixture()
+    const own = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    await createDraft(fixture.router, 'alice', 'work-item-p1')
+    const otherTeam = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-2/time-entries', draftBody('work-item-p1'))
+    expect(otherTeam.status).toBe(201)
+    const ownInOtherTeam = readEntryRef(await otherTeam.json())
+    const period = { from: '2026-08-02T00:00:00.000Z', to: '2026-08-03T00:00:00.000Z' }
+
+    const listed = await requestAs(
+      fixture.router,
+      'bob',
+      'GET',
+      `/api/time-tracking/my-timesheet?from=${period.from}&to=${period.to}`,
+    )
+    expect(listed.status).toBe(200)
+    const sheet = await listed.json()
+    expect(sheet).toMatchObject({
+      timeZone: 'UTC',
+      teams: [
+        { teamId: 'team-1', name: 'Team 1', timesheet: { canManageTeam: false }, entries: [{ id: own.id, status: 'draft' }] },
+        { teamId: 'team-2', name: 'Team 2', entries: [{ id: ownInOtherTeam.id, status: 'draft' }] },
+      ],
+    })
+    expect(sheet.teams[0].entries).toHaveLength(1)
+
+    const submitBody = {
+      ...period,
+      entries: sheet.teams.flatMap((team: { teamId: string; entries: Array<{ id: string; revision: number }> }) =>
+        team.entries.map((entry) => ({ teamId: team.teamId, entryId: entry.id, expectedRevision: entry.revision }))),
+    }
+    const submitOnce = async () => await fixture.router.request('/api/time-tracking/my-timesheet/submit', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer bob', 'Content-Type': 'application/json', 'Idempotency-Key': 'my-week-1' },
+      body: JSON.stringify(submitBody),
+    })
+    const submitted = await submitOnce()
+    expect(submitted.status).toBe(200)
+    const expectedResult = {
+      count: 2,
+      failedEntryIds: [],
+      partialFailure: false,
+      teams: [
+        { teamId: 'team-1', count: 1, failedEntryIds: [] },
+        { teamId: 'team-2', count: 1, failedEntryIds: [] },
+      ],
+    }
+    expect(await submitted.json()).toEqual(expectedResult)
+
+    // A retry after a lost response replays each entry and leaves drafts created since alone.
+    const later = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    const retried = await submitOnce()
+    expect(await retried.json()).toEqual(expectedResult)
+    const laterRead = await requestAs(fixture.router, 'bob', 'GET', '/api/teams/team-1/time-entries?userId=bob')
+    expect((await laterRead.json()).entries).toContainEqual(expect.objectContaining({ id: later.id, status: 'draft' }))
+
+    // Each Team's manager approves the submitted time in that Team's own flow.
+    const approved = await requestAs(fixture.router, 'alice', 'POST', '/api/teams/team-2/timesheet/approve', period)
+    expect(await approved.json()).toMatchObject({ count: 1, entries: [{ id: ownInOtherTeam.id, status: 'approved' }] })
+
+    const guest = await requestAs(fixture.router, 'guest', 'POST', '/api/time-tracking/my-timesheet/submit', submitBody)
+    expect(guest.status).toBe(403)
   })
 
   test('totals only the member own time in timesheets, summaries, and exports', async () => {
@@ -602,6 +669,7 @@ type FixtureProjectRoles = Record<string, 'viewer' | 'member' | 'manager'>
  */
 function createProjectFixture() {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+    idempotency: createIdempotencyStore(),
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
       let id = 0
@@ -634,8 +702,14 @@ function createProjectFixture() {
     requireTeamPermission: async (principal, _teamId, minimum) => {
       if (projectsWith(principal.userKey, minimum).size === 0) throw deny()
     },
+    listTimeTrackingTeams: async (principal, minimum) =>
+      projectsWith(principal.userKey, minimum).size === 0
+        ? []
+        : [{ teamId: 'team-1', name: 'Team 1' }, { teamId: 'team-2', name: 'Team 2' }],
     canManageRates: async (principal) => projectsWith(principal.userKey, 'manager').size > 0,
     canManageWholeTeam: async () => false,
+    canManageWorkspacePeriods: async () => false,
+    listWorkspaceTeams: async () => [],
     getAccessibleProjectIds: async (principal) => projectsWith(principal.userKey, 'viewer'),
     getManagedProjectIds: async (principal) => projectsWith(principal.userKey, 'manager'),
     verifyProject: async (principal, _teamId, projectId, minimum) => {

@@ -28,6 +28,8 @@ import {
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningEntityCreation,
   type PlanningMutationTransaction,
+  type PlanningReadEnvelope,
+  type PlanningScopedWorkItemReader,
   type PlanningUpdatePublishNotificationContext,
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
@@ -344,6 +346,7 @@ function createFakePlanningTable(
   }
   const writes: Record<string, unknown>[] = []
   const queries: Record<string, unknown>[] = []
+  const batchGets: Record<string, unknown>[] = []
   const documentClient = {
     async send(command: {
       /** AWS SDK command constructor. */
@@ -372,6 +375,31 @@ function createFakePlanningTable(
       if (command.constructor.name === 'QueryCommand') {
         queries.push(command.input)
         return queryPlanningPage(command.input, rows, pageSize)
+      }
+      if (command.constructor.name === 'BatchGetCommand') {
+        batchGets.push(command.input)
+        const request = (command.input.RequestItems as Record<string, {
+          /** Requested primary keys. */
+          Keys: Record<string, unknown>[]
+        }>).PlanningTable!
+        // The first request leaves its last key unprocessed, like a throttled BatchGetItem.
+        const unprocessed = batchGets.length === 1 && request.Keys.length > 1
+          ? request.Keys.slice(-1)
+          : []
+        const processed = request.Keys.slice(0, request.Keys.length - unprocessed.length)
+        return {
+          Responses: {
+            PlanningTable: processed.flatMap((key) => {
+              const item = rows.find((row) =>
+                row.workspaceId === key.workspaceId && row.recordKey === key.recordKey
+              )
+              return item ? [{ ...item }] : []
+            }),
+          },
+          ...(unprocessed.length === 0
+            ? {}
+            : { UnprocessedKeys: { PlanningTable: { Keys: unprocessed } } }),
+        }
       }
       writes.push(command.input)
       const items = command.input.TransactItems
@@ -422,7 +450,16 @@ function createFakePlanningTable(
     undefined,
     sharesRevisionWithWorkItems,
   )
-  return { client, rows, writes, queries, control }
+  return {
+    client,
+    rows,
+    writes,
+    queries,
+    batchGets,
+    control,
+    documentClient,
+    readMeta: () => ({ ...meta }),
+  }
 }
 
 /**
@@ -819,6 +856,34 @@ describe('planning domain', () => {
         'cycle-short': 0,
       },
     })
+  })
+
+  test('counts Planning entity durations in working days when the Workspace calendar is given', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createCycleInput('cycle-first', 0, {
+      baseline: { startDate: '2026-08-03', endDate: '2026-08-09' },
+      forecast: { startDate: '2026-08-03', endDate: '2026-08-09' },
+    }), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createCycleInput('cycle-second', 1, {
+      baseline: { startDate: '2026-08-10', endDate: '2026-08-14' },
+      forecast: { startDate: '2026-08-10', endDate: '2026-08-14' },
+    }), EMPTY_WORK_ITEMS)
+    const response = await client.createDependency('workspace-1', {
+      id: 'dependency-working-days',
+      predecessorId: 'cycle-first',
+      successorId: 'cycle-second',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, {
+      ...EMPTY_WORK_ITEMS,
+      workingCalendar: {
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: ['2026-08-11'],
+      },
+    })
+    // Five weekdays in the first week and four in the second, which has a holiday.
+    expect(response.planning.criticalPath.totalDurationDays).toBe(9)
   })
 
   test('keeps a binding finish-to-finish successor when endpoint finishes tie', async () => {
@@ -2419,18 +2484,26 @@ describe('planning structured updates', () => {
     await publish(4, 'on-track')
 
     expect(contexts).toEqual([
-      { healthDegraded: false, updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com' },
+      {
+        healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        // The escalation member reviews updates when the cadence names no reviewer.
+        reviewerMemberKey: 'lead@example.com',
+      },
       {
         previousHealth: 'on-track', healthDegraded: true,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
       {
         previousHealth: 'at-risk', healthDegraded: false,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
       {
         previousHealth: 'at-risk', healthDegraded: false,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
     ])
   })
@@ -5759,3 +5832,356 @@ describe('planning persistence', () => {
     }
   })
 })
+
+describe('planning scoped reads', () => {
+  /**
+   * Creates a graph with a Workspace Portfolio, a Team Cycle, Milestones in two Projects of one
+   * Team, and a Milestone in another Team, each with one linked Work Item.
+   *
+   * @returns Canonical rows for a fake Planning table.
+   */
+  function createScopedRows(): Record<string, unknown>[] {
+    const link = (teamId: string, workItemId: string, projectId: string, milestoneId: string) => ({
+      workspaceId: 'workspace-1',
+      recordKey: `LINK#${teamId}#${workItemId}`,
+      entryType: 'planning-work-item-link',
+      teamId,
+      workItemId,
+      projectId,
+      milestoneId,
+      goalIds: [],
+      createdAt: NOW.toISOString(),
+    })
+    return [
+      createScaleEntityRow('portfolio-1', 'portfolio'),
+      createScaleEntityRow('roadmap-1', 'roadmap', { parentId: 'portfolio-1' }),
+      createScaleEntityRow('roadmap-team-2', 'roadmap', {
+        parentId: 'portfolio-1',
+        teamId: 'team-2',
+      }),
+      createScaleEntityRow('cycle-team-1', 'cycle', {
+        teamId: 'team-1',
+        cadence: { unit: 'week', count: 2 },
+        capacity: 10,
+        carryOverPolicy: 'move-incomplete',
+      }),
+      createScaleEntityRow('milestone-p1', 'milestone', {
+        baseline: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        forecast: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        parentId: 'roadmap-1',
+        teamId: 'team-1',
+        projectId: 'project-1',
+      }),
+      createScaleEntityRow('milestone-p2', 'milestone', {
+        baseline: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        forecast: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        parentId: 'roadmap-1',
+        teamId: 'team-1',
+        projectId: 'project-2',
+      }),
+      createScaleEntityRow('milestone-team-2', 'milestone', {
+        baseline: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        forecast: { startDate: '2026-08-14', endDate: '2026-08-14' },
+        parentId: 'roadmap-team-2',
+        teamId: 'team-2',
+        projectId: 'project-9',
+      }),
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'DEPENDENCY#p1-to-p2',
+        entryType: 'planning-dependency',
+        id: 'p1-to-p2',
+        predecessorId: 'milestone-p1',
+        successorId: 'milestone-p2',
+        type: 'finish-to-start',
+        lagDays: 0,
+        createdAt: NOW.toISOString(),
+      },
+      link('team-1', 'item-p1', 'project-1', 'milestone-p1'),
+      link('team-1', 'item-p1-b', 'project-1', 'milestone-p1'),
+      link('team-1', 'item-p2', 'project-2', 'milestone-p2'),
+      link('team-2', 'item-t2', 'project-9', 'milestone-team-2'),
+    ]
+  }
+
+  /** Work Items each envelope's reader returns. */
+  const WORK_ITEMS = [
+    createWorkItem('item-p1', 'completed'),
+    createWorkItem('item-p1-b', 'started'),
+    createWorkItem('item-p2', 'started', { projectId: 'project-2' }),
+    createWorkItem('item-t2', 'started', { teamId: 'team-2', projectId: 'project-9' }),
+  ]
+
+  /**
+   * Creates a fake table whose META has the usage counters a Planning commit writes.
+   *
+   * @returns The fake table after one committed Planning change.
+   */
+  async function createCommittedTable() {
+    const table = createFakePlanningTable(createScopedRows())
+    await table.client.update('workspace-1', 'portfolio-1', {
+      expectedRevision: 1,
+      patch: { title: 'Portfolio' },
+    }, EMPTY_WORK_ITEMS)
+    table.queries.length = 0
+    return table
+  }
+
+  /**
+   * Returns a Work Item reader that records the envelopes it was asked for.
+   *
+   * @param envelopes - Receives every requested envelope.
+   * @returns Reader that keeps the Work Items inside the envelope.
+   */
+  function createReader(envelopes: PlanningReadEnvelope[]): PlanningScopedWorkItemReader {
+    return async (envelope) => {
+      envelopes.push(envelope)
+      return {
+        workItems: WORK_ITEMS.filter((workItem) =>
+          (envelope.teamId === undefined || workItem.teamId === envelope.teamId) &&
+          (envelope.projectId === undefined || workItem.projectId === envelope.projectId)
+        ),
+      }
+    }
+  }
+
+  /**
+   * Returns the record prefixes the fake table was queried with.
+   *
+   * @param queries - Recorded Query inputs.
+   * @returns Each Query's record prefix.
+   */
+  function queriedPrefixes(queries: readonly Record<string, unknown>[]) {
+    return queries.map((input) =>
+      (input.ExpressionAttributeValues as Record<string, unknown>)[':recordPrefix']
+    )
+  }
+
+  test('reads one Project by its Work Item keys and reports Workspace capacity from META', async () => {
+    const table = await createCommittedTable()
+    const full = await table.client.get('workspace-1', { workItems: WORK_ITEMS })
+    expect(table.readMeta()).toMatchObject({
+      liveRowCount: full.capacity.liveRowCount,
+      liveByteCount: full.capacity.liveByteCount,
+    })
+    // A cached graph would answer the scoped read without any row read; use a cold client.
+    const cold = createFakePlanningTable(table.rows)
+    const client = createMetaPinnedClient(cold, table.readMeta())
+    const envelopes: PlanningReadEnvelope[] = []
+
+    const snapshot = await client.getScoped(
+      'workspace-1',
+      { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+      createReader(envelopes),
+    )
+
+    expect(envelopes).toEqual([{ teamId: 'team-1', projectId: 'project-1' }])
+    expect(queriedPrefixes(cold.queries).some((prefix) => String(prefix).startsWith('LINK#')))
+      .toBeFalse()
+    // Two batches: the fake leaves one key unprocessed and the client asks for it again.
+    expect(cold.batchGets).toHaveLength(2)
+    expect(snapshot.readScope).toEqual({ type: 'project', teamId: 'team-1', projectId: 'project-1' })
+    expect(snapshot.entities.map((entity) => entity.id).sort()).toEqual([
+      'cycle-team-1',
+      'milestone-p1',
+      'portfolio-1',
+      'roadmap-1',
+    ])
+    expect(snapshot.workItemLinks.map((link) => link.workItemId).sort())
+      .toEqual(['item-p1', 'item-p1-b'])
+    expect(snapshot.workItems.map((workItem) => workItem.id).sort()).toEqual(['item-p1', 'item-p1-b'])
+    // The dependency to the other Project's Milestone stays out of the Project read.
+    expect(snapshot.dependencies).toEqual([])
+    // Roll-ups of the Project's entities match the Workspace read.
+    expect(snapshot.entities.find((entity) => entity.id === 'milestone-p1'))
+      .toEqual(full.entities.find((entity) => entity.id === 'milestone-p1'))
+    expect(snapshot.entities.find((entity) => entity.id === 'milestone-p1'))
+      .toMatchObject({ linkedWorkItemCount: 2 })
+    expect(snapshot.capacity).toEqual(full.capacity)
+    expect(snapshot.revision).toBe(full.revision)
+  })
+
+  test('reads one Team by its link prefix', async () => {
+    const table = createFakePlanningTable(createScopedRows())
+    await table.client.update('workspace-1', 'portfolio-1', {
+      expectedRevision: 1,
+      patch: { title: 'Portfolio' },
+    }, EMPTY_WORK_ITEMS)
+    const cold = createFakePlanningTable(table.rows)
+    const meta = table.readMeta()
+    const client = createMetaPinnedClient(cold, meta)
+    const envelopes: PlanningReadEnvelope[] = []
+
+    const snapshot = await client.getScoped(
+      'workspace-1',
+      { type: 'team', teamId: 'team-1' },
+      createReader(envelopes),
+    )
+
+    expect(envelopes).toEqual([{ teamId: 'team-1' }])
+    expect(queriedPrefixes(cold.queries)).toContain('LINK#team-1#')
+    expect(queriedPrefixes(cold.queries)).not.toContain('LINK#')
+    expect(cold.batchGets).toHaveLength(0)
+    expect(snapshot.entities.map((entity) => entity.id).sort()).toEqual([
+      'cycle-team-1',
+      'milestone-p1',
+      'milestone-p2',
+      'portfolio-1',
+      'roadmap-1',
+    ])
+    expect(snapshot.dependencies.map((dependency) => dependency.id)).toEqual(['p1-to-p2'])
+    expect(snapshot.criticalPath.entityIds).toEqual(['milestone-p1', 'milestone-p2'])
+    expect(snapshot.workItemLinks.map((link) => link.workItemId).sort())
+      .toEqual(['item-p1', 'item-p1-b', 'item-p2'])
+  })
+
+  test('reads a Workspace Portfolio as its subtree', async () => {
+    const table = await createCommittedTable()
+    const envelopes: PlanningReadEnvelope[] = []
+    const cold = createFakePlanningTable(table.rows)
+    const client = createMetaPinnedClient(cold, table.readMeta())
+
+    const snapshot = await client.getScoped(
+      'workspace-1',
+      { type: 'portfolio', portfolioId: 'portfolio-1' },
+      createReader(envelopes),
+    )
+
+    expect(envelopes).toEqual([{}])
+    expect(snapshot.entities.map((entity) => entity.id).sort()).toEqual([
+      'milestone-p1',
+      'milestone-p2',
+      'milestone-team-2',
+      'portfolio-1',
+      'roadmap-1',
+      'roadmap-team-2',
+    ])
+    expect(snapshot.entities.find((entity) => entity.id === 'portfolio-1')).toMatchObject({
+      linkedWorkItemCount: 4,
+    })
+    await expect(client.getScoped(
+      'workspace-1',
+      { type: 'portfolio', portfolioId: 'roadmap-1' },
+      createReader([]),
+    )).rejects.toMatchObject({ status: 404, code: 'PlanningEntityNotFound' })
+  })
+
+  test('falls back to the whole graph when META has no usage counters', async () => {
+    const table = createFakePlanningTable(createScopedRows())
+    const envelopes: PlanningReadEnvelope[] = []
+
+    const snapshot = await table.client.getScoped(
+      'workspace-1',
+      { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+      createReader(envelopes),
+    )
+
+    expect(queriedPrefixes(table.queries)).toContain('LINK#')
+    expect(table.batchGets).toHaveLength(0)
+    expect(snapshot.workItemLinks.map((link) => link.workItemId).sort())
+      .toEqual(['item-p1', 'item-p1-b'])
+    expect(snapshot.capacity.liveRowCount).toBe(createScopedRows().length)
+  })
+
+  test('re-reads when the revision moves during a scoped read', async () => {
+    const table = await createCommittedTable()
+    const cold = createFakePlanningTable(table.rows)
+    let metaReads = 0
+    const meta = table.readMeta()
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      {
+        send: async (command: { constructor: { name: string }, input: Record<string, unknown> }) => {
+          if (
+            command.constructor.name === 'GetCommand' &&
+            (command.input.Key as Record<string, unknown>).workspaceId === 'FENCE#workspace-1'
+          ) {
+            metaReads += 1
+            // The second META read of the first attempt sees a Work Item write.
+            return { Item: { ...meta, revision: Number(meta.revision) + (metaReads >= 2 ? 1 : 0) } }
+          }
+          return sendToFake(cold, command)
+        },
+      } as unknown as DynamoDBDocumentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    const envelopes: PlanningReadEnvelope[] = []
+    const snapshot = await client.getScoped(
+      'workspace-1',
+      { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+      createReader(envelopes),
+    )
+
+    expect(snapshot.revision).toBe(Number(meta.revision) + 1)
+    expect(metaReads).toBe(4)
+    // The retry reuses the Work Items read before the first attempt.
+    expect(envelopes).toHaveLength(1)
+  })
+
+  test('narrows the in-memory graph the same way', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', {
+      ...createEntityInput('portfolio-1', 'portfolio', 0),
+    }, EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createEntityInput('roadmap-team-2', 'roadmap', 1, {
+      parentId: 'portfolio-1',
+      teamId: 'team-2',
+    }), EMPTY_WORK_ITEMS)
+
+    const snapshot = await client.getScoped(
+      'workspace-1',
+      { type: 'team', teamId: 'team-1' },
+      createReader([]),
+    )
+
+    expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-1'])
+    expect(snapshot.capacity.liveRowCount).toBe(2)
+    expect(snapshot.readScope).toEqual({ type: 'team', teamId: 'team-1' })
+  })
+})
+
+/**
+ * Forwards one command to a fake table's document client.
+ *
+ * @param table - Fake table created by `createFakePlanningTable`.
+ * @param command - AWS SDK command.
+ * @returns The fake response.
+ */
+function sendToFake(
+  table: ReturnType<typeof createFakePlanningTable>,
+  command: { constructor: { name: string }, input: Record<string, unknown> },
+) {
+  return (table.documentClient as unknown as {
+    /** Fake send implementation. */
+    send: (input: unknown) => Promise<unknown>
+  }).send(command)
+}
+
+/**
+ * Creates a cold client over a fake table whose META is pinned to a committed row.
+ *
+ * @param table - Fake table with the committed graph rows.
+ * @param meta - Committed META row with usage counters.
+ * @returns A client with an empty graph cache.
+ */
+function createMetaPinnedClient(
+  table: ReturnType<typeof createFakePlanningTable>,
+  meta: Record<string, unknown>,
+) {
+  return new DynamoDbPlanningClient(
+    'PlanningTable',
+    {
+      send: async (command: { constructor: { name: string }, input: Record<string, unknown> }) =>
+        command.constructor.name === 'GetCommand' &&
+          (command.input.Key as Record<string, unknown>).workspaceId === 'FENCE#workspace-1'
+          ? { Item: { ...meta } }
+          : sendToFake(table, command),
+    } as unknown as DynamoDBDocumentClient,
+    {} as DynamoDBClient,
+    false,
+    () => NOW,
+  )
+}

@@ -52,6 +52,73 @@ describe('Focus queue API', () => {
     await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
   })
 
+  test('accepts owned Project log entries and rejects an unsafe link or unknown reason', async () => {
+    const entry = {
+      id: 'project-log:core-team:refero:risk-1',
+      teamId: 'core-team',
+      projectId: 'refero',
+      projectTitle: 'Refero',
+      entryId: 'risk-1',
+      kind: 'risk',
+      title: 'Vendor delay',
+      severity: 'high',
+      reason: 'review-overdue',
+      reviewDueDate: '2026-08-01',
+      deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+    }
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, projectLogEntries: [entry] }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).projectLogEntries).toEqual([entry])
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, projectLogEntries: [], projectLogIncomplete: true }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).projectLogIncomplete).toBe(true)
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, projectLogIncomplete: 'yes' }),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+
+    for (const invalid of [{ ...entry, deepLink: '//evil.example/x' }, { ...entry, reason: 'late' }, { ...entry, severity: 'huge' }]) {
+      globalThis.fetch = async () => new Response(
+        JSON.stringify({ ...focusQueueResponseFixture, projectLogEntries: [invalid] }),
+        { status: 200 },
+      )
+      await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+    }
+  })
+
+  test('accepts Team update reviews and rejects an unknown review target', async () => {
+    const review = {
+      id: 'update-review:team:core-team:3',
+      target: { type: 'team', teamId: 'core-team' },
+      version: 3,
+      health: 'on-track',
+      summary: 'On plan.',
+      authorMemberKey: 'lead@example.com',
+      publishedAt: '2026-08-09T09:00:00.000Z',
+      deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+    }
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, updateReviews: [review] }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).updateReviews).toEqual([review])
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({
+        ...focusQueueResponseFixture,
+        updateReviews: [{ ...review, target: { type: 'portfolio', id: 'all' } }],
+      }),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+  })
+
   test('accepts a missing involvement from an older server and rejects an unknown one', async () => {
     const firstSection = focusQueueResponseFixture.sections[0]
     const firstItem = firstSection?.items[0]

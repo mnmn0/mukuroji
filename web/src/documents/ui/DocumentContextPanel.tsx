@@ -26,7 +26,9 @@ import type {
   DocumentRecord,
   DocumentVersion,
 } from '../api'
-import { extractDocumentMentions } from '../model/comments'
+import { resolveDocumentMentions } from '../model/comments'
+import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
+import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import {
   documentContextTabs,
   resolveDocumentContextTabTarget,
@@ -170,6 +172,10 @@ export type DocumentContextPanelProps = {
    * Link 先の検索と title 表示に使う Workspace API token です。
    */
   linkAccessToken?: string
+  /** Members offered by display name after `@` in comment composers. */
+  mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
 }
 
 /**
@@ -190,6 +196,8 @@ export function DocumentContextPanel({
   isLoading = false,
   isOpen = true,
   linkAccessToken,
+  mentionMembers,
+  mentionSuggestionsFailure,
   locale = 'en',
   modal = true,
   onClose,
@@ -374,6 +382,8 @@ export function DocumentContextPanel({
             focusedCommentId={focusedCommentId}
             hasMore={hasMoreComments}
             key={`${document.id}:${defaultAnchorId ?? 'document'}`}
+            mentionMembers={mentionMembers ?? emptyMentionMembers}
+            mentionSuggestionsFailure={mentionSuggestionsFailure}
             t={t}
             onCreateComment={onCreateComment}
             onLoadMore={onLoadMoreComments}
@@ -461,6 +471,11 @@ function createDocumentContextPanelId(prefix: string): string {
   return `${prefix}-document-context-tabpanel`
 }
 
+/** Stable empty mention candidate list. */
+const emptyMentionMembers: readonly MentionableMember[] = []
+/** Empty comment composer state. */
+const emptyCommentDraft: MemberMentionDraft = { body: '', mentionMemberKeys: [] }
+
 function CommentsPanel({
   comments,
   defaultAnchorId,
@@ -470,10 +485,14 @@ function CommentsPanel({
   onCreateComment,
   onLoadMore,
   onResolveComment,
+  mentionMembers,
+  mentionSuggestionsFailure,
   t,
 }: {
   comments: DocumentComment[]
   defaultAnchorId?: string
+  mentionMembers: readonly MentionableMember[]
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
   document: DocumentRecord
   focusedCommentId?: string
   hasMore: boolean
@@ -487,12 +506,14 @@ function CommentsPanel({
   onResolveComment?: (commentId: string) => Promise<void>
   t: (key: MessageKey) => string
 }) {
-  const [body, setBody] = useState('')
+  const [draft, setDraft] = useState<MemberMentionDraft>(emptyCommentDraft)
+  const body = draft.body
   const [anchorId, setAnchorId] = useState(defaultAnchorId ?? '')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showResolved, setShowResolved] = useState(false)
   const [replyingToId, setReplyingToId] = useState<string>()
-  const [replyBody, setReplyBody] = useState('')
+  const [replyDraft, setReplyDraft] = useState<MemberMentionDraft>(emptyCommentDraft)
+  const replyBody = replyDraft.body
   const [isReplySubmitting, setIsReplySubmitting] = useState(false)
 
   const anchors =
@@ -561,11 +582,11 @@ function CommentsPanel({
     try {
       await onCreateComment(
         normalizedBody,
-        extractDocumentMentions(normalizedBody),
+        resolveDocumentMentions(normalizedBody, replyDraft.mentionMemberKeys, mentionMembers),
         root.anchor,
         root.id,
       )
-      setReplyBody('')
+      setReplyDraft(emptyCommentDraft)
       setReplyingToId(undefined)
     } finally {
       setIsReplySubmitting(false)
@@ -583,7 +604,7 @@ function CommentsPanel({
     try {
       await onCreateComment(
         normalizedBody,
-        extractDocumentMentions(normalizedBody),
+        resolveDocumentMentions(normalizedBody, draft.mentionMemberKeys, mentionMembers),
         anchorId
           ? anchors.find((anchor) => anchor.id === anchorId)?.type ===
             'whiteboard-object'
@@ -591,7 +612,7 @@ function CommentsPanel({
             : { blockId: anchorId, type: 'block' as const }
           : { type: 'document' },
       )
-      setBody('')
+      setDraft(emptyCommentDraft)
     } finally {
       setIsSubmitting(false)
     }
@@ -621,11 +642,15 @@ function CommentsPanel({
           </label>
           <label className="mt-3 grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('documents.comments.body')}
-            <textarea
-              className="workbench-input min-h-24 resize-y p-3 text-sm"
-              onChange={(event) => setBody(event.target.value)}
+            <MemberMentionTextarea
+              ariaLabel={t('documents.comments.body')}
+              className="workbench-input min-h-24 w-full resize-y p-3 text-sm"
+              draft={draft}
+              members={mentionMembers}
               placeholder={t('documents.comments.placeholder')}
-              value={body}
+              suggestionsFailure={mentionSuggestionsFailure}
+              suggestionsLabel={t('documents.comments.mentionSuggestions')}
+              onDraftChange={setDraft}
             />
           </label>
           <div className="mt-3 flex items-center justify-between gap-3">
@@ -666,7 +691,7 @@ function CommentsPanel({
                 onReply={
                   onCreateComment && !root.resolved
                     ? () => {
-                        setReplyBody('')
+                        setReplyDraft(emptyCommentDraft)
                         setReplyingToId(root.id)
                       }
                     : undefined
@@ -702,21 +727,23 @@ function CommentsPanel({
                 >
                   <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
                     {t('documents.comments.replyBody')}
-                    <textarea
+                    <MemberMentionTextarea
+                      ariaLabel={t('documents.comments.replyBody')}
                       autoFocus
-                      className="workbench-input min-h-20 resize-y p-3 text-sm"
-                      onChange={(event) =>
-                        setReplyBody(event.target.value)
-                      }
+                      className="workbench-input min-h-20 w-full resize-y p-3 text-sm"
+                      draft={replyDraft}
+                      members={mentionMembers}
                       placeholder={t('documents.comments.replyPlaceholder')}
-                      value={replyBody}
+                      suggestionsFailure={mentionSuggestionsFailure}
+              suggestionsLabel={t('documents.comments.mentionSuggestions')}
+                      onDraftChange={setReplyDraft}
                     />
                   </label>
                   <div className="flex justify-end gap-2">
                     <button
                       className="workbench-button min-h-8 px-3"
                       onClick={() => {
-                        setReplyBody('')
+                        setReplyDraft(emptyCommentDraft)
                         setReplyingToId(undefined)
                       }}
                       type="button"

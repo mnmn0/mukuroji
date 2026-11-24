@@ -28,10 +28,41 @@ test('reads archived Work Items only when asked, so time reports keep their esti
 
   expect((await listTeamWorkItemEffort('workspace', 'team', {}, teamIssues)).map((effort) => effort.workItemId)).toEqual(['open'])
   expect(await listTeamWorkItemEffort('workspace', 'team', { includeArchived: true }, teamIssues)).toEqual([
-    { workItemId: 'open', plannedEffortMinutes: 120, remainingEffortMinutes: 0 },
-    { workItemId: 'archived', plannedEffortMinutes: 120, remainingEffortMinutes: 0 },
+    expect.objectContaining({ workItemId: 'open', plannedEffortMinutes: 120, remainingEffortMinutes: 0 }),
+    expect.objectContaining({ workItemId: 'archived', plannedEffortMinutes: 120, remainingEffortMinutes: 0 }),
   ])
   expect(reads).toEqual([false, true])
+})
+
+test('lists the unfinished contributor shares that capacity planning places on members', async () => {
+  const base = createBulkRecoveryIssue()
+  const open: CanonicalWorkItem = {
+    ...base,
+    id: 'open',
+    statusCategory: 'started',
+    schedule: { mode: 'date-range', startDate: '2026-08-03', endDate: '2026-08-07', durationDays: 5, calendarPolicy: base.schedule.calendarPolicy },
+    contributorAssignments: [
+      { assignmentId: 'a'.repeat(32), memberUserId: 'dev@example.com', plannedEffortMinutes: 240, status: 'in-progress' },
+      { assignmentId: 'b'.repeat(32), memberUserId: 'done@example.com', plannedEffortMinutes: 60, status: 'done' },
+      { assignmentId: 'c'.repeat(32), jobRoleId: 'qa', plannedEffortMinutes: 60, status: 'planned' },
+      { assignmentId: 'd'.repeat(32), memberUserId: 'idle@example.com', status: 'planned' },
+    ],
+  }
+  const finished: CanonicalWorkItem = { ...open, id: 'finished', statusCategory: 'completed' }
+  const teamIssues = {
+    async getTeamIssues(_directoryId: string, teamId: string) {
+      return { teamId, issues: [open, finished], evaluatedCount: 2 }
+    },
+  }
+
+  expect(await listTeamWorkItemEffort('workspace', 'team', {}, teamIssues)).toEqual([
+    expect.objectContaining({
+      workItemId: 'open',
+      window: { fromDate: '2026-08-03', toDate: '2026-08-07' },
+      contributors: [{ assignmentId: 'a'.repeat(32), memberId: 'dev@example.com', plannedEffortMinutes: 240 }],
+    }),
+    expect.not.objectContaining({ contributors: expect.anything() }),
+  ])
 })
 
 test('writes an estimate into a stored schedule and keeps its placement', () => {

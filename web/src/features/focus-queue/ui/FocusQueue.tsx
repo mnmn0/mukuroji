@@ -46,7 +46,9 @@ import type {
   FocusQueueSnoozeFeedback,
 } from '../mutations/useFocusQueueActions'
 import { FocusPolicyPanel } from './FocusPolicyPanel'
+import { FocusProjectLogEntries } from './FocusProjectLogEntries'
 import { FocusUpdateDeadlines } from './FocusUpdateDeadlines'
+import { FocusUpdateReviews } from './FocusUpdateReviews'
 import {
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeLabel,
@@ -377,8 +379,20 @@ export function FocusQueue({
         </div>
       ) : null}
 
+      {response?.updateReviews && response.updateReviews.length > 0 ? (
+        <FocusUpdateReviews locale={locale} reviews={response.updateReviews} t={t} />
+      ) : null}
       {response?.updateDeadlines && response.updateDeadlines.length > 0 ? (
         <FocusUpdateDeadlines deadlines={response.updateDeadlines} locale={locale} t={t} />
+      ) : null}
+
+      {response ? (
+        <FocusProjectLogEntries
+          entries={response.projectLogEntries ?? []}
+          incomplete={response.projectLogIncomplete === true}
+          onRetry={onRetry}
+          t={t}
+        />
       ) : null}
 
       <div

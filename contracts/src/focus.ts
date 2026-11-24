@@ -1,4 +1,6 @@
+import type { ProjectRaidEntryKind, ProjectRaidSeverity } from './project-raid-log'
 import type { CanonicalWorkItem } from './work-items'
+import type { PlanningHealth } from './planning'
 
 /** Current schema version of the Focus queue contract. */
 export const FOCUS_SCHEMA_VERSION = 1
@@ -425,6 +427,12 @@ export type FocusUpdateDeadlineTarget =
       /** Planning entity ID of the Initiative. */
       entityId: string
     }
+  | {
+      /** Identifies a Team-level target. */
+      type: 'team'
+      /** Team that submits the update. */
+      teamId: string
+    }
 
 /**
  * Health update whose submission deadline is near or past for the current viewer, who is the
@@ -443,6 +451,66 @@ export type FocusUpdateDeadline = {
   /** ISO 8601 deadline of the current cadence occurrence. */
   dueAt: string
   /** Authorized application-relative link to the target's update page. */
+  deepLink: string
+}
+
+/**
+ * Latest health update that the viewer reviews and has not acknowledged yet. It disappears once
+ * the viewer records the acknowledgement or a newer update replaces it.
+ */
+export type FocusUpdateReview = {
+  /** Stable identifier made from the target and the update version. */
+  id: string
+  /** Project, Team, or Initiative whose update waits for acknowledgement. */
+  target: FocusUpdateDeadlineTarget
+  /** Display title of the target when the server can resolve it. */
+  title?: string
+  /** Immutable version of the latest update. */
+  version: number
+  /** Health reported by the update. */
+  health: PlanningHealth
+  /** Bounded summary text of the update. */
+  summary: string
+  /** Workspace member key of the update author. */
+  authorMemberKey: string
+  /** ISO 8601 publish time of the update. */
+  publishedAt: string
+  /** Authorized application-relative link to the target's update page. */
+  deepLink: string
+}
+
+/**
+ * Why a Project log entry the viewer owns needs attention: its review date has passed, or it is
+ * a change request still waiting for a decision.
+ */
+export type FocusProjectLogReason = 'review-overdue' | 'decision-pending'
+
+/**
+ * Open risk, issue, or change request the current viewer owns that needs attention. It
+ * disappears once the review date is moved to today or later, or once the entry is closed.
+ */
+export type FocusProjectLogEntry = {
+  /** Stable identifier made from the Team, Project, and entry. */
+  id: string
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project the log belongs to. */
+  projectId: string
+  /** Display name of the Project when the server can resolve it. */
+  projectTitle?: string
+  /** Entry ID within the Project log. */
+  entryId: string
+  /** Whether the entry is a risk, an issue, or a change request. */
+  kind: ProjectRaidEntryKind
+  /** Entry title. */
+  title: string
+  /** Severity derived from probability and impact. */
+  severity: ProjectRaidSeverity
+  /** Why the entry is listed. */
+  reason: FocusProjectLogReason
+  /** Review date in `YYYY-MM-DD`, when the entry has one. */
+  reviewDueDate?: string
+  /** Authorized application-relative link to the Project log. */
   deepLink: string
 }
 
@@ -469,6 +537,21 @@ export type FocusQueueResponse = {
    * responses from servers that predate the field.
    */
   updateDeadlines?: FocusUpdateDeadline[]
+  /**
+   * Published health updates that wait for the viewer's acknowledgement as the cadence reviewer,
+   * oldest first. Absent only in responses from servers that predate the field.
+   */
+  updateReviews?: FocusUpdateReview[]
+  /**
+   * Open Project log entries the viewer owns whose review is overdue or whose decision is pending,
+   * most severe first. Absent only in responses from servers that predate the field.
+   */
+  projectLogEntries?: FocusProjectLogEntry[]
+  /**
+   * True when the log of at least one Project could not be read, so `projectLogEntries` may be
+   * missing entries. Absent when every log was read.
+   */
+  projectLogIncomplete?: boolean
   /** Effective policies referenced by the returned items. */
   effectivePolicies: FocusEffectivePolicy[]
   /** Accessible stored Team overrides used by the policy editor. */

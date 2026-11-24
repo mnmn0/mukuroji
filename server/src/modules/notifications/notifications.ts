@@ -11,10 +11,13 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
-import type {
-  NotificationCategoryChannels,
-  NotificationMutes,
-  PersonalNotificationReminderDays,
+import {
+  isCanonicalWorkItemKey,
+  parseNotificationMessage,
+  type NotificationCategoryChannels,
+  type NotificationMessage,
+  type NotificationMutes,
+  type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
 import {
@@ -136,8 +139,12 @@ export type NotificationItem = {
   actorLabel?: string
   /** 対象 Work Item などの表示タイトルです。 */
   title?: string
+  /** Short key such as `ABC-123` of the target Work Item, when it has one. */
+  workItemKey?: string
   /** Event の安全な短い概要です。 */
   summary?: string
+  /** System が書いた概要の code と値です。読む人の言語で文にします。 */
+  message?: NotificationMessage
   /** App 内で対象を開く相対 path です。 */
   deepLink?: string
   /** 対象 Team ID です。 */
@@ -152,8 +159,8 @@ export type NotificationItem = {
   commentId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
-  /** Scheduled health update の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled health update の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled health update の canonical target ID です。 */
   planningTargetId?: string
   /** Current Planning target を再検証する record key です。 */
@@ -889,6 +896,19 @@ export function requiresCurrentWorkItemAssignee(notification: Pick<NotificationI
   )
 }
 
+/**
+ * Identifies notifications that only tell a member they joined a Work Item as a contributor.
+ *
+ * Such a notification stops being shown or delivered once the member no longer holds a
+ * contributor share of the Work Item, just as owner-only notifications follow the current owner.
+ *
+ * @param notification - Recipient-specific reasons shared by Inbox and external delivery.
+ * @returns Whether the recipient must still be a current contributor.
+ */
+export function requiresCurrentWorkItemContributor(notification: Pick<NotificationItem, 'reasons'>): boolean {
+  return notification.reasons.length > 0 && notification.reasons.every((reason) => reason === 'contributor')
+}
+
 /** Workspace/member を Notifications table の recipient partition key に変換します。 */
 export function createNotificationRecipientKey(workspaceId: string, memberKey: string) {
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`
@@ -1188,6 +1208,7 @@ export function toNotificationItem(
     return undefined
   }
   const deepLink = readText(value.deepLink)
+  const message = parseNotificationMessage(value.message)
   return {
     id: encodeNotificationIdentifier(recipientKey, notificationKey),
     eventId,
@@ -1198,7 +1219,9 @@ export function toNotificationItem(
       ? { actorLabel: readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId) }
       : {}),
     ...(readText(value.title) ? { title: readText(value.title) } : {}),
+    ...(isCanonicalWorkItemKey(value.workItemKey) ? { workItemKey: value.workItemKey } : {}),
     ...(readText(value.summary) ? { summary: readText(value.summary) } : {}),
+    ...(message ? { message } : {}),
     ...(deepLink?.startsWith('/') && !deepLink.startsWith('//') ? { deepLink } : {}),
     ...(readText(value.teamId) ? { teamId: readText(value.teamId) } : {}),
     ...(readText(value.projectId) ? { projectId: readText(value.projectId) } : {}),
@@ -1539,8 +1562,8 @@ function readStringArray(value: unknown) {
 }
 
 /** Reads a validated Planning health update target type. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning health update notification kind. */

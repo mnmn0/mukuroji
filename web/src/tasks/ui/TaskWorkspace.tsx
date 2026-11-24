@@ -751,6 +751,7 @@ export function TaskWorkspace({
       {activeTab === 'table' ? (
         <TaskTableView
           assigneeOptions={assigneeOptions}
+          exportFileBaseName={projectName}
           bulkProjectOptions={bulkProjectOptions}
           bulkTaskActionEpoch={bulkTaskActionEpoch}
           bulkTaskActionRequest={bulkTaskActionRequest}
@@ -848,6 +849,7 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          workingCalendar={workingCalendar}
           {...(scheduleWindowNavigation
             ? {
                 month: scheduleWindowNavigation.calendarMonth,

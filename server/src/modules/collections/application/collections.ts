@@ -7,6 +7,7 @@ import {
   type WorkItemCollection,
   type WorkItemCollectionEntry,
 } from '@mukuroji/contracts'
+import { createAuditFieldChanges, type MutationAuditContext, type MutationAuditEventInput } from '../../audit'
 import { CollectionError, toPublicCollection, type CollectionDeletion, type StoredCollection } from '../domain/collections'
 
 /** Persistence port for Workspace Collections.
@@ -53,8 +54,15 @@ export interface CollectionsStore {
    * @param collection - Complete next state.
    * @param expectedRevision - Stored revision, or 0 to create.
    * @param workItemFence - Work Item whose readability authorized the change.
+   * @param audit - Audit event committed with the write, when audit is configured.
    */
-  put(workspaceId: string, collection: StoredCollection, expectedRevision: number, workItemFence?: CollectionWorkItemFence): Promise<void>
+  put(
+    workspaceId: string,
+    collection: StoredCollection,
+    expectedRevision: number,
+    workItemFence?: CollectionWorkItemFence,
+    audit?: CollectionAuditWrite,
+  ): Promise<void>
   /**
    * Deletes a Collection when its stored revision still matches and records the deletion.
    *
@@ -62,8 +70,23 @@ export interface CollectionsStore {
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
    * @param deletion - Creation details kept in the deletion marker.
+   * @param audit - Audit event committed with the deletion, when audit is configured.
    */
-  delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void>
+  delete(
+    workspaceId: string,
+    collectionId: string,
+    expectedRevision: number,
+    deletion: CollectionDeletion,
+    audit?: CollectionAuditWrite,
+  ): Promise<void>
+}
+
+/** Audit event committed in the same write as one Collection change. */
+export type CollectionAuditWrite = {
+  /** Request audit context of the change. */
+  context: MutationAuditContext
+  /** Event describing the change. */
+  event: MutationAuditEventInput
 }
 
 /** Caller and clock used by Collection mutations. */
@@ -74,6 +97,8 @@ export type CollectionMutationContext = {
   actor: string
   /** Current time as an ISO timestamp. */
   now: string
+  /** Request audit context; with it each change also writes an audit event. */
+  audit?: MutationAuditContext
 }
 
 /** Readable canonical Work Item fields shown in a Collection. */
@@ -188,7 +213,12 @@ export async function createCollection(
     createFingerprint,
   }
   try {
-    await store.put(context.workspaceId, collection, 0)
+    await store.put(context.workspaceId, collection, 0, undefined, collectionAudit(context, {
+      eventType: 'collection.created',
+      action: 'created',
+      collectionId,
+      after: auditedCollectionFields(collection),
+    }))
   } catch (error) {
     const raced = error instanceof CollectionError && error.status === 409
       ? await store.get(context.workspaceId, collectionId)
@@ -238,7 +268,13 @@ export async function updateCollection(
     items: current.items,
     createFingerprint: current.createFingerprint,
   }
-  await store.put(context.workspaceId, next, current.revision)
+  await store.put(context.workspaceId, next, current.revision, undefined, collectionAudit(context, {
+    eventType: 'collection.updated',
+    action: 'updated',
+    collectionId,
+    before: auditedCollectionFields(current),
+    after: auditedCollectionFields(next),
+  }))
   return toPublicCollection(next)
 }
 
@@ -249,12 +285,14 @@ export async function updateCollection(
  * @param workspaceId - Server-resolved Workspace.
  * @param collectionId - Collection identifier.
  * @param expectedRevision - Observed revision.
+ * @param audit - Request audit context; with it the deletion also writes an audit event.
  */
 export async function deleteCollection(
   store: CollectionsStore,
   workspaceId: string,
   collectionId: string,
   expectedRevision: number,
+  audit?: MutationAuditContext,
 ): Promise<void> {
   const current = await store.get(workspaceId, collectionId)
   if (!current) {
@@ -268,7 +306,13 @@ export async function deleteCollection(
   await store.delete(workspaceId, collectionId, expectedRevision, {
     createFingerprint: current.createFingerprint,
     deletedRevision: current.revision,
-  })
+  }, collectionAudit({ workspaceId, ...(audit ? { audit } : {}) }, {
+    eventType: 'collection.deleted',
+    action: 'deleted',
+    collectionId,
+    before: auditedCollectionFields(current),
+    after: {},
+  }))
 }
 
 /** Largest encoded Collection row, kept well below DynamoDB's 400 KB item limit. */
@@ -297,7 +341,7 @@ export async function addCollectionItem(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
 ): Promise<AddWorkItemCollectionItemResponse> {
-  const { collection, observed } = await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
+  const { collection, observed } = await applyItemChange(store, context, collectionId, teamId, issueId, readWorkItem, 'added', (current) => {
     if (current.items.some((item) => item.teamId === teamId && item.issueId === issueId)) return undefined
     if (current.items.length >= COLLECTION_ITEM_LIMIT) {
       throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
@@ -348,7 +392,7 @@ export async function removeCollectionItem(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
 ): Promise<WorkItemCollection> {
-  const { collection } = await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
+  const { collection } = await applyItemChange(store, context, collectionId, teamId, issueId, readWorkItem, 'removed', (current) => {
     const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
     if (items.length === current.items.length) return undefined
     return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: nextRevision(current.revision) }
@@ -371,23 +415,26 @@ const ITEM_CHANGE_ATTEMPTS = 3
  * then becomes a no-op instead of a reported failure.
  *
  * @param store - Collection persistence.
- * @param workspaceId - Server-resolved Workspace.
+ * @param context - Caller, clock, and audit context.
  * @param collectionId - Collection identifier.
  * @param teamId - Team that owns the Work Item.
  * @param issueId - Work Item identifier.
  * @param readWorkItem - Caller-scoped Work Item reader.
+ * @param kind - Whether the change adds or removes the reference, for the audit event.
  * @param change - Returns the next state, or undefined when the change is already applied.
  * @returns The stored Collection after the change and the Work Item read by the last attempt.
  */
 async function applyItemChange(
   store: CollectionsStore,
-  workspaceId: string,
+  context: CollectionMutationContext,
   collectionId: string,
   teamId: string,
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
+  kind: 'added' | 'removed',
   change: (current: StoredCollection) => StoredCollection | undefined,
 ): Promise<{ collection: StoredCollection; observed: ObservedCollectionWorkItem }> {
+  const { workspaceId } = context
   for (let attempt = 1; ; attempt += 1) {
     const observed = await readWorkItem(teamId, issueId)
     if (!observed) throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
@@ -402,7 +449,14 @@ async function applyItemChange(
         ...(observed.accessProjectId === undefined ? {} : { accessProjectId: observed.accessProjectId }),
         ...(observed.activeProjectId === undefined ? {} : { activeProjectId: observed.activeProjectId }),
         ...(observed.activeTeamOnly ? { activeTeamOnly: true } : {}),
-      })
+      }, collectionAudit(context, {
+        eventType: `collection.item-${kind}`,
+        action: kind === 'added' ? 'item-added' : 'item-removed',
+        collectionId,
+        after: { itemCount: next.items.length },
+        before: { itemCount: current.items.length },
+        metadata: { teamId, issueId },
+      }))
       return { collection: next, observed }
     } catch (error) {
       const retryable = error instanceof CollectionError &&
@@ -537,4 +591,60 @@ function laterInstant(now: string, stored: string): string {
  */
 function corruptState(): CollectionError {
   return new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
+}
+
+/** One Collection change, before it becomes an audit event. */
+type CollectionAuditChange = {
+  /** Audit event type, such as `collection.created`. */
+  eventType: string
+  /** Audit action code. */
+  action: string
+  /** Changed Collection. */
+  collectionId: string
+  /** Audited fields before the change; absent for a created Collection. */
+  before?: Record<string, unknown>
+  /** Audited fields after the change. */
+  after: Record<string, unknown>
+  /** Additional metadata, such as the referenced Work Item. */
+  metadata?: Record<string, unknown>
+}
+
+/**
+ * Builds the audit event of one Collection change.
+ *
+ * @param context - Caller context; without an audit context no event is written.
+ * @param change - Change to record.
+ * @returns The audit write, or undefined when audit is not requested.
+ */
+function collectionAudit(
+  context: Pick<CollectionMutationContext, 'workspaceId' | 'audit'>,
+  change: CollectionAuditChange,
+): CollectionAuditWrite | undefined {
+  if (!context.audit) return undefined
+  return {
+    context: context.audit,
+    event: {
+      directoryId: context.workspaceId,
+      eventType: change.eventType,
+      entityType: 'collection',
+      entityId: change.collectionId,
+      action: change.action,
+      changes: createAuditFieldChanges(change.before ?? {}, change.after),
+      ...(change.metadata ? { metadata: change.metadata } : {}),
+    },
+  }
+}
+
+/**
+ * Picks the Collection fields recorded in its audit events.
+ *
+ * @param collection - Stored Collection.
+ * @returns Name, description, and the number of referenced Work Items.
+ */
+function auditedCollectionFields(collection: StoredCollection): Record<string, unknown> {
+  return {
+    name: collection.name,
+    ...(collection.description ? { description: collection.description } : {}),
+    itemCount: collection.items.length,
+  }
 }

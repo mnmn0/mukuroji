@@ -1,17 +1,27 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
   type ResourceAssignment,
+  type UpdateResourceRequestInput,
   type WorkloadMemberProfile,
 } from '@mukuroji/contracts'
+import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import {
   buildWorkloadSnapshot,
+  CapacityPlanningError,
   CapacityPlanningService,
   createDefaultWorkingSchedule,
+  DynamoDbCapacityPlanningRepository,
   InMemoryCapacityPlanningRepository,
+  pruneCapacityPlanningState,
+  upgradeLegacyTimeOff,
+  WORKLOAD_ESTIMATES_LIMIT_EXCEEDED,
   type CapacityPlanningState,
   type WorkloadTimeEntry,
 } from './capacity-planning'
+import type { MutationAuditContext } from '../audit'
 
 const profile = createProfile('member-1', 'UTC')
 
@@ -68,6 +78,76 @@ describe('capacity planning calculations', () => {
     expect(memberSummary.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0, 0, 480])
     expect(memberSummary.cells.map((cell) => cell.allocatedMinutes)).toEqual([720, 0, 0, 720])
     expect(memberSummary.cells.map((cell) => cell.status)).toEqual(['over', 'unavailable', 'unavailable', 'over'])
+  })
+
+  test('applies the Workspace calendar to a profile that inherits it, keeping personal days off', () => {
+    const schedule = createDefaultWorkingSchedule()
+    // A part-time member who does not work on Wednesdays.
+    schedule.wednesday = { enabled: false, minutes: 0 }
+    schedule.saturday = { enabled: true, minutes: 240 }
+    const inheriting: WorkloadMemberProfile = {
+      ...createProfile('member-1', 'UTC'),
+      calendarSource: 'workspace',
+      schedule,
+      holidays: [{ date: '2026-08-06', label: 'Personal day' }],
+    }
+    const custom = createProfile('member-2', 'UTC')
+    const workspaceCalendar = {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] as const,
+      holidays: ['2026-08-04'],
+    }
+    const snapshot = buildWorkloadSnapshot(
+      createState([inheriting, custom]),
+      // 2026-08-07T16:00Z is Friday in UTC but already Saturday 2026-08-08 in Tokyo.
+      [{ memberId: 'member-1', startAt: '2026-08-07T16:00:00.000Z', endAt: '2026-08-07T17:00:00.000Z', durationMinutes: 60, status: 'approved' }],
+      [],
+      createInput({
+        fromDate: '2026-08-03',
+        toDate: '2026-08-08',
+        workspaceCalendar: { ...workspaceCalendar, workingWeekdays: [...workspaceCalendar.workingWeekdays] },
+      }),
+    )
+
+    const [member, other] = snapshot.members
+    // Monday works; the Workspace holiday on Tuesday, the member's own Wednesday off, the personal
+    // day on Thursday; Friday works; Saturday is not a Workspace working day.
+    expect(member?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0, 0, 0, 480, 0])
+    expect(member?.cells.map((cell) => cell.actualMinutes)).toEqual([0, 0, 0, 0, 0, 60])
+    // The summary returns the stored profile for editing, not the inherited days off.
+    expect(member).toMatchObject({
+      calendarSource: 'workspace',
+      timeZone: 'UTC',
+      effectiveTimeZone: 'Asia/Tokyo',
+      holidays: [{ date: '2026-08-06', label: 'Personal day' }],
+    })
+    expect(member?.schedule).toEqual(schedule)
+    // A profile with its own calendar ignores the Workspace holiday.
+    expect(other?.calendarSource).toBe('custom')
+    expect(other?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 480, 480, 480, 480, 0])
+  })
+
+  test('uses the default Workspace calendar for an inheriting profile when none is given', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([{ ...createProfile('member-1', 'UTC'), calendarSource: 'workspace' }]),
+      [],
+      [],
+      // 2027-01-01 is a bundled Japanese national holiday.
+      createInput({ fromDate: '2026-12-31', toDate: '2027-01-01' }),
+    )
+
+    expect(snapshot.members[0]?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0])
+  })
+
+  test('reads the current holidays of a reused custom profile in every snapshot', () => {
+    const reused = createProfile('member-1', 'UTC')
+    const state = createState([reused])
+    const input = createInput({ fromDate: '2026-08-03', toDate: '2026-08-03' })
+    expect(buildWorkloadSnapshot(state, [], [], input).members[0]?.capacityMinutes).toBe(480)
+
+    reused.holidays.push({ date: '2026-08-03' })
+
+    expect(buildWorkloadSnapshot(state, [], [], input).members[0]?.capacityMinutes).toBe(0)
   })
 
   test('splits actual submitted time at a DST-aware local midnight', () => {
@@ -166,6 +246,25 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members[0]?.cells.every((cell) => cell.status === 'balanced')).toBe(true)
   })
 
+  test('starts weekly capacity buckets on the Workspace week start day', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile], [createAssignment('assignment-1', false, '2026-08-03', '2026-08-14', 4_800)]),
+      [],
+      [],
+      createInput({
+        fromDate: '2026-08-02',
+        toDate: '2026-08-15',
+        granularity: 'week',
+        weekStartDay: 0,
+      }),
+    )
+
+    expect(snapshot.members[0]?.cells.map((cell) => [cell.fromDate, cell.toDate])).toEqual([
+      ['2026-08-02', '2026-08-08'],
+      ['2026-08-09', '2026-08-15'],
+    ])
+  })
+
   test('keeps remaining effort when an earlier assignment for the Work Item is outside the range', () => {
     const assignments = [
       { ...createAssignment('outside-range', false, '2026-08-01'), workItemId: 'work-item-1' },
@@ -216,6 +315,56 @@ describe('capacity planning calculations', () => {
     expect(unestimated.members.map((member) => member.remainingEffortMinutes)).toEqual([600, 600])
   })
 
+  test('counts Work Item contributor shares in member workload without doubling planned work', () => {
+    const secondMember = createProfile('member-2', 'UTC')
+    const state = createState([profile, secondMember], [
+      // member-2 already plans their part of work-item-1, so their contributor share is not counted again.
+      { ...createAssignment('assignment-b', false), memberId: 'member-2', workItemId: 'work-item-1', plannedEffortMinutes: 120, allocationMinutes: 120 },
+    ])
+    const snapshot = buildWorkloadSnapshot(state, [], [
+      {
+        workItemId: 'work-item-1',
+        estimateMinutes: 480,
+        window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+        contributors: [
+          { assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-2', memberId: 'member-2', plannedEffortMinutes: 360 },
+          { assignmentId: 'share-3', memberId: 'outside-team', plannedEffortMinutes: 60 },
+        ],
+      },
+      {
+        workItemId: 'unscheduled',
+        contributors: [{ assignmentId: 'share-4', memberId: 'member-1', plannedEffortMinutes: 60 }],
+      },
+    ], createInput())
+
+    expect(snapshot.contributorShares).toEqual([{
+      workItemId: 'work-item-1',
+      assignmentId: 'share-1',
+      memberId: 'member-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      plannedEffortMinutes: 360,
+    }])
+    expect(snapshot.assignments.map((assignment) => assignment.id)).toEqual(['assignment-b'])
+    expect(snapshot.members.map((member) => member.allocatedMinutes)).toEqual([360, 120])
+    expect(snapshot.members.map((member) => member.plannedEffortMinutes)).toEqual([360, 120])
+    // The Work Item estimate is shared by planned effort and never added on top of it.
+    expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([360, 120])
+  })
+
+  test('leaves out contributor shares of a Project the reader cannot see', () => {
+    const snapshot = buildWorkloadSnapshot(createState([profile]), [], [{
+      workItemId: 'work-item-1',
+      projectId: 'secret',
+      window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+      contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 60 }],
+    }], createInput({ visibleProjectIds: new Set(['public']) }))
+
+    expect(snapshot.contributorShares).toEqual([])
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+  })
+
   test('bounds the snapshot time-entry query by the visible assignment horizon', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     await repository.saveState(
@@ -239,6 +388,28 @@ describe('capacity planning calculations', () => {
 
     expect(observedFrom).toBe('2026-07-31T00:00:00.000Z')
     expect(observedTo).toBe('2026-08-12T00:00:00.000Z')
+  })
+
+  test('widens the snapshot time-entry query to scheduled contributor shares', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    let observedFrom: string | undefined
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async (input) => {
+        observedFrom = input.from
+        return []
+      },
+      listEstimates: async () => [{
+        workItemId: 'work-item-1',
+        window: { fromDate: '2026-07-20', toDate: '2026-08-14' },
+        contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 600 }],
+      }],
+    })
+
+    await service.getSnapshot(createInput({ fromDate: '2026-08-10', toDate: '2026-08-10' }))
+
+    // Time logged since the share started still counts against its remaining effort.
+    expect(observedFrom).toBe('2026-07-19T00:00:00.000Z')
   })
 })
 
@@ -278,6 +449,42 @@ describe('capacity planning mutations', () => {
       code: 'CapacityPlanningRevisionConflict',
       status: 409,
     })
+  })
+
+  test('keeps the calendar source when a client leaves it out', async () => {
+    const service = new CapacityPlanningService(
+      new InMemoryCapacityPlanningRepository(),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => new Date('2026-08-01T00:00:00.000Z') },
+    )
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      actorMemberId: 'member-1',
+    }
+    // A new profile saved without the field keeps its own calendar.
+    expect((await service.saveMemberProfile({ ...base, expectedRevision: 0, expectedTeamRevision: 0 })).calendarSource)
+      .toBeUndefined()
+    expect((await service.saveMemberProfile({
+      ...base,
+      calendarSource: 'workspace',
+      expectedRevision: 1,
+      expectedTeamRevision: 1,
+    })).calendarSource).toBe('workspace')
+    // An older client that leaves the field out does not turn inheritance off.
+    expect((await service.saveMemberProfile({ ...base, expectedRevision: 2, expectedTeamRevision: 2 })).calendarSource)
+      .toBe('workspace')
+    expect((await service.saveMemberProfile({
+      ...base,
+      calendarSource: 'custom',
+      expectedRevision: 3,
+      expectedTeamRevision: 3,
+    })).calendarSource).toBeUndefined()
   })
 
   test('updates a request timestamp only when its fill status changes', async () => {
@@ -679,6 +886,373 @@ describe('capacity planning mutations', () => {
   })
 })
 
+
+describe('capacity planning reviews and retention', () => {
+  test('subtracts only approved time off and reports pending time off and tentative allocation', () => {
+    const member = {
+      ...profile,
+      timeOff: [
+        { id: 'approved', fromDate: '2026-08-03', toDate: '2026-08-03', minutesPerDay: 240, reason: 'Clinic', status: 'approved' as const, revision: 1 },
+        { id: 'pending', fromDate: '2026-08-03', toDate: '2026-08-04', reason: 'Trip', status: 'planned' as const, revision: 1 },
+        { id: 'rejected', fromDate: '2026-08-04', toDate: '2026-08-04', status: 'rejected' as const, revision: 2 },
+        { id: 'canceled', fromDate: '2026-08-04', toDate: '2026-08-04', status: 'canceled' as const, revision: 2 },
+      ],
+    }
+    const tentative = { ...createAssignment('tentative', false, '2026-08-04'), status: 'tentative' as const, allocationMinutes: 120 }
+    const state = createState([member], [createAssignment('confirmed', false, '2026-08-04', '2026-08-04', 60), tentative])
+    const managerView = buildWorkloadSnapshot(state, [], [], createInput({ toDate: '2026-08-04' }))
+    const otherView = buildWorkloadSnapshot(state, [], [], createInput({ toDate: '2026-08-04', canViewConfidential: false, viewerMemberId: 'member-2' }))
+    const [first, second] = managerView.members[0].cells
+
+    expect(first).toMatchObject({ capacityMinutes: 240, pendingTimeOffMinutes: 240, tentativeAllocatedMinutes: 0 })
+    expect(second).toMatchObject({ capacityMinutes: 480, pendingTimeOffMinutes: 480, allocatedMinutes: 180, tentativeAllocatedMinutes: 120 })
+    expect(managerView.members[0].timeOff.map((timeOff) => [timeOff.id, timeOff.reason])).toEqual([
+      ['approved', 'Clinic'],
+      ['pending', 'Trip'],
+      ['rejected', undefined],
+    ])
+    expect(otherView.members[0].timeOff.every((timeOff) => timeOff.reason === undefined)).toBe(true)
+  })
+
+  test('records a workload profile change in the same write', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    const input = {
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], actorMemberId: 'manager-1',
+    }
+    await service.saveMemberProfile({ ...input, expectedRevision: 0, expectedTeamRevision: 0 }, { auditContext })
+    await service.saveMemberProfile({ ...input, timeZone: 'Asia/Tokyo', expectedRevision: 1, expectedTeamRevision: 1 }, { auditContext })
+
+    expect(repository.auditLog.map((audit) => audit.events.map((event) => event.eventType))).toEqual([
+      ['workload.profile.created'],
+      ['workload.profile.updated'],
+    ])
+    expect(repository.auditLog[1].events[0]).toMatchObject({
+      entityId: 'team-1',
+      target: { type: 'workload-profile', id: 'member-2' },
+      changes: [{ field: 'timeZone', before: 'UTC', after: 'Asia/Tokyo' }],
+      metadata: { memberId: 'member-2', teamId: 'team-1' },
+    })
+    expect(repository.auditLog[1].events[0].metadata).not.toHaveProperty('notificationCandidates')
+  })
+
+  test('reviews time off at its own revision and records who reviewed it', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    await service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-1', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'planned', expectedRevision: 1, expectedTeamRevision: 1,
+    }, { auditContext })
+    const review = { workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', timeOffId: 'pto-1', actorMemberId: 'manager-1' }
+
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 9, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'WorkloadTimeOffRevisionConflict', status: 409 })
+    const approved = await service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }, { auditContext })
+    // The approval sent again after a lost response gets the saved result instead of a conflict,
+    // without another write; another reviewer or decision still conflicts.
+    const auditBatches = repository.auditLog.length
+    expect(await service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }, { auditContext }))
+      .toEqual(approved)
+    expect(repository.auditLog).toHaveLength(auditBatches)
+    await expect(service.reviewTimeOff({ ...review, actorMemberId: 'manager-2', status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    await expect(service.reviewTimeOff({ ...review, status: 'rejected', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 3 }))
+      .rejects.toMatchObject({ code: 'WorkloadTimeOffRevisionConflict' })
+    const reopened = await service.reviewTimeOff({ ...review, status: 'planned', expectedRevision: 2, expectedTeamRevision: 3 })
+
+    expect(approved).toMatchObject({ status: 'approved', reviewedBy: 'manager-1', reviewedAt: '2026-08-01T00:00:00.000Z', revision: 2 })
+    // Once the decision changed again, the old approval is no longer the saved result.
+    await expect(service.reviewTimeOff({ ...review, status: 'approved', expectedRevision: 1, expectedTeamRevision: 2 }))
+      .rejects.toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    expect(reopened.reviewedBy).toBeUndefined()
+    expect(reopened.submittedAt).toBe('2026-08-01T00:00:00.000Z')
+    expect(upgradeLegacyTimeOff(reopened)).toEqual(reopened)
+    expect(repository.auditLog.map((audit) => audit.events[0].eventType)).toEqual([
+      'workload.time-off.requested',
+      'workload.time-off.approved',
+    ])
+    expect(repository.auditLog[0].events[0].metadata).not.toHaveProperty('notificationCandidates')
+    expect(repository.auditLog[1].events[0].metadata).toMatchObject({
+      teamId: 'team-1',
+      notificationCandidates: [{ memberKey: 'member-2', reason: 'time-off-review' }],
+    })
+  })
+
+  test('cancels a request together with its assignments and notifies each assigned member', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Release', skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03',
+      requestedMinutes: 480, confidential: false, expectedTeamRevision: 1, actorMemberId: 'manager-1',
+    })
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, memberId: 'member-2', skillIds: [],
+      fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 480, plannedEffortMinutes: 480, confidential: false,
+      status: 'tentative', expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    })
+    const cancel: UpdateResourceRequestInput = {
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
+      expectedRevision: 2, expectedTeamRevision: 3, actorMemberId: 'manager-1',
+    }
+
+    // An assignment the caller did not authorize, such as one added since it checked, stops the cascade.
+    await expect(service.updateRequest(cancel, { canViewConfidential: true, authorizedAssignmentIds: new Set() }))
+      .rejects.toMatchObject({ code: 'ResourceRequestAssignmentsChanged' })
+    expect(await service.listActiveRequestAssignments('workspace-1', 'team-1', request.id)).toEqual({ teamRevision: 3, assignments: [assignment] })
+    const canceled = await service.updateRequest(cancel, {
+      canViewConfidential: true,
+      authorizedAssignmentIds: new Set([assignment.id]),
+    }, { auditContext })
+    const state = await repository.getState('workspace-1', 'team-1')
+
+    expect(canceled.status).toBe('canceled')
+    expect(state.assignments.map((assignment) => assignment.status)).toEqual(['canceled'])
+    expect(repository.auditLog.at(-1)?.events.map((event) => [event.eventType, event.metadata?.notificationCandidates])).toEqual([
+      ['workload.assignment.canceled', [{ memberKey: 'member-2', reason: 'workload-assignment' }]],
+      ['workload.request.canceled', undefined],
+    ])
+  })
+
+  test('refuses a cascade larger than one write can audit assignment by assignment', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-3', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 1, actorMemberId: 'member-3',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Migration', skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03',
+      requestedMinutes: 99 * 60, confidential: false, expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    })
+    const ids = new Set<string>()
+    for (let index = 0; index < 99; index += 1) {
+      const assignment = await service.createAssignment({
+        workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, memberId: index % 2 === 0 ? 'member-2' : 'member-3',
+        skillIds: [], fromDate: '2026-08-03', toDate: '2026-08-03', allocationMinutes: 1, plannedEffortMinutes: 1,
+        confidential: false, status: 'tentative', expectedTeamRevision: 3 + index, actorMemberId: 'manager-1',
+      })
+      ids.add(assignment.id)
+    }
+    const current = await service.getRequest('workspace-1', 'team-1', request.id)
+
+    const cancel: UpdateResourceRequestInput = {
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: request.id, status: 'canceled', cancelAssignments: true,
+      expectedRevision: current.revision, expectedTeamRevision: 102, actorMemberId: 'manager-1',
+    }
+
+    // 99 assignment events, the request event, and the state Put would exceed DynamoDB's 100 items.
+    await expect(service.updateRequest(cancel, { canViewConfidential: true, authorizedAssignmentIds: ids }, { auditContext }))
+      .rejects.toMatchObject({ code: 'ResourceRequestCascadeTooLarge', status: 413 })
+    const [first] = ids
+    if (!first) throw new Error('The fixture must have assignments.')
+    const single = await service.getAssignment('workspace-1', 'team-1', first)
+    await service.updateAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', assignmentId: first, status: 'canceled',
+      expectedRevision: single.revision, expectedTeamRevision: 102, actorMemberId: 'manager-1',
+    })
+    const after = await service.getRequest('workspace-1', 'team-1', request.id)
+    await service.updateRequest({ ...cancel, expectedRevision: after.revision, expectedTeamRevision: 103 }, {
+      canViewConfidential: true, authorizedAssignmentIds: ids,
+    }, { auditContext })
+    const events = repository.auditLog.at(-1)?.events ?? []
+
+    // Each of the remaining 98 assignments keeps its own audit event and target.
+    expect(events).toHaveLength(99)
+    expect(events.filter((event) => event.eventType === 'workload.assignment.canceled')).toHaveLength(98)
+    expect(events.at(-1)?.eventType).toBe('workload.request.canceled')
+  })
+
+  test('reports a replayed audit event as a duplicate and keeps other transaction failures as errors', async () => {
+    const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1', credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }))
+    const repository = new DynamoDbCapacityPlanningRepository('capacity', client, 'audit-events')
+    const state: CapacityPlanningState = { revision: 2, profiles: [], requests: [], assignments: [] }
+    const audit = {
+      context: auditContext,
+      events: [{
+        directoryId: 'workspace-1', eventType: 'workload.request.created', entityType: 'team-workload', entityId: 'team-1',
+        action: 'resource_request_created',
+      }],
+    }
+    /** Builds a transaction cancellation with the given item reasons. */
+    const canceled = (...codes: string[]) => Object.assign(new Error('Transaction cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: codes.map((Code) => ({ Code })),
+    })
+    const save = async (error: Error) => {
+      const send = spyOn(client, 'send').mockImplementation(async () => { throw error })
+      try {
+        return await repository.saveState('workspace-1', 'team-1', state, 1, audit).then(() => undefined, (cause: unknown) => cause)
+      } finally {
+        send.mockRestore()
+      }
+    }
+
+    expect(await save(canceled('ConditionalCheckFailed', 'None'))).toMatchObject({ code: 'CapacityPlanningRevisionConflict' })
+    expect(await save(canceled('None', 'ConditionalCheckFailed'))).toMatchObject({ code: 'CapacityPlanningDuplicateRequest' })
+    const conflict = await save(canceled('None', 'TransactionConflict'))
+    expect(conflict).not.toBeInstanceOf(CapacityPlanningError)
+    expect(conflict).toMatchObject({ name: 'TransactionCanceledException' })
+    expect(await save(canceled('ThrottlingError', 'ConditionalCheckFailed'))).not.toBeInstanceOf(CapacityPlanningError)
+  })
+
+  test('derives request fulfillment again after pruning an old assignment', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const state = await repository.getState('workspace-1', 'team-1')
+    const timestamp = '2025-01-01T00:00:00.000Z'
+    const assignment = (id: string, fromDate: string, toDate: string): ResourceAssignment => ({
+      id, workspaceId: 'workspace-1', teamId: 'team-1', requestId: 'request-1', memberId: 'member-2', skillIds: [],
+      fromDate, toDate, allocationMinutes: 300, plannedEffortMinutes: 300, confidential: false, status: 'confirmed',
+      revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    })
+    await repository.saveState('workspace-1', 'team-1', {
+      ...state,
+      revision: 2,
+      requests: [{
+        id: 'request-1', workspaceId: 'workspace-1', teamId: 'team-1', title: 'Long run', skillIds: [], fromDate: '2025-11-01',
+        toDate: '2026-09-30', requestedMinutes: 600, confidential: false, status: 'filled', revision: 3,
+        createdAt: timestamp, updatedAt: timestamp,
+      }],
+      assignments: [assignment('old', '2025-01-01', '2025-01-31'), assignment('recent', '2026-08-03', '2026-08-03')],
+    }, 1)
+
+    const changed = await service.updateRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', requestId: 'request-1', title: 'Long run, phase 2',
+      expectedRevision: 3, expectedTeamRevision: 2, actorMemberId: 'manager-1',
+    }, { canViewConfidential: true }, { auditContext })
+    const saved = await repository.getState('workspace-1', 'team-1')
+
+    expect(saved.assignments.map((row) => row.id)).toEqual(['recent'])
+    // The response and audit event describe the request as saved, so the next change does not conflict.
+    expect(saved.requests[0]).toMatchObject({ status: 'partially-filled', revision: 4, title: 'Long run, phase 2' })
+    expect(changed).toEqual(saved.requests[0])
+    expect(repository.auditLog.at(-1)?.events[0]?.changes).not.toContainEqual(expect.objectContaining({ field: 'status' }))
+  })
+
+  test('refuses rows that would end before retention instead of saving and pruning them at once', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    const before = await repository.getState('workspace-1', 'team-1')
+
+    // 2026-08-01 minus 400 days is 2025-06-27, so these rows would be pruned by the same write.
+    await expect(service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-old', fromDate: '2025-06-01', toDate: '2025-06-26', status: 'planned', expectedRevision: 1, expectedTeamRevision: before.revision,
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention', status: 400 })
+    await expect(service.createRequest({
+      workspaceId: 'workspace-1', teamId: 'team-1', title: 'Old', skillIds: [], fromDate: '2025-06-01', toDate: '2025-06-26',
+      requestedMinutes: 60, confidential: false, expectedTeamRevision: before.revision, actorMemberId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention' })
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', skillIds: [], fromDate: '2025-06-27', toDate: '2025-06-27',
+      allocationMinutes: 60, plannedEffortMinutes: 60, confidential: false, status: 'tentative',
+      expectedTeamRevision: before.revision, actorMemberId: 'manager-1',
+    })
+    await expect(service.updateAssignment({
+      workspaceId: 'workspace-1', teamId: 'team-1', assignmentId: assignment.id, fromDate: '2025-06-26', toDate: '2025-06-26',
+      expectedRevision: 1, expectedTeamRevision: before.revision + 1, actorMemberId: 'manager-1',
+    })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention' })
+    expect((await repository.getState('workspace-1', 'team-1')).assignments.map((row) => row.id)).toEqual([assignment.id])
+  })
+
+  test('refuses to reject time off that ended past the closed-row retention', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    await seedMember(service, 'member-2')
+    // 2026-08-01 minus 30 days is 2026-07-02: a rejection would be pruned by the same write.
+    await service.saveTimeOff({
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', actorMemberId: 'member-2',
+      id: 'pto-old', fromDate: '2026-06-01', toDate: '2026-07-01', status: 'planned', expectedRevision: 1, expectedTeamRevision: 1,
+    })
+    const review = { workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', timeOffId: 'pto-old', actorMemberId: 'manager-1', expectedRevision: 1, expectedTeamRevision: 2 }
+
+    await expect(service.reviewTimeOff({ ...review, status: 'rejected' })).rejects.toMatchObject({ code: 'WorkloadDateOutOfRetention', status: 400 })
+    expect(await service.reviewTimeOff({ ...review, status: 'approved' })).toMatchObject({ status: 'approved', revision: 2 })
+  })
+
+  test('reads time off saved before approval existed as approved so capacity does not change', () => {
+    const legacy = { id: 'legacy', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'planned' as const, revision: 1 }
+    const submitted = { ...legacy, id: 'submitted', submittedAt: '2026-08-01T00:00:00.000Z' }
+
+    expect(upgradeLegacyTimeOff(legacy).status).toBe('approved')
+    expect(upgradeLegacyTimeOff(submitted).status).toBe('planned')
+    expect(upgradeLegacyTimeOff({ ...legacy, status: 'canceled' }).status).toBe('canceled')
+  })
+
+  test('prunes closed rows after 30 days and any row after 400 days, keeping referenced requests', () => {
+    const request = (id: string, toDate: string, status: 'open' | 'canceled') => ({
+      id, workspaceId: 'workspace-1', teamId: 'team-1', title: id, skillIds: [], fromDate: toDate, toDate,
+      requestedMinutes: 60, confidential: false, status, revision: 1,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    })
+    const state: CapacityPlanningState = {
+      revision: 3,
+      profiles: [{
+        ...profile,
+        timeOff: [
+          { id: 'recent-rejected', fromDate: '2026-07-10', toDate: '2026-07-10', status: 'rejected', revision: 1 },
+          { id: 'old-rejected', fromDate: '2026-06-01', toDate: '2026-06-01', status: 'rejected', revision: 1 },
+          { id: 'old-approved', fromDate: '2025-06-01', toDate: '2025-06-01', status: 'approved', revision: 1 },
+          { id: 'approved', fromDate: '2026-06-01', toDate: '2026-06-01', status: 'approved', revision: 1 },
+        ],
+      }],
+      requests: [
+        request('old-canceled', '2026-06-01', 'canceled'),
+        request('referenced-canceled', '2026-06-01', 'canceled'),
+        request('ancient-open', '2025-06-01', 'open'),
+        request('open', '2026-06-01', 'open'),
+      ],
+      assignments: [
+        { ...createAssignment('old-canceled', false, '2026-06-01'), status: 'canceled' },
+        { ...createAssignment('kept', false, '2026-06-01'), requestId: 'referenced-canceled' },
+        createAssignment('ancient', false, '2025-06-01'),
+      ],
+    }
+
+    pruneCapacityPlanningState(state, '2026-08-01')
+
+    expect(state.profiles[0].timeOff.map((timeOff) => timeOff.id)).toEqual(['recent-rejected', 'approved'])
+    expect(state.requests.map((value) => value.id)).toEqual(['referenced-canceled', 'open'])
+    expect(state.assignments.map((value) => value.id)).toEqual(['kept'])
+  })
+})
+
+const auditContext: MutationAuditContext = {
+  workspaceId: 'workspace-1',
+  actor: { id: 'actor-1', kind: 'user' },
+  source: { kind: 'api' },
+  idempotencyKeyHash: 'hash-1',
+  requestFingerprint: 'fingerprint-1',
+  correlationId: 'correlation-1',
+  occurredAt: '2026-08-01T00:00:00.000Z',
+}
+
+/** Creates a service with a fixed clock and sequential identifiers. */
+function createReviewService(repository: InMemoryCapacityPlanningRepository): CapacityPlanningService {
+  let sequence = 0
+  return new CapacityPlanningService(
+    repository,
+    { listTimeEntries: async () => [], listEstimates: async () => [] },
+    { now: () => new Date('2026-08-01T00:00:00.000Z'), createId: () => `generated-${++sequence}` },
+  )
+}
+
+/** Saves a default profile for one member as the first Team write. */
+async function seedMember(service: CapacityPlanningService, memberId: string): Promise<void> {
+  await service.saveMemberProfile({
+    workspaceId: 'workspace-1', teamId: 'team-1', memberId, skills: [], timeZone: 'UTC',
+    schedule: createDefaultWorkingSchedule(), holidays: [], expectedRevision: 0, expectedTeamRevision: 0, actorMemberId: memberId,
+  })
+}
+
 /** Creates a deterministic member profile fixture. */
 function createProfile(memberId: string, timeZone: string): WorkloadMemberProfile {
   return {
@@ -743,4 +1317,455 @@ function createInput(overrides: Partial<Parameters<typeof buildWorkloadSnapshot>
     canViewConfidential: true,
     ...overrides,
   }
+}
+
+/** Re-scopes a profile fixture to another Team. */
+function inTeam<T extends { teamId: string }>(value: T, teamId: string): T {
+  return { ...value, teamId }
+}
+
+/** Saves one Team state per entry and returns a service reading them. */
+async function createWorkspaceService(states: Record<string, CapacityPlanningState>) {
+  const repository = new InMemoryCapacityPlanningRepository()
+  for (const [teamId, state] of Object.entries(states)) await repository.saveState('workspace-1', teamId, state, 0)
+  return new CapacityPlanningService(
+    repository,
+    { listTimeEntries: async () => [], listEstimates: async () => [] },
+    { now: () => new Date('2026-08-01T00:00:00.000Z') },
+  )
+}
+
+describe('Workspace-wide workload', () => {
+  const twoTeams = () => ({
+    'team-1': createState([profile], [createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300)]),
+    'team-2': createState(
+      [inTeam(profile, 'team-2')],
+      [inTeam({ ...createAssignment('assignment-2', false, '2026-08-03', '2026-08-03', 300), projectId: 'project-2' }, 'team-2')],
+    ),
+  })
+
+  test('marks a member over in both Team views when two Teams together exceed capacity', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    for (const teamId of ['team-1', 'team-2']) {
+      const snapshot = await service.getSnapshot(createInput({ teamId }))
+      const cell = snapshot.members[0]?.cells[0]
+      expect(cell).toMatchObject({
+        allocatedMinutes: 300,
+        status: 'under',
+        workspaceCapacityMinutes: 480,
+        workspaceAllocatedMinutes: 600,
+        workspaceStatus: 'over',
+      })
+      expect(snapshot.members[0]?.workspaceOverloaded).toBe(true)
+    }
+  })
+
+  test('counts contributor shares of every Team in Workspace-wide totals', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')], [
+      // This assignment already plans the member's part of work-item-planned, so its share is not counted again.
+      inTeam({ ...createAssignment('assignment-2', false, '2026-08-03', '2026-08-03', 60), workItemId: 'work-item-planned' }, 'team-2'),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [
+            {
+              workItemId: 'work-item-shared',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+            },
+            {
+              workItemId: 'work-item-planned',
+              window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+              contributors: [{ assignmentId: 'share-2', memberId: 'member-1', plannedEffortMinutes: 120 }],
+            },
+          ]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 660,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 660,
+      status: 'over',
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 360,
+    })
+  })
+
+  test('counts contributor shares of an active Team that never saved capacity state', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => teamId === 'team-2'
+        ? [{
+            workItemId: 'work-item-shared',
+            window: { fromDate: '2026-08-03', toDate: '2026-08-03' },
+            contributors: [{ assignmentId: 'share-1', memberId: 'member-1', plannedEffortMinutes: 300 }],
+          }]
+        : [],
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+    const activeTeamIds = new Set(['team-1', 'team-2'])
+
+    const teamSnapshot = await service.getSnapshot({ ...createInput(), activeTeamIds })
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 300,
+      workspaceAllocatedMinutes: 600,
+      workspaceStatus: 'over',
+    })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+      activeTeamIds,
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 600,
+      status: 'over',
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
+  test('keeps a Team view when another Team\'s estimates cannot be read, and fails the Workspace read', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile], [
+      createAssignment('assignment-1', false, '2026-08-03', '2026-08-03', 300),
+    ]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const teamSnapshot = await service.getSnapshot(createInput())
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300 })
+    // Totals that would miss team-2's shares are left out rather than shown too low, and say so.
+    expect(teamSnapshot.members[0]?.cells[0]).not.toHaveProperty('workspaceAllocatedMinutes')
+    expect(teamSnapshot.workspaceTotalsUnavailable).toBe(true)
+
+    await expect(service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })).rejects.toThrow('Too many Work Items.')
+  })
+
+  test('fails a Team view when another Team\'s estimates fail for an unexpected reason', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') throw new Error('Storage unavailable.')
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
+  })
+
+  test('reports an unexpected failure even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          throw new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.')
+        }
+        if (teamId === 'team-3') {
+          // Fails after the limit error, so a fail-fast read would never see it.
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          throw new Error('Storage unavailable.')
+        }
+        return []
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
+  })
+
+  test('reports a failure without a reason even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          return Promise.reject(new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.'))
+        }
+        // oxlint-disable-next-line prefer-promise-reject-errors -- the case under test is a rejection without a reason.
+        if (teamId === 'team-3') return Promise.reject(undefined)
+        return Promise.resolve([])
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const outcome = await service.getSnapshot(createInput()).then(
+      () => 'resolved',
+      (reason: unknown) => reason === undefined ? 'rejected without a reason' : 'rejected with a reason',
+    )
+    expect(outcome).toBe('rejected without a reason')
+  })
+
+  test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+
+    expect(snapshot.teams).toEqual([{ teamId: 'team-1', name: 'Team 1' }])
+    expect(snapshot.members).toHaveLength(1)
+    expect(snapshot.members[0]).toMatchObject({ memberId: 'member-1', teamIds: ['team-1'], overloaded: true })
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({
+      capacityMinutes: 480,
+      allocatedMinutes: 600,
+      status: 'over',
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      projects: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
+  test('keeps confidential rows and invisible Projects out of the breakdown for a Team viewer', async () => {
+    const service = await createWorkspaceService({
+      'team-1': createState([profile], [
+        { ...createAssignment('secret', true, '2026-08-03', '2026-08-03', 120), projectId: 'project-1' },
+        { ...createAssignment('other-project', false, '2026-08-03', '2026-08-03', 60), projectId: 'project-9' },
+        { ...createAssignment('visible', false, '2026-08-03', '2026-08-03', 30), projectId: 'project-1' },
+      ]),
+    })
+    const read = async (canViewConfidential: boolean) => await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{
+        teamId: 'team-1',
+        name: 'Team 1',
+        visibleMemberIds: new Set(['member-1']),
+        visibleProjectIds: new Set(['project-1']),
+        canViewConfidential,
+      }],
+    })
+
+    expect((await read(false)).members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 210,
+      projects: [{ teamId: 'team-1', projectId: 'project-1', allocatedMinutes: 30 }],
+      hiddenAllocatedMinutes: 180,
+    })
+    expect((await read(true)).members[0]?.cells[0]).toMatchObject({
+      projects: [{ teamId: 'team-1', projectId: 'project-1', allocatedMinutes: 150 }],
+      hiddenAllocatedMinutes: 60,
+    })
+  })
+
+  test('uses the smallest capacity of the member profiles, so time off in one Team counts everywhere', async () => {
+    const service = await createWorkspaceService({
+      'team-1': createState([profile]),
+      'team-2': createState([{
+        ...inTeam(profile, 'team-2'),
+        timeOff: [{ id: 'pto', fromDate: '2026-08-03', toDate: '2026-08-03', status: 'approved', revision: 1 }],
+      }]),
+    })
+
+    const snapshot = await service.getSnapshot(createInput({ teamId: 'team-1' }))
+
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({ capacityMinutes: 480, workspaceCapacityMinutes: 0 })
+  })
+
+  test('hides the allocation of a Team whose member allowlist leaves the member out', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [
+        { teamId: 'team-1', name: 'Team 1', canViewConfidential: false },
+        { teamId: 'team-2', name: 'Team 2', visibleMemberIds: new Set(['viewer-1']), canViewConfidential: true },
+      ],
+    })
+
+    expect(snapshot.members[0]).toMatchObject({ memberId: 'member-1', teamIds: ['team-1'] })
+    expect(snapshot.members[0]?.cells[0]).toMatchObject({
+      allocatedMinutes: 600,
+      teams: [{ teamId: 'team-1', allocatedMinutes: 300 }],
+      hiddenAllocatedMinutes: 300,
+    })
+  })
+
+  test('labels a member only from the profiles of Teams the viewer may see', async () => {
+    const { displayName: _displayName, role: _role, ...unlabeled } = profile
+    const service = await createWorkspaceService({
+      'team-1': createState([unlabeled]),
+      'team-2': createState([{ ...inTeam(profile, 'team-2'), displayName: 'Secret name', role: 'Secret role' }]),
+    })
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+    })
+
+    expect(snapshot.members[0]?.memberId).toBe('member-1')
+    expect(snapshot.members[0]?.displayName).toBeUndefined()
+    expect(snapshot.members[0]?.role).toBeUndefined()
+  })
+
+  test('leaves archived Teams out of Workspace totals', async () => {
+    const service = await createWorkspaceService(twoTeams())
+    const activeTeamIds = new Set(['team-1'])
+
+    const teamSnapshot = await service.getSnapshot({ ...createInput({ teamId: 'team-1' }), activeTeamIds })
+    expect(teamSnapshot.members[0]?.cells[0]).toMatchObject({ workspaceAllocatedMinutes: 300, workspaceStatus: 'under' })
+
+    const workspace = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-1', name: 'Team 1', canViewConfidential: false }],
+      activeTeamIds,
+    })
+    expect(workspace.members[0]?.cells[0]).toMatchObject({ allocatedMinutes: 300, hiddenAllocatedMinutes: 0 })
+  })
+
+  test('leaves out members the viewer cannot see in any viewable Team', async () => {
+    const service = await createWorkspaceService(twoTeams())
+
+    const snapshot = await service.getWorkspaceSnapshot({
+      workspaceId: 'workspace-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-09',
+      granularity: 'week',
+      viewerMemberId: 'viewer-1',
+      teams: [{ teamId: 'team-2', name: 'Team 2', visibleMemberIds: new Set(['viewer-1']), canViewConfidential: false }],
+    })
+
+    expect(snapshot.members).toEqual([])
+  })
+})
+
+describe('DynamoDbCapacityPlanningRepository', () => {
+  test('lists Team states across every Query page', async () => {
+    const requests: Record<string, unknown>[] = []
+    const lastEvaluatedKey = { workspaceId: { S: 'workspace-1' }, recordKey: { S: 'CAPACITY#TEAM#team-a' } }
+    const pages = [
+      { Items: [storedStateItem('team-a')], LastEvaluatedKey: lastEvaluatedKey },
+      { Items: [storedStateItem('team-b')] },
+    ]
+    const lowLevelClient = new DynamoDBClient({
+      credentials: { accessKeyId: 'test-access-key', secretAccessKey: 'test-secret-key' },
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push(readJsonRequestBody(request))
+          const page = pages[requests.length - 1] ?? { Items: [] }
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(page)),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = createDynamoDbDocumentClient(lowLevelClient)
+    try {
+      const repository = new DynamoDbCapacityPlanningRepository('capacity-table', documentClient)
+
+      const states = await repository.listStates('workspace-1')
+
+      expect(states.map((state) => state.teamId)).toEqual(['team-a', 'team-b'])
+      expect(requests).toHaveLength(2)
+      expect(requests[0]?.ExclusiveStartKey).toBeUndefined()
+      expect(requests[1]?.ExclusiveStartKey).toEqual(lastEvaluatedKey)
+    } finally {
+      documentClient.destroy()
+    }
+  })
+})
+
+/** Encodes an empty stored Team state as a low-level DynamoDB item. */
+function storedStateItem(teamId: string): Record<string, unknown> {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `CAPACITY#TEAM#${teamId}` },
+    revision: { N: '1' },
+    profiles: { L: [] },
+    requests: { L: [] },
+    assignments: { L: [] },
+  }
+}
+
+/** Parses the JSON body of an AWS SDK request. */
+function readJsonRequestBody(request: unknown): Record<string, unknown> {
+  if (!isRecord(request)) throw new TypeError('Expected an AWS SDK request object.')
+  const body = Reflect.get(request, 'body')
+  const text = typeof body === 'string'
+    ? body
+    : body instanceof Uint8Array
+      ? new TextDecoder().decode(body)
+      : undefined
+  if (text === undefined) throw new TypeError('Expected an AWS SDK request body.')
+  const parsed: unknown = JSON.parse(text)
+  if (!isRecord(parsed)) throw new TypeError('Expected an AWS SDK JSON request body.')
+  return parsed
+}
+
+/** Returns whether an unknown value is a non-array object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

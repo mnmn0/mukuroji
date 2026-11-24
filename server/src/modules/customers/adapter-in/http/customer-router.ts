@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono'
+import type { MutationAuditContext } from '../../../audit'
 import type {
   CreateCustomerContactInput,
   CreateCustomerInput,
@@ -87,6 +88,8 @@ export type CustomerProjectAuthorization = {
 export type CustomerRouterDependencies<Principal extends CustomerPrincipal = CustomerPrincipal> = {
   /** Returns the Customer application client. */
   getCustomers(): CustomerClient
+  /** Builds the audit context recorded with Customer writes; omitted when audit is not wired. */
+  createAuditContext?(context: Context, principal: Principal): MutationAuditContext
   /** Authenticates and authorizes the current Workspace request. */
   requireWorkspaceAccess(context: Context, minimum: 'read' | 'write' | 'manage', scope?: CustomerAuthorizationScope): Promise<Principal>
   /** Verifies Team access before associating a Triage Entry. */
@@ -122,7 +125,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/export', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      return context.json(await projectExport(principal, await dependencies.getCustomers().exportWorkspace(principal.directoryId), dependencies))
+      return context.json(await projectExport(principal, await customersFor(dependencies, context, principal).exportWorkspace(principal.directoryId), dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -133,7 +136,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const input = readCustomerListInput(context)
       requireRestrictedCustomerFilters(principal, input)
-      const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
+      const page = await customersFor(dependencies, context, principal).listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
         customers: page.customers.map((customer) => projectCustomer(principal, customer)),
@@ -146,7 +149,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/views', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      const views = await dependencies.getCustomers().listSavedViews(principal.directoryId)
+      const views = await customersFor(dependencies, context, principal).listSavedViews(principal.directoryId)
       return context.json({ views: views.map((view) => projectSavedView(principal, view)) })
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -158,7 +161,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const input = readCreateSavedViewInput(await dependencies.readJson(context.req))
       requireRestrictedCustomerFilters(principal, input.filters)
-      const view = await dependencies.getCustomers().createSavedView(
+      const view = await customersFor(dependencies, context, principal).createSavedView(
         principal.directoryId,
         principal.userKey,
         input,
@@ -175,7 +178,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const input = readUpdateSavedViewInput(await dependencies.readJson(context.req))
       if (input.filters) requireRestrictedCustomerFilters(principal, input.filters)
-      const view = await dependencies.getCustomers().updateSavedView(
+      const view = await customersFor(dependencies, context, principal).updateSavedView(
         principal.directoryId,
         context.req.param('viewId') ?? '',
         principal.userKey,
@@ -190,7 +193,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.delete('/api/customers/views/:viewId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      await dependencies.getCustomers().deleteSavedView(
+      await customersFor(dependencies, context, principal).deleteSavedView(
         principal.directoryId,
         context.req.param('viewId') ?? '',
         principal.userKey,
@@ -207,7 +210,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const input = readCustomerListInput(context)
       requireRestrictedCustomerFilters(principal, input)
-      const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
+      const page = await customersFor(dependencies, context, principal).listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
         customers: page.customers.map((customer) => projectCustomer(principal, customer)),
@@ -225,7 +228,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const authorizationConditionChecks = input.ownerUserId === undefined
         ? undefined
         : await dependencies.verifyCustomerOwner(principal, input.ownerUserId)
-      const customer = await dependencies.getCustomers().createCustomer(
+      const customer = await customersFor(dependencies, context, principal).createCustomer(
         principal.directoryId,
         principal.userKey,
         input,
@@ -244,7 +247,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       return context.json({
         workItems: await projectCustomerWorkItems(
           principal,
-          await dependencies.getCustomers().listCustomerWorkItems(
+          await customersFor(dependencies, context, principal).listCustomerWorkItems(
             principal.directoryId,
             context.req.param('customerId') ?? '',
           ),
@@ -259,7 +262,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/:customerId/contacts', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      const contacts = await dependencies.getCustomers().listContacts(
+      const contacts = await customersFor(dependencies, context, principal).listContacts(
         principal.directoryId,
         context.req.param('customerId') ?? '',
       )
@@ -273,7 +276,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const input = readCreateContactInput(await dependencies.readJson(context.req))
-      const contact = await dependencies.getCustomers().createContact(
+      const contact = await customersFor(dependencies, context, principal).createContact(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
@@ -289,7 +292,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/:customerId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      return context.json(await projectCustomerDetail(principal, await dependencies.getCustomers().getCustomer(
+      return context.json(await projectCustomerDetail(principal, await customersFor(dependencies, context, principal).getCustomer(
         principal.directoryId,
         context.req.param('customerId') ?? '',
       ), dependencies))
@@ -305,7 +308,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const authorizationConditionChecks = input.ownerUserId === undefined || input.ownerUserId === null
         ? undefined
         : await dependencies.verifyCustomerOwner(principal, input.ownerUserId)
-      const customer = await dependencies.getCustomers().updateCustomer(
+      const customer = await customersFor(dependencies, context, principal).updateCustomer(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
@@ -327,7 +330,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       if (!triage.clearCustomerAssociations || !triage.listCustomerAssociations) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association cleanup is unavailable.')
       }
-      const customers = dependencies.getCustomers()
+      const customers = customersFor(dependencies, context, principal)
       const authorizeAssociation: TriageCustomerAssociationAuthorizationFactory = async (entry) => {
         await dependencies.verifyTriageAccess(principal, entry.teamId, 'member')
         return await dependencies.createTriageAuthorizationConditionChecks(
@@ -371,7 +374,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       if (!triage.associateCustomer || !triage.listCustomerAssociations) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association repointing is unavailable.')
       }
-      const customers = dependencies.getCustomers()
+      const customers = customersFor(dependencies, context, principal)
       const listCustomerAssociations = triage.listCustomerAssociations.bind(triage)
       const sourceCustomerId = context.req.param('customerId') ?? ''
       const input = readMergeCustomerInput(await dependencies.readJson(context.req))
@@ -445,7 +448,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customers/:customerId/contacts/:contactId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      const contact = await dependencies.getCustomers().updateContact(
+      const contact = await customersFor(dependencies, context, principal).updateContact(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         context.req.param('contactId') ?? '',
@@ -464,7 +467,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const customerId = context.req.param('customerId') ?? ''
       const contactId = context.req.param('contactId') ?? ''
       const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
-      const customers = dependencies.getCustomers()
+      const customers = customersFor(dependencies, context, principal)
       await assertContactMutationAllowed(principal.directoryId, customerId, contactId, dependencies)
       await customers.beginCustomerContactDeletion(
         principal.directoryId,
@@ -512,7 +515,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
       const input = readMergeContactInput(await dependencies.readJson(context.req))
       const sourceContactId = context.req.param('contactId') ?? ''
-      const sourceContact = await dependencies.getCustomers().getContactById(
+      const sourceContact = await customersFor(dependencies, context, principal).getContactById(
         principal.directoryId,
         sourceContactId,
       )
@@ -522,7 +525,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         sourceContactId,
         dependencies,
       )
-      const customers = dependencies.getCustomers()
+      const customers = customersFor(dependencies, context, principal)
       await customers.beginCustomerContactMerge(
         principal.directoryId,
         sourceContactId,
@@ -571,7 +574,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const input = readRequestListInput(context)
       requireRestrictedSearch(principal, input.search)
-      const page = await dependencies.getCustomers().listRequests(principal.directoryId, input)
+      const page = await customersFor(dependencies, context, principal).listRequests(principal.directoryId, input)
       return context.json({
         ...page,
         requests: await Promise.all(page.requests.map((request) => projectRequestForResponse(principal, request, dependencies))),
@@ -585,7 +588,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
       const body = await dependencies.readJson(context.req)
-      const request = await dependencies.getCustomers().createRequest(
+      const request = await customersFor(dependencies, context, principal).createRequest(
         principal.directoryId,
         principal.userKey,
         readCreateRequestInput(body, readIdempotencyKey(context.req.header('Idempotency-Key'))),
@@ -599,7 +602,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customer-requests/:requestId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      return context.json(await projectRequestForResponse(principal, await dependencies.getCustomers().getRequest(
+      return context.json(await projectRequestForResponse(principal, await customersFor(dependencies, context, principal).getRequest(
         principal.directoryId,
         context.req.param('requestId') ?? '',
       ), dependencies))
@@ -611,7 +614,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customer-requests/:requestId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      const request = await dependencies.getCustomers().updateRequest(
+      const request = await customersFor(dependencies, context, principal).updateRequest(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -626,7 +629,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.delete('/api/customer-requests/:requestId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      const customers = dependencies.getCustomers()
+      const customers = customersFor(dependencies, context, principal)
       const requestId = context.req.param('requestId') ?? ''
       const request = await customers.getRequest(principal.directoryId, requestId)
       const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
@@ -688,7 +691,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customer-requests/:requestId/merge', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      const request = await dependencies.getCustomers().mergeRequest(
+      const request = await customersFor(dependencies, context, principal).mergeRequest(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -705,7 +708,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readLinkInput(await dependencies.readJson(context.req))
       const access = await dependencies.verifyWorkItemAccess(principal, body.teamId, body.workItemId, 'member')
-      const request = await dependencies.getCustomers().linkRequestToWorkItem(
+      const request = await customersFor(dependencies, context, principal).linkRequestToWorkItem(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -724,7 +727,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readUnlinkInput(await dependencies.readJson(context.req))
       const access = await dependencies.verifyWorkItemAccess(principal, body.teamId, body.workItemId, 'member')
-      const request = await dependencies.getCustomers().unlinkRequestFromWorkItem(
+      const request = await customersFor(dependencies, context, principal).unlinkRequestFromWorkItem(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -742,7 +745,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readProjectLinkInput(await dependencies.readJson(context.req))
       const access = await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
-      const request = await dependencies.getCustomers().linkRequestToProject(
+      const request = await customersFor(dependencies, context, principal).linkRequestToProject(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -760,7 +763,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readProjectUnlinkInput(await dependencies.readJson(context.req))
       const access = await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
-      const request = await dependencies.getCustomers().unlinkRequestFromProject(
+      const request = await customersFor(dependencies, context, principal).unlinkRequestFromProject(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
@@ -782,7 +785,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
       const triage = dependencies.getTriage()
       const currentEntry = await triage.getEntry(principal.directoryId, teamId, entryId)
-      const customerClient = dependencies.getCustomers()
+      const customerClient = customersFor(dependencies, context, principal)
       const effectiveCustomerId = input.customerId === undefined
         ? currentEntry.customerId
         : input.customerId
@@ -859,7 +862,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         throw new CustomerError(409, 'CustomerAlreadyAssociated', 'This Triage Entry is already associated with another Customer.')
       }
       if (entry.customerRequestId) {
-        const existing = await dependencies.getCustomers().getRequest(principal.directoryId, entry.customerRequestId)
+        const existing = await customersFor(dependencies, context, principal).getRequest(principal.directoryId, entry.customerRequestId)
         if (existing.customerId !== input.customerId) {
           throw new CustomerError(409, 'CustomerRequestAlreadyAssociated', 'This Triage Entry is already associated with another Customer Request.')
         }
@@ -892,7 +895,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         teamId,
         [entry.projectId, workItemAuthorization?.projectId],
       )
-      let request = await dependencies.getCustomers().createRequest(
+      let request = await customersFor(dependencies, context, principal).createRequest(
         principal.directoryId,
         principal.userKey,
         requestInput,
@@ -906,7 +909,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         )
       }
       if (canonicalWorkItem && workItemAuthorization) {
-        request = await dependencies.getCustomers().linkRequestToWorkItem(
+        request = await customersFor(dependencies, context, principal).linkRequestToWorkItem(
           principal.directoryId,
           request.id,
           principal.userKey,
@@ -946,7 +949,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const issueId = requirePathValue(context.req.param('issueId'), 'Work Item ID')
       const principal = await dependencies.requireWorkspaceAccess(context, 'read', { teamId })
       await dependencies.verifyWorkItemAccess(principal, teamId, issueId, 'viewer')
-      return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getWorkItemImpact(principal.directoryId, teamId, issueId)))
+      return context.json(projectCustomerImpact(principal, await customersFor(dependencies, context, principal).getWorkItemImpact(principal.directoryId, teamId, issueId)))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -968,7 +971,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       }
       return context.json(projectCustomerImpact(
         principal,
-        await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId, resolveWorkItemProject),
+        await customersFor(dependencies, context, principal).getProjectImpact(principal.directoryId, projectId, resolveWorkItemProject),
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -1725,4 +1728,30 @@ function isHiddenCustomerRelationshipError(value: unknown): boolean {
 /** Checks whether an untrusted value is a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Request-bound Customer clients, so every write of one request shares one audit sequence. */
+const requestCustomerClients = new WeakMap<Context, CustomerClient>()
+
+/**
+ * Returns the Customer client for one request, bound to its audit context when audit is wired.
+ *
+ * @param dependencies - Router dependencies.
+ * @param context - Hono request context.
+ * @param principal - Authenticated principal.
+ * @returns The request's Customer client.
+ */
+function customersFor<Principal extends CustomerPrincipal>(
+  dependencies: CustomerRouterDependencies<Principal>,
+  context: Context,
+  principal: Principal,
+): CustomerClient {
+  const existing = requestCustomerClients.get(context)
+  if (existing) return existing
+  const client = dependencies.getCustomers()
+  const bound = dependencies.createAuditContext && client.withAuditContext
+    ? client.withAuditContext(dependencies.createAuditContext(context, principal))
+    : client
+  requestCustomerClients.set(context, bound)
+  return bound
 }

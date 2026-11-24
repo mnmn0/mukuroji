@@ -4,14 +4,19 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { normalizeProjectMemberKey, type ProjectAccessEntry } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import {
+  createPlanningEntityCollaborationEntityKey,
   createPlanningUpdateCollaborationEntityKey,
   createPlanningUpdatePublicTargetKey,
 } from '../../modules/collaboration/collaboration'
 import { NotificationError, type NotificationItem } from '../../modules/notifications/notifications'
-import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
+import { requiresCurrentWorkItemAssignee, requiresCurrentWorkItemContributor } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
-import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
+import {
+  createPlanningUpdateTargetRecordKey,
+  readPlanningUpdateTargetId,
+  type PlanningAuthorizationState,
+} from '../../modules/planning'
 import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../../modules/analytics'
 import {
   DocumentError,
@@ -29,6 +34,7 @@ import { resolveEnterpriseDocumentScopeAccess } from './document-access'
 import { type EnterpriseProjectScopeAccess } from './enterprise-access'
 import { toAuthErrorResponse } from './http'
 import { requiresCurrentPlanningUpdateTarget } from './planning-access'
+import { PLANNING_MILESTONE_NOTIFICATION_EVENT_TYPES } from './planning-entity-audit'
 import {
   collapseProjectAccessesById,
   createDocumentEnterpriseScopeBoundary,
@@ -105,24 +111,11 @@ function resolveCurrentPlanningNotificationScope(
     return undefined
   }
 
-  const updateTarget = state.updateTargets.find((candidate) => {
-    if (candidate.target.type !== notification.planningTargetType) return false
-    if (candidate.target.type === 'project') {
-      return candidate.target.projectId === notification.planningTargetId &&
-        notification.planningTargetRecordKey === [
-          'UPDATE_TARGET',
-          'PROJECT',
-          encodeURIComponent(candidate.target.teamId),
-          encodeURIComponent(candidate.target.projectId),
-        ].join('#')
-    }
-    return candidate.target.entityId === notification.planningTargetId &&
-      notification.planningTargetRecordKey === [
-        'UPDATE_TARGET',
-        'INITIATIVE',
-        encodeURIComponent(candidate.target.entityId),
-      ].join('#')
-  })
+  const updateTarget = state.updateTargets.find((candidate) =>
+    candidate.target.type === notification.planningTargetType &&
+    readPlanningUpdateTargetId(candidate.target) === notification.planningTargetId &&
+    createPlanningUpdateTargetRecordKey(candidate.target) === notification.planningTargetRecordKey
+  )
   if (!updateTarget || updateTarget.archivedAt || !updateTarget.cadence) {
     return undefined
   }
@@ -148,6 +141,14 @@ function resolveCurrentPlanningNotificationScope(
       projectId: currentTarget.projectId,
     }
   }
+  if (currentTarget.type === 'team') {
+    return {
+      currentRecipientMatches,
+      notificationKind: kind,
+      planningUpdateTargetKey,
+      teamId: currentTarget.teamId,
+    }
+  }
 
   const initiative = state.entities.find((entity) =>
     entity.id === currentTarget.entityId && entity.type === 'initiative'
@@ -170,6 +171,34 @@ const planningUpdateActivityEventTypes = new Set([
   'planning-update.health-degraded',
   'planning-update.commented',
 ])
+
+/** Milestone completion and reschedule events shown in the Inbox. */
+const planningMilestoneNotificationEventTypes: ReadonlySet<string> = new Set(
+  Object.values(PLANNING_MILESTONE_NOTIFICATION_EVENT_TYPES),
+)
+
+/**
+ * Reports whether a Milestone notification still names an unarchived Milestone in the scope the
+ * notification captured.
+ *
+ * @param notification - Persisted Milestone notification whose scope metadata is untrusted.
+ * @param state - Current strongly read Planning authorization state.
+ * @returns Whether the Milestone is still current; a moved Milestone is not.
+ */
+function isCurrentPlanningMilestone(
+  notification: NotificationItem,
+  state: PlanningAuthorizationState,
+) {
+  const milestone = notification.entityId === undefined
+    ? undefined
+    : state.entities.find((entity) => entity.id === notification.entityId)
+  return milestone !== undefined &&
+    milestone.type === 'milestone' &&
+    milestone.archivedAt === undefined &&
+    milestone.teamId === notification.teamId &&
+    milestone.projectId === notification.projectId &&
+    (milestone.projectId === undefined || milestone.teamId !== undefined)
+}
 
 /**
  * Resolves the current target scope of a Planning update publish or comment notification.
@@ -194,9 +223,7 @@ function resolveCurrentPlanningActivityScope(
   }
   const updateTarget = state.updateTargets.find((candidate) =>
     candidate.target.type === notification.planningTargetType &&
-    (candidate.target.type === 'project'
-      ? candidate.target.projectId
-      : candidate.target.entityId) === notification.planningTargetId &&
+    readPlanningUpdateTargetId(candidate.target) === notification.planningTargetId &&
     createPlanningUpdateTargetRecordKey(candidate.target) === notification.planningTargetRecordKey
   )
   if (!updateTarget || updateTarget.archivedAt) return undefined
@@ -208,6 +235,9 @@ function resolveCurrentPlanningActivityScope(
       teamId: currentTarget.teamId,
       projectId: currentTarget.projectId,
     }
+  }
+  if (currentTarget.type === 'team') {
+    return { planningUpdateTargetKey, teamId: currentTarget.teamId }
   }
   const initiative = state.entities.find((entity) =>
     entity.id === currentTarget.entityId && entity.type === 'initiative'
@@ -503,6 +533,7 @@ export async function createNotificationVisibilityFilter(
     : fullyAccessibleTeamIds
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
+    contributorMemberKeys?: string[]
     exists: boolean
     projectId?: string
   }>>()
@@ -554,6 +585,19 @@ export async function createNotificationVisibilityFilter(
         : isEnterpriseContentPrincipal
           ? enterprisePlanningWorkspaceReadable
           : principal.workspaceRole !== 'guest'
+  /** Reports whether the principal currently watches one Planning entity, such as a Milestone. */
+  const isWatchingPlanningEntity = (entityId: string) => {
+    const entityKey = createPlanningEntityCollaborationEntityKey(principal.directoryId, entityId)
+    let visibility = watcherVisibilities.get(entityKey)
+    if (!visibility) {
+      visibility = workItemDependencies.collaboration.getWatcherState({
+        entityKey,
+        memberKey: principal.userKey,
+      }).then((watch) => watch.subscribed)
+      watcherVisibilities.set(entityKey, visibility)
+    }
+    return visibility
+  }
   /** Reports whether the principal currently watches one Planning update target. */
   const isWatchingPlanningTarget = (planningUpdateTargetKey: string) => {
     const entityKey = createPlanningUpdateCollaborationEntityKey(
@@ -612,6 +656,18 @@ export async function createNotificationVisibilityFilter(
       if (!visibility.readable) return false
       notification.title = visibility.name
       return true
+    }
+    if (planningMilestoneNotificationEventTypes.has(notification.eventType)) {
+      planningAuthorizationState ??=
+        workItemDependencies.planning.getAuthorizationState(principal.directoryId)
+      // Watchers are the only recipients; they must still watch and still read the Milestone.
+      return notification.entityId !== undefined &&
+        isCurrentPlanningMilestone(notification, await planningAuthorizationState) &&
+        isPlanningScopeReadable({
+          ...(notification.teamId ? { teamId: notification.teamId } : {}),
+          ...(notification.projectId ? { projectId: notification.projectId } : {}),
+        }) &&
+        await isWatchingPlanningEntity(notification.entityId)
     }
     if (planningUpdateActivityEventTypes.has(notification.eventType)) {
       planningAuthorizationState ??=
@@ -731,6 +787,8 @@ export async function createNotificationVisibilityFilter(
       } else {
         delete notification.projectId
       }
+      // A Team target has no Work Item of its own to read: the Planning checks above decide.
+      if (notification.planningTargetType === 'team') return true
     }
     if (notification.eventType.startsWith('document.')) {
       if (!notification.entityId) return false
@@ -826,6 +884,8 @@ export async function createNotificationVisibilityFilter(
         ).then((detail) => {
           return {
             assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
+            contributorMemberKeys: (detail.issue.contributorAssignments ?? []).flatMap((assignment) =>
+              assignment.memberUserId === undefined ? [] : [assignment.memberUserId.trim().toLowerCase()]),
             exists: true,
             ...(detail.issue.assignedProjectId
               ? { projectId: detail.issue.assignedProjectId }
@@ -846,6 +906,12 @@ export async function createNotificationVisibilityFilter(
       if (
         requiresCurrentWorkItemAssignee(notification) &&
         currentScope.assigneeMemberKey !== principal.userKey
+      ) {
+        return false
+      }
+      if (
+        requiresCurrentWorkItemContributor(notification) &&
+        !currentScope.contributorMemberKeys?.includes(principal.userKey)
       ) {
         return false
       }

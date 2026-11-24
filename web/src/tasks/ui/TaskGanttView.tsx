@@ -52,6 +52,7 @@ import {
   resolveTaskScheduleStartDate,
   taskScheduleInstantToLocalDate,
   tryAddTaskTimelineDays,
+  cloneTaskScheduleCalendarPolicy,
 } from '../model/taskSchedule'
 import {
   createTaskKey,
@@ -93,7 +94,10 @@ import {
   type TaskGanttImageFormat,
 } from './taskGanttImageExport'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
-import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
+import {
+  WORK_ITEM_BASELINE_END_DELAY_COLUMN,
+  type WorkItemBaselineLookup,
+} from '../../work-items/model/workItemScheduleBaselines'
 import {
   formatTaskScheduleVariance,
   resolveTaskScheduleVarianceTone,
@@ -122,6 +126,9 @@ import {
 } from '../model/taskGanttVirtualRows'
 
 const GANTT_TABLE_WIDTH = 360
+import { TaskViewExportButtons } from './TaskViewExportButtons'
+import { createTaskTableExportTable } from '../model/taskTableExport'
+import type { TaskViewExportTable } from '../../task-views/model/taskViewExport'
 /** Height of a group heading row. */
 const GANTT_GROUP_ROW_HEIGHT = 40
 /** Indentation per outline level in the task column. */
@@ -200,6 +207,17 @@ function formatSignedLag(lagDays: number, t: TaskGanttTranslator): string {
 
 /** Resolves a localized task Gantt-view message. */
 type TaskGanttTranslator = (key: MessageKey) => string
+
+/** Heading of each column of a Gantt CSV or Excel export. */
+const ganttExportColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
+  title: 'tasks.column.name',
+  workItemType: 'tasks.column.workItemType',
+  status: 'tasks.column.status',
+  assignee: 'tasks.column.assignee',
+  dueDate: 'tasks.column.dueDate',
+  progress: 'tasks.column.progress',
+  [WORK_ITEM_BASELINE_END_DELAY_COLUMN]: 'tasks.column.baselineEndDelayDays',
+}
 
 /** Context used when a task is created from a schedule-aware surface. */
 type TaskScheduleCreateContext = TaskCreateContext & {
@@ -974,6 +992,26 @@ export function TaskGanttView({
         onMoveToToday={moveToToday}
         isExportingImage={isExportingImage}
         onExportImage={(format) => void exportChartImage(format)}
+        createExportTable={() => createTaskTableExportTable(
+          rows.map((row) => row.task),
+          [
+            'title',
+            'workItemType',
+            'status',
+            'assignee',
+            'dueDate',
+            'progress',
+            ...(scheduleBaselineFor ? [WORK_ITEM_BASELINE_END_DELAY_COLUMN] : []),
+          ],
+          {
+            columnLabel: (field) => t(ganttExportColumnLabelKeys[field] ?? 'tasks.column.name'),
+            configurationFor: (task) =>
+              resolveProjectTaskConfiguration(task, configurationsByTeam, configuration),
+            ...(scheduleBaselineFor ? { scheduleBaselineFor } : {}),
+            t,
+          },
+        )}
+        exportFileBaseName={`gantt-${projectId ?? 'work-items'}`}
         onPrint={printChart}
         onProgressLineChange={(nextShowsProgressLine) =>
           changeDisplay({ showsProgressLine: nextShowsProgressLine })
@@ -2180,6 +2218,10 @@ type GanttDisplayToolbarProps = {
   onCompactChange: (isCompact: boolean) => void
   /** Saves the whole chart as an image file. */
   onExportImage: (format: TaskGanttImageFormat) => void
+  /** Builds the chart's rows as a table for a CSV or Excel export. */
+  createExportTable: () => TaskViewExportTable
+  /** File name of a CSV or Excel export, without the date and extension. */
+  exportFileBaseName: string
   /** Brings today's line into view. */
   onMoveToToday: () => void
   /** Prints the chart on landscape paper. */
@@ -2204,7 +2246,9 @@ type GanttDisplayToolbarProps = {
  */
 function GanttDisplayToolbar({
   canMoveToToday,
+  createExportTable,
   effectiveScale,
+  exportFileBaseName,
   isCompact,
   isExportingImage,
   onCompactChange,
@@ -2274,6 +2318,12 @@ function GanttDisplayToolbar({
       >
         {t('tasks.gantt.progressLine')}
       </button>
+      <TaskViewExportButtons
+        createTable={createExportTable}
+        fileBaseName={exportFileBaseName}
+        t={t}
+        testId="task-gantt-export-table"
+      />
       <button
         className={buttonClassName}
         data-testid="task-gantt-print-a3"
@@ -2843,11 +2893,7 @@ function createModeReplacement(
   fallbackDate: string,
 ): WorkItemSchedule {
   const plannedEffortMinutes = current.plannedEffortMinutes
-  const calendarPolicy = {
-    holidays: [...current.calendarPolicy.holidays],
-    timeZone: current.calendarPolicy.timeZone,
-    workingWeekdays: [...current.calendarPolicy.workingWeekdays],
-  }
+  const calendarPolicy = cloneTaskScheduleCalendarPolicy(current.calendarPolicy)
   const effort = plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }
   if (mode === 'unscheduled') {
     return {

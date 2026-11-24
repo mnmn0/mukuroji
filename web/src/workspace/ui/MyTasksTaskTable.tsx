@@ -54,6 +54,8 @@ import {
   resolveMyTasksTableColumns,
 } from '../model/myTaskTable'
 
+import { TaskViewExportButtons } from '../../tasks/ui/TaskViewExportButtons'
+import { createTaskTableExportTable } from '../../tasks/model/taskTableExport'
 /** Props for the My Tasks table. */
 export type MyTasksTaskTableProps = {
   /** Checks whether the person may edit one row's due date and priority in place. */
@@ -505,12 +507,37 @@ export function MyTasksTaskTable({
           </tbody>
         </table>
       </div>
-      <p
-        className="border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-3 text-right text-sm font-medium text-fg-5f6874"
-        data-testid="my-tasks-table-count"
-      >
-        {t('tasks.count').replace('{count}', String(tasks.length))}
-      </p>
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-3 text-sm font-medium text-fg-5f6874">
+        {tasks.length > 0 ? (
+          <TaskViewExportButtons
+            createTable={() => createTaskTableExportTable(
+              sections.flatMap((section) => section.items),
+              columns,
+              {
+                columnLabel: (field) => resolveMyTasksTableColumnLabel(field, configurationsByTeam, t),
+                configurationFor: (task) => configurationsByTeam[task.teamId]?.configuration,
+                locale,
+                personLabels,
+                t,
+                // My Tasks names the Project and Team, and shows only the date range of a schedule.
+                cellOverride: (field, task) => {
+                  if (field === 'project') return resolveMyTaskProjectLabel(task, teams) ?? ''
+                  if (field === 'team') return teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
+                  if (field !== 'dueDate') return undefined
+                  const schedule = resolveTaskSchedule(task)
+                  return formatTaskScheduleRange(schedule) ?? t(taskScheduleModeLabelKeys[schedule.mode])
+                },
+              },
+            )}
+            fileBaseName={t('workspace.myTasks.title')}
+            t={t}
+            testId="my-tasks-table-export"
+          />
+        ) : null}
+        <p data-testid="my-tasks-table-count">
+          {t('tasks.count').replace('{count}', String(tasks.length))}
+        </p>
+      </div>
       {pendingScheduleChange ? (
         <CalendarSchedulePreview
           isApplying={isApplyingSchedule}

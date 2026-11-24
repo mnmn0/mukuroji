@@ -18,6 +18,8 @@ export function isUpdateFeedView(value: unknown): value is UpdateFeedView {
 export function updateFeedTargetPath(target: PlanningUpdateTarget): string {
   const params = target.type === 'project'
     ? new URLSearchParams({ targetType: 'project', teamId: target.teamId, projectId: target.projectId })
+    : target.type === 'team'
+    ? new URLSearchParams({ targetType: 'team', teamId: target.teamId })
     : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
   return `/planning/portfolio?${params}`
 }
@@ -27,5 +29,6 @@ export function updateFeedTargetPath(target: PlanningUpdateTarget): string {
  * @returns Stable logical row key.
  */
 export function updateFeedTargetKey(target: PlanningUpdateTarget): string {
-  return target.type === 'project' ? JSON.stringify([target.type, target.teamId, target.projectId]) : JSON.stringify([target.type, target.entityId])
+  if (target.type === 'project') return JSON.stringify([target.type, target.teamId, target.projectId])
+  return target.type === 'team' ? JSON.stringify([target.type, target.teamId]) : JSON.stringify([target.type, target.entityId])
 }

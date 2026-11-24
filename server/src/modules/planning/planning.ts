@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
+  UpdateTableCommand,
   DynamoDBClient,
   waitUntilTableExists,
+  type AttributeDefinition,
+  type GlobalSecondaryIndex,
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchGetCommand,
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
@@ -54,6 +58,7 @@ import {
   type PlanningUpdateCadence,
   type PlanningUpdateCadenceMutationResponse,
   type PlanningUpdateChange,
+  type PlanningUpdateAcknowledgement,
   type PlanningUpdateComment,
   type PlanningUpdateCommentPage,
   type PlanningUpdateContextSnapshot,
@@ -66,6 +71,7 @@ import {
   type PlanningUpdateScopeSnapshot,
   type PlanningUpdateTarget,
   type PlanningUpdateTargetSummary,
+  type PlanningReadScope,
   type PlanningWorkItemLink,
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemDependencySummary,
@@ -80,8 +86,10 @@ import {
   type WorkItemDependencyCriticalPath,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
+  type WorkspaceCalendarWeekday,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
+  resolvePlanningUpdateReviewerMemberKey,
 } from '@mukuroji/contracts'
 import {
   createPlanningCycleScheduleRecordKey,
@@ -95,7 +103,7 @@ import {
 import {
   bindPlanningRevisionFenceBarrierDocumentClient,
 } from '../../infrastructure/runtime/planning-revision-fence-barrier'
-import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity } from './planning-update-activity'
+import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity, type PlanningUpdateActivityKind } from './planning-update-activity'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 const META_RECORD_KEY = 'META'
@@ -111,6 +119,7 @@ const UPDATE_ID_RECORD_PREFIX = 'UPDATE_ID#'
 const UPDATE_COMMENT_RECORD_PREFIX = 'UPDATE_COMMENT#'
 const UPDATE_COMMENT_ID_RECORD_PREFIX = 'UPDATE_COMMENT_ID#'
 const UPDATE_REACTION_RECORD_PREFIX = 'UPDATE_REACTION#'
+const UPDATE_ACKNOWLEDGEMENT_RECORD_PREFIX = 'UPDATE_ACK#'
 /**
  * Archived entities that left the live graph. No live graph prefix is a prefix of it, so live
  * reads never return these rows and they never count toward the live capacity.
@@ -135,8 +144,16 @@ const PLANNING_ARCHIVE_REQUEST_STEP_LIMIT = 40
 const PLANNING_ARCHIVE_STEP_ATTEMPTS = 3
 /** Maximum archived entities returned by one archive list page. */
 const PLANNING_ARCHIVE_PAGE_LIMIT = 50
+/** One strongly consistent graph prefix query and the entry type its rows must have. */
+type PlanningGraphRowQuery = {
+  /** Record key prefix inside the Workspace partition. */
+  recordPrefix: string
+  /** Canonical entry type of every row under the prefix. */
+  entryType: string
+}
+
 /** Mutable graph row prefixes and their canonical persisted entry types. */
-const PLANNING_GRAPH_ROW_QUERIES = [
+const PLANNING_GRAPH_ROW_QUERIES: readonly PlanningGraphRowQuery[] = [
   { recordPrefix: ENTITY_RECORD_PREFIX, entryType: 'planning-entity' },
   { recordPrefix: DEPENDENCY_RECORD_PREFIX, entryType: 'planning-dependency' },
   {
@@ -196,6 +213,11 @@ type PlanningMeta = {
   updatedAt?: string
   /** Counters that tell Work Item advances apart from Planning structure commits. */
   revisionFence?: PlanningRevisionFence
+  /**
+   * Live graph rows and bytes measured by the latest Planning commit, when META still has them.
+   * Scoped reads report capacity from it instead of reading the whole graph.
+   */
+  liveGraphUsage?: PlanningLiveGraphUsage
 }
 
 /**
@@ -221,6 +243,12 @@ const PLANNING_WORK_ITEM_REBASE_ATTEMPT_LIMIT = 3
 
 /** Strong graph reads attempted while Work Item writes advance META during the read. */
 const PLANNING_STABLE_READ_ATTEMPT_LIMIT = 3
+/** Keys in one BatchGetItem request, the DynamoDB maximum. */
+const PLANNING_LINK_BATCH_GET_SIZE = 100
+/** Attempts for one link batch while DynamoDB returns unprocessed keys. */
+const PLANNING_LINK_BATCH_GET_ATTEMPTS = 5
+/** First backoff before re-requesting unprocessed link keys, doubled on each retry. */
+const PLANNING_LINK_BATCH_GET_BACKOFF_MS = 50
 
 /** Mutation options for Planning-only changes that Work Item edits must not block. */
 const REBASE_OVER_WORK_ITEM_CHANGES: PlanningMutateOptions = { rebaseOverWorkItemChanges: true }
@@ -246,6 +274,19 @@ export class PlanningError extends Error {
 export type PlanningWorkItemState = {
   /** 現在 user の planning snapshot に含める Work Item 一覧です。 */
   workItems: readonly PlanningWorkItemSummary[]
+  /**
+   * Workspace の稼働カレンダーです（ADR 0058）。指定すると Planning entity の critical path を稼働日で
+   * 数えます。省略時は従来どおり calendar day で数えます。
+   */
+  workingCalendar?: PlanningWorkingCalendar
+}
+
+/** Planning entity の critical path を数える稼働カレンダーです。 */
+export type PlanningWorkingCalendar = {
+  /** 稼働する曜日です。 */
+  workingWeekdays: readonly WorkspaceCalendarWeekday[]
+  /** 稼働しない `YYYY-MM-DD` の日付です。 */
+  holidays: readonly string[]
 }
 
 /** Caller authorization check appended to a Planning DynamoDB mutation transaction. */
@@ -315,6 +356,8 @@ export type PlanningUpdatePublishNotificationContext = {
   updateOwnerMemberKey: string
   /** Escalation recipient of the cadence the publish covered, when configured. */
   escalationMemberKey?: string
+  /** Reviewer of the cadence the publish covered, when configured. */
+  reviewerMemberKey?: string
 }
 
 /** Severity order used to decide whether a health change is a degradation. */
@@ -385,6 +428,27 @@ export type PlanningEntityTransactionResult = {
   movedDescendantCount?: number
 }
 
+/** Change of one dependency between Planning entities recorded by its audit events. */
+export type PlanningDependencyChangeAction = 'created' | 'deleted'
+
+/** Minimal result exposed while preparing the audit events of one Planning dependency change. */
+export type PlanningDependencyTransactionResult = {
+  /** Identifies a dependency change between Planning entities. */
+  kind: 'dependency'
+  /** Planning revision produced by the change. */
+  revision: number
+  /** Dependency change committed by the mutation. */
+  action: PlanningDependencyChangeAction
+  /** Dependency added or removed by the mutation. */
+  dependency: PlanningDependency
+  /** Predecessor entity as stored when the change committed. */
+  predecessor: PlanningEntityTransactionSnapshot
+  /** Successor entity as stored when the change committed. */
+  successor: PlanningEntityTransactionSnapshot
+  /** Time the mutation committed. */
+  occurredAt: string
+}
+
 /** Minimal Planning mutation result accepted by a durable receipt contribution. */
 export type PlanningMutationTransactionResult =
   | PlanningWorkItemDependencyTransactionResult
@@ -392,6 +456,7 @@ export type PlanningMutationTransactionResult =
   | PlanningUpdateCadenceTransactionResult
   | PlanningUpdatePublishTransactionResult
   | PlanningEntityTransactionResult
+  | PlanningDependencyTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
 type PlanningMutationTransactionContribution = {
@@ -475,6 +540,37 @@ export type PlanningEntityDuplication = DuplicatePlanningEntityInput & {
   targetId: string
 }
 
+/**
+ * Team / Project envelope whose Work Items and links a scoped read loads. An omitted Team means the
+ * whole Workspace (a Workspace-scoped Portfolio).
+ */
+export type PlanningReadEnvelope = {
+  /** Team whose Work Items and links are read. */
+  teamId?: string
+  /** Project of `teamId` whose Work Items and links are read. */
+  projectId?: string
+}
+
+/**
+ * Reads the caller-visible Work Items of one scoped read envelope.
+ *
+ * @param envelope - Team / Project envelope resolved from the read scope.
+ * @returns The Work Item projections the snapshot rolls up.
+ */
+export type PlanningScopedWorkItemReader = (
+  envelope: PlanningReadEnvelope,
+) => Promise<PlanningWorkItemState>
+
+/** Graph narrowed to one read scope, with the inputs a snapshot needs. */
+type PlanningScopedRead = {
+  /** Graph rows inside the scope. */
+  state: PlanningWorkspaceState
+  /** Work Items of the resolved envelope. */
+  workItemState: PlanningWorkItemState
+  /** Workspace-wide live graph usage for the capacity summary. */
+  usage: PlanningLiveGraphUsage
+}
+
 /** Planning domain を読み書きする client contract です。 */
 export type PlanningClient = {
   /** Reads bounded compact activity without scanning immutable updates or annotations.
@@ -484,6 +580,19 @@ export type PlanningClient = {
   getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]>
   /** Workspace planning snapshot を返します。 */
   get(workspaceId: string, workItemState: PlanningWorkItemState): Promise<PlanningSnapshot>
+  /**
+   * Returns a snapshot of one Team, Project, or Portfolio without reading the whole Workspace.
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param scope - Team, Project, or Portfolio to read.
+   * @param readWorkItems - Reads the caller-visible Work Items of the resolved envelope.
+   * @returns The scoped snapshot, before caller-specific filtering.
+   */
+  getScoped(
+    workspaceId: string,
+    scope: PlanningReadScope,
+    readWorkItems: PlanningScopedWorkItemReader,
+  ): Promise<PlanningSnapshot>
   /** 外部 authorization transaction を束縛する global revision を返します。 */
   getAuthorizationRevision(workspaceId: string): Promise<number>
   /**
@@ -661,6 +770,7 @@ export type PlanningClient = {
     workspaceId: string,
     input: CreatePlanningDependencyInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Planning dependency を削除します。 */
   deleteDependency(
@@ -668,6 +778,7 @@ export type PlanningClient = {
     dependencyId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /**
    * Creates one canonical schedule dependency between Work Items.
@@ -885,6 +996,8 @@ type PlanningMutationResult = {
   archiveChanges?: PlanningArchiveChange[]
   /** Entity lifecycle change exposed to an audit contribution. */
   entityTransactionSource?: Omit<PlanningEntityTransactionResult, 'kind' | 'revision'>
+  /** Dependency change between entities exposed to an audit contribution. */
+  dependencyTransactionSource?: Omit<PlanningDependencyTransactionResult, 'kind' | 'revision'>
 }
 
 /** One archive row write that commits with a Planning revision. */
@@ -1136,6 +1249,56 @@ abstract class BasePlanningClient implements PlanningClient {
       this.now().toISOString(),
       createPlanningCapacity(measurePlanningLiveGraph(workspaceId, state)),
     )
+  }
+
+  /**
+   * Returns a snapshot of one Team, Project, or Portfolio.
+   *
+   * @param workspaceIdValue - Owning Workspace.
+   * @param scopeValue - Team, Project, or Portfolio to read.
+   * @param readWorkItems - Reads the caller-visible Work Items of the resolved envelope.
+   * @returns The scoped snapshot, before caller-specific filtering.
+   */
+  async getScoped(
+    workspaceIdValue: string,
+    scopeValue: PlanningReadScope,
+    readWorkItems: PlanningScopedWorkItemReader,
+  ): Promise<PlanningSnapshot> {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const scope = readPlanningReadScope(scopeValue)
+    const read = await this.readScopedState(workspaceId, scope, readWorkItems)
+    return {
+      ...createPlanningSnapshot(
+        read.state,
+        read.workItemState,
+        this.now().toISOString(),
+        createPlanningCapacity(read.usage),
+      ),
+      readScope: scope,
+    }
+  }
+
+  /**
+   * Reads the graph rows of one scope. The default reads the whole graph and narrows it in memory.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param scope - Validated read scope.
+   * @param readWorkItems - Reads the caller-visible Work Items of the resolved envelope.
+   * @returns The narrowed graph, the Work Items it was narrowed with, and Workspace capacity.
+   */
+  protected async readScopedState(
+    workspaceId: string,
+    scope: PlanningReadScope,
+    readWorkItems: PlanningScopedWorkItemReader,
+  ): Promise<PlanningScopedRead> {
+    const state = await this.readState(workspaceId)
+    const envelope = resolvePlanningReadEnvelope(state.entities, scope)
+    const workItemState = await readWorkItems(envelope)
+    return {
+      state: selectPlanningReadScopeState(state, scope, envelope),
+      workItemState,
+      usage: measurePlanningLiveGraph(workspaceId, state),
+    }
   }
 
   /** 外部 authorization transaction を束縛する global revision を返します。 */
@@ -1998,6 +2161,9 @@ abstract class BasePlanningClient implements PlanningClient {
           ...(current.cadence.escalationMemberKey
             ? { escalationMemberKey: current.cadence.escalationMemberKey }
             : {}),
+          ...(resolvePlanningUpdateReviewerMemberKey(current.cadence)
+            ? { reviewerMemberKey: resolvePlanningUpdateReviewerMemberKey(current.cadence) }
+            : {}),
         }
         let next = replacePlanningUpdateTarget(state, updatedTarget)
         if (target.type === 'initiative') {
@@ -2047,6 +2213,9 @@ abstract class BasePlanningClient implements PlanningClient {
       body: readPlanningUpdateCommentBody(input.body),
       authorMemberKey: readOwnerMemberKey(authorMemberKey),
       createdAt: this.now().toISOString(),
+      ...(readPlanningUpdateAcknowledgementFlag(input.acknowledgement)
+        ? { acknowledgement: true as const }
+        : {}),
     }
     const transactionContribution = transaction
       ? await preparePlanningMutationTransactionContribution(transaction, {
@@ -2200,6 +2369,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     input: CreatePlanningDependencyInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const id = readIdentifier(input.id, 'Dependency ID')
@@ -2217,12 +2387,21 @@ abstract class BasePlanningClient implements PlanningClient {
           : { constraint: readDependencyConstraint(input.constraint) }),
         createdAt: now,
       }
-      requireActiveEntity(state, dependency.predecessorId)
-      requireActiveEntity(state, dependency.successorId)
+      const predecessor = requireActiveEntity(state, dependency.predecessorId)
+      const successor = requireActiveEntity(state, dependency.successorId)
       const next = { ...state, dependencies: [...state.dependencies, dependency] }
       validatePlanningState(next)
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        dependencyTransactionSource: {
+          action: 'created',
+          dependency: structuredClone(dependency),
+          predecessor: structuredClone(predecessor),
+          successor: structuredClone(successor),
+          occurredAt: now,
+        },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning dependency を削除します。 */
@@ -2231,19 +2410,36 @@ abstract class BasePlanningClient implements PlanningClient {
     dependencyId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningDependencyTransactionResult>,
   ) {
-    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state) => {
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const id = readIdentifier(dependencyId, 'Dependency ID')
-      if (!state.dependencies.some((dependency) => dependency.id === id)) {
+      const removed = state.dependencies.find((dependency) => dependency.id === id)
+      if (!removed) {
         throw notFound('PlanningDependencyNotFound', `Dependency "${id}" was not found.`)
       }
-      return {
+      // An archived endpoint can keep its edges until the archive finishes moving them out.
+      const predecessor = findEntity(state, removed.predecessorId)
+      const successor = findEntity(state, removed.successorId)
+      const result: PlanningMutationResult = {
         state: {
           ...state,
           dependencies: state.dependencies.filter((dependency) => dependency.id !== id),
         },
+        ...(predecessor === undefined || successor === undefined
+          ? {}
+          : {
+              dependencyTransactionSource: {
+                action: 'deleted',
+                dependency: structuredClone(removed),
+                predecessor: structuredClone(predecessor),
+                successor: structuredClone(successor),
+                occurredAt: now,
+              },
+            }),
       }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return result
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -2951,6 +3147,8 @@ abstract class BasePlanningClient implements PlanningClient {
     const transactionResult: PlanningMutationTransactionResult | undefined =
       result.entityTransactionSource !== undefined
         ? { ...result.entityTransactionSource, kind: 'entity', revision: after.revision }
+        : result.dependencyTransactionSource !== undefined
+        ? { ...result.dependencyTransactionSource, kind: 'dependency', revision: after.revision }
         : result.publishedUpdate === undefined
         ? cadenceTarget === undefined
           ? result.workItemDependencyTransactionSource === undefined
@@ -3116,7 +3314,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
   }
 
   /** Records current-version activity in the same synchronous source mutation step. */
-  private recordUpdateActivity(workspaceId: string, annotation: PlanningUpdateComment | PlanningUpdateReaction, kind: 'comment' | 'reaction') {
+  private recordUpdateActivity(workspaceId: string, annotation: PlanningUpdateComment | PlanningUpdateReaction, kind: PlanningUpdateActivityKind) {
     const target = this.states.get(workspaceId)?.updateTargets.find((item) => planningUpdateTargetsEqual(item.target, annotation.target))
     if (!target || target.archivedAt || target.latestVersion !== annotation.updateVersion) return
     const key = `${JSON.stringify(workspaceId)}:${createPlanningUpdateTargetRecordSuffix(annotation.target)}`
@@ -3241,7 +3439,22 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     const candidates = history
       .filter((update) => update.version < beforeVersion)
       .sort((first, second) => second.version - first.version)
-    const updates = candidates.slice(0, limit).map((update) => structuredClone(update))
+    const updates = candidates.slice(0, limit).map((update) => {
+      const copy = structuredClone(update)
+      const acknowledgement = (this.updateComments.get(
+        createPlanningUpdateAnnotationMapKey(workspaceId, target, update.version),
+      ) ?? []).find((comment) => comment.acknowledgement)
+      return acknowledgement
+        ? {
+            ...copy,
+            acknowledgement: {
+              memberKey: acknowledgement.authorMemberKey,
+              commentId: acknowledgement.id,
+              acknowledgedAt: acknowledgement.createdAt,
+            },
+          }
+        : copy
+    })
     const hasMore = candidates.length > updates.length
     const last = updates.at(-1)
     return {
@@ -3281,8 +3494,11 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     if (comments.some((candidate) => candidate.id === comment.id)) {
       throw conflict('PlanningUpdateCommentExists', 'Planning update comment already exists.')
     }
+    if (comment.acknowledgement && comments.some((candidate) => candidate.acknowledgement)) {
+      throw planningUpdateAlreadyAcknowledged()
+    }
     this.updateComments.set(key, [...comments, structuredClone(comment)])
-    this.recordUpdateActivity(workspaceId, comment, 'comment')
+    this.recordUpdateActivity(workspaceId, comment, comment.acknowledgement ? 'acknowledgement' : 'comment')
   }
 
   /** In-memory comments の cursor page を返します。 */
@@ -3488,7 +3704,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   }
 
   /** Prepares a fenced compact activity write without overwriting the canonical target. */
-  private async prepareUpdateActivity(workspaceId: string, target: PlanningUpdateTarget, version: number, activity: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Server-resolved actor. */ memberKey: string; /** Source timestamp. */ at: string }): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  private async prepareUpdateActivity(workspaceId: string, target: PlanningUpdateTarget, version: number, activity: { /** Added annotation kind. */ kind: PlanningUpdateActivityKind; /** Server-resolved actor. */ memberKey: string; /** Source timestamp. */ at: string }): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
     const targetKey = createPlanningUpdateTargetRecordKey(target)
     const recordKey = `${UPDATE_ACTIVITY_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`
     const source = await this.documentClient.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: targetKey }, ConsistentRead: true }))
@@ -3582,6 +3798,180 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   }
 
   /**
+   * Reads one scope without reading Work Item links outside its envelope.
+   *
+   * Entity, dependency, and update target rows are read whole because hierarchy validation and
+   * ancestors need them. Links, the rows that grow with Work Items, are read by Team prefix or,
+   * for a Project, by the keys of the Project's Work Items. Capacity comes from META. A cached
+   * graph, or a META row without usage counters, falls back to the whole graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param scope - Validated read scope.
+   * @param readWorkItems - Reads the caller-visible Work Items of the resolved envelope.
+   * @returns The narrowed graph at one stable revision.
+   */
+  protected override async readScopedState(
+    workspaceId: string,
+    scope: PlanningReadScope,
+    readWorkItems: PlanningScopedWorkItemReader,
+  ): Promise<PlanningScopedRead> {
+    await this.ensureTable()
+    // Work Items are read once and outside the META barrier, as the Workspace read does, so a
+    // retry after a concurrent write does not re-read them and the barrier window stays short.
+    const readEnvelopeWorkItems = memoizePlanningScopedWorkItemReader(readWorkItems)
+    if (scope.type !== 'portfolio') {
+      await readEnvelopeWorkItems(resolvePlanningReadEnvelope([], scope))
+    }
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const read = await this.readStableScopedState(workspaceId, scope, readEnvelopeWorkItems)
+        return read ?? await super.readScopedState(workspaceId, scope, readEnvelopeWorkItems)
+      } catch (error) {
+        if (
+          attempt < PLANNING_STABLE_READ_ATTEMPT_LIMIT &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Strongly reads META, the scope's rows, then META again.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param scope - Validated read scope.
+   * @param readWorkItems - Reads the caller-visible Work Items of the resolved envelope.
+   * @returns The narrowed graph, or undefined when the whole graph must be read instead.
+   */
+  private async readStableScopedState(
+    workspaceId: string,
+    scope: PlanningReadScope,
+    readWorkItems: PlanningScopedWorkItemReader,
+  ): Promise<PlanningScopedRead | undefined> {
+    const before = await this.readMeta(workspaceId)
+    const usage = before.liveGraphUsage
+    if (
+      before.revision === 0 ||
+      usage === undefined ||
+      this.readCachedGraph(workspaceId, before) !== undefined
+    ) {
+      return undefined
+    }
+    const items = await this.queryLiveGraphRows(
+      workspaceId,
+      PLANNING_GRAPH_ROW_QUERIES.filter(({ recordPrefix }) => recordPrefix !== LINK_RECORD_PREFIX),
+    )
+    let entities: StoredPlanningEntity[]
+    try {
+      entities = items
+        .filter((item) => item.entryType === 'planning-entity')
+        .map((item) => readStoredPlanningEntity(item))
+    } catch {
+      throw persistenceInvalid('Stored Planning data failed validation.')
+    }
+    const envelope = resolvePlanningReadEnvelope(entities, scope)
+    const workItemState = await readWorkItems(envelope)
+    const linkItems = envelope.teamId === undefined
+      ? await this.queryLiveGraphRows(workspaceId, [{
+          recordPrefix: LINK_RECORD_PREFIX,
+          entryType: 'planning-work-item-link',
+        }])
+      : envelope.projectId === undefined
+        ? await this.queryLiveGraphRows(workspaceId, [{
+            recordPrefix: `${LINK_RECORD_PREFIX}${encodeRecordKeyIdentifier(envelope.teamId)}#`,
+            entryType: 'planning-work-item-link',
+          }])
+        : await this.batchGetLinkRows(
+            workspaceId,
+            workItemState.workItems
+              .filter((workItem) =>
+                workItem.teamId === envelope.teamId && workItem.projectId === envelope.projectId
+              )
+              .map((workItem) => createLinkRecordKey(workItem.teamId, workItem.id)),
+          )
+    const after = await this.readMeta(workspaceId)
+    if (before.revision !== after.revision) {
+      throw conflict('PlanningRevisionConflict', 'Planning changed while it was being read.')
+    }
+    const state = readPlanningRows([...items, ...linkItems], before, workspaceId)
+    return {
+      state: selectPlanningReadScopeState(state, scope, envelope),
+      workItemState,
+      usage,
+    }
+  }
+
+  /**
+   * Strongly reads the link rows of the given keys, at most the live row read limit.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param recordKeys - Link record keys of the envelope's Work Items.
+   * @returns The link rows that exist.
+   */
+  private async batchGetLinkRows(workspaceId: string, recordKeys: readonly string[]) {
+    const uniqueKeys = [...new Set(recordKeys)]
+    if (uniqueKeys.length > PLANNING_LIVE_ROW_READ_LIMIT) {
+      throw new PlanningError(
+        413,
+        'PlanningReadLimitExceeded',
+        `Planning Workspace cannot be read beyond ${PLANNING_LIVE_ROW_READ_LIMIT} live rows.`,
+      )
+    }
+    const requested = new Set(uniqueKeys)
+    const items: Record<string, unknown>[] = []
+    let bytes = 0
+    for (let offset = 0; offset < uniqueKeys.length; offset += PLANNING_LINK_BATCH_GET_SIZE) {
+      let pending: Record<string, unknown>[] = uniqueKeys
+        .slice(offset, offset + PLANNING_LINK_BATCH_GET_SIZE)
+        .map((recordKey) => ({ workspaceId, recordKey }))
+      for (let attempt = 1; pending.length > 0; attempt += 1) {
+        if (attempt > PLANNING_LINK_BATCH_GET_ATTEMPTS) {
+          throw new PlanningError(
+            503,
+            'PlanningReadThrottled',
+            'Planning links could not be read. Try again.',
+          )
+        }
+        if (attempt > 1) await delay(PLANNING_LINK_BATCH_GET_BACKOFF_MS * 2 ** (attempt - 2))
+        let response
+        try {
+          response = await this.documentClient.send(new BatchGetCommand({
+            RequestItems: { [this.tableName]: { Keys: pending, ConsistentRead: true } },
+          }))
+        } catch (error) {
+          throw toPersistenceError(error)
+        }
+        for (const item of response.Responses?.[this.tableName] ?? []) {
+          if (
+            item.workspaceId !== workspaceId ||
+            typeof item.recordKey !== 'string' ||
+            !requested.has(item.recordKey) ||
+            item.entryType !== 'planning-work-item-link'
+          ) {
+            throw persistenceInvalid('Planning link read returned an invalid row.')
+          }
+          requested.delete(item.recordKey)
+          items.push(item)
+          bytes += utf8ByteLength(JSON.stringify(item))
+          if (bytes > PLANNING_LIVE_GRAPH_READ_BYTE_LIMIT) {
+            throw new PlanningError(
+              413,
+              'PlanningReadLimitExceeded',
+              `Planning Workspace cannot be read beyond ${PLANNING_LIVE_ROW_READ_LIMIT} live rows.`,
+            )
+          }
+        }
+        pending = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
+      }
+    }
+    return items
+  }
+
+  /**
    * Strongly reads META, then the graph rows, then META again.
    *
    * @param workspaceId - Owning Workspace identifier.
@@ -3620,7 +4010,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
    */
   private async queryLiveGraphRows(
     workspaceId: string,
-    queries: readonly (typeof PLANNING_GRAPH_ROW_QUERIES)[number][],
+    queries: readonly PlanningGraphRowQuery[],
   ) {
     const items: Record<string, unknown>[] = []
     let bytes = 0
@@ -3827,7 +4217,16 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       const decoded = (response.Items ?? []).map((item) =>
         readStoredPlanningUpdate(item, workspaceId)
       )
-      const updates = decoded.slice(0, limit)
+      const pageUpdates = decoded.slice(0, limit)
+      const acknowledgements = await this.readUpdateAcknowledgements(
+        workspaceId,
+        target,
+        pageUpdates.map((update) => update.version),
+      )
+      const updates = pageUpdates.map((update) => {
+        const acknowledgement = acknowledgements.get(update.version)
+        return acknowledgement ? { ...update, acknowledgement } : update
+      })
       const last = updates.at(-1)
       return {
         updates,
@@ -3839,6 +4238,50 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (error instanceof PlanningError) throw persistenceInvalid('Stored Planning update is invalid.')
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Reads the acknowledgement rows of one history page in a single bounded range query.
+   *
+   * @param workspaceId - Owning Workspace partition.
+   * @param target - Canonical update target.
+   * @param versions - Versions on the history page.
+   * @returns Acknowledgements keyed by update version.
+   */
+  private async readUpdateAcknowledgements(
+    workspaceId: string,
+    target: PlanningUpdateTarget,
+    versions: readonly number[],
+  ): Promise<Map<number, PlanningUpdateAcknowledgement>> {
+    const acknowledgements = new Map<number, PlanningUpdateAcknowledgement>()
+    if (versions.length === 0) return acknowledgements
+    const lowest = Math.min(...versions)
+    const highest = Math.max(...versions)
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND recordKey BETWEEN :lowest AND :highest',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':lowest': createPlanningUpdateAcknowledgementRecordKey(target, lowest),
+          ':highest': createPlanningUpdateAcknowledgementRecordKey(target, highest),
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        ConsistentRead: true,
+      }))
+      for (const item of response.Items ?? []) {
+        const { updateVersion, acknowledgement } = readStoredPlanningUpdateAcknowledgement(
+          item,
+          workspaceId,
+          target,
+        )
+        acknowledgements.set(updateVersion, acknowledgement)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return acknowledgements
   }
 
   /** Strongly checks one immutable update row before reading annotations. */
@@ -3885,7 +4328,12 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       createPlanningUpdateCommentIdRow(workspaceId, comment),
       transactionContribution,
       authorizationConditionChecks,
-      { kind: 'comment', memberKey: comment.authorMemberKey, at: comment.createdAt },
+      {
+        kind: comment.acknowledgement ? 'acknowledgement' : 'comment',
+        memberKey: comment.authorMemberKey,
+        at: comment.createdAt,
+      },
+      comment.acknowledgement ? createPlanningUpdateAcknowledgementRow(workspaceId, comment) : undefined,
     )
   }
 
@@ -4101,7 +4549,8 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     uniquenessRow?: Record<string, unknown>,
     transactionContribution?: PlanningMutationTransactionContribution,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
-    activity?: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Authenticated actor. */ memberKey: string; /** Source timestamp. */ at: string },
+    activity?: { /** Added annotation kind. */ kind: PlanningUpdateActivityKind; /** Authenticated actor. */ memberKey: string; /** Source timestamp. */ at: string },
+    acknowledgementRow?: Record<string, unknown>,
   ) {
     await this.ensureTable()
     const activityWrites = activity ? await this.prepareUpdateActivity(workspaceId, target, updateVersion, activity).catch((error: unknown) => { throw toPersistenceError(error) }) : []
@@ -4133,12 +4582,22 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          ...(acknowledgementRow === undefined
+            ? []
+            : [{
+                Put: {
+                  TableName: this.tableName,
+                  Item: acknowledgementRow,
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+                },
+              }]),
           ...activityWrites,
           ...planningTransactionContributionItems(transactionContribution),
         ],
       }))
     } catch (error) {
-      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
+      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + (acknowledgementRow ? 1 : 0) + activityWrites.length + planningTransactionContributionItems(transactionContribution).length)) throw toPersistenceError(error)
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
@@ -4156,7 +4615,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       ) {
         throw conflict(duplicateCode, duplicateMessage)
       }
-      const activityIndex = rowIndex + 1
+      const acknowledgementIndex = rowIndex + 1
+      if (acknowledgementRow !== undefined && isPlanningTransactionConditionalFailureAt(error, acknowledgementIndex)) {
+        throw planningUpdateAlreadyAcknowledged()
+      }
+      const activityIndex = acknowledgementIndex + (acknowledgementRow === undefined ? 0 : 1)
       if (activityWrites.some((_, index) => isPlanningTransactionConditionalFailureAt(error, activityIndex + index))) throw conflict('PlanningUpdateActivityConflict', 'Update activity or the latest version changed. Retry with current authorization.')
       const transactionContributionIndex = activityIndex + activityWrites.length
       if (
@@ -4306,7 +4769,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         'Planning mutation exceeds the DynamoDB transaction item limit.',
       )
     }
-    const meta = afterRows.get(META_RECORD_KEY)!
+    const meta = { ...afterRows.get(META_RECORD_KEY)!, ...createPlanningLiveGraphUsageAttributes(afterRows) }
     const metaMutation = {
       Put: {
         TableName: this.tableName,
@@ -4453,6 +4916,43 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
 
 const localTableInitializers = new Map<string, Promise<void>>()
 
+/** Key attributes of the CDK Planning table's `InboxDigestDueIndex`. */
+const LOCAL_INBOX_DIGEST_ATTRIBUTES: AttributeDefinition[] = [
+  { AttributeName: 'inboxDigestShard', AttributeType: 'S' },
+  { AttributeName: 'inboxDigestDueAt', AttributeType: 'N' },
+]
+
+/** Matches the CDK Planning table; the Inbox digest worker finds due members here. */
+const LOCAL_INBOX_DIGEST_INDEX: GlobalSecondaryIndex = {
+  IndexName: 'InboxDigestDueIndex',
+  KeySchema: [
+    { AttributeName: 'inboxDigestShard', KeyType: 'HASH' },
+    { AttributeName: 'inboxDigestDueAt', KeyType: 'RANGE' },
+  ],
+  Projection: { ProjectionType: 'KEYS_ONLY' },
+}
+
+/**
+ * Waits until the local Planning table's Inbox digest index can be queried; a GSI added by
+ * `UpdateTable` stays `CREATING` for a while and rejects Queries until it is `ACTIVE`.
+ *
+ * @param tableName - Local Planning table name.
+ * @param client - DynamoDB client for the local endpoint.
+ */
+async function waitUntilLocalInboxDigestIndexActive(tableName: string, client: DynamoDBClient): Promise<void> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
+    const status = response.Table?.GlobalSecondaryIndexes
+      ?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)?.IndexStatus
+    if (status === 'ACTIVE') return
+    if (Date.now() >= deadline) {
+      throw new Error(`Local DynamoDB index "${LOCAL_INBOX_DIGEST_INDEX.IndexName}" on "${tableName}" did not become ACTIVE.`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+}
+
 /** Local DynamoDB に CDK 互換の Planning table を作成します。 */
 export async function ensureLocalPlanningTable(tableName: string, client: DynamoDBClient) {
   const current = localTableInitializers.get(tableName)
@@ -4463,6 +4963,16 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
       if (!isPlanningTableDescription(response.Table)) {
         throw new Error(`Local DynamoDB table "${tableName}" has an incompatible schema.`)
       }
+      const digestIndex = response.Table?.GlobalSecondaryIndexes?.find((index) => index.IndexName === LOCAL_INBOX_DIGEST_INDEX.IndexName)
+      if (!digestIndex) {
+        // Tables created before the Inbox digest job lack its index; add it like the CDK table.
+        await client.send(new UpdateTableCommand({
+          TableName: tableName,
+          AttributeDefinitions: LOCAL_INBOX_DIGEST_ATTRIBUTES,
+          GlobalSecondaryIndexUpdates: [{ Create: LOCAL_INBOX_DIGEST_INDEX }],
+        }))
+      }
+      if (digestIndex?.IndexStatus !== 'ACTIVE') await waitUntilLocalInboxDigestIndexActive(tableName, client)
       return
     } catch (error) {
       if (!isNamedError(error, 'ResourceNotFoundException')) throw error
@@ -4474,6 +4984,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
+        ...LOCAL_INBOX_DIGEST_ATTRIBUTES,
       ],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
@@ -4486,7 +4997,7 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
           { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
-      }],
+      }, LOCAL_INBOX_DIGEST_INDEX],
       BillingMode: 'PAY_PER_REQUEST',
     }))
     await waitUntilTableExists({ client, maxWaitTime: 30 }, { TableName: tableName })
@@ -4534,6 +5045,12 @@ function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
       entityId: readIdentifier(value.entityId, 'Update target Initiative ID'),
     }
   }
+  if (value.type === 'team') {
+    return {
+      type: 'team',
+      teamId: readIdentifier(value.teamId, 'Update target Team ID'),
+    }
+  }
   throw invalid('PlanningUpdateTargetInvalid', 'Planning update target type is invalid.')
 }
 
@@ -4544,8 +5061,9 @@ function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
  * @returns Target-local identity string.
  */
 function createPlanningUpdateTargetIdentity(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `project\u0000${target.teamId}\u0000${target.projectId}`
+  if (target.type === 'project') return `project\u0000${target.teamId}\u0000${target.projectId}`
+  return target.type === 'team'
+    ? `team\u0000${target.teamId}`
     : `initiative\u0000${target.entityId}`
 }
 
@@ -4673,6 +5191,9 @@ function readPlanningUpdateCadence(value: unknown): PlanningUpdateCadence {
           escalationMemberKey: readOwnerMemberKey(value.escalationMemberKey),
         }
       : {}),
+    ...(value.reviewerMemberKey === undefined
+      ? {}
+      : { reviewerMemberKey: readOwnerMemberKey(value.reviewerMemberKey) }),
   }
 }
 
@@ -5559,7 +6080,7 @@ function createPlanningSnapshot(
         createPlanningUpdateTargetIdentity(first.target),
         createPlanningUpdateTargetIdentity(second.target),
       )),
-    criticalPath: calculateCriticalPath(state),
+    criticalPath: calculateCriticalPath(state, workItemState.workingCalendar),
     workItemDependencySummary: createPlanningWorkItemDependencySummary(
       visibleWorkItemDependencies,
       visibleWorkItems,
@@ -5700,6 +6221,7 @@ function createPlanningUpdateVisibilityEnvelope(
   if (target.type === 'project') {
     return { teamId: target.teamId, projectId: target.projectId }
   }
+  if (target.type === 'team') return { teamId: target.teamId }
   const initiative = requireActiveEntity(state, target.entityId)
   return {
     ...(initiative.teamId === undefined ? {} : { teamId: initiative.teamId }),
@@ -5973,7 +6495,10 @@ function calculateRollups(
   return rollups
 }
 
-function calculateCriticalPath(state: PlanningWorkspaceState): PlanningCriticalPath {
+function calculateCriticalPath(
+  state: PlanningWorkspaceState,
+  workingCalendar?: PlanningWorkingCalendar,
+): PlanningCriticalPath {
   const activeEntities = state.entities
     .filter((entity) => !entity.archivedAt && entity.status !== 'canceled')
     .sort((first, second) => compareText(first.id, second.id))
@@ -6011,7 +6536,12 @@ function calculateCriticalPath(state: PlanningWorkspaceState): PlanningCriticalP
   if (order.length !== entities.length) {
     throw new PlanningError(503, 'PlanningDependencyCycle', 'Stored planning dependencies contain a cycle.')
   }
-  const durations = new Map(entities.map((entity) => [entity.id, durationDays(entity.forecast ?? entity.baseline)]))
+  const durations = new Map(entities.map((entity) => [
+    entity.id,
+    workingCalendar
+      ? workingDurationDays(entity.forecast ?? entity.baseline, workingCalendar)
+      : durationDays(entity.forecast ?? entity.baseline),
+  ]))
   const earliestStart = new Map(entities.map((entity) => [entity.id, 0]))
   const pathPredecessor = new Map<string, string>()
   const pathDepth = new Map(entities.map((entity) => [entity.id, 0]))
@@ -6567,7 +7097,8 @@ function createWorkItemSlackKey(teamId: string, workItemId: string) {
 function workItemScheduleDurationDays(schedule: WorkItemSchedule) {
   if (schedule.mode === 'unscheduled' || schedule.mode === 'milestone') return 0
   if (schedule.mode === 'due-date') return 1
-  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+  // Working days under the Work Item's own calendar, the same count its schedule keeps (ADR 0058).
+  return schedule.durationDays
 }
 
 /**
@@ -6579,7 +7110,7 @@ function workItemScheduleDurationDays(schedule: WorkItemSchedule) {
 function workItemScheduleSpanDays(schedule: WorkItemSchedule) {
   if (schedule.mode === 'unscheduled') return 0
   if (schedule.mode === 'due-date' || schedule.mode === 'milestone') return 1
-  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+  return schedule.durationDays
 }
 
 /**
@@ -6799,7 +7330,8 @@ function readPlanningRows(
         row.entryType === 'planning-update-id' ||
         row.entryType === 'planning-update-comment' ||
         row.entryType === 'planning-update-comment-id' ||
-        row.entryType === 'planning-update-reaction'
+        row.entryType === 'planning-update-reaction' ||
+        row.entryType === 'planning-update-acknowledgement'
       ) {
         continue
       } else {
@@ -8526,8 +9058,11 @@ function createLinkRecordKey(teamId: string, workItemId: string) {
  * @returns DynamoDB-safe target suffix.
  */
 function createPlanningUpdateTargetRecordSuffix(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `PROJECT#${encodeRecordKeyIdentifier(target.teamId)}#${encodeRecordKeyIdentifier(target.projectId)}`
+  if (target.type === 'project') {
+    return `PROJECT#${encodeRecordKeyIdentifier(target.teamId)}#${encodeRecordKeyIdentifier(target.projectId)}`
+  }
+  return target.type === 'team'
+    ? `TEAM#${encodeRecordKeyIdentifier(target.teamId)}`
     : `INITIATIVE#${encodeRecordKeyIdentifier(target.entityId)}`
 }
 
@@ -8545,6 +9080,17 @@ function requirePublishedUpdateNotification(
     throw new PlanningError(503, 'PlanningUpdateUnavailable', 'Published update is unavailable.')
   }
   return { ...value }
+}
+
+/**
+ * Returns the identifier that notification metadata stores for one update target.
+ *
+ * @param target - Project, Team, or Initiative update target.
+ * @returns Project ID, Team ID, or Initiative entity ID.
+ */
+export function readPlanningUpdateTargetId(target: PlanningUpdateTarget): string {
+  if (target.type === 'project') return target.projectId
+  return target.type === 'team' ? target.teamId : target.entityId
 }
 
 /**
@@ -8702,6 +9248,123 @@ function createPlanningUpdateCommentRecordKey(
 }
 
 /**
+ * Reads the optional acknowledgement flag of an update comment.
+ *
+ * @param value - Untrusted `acknowledgement` value.
+ * @returns Whether the comment records the reviewer acknowledgement.
+ * @throws PlanningError when the value is neither absent nor `true`.
+ */
+function readPlanningUpdateAcknowledgementFlag(value: unknown): boolean {
+  if (value === undefined) return false
+  if (value === true) return true
+  throw invalid(
+    'PlanningUpdateAcknowledgementInvalid',
+    'Planning update acknowledgement must be true when present.',
+  )
+}
+
+/**
+ * Creates the conflict raised when a version already has its reviewer acknowledgement.
+ *
+ * @returns Planning conflict error.
+ */
+function planningUpdateAlreadyAcknowledged() {
+  return conflict(
+    'PlanningUpdateAlreadyAcknowledged',
+    'This Planning update version is already acknowledged.',
+  )
+}
+
+/**
+ * Creates the target-bound sort-key prefix of acknowledgement rows.
+ *
+ * @param target - Canonical update target.
+ * @returns DynamoDB sort-key prefix.
+ */
+function createPlanningUpdateAcknowledgementRecordPrefix(target: PlanningUpdateTarget) {
+  return readRecordKey(
+    `${UPDATE_ACKNOWLEDGEMENT_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}#`,
+    'Planning update acknowledgement record prefix',
+  )
+}
+
+/**
+ * Creates the one acknowledgement key allowed for an immutable update version.
+ *
+ * @param target - Canonical update target.
+ * @param updateVersion - Immutable target-local version.
+ * @returns Zero-padded DynamoDB sort key.
+ */
+function createPlanningUpdateAcknowledgementRecordKey(
+  target: PlanningUpdateTarget,
+  updateVersion: number,
+) {
+  return readRecordKey(
+    `${createPlanningUpdateAcknowledgementRecordPrefix(target)}` +
+      `${String(readPlanningUpdateVersion(updateVersion)).padStart(UPDATE_VERSION_WIDTH, '0')}`,
+    'Planning update acknowledgement record key',
+  )
+}
+
+/**
+ * Creates the acknowledgement row written atomically with its acknowledgement comment.
+ *
+ * @param workspaceId - Owning Workspace partition.
+ * @param comment - Validated acknowledgement comment.
+ * @returns DynamoDB row that is unique per immutable update version.
+ */
+function createPlanningUpdateAcknowledgementRow(
+  workspaceId: string,
+  comment: PlanningUpdateComment,
+) {
+  const row = {
+    workspaceId,
+    recordKey: createPlanningUpdateAcknowledgementRecordKey(comment.target, comment.updateVersion),
+    entryType: 'planning-update-acknowledgement',
+    target: structuredClone(comment.target),
+    updateVersion: comment.updateVersion,
+    memberKey: comment.authorMemberKey,
+    commentId: comment.id,
+    acknowledgedAt: comment.createdAt,
+  }
+  requirePlanningAnnotationRowSize(row)
+  return row
+}
+
+/**
+ * Decodes one acknowledgement row.
+ *
+ * @param row - Untrusted DynamoDB row.
+ * @param workspaceId - Expected Workspace partition.
+ * @param target - Expected update target.
+ * @returns Version and validated acknowledgement.
+ */
+function readStoredPlanningUpdateAcknowledgement(
+  row: Record<string, unknown>,
+  workspaceId: string,
+  target: PlanningUpdateTarget,
+): { updateVersion: number, acknowledgement: PlanningUpdateAcknowledgement } {
+  if (row.workspaceId !== workspaceId || row.entryType !== 'planning-update-acknowledgement') {
+    throw persistenceInvalid('Planning update acknowledgement row scope is invalid.')
+  }
+  const updateVersion = readPlanningUpdateVersion(row.updateVersion)
+  if (
+    !planningUpdateTargetsEqual(readPlanningUpdateTarget(row.target), target) ||
+    row.recordKey !== createPlanningUpdateAcknowledgementRecordKey(target, updateVersion)
+  ) {
+    throw persistenceInvalid('Planning update acknowledgement row key is invalid.')
+  }
+  return {
+    updateVersion,
+    acknowledgement: {
+      memberKey: readOwnerMemberKey(row.memberKey),
+      commentId: readIdentifier(row.commentId, 'Planning update comment ID'),
+      acknowledgedAt: readTimestamp(row.acknowledgedAt, 'Planning update acknowledgement timestamp'),
+    },
+  }
+}
+
+/**
  * Creates and size-checks one append-only comment row.
  *
  * @param workspaceId - Owning Workspace partition.
@@ -8785,6 +9448,9 @@ function readStoredPlanningUpdateComment(
     body: readPlanningUpdateCommentBody(row.body),
     authorMemberKey: readOwnerMemberKey(row.authorMemberKey),
     createdAt: readTimestamp(row.createdAt, 'Planning update comment timestamp'),
+    ...(readPlanningUpdateAcknowledgementFlag(row.acknowledgement)
+      ? { acknowledgement: true as const }
+      : {}),
   }
   if (row.recordKey !== createPlanningUpdateCommentRecordKey(comment)) {
     throw persistenceInvalid('Planning update comment row key is invalid.')
@@ -9224,6 +9890,51 @@ function durationDays(range: { startDate: string; endDate: string }) {
   const start = Date.parse(`${range.startDate}T00:00:00.000Z`)
   const end = Date.parse(`${range.endDate}T00:00:00.000Z`)
   return Math.floor((end - start) / 86_400_000) + 1
+}
+
+/** Weekday names indexed by `Date#getUTCDay()`. */
+const PLANNING_WEEKDAYS_BY_UTC_DAY: readonly WorkspaceCalendarWeekday[] = [
+  'sunday',
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+]
+
+/**
+ * Counts the working days of an inclusive range under the Workspace calendar.
+ *
+ * A range with no working day counts as one day, so an entity on a holiday still takes part in the
+ * path instead of vanishing.
+ *
+ * @param range - Inclusive range.
+ * @param calendar - Workspace working weekdays and holidays.
+ * @returns The working-day count, at least one.
+ */
+function workingDurationDays(
+  range: { startDate: string; endDate: string },
+  calendar: PlanningWorkingCalendar,
+) {
+  const dayMilliseconds = 86_400_000
+  const start = Date.parse(`${range.startDate}T00:00:00.000Z`)
+  const end = Date.parse(`${range.endDate}T00:00:00.000Z`)
+  const workingWeekdays = new Set(calendar.workingWeekdays)
+  const isWorkingWeekday = (day: number) =>
+    workingWeekdays.has(PLANNING_WEEKDAYS_BY_UTC_DAY[new Date(day).getUTCDay()] ?? 'sunday')
+  // Whole weeks are counted arithmetically, so the work stays bounded for any date range.
+  const totalDays = Math.floor((end - start) / dayMilliseconds) + 1
+  const wholeWeeks = Math.floor(totalDays / 7)
+  let count = wholeWeeks * workingWeekdays.size
+  for (let day = start + wholeWeeks * 7 * dayMilliseconds; day <= end; day += dayMilliseconds) {
+    if (isWorkingWeekday(day)) count += 1
+  }
+  for (const holiday of new Set(calendar.holidays)) {
+    const day = Date.parse(`${holiday}T00:00:00.000Z`)
+    if (day >= start && day <= end && isWorkingWeekday(day)) count -= 1
+  }
+  return Math.max(count, 1)
 }
 
 function effectiveEntityHealth(entity: StoredPlanningEntity) {
@@ -9820,11 +10531,34 @@ function readPlanningMetaItem(
     readOptionalStoredCounter(item.structureRevision),
     readOptionalStoredCounter(item.structureSourceRevisionCount),
   )
+  const liveRowCount = readOptionalStoredCounter(item.liveRowCount)
+  const liveByteCount = readOptionalStoredCounter(item.liveByteCount)
   return {
     revision: item.revision,
     ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
     ...(revisionFence === undefined ? {} : { revisionFence }),
+    // Both counters are written together; a META row with only one of them is ignored.
+    ...(liveRowCount === undefined || liveByteCount === undefined
+      ? {}
+      : { liveGraphUsage: { rows: liveRowCount, bytes: liveByteCount } }),
   }
+}
+
+/**
+ * Measures the live graph rows a commit leaves, to store on its META row.
+ *
+ * @param rows - Every row the committed graph persists, including META.
+ * @returns META attributes with the row count and UTF-8 JSON bytes, excluding META itself.
+ */
+function createPlanningLiveGraphUsageAttributes(rows: ReadonlyMap<string, Record<string, unknown>>) {
+  let liveRowCount = 0
+  let liveByteCount = 0
+  for (const [recordKey, row] of rows) {
+    if (recordKey === META_RECORD_KEY) continue
+    liveRowCount += 1
+    liveByteCount += Buffer.byteLength(JSON.stringify(row), 'utf8')
+  }
+  return { liveRowCount, liveByteCount }
 }
 
 /**
@@ -10044,4 +10778,184 @@ function toPersistenceError(error: unknown) {
     ? error.name
     : 'PlanningUnavailable'
   return new PlanningError(503, code, 'Planning storage is unavailable.')
+}
+
+/**
+ * Waits before a retry.
+ *
+ * @param milliseconds - Time to wait.
+ * @returns A promise that resolves after the wait.
+ */
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
+}
+
+/**
+ * Validates a scoped read request.
+ *
+ * @param value - Untrusted read scope.
+ * @returns A read scope with normalized identifiers.
+ */
+function readPlanningReadScope(value: PlanningReadScope): PlanningReadScope {
+  if (value.type === 'team') {
+    return { type: 'team', teamId: readIdentifier(value.teamId, 'Team ID') }
+  }
+  if (value.type === 'project') {
+    return {
+      type: 'project',
+      teamId: readIdentifier(value.teamId, 'Team ID'),
+      projectId: readIdentifier(value.projectId, 'Project ID'),
+    }
+  }
+  if (value.type === 'portfolio') {
+    return { type: 'portfolio', portfolioId: readIdentifier(value.portfolioId, 'Portfolio ID') }
+  }
+  throw invalid('PlanningReadScopeInvalid', 'Planning read scope is invalid.')
+}
+
+/**
+ * Resolves the Team / Project envelope whose Work Items and links a scoped read loads.
+ *
+ * A Portfolio's descendants stay inside its own Team / Project scope, so the Portfolio's scope
+ * bounds them. A Workspace-scoped Portfolio can span every Team.
+ *
+ * @param entities - Live graph entities.
+ * @param scope - Validated read scope.
+ * @returns The envelope to read.
+ */
+function resolvePlanningReadEnvelope(
+  entities: readonly StoredPlanningEntity[],
+  scope: PlanningReadScope,
+): PlanningReadEnvelope {
+  if (scope.type === 'team') return { teamId: scope.teamId }
+  if (scope.type === 'project') return { teamId: scope.teamId, projectId: scope.projectId }
+  const portfolio = entities.find((entity) => entity.id === scope.portfolioId)
+  if (portfolio === undefined || portfolio.type !== 'portfolio') {
+    throw notFound('PlanningEntityNotFound', `Portfolio "${scope.portfolioId}" was not found.`)
+  }
+  return {
+    ...(portfolio.teamId === undefined ? {} : { teamId: portfolio.teamId }),
+    ...(portfolio.projectId === undefined ? {} : { projectId: portfolio.projectId }),
+  }
+}
+
+/**
+ * Returns whether a Team / Project scope lies inside a read envelope, or contains it.
+ *
+ * Workspace-scoped rows always match, and a Team-scoped row matches a Project envelope of its
+ * Team, because those are the ancestors a scope's entities can have.
+ *
+ * @param scope - Team / Project scope of a row.
+ * @param envelope - Resolved read envelope.
+ * @returns True when the row belongs to the read.
+ */
+function isPlanningScopeInReadEnvelope(
+  scope: { teamId?: string, projectId?: string },
+  envelope: PlanningReadEnvelope,
+) {
+  if (envelope.teamId === undefined || scope.teamId === undefined) return true
+  if (scope.teamId !== envelope.teamId) return false
+  return envelope.projectId === undefined ||
+    scope.projectId === undefined ||
+    scope.projectId === envelope.projectId
+}
+
+/**
+ * Narrows a graph to one read scope.
+ *
+ * Entities are the scope's own and their ancestors (for a Portfolio, its subtree). Entity
+ * dependencies need both endpoints in the read, links lose references to entities outside it,
+ * and links with no reference left are dropped. Critical path and roll-ups computed from the
+ * result therefore stay inside the scope.
+ *
+ * @param state - Graph that holds at least the scope's rows.
+ * @param scope - Validated read scope.
+ * @param envelope - Envelope resolved from the scope.
+ * @returns A graph containing only the scope's rows.
+ */
+function selectPlanningReadScopeState(
+  state: PlanningWorkspaceState,
+  scope: PlanningReadScope,
+  envelope: PlanningReadEnvelope,
+): PlanningWorkspaceState {
+  let entities: StoredPlanningEntity[]
+  if (scope.type === 'portfolio') {
+    const childrenByParent = new Map<string, StoredPlanningEntity[]>()
+    for (const entity of state.entities) {
+      if (entity.parentId === undefined) continue
+      const children = childrenByParent.get(entity.parentId) ?? []
+      children.push(entity)
+      childrenByParent.set(entity.parentId, children)
+    }
+    const portfolio = state.entities.find((entity) => entity.id === scope.portfolioId)
+    entities = []
+    const pending = portfolio === undefined ? [] : [portfolio]
+    const visited = new Set<string>()
+    while (pending.length > 0) {
+      const entity = pending.pop()!
+      if (visited.has(entity.id)) continue
+      visited.add(entity.id)
+      entities.push(entity)
+      pending.push(...(childrenByParent.get(entity.id) ?? []))
+    }
+  } else {
+    entities = state.entities.filter((entity) => isPlanningScopeInReadEnvelope(entity, envelope))
+  }
+  const entityIds = new Set(entities.map((entity) => entity.id))
+  const workItemLinks = state.workItemLinks
+    .filter((link) =>
+      (envelope.teamId === undefined || link.teamId === envelope.teamId) &&
+      (envelope.projectId === undefined || link.projectId === envelope.projectId)
+    )
+    .map((link) => {
+      const { cycleId, milestoneId, ...rest } = link
+      return {
+        ...rest,
+        ...(cycleId !== undefined && entityIds.has(cycleId) ? { cycleId } : {}),
+        ...(milestoneId !== undefined && entityIds.has(milestoneId) ? { milestoneId } : {}),
+        goalIds: link.goalIds.filter((goalId) => entityIds.has(goalId)),
+      }
+    })
+    .filter((link) =>
+      link.cycleId !== undefined || link.milestoneId !== undefined || link.goalIds.length > 0
+    )
+  return {
+    ...state,
+    entities,
+    dependencies: state.dependencies.filter((dependency) =>
+      entityIds.has(dependency.predecessorId) && entityIds.has(dependency.successorId)
+    ),
+    workItemDependencies: state.workItemDependencies.filter((dependency) =>
+      [dependency.predecessor, dependency.successor].every((endpoint) =>
+        envelope.teamId === undefined || endpoint.teamId === envelope.teamId
+      )
+    ),
+    workItemLinks,
+    updateTargets: state.updateTargets.filter((updateTarget) =>
+      updateTarget.target.type === 'initiative'
+        ? entityIds.has(updateTarget.target.entityId)
+        : isPlanningScopeInReadEnvelope(updateTarget.target, envelope)
+    ),
+  }
+}
+
+/**
+ * Wraps a Work Item reader so each envelope is read at most once per scoped read.
+ *
+ * @param readWorkItems - Reader supplied by the route.
+ * @returns A reader that returns the first result for a repeated envelope.
+ */
+function memoizePlanningScopedWorkItemReader(
+  readWorkItems: PlanningScopedWorkItemReader,
+): PlanningScopedWorkItemReader {
+  const reads = new Map<string, Promise<PlanningWorkItemState>>()
+  return (envelope) => {
+    const key = JSON.stringify([envelope.teamId ?? null, envelope.projectId ?? null])
+    let read = reads.get(key)
+    if (read === undefined) {
+      read = readWorkItems(envelope)
+      reads.set(key, read)
+    }
+    return read
+  }
 }

@@ -108,6 +108,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     projectDirectoryTable,
     tenantAdministrationTable,
     workItemsTable,
+    workspaceAccessTable,
   } = input.dataStores;
   const { auditRetentionDays, notificationReminderDefaultDays } = input.parameters;
 
@@ -129,6 +130,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
       WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+      WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
     },
     grant: (grantee) => {
       // Planning update targets, and the weekly report rows that decide who is reminded.
@@ -190,6 +192,11 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
         actions: ['dynamodb:GetItem'],
         resources: [notificationsTable.tableArn],
       }));
+      // Members' current display names for weekly report reminders (ADR 0074).
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [workspaceAccessTable.tableArn],
+      }));
       // Unsubmitted time entries for timesheet reminders.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],
@@ -234,6 +241,111 @@ export function defineCycleScheduleJob(input: ScheduleWorkerInput): ScheduledJob
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
         resources: [workItemsTable.tableArn],
+      }));
+    },
+  };
+}
+
+/**
+ * Defines the quarter-hourly job that delivers the daily / weekly Update digests members opted
+ * into as one Inbox notification each (ADR 0066).
+ *
+ * The worker finds due members through the sparse `InboxDigestDueIndex`, rechecks each member's
+ * current access with the same reads as the API's Update Feed, and commits the digest receipt and
+ * the Inbox row in one transaction fenced by the member's current access rows.
+ *
+ * @param input Shared data stores and parameters.
+ * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
+ */
+export function defineInboxDigestJob(input: ScheduleWorkerInput): ScheduledJobGrant {
+  const {
+    collaborationTable,
+    enterpriseIdentityTable,
+    notificationsTable,
+    planningTable,
+    projectDirectoryTable,
+    tenantAdministrationTable,
+    workspaceAccessTable,
+  } = input.dataStores;
+  const {
+    cognitoUserPoolArn,
+    cognitoUserPoolClientId,
+    cognitoUserPoolId,
+    inboxDigestDeliveryEnabled,
+    systemAdminGroups,
+  } = input.parameters;
+
+  return {
+    id: 'InboxDigest',
+    runtimeScope: 'notification-schedule',
+    // The role already holds ten managed policies with every optional module on.
+    policy: 'shared-role',
+    environment: {
+      COGNITO_CLIENT_ID: cognitoUserPoolClientId,
+      COGNITO_USER_POOL_ID: cognitoUserPoolId,
+      COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+      ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+      INBOX_DIGEST_WORKER_ENABLED: inboxDigestDeliveryEnabled.valueAsString,
+      NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      PLANNING_TABLE_NAME: planningTable.tableName,
+      PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+      SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
+      WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+    },
+    grant: (grantee) => {
+      // The Update Feed reads the Planning graph, read state and saved feeds; the worker writes
+      // only its digest, checkpoint, deferred and failure rows, each in a conditional transaction.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: [
+          'dynamodb:BatchGetItem',
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+        ],
+        resources: [planningTable.tableArn],
+      }));
+      // Deletes only remove settled deferred rows from the worker's own system partition.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:DeleteItem'],
+        resources: [planningTable.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['SYSTEM#INBOX_DIGEST'] },
+        },
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${planningTable.tableArn}/index/InboxDigestDueIndex`],
+      }));
+      // The member's channel preference fences the transaction that inserts the Inbox row.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem'],
+        resources: [notificationsTable.tableArn],
+      }));
+      // Current membership, Enterprise policy, tenant state, Projects and watchers decide what
+      // the member may still read, and fence the delivery transaction.
+      for (const table of [
+        collaborationTable,
+        enterpriseIdentityTable,
+        projectDirectoryTable,
+        tenantAdministrationTable,
+        workspaceAccessTable,
+      ]) {
+        grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: [
+            'dynamodb:BatchGetItem',
+            'dynamodb:ConditionCheckItem',
+            'dynamodb:GetItem',
+            'dynamodb:Query',
+          ],
+          resources: [table.tableArn],
+        }));
+      }
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        // Current groups decide whether the member is a system administrator.
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [cognitoUserPoolArn],
       }));
     },
   };

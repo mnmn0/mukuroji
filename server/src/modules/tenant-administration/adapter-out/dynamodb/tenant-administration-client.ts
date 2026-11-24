@@ -23,10 +23,20 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  PlanningUpdateTemplateSettings,
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
+  WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
-import { isCurrencyCode, readWeeklyReportReminderSettings, readWorkspaceCalendarSettings } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+  findRemovedTimeEntryCategoryKeys,
+  isCurrencyCode,
+  readPlanningUpdateTemplateSettings,
+  readWeeklyReportReminderSettings,
+  readWorkspaceCalendarSettings,
+  readWorkspaceTimeEntryCategorySettings,
+} from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -271,6 +281,9 @@ export class DynamoDbTenantAdministrationClient implements
     if (current.revision !== input.expectedRevision) {
       throw revisionConflict('TenantProfileRevisionConflict')
     }
+    const timeEntryCategories = input.timeEntryCategories
+      ? readChangedTimeEntryCategories(current.timeEntryCategories, input.timeEntryCategories)
+      : undefined
     const updated: TenantProfile = {
       ...current,
       region: validateTenantRegion(input.region),
@@ -280,6 +293,10 @@ export class DynamoDbTenantAdministrationClient implements
       ...(input.weeklyReportReminders
         ? { weeklyReportReminders: readStoredWeeklyReportReminders(input.weeklyReportReminders) }
         : {}),
+      ...(input.planningUpdateTemplate
+        ? { planningUpdateTemplate: readStoredPlanningUpdateTemplate(input.planningUpdateTemplate) }
+        : {}),
+      ...(timeEntryCategories ? { timeEntryCategories } : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
@@ -1994,6 +2011,12 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.weeklyReportReminders === undefined
       ? {}
       : { weeklyReportReminders: readStoredWeeklyReportReminders(value.weeklyReportReminders) }),
+    ...(value.planningUpdateTemplate === undefined
+      ? {}
+      : { planningUpdateTemplate: readStoredPlanningUpdateTemplate(value.planningUpdateTemplate) }),
+    ...(value.timeEntryCategories === undefined
+      ? {}
+      : { timeEntryCategories: readStoredTimeEntryCategories(value.timeEntryCategories) }),
     ...(value.defaultCurrency === undefined ? {} : { defaultCurrency: readStoredDefaultCurrency(value.defaultCurrency) }),
     status,
     ...(closedAt ? { closedAt } : {}),
@@ -2017,6 +2040,19 @@ function readStoredDefaultCurrency(value: unknown): string {
 }
 
 /**
+ * Reads stored or already-validated health update template settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredPlanningUpdateTemplate(value: unknown): PlanningUpdateTemplateSettings {
+  const settings = readPlanningUpdateTemplateSettings(value)
+  if (!settings) throw new Error('invalid planning update template settings')
+  return settings
+}
+
+/**
  * Reads stored or already-validated weekly report reminder settings.
  *
  * @param value - Settings candidate.
@@ -2026,6 +2062,47 @@ function readStoredDefaultCurrency(value: unknown): string {
 function readStoredWeeklyReportReminders(value: unknown): WeeklyReportReminderSettings {
   const settings = readWeeklyReportReminderSettings(value)
   if (!settings) throw new Error('invalid weekly report reminder settings')
+  return settings
+}
+
+/**
+ * Reads stored or already-validated Workspace work category settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredTimeEntryCategories(value: unknown): WorkspaceTimeEntryCategorySettings {
+  const settings = readWorkspaceTimeEntryCategorySettings(value)
+  if (!settings) throw new Error('invalid time entry category settings')
+  return settings
+}
+
+/**
+ * Validates a work category change against the categories in effect, which are the defaults until
+ * the Workspace saves its own.
+ *
+ * @param stored - Stored settings, if any.
+ * @param requested - Already-validated requested settings.
+ * @returns The settings to store.
+ * @throws TenantAdministrationError When the change drops a category instead of retiring it.
+ */
+function readChangedTimeEntryCategories(
+  stored: WorkspaceTimeEntryCategorySettings | undefined,
+  requested: WorkspaceTimeEntryCategorySettings,
+): WorkspaceTimeEntryCategorySettings {
+  const settings = readStoredTimeEntryCategories(requested)
+  const removed = findRemovedTimeEntryCategoryKeys(
+    stored ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
+    settings,
+  )
+  if (removed.length > 0) {
+    throw new TenantAdministrationError(
+      400,
+      'TimeEntryCategoryRemoved',
+      `Work categories cannot be removed, only retired: ${removed.join(', ')}.`,
+    )
+  }
   return settings
 }
 

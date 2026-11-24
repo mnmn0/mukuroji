@@ -5,7 +5,11 @@ import type {
   PlanningHealth,
   PlanningRisk,
   PlanningUpdateEvidence,
+  PlanningUpdateRequirableField,
+  PlanningUpdateTemplateSettings,
+  PlanningUpdateTemplateTextField,
 } from '@mukuroji/contracts'
+import { listMissingPlanningUpdateFields } from '@mukuroji/contracts'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import {
@@ -13,6 +17,8 @@ import {
   type AiPlanningStatusUpdateAdoptionContext,
 } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import type { MentionableMember, MentionSuggestionsFailure } from '../../shared/lib/memberMentions'
+import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import {
@@ -23,7 +29,6 @@ import {
 } from '../model/baselineDelayEvidence'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
   readPlanningUpdateEvidence,
   readPlanningUpdateEvidenceType,
   submitPlanningUpdateCommentAndReset,
@@ -47,6 +52,8 @@ export type PlanningUpdateLabels = {
   projectTarget: string
   /** Initiative update-target label. */
   initiativeTarget: string
+  /** Team update-target label. */
+  teamTarget: string
   /** Next deadline label. */
   nextDueAt: string
   /** Label shown when no update has been published. */
@@ -79,6 +86,8 @@ export type PlanningUpdateLabels = {
   escalation: string
   /** Escalation recipient field label. */
   escalationOwner: string
+  /** Reviewer field label. */
+  reviewer: string
   /** Schedule save action label. */
   saveCadence: string
   /** Schedule clear action label. */
@@ -93,6 +102,14 @@ export type PlanningUpdateLabels = {
   composerRequiredHint: string
   /** Form validation error shown when a structured form cannot be submitted. */
   formInvalid: string
+  /** Error naming the Workspace-required fields left empty, as a comma-separated list. */
+  requiredFieldsMissing?: (fields: string) => string
+  /** Marks a field label as required by the Workspace. */
+  requiredField?: (label: string) => string
+  /** Note shown while the Workspace required fields and template load. */
+  templateLoading?: string
+  /** Error shown when the Workspace required fields and template cannot be read. */
+  templateLoadFailed?: string
   /** Health field label. */
   health: string
   /** Localized planning-health values. */
@@ -155,6 +172,8 @@ export type PlanningUpdateLabels = {
   acknowledged: (reviewerMemberKey: string, acknowledgedAt: string) => string
   /** Badge text shown while the configured reviewer has not confirmed an update. */
   acknowledgementPending: (reviewerMemberKey: string) => string
+  /** Reviewer action that records the acknowledgement. */
+  acknowledge: string
   /** History loading-state label. */
   historyLoading: string
   /** History error-state label. */
@@ -187,6 +206,8 @@ export type PlanningUpdateLabels = {
   addComment: string
   /** Comment composer placeholder. */
   commentPlaceholder: string
+  /** Accessible name of the comment composer's mention suggestions. */
+  mentionSuggestions: string
   /** Reaction control accessible label. */
   reaction: string
   /** Formats the target watcher count. */
@@ -304,6 +325,10 @@ export type PlanningUpdateDetailPaneProps = {
   evidenceCandidates?: PlanningUpdateEvidenceCandidates
   /** Records behind the baseline that the composer can attach as evidence. */
   baselineDelays?: PlanningBaselineDelaysView
+  /** Workspace required fields and template for new updates. */
+  template?: PlanningUpdateTemplateSettings
+  /** Set while the Workspace settings load or after they fail to load. */
+  templateLoadState?: PlanningUpdateTemplateLoadState
 }
 
 /**
@@ -328,6 +353,8 @@ export function PlanningUpdateDetailPane({
   onSaveCadence,
   summary,
   updateView,
+  template,
+  templateLoadState,
 }: PlanningUpdateDetailPaneProps) {
   const collaborationIsPending = collaboration?.isPending ?? false
   const collaborationIsLoading = collaboration?.isLoading ?? false
@@ -340,7 +367,11 @@ export function PlanningUpdateDetailPane({
     >
       <header className="border-b border-[var(--workbench-border)] px-5 py-5">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
-          {summary.target.type === 'project' ? labels.projectTarget : labels.initiativeTarget}
+          {summary.target.type === 'project'
+            ? labels.projectTarget
+            : summary.target.type === 'team'
+            ? labels.teamTarget
+            : labels.initiativeTarget}
         </p>
         <h2 className="mt-1 text-lg font-semibold text-[var(--workbench-text)]">
           {summary.title}
@@ -423,6 +454,8 @@ export function PlanningUpdateDetailPane({
           labels={labels}
           onPublish={onPublish}
           progress={summary.progress}
+          template={template}
+          templateLoadState={templateLoadState}
         />
         <PlanningStatusUpdateLedger
           errorMessage={historyErrorMessage}
@@ -524,6 +557,7 @@ export function PlanningUpdateCadenceEditor({
             cadence: { unit: cadenceUnit, count: cadenceCount },
             escalationHoursAfter,
             escalationMemberKey: readOptionalText(data.get('escalationMemberKey')),
+            reviewerMemberKey: readOptionalText(data.get('reviewerMemberKey')),
             nextDueAt,
             reminderHoursBefore,
             timeZone,
@@ -624,6 +658,15 @@ export function PlanningUpdateCadenceEditor({
             name="escalationMemberKey"
           />
         </label>
+        <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+          {labels.reviewer}
+          <input
+            className="workbench-input h-10 px-3"
+            defaultValue={cadence?.reviewerMemberKey}
+            disabled={!onSave || isSaving}
+            name="reviewerMemberKey"
+          />
+        </label>
         {!onSave ? (
           <p className="text-xs font-semibold text-[var(--workbench-muted)]">
             {labels.cadenceDisabled}
@@ -714,7 +757,33 @@ export type PlanningStatusUpdateComposerProps = {
   initialDraft?: AiPlanningStatusUpdateDraft
   /** Publishes a manual canonical update when the viewer has permission. */
   onPublish?: (draft: PlanningStatusUpdateDraft) => void | Promise<void>
+  /** Workspace required fields and the text a new update starts from. */
+  template?: PlanningUpdateTemplateSettings
+  /** Set while the Workspace settings load or after they fail to load. */
+  templateLoadState?: PlanningUpdateTemplateLoadState
 }
+
+/** Loading state of the Workspace required fields and template, when they are not ready. */
+export type PlanningUpdateTemplateLoadState =
+  | {
+      /** The settings are still loading; the composer waits so typed text is never replaced. */
+      status: 'loading'
+    }
+  | {
+      /** The settings could not be read; the server still enforces the required fields. */
+      status: 'error'
+      /** Reads the settings again. */
+      onRetry: () => void
+    }
+
+/** Composer label of each field a Workspace may make required. */
+const planningUpdateFieldLabelKeys = {
+  riskSummary: 'riskSummary',
+  decisionSummary: 'decisionSummary',
+  helpNeeded: 'helpNeeded',
+  nextAction: 'nextAction',
+  evidence: 'evidence',
+} as const satisfies Record<PlanningUpdateRequirableField, keyof PlanningUpdateLabels>
 
 /** Authentication and revision-fenced source for a Planning status update draft. */
 export type PlanningStatusUpdateAiAssistance = {
@@ -814,7 +883,19 @@ export function PlanningStatusUpdateComposer({
   labels,
   onPublish,
   progress,
+  template,
+  templateLoadState,
 }: PlanningStatusUpdateComposerProps) {
+  const requiredFields = new Set(template?.requiredFields ?? [])
+  /**
+   * Adds the Workspace-required mark to one field label.
+   *
+   * @param field - Field that may be required.
+   * @param label - Plain field label.
+   * @returns The label, marked when the Workspace requires the field.
+   */
+  const fieldLabel = (field: PlanningUpdateRequirableField, label: string) =>
+    requiredFields.has(field) && labels.requiredField ? labels.requiredField(label) : label
   const [evidenceType, setEvidenceType] = useState<PlanningUpdateEvidence['type'] | 'none'>(
     initialEvidenceType,
   )
@@ -839,9 +920,19 @@ export function PlanningStatusUpdateComposer({
     draft: initialDraft,
     revision: 0,
   })
+  // The template seeds the form once, and only while nothing has been typed, so a late or
+  // retried load never replaces the author's text. Required marks always follow the live value.
+  const [seededTemplate, setSeededTemplate] = useState(template)
+  if (template !== undefined && seededTemplate === undefined && !isFormDirty) {
+    setSeededTemplate(template)
+  }
+  // A form seeded by a draft (AI or story) keeps that draft; a fresh form starts from the template.
+  const startingText: Partial<Record<PlanningUpdateTemplateTextField, string>> | undefined =
+    formSeed.draft ?? seededTemplate?.template
   const formDisabled =
     !onPublish ||
     isPublishing ||
+    templateLoadState?.status === 'loading' ||
     aiAssistance?.isAiOperationPending === true
   const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
   const aiAssistantSessionKey = aiAssistance
@@ -980,9 +1071,28 @@ export function PlanningStatusUpdateComposer({
       <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]">
         {labels.composerRequiredHint}
       </p>
+      {templateLoadState?.status === 'loading' && labels.templateLoading ? (
+        <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]" role="status">
+          {labels.templateLoading}
+        </p>
+      ) : templateLoadState?.status === 'error' ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2" role="alert">
+          <p className="text-xs font-semibold text-fg-red-800">
+            {labels.templateLoadFailed ?? labels.formInvalid}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-9 px-3"
+            onClick={templateLoadState.onRetry}
+            type="button"
+          >
+            {labels.retryHistory}
+          </button>
+        </div>
+      ) : null}
       <form
         className="mt-4 grid gap-3"
-        key={`planning-status-update-form-${formSeed.revision}`}
+        // Remounts only when the untouched form first receives the template (see seededTemplate).
+        key={`planning-status-update-form-${formSeed.revision}-${seededTemplate ? 'template' : 'plain'}`}
         noValidate
         onChange={() => {
           isFormDirtyRef.current = true
@@ -1013,18 +1123,29 @@ export function PlanningStatusUpdateComposer({
             setFormError(labels.formInvalid)
             return
           }
+          const draftText = {
+            riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
+            decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
+            helpNeeded: readOptionalText(data.get('helpNeeded')) ?? '',
+            nextAction,
+          }
+          const missing = template
+            ? listMissingPlanningUpdateFields(template, { ...draftText, evidence })
+            : []
+          if (missing.length > 0) {
+            const names = missing.map((field) => labels[planningUpdateFieldLabelKeys[field]]).join(', ')
+            setFormError(labels.requiredFieldsMissing?.(names) ?? labels.formInvalid)
+            return
+          }
           if (aiGenerationReference !== undefined && evidence.length === 0) {
             setFormError(aiT?.('ai.planning.evidenceRequired') ?? labels.formInvalid)
             return
           }
           const draft = {
-            decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
+            ...draftText,
             evidence,
             health: selectedHealth,
-            helpNeeded: readOptionalText(data.get('helpNeeded')) ?? '',
-            nextAction,
             risk: selectedRisk,
-            riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
             summary,
           }
           const wasAiSeeded = aiGenerationReference !== undefined
@@ -1100,7 +1221,7 @@ export function PlanningStatusUpdateComposer({
           {labels.summary}
           <textarea
             className="workbench-input min-h-24 p-3"
-            defaultValue={formSeed.draft?.summary}
+            defaultValue={startingText?.summary}
             disabled={formDisabled}
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
@@ -1110,16 +1231,16 @@ export function PlanningStatusUpdateComposer({
         </label>
         <div className="grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.riskSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={formDisabled} name="riskSummary" />
+            {fieldLabel('riskSummary', labels.riskSummary)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.riskSummary} disabled={formDisabled} name="riskSummary" required={requiredFields.has('riskSummary')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.decisionSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={formDisabled} name="decisionSummary" />
+            {fieldLabel('decisionSummary', labels.decisionSummary)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.decisionSummary} disabled={formDisabled} name="decisionSummary" required={requiredFields.has('decisionSummary')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.helpNeeded}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={formDisabled} name="helpNeeded" />
+            {fieldLabel('helpNeeded', labels.helpNeeded)}
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={startingText?.helpNeeded} disabled={formDisabled} name="helpNeeded" required={requiredFields.has('helpNeeded')} />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
@@ -1127,7 +1248,7 @@ export function PlanningStatusUpdateComposer({
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             className="workbench-input min-h-20 p-3"
-            defaultValue={formSeed.draft?.nextAction}
+            defaultValue={startingText?.nextAction}
             disabled={formDisabled}
             name="nextAction"
             required
@@ -1136,7 +1257,7 @@ export function PlanningStatusUpdateComposer({
         </div>
         <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] pt-4">
           <legend className="text-sm font-semibold text-[var(--workbench-text)]">
-            {labels.evidence}
+            {fieldLabel('evidence', labels.evidence)}
           </legend>
           {baselineDelays && labels.baselineDelays ? (
             <PlanningBaselineDelaySection
@@ -1461,11 +1582,13 @@ export function PlanningStatusUpdateLedger({
   updateView,
 }: PlanningStatusUpdateLedgerProps) {
   const onAddComment = collaboration?.onAddComment
+  const onAcknowledge = collaboration?.onAcknowledge
   const collaborationIsPending = collaboration?.isPending ?? false
   const collaborationIsLoading = collaboration?.isLoading ?? false
   const collaborationErrorMessage = collaboration?.errorMessage
   return (
-    <section className="workbench-panel overflow-hidden" data-testid="planning-status-update-history">
+    // Not clipped, so a comment composer's mention suggestions can extend below the last update.
+    <section className="workbench-panel" data-testid="planning-status-update-history">
       <div className="px-5 py-4">
         <h2 className="text-base font-semibold text-[var(--workbench-text)]">
           {labels.historyTitle}
@@ -1475,7 +1598,7 @@ export function PlanningStatusUpdateLedger({
         </p>
       </div>
       {errorMessage ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4" role="alert">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-5 py-4 last:rounded-b-[7px]" role="alert">
           <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.historyError}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
@@ -1657,49 +1780,22 @@ export function PlanningStatusUpdateLedger({
                   ))}
                 </div>
               ) : null}
-              {onAddComment ? (
-                <form
-                  className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    const form = event.currentTarget
-                    const bodyMarkdown = readOptionalText(
-                      new FormData(form).get('comment'),
-                    )
-                    if (bodyMarkdown) {
-                      void submitPlanningUpdateCommentAndReset(
-                        onAddComment,
-                        update.id,
-                        bodyMarkdown,
-                        () => form.reset(),
-                      ).catch(() => undefined)
-                    }
-                  }}
-                >
-                  <textarea
-                    aria-label={labels.commentPlaceholder}
-                    className="workbench-input min-h-20 p-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    name="comment"
-                    placeholder={labels.commentPlaceholder}
-                    required
-                  />
-                  <button
-                    className="workbench-button-secondary min-h-9 px-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    type="submit"
-                  >
-                    {labels.addComment}
-                  </button>
-                </form>
+              {onAddComment || onAcknowledge ? (
+                <PlanningUpdateCommentForm
+                  disabled={
+                    collaborationIsPending ||
+                    collaborationIsLoading ||
+                    Boolean(collaborationErrorMessage)
+                  }
+                  labels={labels}
+                  members={collaboration?.mentionMembers ?? []}
+                  onAcknowledge={acknowledgement && !acknowledgement.acknowledgedAt
+                    ? onAcknowledge
+                    : undefined}
+                  suggestionsFailure={collaboration?.mentionSuggestionsFailure}
+                  updateId={update.id}
+                  onAddComment={onAddComment}
+                />
               ) : null}
             </article>
             )
@@ -1795,7 +1891,7 @@ const planningUpdateReactionChoices: readonly string[] = [
   '❤️',
   '🎉',
   '👀',
-  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
+  '✅',
 ]
 
 /**
@@ -1860,4 +1956,104 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
 function readOptionalText(value: FormDataEntryValue | null) {
   const text = typeof value === 'string' ? value.trim() : ''
   return text || undefined
+}
+
+/** Props of {@link PlanningUpdateCommentForm}. */
+type PlanningUpdateCommentFormProps = {
+  /** Whether the form is disabled while collaboration state loads, saves, or failed. */
+  disabled: boolean
+  /** Localized ledger labels. */
+  labels: Pick<
+    PlanningUpdateLabels,
+    'acknowledge' | 'addComment' | 'commentPlaceholder' | 'mentionSuggestions'
+  >
+  /** Members offered by display name after `@`. */
+  members: readonly MentionableMember[]
+  /** Set when the candidates failed to load. */
+  suggestionsFailure?: MentionSuggestionsFailure
+  /** Immutable update receiving the comment. */
+  updateId: string
+  /** Saves the comment with the members picked in the composer; absent hides the comment button. */
+  onAddComment?: PlanningUpdateCollaborationController['onAddComment']
+  /**
+   * Records the viewer's reviewer acknowledgement with the drafted remark; absent hides the
+   * acknowledge button.
+   */
+  onAcknowledge?: PlanningUpdateCollaborationController['onAcknowledge']
+}
+
+/**
+ * Comment form of one immutable update, with display-name mention suggestions.
+ *
+ * @param props - Update, candidates, labels, and save callback.
+ * @returns The comment form; its draft is kept when saving fails.
+ */
+function PlanningUpdateCommentForm({
+  disabled,
+  labels,
+  members,
+  onAcknowledge,
+  onAddComment,
+  suggestionsFailure,
+  updateId,
+}: PlanningUpdateCommentFormProps) {
+  const [draft, setDraft] = useState<MemberMentionDraft>({ body: '', mentionMemberKeys: [] })
+  const resetDraft = () => setDraft({ body: '', mentionMemberKeys: [] })
+  return (
+    <form
+      className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const bodyMarkdown = draft.body.trim()
+        if (!bodyMarkdown || !onAddComment) return
+        void submitPlanningUpdateCommentAndReset(
+          onAddComment,
+          updateId,
+          bodyMarkdown,
+          resetDraft,
+          draft.mentionMemberKeys,
+        ).catch(() => undefined)
+      }}
+    >
+      <MemberMentionTextarea
+        ariaLabel={labels.commentPlaceholder}
+        className="workbench-input min-h-20 w-full p-3"
+        disabled={disabled}
+        draft={draft}
+        members={members}
+        name="comment"
+        placeholder={labels.commentPlaceholder}
+        required
+        suggestionsFailure={suggestionsFailure}
+        suggestionsLabel={labels.mentionSuggestions}
+        onDraftChange={setDraft}
+      />
+      {onAddComment ? (
+        <button
+          className="workbench-button-secondary min-h-9 px-3"
+          disabled={disabled}
+          type="submit"
+        >
+          {labels.addComment}
+        </button>
+      ) : null}
+      {onAcknowledge ? (
+        <button
+          className="workbench-button-primary min-h-9 px-3"
+          data-testid="planning-update-acknowledge"
+          disabled={disabled}
+          onClick={() => {
+            // The reviewer's remark in the comment box becomes the acknowledgement comment.
+            const bodyMarkdown = draft.body.trim() || undefined
+            void Promise.resolve(onAcknowledge(updateId, bodyMarkdown, draft.mentionMemberKeys))
+              .then(resetDraft)
+              .catch(() => undefined)
+          }}
+          type="button"
+        >
+          {labels.acknowledge}
+        </button>
+      ) : null}
+    </form>
+  )
 }

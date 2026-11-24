@@ -66,6 +66,9 @@ Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`�
 - `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。削除しても key の row は残り、固定 ID の作成では同じ ID が新しい key で作られ得るため、その ID の Work Item が今もその key を持つときだけ解決する。
 - key は内部 API の Work Item、Public API の `GET /api/v1/work-items/{workItemId}/key`、coding-agent MCP の `get_task` に出る。Public API の `WorkItem` は closed schema で、既存操作の応答に property を足すと後方互換を壊すため、key は別 endpoint で返す。作成時の audit event の変更内容にも含める。
 - title の上限 256 文字は Public API v1 の request（`title` の `maxLength`）を狭める変更で、互換チェックは失敗する。利用者がまだいないため、判断のうえで入れた（2026-11-16）。
+- Team manager（Workspace の書き込み権限も必要）は `PUT /api/teams/{teamId}/work-item-key-prefix`（`{ keyPrefix, expectedKeyPrefix }`）で新しい Work Item の prefix を変えられる（[ADR 0055](adr/0055-team-work-item-key-prefix-change.md)）。`GET` は Team の閲覧者に現在の prefix、以前の prefix、最後の番号、`canManage` を返す。以前の prefix row は Team が持ち続け、古い key は解決し続ける。番号は counter から続き、prefix ごとに振り直さない。別の Team が持つ prefix は `409 WorkItemKeyPrefixTaken`、読み込み後に変わっていたら `409 WorkItemKeyPrefixChanged`。
+- `GET /api/work-items/key-prefixes` は、呼び出した人が Work Item を閲覧できる Team の key prefix を `{ prefixes }` で返す。Web はこの一覧にある prefix の語だけをコメント本文と説明の key link にし、`UTF-8` のような語は link にしない。一覧を読めないとき（読み込み中・失敗）は従来どおり key の形の語をすべて link にする。
+- 通知（Inbox・Slack・Email）は対象 Work Item の key を表示する（[通知](notifications.md#work-item-key-の表示)）。
 - key を持たない既存 Work Item への付与は #365 の migration 契約で行う。
 
 Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。field-specific timestamp がある場合は canonical UTC で `createdAt` 以上 `updatedAt` 以下であることも検証する。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。
@@ -114,11 +117,13 @@ Project・Team の Gantt は、表示中の Work Item の Project（Team ごと�
 
 保存・切り替えは baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）、`project.schedule_baseline_replaced`（2 回目以降の保存）、`project.schedule_baseline_activated`（切り替え）で、entity は Project、target は `project-schedule-baseline`。changes には baseline ID・revision・保存時刻・Work Item 数の前後だけを残し、名前・Work Item の ID と日付は残さない。metadata には保存済みの件数と、上限で消した baseline の ID を残す。audit の書き込みが失敗すると baseline も保存されない。
 
+Cycle ごとの baseline（Cycle に入っている Work Item のコミットを保存し、追加・除外・遅れを比べる）は Project の基準とは別で、`docs/planning.md`「Cycle の schedule baseline」と ADR 0059 にある。
+
 Planning の Project / Initiative の近況（Planning update）の作成欄は、対象範囲の Work Item の Project の基準 baseline を読み、基準より終了が遅れている未完了の Work Item と、baseline より予測終了が遅い Milestone を遅れの大きい順に出す。「遅れ n 件を根拠に添付」で、これらを Work Item / Planning entity の evidence として 1 回でまとめて添付できる（手で選んだ根拠の分を 1 件残し、最大 99 件）。前回の近況が根拠にしていないものには「前回以降に新規」と出す。Planning の snapshot は実績終了日を持たないので、完了した Work Item は出さない。baseline を読めない Project が 1 つでもあると、欠けた一覧を出さずに読み込み直しを促す。
 
 Focus は、責任者または Contributor の未完了 Work Item が baseline より Team 設定の日数以上遅れると `slipped` signal を出す（`docs/focus.md`）。
 
-まだ無いもの: Focus の `slipped` signal の通知・Automation trigger、Cycle 単位の baseline。
+まだ無いもの: Focus の `slipped` signal の通知・Automation trigger。
 
 ### Estimate, remaining effort, and progress
 
@@ -211,12 +216,13 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - Focus は [Focus queue の「責任者と参加」](./focus.md#責任者と参加) のとおり `involvement` で区別する。
 - My Tasks は、利用者が責任者の Work Item に加えて、`contributorAssignments` に member として入っている Work Item を表示する。後者のカードにだけ「参加」の badge を付け、担当者の表示はこれまでどおり責任者を示す。対象の判定は Focus と同じで、責任者が Contributor の一覧にも入っている場合は責任者として扱い、自分の分担が `done` の Contributor は進行中の Work Item から外れ、完了・キャンセル済みの Work Item には残る。ロールだけの分担はどの利用者の My Tasks にも入らない。判定は Web が取得済みの Work Item から行い、状態の移動などの操作可否はこれまでどおり Work Item の書き込み権限で決まる。
 
-まだ実装していない範囲は次のとおり。
+通知、引き継ぎ、負荷、テンプレートは次のとおり扱う。
 
-- workload / capacity への planned effort の集計
-- automation、template、bulk action からの設定
-- member 無効化や Team 移動時の再割り当て
-- 通知の分離
+- 通知: 新しく Contributor になった member（責任者と、最初から `done` の分担を除く）に `contributor` reason の通知を1件送る。種類は `assignment`。状態・日程・archive・期限の通知は責任者だけ、承認は reviewer、購読は watcher の reason で届き、Contributor の追加では作成者への `creator` 通知も出さない。`contributor` だけの通知は、受信者が今も Contributor のときだけ Inbox に出て配信される（[Notifications](./notifications.md)）。
+- 引き継ぎ: member の無効化や Team の異動では、Bulk operation の `reassign-member` action（`fromMemberUserId` → `toMemberUserId`）で責任者と、`done` でない分担を移す。`done` の分担は記録として残す。移し先がすでに Contributor なら、移す分担の予定工数を移し先の分担に足し（上限 60,000 分）、その分担が `done` なら `in-progress` に戻す。移し先は通常の更新と同じく active な non-guest member であることを検証し、commit 時に fence する。Work Item ごとに preview・revision 確認・retry・undo ができ、undo は元の責任者と Contributor を戻す（無効化済みの member へは戻せないので失敗する）。対象の一覧は `GET /api/work-items?member=<memberKey>&open=true` で読む。`member` は `involvement` と併用できず、閲覧できる範囲を狭めるだけである。Web は Workspace 管理のメンバー一覧の「担当の引き継ぎ」から使う（[Automation](./automation.md#bulk-operation)）。
+- 責任者の不在・無効の検出: 「担当の引き継ぎ」は利用停止した member にも開け、その人が責任者のまま残っている未完了の Work Item を一覧する。
+- 負荷: decided member の `done` でない分担の予定工数を、Team の workload snapshot に読み取り専用で数える（[Capacity planning](./capacity-planning.md#contributor-の予定工数)）。capacity planning には保存しない。
+- テンプレート: Work Item template の payload に `contributorAssignments`（`memberUserId`・`jobRoleId`・`plannedEffortMinutes`・`status`、最大 20 件）を書ける。ジョブロールと member は、template から Work Item を作るとき（Automation の create action と繰り返し作業）と Work Item configuration の保存時の参照検査で、通常の作成と同じ規則で検証する。
 
 ## Read model
 
@@ -245,6 +251,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - 順序は Team ID、次に Work Item ID。cursor は filter と `includeArchived` に結び付いており、別の filter で使うと `400 InvalidWorkItemPageCursor` になる。
 - filter はどれも閲覧できる範囲を狭めるだけで広げない。
   - `involvement=mine`: 責任者（`assigneeUserId`）または Contributor が自分の Work Item
+  - `member=<memberKey>`: 責任者または Contributor が指定した member の Work Item（引き継ぎ用。`involvement` とは併用できない）
   - `teamId`: その Team の partition だけを読む
   - `projectId`: その Project に割り当てた Work Item
   - `statusCategory`: 繰り返し指定またはカンマ区切り（`backlog` / `unstarted` / `started` / `completed` / `canceled`）

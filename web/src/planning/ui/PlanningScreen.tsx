@@ -19,6 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
   WorkspaceWeekStartDay,
+  PlanningUpdateTemplateSettings,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS, toWorkspaceLocalDate } from '@mukuroji/contracts'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
@@ -69,6 +70,7 @@ import {
   type PlanningArchiveLabels,
 } from './PlanningArchivePanel'
 import { CyclePlanningPanel, type CyclePlanningLabels, type CyclePlanningPanelProps } from './CyclePlanningPanel'
+import type { CycleScheduleBaselineLabels } from './CycleScheduleBaselinePanel'
 import {
   PlanningEntityEditor,
   type PlanningEntityEditorLabels,
@@ -77,6 +79,7 @@ import {
   PlanningEntityDetailTabs,
   type PlanningEntityDetailTabsLabels,
 } from './PlanningEntityDetailTabs'
+import type { PlanningMilestoneWatchLabels } from './PlanningMilestoneWatch'
 import type { PlanningEntityActivityLabels } from './PlanningEntityActivityPanel'
 import {
   collectPlanningOwnerCandidates,
@@ -90,6 +93,7 @@ import {
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
   type PlanningUpdateLabels,
+  type PlanningUpdateTemplateLoadState,
   type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
 
@@ -227,8 +231,18 @@ export type PlanningLabels = PlanningUpdateLabels & {
   entityDetailTabs: PlanningEntityDetailTabsLabels
   /** Selected entity の活動 tab の文言です。 */
   entityActivity: PlanningEntityActivityLabels
+  /** 選択中の Milestone の watch 操作の文言です。 */
+  milestoneWatch: PlanningMilestoneWatchLabels
+  /** Cycle のベースラインの文言です。 */
+  cycleBaseline: CycleScheduleBaselineLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
+  /** Team update list heading. */
+  teamUpdatesTitle: string
+  /** Team update list description. */
+  teamUpdatesDescription: string
+  /** Action that opens one Team's updates. */
+  openTeamUpdates: string
   /** Portfolio section の説明です。 */
   portfolioDescription: string
   /** Entity name の列見出しです。 */
@@ -421,10 +435,14 @@ export type PlanningScreenProps = {
   onUpdateCycleAutomation?: CyclePlanningPanelProps['onUpdateCycleAutomation']
   /** 複数の Work Item を Cycle に入れる、または外す callback です。 */
   onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
+  /** Cycle の計画で選んだ Cycle のベースラインを描きます。省略すると表示しません。 */
+  renderCycleBaseline?: CyclePlanningPanelProps['renderCycleBaseline']
   /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
   renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** 選択中の entity の活動 tab を描きます。省略すると tab を出さず編集欄だけを表示します。 */
   renderEntityActivity?: (entity: PlanningEntity) => ReactNode
+  /** 選択中の Milestone の watch 操作を編集欄の上に描きます。省略すると表示しません。 */
+  renderMilestoneWatch?: (milestone: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
@@ -446,6 +464,10 @@ export type PlanningScreenProps = {
     target: PlanningUpdateTargetView,
     draft: PlanningUpdateCadenceDraft,
   ) => void | Promise<void>
+  /** Workspace の health update 必須項目とテンプレートです。 */
+  updateTemplate?: PlanningUpdateTemplateSettings
+  /** 必須項目とテンプレートの読み込み中、または読み込み失敗の状態です。 */
+  updateTemplateLoadState?: PlanningUpdateTemplateLoadState
   /** Project または Initiative の structured manual update を公開する callback です。 */
   onPublishUpdate?: (
     target: PlanningUpdateTargetView,
@@ -541,6 +563,8 @@ export function PlanningScreen({
   onOpenProjectOverview,
   onOpenWorkItem,
   onPublishUpdate,
+  updateTemplate,
+  updateTemplateLoadState,
   onSaveUpdateCadence,
   onSaveWorkItemLink,
   onSelectUpdateTarget,
@@ -553,8 +577,10 @@ export function PlanningScreen({
   onSetCycleWorkItems,
   onViewChange,
   onUpdateWorkItemDependency,
+  renderCycleBaseline,
   renderCycleBurndown,
   renderEntityActivity,
+  renderMilestoneWatch,
   snapshot,
   updateCollaboration,
   updateBaselineDelays,
@@ -648,7 +674,9 @@ export function PlanningScreen({
     ? updateBaselineDelays.delays
     : undefined
   const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
-    aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
+    // AI drafting reads Project or Initiative sources; Team updates are written by hand.
+    aiAssistance && snapshot && resolvedSelectedUpdateTarget &&
+      resolvedSelectedUpdateTarget.type !== 'team' && onPublishUpdate && canPublishSelectedUpdate
       ? {
           accessToken: aiAssistance.accessToken,
           onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
@@ -671,6 +699,13 @@ export function PlanningScreen({
     setSelectedEntityId(entityId)
     setSelectedUpdateTarget(target)
     if (target) onSelectUpdateTarget?.(target)
+  }
+
+  /** Selects an update target that no Planning entity row represents, such as a Team. */
+  const handleSelectUpdateTarget = (target: PlanningUpdateTargetView) => {
+    if (isAiOperationPendingRef.current) return
+    setSelectedUpdateTarget(target)
+    onSelectUpdateTarget?.(target)
   }
 
   useEffect(() => {
@@ -844,6 +879,7 @@ export function PlanningScreen({
                   onCreateNextCycle={onCreateNextCycle}
                   onSetCycleWorkItems={onSetCycleWorkItems}
                   onUpdateCycleAutomation={onUpdateCycleAutomation}
+                  renderCycleBaseline={renderCycleBaseline}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'roadmap' ? (
@@ -863,6 +899,15 @@ export function PlanningScreen({
                   onOpenWorkItem={onOpenWorkItem}
                   onSaveWorkItemLink={onSaveWorkItemLink}
                   onSelectEntity={handleSelectEntity}
+                />
+              ) : null}
+              {activeView === 'portfolio' && directoryTeams && directoryTeams.length > 0 ? (
+                <TeamUpdateTargetsPanel
+                  isAiOperationPending={isAiOperationPending}
+                  labels={labels}
+                  onSelectTarget={handleSelectUpdateTarget}
+                  teams={directoryTeams}
+                  updateTargetDetails={updateTargetDetails}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'portfolio' ? (
@@ -890,13 +935,18 @@ export function PlanningScreen({
                       : undefined}
                   />
                 )
-                return renderEntityActivity ? (
+                const watch = renderMilestoneWatch && selectedEntity.type === 'milestone' &&
+                  !selectedEntity.archivedAt
+                  ? renderMilestoneWatch(selectedEntity)
+                  : null
+                const detail = renderEntityActivity ? (
                   <PlanningEntityDetailTabs
                     details={editor}
                     labels={labels.entityDetailTabs}
                     renderActivity={() => renderEntityActivity(selectedEntity)}
                   />
                 ) : editor
+                return watch ? <div className="grid gap-3">{watch}{detail}</div> : detail
               })() : null}
               <CreateEntityPanel
                 canCreateInScope={canCreateInScope}
@@ -941,6 +991,8 @@ export function PlanningScreen({
                   ? (draft) => onSaveUpdateCadence(resolvedSelectedUpdateTarget, draft)
                   : undefined}
                 onRetryHistory={onRetryUpdateHistory}
+                template={updateTemplate}
+                templateLoadState={updateTemplateLoadState}
               />
             ) : null}
           </div>
@@ -2029,6 +2081,63 @@ function PortfolioView({
           </tbody>
         </table>
       </div>
+    </section>
+  )
+}
+
+/**
+ * Lists the Teams that can submit a Team-level health update, with their latest update state.
+ *
+ * @param props - Visible Teams, update projections, labels, and the selection handler.
+ * @returns A compact table whose rows open one Team's update pane.
+ */
+function TeamUpdateTargetsPanel({
+  isAiOperationPending = false,
+  labels,
+  onSelectTarget,
+  teams,
+  updateTargetDetails,
+}: {
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
+  /** Localized Planning labels. */
+  labels: PlanningLabels
+  /** Opens one Team target. */
+  onSelectTarget: (target: PlanningUpdateTargetView) => void
+  /** Permission-filtered Workspace Teams. */
+  teams: readonly CrossProjectTimelineDirectoryTeam[]
+  /** Update projections for the configured targets. */
+  updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
+}) {
+  return (
+    <section className="workbench-panel overflow-hidden" data-testid="planning-team-updates">
+      <PlanningSectionHeader title={labels.teamUpdatesTitle} description={labels.teamUpdatesDescription} />
+      <ul className="divide-y divide-[var(--workbench-border)] border-t border-[var(--workbench-border)]">
+        {teams.map((team) => {
+          const target: PlanningUpdateTargetView = { type: 'team', teamId: team.id }
+          const updateView = resolvePlanningUpdateTargetDetail(updateTargetDetails, target)?.updateView ??
+            createMissingPlanningTargetUpdateView(target)
+          return (
+            <li className="flex flex-wrap items-center justify-between gap-3 px-5 py-4" data-testid={`planning-team-update-${team.id}`} key={team.id}>
+              <div className="grid min-w-0 gap-2">
+                <span className="truncate text-sm font-semibold text-[var(--workbench-text)]">{team.name}</span>
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                </div>
+                <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+              </div>
+              <button
+                className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={isAiOperationPending}
+                onClick={() => onSelectTarget(target)}
+                type="button"
+              >
+                {labels.openTeamUpdates}
+              </button>
+            </li>
+          )
+        })}
+      </ul>
     </section>
   )
 }

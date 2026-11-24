@@ -3,6 +3,7 @@ export {
   DEFAULT_FOCUS_POLICY_SETTINGS,
   createFocusCauseFingerprint,
   createFocusQueue,
+  createFocusUpdateReviewKey,
   createFocusWorkItemStateKey,
   focusQueueUsesApprovalSummary,
   focusQueueUsesScheduleBaseline,
@@ -12,6 +13,8 @@ export {
   type FocusScheduleBaselineSource,
   type ResolveFocusEffectivePoliciesInput,
 } from './focus-queue'
+
+export { createFocusProjectLogEntries, type FocusProjectLogSource } from './focus-project-log'
 
 export {
   FOCUS_MEMBER_INDEX_LIMIT,

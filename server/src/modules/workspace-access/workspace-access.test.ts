@@ -3431,3 +3431,316 @@ test('pins a member record to the version read, or to its absence', () => {
     },
   })
 })
+
+/**
+ * Creates a Workspace Access adapter over the given member rows that records each write.
+ *
+ * @param members - Stored member rows, by member key.
+ * @returns The adapter and the recorded write inputs.
+ */
+function createMemberNameClient(
+  members: readonly WorkspaceMember[],
+  auditItems: ReadonlyArray<Record<string, unknown>> = [],
+) {
+  const inputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand' && command.input.TableName === 'AuditTable') {
+        const key = command.input.Key
+        const eventId = typeof key === 'object' && key !== null && 'eventId' in key ? String(key.eventId) : ''
+        return { Item: auditItems.find((item) => item.eventId === eventId) }
+      }
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key
+        const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key
+          ? String(key.recordKey)
+          : ''
+        const member = members.find((candidate) => recordKey === `MEMBER#${candidate.memberKey}`)
+        return { Item: member ? toMemberItem(member) : undefined }
+      }
+      inputs.push(command.input)
+      // An audit Put whose event already exists fails its condition, as DynamoDB would.
+      const transactItems = command.input.TransactItems
+      if (command.constructor.name === 'TransactWriteCommand' && Array.isArray(transactItems)) {
+        const failedIndex = transactItems.findIndex((item: unknown) => {
+          if (typeof item !== 'object' || item === null || !('Put' in item)) return false
+          const put = item.Put
+          const eventId = typeof put === 'object' && put !== null && 'Item' in put &&
+            typeof put.Item === 'object' && put.Item !== null && 'eventId' in put.Item
+            ? put.Item.eventId
+            : undefined
+          return eventId !== undefined && auditItems.some((audit) => audit.eventId === eventId)
+        })
+        if (failedIndex >= 0) throw createConditionalTransactionError(transactItems.length, failedIndex)
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+  return { client, inputs }
+}
+
+test('lets a member change their own display name with a version condition', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const { client, inputs } = createMemberNameClient([member])
+
+  const renamed = await client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '  佐藤 花子 ', expectedVersion: 1 },
+    createAuditContext('rename-self'),
+  )
+
+  expect(renamed).toMatchObject({ name: '佐藤 花子', version: 2 })
+  const transactItems = inputs[0]?.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems : []).toHaveLength(2)
+  expect(inputs[0]).toMatchObject({
+    TransactItems: [
+      {
+        Update: {
+          Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+          UpdateExpression: 'SET #name = :name, updatedAt = :now, version = version + :one',
+          ExpressionAttributeValues: { ':name': '佐藤 花子', ':expectedVersion': 1 },
+        },
+      },
+      {
+        Put: {
+          TableName: 'AuditTable',
+          Item: { eventType: 'member.renamed', action: 'renamed' },
+        },
+      },
+    ],
+  })
+})
+
+test('removes the display name when it is blank and leaves an unchanged name as it is', async () => {
+  const owner = createWorkspaceMember('demo@example.com')
+  const { client, inputs } = createMemberNameClient([owner])
+
+  const unchanged = await client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: 'Demo User', expectedVersion: 1 },
+    createAuditContext('same-name'),
+  )
+  expect(unchanged).toEqual(owner)
+  // Only the version is checked and the request's audit event written; the member row is untouched.
+  expect(inputs[0]).toMatchObject({
+    TransactItems: [
+      { ConditionCheck: { Key: { recordKey: 'MEMBER#demo@example.com' }, ExpressionAttributeValues: { ':expectedVersion': 1 } } },
+      { Put: { TableName: 'AuditTable', Item: { eventType: 'member.renamed', changes: [], metadata: { unchanged: true } } } },
+    ],
+  })
+  inputs.length = 0
+
+  const cleared = await client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: ' ', expectedVersion: 1 },
+    createAuditContext('clear-name'),
+  )
+  expect(cleared.name).toBeUndefined()
+  const clearItems = inputs[0]?.TransactItems
+  expect(Array.isArray(clearItems) ? clearItems[0] : undefined).toMatchObject({
+    Update: { UpdateExpression: 'SET updatedAt = :now, version = version + :one REMOVE #name' },
+  })
+})
+
+test('lets an admin rename a member but not an owner, and pins the admin', async () => {
+  const admin = createWorkspaceMember('admin@example.com', 'admin')
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const owner = createWorkspaceMember('demo@example.com')
+  const { client, inputs } = createMemberNameClient([admin, member, owner])
+
+  await client.updateMemberName(
+    workspaceId,
+    admin.memberKey,
+    member.memberKey,
+    { name: 'Sato', expectedVersion: 1 },
+    createAuditContext('admin-rename'),
+  )
+  const adminItems = inputs[0]?.TransactItems
+  expect(Array.isArray(adminItems) ? adminItems.slice(0, 2) : []).toMatchObject([
+    { ConditionCheck: { Key: { recordKey: 'MEMBER#admin@example.com' } } },
+    { Update: { Key: { recordKey: 'MEMBER#sato@example.com' } } },
+  ])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    admin.memberKey,
+    owner.memberKey,
+    { name: 'Owner', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+})
+
+test('refuses a member renaming someone else', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const other = createWorkspaceMember('suzuki@example.com', 'member')
+  const { client, inputs } = createMemberNameClient([member, other])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    other.memberKey,
+    { name: 'Suzuki', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 403, code: 'WorkspaceRoleDenied' })
+  expect(inputs).toHaveLength(0)
+})
+
+test('refuses renaming a directory member and a stale version', async () => {
+  const owner = createWorkspaceMember('demo@example.com')
+  const directoryMember = {
+    ...createWorkspaceMember('scim@example.com', 'member'),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'ext-1',
+  }
+  const { client } = createMemberNameClient([owner, directoryMember])
+
+  await expect(client.updateMemberName(
+    workspaceId,
+    directoryMember.memberKey,
+    directoryMember.memberKey,
+    { name: 'Self', expectedVersion: 1 },
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceMemberNameDirectoryManaged' })
+  await expect(client.updateMemberName(
+    workspaceId,
+    owner.memberKey,
+    owner.memberKey,
+    { name: 'New', expectedVersion: 3 },
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+})
+
+/**
+ * Builds the audit context of a rename request whose fingerprint covers the requested change.
+ *
+ * @param idempotencyKey - Idempotency key of the request.
+ * @param name - Requested name.
+ * @returns Audit context of the request.
+ */
+function createRenameAuditContext(idempotencyKey: string, name: string) {
+  return createMutationAuditContext({
+    workspaceId,
+    actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+    idempotencyKey,
+    occurredAt: now.toISOString(),
+    request: { method: 'PUT', path: '/api/me/profile', body: { expectedVersion: 1, name } },
+    source: { kind: 'api' },
+  })
+}
+
+test('returns the saved member when a committed rename is retried with the same idempotency key', async () => {
+  const member = createWorkspaceMember('sato@example.com', 'member')
+  const first = createMemberNameClient([member])
+  await first.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createRenameAuditContext('rename-retry', '佐藤 花子'),
+  )
+  const transactItems = first.inputs[0]?.TransactItems
+  const auditPut = Array.isArray(transactItems) ? transactItems[1] : undefined
+  const auditItem = typeof auditPut === 'object' && auditPut !== null && 'Put' in auditPut
+    ? auditPut.Put.Item
+    : undefined
+  expect(auditItem).toMatchObject({ metadata: { expectedVersion: 1 } })
+  const saved = { ...member, name: '佐藤 花子', version: 2 }
+  const retry = createMemberNameClient([saved], auditItem ? [auditItem] : [])
+
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createRenameAuditContext('rename-retry', '佐藤 花子'),
+  )).resolves.toEqual(saved)
+  expect(retry.inputs).toEqual([])
+
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤 花子', expectedVersion: 1 },
+    createRenameAuditContext('rename-other', '佐藤 花子'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceVersionConflict' })
+  await expect(retry.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '別の名前', expectedVersion: 1 },
+    createRenameAuditContext('rename-retry', '別の名前'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+
+  // After a later change, the same key with another name is still refused, not taken as saved.
+  const later = createMemberNameClient([{ ...saved, name: '後の名前', version: 3 }], auditItem ? [auditItem] : [])
+  await expect(later.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '別の名前', expectedVersion: 1 },
+    createRenameAuditContext('rename-retry', '別の名前'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+})
+
+test('binds the idempotency key of an unchanged-name request to its input', async () => {
+  const member = { ...createWorkspaceMember('sato@example.com', 'member'), name: '佐藤' }
+  const first = createMemberNameClient([member])
+  await first.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤', expectedVersion: 1 },
+    createRenameAuditContext('same-key', '佐藤'),
+  )
+  const transactItems = first.inputs[0]?.TransactItems
+  const auditPut = Array.isArray(transactItems) ? transactItems[1] : undefined
+  const auditItem = typeof auditPut === 'object' && auditPut !== null && 'Put' in auditPut
+    ? auditPut.Put.Item
+    : undefined
+  expect(auditItem).toMatchObject({ metadata: { expectedVersion: 1, unchanged: true } })
+  const recorded = createMemberNameClient([member], auditItem ? [auditItem] : [])
+
+  // The same request again is answered as before.
+  await expect(recorded.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '佐藤', expectedVersion: 1 },
+    createRenameAuditContext('same-key', '佐藤'),
+  )).resolves.toEqual(member)
+  // The same key with another name is refused instead of renaming the member.
+  await expect(recorded.client.updateMemberName(
+    workspaceId,
+    member.memberKey,
+    member.memberKey,
+    { name: '別の名前', expectedVersion: 1 },
+    createRenameAuditContext('same-key', '別の名前'),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+})
+
+test('lists every member row, deactivated members included, for name readers', async () => {
+  const active = createWorkspaceMember('sato@example.com', 'member')
+  const deactivated = { ...createWorkspaceMember('suzuki@example.com', 'member', 'deactivated'), name: '鈴木 改名' }
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Items: [toMemberItem(active), toMemberItem(deactivated)] })),
+    undefined,
+    false,
+    () => now,
+  )
+
+  expect((await client.listMembers(workspaceId)).map((member) => [member.memberKey, member.status, member.name]))
+    .toEqual([
+      ['sato@example.com', 'active', undefined],
+      ['suzuki@example.com', 'deactivated', '鈴木 改名'],
+    ])
+  expect((await client.listActiveMembers(workspaceId)).map((member) => member.memberKey)).toEqual(['sato@example.com'])
+})

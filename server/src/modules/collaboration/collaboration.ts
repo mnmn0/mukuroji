@@ -548,6 +548,8 @@ export type UpdateWatcherInput = {
   projectId?: string
   /** Project/Initiative を一意に表す Planning update target key です。 */
   planningUpdateTargetKey?: string
+  /** Watch 対象の Planning entity（Milestone）ID です。 */
+  planningEntityId?: string
   /** Work Item 取得時に併記する assigned project entity key です。 */
   projectEntityKey?: string
   /** Subscribe/unsubscribe 対象 member key です。 */
@@ -2523,6 +2525,20 @@ export function createPlanningUpdateCollaborationEntityKey(
   return `${requireText(workspaceId, 'Workspace ID')}#planning-update#${requireText(targetKey, 'Planning update target key')}`
 }
 
+/**
+ * Creates the collaboration entity key for watchers of one Planning entity, such as a Milestone.
+ *
+ * @param workspaceId - Workspace that owns the entity.
+ * @param entityId - Workspace-local Planning entity ID.
+ * @returns Stable collaboration entity key.
+ */
+export function createPlanningEntityCollaborationEntityKey(
+  workspaceId: string,
+  entityId: string,
+) {
+  return `${requireText(workspaceId, 'Workspace ID')}#planning-entity#${encodeURIComponent(requireText(entityId, 'Planning entity ID'))}`
+}
+
 /** Canonical target identity used by Planning update APIs, watchers, and notifications. */
 export type PlanningUpdateTargetKeyInput =
   | {
@@ -2539,6 +2555,12 @@ export type PlanningUpdateTargetKeyInput =
       /** Workspace-local Initiative identifier. */
       entityId: string
     }
+  | {
+      /** Target discriminator for a Team-level update. */
+      type: 'team'
+      /** Team that submits the update. */
+      teamId: string
+    }
 
 /**
  * Creates the shared public key used to store and query Planning update watchers.
@@ -2549,6 +2571,9 @@ export type PlanningUpdateTargetKeyInput =
 export function createPlanningUpdatePublicTargetKey(
   target: PlanningUpdateTargetKeyInput,
 ): string {
+  if (target.type === 'team') {
+    return `team/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}`
+  }
   return target.type === 'project'
     ? `project/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}/${encodeURIComponent(requireText(target.projectId, 'Project ID'))}`
     : `initiative/${encodeURIComponent(requireText(target.entityId, 'Initiative ID'))}`
@@ -4067,6 +4092,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         issueId: input.issueId,
         projectId: input.projectId,
         planningUpdateTargetKey: input.planningUpdateTargetKey,
+        planningEntityId: input.planningEntityId,
         kind: reason,
       },
     })
@@ -4153,6 +4179,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         issueId: input.issueId,
         projectId: input.projectId,
         planningUpdateTargetKey: input.planningUpdateTargetKey,
+        planningEntityId: input.planningEntityId,
       },
     })
     try {
@@ -5149,6 +5176,22 @@ function validateWatcherScope(input: UpdateWatcherInput) {
     }
   }
 
+  if (input.planningEntityId) {
+    const planningEntityId = requireText(input.planningEntityId, 'Planning entity ID')
+    if (entityKey !== createPlanningEntityCollaborationEntityKey(workspaceId, planningEntityId)) {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationScope',
+        'Planning entity watcher scope is invalid.',
+      )
+    }
+    return {
+      entityKey,
+      entityType: 'planning-entity' as const,
+      entityId: planningEntityId,
+    }
+  }
+
   const projectId = requireText(input.projectId ?? '', 'Project ID')
   if (entityKey !== createProjectCollaborationEntityKey(workspaceId, projectId)) {
     throw new CollaborationError(400, 'InvalidCollaborationScope', 'Project watcher scope is invalid.')
@@ -5628,6 +5671,13 @@ function curatedContextActivitySourceConditions(
   }]
 }
 
+/**
+ * Builds the parent Work Item condition of a watcher write, when the watch is on a Work Item.
+ *
+ * @param tableName - Work Items table name.
+ * @param input - Watcher write input.
+ * @returns At most one parent condition, without the caller authorization checks.
+ */
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {
   const parentConditions = input.issueId === undefined
     ? []
@@ -5639,7 +5689,9 @@ function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInp
         projectId: input.projectId,
         projectEntityKey: input.projectEntityKey,
       })]
-  return [...(input.authorizationConditionChecks ?? []), ...parentConditions]
+  // Caller authorization checks are appended by the transaction itself, right after these, so
+  // their indexes stay known; including them here too would name one item twice.
+  return parentConditions
 }
 
 function commentCondition(tableName: string, entityKey: string, commentId: string) {

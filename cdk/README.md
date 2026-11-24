@@ -29,12 +29,10 @@
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
-| `WebDomainName` | no | Web app と `/api` を配信する独自 domain（例: `wbs.example.com`、小文字）。既定値は空で、空のあいだは CloudFront の domain で配信します。指定すると通知 Email の link などに使う正規 URL（`WebUrl`）がこの domain になります。[独自 domain で配信する](#独自-domain-で配信する) を参照してください。 |
-| `WebCertificateArn` | `WebDomainName` 指定時 | `WebDomainName` を含む、**us-east-1** の発行済み ACM 証明書 ARN。CloudFront は us-east-1 の証明書しか読めません。 |
-| `WebHostedZoneId` | no | `WebDomainName` の A / AAAA alias record を stack に作らせる Route 53 public hosted zone ID。空なら DNS は stack の外で設定します。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `InboxDigestDeliveryEnabled` | no | `true`（既定）なら、メンバーが「受信トレイのダイジェスト設定」で同意した Update の日次・週次ダイジェストを scheduled-jobs Lambda が15分おきに受信トレイへ配ります。`false` にすると同意は保存されたまま何も配りません。[ADR 0066](../docs/adr/0066-inbox-digest-scheduled-job.md) を参照してください。 |
 | `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
 | `CognitoEmailSesIdentity` | no | `CognitoEmailSender` を認可する SES の検証済み identity（アドレスかドメイン）。既定値は空で、空なら `CognitoEmailSender` のアドレス自体を使います。ドメインを検証した場合はそのドメインを指定します。 |
 | `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
@@ -300,7 +298,7 @@ templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
-- `WebUrl`: アプリの正規 URL。`WebDomainName` を指定した場合はその domain、空なら CloudFront の domain
+- `WebUrl`: アプリの正規 URL。`cdk.json` の `mukuroji:webDomainName` を指定した場合はその domain、空なら CloudFront の domain
 - `WebDistributionDomainName`: CloudFront distribution の domain（`dxxxx.cloudfront.net`）。独自 domain の DNS を stack の外で設定するときの向き先
 - `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
 - `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
@@ -351,25 +349,49 @@ Lambda が同じ deploy で切り替わりますが、切り替え中の数分�
 
 ### 独自 domain で配信する
 
-`WebDomainName` と `WebCertificateArn` を一緒に指定すると、同じ distribution が独自 domain でも Web app と
-`/api/*` を配信します。証明書は TLSv1.2_2021 の viewer policy と SNI で使います。CloudFront の domain
-（`WebDistributionDomainName`）も引き続き使えますが、`WebUrl` と通知 Email の link は独自 domain になります。
-3つとも空なら distribution・DNS・link は従来どおりで、既存環境には resource の変更がありません。
-`WebDomainName` だけ、または `WebHostedZoneId` だけを指定すると、CloudFormation の rule が deploy 前に止めます。
+独自 domain は `cdk/cdk.json` の `context` で指定します。3つとも空（既定）のあいだは CloudFront の domain だけで
+配信し、distribution・DNS・link は従来どおりです。`-c mukuroji:webDomainName=...` のように command line で
+上書きもできますが、GitHub Actions の deploy は `cdk.json` の値を使うため、本番の domain は `cdk.json` を変える
+PR で切り替えます。
 
-1. **us-east-1** の ACM で `WebDomainName` の証明書を発行し、DNS 検証を済ませます（ACM の公開証明書は無料）。
-2. `WebDomainName`、`WebCertificateArn` を指定して deploy します。domain の hosted zone が同じ account の
-   Route 53 にあれば `WebHostedZoneId` も指定し、stack に A / AAAA alias を作らせます。
-   それ以外の DNS では、`WebDomainName` の CNAME を output の `WebDistributionDomainName` に向けます。
+```json
+"context": {
+  "mukuroji:webDomainName": "wbs.example.com",
+  "mukuroji:webCertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/...",
+  "mukuroji:webHostedZoneId": "Z0123456789ABCDEFGHIJ",
+  ...
+}
+```
+
+| Context key | 必須 | 説明 |
+| --- | --- | --- |
+| `mukuroji:webDomainName` | no | Web app と `/api` を配信する独自 domain（例: `wbs.example.com`、小文字）。指定すると `WebUrl`、通知 Email の link、Cognito の招待・パスワード再設定メールの link がこの domain になります。 |
+| `mukuroji:webCertificateArn` | `mukuroji:webDomainName` 指定時 | `mukuroji:webDomainName` を含む、**us-east-1** の発行済み ACM 証明書 ARN。CloudFront は us-east-1 の証明書しか読めません。 |
+| `mukuroji:webHostedZoneId` | no | `mukuroji:webDomainName` の A / AAAA alias record を stack に作らせる Route 53 public hosted zone ID。空なら DNS は stack の外で設定します。 |
+
+domain と証明書の片方だけ、または hosted zone だけを指定した場合や、形式が違う値は `cdk synth` / `cdk deploy` の
+時点で止まります。指定すると同じ distribution が独自 domain でも Web app と `/api/*` を配信し、証明書は
+TLSv1.2_2021 の viewer policy と SNI で使います。CloudFront の domain（`WebDistributionDomainName`）も
+引き続き使えます。
+
+1. **us-east-1** の ACM で domain の証明書を発行し、DNS 検証を済ませます（ACM の公開証明書は無料）。
+2. `cdk.json` に domain と証明書 ARN を書きます。domain の hosted zone が同じ account の Route 53 にあれば
+   `mukuroji:webHostedZoneId` も書き、stack に A / AAAA alias を作らせます。それ以外の DNS では、domain の
+   CNAME を output の `WebDistributionDomainName` に向けます。
 3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
    ブラウザの error 送信が受け付ける origin（`WEB_APP_ORIGINS`）にも、独自 domain と CloudFront domain を stack が自動で入れます。
    file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
 4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
-   `https://<WebDomainName>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
-   callback は1件だけ許可するため、切り替え後は CloudFront の domain からの SSO login は使えません。
+   `https://<domain>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
+   独自 domain の指定中に `CognitoSsoRedirectUri` が空でもこの値でもないと、CloudFormation の rule
+   （`WebSsoCallbackOnCustomDomain`）が deploy 前に止めます。callback は1件だけ許可するため、切り替え後は
+   CloudFront の domain からの SSO login は使えません。
 5. `bun run web:deploy` で配信し直す必要はありません。PWA の `manifest.webmanifest` は `start_url` と `scope` を
    相対 path で持つため、独自 domain でそのまま install できます。ただし PWA と Web Push の購読は origin ごとなので、
    CloudFront の domain で install・購読した利用者には、独自 domain で開き直して入れ直してもらいます。
+
+domain を変えると distribution の alias と証明書は同じ resource の更新で切り替わり、Route 53 の record は
+作り直されます。`cdk.json` の値を空に戻すと独自 domain の alias と record は外れます。
 
 Lambda Function URL は作りません。外部 sender に渡す signed inbound webhook URL は Lambda の version
 に依存しない安定した HTTP API endpoint を使い、CloudFront の origin も同じ HTTP API にそろえます。

@@ -5,7 +5,6 @@ import type {
   PlanningUpdateCadence,
   PlanningUpdateChange,
   PlanningUpdateEvidence,
-  PlanningUpdateReaction,
   PlanningUpdateScopeSnapshot,
   PlanningUpdateState,
   PlanningUpdateTarget,
@@ -15,6 +14,11 @@ import type {
   PublishPlanningUpdateInput,
 } from '@mukuroji/contracts'
 import { PLANNING_UPDATE_CONTENT_VERSION } from '@mukuroji/contracts'
+import {
+  findMemberMentionRanges,
+  type MentionableMember,
+  type MentionSuggestionsFailure,
+} from '../../shared/lib/memberMentions'
 import {
   createPlanningDependencyPath,
   createPlanningPath,
@@ -128,6 +132,9 @@ export function planningEvidenceScopeMatchesTarget(
 ) {
   if (target.type === 'project') {
     return scope.teamId === target.teamId && scope.projectId === target.projectId
+  }
+  if (target.type === 'team') {
+    return scope.teamId === target.teamId && scope.projectId === undefined
   }
   if (!initiative) return false
   if (initiative.projectId) {
@@ -243,12 +250,41 @@ export function extractPlanningUpdateCommentMentions(bodyMarkdown: string): stri
 }
 
 /**
+ * Resolves every member an update comment mentions, by a display-name token picked in the composer
+ * or by a typed `@member@example.com` token.
+ *
+ * An email-shaped token inside a display-name token, such as a duplicate name's discriminator, is
+ * not counted twice.
+ *
+ * @param bodyMarkdown - Comment body typed by the member.
+ * @param selectedMemberKeys - Member keys picked from the composer's suggestions.
+ * @param members - Mention candidates used to validate the picked tokens.
+ * @returns Sorted, deduplicated member keys of at most 320 characters, at most 20 keys.
+ */
+export function resolvePlanningUpdateCommentMentions(
+  bodyMarkdown: string,
+  selectedMemberKeys: readonly string[],
+  members: readonly MentionableMember[],
+): string[] {
+  const ranges = findMemberMentionRanges(bodyMarkdown, selectedMemberKeys, members)
+  const keys = new Set(ranges.map((range) => range.memberKey)
+    .filter((key) => key.length <= maxPlanningUpdateCommentMentionLength))
+  const textOutsideNames = ranges.reduceRight(
+    (text, range) => `${text.slice(0, range.offset)}${' '.repeat(range.length)}${text.slice(range.offset + range.length)}`,
+    bodyMarkdown,
+  )
+  for (const key of extractPlanningUpdateCommentMentions(textOutsideNames)) keys.add(key)
+  return [...keys].sort().slice(0, maxPlanningUpdateCommentMentions)
+}
+
+/**
  * Clears one comment form only after its append-only mutation succeeds.
  *
  * @param submit - Comment mutation supplied by the production controller.
  * @param updateId - Immutable update identifier receiving the comment.
  * @param bodyMarkdown - Validated non-empty comment body.
  * @param reset - Form reset action to invoke after successful persistence.
+ * @param mentionMemberKeys - Member keys picked from the composer's suggestions.
  * @returns A promise that rejects without resetting when persistence fails.
  */
 export async function submitPlanningUpdateCommentAndReset(
@@ -256,8 +292,9 @@ export async function submitPlanningUpdateCommentAndReset(
   updateId: string,
   bodyMarkdown: string,
   reset: () => void,
+  mentionMemberKeys: readonly string[] = [],
 ) {
-  await submit(updateId, bodyMarkdown)
+  await submit(updateId, bodyMarkdown, mentionMemberKeys)
   reset()
 }
 
@@ -309,46 +346,36 @@ export type PlanningUpdateCommentView = {
   createdAt: string
 }
 
-/**
- * Reaction token that records a reviewer confirmation on an immutable update.
- *
- * The reviewer is the cadence escalation member, so the existing reaction API and its
- * permission checks record the confirmation without a separate acknowledgement endpoint.
- */
-export const PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION = '✅'
-
 /** Reviewer confirmation state displayed next to one published update. */
 export type PlanningUpdateAcknowledgementView = {
-  /** Workspace member key of the configured reviewer (the cadence escalation member). */
+  /** Reviewer who acknowledged the update, or the configured cadence reviewer while pending. */
   reviewerMemberKey: string
   /** Confirmation time as an ISO 8601 timestamp, absent while the update is unconfirmed. */
   acknowledgedAt?: string
 }
 
 /**
- * Derives whether the configured reviewer has confirmed one immutable update version.
+ * Derives the reviewer acknowledgement state of one immutable update version.
  *
- * @param reactions - Loaded member reactions, possibly spanning several update versions.
- * @param updateVersion - Immutable update version to evaluate.
- * @param reviewerMemberKey - Cadence escalation member treated as the reviewer, if configured.
- * @returns Confirmation state, or undefined when no reviewer is configured.
+ * A recorded acknowledgement stays visible after the cadence reviewer changes. Without one, the
+ * update waits for the currently configured reviewer.
+ *
+ * @param update - Immutable update from the history API, with its acknowledgement when recorded.
+ * @param reviewerMemberKey - Currently configured cadence reviewer, if any.
+ * @returns Confirmation state, or undefined when nobody reviews the update.
  */
 export function derivePlanningUpdateAcknowledgement(
-  reactions: readonly PlanningUpdateReaction[],
-  updateVersion: number,
+  update: Pick<PlanningUpdate, 'acknowledgement'>,
   reviewerMemberKey: string | undefined,
 ): PlanningUpdateAcknowledgementView | undefined {
+  if (update.acknowledgement) {
+    return {
+      reviewerMemberKey: update.acknowledgement.memberKey,
+      acknowledgedAt: update.acknowledgement.acknowledgedAt,
+    }
+  }
   const reviewer = reviewerMemberKey?.trim()
-  if (!reviewer) return undefined
-  const normalizedReviewer = reviewer.toLowerCase()
-  const acknowledgement = reactions.find((reaction) =>
-    reaction.updateVersion === updateVersion &&
-    reaction.emoji === PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION &&
-    reaction.memberKey.trim().toLowerCase() === normalizedReviewer
-  )
-  return acknowledgement
-    ? { reviewerMemberKey: reviewer, acknowledgedAt: acknowledgement.createdAt }
-    : { reviewerMemberKey: reviewer }
+  return reviewer ? { reviewerMemberKey: reviewer } : undefined
 }
 
 /** Watcher state displayed in the selected update target header. */
@@ -381,8 +408,26 @@ export type PlanningUpdateCollaborationController = {
   onToggleWatch?: () => void | Promise<void>
   /** Exports all immutable history for the selected target. */
   onExport?: () => void | Promise<void>
-  /** Adds a comment to one immutable update. */
-  onAddComment?: (updateId: string, bodyMarkdown: string) => void | Promise<void>
+  /** Members offered by display name after `@` in the comment composer. */
+  mentionMembers?: readonly MentionableMember[]
+  /** Set when the mention candidates failed to load, so the composer offers a retry. */
+  mentionSuggestionsFailure?: MentionSuggestionsFailure
+  /** Adds a comment to one immutable update with the members picked in the composer. */
+  onAddComment?: (
+    updateId: string,
+    bodyMarkdown: string,
+    mentionMemberKeys: readonly string[],
+  ) => void | Promise<void>
+  /**
+   * Records the current viewer's reviewer acknowledgement on one unacknowledged update, with the
+   * optional remark and the members picked in the composer as the acknowledgement comment.
+   * Rejects when the acknowledgement fails.
+   */
+  onAcknowledge?: (
+    updateId: string,
+    bodyMarkdown?: string,
+    mentionMemberKeys?: readonly string[],
+  ) => void | Promise<void>
   /** Toggles one supported reaction on an immutable update. */
   onToggleReaction?: (updateId: string, reaction: string) => void | Promise<void>
 }
@@ -528,7 +573,7 @@ export function createPlanningTargetUpdateView(
 }
 
 /**
- * Compares canonical Project or Initiative target identities.
+ * Compares canonical Project, Team, or Initiative target identities.
  *
  * @param left - First target identity.
  * @param right - Second target identity.
@@ -544,6 +589,9 @@ export function planningUpdateTargetsAreEqual(
   }
   if (left.type === 'project' && right.type === 'project') {
     return left.teamId === right.teamId && left.projectId === right.projectId
+  }
+  if (left.type === 'team' && right.type === 'team') {
+    return left.teamId === right.teamId
   }
   return false
 }

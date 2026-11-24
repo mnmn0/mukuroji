@@ -4,12 +4,14 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
   type FocusItem,
+  type FocusProjectLogEntry,
   type FocusQueueResponse,
   type FocusQueueSection,
   type FocusSignal,
   type FocusSignalResolutionCondition,
   type FocusSignalType,
   type FocusUpdateDeadline,
+  type FocusUpdateReview,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -373,3 +375,69 @@ export const focusUpdateDeadlinesFixture = [
     deepLink: '/planning/portfolio?targetType=project&teamId=design-team&projectId=brand-refresh',
   },
 ] satisfies FocusUpdateDeadline[]
+
+/** Pending health update reviews covering a titled Team, an untitled Project, and a long summary. */
+export const focusUpdateReviewsFixture = [
+  {
+    id: 'update-review:team:core-team:3',
+    target: { type: 'team', teamId: 'core-team' },
+    title: 'Core team',
+    version: 3,
+    health: 'at-risk',
+    summary: 'Hiring for the platform squad is two weeks behind plan; the onboarding of the new vendor moved to next sprint.',
+    authorMemberKey: 'lead@example.com',
+    publishedAt: '2026-08-07T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+  },
+  {
+    id: 'update-review:project:design-team:brand-refresh:2',
+    target: { type: 'project', teamId: 'design-team', projectId: 'brand-refresh' },
+    version: 2,
+    health: 'on-track',
+    summary: 'On plan.',
+    authorMemberKey: 'designer@example.com',
+    publishedAt: '2026-08-08T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=design-team&projectId=brand-refresh',
+  },
+] satisfies FocusUpdateReview[]
+
+/** Project log entries the viewer owns: an overdue risk, an overdue issue without a Project title, and a pending change request. */
+export const focusProjectLogEntriesFixture = [
+  {
+    id: 'project-log:core-team:refero:risk-1',
+    teamId: 'core-team',
+    projectId: 'refero',
+    projectTitle: 'Refero',
+    entryId: 'risk-1',
+    kind: 'risk',
+    title: 'Payment provider contract may not be renewed before the launch window closes',
+    severity: 'critical',
+    reason: 'review-overdue',
+    reviewDueDate: '2026-08-05',
+    deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+  },
+  {
+    id: 'project-log:core-team:untitled:issue-1',
+    teamId: 'core-team',
+    projectId: 'untitled',
+    entryId: 'issue-1',
+    kind: 'issue',
+    title: 'Staging data is out of date',
+    severity: 'medium',
+    reason: 'review-overdue',
+    reviewDueDate: '2026-08-08',
+    deepLink: '/projects/untitled/issues?teamId=core-team&tab=permissions',
+  },
+  {
+    id: 'project-log:design-team:brand-refresh:change-1',
+    teamId: 'design-team',
+    projectId: 'brand-refresh',
+    projectTitle: 'Brand refresh',
+    entryId: 'change-1',
+    kind: 'change-request',
+    title: 'Move the launch by one week',
+    severity: 'high',
+    reason: 'decision-pending',
+    deepLink: '/projects/brand-refresh/issues?teamId=design-team&tab=permissions',
+  },
+] satisfies FocusProjectLogEntry[]

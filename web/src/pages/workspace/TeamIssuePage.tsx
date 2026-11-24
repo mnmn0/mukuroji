@@ -132,6 +132,7 @@ import {
 } from '../../issues/ui/teamIssueScreenShared'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
+import { revalidateWorkItemKeyPrefixes } from '../../issues/queries/workItemKeyPrefixesCache'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 
@@ -659,6 +660,8 @@ export function TeamIssuePage() {
     )
     navigate(navigationPath)
     // The outline places the new Work Item and the parent roll-ups count it.
+    // A Team's first Work Item gives the Team its prefix, which key links must learn.
+    void revalidateWorkItemKeyPrefixes()
     await Promise.all([mutateIssues(), refreshTeamHierarchy()])
     return { issue, navigationPath }
   }

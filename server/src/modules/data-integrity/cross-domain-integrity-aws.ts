@@ -102,6 +102,7 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'project-id',
   'project-member',
   'project-quick-access',
+  'team-grant-request',
   'webhook-team-grant',
   'webhook-team-grant-cleanup',
   'workspace-member',
@@ -1216,6 +1217,16 @@ function validateProjectDirectoryAuxiliaryRow(
     if (
       directoryId !== `PROJECT_ID#${encodeURIComponent(workspaceId)}` ||
       entryKey !== `PROJECT#${projectId}`
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'team-grant-request') {
+    const workspaceId = requireText(row.workspaceId)
+    requireText(row.requestFingerprint)
+    requireCanonicalTimestamp(row.createdAt)
+    if (
+      directoryId !== `TEAM_GRANT_REQUEST#${encodeURIComponent(workspaceId)}` ||
+      !/^KEY#[^#]+$/u.test(entryKey)
     ) normalizationFailure()
     return
   }

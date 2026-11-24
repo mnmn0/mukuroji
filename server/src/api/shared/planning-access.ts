@@ -7,6 +7,7 @@ import {
   type WorkItemDependencyEndpoint,
   type EnterprisePermissionId,
 } from '@mukuroji/contracts'
+import { readWorkspaceWorkloadCalendarPolicy } from './workspace-calendar'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -335,6 +336,10 @@ export async function requirePlanningUpdateTargetPermission(
     )
     return undefined
   }
+  if (target.type === 'team') {
+    await requirePlanningUpdateTeamPermission(principal, target.teamId, minimumRole, readContext)
+    return undefined
+  }
 
   const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
   if (!entity || entity.type !== 'initiative') {
@@ -556,8 +561,18 @@ export async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
   scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
-  const response = await readAccessibleWorkItems(principal, false, scope)
+  const [response, workspacePolicy] = await Promise.all([
+    readAccessibleWorkItems(principal, false, scope),
+    readWorkspaceWorkloadCalendarPolicy(principal.directoryId),
+  ])
+  // Planning entities belong to the Workspace, so their critical path counts the Workspace
+  // calendar's working days (ADR 0058). The policy stays in memory, so it keeps every day off
+  // rather than the capped set a stored Work Item schedule holds.
   return {
+    workingCalendar: {
+      workingWeekdays: workspacePolicy.workingWeekdays,
+      holidays: workspacePolicy.holidays,
+    },
     workItems: response.workItems.map((workItem) => ({
       id: workItem.id,
       revision: workItem.revision,
@@ -597,6 +612,7 @@ function resolvePlanningPublishTargetScope(
   if (target.type === 'project') {
     return { teamId: target.teamId, projectId: target.projectId }
   }
+  if (target.type === 'team') return { teamId: target.teamId }
 
   const entity = snapshot.entities.find((candidate) =>
     candidate.id === target.entityId && candidate.type === 'initiative'
@@ -653,6 +669,8 @@ export async function readPlanningPublishState(
   let targetScope: PlanningWorkItemReadScope | undefined
   if (target.type === 'project') {
     targetScope = { teamId: target.teamId, projectId: target.projectId }
+  } else if (target.type === 'team') {
+    targetScope = { teamId: target.teamId }
   } else {
     const preliminarySnapshot = await workItemDependencies.planning.get(
       principal.directoryId,
@@ -892,6 +910,8 @@ export function filterPlanningSnapshotForPrincipal(
     .filter((updateTarget) =>
       updateTarget.target.type === 'initiative'
         ? entityIds.has(updateTarget.target.entityId)
+        : updateTarget.target.type === 'team'
+        ? teamIds.has(updateTarget.target.teamId)
         : projectScopeKeys.has(createPlanningProjectScopeKey(
             updateTarget.target.teamId,
             updateTarget.target.projectId,

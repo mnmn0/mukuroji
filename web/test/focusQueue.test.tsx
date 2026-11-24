@@ -293,6 +293,121 @@ describe('Focus queue', () => {
     expect(html.indexOf('Overdue')).toBeLessThan(html.indexOf('Due soon'))
   })
 
+  test('lists owned Project log entries with what resolves each one', () => {
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      projectLogEntries: [
+        {
+          id: 'project-log:core-team:refero:cr-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          projectTitle: 'Refero',
+          entryId: 'cr-1',
+          kind: 'change-request',
+          title: 'Add CSV export',
+          severity: 'critical',
+          reason: 'decision-pending',
+          deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+        },
+        {
+          id: 'project-log:core-team:refero:risk-1',
+          teamId: 'core-team',
+          projectId: 'refero',
+          entryId: 'risk-1',
+          kind: 'risk',
+          title: 'Vendor delay',
+          severity: 'high',
+          reason: 'review-overdue',
+          reviewDueDate: '2026-08-01',
+          deepLink: '/projects/refero/issues?teamId=core-team&tab=permissions',
+        },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="ja"
+          onOpenItem={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('担当のリスク・課題・変更要求')
+    expect(html).toContain('判断待ち')
+    expect(html).toContain('承認か却下を決めて、クローズすると消えます')
+    expect(html).toContain('見直し期限切れ')
+    expect(html).toContain('見直して期限を今日以降に更新するか、クローズすると消えます')
+    expect(html).toContain('見直し 2026-08-01')
+    expect(html).toContain('href="/projects/refero/issues?teamId=core-team&amp;tab=permissions"')
+  })
+
+  test('tells the viewer when some Project logs could not be read, even with no entries', () => {
+    /**
+     * Renders the queue for one response.
+     *
+     * @param response - Focus response.
+     * @returns The markup.
+     */
+    const render = (response: FocusQueueResponse) => renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="ja"
+          onOpenItem={() => undefined}
+          onRetry={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
+    )
+
+    const failed = render({ ...focusQueueResponseFixture, projectLogEntries: [], projectLogIncomplete: true })
+    expect(failed).toContain('data-testid="focus-project-log-incomplete"')
+    expect(failed).toContain('一部の Project の登録簿を読み込めませんでした。')
+    expect(render({ ...focusQueueResponseFixture, projectLogEntries: [] })).not.toContain('focus-project-log')
+  })
+
+  test('lists Team updates that wait for the viewer acknowledgement', () => {
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      updateReviews: [
+        {
+          id: 'update-review:team:core-team:3',
+          target: { type: 'team', teamId: 'core-team' },
+          title: 'Core team',
+          version: 3,
+          health: 'at-risk',
+          summary: 'Hiring is behind plan.',
+          authorMemberKey: 'lead@example.com',
+          publishedAt: '2026-08-09T09:00:00.000Z',
+          deepLink: '/planning/portfolio?targetType=team&teamId=core-team',
+        },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="en"
+          onOpenItem={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('en')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="focus-update-reviews"')
+    expect(html).toContain('Core team')
+    expect(html).toContain('Hiring is behind plan.')
+    expect(html).toContain('href="/planning/portfolio?targetType=team&amp;teamId=core-team"')
+  })
+
   test('falls back from an inaccessible requested signal to another authorized source', () => {
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     const firstSignal = item?.signals[0]
