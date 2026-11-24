@@ -1052,10 +1052,13 @@ export class CapacityPlanningService {
       known?.teamId === teamId ? known.estimates : this.dataSource.listEstimates(workspaceId, teamId)))
     // Every read settles first, so an unexpected failure is reported even when another Team is
     // only over the read limit.
-    const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
-    const unexpected = failures.find((reason) => !isWorkloadEstimatesLimitExceeded(reason))
-    if (unexpected !== undefined) throw unexpected
-    if (failures.length > 0) throw failures[0]
+    // The settled results are searched rather than their reasons, so a rejection whose reason is
+    // undefined is still told apart from finding none.
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    const unexpected = failures.find((failure) => !isWorkloadEstimatesLimitExceeded(failure.reason))
+    if (unexpected) throw unexpected.reason
+    const [limitExceeded] = failures
+    if (limitExceeded) throw limitExceeded.reason
     return new Map(teamStates.map(({ teamId }, index) => {
       const result = results[index]
       return [teamId, result?.status === 'fulfilled' ? result.value : []]

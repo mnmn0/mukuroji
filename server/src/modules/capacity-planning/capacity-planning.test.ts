@@ -1149,6 +1149,30 @@ describe('Workspace-wide workload', () => {
     await expect(service.getSnapshot(createInput())).rejects.toThrow('Storage unavailable.')
   })
 
+  test('reports a failure without a reason even when another Team is only over the read limit', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState('workspace-1', 'team-1', createState([profile]), 0)
+    await repository.saveState('workspace-1', 'team-2', createState([inTeam(profile, 'team-2')]), 0)
+    await repository.saveState('workspace-1', 'team-3', createState([inTeam(profile, 'team-3')]), 0)
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: (_workspaceId, teamId) => {
+        if (teamId === 'team-2') {
+          return Promise.reject(new CapacityPlanningError(413, WORKLOAD_ESTIMATES_LIMIT_EXCEEDED, 'Too many Work Items.'))
+        }
+        // oxlint-disable-next-line prefer-promise-reject-errors -- the case under test is a rejection without a reason.
+        if (teamId === 'team-3') return Promise.reject(undefined)
+        return Promise.resolve([])
+      },
+    }, { now: () => new Date('2026-08-01T00:00:00.000Z') })
+
+    const outcome = await service.getSnapshot(createInput()).then(
+      () => 'resolved',
+      (reason: unknown) => reason === undefined ? 'rejected without a reason' : 'rejected with a reason',
+    )
+    expect(outcome).toBe('rejected without a reason')
+  })
+
   test('lists Workspace totals with visible Team and Project shares and hides the rest', async () => {
     const service = await createWorkspaceService(twoTeams())
 
