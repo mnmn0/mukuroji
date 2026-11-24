@@ -1235,7 +1235,11 @@ function createDocumentAuditContext(
   c: Context,
   principal: DocumentApiPrincipal,
 ): MutationAuditContext {
-  const path = new URL(c.req.url).pathname
+  const url = new URL(c.req.url)
+  const path = url.pathname
+  // The query is part of the request, such as an export's format, so the same key with another
+  // query is another request rather than a retry of the recorded one.
+  const query = url.search
   const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
   const correlationId = c.req.header('X-Correlation-Id')?.trim()
   try {
@@ -1248,12 +1252,12 @@ function createDocumentAuditContext(
       },
       idempotencyKey: idempotencyKey
         // A digest keeps any key the Document store accepts within the audit key length limit.
-        ? `document-request:${createHash('sha256').update(`${c.req.method}\0${path}\0${idempotencyKey}`).digest('hex')}`
+        ? `document-request:${createHash('sha256').update(`${c.req.method}\0${path}\0${query}\0${idempotencyKey}`).digest('hex')}`
         : randomUUID(),
       request: {
         method: c.req.method,
         path,
-        body: { path },
+        body: { path, query },
       },
       source: {
         kind: 'api',

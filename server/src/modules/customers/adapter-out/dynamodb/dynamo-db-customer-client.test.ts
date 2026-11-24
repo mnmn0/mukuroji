@@ -1334,7 +1334,7 @@ test('resumes Customer retention after a later transaction fails', async () => {
   }
 })
 
-test('records one Customer deletion event in the first deletion batch of the HTTP deletion path', async () => {
+test('records one Customer deletion event when the HTTP deletion commits to the customer phase', async () => {
   const customer = createCustomerRow().customer
   const contactRow = createContactRow(customer.id, 'contact-1')
   const harness = createHarness([createCustomerRow(), contactRow, createRequestRow(createRequest('request-1', '2027-08-01T00:00:00.000Z'))], {
@@ -1358,9 +1358,40 @@ test('records one Customer deletion event in the first deletion batch of the HTT
         const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
         return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item] : []
       }))
-    expect(auditPuts.map((items) => items.map((item) => item.eventType))).toEqual([[], [], ['customer.deleted']])
+    expect(auditPuts.map((items) => items.map((item) => item.eventType))).toEqual([[], ['customer.deleted'], []])
     expect(JSON.stringify(auditPuts)).not.toContain('Contact contact-1')
     expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps the Customer deletion event when another request finishes the deletion', async () => {
+  const customer = createCustomerRow().customer
+  const harness = createHarness([createCustomerRow()], { auditTableName: 'AuditTable', failTransactionAt: 3 })
+  try {
+    const client = harness.client.withAuditContext(createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Member' },
+      idempotencyKey: 'delete-customer-2',
+      request: { method: 'DELETE', path: `/customers/${customer.id}`, body: {} },
+      source: { kind: 'api' },
+    }))
+    await client.beginCustomerDeletion('workspace-1', customer.id, 'member-1', customer.revision)
+    // The first deletion batch fails after the move to the customer phase has committed.
+    await expect(client.completeCustomerDeletion('workspace-1', customer.id, 'member-1'))
+      .rejects.toThrow('Injected Customer transaction failure.')
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+    const auditEventTypes = harness.commands
+      .filter((command) => command.name === 'TransactWriteCommand')
+      .flatMap((command) => (Array.isArray(command.input.TransactItems) ? command.input.TransactItems : []))
+      .flatMap((item: unknown) => {
+        const put = isRecord(item) && isRecord(item.Put) ? item.Put : undefined
+        return put?.TableName === 'AuditTable' && isRecord(put.Item) ? [put.Item.eventType] : []
+      })
+    expect(auditEventTypes).toEqual(['customer.deleted'])
   } finally {
     harness.restore()
   }

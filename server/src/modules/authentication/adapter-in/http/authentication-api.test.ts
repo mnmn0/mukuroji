@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   createApiTestHarness,
   type ObservedWorkspaceMutationAuditContext,
@@ -821,14 +822,25 @@ test('records repeated rejected sign-ins once per window without the address or 
     throw new CognitoServiceError(400, 'NotAuthorizedException', 'Incorrect username or password.')
   }
 
-  await withTestEnvironment({ MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production' }, async () => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const response = await app.request('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'Guess@Example.com', password: `Wrong-${attempt}` }),
-      })
-      expect(response.status).toBe(401)
+  /** Sends one rejected sign-in for the guessed address. */
+  const attemptSignIn = async (attempt: number) => {
+    const response = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'Guess@Example.com', password: `Wrong-${attempt}` }),
+    })
+    expect(response.status).toBe(401)
+  }
+  // Without the pseudonym key the address cannot be named safely, so nothing is recorded.
+  await withTestEnvironment({ MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production', MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: undefined }, async () => {
+    await attemptSignIn(0)
+  })
+  expect(written.filter((event) => event.eventType === 'auth.sign-in-failed')).toHaveLength(0)
+
+  await withTestEnvironment({ MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#production', MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: 'ab'.repeat(32) }, async () => {
+    await Promise.all([1, 2].map(attemptSignIn))
+    for (let attempt = 3; attempt < 5; attempt += 1) {
+      await attemptSignIn(attempt)
     }
   })
 
@@ -839,7 +851,10 @@ test('records repeated rejected sign-ins once per window without the address or 
     actor: { kind: 'system' },
     metadata: { signInFailure: 'invalid-credentials', emailDomain: 'example.com' },
   })
+  // The address is named by a keyed pseudonym, not a digest anyone could recompute.
+  const unkeyed = createHash('sha256').update('sign-in-subject\0workspace#production\0guess@example.com').digest('hex').slice(0, 32)
   const serialized = JSON.stringify(failures[0])
+  expect(serialized).not.toContain(unkeyed)
   expect(serialized).not.toContain('guess@example.com')
   expect(serialized).not.toContain('Wrong-')
 })

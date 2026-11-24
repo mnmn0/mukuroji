@@ -705,12 +705,25 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       throw new CustomerError(409, 'CustomerDeletionInProgress', 'The Customer deletion marker is missing or does not match.')
     }
     if (pendingDeletion.phase === 'triage') {
-      await this.writeTransaction(workspaceId, metadata.revision, [], {
-        expectedDeletion: pendingDeletion,
-        nextDeletion: { customerId, phase: 'customer' },
-      })
+      // The move to the customer phase commits the deletion: any later reader completes it, so the
+      // deletion's audit event is written with this move rather than with a batch that recovery
+      // from another request might write.
+      const loaded = await this.loadWithoutRecovery(workspaceId, [CUSTOMER_RECORD_PREFIX])
+      const customer = loaded.state.customers.get(customerId)
+      if (customer) {
+        const emptyGraph = { ...loaded.state, customers: new Map<string, Customer>(), contacts: new Map(), requests: new Map(), views: new Map() }
+        this.prepareAudit(workspaceId, { ...emptyGraph, customers: new Map([[customerId, customer]]) }, emptyGraph)
+      }
+      try {
+        await this.writeTransaction(workspaceId, metadata.revision, [], {
+          expectedDeletion: pendingDeletion,
+          nextDeletion: { customerId, phase: 'customer' },
+        })
+      } finally {
+        this.takeAuditItems()
+      }
     }
-    await this.resumePendingDeletion(workspaceId, { ...pendingDeletion, phase: 'customer' }, true)
+    await this.resumePendingDeletion(workspaceId, { ...pendingDeletion, phase: 'customer' })
   }
 
   /** Merges a source customer into a retained customer.
@@ -2337,16 +2350,13 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * Resumes a durable deletion marker before exposing the Customer graph.
    *
    * @param workspaceId - Workspace containing the Customer.
-   * @param pendingDeletion - Durable deletion marker to complete.
-   * @param audited - Whether the deletion is completed by its own request, whose audit context
-   *   records `customer.deleted` in the first deletion batch. Recovery from another request is not
-   *   audited, and neither is a deletion whose first batch already committed.
+   * @param pendingDeletion - Durable deletion marker to complete; its audit event, when any, was
+   *   written when the deletion entered the customer phase.
    * @returns A promise that resolves after the Customer's records are deleted.
    */
   private async resumePendingDeletion(
     workspaceId: string,
     pendingDeletion: CustomerDeletionOperation,
-    audited = false,
   ): Promise<void> {
     const loaded = await this.loadWithoutRecovery(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
@@ -2360,27 +2370,13 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       .filter((row) => isOwnedByCustomer(row, pendingDeletion.customerId))
       .map((row) => row.recordKey)
       .sort(compareCustomerDeletionRecordKeys)
-    if (audited && pendingDeletion.cursor === undefined) {
-      const customerId = pendingDeletion.customerId
-      this.prepareAudit(workspaceId, loaded.state, {
-        ...loaded.state,
-        customers: new Map([...loaded.state.customers].filter(([id]) => id !== customerId)),
-        contacts: new Map([...loaded.state.contacts].filter(([, contact]) => contact.customerId !== customerId)),
-        requests: new Map([...loaded.state.requests].filter(([, request]) => request.customerId !== customerId)),
-      })
-    }
-    try {
-      await this.persistDeletionBatches(
-        workspaceId,
-        loaded.revision,
-        recordKeys,
-        pendingDeletion.customerId,
-        pendingDeletion,
-      )
-    } finally {
-      // Events not taken by the first deletion batch must never ride on a later write.
-      this.takeAuditItems()
-    }
+    await this.persistDeletionBatches(
+      workspaceId,
+      loaded.revision,
+      recordKeys,
+      pendingDeletion.customerId,
+      pendingDeletion,
+    )
   }
 
   /** Recomputes and resumes a retention operation using its original timestamp. */

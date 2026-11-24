@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
 import type { Context } from 'hono'
 import {
   calculateAuditExpiresAt,
   createAuditEvent,
   getConfiguredAuditRetentionDays,
+  readWorkspaceAuditPseudonymKey,
   type MutationAuditContext,
 } from '../../modules/audit'
 import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
@@ -19,6 +20,9 @@ const SIGN_IN_FAILURE_MEMORY_LIMIT = 1_000
 
 /** Failure keys already recorded in the current or previous window by this server instance. */
 const recordedFailureKeys = new Set<string>()
+
+/** Failure keys whose write is in flight, so a concurrent burst for one key costs one write. */
+const pendingFailureKeys = new Set<string>()
 
 /** Why a sign-in attempt failed, as recorded in the audit log. */
 export type SignInFailureReason = 'invalid-credentials' | 'invalid-mfa-code'
@@ -69,12 +73,12 @@ export async function recordSignInSucceeded(
 /**
  * Records a rejected sign-in attempt in the configured Workspace's audit log.
  *
- * The address is unauthenticated, so the event names it only by a digest and its domain, and the
- * actor is the sign-in service. Repeated failures for one address from one client count once per
+ * The address is unauthenticated, so the event names it only by an HMAC pseudonym keyed with the
+ * Workspace audit pseudonym key, and its domain; the actor is the sign-in service. Repeated failures for one address from one client count once per
  * ten-minute window: the event ID is deterministic for that window and this server instance skips
  * keys it already wrote, so a password-guessing burst costs at most one audit write per window.
  * Without `MUKUROJI_WORKSPACE_DIRECTORY_ID` the Workspace of an unknown address cannot be known,
- * and nothing is recorded.
+ * and without the pseudonym key the address cannot be named safely; then nothing is recorded.
  *
  * @param c - Hono request context.
  * @param email - Address the attempt used.
@@ -91,11 +95,22 @@ export async function recordSignInFailed(
   const workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim()
   if (!workspaceId) return
   const normalizedEmail = email.trim().toLowerCase()
-  const subject = createHash('sha256').update(`sign-in-subject\0${workspaceId}\0${normalizedEmail}`).digest('hex').slice(0, 32)
+  let pseudonymKey: string
+  try {
+    pseudonymKey = readWorkspaceAuditPseudonymKey()
+  } catch (error) {
+    console.error('Failed to record the failed sign-in audit event:', error)
+    return
+  }
+  const subject = createHmac('sha256', Buffer.from(pseudonymKey, 'hex'))
+    .update(`sign-in-subject\0${workspaceId}\0${normalizedEmail}`)
+    .digest('hex')
+    .slice(0, 32)
   const window = Math.floor(now / SIGN_IN_FAILURE_WINDOW_MS)
   const client = createHash('sha256').update(resolveTrustedRequestSource(c)).digest('hex').slice(0, 16)
   const key = `sign-in-failed:${reason}:${subject}:${client}:${window}`
-  if (recordedFailureKeys.has(key)) return
+  if (recordedFailureKeys.has(key) || pendingFailureKeys.has(key)) return
+  pendingFailureKeys.add(key)
   try {
     const domain = normalizedEmail.includes('@') ? normalizedEmail.slice(normalizedEmail.lastIndexOf('@') + 1) : undefined
     const context = createRequestMutationContext(
@@ -114,6 +129,8 @@ export async function recordSignInFailed(
     rememberFailureKey(key)
   } catch (error) {
     console.error('Failed to record the failed sign-in audit event:', error)
+  } finally {
+    pendingFailureKeys.delete(key)
   }
 }
 

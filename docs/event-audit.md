@@ -124,7 +124,7 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 | `collection.created` / `collection.updated` / `collection.deleted` / `collection.item-added` / `collection.item-removed` | コレクションの作成・名前と説明の変更・削除、Work Item の追加と削除 | `collection` | `name`・`description`・`itemCount` の前後。項目の追加と削除は `metadata.teamId`・`metadata.issueId` |
 | `customer.*` / `customer-contact.*` / `customer-request.*` / `customer-view.*`（`created` / `updated` / `deleted` / `merged`） | 顧客・連絡先・顧客の要望・保存ビューの作成・変更・削除・統合 | 各 record | 書き込みの前後の graph を比べて作る。連絡先の `name`・`email`・`phone` と顧客の `notes`、要望の本文（`originalMessage`）・送信元の参照と link・外部参照は値を `[REDACTED]` にする（変わったことだけが残る）。顧客の削除・統合に伴う連絡先と要望の削除・付け替えは顧客の event 1 件にまとめ、統合は顧客・連絡先・要望とも `metadata.mergedIntoId`。1 回の書き込みで 3 件を超えるときは 3 件目に `metadata.additionalChanges` |
 | `auth.signed-in` | sign-in の完了（パスワード、MFA、パスワード再設定後、MFA の初回設定、SSO） | `sign-in`（Cognito の sub） | `metadata.authenticationMethods`。token の refresh は記録しない |
-| `auth.sign-in-failed` | パスワードまたは MFA コードの誤り | `sign-in`（`email:<digest>`） | `metadata.signInFailure`（`invalid-credentials` / `invalid-mfa-code`）と `emailDomain`。actor は `system:sign-in` |
+| `auth.sign-in-failed` | パスワードまたは MFA コードの誤り | `sign-in`（`email:<pseudonym>`、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` による HMAC。鍵がない deploy では記録しない） | `metadata.signInFailure`（`invalid-credentials` / `invalid-mfa-code`）と `emailDomain`。actor は `system:sign-in` |
 
 Document の event は通知の候補（`notificationCandidates`）を持たないので、通知は増えない。本文の編集は Document の版（`/api/documents/:documentId/versions`）が記録するので audit event にはしない。Planning の依存関係の event は計画の活動（`/api/planning/entities/:entityId/activity`）にも出て、相手の計画が閲覧者に見えないときは `relatedEntityId` を返さない。API キーの発行・差し替え・失効は以前から `api-key.*` として記録している。
 
@@ -132,7 +132,7 @@ Document の event は通知の候補（`notificationCandidates`）を持たな�
 
 要員計画とコレクションの event は状態の書き込みと同じ transaction で書く。顧客の event は同じく書き込みの transaction に入れ、顧客の削除・統合のように何回かに分けて書く操作では最初の transaction に入れる。そのため顧客の 1 回の書き込みに入る record は、audit を付けるとき最大 96 件になる。
 
-sign-in の event は session を発行した後に別に書き、書けなくても sign-in は止めない（失敗はログに出す）。失敗の event は、未認証の宛先の Workspace を引かずに済むよう、deploy が 1 Workspace に固定されている（`MUKUROJI_WORKSPACE_DIRECTORY_ID` がある）ときだけ書く。宛先はメールアドレスではなく Workspace ごとの digest で示す。総当たりで書き込みが増えないよう、同じ宛先・接続元・理由の失敗は 10 分の枠ごとに同じ event ID になり、各 server instance は書いた枠を覚えて 2 回目以降は書かない。
+sign-in の event は session を発行した後に別に書き、書けなくても sign-in は止めない（失敗はログに出す）。失敗の event は、未認証の宛先の Workspace を引かずに済むよう、deploy が 1 Workspace に固定されている（`MUKUROJI_WORKSPACE_DIRECTORY_ID` がある）ときだけ書く。宛先はメールアドレスではなく、Workspace audit pseudonym key による Workspace ごとの HMAC pseudonym で示す（未キーの digest は候補アドレスから計算できるため使わない）。総当たりで書き込みが増えないよう、同じ宛先・接続元・理由の失敗は 10 分の枠ごとに同じ event ID になり、各 server instance は書いた枠と書き込み中の枠を覚えて 2 回目以降は書かない。
 
 ### Runtime control の切り替え event
 

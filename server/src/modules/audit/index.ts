@@ -24,6 +24,7 @@ export {
   createWorkspaceMemberAuditEntityId,
   createWorkspaceMemberAuditEntityIdFromKeyBytes,
   WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
+  readWorkspaceAuditPseudonymKey,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
