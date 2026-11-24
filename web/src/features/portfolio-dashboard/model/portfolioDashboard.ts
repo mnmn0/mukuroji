@@ -13,6 +13,7 @@ import {
   type TeamAgentRunBoardResponse,
   type TeamPortfolioResponse,
   type TeamPortfolioSnapshot,
+  type WorkspaceWorkloadSnapshot,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../../projects/api'
 import { summarizeProjectOverviewAgentRuns } from '../../../projects/model/projectOverview'
@@ -89,6 +90,7 @@ export const PORTFOLIO_DASHBOARD_SORT_KEYS = [
   'forecast',
   'risks',
   'milestone',
+  'utilization',
 ] as const
 
 /** Column the dashboard table sorts by. */
@@ -118,6 +120,19 @@ export type PortfolioDashboardAgentRuns = {
   stalled: number
   /** Whether the board stopped at a read bound, so the counts can be low. */
   isIncomplete: boolean
+}
+
+/** Workload of the members allocated to one Project in the current month, across every Team. */
+export type PortfolioDashboardUtilization = {
+  /** Members with an allocation to the Project in the month. */
+  memberCount: number
+  /**
+   * Those members' allocation across every Team divided by their Workspace-wide capacity, in
+   * percent; absent when they have no capacity in the month.
+   */
+  percent?: number
+  /** Those members who are over capacity in the month once every Team counts. */
+  overloadedMemberCount: number
 }
 
 /** Change of a row since the compared month's snapshot. */
@@ -166,6 +181,8 @@ export type PortfolioDashboardRow = {
   budgetForecast?: number
   /** Agent Run counts, when Software factory is on and the board was read. */
   agentRuns?: PortfolioDashboardAgentRuns
+  /** Workload of the Project's members this month, when the Workspace workload was read. */
+  utilization?: PortfolioDashboardUtilization
   /** Change since the compared month. */
   delta?: PortfolioDashboardDelta
 }
@@ -188,6 +205,8 @@ export type PortfolioDashboardModel = {
   snapshotHiddenProjectCount: number
   /** Whether a Factory board read failed, so some Agent Run counts are missing. */
   agentRunsIncomplete: boolean
+  /** Whether the Workspace workload could not be read, so utilization is missing. */
+  utilizationUnavailable: boolean
 }
 
 /** Inputs of {@link createPortfolioDashboardModel}. */
@@ -204,6 +223,10 @@ export type PortfolioDashboardModelInput = {
   planningEntities?: readonly PlanningEntity[]
   /** Today in the reader's calendar, as `YYYY-MM-DD`. */
   today: string
+  /** Workspace workload of the current month at month granularity, when it could be read. */
+  workload?: WorkspaceWorkloadSnapshot
+  /** Whether the Workspace workload read failed. */
+  workloadFailed?: boolean
 }
 
 /**
@@ -217,6 +240,7 @@ export function createPortfolioDashboardModel(input: PortfolioDashboardModelInpu
   const teamsById = new Map(input.teams.map((team) => [team.id, team] as const))
   const snapshotsByTeam = new Map((input.snapshots ?? []).map((read) => [read.teamId, read] as const))
   const portfoliosByProject = indexProjectPortfolios(input.planningEntities ?? [])
+  const utilizationByProject = input.workload ? summarizePortfolioUtilization(input.workload) : undefined
   const rows: PortfolioDashboardRow[] = []
   const failedTeamNames: string[] = []
   const tooLargeTeamNames: string[] = []
@@ -258,6 +282,9 @@ export function createPortfolioDashboardModel(input: PortfolioDashboardModelInpu
       const agentRuns = read.agentBoard
         ? summarizeProjectOverviewAgentRuns(read.agentBoard, metrics.projectId)
         : undefined
+      const utilization = utilizationByProject
+        ? utilizationByProject.get(`${read.teamId}/${metrics.projectId}`) ?? { memberCount: 0, overloadedMemberCount: 0 }
+        : undefined
       rows.push({
         key: `${read.teamId}/${metrics.projectId}`,
         teamId: read.teamId,
@@ -283,6 +310,7 @@ export function createPortfolioDashboardModel(input: PortfolioDashboardModelInpu
               },
             }
           : {}),
+        ...(utilization ? { utilization } : {}),
         ...(previous ? { delta: createDelta(metrics, previous) } : {}),
       })
     }
@@ -297,7 +325,48 @@ export function createPortfolioDashboardModel(input: PortfolioDashboardModelInpu
     failedSnapshotTeamNames,
     snapshotHiddenProjectCount,
     agentRunsIncomplete,
+    utilizationUnavailable: input.workloadFailed === true,
   }
+}
+
+/**
+ * Sums, per Team-qualified Project, the Workspace-wide workload of the members the Project has
+ * allocations for. A member's whole load counts, not only the Project's share, so the column shows
+ * whether the Project's people are stretched by work elsewhere too. Only Project shares the reader
+ * may see name a member, so hidden Projects and confidential assignments name no one.
+ *
+ * @param workload - Workspace workload of the month.
+ * @returns Utilization keyed by `teamId/projectId`.
+ */
+export function summarizePortfolioUtilization(
+  workload: WorkspaceWorkloadSnapshot,
+): Map<string, PortfolioDashboardUtilization> {
+  const totals = new Map<string, { members: number; capacity: number; allocated: number; overloaded: number }>()
+  for (const member of workload.members) {
+    const projectKeys = new Set<string>()
+    for (const cell of member.cells) {
+      for (const share of cell.projects) {
+        if (share.projectId !== undefined && share.allocatedMinutes > 0) projectKeys.add(`${share.teamId}/${share.projectId}`)
+      }
+    }
+    for (const key of projectKeys) {
+      const total = totals.get(key) ?? { members: 0, capacity: 0, allocated: 0, overloaded: 0 }
+      total.members += 1
+      total.capacity += member.capacityMinutes
+      total.allocated += member.allocatedMinutes
+      if (member.overloaded) total.overloaded += 1
+      totals.set(key, total)
+    }
+  }
+  const result = new Map<string, PortfolioDashboardUtilization>()
+  for (const [key, total] of totals) {
+    result.set(key, {
+      memberCount: total.members,
+      ...(total.capacity > 0 ? { percent: Math.round((total.allocated / total.capacity) * 100) } : {}),
+      overloadedMemberCount: total.overloaded,
+    })
+  }
+  return result
 }
 
 /**
@@ -412,6 +481,8 @@ export type PortfolioDashboardAttention = {
   budget: boolean
   /** Whether the largest delay is over the threshold. */
   delay: boolean
+  /** Whether a member allocated to the Project is over capacity this month. */
+  utilization: boolean
 }
 
 /**
@@ -429,6 +500,7 @@ export function evaluatePortfolioDashboardAttention(
   return {
     budget: row.budgetConsumption !== undefined && budgetValue > thresholds.budgetPercent,
     delay: (row.metrics.schedule.maxDelayDays ?? 0) > thresholds.delayDays,
+    utilization: (row.utilization?.overloadedMemberCount ?? 0) > 0,
   }
 }
 
@@ -464,6 +536,8 @@ function readSortValue(row: PortfolioDashboardRow, key: PortfolioDashboardSortKe
       return openRiskCount(row.metrics) * 10 + PROJECT_RAID_SEVERITIES.indexOf(row.metrics.raid.highestOpenSeverity ?? 'low')
     case 'milestone':
       return row.metrics.nextMilestone?.dueDate
+    case 'utilization':
+      return row.utilization?.percent
   }
 }
 
@@ -496,7 +570,7 @@ export function arrangePortfolioDashboardRows(
     }
     if (filters.attentionOnly) {
       const attention = evaluatePortfolioDashboardAttention(row, thresholds)
-      if (!attention.budget && !attention.delay) return false
+      if (!attention.budget && !attention.delay && !attention.utilization) return false
     }
     return true
   })
@@ -553,6 +627,9 @@ export const PORTFOLIO_DASHBOARD_CSV_COLUMNS = [
   'nextMilestoneDate',
   'agentRunsFailed',
   'agentRunsStalled',
+  'utilizationPercent',
+  'utilizationMembers',
+  'overloadedMembers',
   'progressDelta',
   'budgetDelta',
   'delayDelta',
@@ -603,6 +680,9 @@ export function createPortfolioDashboardCsv(
       metrics.nextMilestone?.dueDate,
       row.agentRuns?.failed,
       row.agentRuns?.stalled,
+      row.utilization?.percent,
+      row.utilization?.memberCount,
+      row.utilization?.overloadedMemberCount,
       row.delta?.progress,
       row.delta?.budget,
       row.delta?.delay,

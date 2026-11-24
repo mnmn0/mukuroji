@@ -69,5 +69,8 @@ Issue #343 で、PMO が Workspace 全体の Project を健全性・進捗・ベ
 - 1 Team の Project が 200 件を超えると、その Team のポートフォリオは読めない。超えたら Team を
   分けるか、上限を見直す。
 - snapshot の行は費用を含むので、読み出しは必ず伏せ直しを通す。新しい読み出し口を足すときも同じ。
-- 稼働率と顧客での絞り込みは、それぞれの元データ（#342、Project の顧客項目）ができてから足す。
+- 要員稼働率は Web が `GET /api/workload`（ADR 0068）の今月分を 1 回読み、Project ごとに割り当てのある
+  メンバーの Workspace 横断の割り当てと稼働可能時間を合計して出す。Team の portfolio API と snapshot には
+  入れない（Team ごとに全 Team の capacity record を読むことになるため）。前月比は出さない。
+- 顧客での絞り込みは、Project の顧客項目ができてから足す。
 - 利用者ガイド `docs/guide/pm.md` にポートフォリオダッシュボードの説明を足す。

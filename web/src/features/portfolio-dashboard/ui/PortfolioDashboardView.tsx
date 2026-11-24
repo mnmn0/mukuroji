@@ -106,10 +106,11 @@ const sortableColumns: readonly { key: PortfolioDashboardSortKey; label: Message
   { key: 'forecast', label: 'portfolioDashboard.column.forecast' },
   { key: 'risks', label: 'portfolioDashboard.column.risks' },
   { key: 'milestone', label: 'portfolioDashboard.column.milestone' },
+  { key: 'utilization', label: 'portfolioDashboard.column.utilization' },
 ]
 
 /** Width in CSS pixels the table needs, used to fit it on paper. */
-const TABLE_MIN_WIDTH = 1_480
+const TABLE_MIN_WIDTH = 1_620
 
 /** Health filter options. */
 const healthFilterOptions: readonly (PlanningHealth | 'all')[] = ['all', 'off-track', 'at-risk', 'on-track', 'unknown']
@@ -218,12 +219,14 @@ export function PortfolioDashboardView({
   const attentionCounts = useMemo(() => {
     let budget = 0
     let delay = 0
+    let utilization = 0
     for (const row of model.rows) {
       const attention = evaluatePortfolioDashboardAttention(row, thresholds)
       if (attention.budget) budget += 1
       if (attention.delay) delay += 1
+      if (attention.utilization) utilization += 1
     }
-    return { budget, delay }
+    return { budget, delay, utilization }
   }, [model.rows, thresholds])
   const offTrackCount = model.rows.filter((row) => row.health === 'off-track').length
   const openRisks = model.rows.reduce((sum, row) => sum + openRiskCount(row.metrics), 0)
@@ -271,6 +274,7 @@ export function PortfolioDashboardView({
       ? format(t('portfolioDashboard.error.snapshots'), { teams: model.failedSnapshotTeamNames.join(', ') })
       : undefined,
     showAgentRuns && model.agentRunsIncomplete ? t('portfolioDashboard.error.agentRuns') : undefined,
+    model.utilizationUnavailable ? t('portfolioDashboard.error.utilization') : undefined,
     isPlanningUnavailable ? t('workspace.planningUpdate.error.loading') : undefined,
   ].filter((notice) => notice !== undefined)
   const hiddenNotices = [
@@ -283,11 +287,12 @@ export function PortfolioDashboardView({
 
   return (
     <div className="grid gap-6" data-print-root="portfolio-dashboard" ref={setRootElement}>
-      <div className="grid grid-cols-2 gap-3 min-[901px]:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 min-[901px]:grid-cols-6">
         <MetricCard label={t('portfolioDashboard.metric.projects')} tone="teal" value={model.rows.length} />
         <MetricCard label={t('portfolioDashboard.metric.offTrack')} tone={offTrackCount > 0 ? 'red' : 'emerald'} value={isPlanningUnavailable ? '—' : offTrackCount} />
         <MetricCard label={t('portfolioDashboard.metric.overBudget')} testId="portfolio-over-budget" tone={attentionCounts.budget > 0 ? 'red' : 'emerald'} value={attentionCounts.budget} />
         <MetricCard label={t('portfolioDashboard.metric.delayed')} testId="portfolio-delayed" tone={attentionCounts.delay > 0 ? 'amber' : 'emerald'} value={attentionCounts.delay} />
+        <MetricCard label={t('portfolioDashboard.metric.overloaded')} testId="portfolio-overloaded" tone={attentionCounts.utilization > 0 ? 'amber' : 'emerald'} value={model.utilizationUnavailable ? '—' : attentionCounts.utilization} />
         <MetricCard label={t('portfolioDashboard.metric.openRisks')} tone={openRisks > 0 ? 'amber' : 'emerald'} value={openRisks} />
       </div>
 
@@ -582,6 +587,26 @@ function PortfolioRow({ locale, onOpenProject, row, showAgentRuns, t, thresholds
             <p className="truncate text-xs text-[var(--workbench-muted)]">{metrics.nextMilestone.title}</p>
           </>
         ) : <span className="text-[var(--workbench-muted)]">{t('portfolioDashboard.cell.noMilestone')}</span>}
+      </td>
+      <td
+        className={`${cellClassName} tabular-nums ${attention.utilization ? 'bg-amber-50' : ''}`}
+        data-attention={attention.utilization ? 'utilization' : undefined}
+      >
+        {row.utilization === undefined ? '—' : row.utilization.memberCount === 0 ? (
+          <span className="text-[var(--workbench-muted)]">{t('portfolioDashboard.cell.noUtilization')}</span>
+        ) : (
+          <>
+            <p className={attention.utilization ? 'font-semibold text-fg-amber-800' : ''}>
+              {row.utilization.percent === undefined ? '—' : `${row.utilization.percent}%`}
+            </p>
+            <p className="text-xs text-[var(--workbench-muted)]">
+              {format(t('portfolioDashboard.cell.utilization'), {
+                members: row.utilization.memberCount,
+                overloaded: row.utilization.overloadedMemberCount,
+              })}
+            </p>
+          </>
+        )}
       </td>
       {showAgentRuns ? (
         <td className={`${cellClassName} tabular-nums`}>

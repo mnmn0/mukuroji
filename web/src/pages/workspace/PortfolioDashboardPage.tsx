@@ -9,6 +9,7 @@ import { useSaveTeamPortfolioSnapshots } from '../../features/portfolio-dashboar
 import {
   usePortfolioDashboard,
   usePortfolioSnapshots,
+  usePortfolioWorkload,
 } from '../../features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../../features/portfolio-dashboard/ui/PortfolioDashboardView'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
@@ -100,6 +101,7 @@ export function PortfolioDashboardPage() {
   const reads = usePortfolioDashboard(accessToken, teamIds, timeZone, workspace.softwareFactoryEnabled)
   const snapshots = usePortfolioSnapshots(accessToken, teamIds, compareMonth)
   const planning = usePlanningSnapshot(workspace.accessToken, workspace.canLoadWorkspaceData)
+  const workload = usePortfolioWorkload(accessToken, calendar.month)
   const model = useMemo(
     () => createPortfolioDashboardModel({
       teams: workspace.teams,
@@ -107,8 +109,10 @@ export function PortfolioDashboardPage() {
       ...(compareMonth && snapshots.data ? { snapshots: snapshots.data } : {}),
       ...(planning.data ? { updateTargets: planning.data.updateTargets, planningEntities: planning.data.entities } : {}),
       today: calendar.today,
+      ...(workload.data ? { workload: workload.data } : {}),
+      workloadFailed: workload.error !== undefined,
     }),
-    [calendar.today, compareMonth, planning.data, reads.data, snapshots.data, workspace.teams],
+    [calendar.today, compareMonth, planning.data, reads.data, snapshots.data, workload.data, workload.error, workspace.teams],
   )
   const capturableTeamIds = (reads.data?.teams ?? [])
     .filter((read) => read.portfolio?.viewer.canCaptureSnapshot === true)
@@ -131,12 +135,14 @@ export function PortfolioDashboardPage() {
     void reads.mutate()
     if (compareMonth) void snapshots.mutate()
     if (planning.error) void planning.mutate()
+    if (workload.error) void workload.mutate()
   }
 
   const sessionErrors = [
     reads.error,
     planning.error,
     snapshots.error,
+    workload.error,
     ...listPortfolioDashboardErrors(reads.data?.teams ?? [], snapshots.data ?? []),
     ...snapshotSave.errors,
   ]

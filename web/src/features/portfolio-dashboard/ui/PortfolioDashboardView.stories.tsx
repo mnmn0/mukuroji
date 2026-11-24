@@ -105,6 +105,43 @@ const model = createPortfolioDashboardModel({
     },
   }],
   today: '2026-11-23',
+  workload: {
+    schemaVersion: 1,
+    workspaceId: 'workspace',
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+    granularity: 'month',
+    teams: [],
+    generatedAt: '2026-11-23T00:00:00.000Z',
+    members: [
+      { memberId: 'a', teamIds: ['core'], capacityMinutes: 9_600, allocatedMinutes: 11_400, overloaded: true, cells: [{
+        fromDate: '2026-11-01',
+        toDate: '2026-11-30',
+        label: '2026-11-01',
+        capacityMinutes: 9600,
+        allocatedMinutes: 11400,
+        utilizationPercent: 119,
+        varianceMinutes: -1800,
+        status: 'over',
+        teams: [],
+        projects: [{ teamId: 'core', projectId: 'billing', allocatedMinutes: 11_400 }],
+        hiddenAllocatedMinutes: 0,
+      }] },
+      { memberId: 'b', teamIds: ['core'], capacityMinutes: 9_600, allocatedMinutes: 7_200, overloaded: false, cells: [{
+        fromDate: '2026-11-01',
+        toDate: '2026-11-30',
+        label: '2026-11-01',
+        capacityMinutes: 9600,
+        allocatedMinutes: 7200,
+        utilizationPercent: 75,
+        varianceMinutes: 2400,
+        status: 'balanced',
+        teams: [],
+        projects: [{ teamId: 'core', projectId: 'billing', allocatedMinutes: 7_200 }],
+        hiddenAllocatedMinutes: 0,
+      }] },
+    ],
+  },
 })
 
 const meta = {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { PortfolioProjectMetrics, TeamPortfolioResponse } from '@mukuroji/contracts'
+import type { PortfolioProjectMetrics, TeamPortfolioResponse, WorkspaceWorkloadMember } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   arrangePortfolioDashboardRows,
@@ -7,6 +7,7 @@ import {
   createPortfolioDashboardModel,
   evaluatePortfolioDashboardAttention,
   listPortfolioDashboardErrors,
+  summarizePortfolioUtilization,
 } from '../src/features/portfolio-dashboard/model/portfolioDashboard'
 import { isPortfolioSnapshotsKeyOfMonth } from '../src/features/portfolio-dashboard/queries/usePortfolioDashboard'
 import { PortfolioDashboardView } from '../src/features/portfolio-dashboard/ui/PortfolioDashboardView'
@@ -108,8 +109,8 @@ describe('createPortfolioDashboardModel', () => {
     const thresholds = { budgetPercent: 90, delayDays: 3 }
     const [alpha, beta] = model.rows
     if (!alpha || !beta) throw new Error('Rows are missing.')
-    expect(evaluatePortfolioDashboardAttention(alpha, thresholds)).toEqual({ budget: true, delay: true })
-    expect(evaluatePortfolioDashboardAttention(beta, thresholds)).toEqual({ budget: false, delay: false })
+    expect(evaluatePortfolioDashboardAttention(alpha, thresholds)).toEqual({ budget: true, delay: true, utilization: false })
+    expect(evaluatePortfolioDashboardAttention(beta, thresholds)).toEqual({ budget: false, delay: false, utilization: false })
     const filters = { teamId: 'all', lifecycle: 'all' as const, health: 'all' as const, portfolioId: 'all', attentionOnly: true }
     expect(arrangePortfolioDashboardRows(model.rows, filters, thresholds, { key: 'project', descending: false }).map((row) => row.projectId)).toEqual(['alpha'])
     expect(arrangePortfolioDashboardRows(model.rows, { ...filters, attentionOnly: false }, thresholds, { key: 'budget', descending: true }).map((row) => row.projectId)).toEqual(['alpha', 'beta'])
@@ -182,4 +183,92 @@ test('matches the saved snapshot reads of a month whichever month the page compa
   expect(isPortfolioSnapshotsKeyOfMonth(['portfolio-snapshots', 'token', 'a\nb', '2026-10'], '2026-11')).toBe(false)
   expect(isPortfolioSnapshotsKeyOfMonth(['portfolio-team', 'token', 'a', '2026-11'], '2026-11')).toBe(false)
   expect(isPortfolioSnapshotsKeyOfMonth('portfolio-snapshots', '2026-11')).toBe(false)
+})
+
+/**
+ * Builds one member of a monthly Workspace workload.
+ *
+ * @param memberId - Member ID.
+ * @param capacityMinutes - Workspace-wide capacity in the month.
+ * @param allocatedMinutes - Allocation across every Team in the month.
+ * @param projects - Viewer-visible Project shares.
+ * @returns The member.
+ */
+function workloadMember(
+  memberId: string,
+  capacityMinutes: number,
+  allocatedMinutes: number,
+  projects: { teamId: string; projectId?: string; allocatedMinutes: number }[],
+): WorkspaceWorkloadMember {
+  return {
+    memberId,
+    teamIds: ['core'],
+    capacityMinutes,
+    allocatedMinutes,
+    overloaded: allocatedMinutes > capacityMinutes,
+    cells: [{
+      fromDate: '2026-11-01',
+      toDate: '2026-11-30',
+      label: '2026-11-01',
+      capacityMinutes,
+      allocatedMinutes,
+      utilizationPercent: capacityMinutes === 0 ? 0 : Math.round((allocatedMinutes / capacityMinutes) * 100),
+      varianceMinutes: capacityMinutes - allocatedMinutes,
+      status: allocatedMinutes > capacityMinutes ? 'over' : 'balanced',
+      teams: [],
+      projects,
+      hiddenAllocatedMinutes: 0,
+    }],
+  }
+}
+
+describe('summarizePortfolioUtilization', () => {
+  const workload = {
+    schemaVersion: 1 as const,
+    workspaceId: 'w',
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+    granularity: 'month' as const,
+    teams: [{ teamId: 'core', name: 'Core' }],
+    generatedAt: '2026-11-24T00:00:00.000Z',
+    members: [
+      workloadMember('a', 6_000, 9_000, [{ teamId: 'core', projectId: 'alpha', allocatedMinutes: 3_000 }, { teamId: 'ops', projectId: 'gamma', allocatedMinutes: 6_000 }]),
+      workloadMember('b', 6_000, 3_000, [{ teamId: 'core', projectId: 'alpha', allocatedMinutes: 3_000 }]),
+      workloadMember('c', 6_000, 6_000, [{ teamId: 'core', allocatedMinutes: 6_000 }]),
+    ],
+  }
+
+  test('sums the whole load of the members allocated to each Project', () => {
+    const summary = summarizePortfolioUtilization(workload)
+    expect(summary.get('core/alpha')).toEqual({ memberCount: 2, percent: 100, overloadedMemberCount: 1 })
+    expect(summary.get('ops/gamma')).toEqual({ memberCount: 1, percent: 150, overloadedMemberCount: 1 })
+    expect(summary.size).toBe(2)
+  })
+
+  test('highlights a Project whose members are overloaded and exports the column', () => {
+    const withWorkload = createPortfolioDashboardModel({
+      teams,
+      reads: [{ teamId: 'core', agentBoardFailed: false, portfolio: portfolio('core', [metrics('alpha'), metrics('beta')]) }],
+      today: '2026-11-24',
+      workload,
+    })
+    const alpha = withWorkload.rows.find((row) => row.projectId === 'alpha')
+    const beta = withWorkload.rows.find((row) => row.projectId === 'beta')
+    if (!alpha || !beta) throw new Error('Rows are missing.')
+    expect(beta.utilization).toEqual({ memberCount: 0, overloadedMemberCount: 0 })
+    const thresholds = { budgetPercent: 90, delayDays: 3 }
+    expect(evaluatePortfolioDashboardAttention(alpha, thresholds).utilization).toBe(true)
+    expect(evaluatePortfolioDashboardAttention(beta, thresholds).utilization).toBe(false)
+    const arranged = arrangePortfolioDashboardRows(
+      withWorkload.rows,
+      { teamId: 'all', lifecycle: 'all', health: 'all', portfolioId: 'all', attentionOnly: true },
+      thresholds,
+      { key: 'utilization', descending: true },
+    )
+    expect(arranged.map((row) => row.projectId)).toEqual(['alpha'])
+    const csv = createPortfolioDashboardCsv([alpha], (column) => column, (_kind, value) => value)
+    expect(csv.split('\r\n')[0]).toContain('"utilizationPercent","utilizationMembers","overloadedMembers"')
+    expect(csv.split('\r\n')[1]).toContain('"100","2","1"')
+    expect(createPortfolioDashboardModel({ teams, reads: [], today: '2026-11-24', workloadFailed: true }).utilizationUnavailable).toBe(true)
+  })
 })

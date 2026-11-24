@@ -1,6 +1,7 @@
 import { PORTFOLIO_WORKSPACE_TEAM_LIMIT } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import { getTeamAgentRunBoard } from '../../../work-items/api/agentRuns'
+import { getWorkspaceWorkload } from '../../../workload/api/workspaceWorkload'
 import { getTeamPortfolio, getTeamPortfolioSnapshot } from '../api/portfolio'
 import type {
   PortfolioDashboardReads,
@@ -117,6 +118,34 @@ export function usePortfolioSnapshots(
           return { teamId, failed: true, error }
         }
       }),
+    { revalidateOnFocus: false, shouldRetryOnError: false },
+  )
+}
+
+/**
+ * Returns the first and last day of a month.
+ *
+ * @param month - Month as `YYYY-MM`.
+ * @returns Inclusive dates as `YYYY-MM-DD`.
+ */
+function monthRange(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const lastDay = new Date(Date.UTC(year ?? 1970, monthNumber ?? 1, 0)).getUTCDate()
+  return { fromDate: `${month}-01`, toDate: `${month}-${String(lastDay).padStart(2, '0')}` }
+}
+
+/**
+ * Reads the Workspace workload of one month at month granularity, for the utilization column.
+ *
+ * @param accessToken - Session access token; reading is skipped without it.
+ * @param month - Month as `YYYY-MM`.
+ * @returns SWR state of the read.
+ */
+export function usePortfolioWorkload(accessToken: string | undefined, month: string) {
+  return useSWR(
+    accessToken ? ['portfolio-workload', accessToken, month] as const : null,
+    async ([, token, currentMonth]) =>
+      await getWorkspaceWorkload(token, { ...monthRange(currentMonth), granularity: 'month' }),
     { revalidateOnFocus: false, shouldRetryOnError: false },
   )
 }
