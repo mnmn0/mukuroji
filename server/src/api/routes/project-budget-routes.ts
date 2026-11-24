@@ -1,18 +1,12 @@
 import type { Context, Hono } from 'hono'
 import {
-  deriveWorkItemProgressPercent,
   isProjectBudgetReportInterval,
   PROJECT_BUDGET_REPORT_MAX_POINTS,
   type ProjectBudgetReport,
   type ProjectBudgetReportInterval,
-  type TimeEntry,
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
-import {
-  createProjectBudgetReport,
-  type ProjectBudgetTimeEntry,
-  type ProjectBudgetWorkItemProgress,
-} from '../../modules/project-budget'
+import { loadProjectBudgetReport, ProjectBudgetReportError } from '../../modules/project-budget'
 import { TimeTrackingError } from '../../modules/time-tracking'
 import { requireAppDependencies, workItemDependencies } from '../shared/app-dependencies'
 import { WORK_ITEMS_AGGREGATE_ITEM_LIMIT, WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE } from '../shared/constants'
@@ -21,19 +15,12 @@ import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-ac
 import { requireTeamPermission, requireWorkspaceBusinessRead } from '../shared/project-access'
 import { requireTeamProjectManager } from '../shared/project-manager-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { createWorkItemListLimitExceededError } from '../shared/work-item-access'
 
 /** Pattern of a `YYYY-MM-DD` local date. */
 const LOCAL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 
 /** Milliseconds in one UTC day. */
 const DAY_MS = 86_400_000
-
-/**
- * Widest offset of any IANA timezone from UTC, in milliseconds. Entries are read this far
- * around the UTC dates and then kept by their local date.
- */
-const MAX_TIMEZONE_OFFSET_MS = 14 * 3_600_000
 
 /**
  * Registers the Project budget report endpoints.
@@ -102,116 +89,32 @@ async function readReport(c: Context): Promise<ProjectBudgetReport> {
     'ProjectBudgetForbidden',
     'Only a Project manager can read the Project budget report.',
   ))
-  const workspaceId = principal.directoryId
   const timeTracking = requireAppDependencies().timeTracking.timeTrackingService
-  const [budget, baseline, configuration, entries] = await Promise.all([
-    timeTracking.getBudget(workspaceId, teamId, 'project', projectId),
-    workItemDependencies.scheduleBaselines.get(workspaceId, teamId, projectId),
-    workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, teamId),
-    timeTracking.listAllEntries({
-      workspaceId,
-      teamId,
-      from: new Date(Date.parse(`${query.from}T00:00:00Z`) - MAX_TIMEZONE_OFFSET_MS).toISOString(),
-      to: new Date(Date.parse(`${query.to}T00:00:00Z`) + DAY_MS + MAX_TIMEZONE_OFFSET_MS).toISOString(),
-      projectIds: new Set([projectId]),
-    }),
-  ])
-  const baselineIds = new Set((baseline?.entries ?? []).map((entry) => entry.workItemId))
-  const workItems = baselineIds.size === 0
-    ? new Map<string, ProjectBudgetWorkItemProgress>()
-    : await readWorkItemProgress(workspaceId, teamId, baselineIds, configuration.configuration.progressMode)
-  return createProjectBudgetReport({
-    teamId,
-    projectId,
-    ...query,
-    today: localDateAt(Date.now(), query.timeZone),
-    budget: budget ?? null,
-    baseline,
-    workItems,
-    entries: entries.map((entry) => toBudgetEntry(entry, query.timeZone)),
-  })
-}
-
-/**
- * Reads the current progress of the baseline Work Items, archived ones included, because
- * archiving finished work must not take back what it earned.
- *
- * @param workspaceId - Workspace directory ID.
- * @param teamId - Team ID.
- * @param ids - Work Item IDs the baseline holds.
- * @param progressMode - Team progress mode.
- * @returns Progress keyed by Work Item ID; deleted Work Items are missing.
- * @throws ProjectDataError 413 when the Team has more Work Items than one read may evaluate.
- */
-async function readWorkItemProgress(
-  workspaceId: string,
-  teamId: string,
-  ids: ReadonlySet<string>,
-  progressMode: Parameters<typeof deriveWorkItemProgressPercent>[1],
-): Promise<Map<string, ProjectBudgetWorkItemProgress>> {
-  const result = new Map<string, ProjectBudgetWorkItemProgress>()
-  let evaluated = 0
-  let startAfterIssueId: string | undefined
-  do {
-    const response = await workItemDependencies.teamIssues.getTeamIssues(workspaceId, teamId, {
-      limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
-      includeArchived: true,
-      consistentRead: true,
-      limitEvaluatedRows: true,
-      ...(startAfterIssueId ? { startAfterIssueId } : {}),
-    })
-    evaluated += response.evaluatedCount ?? response.issues.length
-    if (evaluated > WORK_ITEMS_AGGREGATE_ITEM_LIMIT) {
-      throw createWorkItemListLimitExceededError(`Team has more than ${WORK_ITEMS_AGGREGATE_ITEM_LIMIT} Work Items to report on.`)
-    }
-    for (const issue of response.issues) {
-      if (!ids.has(issue.id)) continue
-      result.set(issue.id, {
-        canceled: issue.statusCategory === 'canceled',
-        progressPercent: deriveWorkItemProgressPercent(issue, progressMode) ?? 0,
-      })
-    }
-    if (response.nextStartAfterIssueId !== undefined && response.nextStartAfterIssueId === startAfterIssueId) {
-      throw new ProjectDataError(503, 'WorkItemListReadStalled', `Team "${teamId}" Work Item read did not advance.`)
-    }
-    startAfterIssueId = response.nextStartAfterIssueId
-  } while (startAfterIssueId !== undefined)
-  return result
-}
-
-/**
- * Converts a time entry to what the report reads: its start date in the report timezone.
- *
- * @param entry - Stored time entry.
- * @param timeZone - Report timezone.
- * @returns The report entry.
- */
-function toBudgetEntry(entry: TimeEntry, timeZone: string): ProjectBudgetTimeEntry {
-  return {
-    localDate: localDateAt(Date.parse(entry.startAt), timeZone),
-    durationMinutes: entry.durationMinutes,
-    currency: entry.currency,
-    ...(entry.actualCostMinor === undefined ? {} : { actualCostMinor: entry.actualCostMinor }),
-  }
-}
-
-/** Cached local date formatters by timezone. */
-const localDateFormatters = new Map<string, Intl.DateTimeFormat>()
-
-/**
- * Formats an instant as a local date.
- *
- * @param timestamp - Epoch milliseconds.
- * @param timeZone - IANA timezone.
- * @returns `YYYY-MM-DD` in the timezone.
- */
-function localDateAt(timestamp: number, timeZone: string): string {
-  let formatter = localDateFormatters.get(timeZone)
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
-    localDateFormatters.set(timeZone, formatter)
-  }
-  return formatter.format(new Date(timestamp))
+  return await loadProjectBudgetReport(
+    { workspaceId: principal.directoryId, teamId, projectId, ...query },
+    {
+      getBudget: (workspaceId, ownerTeamId, ownerProjectId) => timeTracking.getBudget(workspaceId, ownerTeamId, 'project', ownerProjectId),
+      getBaseline: (workspaceId, ownerTeamId, ownerProjectId) => workItemDependencies.scheduleBaselines.get(workspaceId, ownerTeamId, ownerProjectId),
+      getProgressMode: async (workspaceId, ownerTeamId) =>
+        (await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, ownerTeamId)).configuration.progressMode,
+      listEntries: (input) => timeTracking.listAllEntries({
+        workspaceId: input.workspaceId,
+        teamId: input.teamId,
+        from: input.from,
+        to: input.to,
+        projectIds: new Set([input.projectId]),
+      }),
+      listWorkItems: (workspaceId, ownerTeamId, startAfterIssueId) => workItemDependencies.teamIssues.getTeamIssues(workspaceId, ownerTeamId, {
+        limit: WORK_ITEMS_AGGREGATE_READ_PAGE_SIZE,
+        includeArchived: true,
+        consistentRead: true,
+        limitEvaluatedRows: true,
+        ...(startAfterIssueId ? { startAfterIssueId } : {}),
+      }),
+      now: () => new Date(),
+    },
+    WORK_ITEMS_AGGREGATE_ITEM_LIMIT,
+  )
 }
 
 /**
@@ -361,6 +264,10 @@ function isProjectBudgetErrorCode(code: string): code is keyof typeof projectBud
 function toProjectBudgetErrorResponse(c: Context, error: unknown) {
   if (error instanceof ProjectDataError && isProjectBudgetErrorCode(error.code)) {
     return c.json({ code: error.code, message: error.message }, projectBudgetErrorStatuses[error.code])
+  }
+  if (error instanceof ProjectBudgetReportError) {
+    if (error.status === 503) console.error(error)
+    return c.json({ code: error.code, message: error.message }, error.status)
   }
   if (error instanceof TimeTrackingError) {
     if (error.status === 400) return c.json({ code: error.code, message: error.message }, 400)
