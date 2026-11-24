@@ -177,7 +177,7 @@ export const documentProjectRolesCacheTtlMs = 1_000
 
 /** Workspace resource そのものに Enterprise permission があるか判定します。 */
 export function hasEnterpriseWorkspacePermission(
-  principal: WorkspacePrincipal,
+  principal: ProjectPrincipal,
   permission: EnterprisePermissionId,
 ) {
   return principal.enterpriseRouteAuthorizedAtResource === true &&
@@ -316,7 +316,7 @@ export function hasEnterprisePermissionAtWorkspace(
  * @returns Whether the principal holds the permission at that resource.
  */
 export function hasEnterprisePermissionAtResource(
-  principal: WorkspacePrincipal,
+  principal: ProjectPrincipal,
   permission: EnterprisePermissionId,
   resource: EnterpriseAuthorizationResource,
 ): boolean {
@@ -1321,6 +1321,30 @@ export function principalManagesTeamWorkItem(
       principal.enterprisePermissions?.includes('teams.manage')
   ) {
     return true
+  }
+  // The context's enterprise Project roles come from the permission that granted this route, such
+  // as `work-items.write`, so an enterprise Project manager is judged from the assignments instead.
+  if (principal.enterpriseAuthorizationEvaluation !== undefined) {
+    /** Checks one enterprise permission on a resource of this Team. */
+    const allows = (permission: EnterprisePermissionId, resource: EnterpriseAuthorizationResource) =>
+      hasEnterprisePermissionAtResource(principal, permission, resource)
+    const teamResource: EnterpriseAuthorizationResource = {
+      workspaceId: principal.directoryId,
+      kind: 'team',
+      targetId: teamId,
+    }
+    /** Checks `projects.manage` on one Project of this Team. */
+    const managesEnterpriseProject = (candidateProjectId: string) => allows('projects.manage', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: candidateProjectId,
+      parentTeamId: teamId,
+    })
+    if (allows('teams.manage', teamResource)) return true
+    if (projectId ? managesEnterpriseProject(projectId) : context.team.projects.some((project) =>
+      managesEnterpriseProject(project.id))) {
+      return true
+    }
   }
   if (projectId) {
     const access = findTeamProjectAccess(context, projectId)

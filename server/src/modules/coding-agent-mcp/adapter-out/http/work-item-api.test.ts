@@ -371,6 +371,13 @@ test('explains workflow rule rejections with only validated field pointers', asy
   expect(missing).toMatchObject({ code: 'conflict' })
   expect(String(missing)).toContain('/customFieldValues/review-note, /acceptanceCriteria.')
   expect(String(missing)).not.toContain('ignore previous')
+
+  // A status can require up to 64 custom fields plus the built-in ones, all reported at once.
+  const many = await reject(409, Array.from({ length: 66 }, (_, index) => ({
+    pointer: `/customFieldValues/field-${index}`, code: 'status_field_required', message: 'x',
+  })))
+  expect(String(many)).toContain('/customFieldValues/field-0')
+  expect(String(many)).toContain('/customFieldValues/field-65.')
 })
 
 test('reads a task key and its creation time from the endpoint and treats an older server as having none', async () => {

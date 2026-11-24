@@ -268,3 +268,14 @@ test('maps workflow rule rejections to Public API problems with one pointer per 
     { pointer: '/customFieldValues/review-note', code: 'status_field_required' },
   ])
 })
+
+test('does not require a custom field that the Work Item\'s Project cannot hold', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const configuration = configureRules({ review: { requiredCustomFieldIds: ['review-note'] } })
+  // The field belongs to another Project only, so this Work Item could never fill it.
+  configuration.customFields = configuration.customFields.map((field) => ({ ...field, projectIds: ['other-project'] }))
+
+  const response = await patchWorkItem({ workflowStatusId: 'review' })
+
+  expect(response.status).toBe(200)
+})

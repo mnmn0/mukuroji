@@ -392,6 +392,7 @@ async function resolveCompletionTransition(
     if (decider) {
       assertWorkflowRules(resolved.configuration, {
         workItemTypeId: workItem.workItemTypeId,
+        projectId: workItem.assignedProjectId,
         fromStatusId: currentStatus.workflowStatusId,
         toStatusId: nextStatus.workflowStatusId,
         actor: resolveWorkflowRuleActor(decider, workItem, workItem.assignedProjectId),
@@ -628,6 +629,7 @@ export async function prepareConfiguredUpdateWorkItem(
   const sameWorkflow = !typeChanged || currentWorkflow.id === targetWorkflow.id
   assertWorkflowRules(resolved.configuration, {
     workItemTypeId: targetWorkItemType.id,
+    projectId,
     // Another workflow has no transition from the current status, so its target is entered directly.
     fromStatusId: sameWorkflow ? currentWorkflowStatus.workflowStatusId : undefined,
     toStatusId: nextWorkflowStatus.workflowStatusId,

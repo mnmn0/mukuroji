@@ -5990,9 +5990,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           scope.teamId,
           canonicalWorkItem,
           completionTransition,
-          deciderContext
-            ? createPersonWorkflowRulePrincipal(principal, deciderContext)
-            : { kind: 'person', userKey: principal.userKey, managesProject: () => principal.isSystemAdmin },
+          createPersonWorkflowRulePrincipal(principal, deciderContext),
         )
         resolvedCompletionTransition = resolved
         return resolved

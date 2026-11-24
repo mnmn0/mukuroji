@@ -206,6 +206,7 @@ export class WorkflowRuleError extends WorkItemConfigurationError {
  * @param configuration - Work Item configuration that owns the workflow.
  * @param change - The status change, its actor, and the Work Item state after it.
  * @param change.workItemTypeId - Work Item Type after the change.
+ * @param change.projectId - Project after the change, which decides the custom fields that apply.
  * @param change.fromStatusId - Status before the change, or `undefined` without a known transition.
  * @param change.toStatusId - Status after the change.
  * @param change.actor - Actor making the change.
@@ -216,6 +217,7 @@ export function assertWorkflowRules(
   configuration: WorkItemConfiguration,
   change: {
     workItemTypeId: string | undefined
+    projectId: string | undefined
     fromStatusId: string | undefined
     toStatusId: string
     actor: WorkflowRuleActor
@@ -231,8 +233,16 @@ export function assertWorkflowRules(
     change.actor,
   )
   if (actorRule) unmet.push(actorRule)
-  if (status && ((status.requiredFields?.length ?? 0) > 0 || (status.requiredCustomFieldIds?.length ?? 0) > 0)) {
-    unmet.push(...evaluateWorkflowStatusRequirements(status, change.state()))
+  // A status shared by several Types or Projects asks only for the custom fields this Work Item can
+  // hold; a field its Type or Project does not use could never be filled.
+  const applicableFieldIds = (status?.requiredCustomFieldIds?.length ?? 0) > 0
+    ? new Set(getWorkItemTypeCustomFieldDefinitions(configuration, change.workItemTypeId, { allowArchived: true })
+      .filter((definition) => isFieldApplicable(definition, change.projectId))
+      .map((definition) => definition.id))
+    : new Set<string>()
+  const requiredCustomFieldIds = status?.requiredCustomFieldIds?.filter((fieldId) => applicableFieldIds.has(fieldId)) ?? []
+  if (status && ((status.requiredFields?.length ?? 0) > 0 || requiredCustomFieldIds.length > 0)) {
+    unmet.push(...evaluateWorkflowStatusRequirements({ ...status, requiredCustomFieldIds }, change.state()))
   }
   if (unmet.length > 0) throw new WorkflowRuleError(unmet)
 }

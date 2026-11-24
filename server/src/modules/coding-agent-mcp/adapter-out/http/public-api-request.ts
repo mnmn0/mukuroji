@@ -5,7 +5,9 @@ import { AgentTaskError } from '../../application/work-item-api'
 
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
-  errors: z.array(z.object({ code: z.string(), pointer: z.string().max(300).optional() })).max(20).optional(),
+  // A workflow rule rejection lists every unmet rule: one actor rule, two built-in fields, and up to
+  // 64 custom fields. The 64 KiB body limit still bounds the whole problem.
+  errors: z.array(z.object({ code: z.string(), pointer: z.string().max(300).optional() })).max(100).optional(),
 })
 
 /** Field pointers a workflow status can require; only these are forwarded, never remote text. */

@@ -69,20 +69,27 @@ export const AUTOMATION_WORKFLOW_RULE_PRINCIPAL: WorkflowRulePrincipal = { kind:
 export const CREDENTIAL_WORKFLOW_RULE_PRINCIPAL: WorkflowRulePrincipal = { kind: 'credential' }
 
 /**
- * Creates the rule principal of a person acting in the Web.
+ * Creates the rule principal of a principal signed in to a Team route.
+ *
+ * An enterprise service account authenticates on the same routes as a person but is not one, so it
+ * is judged like a developer credential. Without a Team permission context, only a system admin
+ * counts as a manager.
  *
  * @param principal - Authenticated Workspace principal.
- * @param context - Team permission context of the principal.
+ * @param context - Team permission context of the principal, if the principal has one.
  * @returns A rule principal that reads the person's manager roles from the context.
  */
 export function createPersonWorkflowRulePrincipal(
   principal: ProjectPrincipal,
-  context: TeamPermissionContext,
+  context: TeamPermissionContext | undefined,
 ): WorkflowRulePrincipal {
+  if (principal.principalKind === 'service-account') return CREDENTIAL_WORKFLOW_RULE_PRINCIPAL
   return {
     kind: 'person',
     userKey: principal.userKey,
-    managesProject: (projectId) => principalManagesTeamWorkItem(principal, context, projectId),
+    managesProject: (projectId) => context
+      ? principalManagesTeamWorkItem(principal, context, projectId)
+      : principal.isSystemAdmin,
   }
 }
 
@@ -345,6 +352,7 @@ export async function prepareConfiguredCreateWorkItem(
   if (workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId) {
     assertWorkflowRules(resolved.configuration, {
       workItemTypeId: workItemType.id,
+      projectId,
       fromStatusId: undefined,
       toStatusId: workflowStatus.workflowStatusId,
       // A new Work Item has no assignee before the change, so a creator naming themselves does not
