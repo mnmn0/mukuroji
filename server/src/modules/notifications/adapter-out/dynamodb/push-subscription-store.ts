@@ -298,7 +298,7 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore, Pus
     const nowSeconds = Math.floor(now.getTime() / 1_000)
     const devices: PushDevice[] = []
     let startKey: Record<string, unknown> | undefined
-    // The registration limit bounds the partition; the page bound guards against corrupt data.
+    // The registration limit bounds live rows; the page bound keeps one delivery's reads finite.
     for (let page = 0; page < 5; page += 1) {
       const result = await this.#client.send(new QueryCommand({
         TableName: this.#tableName,
@@ -324,6 +324,10 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore, Pus
       }
       startKey = result.LastEvaluatedKey
       if (!startKey) break
+    }
+    // Expired rows awaiting TTL deletion are not bounded by the limit, so a partial list is not a result.
+    if (startKey) {
+      throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription list could not be read completely.')
     }
     const owned: PushDevice[] = []
     for (const device of devices.slice(0, MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER)) {

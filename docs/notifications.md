@@ -140,7 +140,7 @@ POST /api/notifications/bulk
   配信 worker が任意の宛先へ request を送らないための境界です。`p256dh` は 65 byte の非圧縮 P-256 公開鍵で、曲線上の点であることも確認します（後の暗号化で必ず失敗する鍵を保存しません）。`auth` は 16 byte で、どちらも padding なし base64url です。
 - 保存先は `PushSubscriptionsTable` です。member の購読（`member#<workspaceId>#<memberKey>` / `subscription#<id>`。各 ID は URL エンコードし、`#` を含む ID でも区切りがずれません）と endpoint の所有者
   （`endpoint#<id>` / `owner`）を 1 transaction で書き、同じ endpoint を別 member が登録すると前の member の購読を削除します。
-  共有端末で別の人の通知が届き続けることはありません。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
+  共有端末で前の人宛ての通知を新しく送り続けることはありません（引き継ぐ前に push service が受け付けていた通知が後から届く場合は [Web Push 配信](#web-push-配信) を参照）。所有者の行には最後の登録・削除の server 時刻（`changedAt`）と書き込みごとの乱数の revision を記録し、所有者の行への書き込みはすべて読んだ revision を条件にするため、変更は必ず順番に適用されます。request の開始以降（同じミリ秒を含む）に（どの member でも）登録・削除があった場合、その登録は古い request として `409 PushSubscriptionConflict` にし、端末を取り戻したり購読を作り直したりしません。ただし、後から登録したのが同じ member で購読が有効なままなら、すでに目的の状態なので書き込まずに成功を返します。所有者の読み取りと transaction の間に競合した場合は 3 回まで再試行し、それでも競合すれば `409 PushSubscriptionConflict` です。
   再試行するのは transaction の取消理由が条件不一致または transaction 競合だけの場合で、throttling などの基盤エラーはそのまま再試行可能な失敗として返します。
 - 1 member あたり 20 デバイスまでで、超えると `409 PushSubscriptionLimitExceeded` です。保持期限（`expiresAt`）を過ぎた購読は、DynamoDB の TTL が実際に削除する前でも数えず（`expiresAt` がない・数値でない壊れた行は数えます）、再登録では新しいデバイスとして上限を確認します。member ごとの登録 version の行が version を持たない壊れた状態なら上書きせず `503 PushSubscriptionUnavailable` にします。新しいデバイスの登録は member ごとの登録 version
   （`member#<workspaceId>#<memberKey>` / `devices`）を件数の読み取りと同じ transaction で更新するため、同時に登録しても上限を超えません。
@@ -279,7 +279,7 @@ worker は warm な Lambda ごとに secret を 1 回読み、公開鍵と対で
 
 ### 宛先
 
-送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません（読み直しと送信の間に残る隙間は1回の読み取りの時間だけです）。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
+送るたびに `PushSubscriptionsTable` の recipient の購読を強整合で読み、保持期限内で、endpoint の所有者の行がまだその member を指す（tombstone でない）ものだけに送ります。各端末へ送る直前にも所有者の行を強整合で読み直し、一覧の後に別の member が同じ endpoint を登録した端末には送りません。push service への送信は所有者の変更と原子的にはできないため、次の場合は変わる前の所有者宛ての通知がその browser に表示されることがあります。読み直しから送信の開始まで（暗号化と request の開始の間）に所有者が変わった場合と、所有者が変わる前に push service が受け付けた通知を、browser がオフラインだったなどで TTL（24時間）以内に後から受け取った場合です。service worker は受け取った通知を所有者を確かめずに表示します。サインアウトが browser の購読を取り消せた場合は、push service にたまった通知も届かなくなります。ただし取り消しは保証されません。取り消しに失敗した場合、別のアカウントが登録した購読を残した場合、セッションの期限切れでサインアウトを通らなかった場合、別のアカウントがサインアウトせずに同じ browser で通知を有効にし直した場合は、このリスクが残ります（2026-11-24 にリポジトリの持ち主が受け入れると判断しました）。送る直前に endpoint を登録時と同じ allowlist で検証し、redirect は追いません。
 
 ### 配信の規則
 
@@ -293,12 +293,12 @@ push service の応答は次のように扱います。
 | --- | --- |
 | `2xx` | その端末は受け付け済み |
 | `404` / `410` | 購読が失効。送った時点の `updatedAt` を条件にその購読の行を削除する（その間に登録し直した行は消さない） |
-| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（不正な値に備えて 31 日で頭打ち） |
+| `429` / `5xx` / 通信失敗 | 再試行。`Retry-After` があればその時間より早くは再試行しない（通知の保持期限を越える指定は保持期限までで、その時点で期限切れとして終わる） |
 | `400` / `401` / `403` / `413` | VAPID 鍵や payload の問題として失敗にする（`PushDeliveryRejected`） |
 | `404` / `410` で購読を消せなかった（DynamoDB の一時障害など） | 受け付けた端末がなければ再試行し、そのときに消し直す（`PushCleanupUnavailable`） |
 | （送る前）保存された endpoint か鍵が使えない | 購読を消さずに失敗にし、運用者が調べられるよう残す（`PushSubscriptionInvalid`） |
 
-1 台でも受け付ければ通知は送信済み（`pushDeliveryStatus: sent`）です。他の端末が一時的に失敗しても、受け付けた端末に同じ通知を 2 回出さないよう再試行しません。購読が 1 つもない・すべて失効した場合は alarm を出さずに抑止します（`suppressed`、`pushLastCode: PushNoDevices`）。読み取りから全端末への送信までは合計 30 秒で打ち切ります。端末へは最大 4 台ずつ同時に送るため、応答しない push service が 1 つあっても他の端末には届きます。
+1 台でも受け付ければ通知は送信済み（`pushDeliveryStatus: sent`）です。他の端末が一時的に失敗しても、受け付けた端末に同じ通知を 2 回出さないよう再試行しません。購読が 1 つもない・すべて失効した場合は alarm を出さずに抑止します（`suppressed`、`pushLastCode: PushNoDevices`）。購読の一覧は 5 ページまで読み、まだ続きがあるときは一部だけで判断せず、読み取り失敗（`pushLastCode: PushDevicesUnavailable`）として再試行します。TTL の削除を待つ期限切れの行は登録上限に数えないため、その分だけ一覧が長くなることがあるからです。読み取りから全端末への送信までは合計 30 秒で打ち切ります。端末へは最大 4 台ずつ同時に送るため、応答しない push service が 1 つあっても他の端末には届きます。
 
 ### 失敗の調査
 

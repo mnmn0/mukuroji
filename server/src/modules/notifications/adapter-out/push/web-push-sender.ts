@@ -138,6 +138,9 @@ export function createWebPushNotificationSender(options: WebPushNotificationSend
     // An accepting device ends the delivery; a gone device left behind is removed on the next one.
     if (outcomes.includes('accepted')) return { succeeded: true, retryable: false }
     if (outcomes.includes('retryable')) {
+      // A wait past the notification's retention only needs to reach it: the retry then finds the
+      // row expired. Bounding it there also keeps an absurd header from producing an invalid time.
+      retryAfterMs = Math.min(retryAfterMs, Math.max(0, delivery.expiresAt * 1_000 - now().getTime()))
       return {
         succeeded: false, retryable: true, code: cleanupFailed ? 'PushCleanupUnavailable' : 'PushDeliveryUnavailable',
         ...(retryAfterMs ? { retryAfterMs } : {}),
@@ -209,13 +212,6 @@ async function sendToDevice(
 }
 
 /**
- * Longest receiver-requested delay honored. It is longer than any notification is retained, so a
- * receiver's request is never cut short while the delivery can still be sent; the bound only
- * keeps an absurd header from producing an invalid retry time.
- */
-const MAX_RETRY_AFTER_MS = 31 * 86_400_000
-
-/**
  * Reads a `Retry-After` header given in seconds or as an HTTP date.
  * @param value - Header value.
  * @param now - Current time.
@@ -224,7 +220,7 @@ const MAX_RETRY_AFTER_MS = 31 * 86_400_000
 function readRetryAfterMs(value: string | null, now: Date): number | undefined {
   if (!value) return undefined
   const seconds = /^\d+$/.test(value.trim()) ? Number(value.trim()) * 1_000 : Date.parse(value) - now.getTime()
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, MAX_RETRY_AFTER_MS) : undefined
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined
 }
 
 /**
