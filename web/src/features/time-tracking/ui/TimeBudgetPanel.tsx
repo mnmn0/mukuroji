@@ -36,6 +36,11 @@ export type TimeBudgetPanelProps = {
   scope: TimeReportBudgetScope
   /** Report of the period grouped by Project, carrying the budget of the scope. */
   summary?: TimeTrackingSummary
+  /**
+   * Inclusive local dates of the report period. A new budget per period starts with them, since
+   * the summary carries its period as UTC instants.
+   */
+  reportRange: TimeReportRange
   /** Whether the budget is loading. */
   isLoading?: boolean
   /** Whether the read failed. */
@@ -89,6 +94,7 @@ export function TimeBudgetPanel({
   onRetryFiscalYear,
   onUseBudgetPeriod,
   projects,
+  reportRange,
   scope,
   summary,
   t,
@@ -114,11 +120,16 @@ export function TimeBudgetPanel({
    */
   const initialPeriodOf = (target: TimeBudgetEditTarget | undefined) => target === 'newPeriod'
     // A new budget per period starts with the report period, which is the period it is compared with.
-    ? { from: summary?.from ?? '', to: summary?.to ?? '' }
+    ? { from: reportRange.from, to: reportRange.to }
     : { from: budget?.periodFrom ?? '', to: budget?.periodTo ?? '' }
   const [periodFrom, setPeriodFrom] = useState('')
   const [periodTo, setPeriodTo] = useState('')
-  const formKey = `${projectId ?? 'team'}:${editTarget ?? 'closed'}:${budget?.revision ?? 0}`
+  // The key names the budget being edited, so switching to another period's budget, or between a
+  // budget per period and the default budget, resets the form even at the same revision.
+  const editedBudgetKey = editTarget === 'newPeriod'
+    ? `new:${reportRange.from}/${reportRange.to}`
+    : budget?.periodBudget ? `period:${budget.periodFrom ?? ''}/${budget.periodTo ?? ''}` : 'default'
+  const formKey = `${projectId ?? 'team'}:${editTarget ?? 'closed'}:${editedBudgetKey}:${budget?.revision ?? 0}`
   const [periodFormKey, setPeriodFormKey] = useState(formKey)
   if (periodFormKey !== formKey) {
     // The keyed form resets amount and currency when the saved budget changes; reset the period with them.

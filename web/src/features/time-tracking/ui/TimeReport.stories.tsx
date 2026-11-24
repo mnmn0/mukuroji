@@ -45,6 +45,7 @@ function TimeReportView(props: TimeReportProps & {
           onSave={fn(async () => undefined)}
           onUseBudgetPeriod={fn()}
           projects={timeReportFixtureProjects}
+          reportRange={reportProps.range}
           scope={{ scopeType: 'team' }}
           summary={budgetSummary ?? timeReportFixtureBudgetSummary}
           t={reportProps.t}
@@ -81,6 +82,7 @@ function BudgetRevisionConflictView(props: Pick<TimeReportProps, 'locale' | 't'>
       onSave={save}
       onUseBudgetPeriod={fn()}
       projects={timeReportFixtureProjects}
+      reportRange={timeReportFixtureRange}
       scope={{ scopeType: 'team' }}
       summary={summary}
       t={props.t}
@@ -192,7 +194,7 @@ export const AddPeriodBudget: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: '期間ごとの予算を追加' }))
-    await expect(canvas.getByLabelText('期間の開始日')).toHaveValue(timeReportFixtureBudgetSummary.from)
+    await expect(canvas.getByLabelText('期間の開始日')).toHaveValue(timeReportFixtureRange.from)
     await expect(canvas.getByLabelText('期間の終了日')).toBeRequired()
   },
 }

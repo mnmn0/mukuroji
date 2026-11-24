@@ -157,6 +157,7 @@ export function TimeReportContainer({
           onSave={(input) => saveBudget(budgetScope, input)}
           onUseBudgetPeriod={(next) => onChange(next, groupBy)}
           projects={projects}
+          reportRange={range}
           scope={budgetScope}
           t={t}
           {...(budgetReport.data && settings.data ? { summary: budgetReport.data } : {})}

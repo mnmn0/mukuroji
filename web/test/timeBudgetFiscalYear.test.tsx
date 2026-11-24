@@ -4,7 +4,7 @@ import {
   findTimeBudgetFiscalYear,
   listTimeBudgetFiscalYearOptions,
 } from '../src/features/time-tracking/model/budgetFiscalYear'
-import { timeReportFixtureBudgetSummary, timeReportFixtureProjects } from '../src/features/time-tracking/reportFixtures'
+import { timeReportFixtureBudgetSummary, timeReportFixtureProjects, timeReportFixtureRange } from '../src/features/time-tracking/reportFixtures'
 import { TimeBudgetPanel } from '../src/features/time-tracking/ui/TimeBudgetPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -55,6 +55,7 @@ describe('budget periods by fiscal year', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'team' }}
         summary={summary}
         t={createTranslator('ja')}

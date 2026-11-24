@@ -150,6 +150,7 @@ describe('time report model', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'project', projectId: 'atlas' }}
         summary={mixed}
         t={t}
@@ -364,6 +365,7 @@ describe('time report views', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'project', projectId: 'atlas' }}
         summary={createProjectBudgetSummary()}
         t={t}
@@ -385,6 +387,7 @@ describe('time report views', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'team' }}
         summary={timeReportFixtureBudgetSummary}
         t={t}
@@ -410,6 +413,7 @@ describe('time report views', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'team' }}
         summary={timeReportFixturePeriodBudgetSummary}
         t={t}
@@ -435,6 +439,7 @@ describe('time report views', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
+        reportRange={timeReportFixtureRange}
         scope={{ scopeType: 'team' }}
         summary={timeReportFixtureBudgetSummary}
         t={t}
