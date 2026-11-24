@@ -125,6 +125,9 @@ import { isRecord } from '../../infrastructure/runtime/value-guards'
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
 
+/** Longest `sourceField` or `targetField` an import mapping entry accepts, in UTF-16 code units. */
+const IMPORT_MAPPING_FIELD_MAX_LENGTH = 256
+
 /** Maximum accepted public API request body size. */
 const PUBLIC_API_BODY_MAX_BYTES = 10 * 1024 * 1024
 
@@ -4313,6 +4316,14 @@ function readPublicImportSourceInput(value: unknown): PublicImportSourceInput {
     )
     const sourceField = readRequiredString(field.sourceField, 'Import sourceField')
     const targetField = readRequiredString(field.targetField, 'Import targetField')
+    // Bounds the mapping, which travels beside the source in the same Lambda payload.
+    if (sourceField.length > IMPORT_MAPPING_FIELD_MAX_LENGTH || targetField.length > IMPORT_MAPPING_FIELD_MAX_LENGTH) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        `Import mapping ${index + 1} fields must be at most ${IMPORT_MAPPING_FIELD_MAX_LENGTH} characters.`,
+      )
+    }
     if (sourceFields.has(sourceField) || targetFields.has(targetField)) {
       throw new PublicApiServiceError(
         400,

@@ -2422,6 +2422,23 @@ describe('public API router', () => {
     // Quotes are escaped in the request body and again in the Lambda event, so 1.5 MiB of them count as 6 MiB.
     expect((await dryRun(1.5 * 1024 * 1024, 'dry-run-escaped-over-limit', '"')).status).toBe(400)
     expect(validatedBytes).toHaveLength(1)
+
+    const longField = await router.request('http://localhost/developer/imports/dry-run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'dry-run-long-mapping',
+      },
+      body: JSON.stringify({
+        format: 'csv',
+        source: { fileName: 'work-items.csv', mediaType: 'text/csv', content: 'Title\nx' },
+        teamId: 'team-1',
+        mapping: [{ sourceField: 'T'.repeat(257), targetField: 'title' }],
+      }),
+    })
+    expect(longField.status).toBe(400)
+    expect(validatedBytes).toHaveLength(1)
   })
 
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
