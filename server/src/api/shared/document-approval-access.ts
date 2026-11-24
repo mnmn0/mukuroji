@@ -87,13 +87,16 @@ export async function createAuthorizedDocumentVersionApproval(
  * Lists approvals of one Document's versions whose Work Item the principal can view. The caller
  * has already verified that the principal can read the Document.
  *
- * @param principal - Authenticated Workspace principal.
+ * @param principal - Authenticated Workspace principal of the Document request.
  * @param documentId - Document whose version approvals are listed.
+ * @param authorizeWorkItem - Authenticates the member for one Work Item as the Work Item routes
+ *   would, so access granted in another Project than the Document's counts.
  * @returns Approvals the principal may see, newest first.
  */
 export async function listAuthorizedDocumentApprovals(
   principal: WorkspacePrincipal,
   documentId: string,
+  authorizeWorkItem: (teamId: string, issueId: string) => Promise<WorkspacePrincipal>,
 ): Promise<ApprovalRequest[]> {
   const approvals = await workItemDependencies.fileProofing.listDocumentApprovals(
     principal.directoryId,
@@ -112,7 +115,7 @@ export async function listAuthorizedDocumentApprovals(
     const key = JSON.stringify([teamId, issueId])
     let visible = visibility.get(key)
     if (!visible) {
-      visible = canViewWorkItemApprovals(principal, teamId, issueId)
+      visible = canViewWorkItemApprovals(authorizeWorkItem, teamId, issueId)
       visibility.set(key, visible)
     }
     return await visible ? approval : undefined
@@ -121,15 +124,20 @@ export async function listAuthorizedDocumentApprovals(
 }
 
 /**
- * Checks whether the principal may see the approvals of one Work Item, reading it once per list.
+ * Checks whether the member may see the approvals of one Work Item, reading it once per list.
  *
- * @param principal - Authenticated Workspace principal.
+ * @param authorizeWorkItem - Authenticates the member for the Work Item's own route.
  * @param teamId - Team that owns the Work Item.
  * @param issueId - Work Item that owns the approvals.
- * @returns Whether the Work Item and its approvals are visible to the principal.
+ * @returns Whether the Work Item and its approvals are visible to the member.
  */
-async function canViewWorkItemApprovals(principal: WorkspacePrincipal, teamId: string, issueId: string) {
+async function canViewWorkItemApprovals(
+  authorizeWorkItem: (teamId: string, issueId: string) => Promise<WorkspacePrincipal>,
+  teamId: string,
+  issueId: string,
+) {
   try {
+    const principal = await authorizeWorkItem(teamId, issueId)
     const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
     return hasEnterpriseApprovalPermission(principal, 'files.read', teamId, detail.issue.assignedProjectId)
   } catch (error) {
