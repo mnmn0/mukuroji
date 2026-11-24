@@ -129,7 +129,8 @@ export function updateNotificationPreferences(
   mutationContext: MutationRequestContext,
 ) {
   // The transport report is server-owned and not part of the saved preferences.
-  const { transports: _transports, ...saved } = preferences
+  const saved: NotificationPreferences = { ...preferences }
+  delete saved.transports
   return requestJson<NotificationPreferences>(
     `${notificationsApiBaseUrl}/notification-preferences`,
     accessToken,
