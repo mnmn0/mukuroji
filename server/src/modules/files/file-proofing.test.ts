@@ -995,6 +995,79 @@ describe('file proofing domain', () => {
     )).rejects.toMatchObject({ code: 'FileTooLarge', status: 413 })
   })
 
+  test('resolves WBS deliverables by extension and stores the canonical media type', async () => {
+    const { client } = createClient()
+    for (const [fileName, contentType, stored] of [
+      ['wbs.md', 'application/octet-stream', 'text/markdown'],
+      ['legacy.xls', 'application/vnd.ms-excel', 'application/vnd.ms-excel'],
+      ['macro.xlsm', 'application/octet-stream', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+      ['flow.drawio', 'application/octet-stream', 'application/vnd.jgraph.mxfile'],
+    ]) {
+      const session = await client.createUpload(scope, manager, { contentType, fileName, sizeBytes: 100 })
+      expect(session.version.contentType).toBe(stored)
+      expect(session.version.scanStatus).toBe('pending')
+      // Object storage is signed for the canonical type, not the one the browser reported.
+      expect(session.upload.headers['content-type']).toBe(stored)
+    }
+  })
+
+  test('applies the Workspace File types but never accepts a dangerous type', async () => {
+    const reads: string[] = []
+    const client = new DynamoDbFileProofingClient(
+      new MemoryDocumentClient() as unknown as DynamoDBDocumentClient,
+      'file-proofing',
+      new FakeFileObjectClient(),
+      {
+        fileTypeSettings: {
+          async readFileTypeSettings(workspaceId) {
+            reads.push(workspaceId)
+            // Every type off by default is enabled and xlsm is blocked.
+            return { allowed: ['tiff', 'heic', 'docm', 'pptm', 'rar', 'eml', 'msg'], blocked: ['xlsm'] }
+          },
+        },
+      },
+    )
+
+    const rar = await client.createUpload(scope, manager, {
+      contentType: 'application/x-rar-compressed',
+      fileName: 'archive.rar',
+      sizeBytes: 100,
+    })
+    expect(rar.version.contentType).toBe('application/vnd.rar')
+
+    const blocked = await client.createUpload(scope, manager, {
+      contentType: 'application/vnd.ms-excel.sheet.macroenabled.12',
+      fileName: 'macro.xlsm',
+      sizeBytes: 100,
+    }).catch((error: unknown) => error)
+    expect(blocked).toMatchObject({
+      code: 'FileTypeNotAllowed',
+      status: 415,
+      fileTypeRejection: { reason: 'not-allowed' },
+    })
+    if (!(blocked instanceof FileProofingError)) throw new Error('expected a FileProofingError')
+    expect(blocked.fileTypeRejection?.allowedFileTypes).toContain('rar')
+    expect(blocked.fileTypeRejection?.allowedFileTypes).not.toContain('xlsm')
+
+    for (const [fileName, contentType] of [
+      ['setup.exe', 'application/x-msdownload'],
+      ['setup.exe', 'application/zip'],
+      ['invoice.pdf.exe', 'application/pdf'],
+      ['deploy.sh', 'text/plain'],
+      ['page.html', 'text/html'],
+      ['logo.svg', 'image/svg+xml'],
+    ]) {
+      await expect(client.createUpload(scope, manager, { contentType, fileName, sizeBytes: 100 }))
+        .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+    }
+    await expect(client.createUpload(scope, manager, {
+      contentType: 'application/octet-stream',
+      fileName: 'model.blend',
+      sizeBytes: 100,
+    })).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'unrecognized' } })
+    expect(new Set(reads)).toEqual(new Set([scope.workspaceId]))
+  })
+
   test('allows access only after a clean scan and records version replacement', async () => {
     const { client, objectClient, session } = await createAvailableFile()
     const access = await client.createAccess(

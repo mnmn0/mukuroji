@@ -1,5 +1,6 @@
 import { useId, useRef } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import { describeFileTypeRejection } from '../model/fileTypeRejection'
 import type { MarkdownAttachmentUpload } from '../mutations/useMarkdownAttachmentUpload'
 
 /**
@@ -56,9 +57,11 @@ export function MarkdownAttachmentControls({ t, upload }: MarkdownAttachmentCont
       <span aria-live="polite" role="status">
         {upload.isUploading
           ? t('files.markdown.uploading')
-          : upload.errorKey
-            ? <span className="font-semibold text-fg-red-700">{t(upload.errorKey)}</span>
-            : t('files.markdown.hint')}
+          : upload.fileTypeRejection
+            ? <span className="font-semibold text-fg-red-700">{describeFileTypeRejection(upload.fileTypeRejection, t)}</span>
+            : upload.errorKey
+              ? <span className="font-semibold text-fg-red-700">{t(upload.errorKey)}</span>
+              : t('files.markdown.hint')}
       </span>
     </div>
   )

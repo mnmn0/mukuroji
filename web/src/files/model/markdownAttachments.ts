@@ -26,32 +26,14 @@ const inlineImageContentTypes: ReadonlySet<string> = new Set([
   'image/avif',
 ])
 
-/**
- * Types the File API accepts, mirrored so the editor can refuse a file before uploading it.
- * The server checks the same list again when the upload session is created.
- */
-const attachableContentTypes: ReadonlySet<string> = new Set([
-  ...inlineImageContentTypes,
-  'video/mp4',
-  'video/webm',
-  'video/quicktime',
-  'application/pdf',
-  'text/plain',
-  'text/csv',
-  'application/json',
-  'application/zip',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-])
-
 /** File ids are server-generated hex or UUID-like tokens; anything else is not a reference. */
 const fileIdPattern = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
- * Why a selected file cannot be attached to a Markdown body.
+ * Why a selected file cannot be attached to a Markdown body before asking the server. The type
+ * is checked by the server, which knows the Workspace settings and says which types it accepts.
  */
-export type MarkdownAttachmentRejection = 'unsupportedType' | 'tooLarge'
+export type MarkdownAttachmentRejection = 'tooLarge'
 
 /**
  * Checks a pasted or dropped file before an upload session is created.
@@ -60,9 +42,8 @@ export type MarkdownAttachmentRejection = 'unsupportedType' | 'tooLarge'
  * @returns Why the file is refused, or `undefined` when it may be uploaded.
  */
 export function findMarkdownAttachmentRejection(
-  file: Pick<File, 'size' | 'type'>,
+  file: Pick<File, 'size'>,
 ): MarkdownAttachmentRejection | undefined {
-  if (!attachableContentTypes.has(normalizeContentType(file.type))) return 'unsupportedType'
   if (file.size <= 0 || file.size > markdownAttachmentMaxSizeBytes) return 'tooLarge'
   return undefined
 }

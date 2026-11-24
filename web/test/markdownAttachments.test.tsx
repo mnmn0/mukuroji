@@ -14,6 +14,7 @@ import {
   markdownAttachmentMaxSizeBytes,
   readMarkdownAttachmentFileId,
 } from '../src/files/model/markdownAttachments'
+import { describeFileTypeRejection } from '../src/files/model/fileTypeRejection'
 import { MarkdownAttachmentReactContext } from '../src/files/ui/markdownAttachmentContext'
 import { MarkdownDescriptionField } from '../src/issues/ui/MarkdownDescriptionField'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
@@ -22,14 +23,17 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 const t = createTranslator('en')
 
 describe('markdown attachment model', () => {
-  test('accepts raster images and allowed files up to the body limit only', () => {
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'image/png' })).toBeUndefined()
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'application/pdf' })).toBeUndefined()
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'image/svg+xml' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'text/html' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: '' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: markdownAttachmentMaxSizeBytes + 1, type: 'image/png' })).toBe('tooLarge')
-    expect(findMarkdownAttachmentRejection({ size: 0, type: 'image/png' })).toBe('tooLarge')
+  test('accepts files up to the body limit and leaves the type to the server', () => {
+    expect(findMarkdownAttachmentRejection({ size: 1_000 })).toBeUndefined()
+    expect(findMarkdownAttachmentRejection({ size: markdownAttachmentMaxSizeBytes + 1 })).toBe('tooLarge')
+    expect(findMarkdownAttachmentRejection({ size: 0 })).toBe('tooLarge')
+  })
+
+  test('explains a refused type with the types the Workspace accepts', () => {
+    expect(describeFileTypeRejection({ reason: 'not-allowed', allowedFileTypes: ['markdown', 'xlsm'] }, t))
+      .toBe('This Workspace does not accept this file type. You can attach: .md, .markdown, .xlsm')
+    expect(describeFileTypeRejection({ reason: 'dangerous', allowedFileTypes: [] }, t))
+      .toBe('Programs, scripts, and other dangerous types cannot be attached. This Workspace accepts no file types.')
   })
 
   test('writes images as image references and other files as links, escaping the label', () => {

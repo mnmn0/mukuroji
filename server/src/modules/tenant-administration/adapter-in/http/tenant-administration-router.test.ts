@@ -962,3 +962,58 @@ test('lets every member read the work categories and keeps changes behind admini
     timeEntryCategories: { categories: [{ key: 'custom-sales', label: '営業支援', active: true }] },
   }])
 })
+
+test('keeps File type changes behind administration and never enables a dangerous type', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const fileTypes = { allowed: ['rar'], blocked: ['xlsm'] }
+
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, fileTypes }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const rejectedTypes of [
+    { allowed: ['exe'], blocked: [] },
+    { allowed: ['svg'], blocked: [] },
+    { allowed: ['html'], blocked: [] },
+    { allowed: ['application/x-msdownload'], blocked: [] },
+    { allowed: ['rar', 'rar'], blocked: [] },
+    { allowed: ['pdf'], blocked: [] },
+    { allowed: [], blocked: ['rar'] },
+    { allowed: ['rar'] },
+    [],
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, fileTypes: rejectedTypes }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidFileTypeSettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, fileTypes: { allowed: ['msg', 'rar'], blocked: ['xlsm'] } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{ ...body, fileTypes: { allowed: ['rar', 'msg'], blocked: ['xlsm'] } }])
+})

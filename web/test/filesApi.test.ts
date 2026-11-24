@@ -46,6 +46,30 @@ describe('file artifacts API', () => {
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(input)
   })
 
+  test('keeps the reason and accepted types of a refused file type', async () => {
+    globalThis.fetch = createFetchRecorder([], {
+      code: 'FileTypeNotAllowed',
+      message: 'This file type cannot be attached.',
+      reason: 'not-allowed',
+      allowedFileTypes: ['pdf', 'markdown'],
+    }, 415)
+
+    const error = await createWorkItemFileUpload(
+      'core',
+      'issue-1',
+      'token',
+      { contentType: 'application/vnd.ms-excel.sheet.macroenabled.12', fileName: 'macro.xlsm', sizeBytes: 120 },
+      mutationContext,
+    ).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(FilesApiError)
+    expect(error).toMatchObject({
+      status: 415,
+      code: 'FileTypeNotAllowed',
+      fileTypeRejection: { reason: 'not-allowed', allowedFileTypes: ['pdf', 'markdown'] },
+    })
+  })
+
   test('uploads file bytes directly to the signed URL without API authorization', async () => {
     const requests: Array<{ init: RequestInit; url: string }> = []
     globalThis.fetch = createFetchRecorder(requests, undefined, 204)

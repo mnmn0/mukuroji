@@ -1,4 +1,5 @@
 import { useCallback, useState, type ClipboardEvent, type DragEvent } from 'react'
+import type { FileTypeRejection } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createMarkdownAttachmentReference,
@@ -46,6 +47,11 @@ export type MarkdownAttachmentUpload = {
    */
   errorKey?: MessageKey
   /**
+   * Why the server refused the last file because of its type, with the types the Workspace
+   * accepts; cleared by the next attempt.
+   */
+  fileTypeRejection?: FileTypeRejection
+  /**
    * Uploads files and inserts a reference for each one that completes.
    */
   attachFiles: (files: readonly File[]) => Promise<void>
@@ -79,17 +85,18 @@ export function useMarkdownAttachmentUpload({
 }: UseMarkdownAttachmentUploadOptions): MarkdownAttachmentUpload {
   const [isUploading, setIsUploading] = useState(false)
   const [errorKey, setErrorKey] = useState<MessageKey>()
+  const [fileTypeRejection, setFileTypeRejection] = useState<FileTypeRejection>()
   const canAttach = Boolean(controller?.scope?.kind === 'work-item' && controller.capabilities.canUpload) && !disabled
 
   const attachFiles = useCallback(async (files: readonly File[]) => {
     if (!controller || !canAttach || files.length === 0 || isUploading) return
     setErrorKey(undefined)
+    setFileTypeRejection(undefined)
     const accepted: File[] = []
     let rejection: MessageKey | undefined
     for (const file of files) {
-      const reason = findMarkdownAttachmentRejection(file)
-      if (reason === 'tooLarge') rejection = 'files.markdown.tooLarge'
-      else if (reason === 'unsupportedType') rejection ??= 'files.error.unsupportedType'
+      // The server decides the type from the name and reports what the Workspace accepts.
+      if (findMarkdownAttachmentRejection(file) === 'tooLarge') rejection = 'files.markdown.tooLarge'
       else accepted.push(file)
     }
     if (rejection) setErrorKey(rejection)
@@ -98,10 +105,15 @@ export function useMarkdownAttachmentUpload({
     setIsUploading(true)
     onUploadingChange?.(true)
     try {
+      let rejected: FileTypeRejection | undefined
       const succeeded = await controller.uploadFiles(accepted, {
         onUploaded: (file, version) => onInsert(createMarkdownAttachmentReference(file, version)),
+        onFileTypeRejected: (rejection) => {
+          rejected = rejection
+        },
       })
-      if (!succeeded) setErrorKey('files.error.upload')
+      if (rejected) setFileTypeRejection(rejected)
+      else if (!succeeded) setErrorKey('files.error.upload')
     } finally {
       setIsUploading(false)
       onUploadingChange?.(false)
@@ -128,5 +140,14 @@ export function useMarkdownAttachmentUpload({
     void attachFiles(files)
   }, [attachFiles, canAttach])
 
-  return { attachFiles, canAttach, errorKey, handleDragOver, handleDrop, handlePaste, isUploading }
+  return {
+    attachFiles,
+    canAttach,
+    errorKey,
+    fileTypeRejection,
+    handleDragOver,
+    handleDrop,
+    handlePaste,
+    isUploading,
+  }
 }

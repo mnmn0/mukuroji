@@ -23,6 +23,7 @@ import {
 import {
   AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
+  DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
@@ -131,7 +132,10 @@ import {
 import {
   createEnterpriseSessionActivityClient,
 } from '../../modules/enterprise-identity/enterprise-session-activity'
-import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
+import {
+  createDefaultFileProofingClient,
+  type FileTypeSettingsSource,
+} from '../../modules/files/file-proofing'
 import {
   InMemoryFocusStateClient,
   createFocusStateClient,
@@ -625,11 +629,31 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
 }
 
 /**
+ * Creates the reader of the File types each Workspace accepts, from its tenant profile.
+ *
+ * @param tenantAdministration - Tenant administration client that reads the profile.
+ * @returns A reader that returns the defaults only when the Workspace has no saved settings; any
+ *   read failure propagates so that uploads fail closed.
+ */
+function createFileTypeSettingsSource(
+  tenantAdministration: WorkspaceDependencies['tenantAdministration'],
+): FileTypeSettingsSource {
+  return {
+    readFileTypeSettings: async (workspaceId) =>
+      (await tenantAdministration.getProfile(workspaceId))?.fileTypes ??
+        DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
+  }
+}
+
+/**
  * Creates the production Work Item and collaboration adapter bundle.
  *
+ * @param fileTypeSettings - Reader of the File types each Workspace accepts; the defaults when omitted.
  * @returns Work Item dependencies backed by configured production adapters.
  */
-export function createProductionWorkItemDependencies(): WorkItemDependencies {
+export function createProductionWorkItemDependencies(
+  fileTypeSettings?: FileTypeSettingsSource,
+): WorkItemDependencies {
   const teamIssues = new DynamoDbTeamIssuesClient()
   const projectDirectory = new DynamoDbProjectDirectoryClient()
   const workspaceAccess = new DynamoDbWorkspaceAccessClient()
@@ -647,7 +671,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     teamIssues,
     realtimeTickets: new DynamoDbRealtimeTicketsClient(),
     collaboration: new DynamoDbCollaborationClient(),
-    fileProofing: createDefaultFileProofingClient(),
+    fileProofing: createDefaultFileProofingClient(fileTypeSettings),
     notifications: new DynamoDbNotificationsClient(),
     pushSubscriptions: new DynamoDbPushSubscriptionStore(
       createDynamoDbDocumentClient(),
@@ -1837,7 +1861,9 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace,
-    workItems: createProductionWorkItemDependencies(),
+    workItems: createProductionWorkItemDependencies(
+      createFileTypeSettingsSource(workspace.tenantAdministration),
+    ),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {
@@ -1886,7 +1912,9 @@ export function createProductionAppDependencies(): AppDependencies {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace,
-    workItems: createProductionWorkItemDependencies(),
+    workItems: createProductionWorkItemDependencies(
+      createFileTypeSettingsSource(workspace.tenantAdministration),
+    ),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {

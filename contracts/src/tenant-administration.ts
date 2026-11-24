@@ -1,3 +1,4 @@
+import type { WorkspaceFileTypeSettings } from './file-types'
 import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
 import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
 import type { WorkspaceCalendarSettings } from './workspace-calendar'
@@ -40,6 +41,8 @@ export type TenantProfile = {
   weeklyReportReminders?: WeeklyReportReminderSettings
   /** Work categories offered for time entries; absent until an administrator chooses them. */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
+  /** File types accepted for attachments; absent until an administrator changes them. */
+  fileTypes?: WorkspaceFileTypeSettings
   /**
    * ISO 4217 currency for time costs, budgets, and rate cards; absent until an administrator
    * chooses one, which means `DEFAULT_WORKSPACE_CURRENCY` (JPY).
@@ -252,6 +255,11 @@ export type UpdateTenantProfileInput = {
    * offered may be retired but not removed.
    */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
+  /**
+   * File types accepted for attachments; omitted keeps the stored settings. Types outside the
+   * catalog, such as executables, cannot be enabled.
+   */
+  fileTypes?: WorkspaceFileTypeSettings
   /** ISO 4217 currency for time costs and budgets; omitted keeps the stored currency. */
   defaultCurrency?: string
   /** Revision read before editing the profile. */

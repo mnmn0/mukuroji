@@ -1,5 +1,5 @@
 import type { FileAttachmentTargetType, FileScanStatus } from '@mukuroji/contracts'
-import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
+import { isCatalogFileContentType, normalizeFileContentType } from './file-content-type'
 
 /** Stable failure categories emitted by file metadata integrity checks. */
 export type FileIntegrityFailureCode =
@@ -882,7 +882,7 @@ function readContentType(value: unknown, code: FileIntegrityFailureCode): string
   const contentType = readText(value, code)
   if (
     normalizeFileContentType(contentType) !== contentType ||
-    !isAllowedFileContentType(contentType)
+    !isCatalogFileContentType(contentType)
   ) {
     throw new FileIntegrityFailure(code)
   }
