@@ -1,26 +1,33 @@
 import { createHash } from 'node:crypto'
 import type { ProjectRaidLogResponse } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
-import { ProjectDataError } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import {
   createProjectRaidEntryUseCase,
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
+  type ProjectRaidEntryReferences,
+  type ProjectRaidLogCallerAuthorizationCheck,
 } from '../../modules/project-raid-log'
-import { workItemDependencies } from '../shared/app-dependencies'
+import { createWorkItemProjectAssignmentConditionCheck } from '../../modules/work-items'
+import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
+import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
+  canAccessAssignedProject,
+  canWorkspaceBusinessWrite,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
+  requireTeamPermission,
   requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
+  type WorkspacePrincipal,
 } from '../shared/project-access'
+import { resolveEnterpriseProjectRole } from '../shared/enterprise-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import {
-  canWriteTeamProject,
-  createTeamProjectCallerAuthorization,
-  requireTeamProjectRead,
-} from '../shared/team-project-access'
+import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Registers the Project risk, issue, and change request log endpoints.
@@ -39,14 +46,14 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
-      await requireTeamProjectRead(principal, teamId, projectId)
+      await requireProjectRead(principal, teamId, projectId)
       const log = await readProjectRaidLogUseCase(
         workItemDependencies.projectRaidLogs,
         { workspaceId: principal.directoryId, teamId, projectId },
       )
       return c.json({
         ...log,
-        viewer: { canEdit: await canWriteTeamProject(principal, teamId, projectId) },
+        viewer: { canEdit: await canEditProjectRaidLog(principal, teamId, projectId) },
       } satisfies ProjectRaidLogResponse)
     } catch (error) {
       return toProjectRaidLogErrorResponse(c, error)
@@ -61,8 +68,8 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readLogRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireTeamProjectRead(principal, teamId, projectId)
-      if (!await canWriteTeamProject(principal, teamId, projectId)) {
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
         throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
       }
       const body = await readJson<unknown>(c.req)
@@ -73,10 +80,11 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: await createTeamProjectCallerAuthorization(principal, teamId, projectId, 'ProjectRaidLogAuthorizationUnavailable'),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
           auditContext,
           entryId: createEntryId(teamId, projectId, auditContext.actor.id, auditContext.idempotencyKeyHash),
           creationFingerprint: auditContext.requestFingerprint,
+          verifyReferences: (references) => verifyEntryReferences(principal, teamId, projectId, references),
         },
       )
       return c.json(response, 201)
@@ -95,8 +103,8 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
       if (!entryId) throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Entry ID is required.')
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireTeamProjectRead(principal, teamId, projectId)
-      if (!await canWriteTeamProject(principal, teamId, projectId)) {
+      await requireProjectRead(principal, teamId, projectId)
+      if (!await canEditProjectRaidLog(principal, teamId, projectId)) {
         throw new ProjectDataError(403, 'ProjectRaidLogForbidden', 'Only a Project member can change the Project log.')
       }
       const body = await readJson<unknown>(c.req)
@@ -108,10 +116,11 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: await createTeamProjectCallerAuthorization(principal, teamId, projectId, 'ProjectRaidLogAuthorizationUnavailable'),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
           auditContext,
           updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
           updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
+          verifyReferences: (references) => verifyEntryReferences(principal, teamId, projectId, references),
         },
       )
       return c.json(response)
@@ -135,6 +144,161 @@ function readLogRoute(c: Context) {
     throw new ProjectDataError(400, 'InvalidProjectRaidEntry', 'Team ID and Project ID are required.')
   }
   return { teamId, projectId }
+}
+
+/**
+ * Requires the Project to belong to the Team and the principal to see it.
+ *
+ * A Project outside the Team and a Project the principal may not see both answer 404, so the
+ * response does not reveal which Projects exist.
+ *
+ * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ */
+async function requireProjectRead(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  const context = await requireTeamPermission(principal, teamId, 'viewer')
+  const inTeam = context.team.projects.some((project) => project.id === projectId)
+  if (!inTeam || !canAccessAssignedProject(principal, context, projectId, 'viewer')) {
+    throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
+  }
+}
+
+/**
+ * Builds the commit-time fences that fail a log write when the caller lost access or the Team
+ * or Project was archived after the request was authorized.
+ *
+ * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose log is changed.
+ * @returns The condition checks.
+ * @throws ProjectDataError 503 when the directory cannot build the active-reference fences.
+ */
+async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  const { projectDirectory } = workspaceDependencies
+  if (!projectDirectory.createActiveReferenceConditionChecks) {
+    throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'Project access cannot be verified.')
+  }
+  return [
+    ...createPlanningCallerAuthorizationConditionChecks(
+      principal,
+      [],
+      principal.principalKind !== 'service-account',
+    ),
+    ...await projectDirectory.createActiveReferenceConditionChecks(principal.directoryId, teamId, projectId),
+  ]
+}
+
+/**
+ * Verifies the owner and the related Work Items an entry gains.
+ *
+ * The owner must be a member of the Project and an active Workspace member; the returned fence
+ * fails the write when the owner is deactivated before it commits. Each added Work Item must be
+ * one the caller can read and must belong to this Project, and its fence fails the write when the
+ * Work Item is deleted or moved to another Project before it commits. Every refusal answers the same 400
+ * whether the Work Item is missing, hidden, or in another Project, so the response does not
+ * reveal which Work Items exist. An Enterprise caller also needs `work-items.read` on the Project,
+ * because the write request itself is authorized by `projects.write` alone.
+ *
+ * @param principal - Authenticated principal changing the entry.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose log is changed.
+ * @param references - Owner and added Work Items.
+ * @returns Fences for the added Work Items and the owner. The owner has none when it did not
+ * change or is the caller.
+ * @throws ProjectDataError 400 for a reference that is not allowed, 503 when membership cannot be fenced.
+ */
+async function verifyEntryReferences(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  references: ProjectRaidEntryReferences,
+): Promise<ProjectRaidLogCallerAuthorizationCheck[]> {
+  const workItemFences: ProjectRaidLogCallerAuthorizationCheck[] = []
+  const [firstAddedWorkItemId] = references.addedWorkItemIds
+  if (
+    firstAddedWorkItemId !== undefined &&
+    principal.enterprisePermissions !== undefined &&
+    !hasEnterprisePermissionAtResource(principal, 'work-items.read', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectRaidEntry',
+      `Related Work Item "${firstAddedWorkItemId}" is not a Work Item of this Project.`,
+    )
+  }
+  for (const workItemId of references.addedWorkItemIds) {
+    let assignedProjectId: string | undefined
+    try {
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      assignedProjectId = detail.issue.assignedProjectId
+    } catch (error) {
+      if (!isHiddenOrMissing(error)) throw error
+    }
+    if (assignedProjectId !== projectId) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectRaidEntry',
+        `Related Work Item "${workItemId}" is not a Work Item of this Project.`,
+      )
+    }
+    workItemFences.push(createWorkItemProjectAssignmentConditionCheck(
+      getTeamIssuesTableName(),
+      principal.directoryId,
+      teamId,
+      workItemId,
+      projectId,
+    ))
+  }
+  const { ownerMemberId } = references
+  if (ownerMemberId === undefined) return workItemFences
+  const notMember = () => new ProjectDataError(
+    400,
+    'InvalidProjectRaidEntry',
+    'The owner must be an active member of the Project.',
+  )
+  const isCaller = principal.principalKind !== 'service-account' &&
+    normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(ownerMemberId)
+  // The owner's fence is read before the membership check: removing the owner from the Project
+  // advances the member version, so a removal after this read fails the write at commit. The
+  // caller's own membership fence already covers a caller who owns the entry, and DynamoDB refuses
+  // a transaction that checks the same item twice.
+  let fence: ProjectRaidLogCallerAuthorizationCheck | undefined
+  if (!isCaller) {
+    const { workspaceAccess } = workspaceDependencies
+    if (!workspaceAccess.createActiveMemberConditionCheck) {
+      throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'The owner cannot be verified.')
+    }
+    fence = await workspaceAccess.createActiveMemberConditionCheck.call(
+      workspaceAccess,
+      principal.directoryId,
+      ownerMemberId,
+    )
+    if (!fence) throw notMember()
+  }
+  const { members } = await workspaceDependencies.projectDirectory.getProjectMembers(
+    principal.directoryId,
+    projectId,
+    teamId,
+  )
+  if (!members.some((member) => member.id === ownerMemberId)) throw notMember()
+  return fence ? [...workItemFences, fence] : workItemFences
+}
+
+/**
+ * Tells whether a Work Item read failed because the Work Item is missing or hidden from the caller.
+ *
+ * @param error - Thrown error.
+ * @returns Whether the error carries status 403 or 404.
+ */
+function isHiddenOrMissing(error: unknown) {
+  if (typeof error !== 'object' || error === null || !('status' in error)) return false
+  return error.status === 403 || error.status === 404
 }
 
 /**
@@ -166,6 +330,55 @@ function createUpdateKey(entryId: string, actorId: string, idempotencyKeyHash: s
   return createHash('sha256')
     .update(JSON.stringify(['project-raid-entry-update-key', entryId, actorId, idempotencyKeyHash]))
     .digest('hex')
+}
+
+/**
+ * Tells whether the principal may change a Project log: a writable Workspace session, member
+ * access to the Project resolved at the Team write level (so a Team-wide grant such as an
+ * Enterprise Team member keeps its effective role), and, for an Enterprise principal,
+ * `projects.write` on the Project.
+ *
+ * @remarks
+ * The Enterprise Project accesses on the principal carry the role of the current route's
+ * permission, so on a read they are viewer even for a Project member. Once `projects.write`
+ * holds on this Project, the check uses the role that grant gives, the same role a write
+ * request resolves, so the read reports the access the write will get.
+ *
+ * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID.
+ * @returns Whether the principal may add and edit entries.
+ */
+async function canEditProjectRaidLog(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  if (!canWorkspaceBusinessWrite(principal)) return false
+  let writer = principal
+  if (principal.enterprisePermissions !== undefined) {
+    if (!hasEnterprisePermissionAtResource(principal, 'projects.write', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })) {
+      return false
+    }
+    writer = {
+      ...principal,
+      enterpriseProjectAccesses: [
+        ...(principal.enterpriseProjectAccesses ?? []).filter((access) =>
+          access.projectId !== projectId || (access.teamId !== undefined && access.teamId !== teamId)
+        ),
+        { teamId, projectId, role: resolveEnterpriseProjectRole(['projects.write']) },
+      ],
+    }
+  }
+  let context: TeamPermissionContext
+  try {
+    context = await requireTeamPermission(writer, teamId, 'member')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return false
+    throw error
+  }
+  return canAccessAssignedProject(writer, context, projectId, 'member')
 }
 
 /**

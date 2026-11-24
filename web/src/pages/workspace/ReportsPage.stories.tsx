@@ -234,6 +234,70 @@ export const MilestoneGroups: Story = {
 }
 
 /**
+ * 自分に届いた定期配信を新しい順に並べた選択肢です。選ぶとその回の report と snapshot を開きます。
+ */
+export const MyDeliveries: Story = {
+  args: {
+    deliveries: [
+      {
+        reportId: analyticsReportFixtures[0].id,
+        reportName: analyticsReportFixtures[0].name,
+        snapshotId: 'snapshot-2026-11-20',
+        format: 'pdf',
+        deliveredAt: '2026-11-20T00:00:00.000Z',
+      },
+      {
+        reportId: analyticsReportFixtures[0].id,
+        reportName: analyticsReportFixtures[0].name,
+        snapshotId: 'snapshot-2026-11-13',
+        format: 'csv',
+        deliveredAt: '2026-11-13T00:00:00.000Z',
+      },
+    ],
+    onOpenDelivery: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const select = canvas.getByTestId('analytics-delivery-selector')
+    await userEvent.selectOptions(select, 'snapshot-2026-11-13')
+    await expect(args.onOpenDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ snapshotId: 'snapshot-2026-11-13' }),
+    )
+  },
+}
+
+/**
+ * 新しい配信がすべて読めなくなった report のもので、以前の配信がまだ残っている状態です。
+ * 続きを読み込めます。
+ */
+export const MyDeliveriesMore: Story = {
+  args: {
+    deliveries: [],
+    hasMoreDeliveries: true,
+    onLoadMoreDeliveries: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    await userEvent.click(within(canvasElement).getByTestId('analytics-deliveries-more'))
+    await expect(args.onLoadMoreDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
+ * 自分への配信を読み込めなかった状態です。report はそのまま使え、再試行できます。
+ */
+export const MyDeliveriesFailed: Story = {
+  args: {
+    deliveriesFailed: true,
+    onRetryDeliveries: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const error = within(canvasElement).getByTestId('analytics-deliveries-error')
+    await userEvent.click(within(error).getByRole('button'))
+    await expect(args.onRetryDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
  * 担当者・カスタムフィールド・配信先を名前の一覧から選ぶ状態です。一覧にいない選択済みの担当者も
  * 選択されたまま残ります。
  */
@@ -337,6 +401,26 @@ export const Empty: Story = {
 }
 
 /**
+ * report がまだなく、自分への配信も読み込めなかった状態です。空の案内の下で再試行できます。
+ */
+export const EmptyDeliveriesFailed: Story = {
+  args: {
+    deliveriesFailed: true,
+    filter: analyticsFilterFixture,
+    onRetryDeliveries: fn(),
+    reports: [],
+    selectedReportId: undefined,
+    snapshot: undefined,
+    widgets: [],
+  },
+  play: async ({ args, canvasElement }) => {
+    const error = within(canvasElement).getByTestId('analytics-deliveries-error')
+    await userEvent.click(within(error).getByRole('button'))
+    await expect(args.onRetryDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
  * Report と analytics query の初回 loading state です。
  */
 export const Loading: Story = {
@@ -379,6 +463,31 @@ export const HistoricalSnapshot: Story = {
     snapshots: [analyticsSnapshotRecordFixture],
     timeZone: analyticsSnapshotRecordFixture.query.timeZone,
     widgets: analyticsSnapshotRecordFixture.query.widgets,
+  },
+}
+
+/**
+ * Report shared with one Project of its Team. The Project list offers only the chosen Team's
+ * Projects, and changing the Team clears the Project.
+ */
+export const ProjectVisibility: Story = {
+  args: {
+    builder: true,
+    reports: [{
+      ...analyticsReportFixtures[0],
+      projectId: 'brand-refresh',
+      teamId: 'design-team',
+      visibility: 'project',
+    }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const project = canvas.getByRole('combobox', { name: '共有先プロジェクト' })
+    await expect(project).toHaveValue('brand-refresh')
+    await expect(within(project).queryByRole('option', { name: 'Refero' })).toBeNull()
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '共有先チーム' }), 'core-team')
+    await expect(project).toHaveValue('')
+    await expect(within(project).getByRole('option', { name: 'Refero' })).toBeInTheDocument()
   },
 }
 

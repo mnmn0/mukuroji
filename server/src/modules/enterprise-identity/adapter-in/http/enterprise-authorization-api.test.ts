@@ -726,6 +726,10 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
   const analyticsReportsResponse = await app.request('/api/analytics/reports', {
     headers: { Authorization: authorization },
   })
+  // The deliveries list uses the same Work Item read as the report list, without Workspace read.
+  const analyticsDeliveriesResponse = await app.request('/api/analytics/deliveries', {
+    headers: { Authorization: authorization },
+  })
   await analyticsRepository.putSnapshot({
     id: 'enterprise-project-snapshot',
     workspaceId,
@@ -868,6 +872,7 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     items: [expect.objectContaining({ workItemId: 'work-item-1', projectId: 'refero' })],
   })
   expect(analyticsReportsResponse.status).toBe(200)
+  expect(analyticsDeliveriesResponse.status).toBe(200)
   expect(await analyticsReportsResponse.json()).toMatchObject({
     reports: [expect.objectContaining({ id: analyticsReport.id })],
   })

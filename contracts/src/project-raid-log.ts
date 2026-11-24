@@ -26,6 +26,15 @@ export const PROJECT_RAID_TITLE_MAX_LENGTH = 200
 export const PROJECT_RAID_TEXT_MAX_LENGTH = 2_000
 /** Most entries, open and closed, one Project log may hold. */
 export const PROJECT_RAID_LOG_MAX_ENTRIES = 300
+/**
+ * Most Work Items one entry may name as related. With the ID length below, a full log of 300
+ * entries still fits the response size the text limits are chosen for (ADR 0024).
+ */
+export const PROJECT_RAID_RELATED_WORK_ITEMS_MAX = 10
+/** Longest Work Item ID an entry may name as related. */
+export const PROJECT_RAID_WORK_ITEM_ID_MAX_LENGTH = 128
+/** Longest owner member key, the longest email address a member key can be. */
+export const PROJECT_RAID_OWNER_ID_MAX_LENGTH = 254
 
 /** Pattern of a `YYYY-MM-DD` date. */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
@@ -59,6 +68,10 @@ export type ProjectRaidEntry = {
   response?: string
   /** Date in `YYYY-MM-DD` by which the entry should be reviewed again. */
   reviewDueDate?: string
+  /** Project member responsible for the entry, by member key. */
+  ownerMemberId?: string
+  /** Work Items of the Project the entry affects, without duplicates, in the order given. */
+  relatedWorkItemIds?: string[]
   /** Whether the entry is still open. */
   status: ProjectRaidEntryStatus
   /** Increments with every change to this entry. */
@@ -87,6 +100,10 @@ export type ProjectRaidEntryInput = {
   response?: string
   /** Date in `YYYY-MM-DD` by which the entry should be reviewed again. */
   reviewDueDate?: string
+  /** Project member responsible for the entry, by member key; the server checks membership. */
+  ownerMemberId?: string
+  /** Work Items of the same Project the entry affects; the server checks each one exists there. */
+  relatedWorkItemIds?: string[]
   /** Whether the entry is still open. */
   status: ProjectRaidEntryStatus
 }
@@ -254,6 +271,25 @@ function readOptionalText(value: unknown, maxLength: number): string | undefined
 }
 
 /**
+ * Reads the related Work Item IDs, trimming each one and dropping repeats.
+ *
+ * @param value - Raw field value.
+ * @returns The IDs in the order given, `undefined` when absent or empty, or `null` when invalid.
+ */
+function readRelatedWorkItemIds(value: unknown): string[] | undefined | null {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) return null
+  const ids: string[] = []
+  for (const item of value) {
+    const id = readOptionalText(item, PROJECT_RAID_WORK_ITEM_ID_MAX_LENGTH)
+    if (id === undefined || id === null) return null
+    if (!ids.includes(id)) ids.push(id)
+  }
+  if (ids.length > PROJECT_RAID_RELATED_WORK_ITEMS_MAX) return null
+  return ids.length === 0 ? undefined : ids
+}
+
+/**
  * Validates and normalizes untrusted Project log entry input.
  *
  * @param value - Untrusted input, usually the `entry` field of a request body.
@@ -261,7 +297,7 @@ function readOptionalText(value: unknown, maxLength: number): string | undefined
  */
 export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInputParseResult {
   if (!isRecord(value)) return { ok: false, message: 'Entry must be an object.' }
-  const { kind, title, description, probability, impact, response, reviewDueDate, status } = value
+  const { kind, title, description, probability, impact, response, reviewDueDate, ownerMemberId, relatedWorkItemIds, status } = value
   if (!isProjectRaidEntryKind(kind)) return { ok: false, message: 'Entry kind must be risk, issue, or change-request.' }
   if (typeof title !== 'string' || title.trim().length === 0) {
     return { ok: false, message: 'Entry title is required.' }
@@ -290,6 +326,17 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
   if (reviewDueDate !== undefined && reviewDueDate !== null && reviewDueDate !== '' && !isCalendarDate(reviewDueDate)) {
     return { ok: false, message: 'Entry review date must be a date in YYYY-MM-DD.' }
   }
+  const normalizedOwner = readOptionalText(ownerMemberId, PROJECT_RAID_OWNER_ID_MAX_LENGTH)
+  if (normalizedOwner === null) {
+    return { ok: false, message: `Entry owner must be a member ID of at most ${PROJECT_RAID_OWNER_ID_MAX_LENGTH} characters.` }
+  }
+  const normalizedRelated = readRelatedWorkItemIds(relatedWorkItemIds)
+  if (normalizedRelated === null) {
+    return {
+      ok: false,
+      message: `Related Work Items must be a list of at most ${PROJECT_RAID_RELATED_WORK_ITEMS_MAX} Work Item IDs of at most ${PROJECT_RAID_WORK_ITEM_ID_MAX_LENGTH} characters.`,
+    }
+  }
   if (!isProjectRaidEntryStatus(status)) return { ok: false, message: 'Entry status must be open or closed.' }
   return {
     ok: true,
@@ -301,6 +348,8 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
       impact,
       ...(normalizedResponse === undefined ? {} : { response: normalizedResponse }),
       ...(isCalendarDate(reviewDueDate) ? { reviewDueDate } : {}),
+      ...(normalizedOwner === undefined ? {} : { ownerMemberId: normalizedOwner }),
+      ...(normalizedRelated === undefined ? {} : { relatedWorkItemIds: normalizedRelated }),
       status,
     },
   }
@@ -327,7 +376,9 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
     input.value.title !== value.title ||
     input.value.description !== value.description ||
     input.value.response !== value.response ||
-    input.value.reviewDueDate !== value.reviewDueDate
+    input.value.reviewDueDate !== value.reviewDueDate ||
+    input.value.ownerMemberId !== value.ownerMemberId ||
+    !sameIds(input.value.relatedWorkItemIds, value.relatedWorkItemIds)
   ) {
     return undefined
   }
@@ -339,6 +390,18 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
     updatedAt,
     ...(closedAt === undefined ? {} : { closedAt }),
   }
+}
+
+/**
+ * Tells whether a stored ID list equals its normalized form.
+ *
+ * @param normalized - Normalized IDs, or `undefined` when there are none.
+ * @param raw - IDs as stored or received.
+ * @returns Whether both hold the same IDs in the same order.
+ */
+function sameIds(normalized: readonly string[] | undefined, raw: unknown) {
+  if (normalized === undefined) return raw === undefined
+  return Array.isArray(raw) && raw.length === normalized.length && normalized.every((id, index) => raw[index] === id)
 }
 
 /**
@@ -444,4 +507,22 @@ export function parseProjectRaidEntryResponse(value: unknown): ProjectRaidEntryR
   if (!isRecord(value) || typeof value.teamId !== 'string' || typeof value.projectId !== 'string') return undefined
   const entry = parseProjectRaidEntry(value.entry)
   return entry ? { teamId: value.teamId, projectId: value.projectId, entry } : undefined
+}
+
+/** One Project log entry as the Public API returns it, with its derived severity. */
+export type PublicProjectRaidEntry = ProjectRaidEntry & {
+  /** Severity derived from probability and impact by {@link deriveProjectRaidSeverity}. */
+  severity: ProjectRaidSeverity
+}
+
+/** Response of `GET /api/v1/projects/{projectId}/raid-log`. */
+export type PublicProjectRaidLog = {
+  /** Version of this response shape. */
+  schemaVersion: 1
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project the log belongs to. */
+  projectId: string
+  /** Every entry, open and closed, newest first. */
+  items: PublicProjectRaidEntry[]
 }

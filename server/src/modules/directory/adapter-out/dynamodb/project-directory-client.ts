@@ -64,6 +64,7 @@ import type {
 import {
   DIRECTORY_DISPLAY_NAME_MAX_LENGTH,
   DIRECTORY_REORDER_MAX_ITEMS,
+  DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH,
   isProjectLifecycleState,
   PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
@@ -82,6 +83,7 @@ import {
   type ReorderDirectoryTeamsInput,
   type RestoreDirectoryProjectResponse,
   type RestoreDirectoryTeamResponse,
+  type UpdateDirectoryTeamProfileResponse,
   type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
@@ -231,6 +233,20 @@ type ProjectDirectoryTeamItem = {
   lifecycleRevision?: number
   /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
   restoreReceipt?: DirectoryRestoreReceipt
+  /** Free-text description set on the Team settings screen. */
+  description?: string
+  /** Member key of the Team leader set on the Team settings screen. */
+  leaderMemberKey?: string
+  /**
+   * Counts profile updates, so a stale update cannot overwrite a newer description or leader.
+   * Rows without it were never updated.
+   */
+  profileRevision?: number
+  /**
+   * Idempotency key hash and request fingerprint of the update that stored the current profile
+   * revision, so a retry of that same request is answered as the success it was.
+   */
+  profileRequestKey?: string
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -425,6 +441,30 @@ type MemberPreferencesItem = MemberPreferenceValues & {
   revision: number
   /** ISO 8601 timestamp of the latest successful replacement. */
   updatedAt: string
+}
+
+/** Idempotency key and input of one Team administration request, such as a Team-wide grant. */
+export type TeamGrantRequest = {
+  /** Hash of the caller's idempotency key, scoped to the Workspace and the caller. */
+  idempotencyKeyHash: string
+  /** Fingerprint of the request the key was first used with. */
+  requestFingerprint: string
+}
+
+/** Receipt binding a Team administration request's idempotency key to its input, in a sidecar partition. */
+type TeamGrantRequestItem = {
+  /** Sidecar partition of the Workspace's grant receipts. */
+  directoryId: string
+  /** `KEY#` and the idempotency key hash. */
+  entryKey: string
+  /** Sidecar row discriminator. */
+  entryType: 'team-grant-request'
+  /** Workspace that owns the receipt. */
+  workspaceId: string
+  /** Fingerprint of the request the key was first used with. */
+  requestFingerprint: string
+  /** ISO 8601 timestamp of the latest accepted use of the key. */
+  createdAt: string
 }
 
 /** Webhook grant から強整合確認する Team / Project source locator です。 */
@@ -898,6 +938,36 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
   ): Promise<UpdateProjectMemberResponse>
   /**
+   * Grants a Project role only when the member has none, so an existing role is never changed.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that must own the Project.
+   * @param projectId - Project to grant.
+   * @param memberKey - Member to add.
+   * @param input - Role and display details of the member.
+   * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns Whether the role was added; false when the member already belonged to the Project.
+   */
+  addProjectMemberIfAbsent(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<{ added: boolean }>
+  /**
+   * Binds the idempotency key of a Team-wide grant to its input before any Project is written.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the grant.
+   */
+  bindTeamGrantRequest(directoryId: string, grantRequest: TeamGrantRequest): Promise<void>
+  /**
    * DynamoDB から project member role を削除します。
    */
   removeProjectMember(
@@ -971,6 +1041,23 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RenameDirectoryTeamResponse>
+  /**
+   * Replaces the description and leader of an active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param input - Untrusted request body with the description and leader.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier and its stored profile.
+   */
+  updateTeamProfile(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<UpdateDirectoryTeamProfileResponse>
   /**
    * Renames an active Project or changes its color without changing its ID.
    *
@@ -1969,6 +2056,188 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * Grants a Project role only when the member has none. The member row is written with an
+   * insert-only condition, so a role granted concurrently is kept and reported as existing.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that must own the Project.
+   * @param projectId - Project to grant.
+   * @param memberKey - Member to add.
+   * @param input - Role and display details of the member.
+   * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns Whether the role was added; false when the member already belonged to the Project.
+   */
+  async addProjectMemberIfAbsent(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<{ added: boolean }> {
+    await this.ensureLocalAuditTable()
+    const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+    const email = readProjectMemberEmail(input.email, normalizedMemberKey)
+    const name = readOptionalProjectMemberName(input.name)
+    const role = readProjectRole(input.role)
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    this.requireActiveProject(items, projectId, teamId)
+    if (hasActiveProjectMember(items, projectId, normalizedMemberKey)) {
+      return { added: false }
+    }
+
+    const updatedAt = new Date().toISOString()
+    const item: ProjectMemberItem = {
+      directoryId,
+      entryKey: createProjectMemberEntryKey(projectId, normalizedMemberKey),
+      entryType: 'project-member',
+      webhookAuthorizationKey: createWebhookMemberAuthorizationKey(directoryId, normalizedMemberKey),
+      webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
+      projectId,
+      memberKey: normalizedMemberKey,
+      email,
+      name,
+      role,
+      createdAt: updatedAt,
+      updatedAt,
+    }
+    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      directoryId,
+      eventType: 'member.added',
+      entityType: 'member',
+      entityId: `${projectId}/${normalizedMemberKey}`,
+      action: 'created',
+      occurredAt: updatedAt,
+      changes: createAuditFieldChanges(undefined, item, ['email', 'name', 'role']),
+      metadata: { projectId, memberKey: normalizedMemberKey },
+    })
+    // The target's own row is already guarded active by the version update below, and one
+    // transaction cannot touch a row twice, so a caller adding themselves drops that check.
+    const callerChecks = authorizationConditionChecks.filter((check) =>
+      !isWorkspaceMemberRowCheck(check, this.workspaceAccessTableName, directoryId, normalizedMemberKey)
+    )
+    const stateItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
+      {
+        Update: this.createActiveWorkspaceMemberVersionUpdate(
+          directoryId,
+          normalizedMemberKey,
+          expectedWorkspaceMemberVersion,
+          updatedAt,
+        ),
+      },
+      ...getActiveProjectGrantSources(items, projectId).flatMap((source) =>
+        createWebhookTeamGrantTransactItems(
+          this.tableName,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          source,
+        )
+      ),
+      ...(auditPut ? [auditPut] : []),
+    ]
+    const transactItems = [...stateItems, ...callerChecks]
+    requireDynamoDbTransactionCapacity(transactItems)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return { added: true }
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        const latest = await this.readValidDirectoryItems(directoryId, true)
+        this.requireActiveProject(latest, projectId, teamId)
+        if (hasActiveProjectMember(latest, projectId, normalizedMemberKey)) {
+          return { added: false }
+        }
+      }
+      if (callerChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, stateItems.length + index)
+      )) {
+        throw new ProjectDataError(
+          403,
+          'DirectoryAuthorizationChanged',
+          'Your permission changed. Reload and try again.',
+        )
+      }
+      if (isTransactionConditionalFailureAt(error, 1)) {
+        await this.requireUnchangedActiveWorkspaceMember(
+          directoryId,
+          normalizedMemberKey,
+          expectedWorkspaceMemberVersion,
+        )
+      }
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Binds the idempotency key of a Team-wide grant to its input before any Project is written.
+   *
+   * The receipt is written with a condition that only the same input may meet, so of two requests
+   * under one key with different inputs only the first proceeds, even when they run concurrently,
+   * and a retry of the same input passes again.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the grant.
+   */
+  async bindTeamGrantRequest(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
+    await this.bindTeamRequestKey(directoryId, grantRequest)
+  }
+
+  /**
+   * Writes the receipt that binds a Team administration request's idempotency key to its input.
+   * Team-wide grants and Team profile saves share the receipts, so one key names one request.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param grantRequest - Idempotency key hash and request fingerprint of the request.
+   */
+  private async bindTeamRequestKey(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
+    const item: TeamGrantRequestItem = {
+      directoryId: createTeamGrantRequestDirectoryId(directoryId),
+      entryKey: `KEY#${grantRequest.idempotencyKeyHash}`,
+      entryType: 'team-grant-request',
+      workspaceId: directoryId,
+      requestFingerprint: grantRequest.requestFingerprint,
+      createdAt: new Date().toISOString(),
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(#entryKey) OR #requestFingerprint = :requestFingerprint',
+            ExpressionAttributeNames: {
+              '#entryKey': 'entryKey',
+              '#requestFingerprint': 'requestFingerprint',
+            },
+            ExpressionAttributeValues: { ':requestFingerprint': grantRequest.requestFingerprint },
+          },
+        }],
+      }))
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * DynamoDB から project member role を削除します。
    */
   async removeProjectMember(
@@ -2844,6 +3113,9 @@ export class DynamoDbProjectDirectoryClient {
         nameJa: team.nameJa,
         nameEn: team.nameEn,
         ...(team.archivedAt === undefined ? {} : { archivedAt: team.archivedAt }),
+        ...(team.description === undefined ? {} : { description: team.description }),
+        ...(team.leaderMemberKey === undefined ? {} : { leaderMemberKey: team.leaderMemberKey }),
+        profileRevision: team.profileRevision ?? 0,
         projects: projectItems
           .filter((project) => project.teamId === team.teamId)
           .map((project) => ({
@@ -2921,6 +3193,229 @@ export class DynamoDbProjectDirectoryClient {
     ])
 
     return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
+  }
+
+  /**
+   * Replaces the description and leader of an active Team. The leader must be an active
+   * Workspace member when the update commits.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param input - Untrusted request body with the description and leader.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier, its stored profile, and the stored profile revision.
+   */
+  async updateTeamProfile(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<UpdateDirectoryTeamProfileResponse> {
+    await this.ensureLocalAuditTable()
+    const profile = readDirectoryTeamProfile(input)
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+    )
+
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+    /**
+     * Builds the response for the stored profile.
+     *
+     * @param profileRevision - Profile revision now stored.
+     * @returns The Team identifier, its stored profile, and that revision.
+     */
+    const respond = (profileRevision: number): UpdateDirectoryTeamProfileResponse => ({
+      teamId,
+      ...(profile.description === undefined ? {} : { description: profile.description }),
+      ...(profile.leaderMemberKey === undefined ? {} : { leaderMemberKey: profile.leaderMemberKey }),
+      profileRevision,
+    })
+    const requestKey = auditContext
+      ? `${auditContext.idempotencyKeyHash}:${auditContext.requestFingerprint}`
+      : undefined
+    // One key is one request: a key already used with another input is refused before anything
+    // else, whether or not audit events are stored (ADR 0080).
+    if (auditContext) {
+      await this.bindTeamRequestKey(directoryId, {
+        idempotencyKeyHash: auditContext.idempotencyKeyHash,
+        requestFingerprint: auditContext.requestFingerprint,
+      })
+    }
+    // A retry of the request that stored the current revision, whose response was lost, is
+    // answered as the success it was instead of as a conflict with itself.
+    if (
+      requestKey !== undefined &&
+      team.profileRequestKey === requestKey &&
+      team.profileRevision === profile.expectedProfileRevision + 1
+    ) {
+      return respond(team.profileRevision)
+    }
+    // The editor's form must show the stored profile, so a save from a stale form cannot
+    // silently restore a field another administrator changed.
+    if ((team.profileRevision ?? 0) !== profile.expectedProfileRevision) {
+      throw new ProjectDataError(
+        409,
+        'TeamProfileConflict',
+        'The Team profile was changed by someone else. Reload and try again.',
+      )
+    }
+
+    if (
+      team.description === profile.description &&
+      team.leaderMemberKey === profile.leaderMemberKey
+    ) {
+      // Nothing is written, so the revision stays as it is.
+      return respond(profile.expectedProfileRevision)
+    }
+
+    const setClauses = ['#profileRevision = :profileRevision']
+    const removeClauses: string[] = []
+    const values: Record<string, unknown> = { ':profileRevision': (team.profileRevision ?? 0) + 1 }
+    if (requestKey === undefined) {
+      removeClauses.push('#profileRequestKey')
+    } else {
+      setClauses.push('#profileRequestKey = :profileRequestKey')
+      values[':profileRequestKey'] = requestKey
+    }
+    if (profile.description === undefined) {
+      removeClauses.push('#description')
+    } else {
+      setClauses.push('#description = :description')
+      values[':description'] = profile.description
+    }
+    if (profile.leaderMemberKey === undefined) {
+      removeClauses.push('#leaderMemberKey')
+    } else {
+      setClauses.push('#leaderMemberKey = :leaderMemberKey')
+      values[':leaderMemberKey'] = profile.leaderMemberKey
+    }
+
+    // The revision read above must still be stored, so a stale update cannot overwrite a newer one.
+    const condition = createActiveTeamRowCondition(teamId)
+    const revisionClause = team.profileRevision === undefined
+      ? 'attribute_not_exists(#profileRevision)'
+      : '#profileRevision = :readProfileRevision'
+    try {
+      await this.sendTeamProfileTransaction(
+        directoryId,
+        teamId,
+        team,
+        profile,
+        auditContext,
+        authorizationConditionChecks,
+        { setClauses, removeClauses, values, condition, revisionClause },
+      )
+    } catch (error) {
+      // The same request sent twice at once: one commits, the other loses the revision condition.
+      // It is answered as the success the first one recorded; any other conflict stays refused.
+      if (
+        requestKey !== undefined &&
+        error instanceof ProjectDataError &&
+        error.code === 'ConditionalCheckFailedException'
+      ) {
+        const latest = (await this.readValidDirectoryItems(directoryId, true)).find(
+          (item): item is ProjectDirectoryTeamItem =>
+            item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+        )
+        if (
+          latest?.profileRequestKey === requestKey &&
+          latest.profileRevision === profile.expectedProfileRevision + 1
+        ) {
+          return respond(latest.profileRevision)
+        }
+      }
+      throw error
+    }
+
+    return respond(profile.expectedProfileRevision + 1)
+  }
+
+  /**
+   * Sends the transaction that stores a Team profile.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param team - Team row read before the update.
+   * @param profile - Validated description, leader, and expected revision.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @param update - Update clauses, values, and conditions of the Team row.
+   */
+  private async sendTeamProfileTransaction(
+    directoryId: string,
+    teamId: string,
+    team: ProjectDirectoryTeamItem,
+    profile: ReturnType<typeof readDirectoryTeamProfile>,
+    auditContext: MutationAuditContext | undefined,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks,
+    update: {
+      /** SET clauses of the Team row. */
+      setClauses: string[]
+      /** REMOVE clauses of the Team row. */
+      removeClauses: string[]
+      /** Values of the SET clauses. */
+      values: Record<string, unknown>
+      /** Active Team row condition. */
+      condition: ReturnType<typeof createActiveTeamRowCondition>
+      /** Condition on the revision read before the update. */
+      revisionClause: string
+    },
+  ) {
+    const { setClauses, removeClauses, values, condition, revisionClause } = update
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: team.entryKey },
+          UpdateExpression: `SET ${setClauses.join(', ')}` +
+            (removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(', ')}` : ''),
+          ConditionExpression: `${condition.ConditionExpression} AND ${revisionClause}`,
+          ExpressionAttributeNames: {
+            ...condition.ExpressionAttributeNames,
+            '#description': 'description',
+            '#leaderMemberKey': 'leaderMemberKey',
+            '#profileRevision': 'profileRevision',
+            '#profileRequestKey': 'profileRequestKey',
+          },
+          ExpressionAttributeValues: {
+            ...condition.ExpressionAttributeValues,
+            ...values,
+            ...(team.profileRevision === undefined
+              ? {}
+              : { ':readProfileRevision': team.profileRevision }),
+          },
+        },
+      },
+      // A leader who is also the caller is already guarded active by the caller's own check, and
+      // one transaction cannot touch a row twice.
+      ...(profile.leaderMemberKey === undefined ||
+        authorizationConditionChecks.some((check) => isWorkspaceMemberRowCheck(
+          check,
+          this.workspaceAccessTableName,
+          directoryId,
+          profile.leaderMemberKey ?? '',
+        ))
+        ? []
+        : [{ ConditionCheck: this.createActiveWorkspaceMemberConditionCheck(directoryId, profile.leaderMemberKey) }]),
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.updated',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'updated',
+        changes: createAuditFieldChanges(
+          team,
+          { ...team, description: profile.description, leaderMemberKey: profile.leaderMemberKey },
+          ['description', 'leaderMemberKey'],
+        ),
+        metadata: { kind: 'team', teamId },
+      }),
+    ])
   }
 
   /**
@@ -4324,7 +4819,27 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * project member 書き込みと同時に active Workspace member の version を進めます。
    */
-  private createActiveWorkspaceMemberVersionUpdate(
+  /**
+   * Builds the guard that a member is still an active Workspace member when a write commits.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param memberKey - Member key to check.
+   * @returns ConditionCheck input for the Workspace access table.
+   */
+  private createActiveWorkspaceMemberConditionCheck(workspaceId: string, memberKey: string) {
+    return {
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      ConditionExpression: '#entryType = :memberEntryType AND #status = :active',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#status': 'status' },
+      ExpressionAttributeValues: { ':memberEntryType': 'workspace-member', ':active': 'active' },
+    }
+  }
+
+    private createActiveWorkspaceMemberVersionUpdate(
     workspaceId: string,
     memberKey: string,
     expectedVersion: number,
@@ -4724,6 +5239,55 @@ function hasTransactionConditionalFailure(error: unknown) {
   }
 
   return reasonCodes.includes('ConditionalCheckFailed')
+}
+
+/**
+ * Tells whether a Project already has an active role for a member.
+ *
+ * @param items - Directory rows read in one snapshot.
+ * @param projectId - Project to look in.
+ * @param memberKey - Normalized member key.
+ * @returns Whether an active member row exists.
+ */
+function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string, memberKey: string) {
+  return items.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === projectId &&
+    item.memberKey === memberKey &&
+    isActiveDirectoryItem(item)
+  )
+}
+
+/**
+ * Creates the sidecar partition of a Workspace's Team-wide grant receipts.
+ *
+ * @param workspaceId - Workspace that owns the receipts.
+ * @returns A partition key that cannot overlap canonical directory rows.
+ */
+function createTeamGrantRequestDirectoryId(workspaceId: string) {
+  return `TEAM_GRANT_REQUEST#${encodeURIComponent(workspaceId)}`
+}
+
+/**
+ * Tells whether a transaction item is a condition check on one Workspace member row.
+ *
+ * @param check - Transaction item to inspect.
+ * @param workspaceAccessTableName - Workspace access table name.
+ * @param workspaceId - Workspace identifier.
+ * @param memberKey - Member key of the row.
+ * @returns Whether the item checks that member's row.
+ */
+function isWorkspaceMemberRowCheck(
+  check: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
+  workspaceAccessTableName: string,
+  workspaceId: string,
+  memberKey: string,
+) {
+  const condition = check.ConditionCheck
+  return condition !== undefined &&
+    condition.TableName === workspaceAccessTableName &&
+    condition.Key?.workspaceId === workspaceId &&
+    condition.Key?.recordKey === `MEMBER#${normalizeProjectMemberKey(memberKey)}`
 }
 
 function isTransactionConditionalFailureAt(error: unknown, index: number) {
@@ -5504,7 +6068,12 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
   }
 
   if (value.entryType === 'team') {
-    return value.expanded === undefined || typeof value.expanded === 'boolean'
+    return (value.expanded === undefined || typeof value.expanded === 'boolean') &&
+      (value.description === undefined || typeof value.description === 'string') &&
+      (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+      (value.profileRevision === undefined ||
+        (Number.isSafeInteger(value.profileRevision) && Number(value.profileRevision) >= 0)) &&
+      (value.profileRequestKey === undefined || typeof value.profileRequestKey === 'string')
   }
 
   return (
@@ -5532,6 +6101,56 @@ function isProjectRole(value: unknown): value is ProjectRole {
 
 function isProjectTone(value: unknown): value is ProjectTone {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
+}
+
+/** Control characters a Team description may not contain; line breaks and tabs are allowed. */
+const DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER = /[^\P{Cc}\n\t]/u
+
+/**
+ * Reads and validates the body of a Team profile update.
+ *
+ * @param input - Untrusted request body.
+ * @returns The trimmed description and leader, each undefined when cleared.
+ */
+function readDirectoryTeamProfile(input: unknown) {
+  if (!isRecord(input) || typeof input.description !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'description must be a string.')
+  }
+  const normalized = input.description.replace(/\r\n?/g, '\n')
+  // Checked before trimming, which would otherwise drop a leading or trailing control character.
+  const hasControlCharacter = DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER.test(normalized)
+  const description = normalized.trim()
+  if (description.length > DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH || hasControlCharacter) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      `description must be ${DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH} characters or fewer without control characters other than line breaks and tabs.`,
+    )
+  }
+  if (input.leaderMemberKey !== null && typeof input.leaderMemberKey !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'leaderMemberKey must be a string or null.')
+  }
+  const leaderMemberKey = input.leaderMemberKey === null
+    ? undefined
+    : normalizeProjectMemberKey(input.leaderMemberKey)
+  const expectedProfileRevision = input.expectedProfileRevision
+  if (
+    typeof expectedProfileRevision !== 'number' ||
+    !Number.isSafeInteger(expectedProfileRevision) ||
+    expectedProfileRevision < 0
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'expectedProfileRevision must be a non-negative integer.',
+    )
+  }
+
+  return {
+    description: description === '' ? undefined : description,
+    leaderMemberKey,
+    expectedProfileRevision,
+  }
 }
 
 /** Control characters a Team or Project name may not contain, such as line breaks and NUL. */

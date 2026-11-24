@@ -71,6 +71,7 @@ function createProjectRow(
  * @param planningItems - Planning rows served by key reads, keyed by `workspaceId|recordKey`.
  * @param cleanupLocators - Webhook grant cleanup locators still waiting for an archive cleanup.
  * @param failedIndex - Index of the transaction item that fails its condition, when one does.
+ * @param beforeTransaction - Runs when a transaction arrives, before it commits or fails.
  * @returns The client and the commands it sent.
  */
 function createClient(
@@ -79,10 +80,29 @@ function createClient(
   planningItems: Record<string, Record<string, unknown>> = {},
   cleanupLocators: Array<Record<string, unknown>> = [],
   failedIndex?: number,
+  beforeTransaction?: () => void,
 ) {
   const sent: SentCommand[] = []
+  const receiptFingerprints = new Map<unknown, unknown>()
   const send = async (command: SentCommand) => {
     sent.push(command)
+    // Request receipts are written on their own and keep the first input of each key; the
+    // failures and races below target the directory transactions that follow them.
+    if (isReceiptTransaction(command.input.TransactItems)) {
+      const [put] = listItems(command.input.TransactItems)
+      const item: unknown = isRecord(put) && isRecord(put.Put) ? put.Put.Item : undefined
+      const entryKey = isRecord(item) ? item.entryKey : undefined
+      const fingerprint = isRecord(item) ? item.requestFingerprint : undefined
+      if (receiptFingerprints.has(entryKey) && receiptFingerprints.get(entryKey) !== fingerprint) {
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+        })
+      }
+      receiptFingerprints.set(entryKey, fingerprint)
+      return {}
+    }
+    if ('TransactItems' in command.input) beforeTransaction?.()
     if ('KeyConditionExpression' in command.input) {
       const values = command.input.ExpressionAttributeValues
       const partition = typeof values === 'object' && values !== null
@@ -121,9 +141,26 @@ function createClient(
     'PlanningTable',
   )
   const transactions = () => sent
-    .filter((command) => 'TransactItems' in command.input)
+    .filter((command) => 'TransactItems' in command.input && !isReceiptTransaction(command.input.TransactItems))
     .map((command) => command.input.TransactItems)
-  return { client, transactions }
+  const receipts = () => sent
+    .filter((command) => isReceiptTransaction(command.input.TransactItems))
+    .map((command) => command.input.TransactItems)
+  const queryCount = () => sent.filter((command) => 'KeyConditionExpression' in command.input).length
+  return { client, transactions, receipts, queryCount }
+}
+
+/**
+ * Tells whether sent transaction items are a lone request receipt write.
+ *
+ * @param items - Transaction items as sent.
+ * @returns Whether the transaction only writes a `team-grant-request` receipt.
+ */
+function isReceiptTransaction(items: unknown) {
+  if (!Array.isArray(items) || items.length !== 1) return false
+  const [item]: unknown[] = items
+  const put = isRecord(item) ? item.Put : undefined
+  return isRecord(put) && isRecord(put.Item) && put.Item.entryType === 'team-grant-request'
 }
 
 /**
@@ -194,6 +231,7 @@ test('lists archived Teams and Projects with both names for administration', asy
         id: 'alpha',
         nameJa: 'alpha 日本語',
         nameEn: 'alpha English',
+        profileRevision: 0,
         projects: [
           { id: 'live', nameJa: 'live 日本語', nameEn: 'live English', tone: 'green' },
           {
@@ -210,6 +248,7 @@ test('lists archived Teams and Projects with both names for administration', asy
         nameJa: 'beta 日本語',
         nameEn: 'beta English',
         archivedAt: '2026-06-07T00:00:00.000Z',
+        profileRevision: 0,
         projects: [],
       },
     ],
@@ -785,4 +824,472 @@ test('binds a restore to the archive it read and fences every change by the call
   const revoked = createClient([createTeamRow('alpha', 10)], false, {}, [], 1)
   await expect(revoked.client.renameTeam(directoryId, 'alpha', { nameJa: '改名' }, undefined, authorization))
     .rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
+})
+
+test('sets a Team description and leader, guarding the revision and the active leader', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10),
+    createTeamRow('beta', 20, { description: '古い説明', leaderMemberKey: 'old', profileRevision: 2 }),
+  ])
+
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: ' 1行目\r\n\t2行目 ',
+    leaderMemberKey: 'Leader-User',
+    expectedProfileRevision: 0,
+  })).resolves.toEqual({
+    teamId: 'alpha',
+    description: '1行目\n\t2行目',
+    leaderMemberKey: 'leader-user',
+    profileRevision: 1,
+  })
+  await expect(client.updateTeamProfile(directoryId, 'beta', {
+    description: '',
+    leaderMemberKey: null,
+    expectedProfileRevision: 2,
+  })).resolves.toEqual({ teamId: 'beta', profileRevision: 3 })
+
+  expect(transactions()).toEqual([
+    [
+      {
+        Update: expect.objectContaining({
+          Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+          UpdateExpression:
+            'SET #profileRevision = :profileRevision, #description = :description, #leaderMemberKey = :leaderMemberKey REMOVE #profileRequestKey',
+          ConditionExpression: expect.stringContaining('attribute_not_exists(#profileRevision)'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':description': '1行目\n\t2行目',
+            ':leaderMemberKey': 'leader-user',
+            ':profileRevision': 1,
+          }),
+        }),
+      },
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: directoryId, recordKey: 'MEMBER#leader-user' },
+          ConditionExpression: '#entryType = :memberEntryType AND #status = :active',
+        }),
+      },
+    ],
+    [{
+      Update: expect.objectContaining({
+        UpdateExpression: 'SET #profileRevision = :profileRevision REMOVE #profileRequestKey, #description, #leaderMemberKey',
+        ConditionExpression: expect.stringContaining('#profileRevision = :readProfileRevision'),
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readProfileRevision': 2,
+          ':profileRevision': 3,
+        }),
+      }),
+    }],
+  ])
+})
+
+test('skips an unchanged Team profile and rejects an invalid one', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { description: '説明' }),
+    createTeamRow('gone', 20, { archivedAt: '2026-01-01T00:00:00.000Z' }),
+  ])
+
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: '説明',
+    leaderMemberKey: null,
+    expectedProfileRevision: 0,
+  })).resolves.toEqual({ teamId: 'alpha', description: '説明', profileRevision: 0 })
+  expect(transactions()).toEqual([])
+
+  // A form loaded before another administrator's save is refused instead of overwriting it.
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: '別の説明',
+    leaderMemberKey: null,
+    expectedProfileRevision: 3,
+  })).rejects.toMatchObject({ status: 409, code: 'TeamProfileConflict' })
+  expect(transactions()).toEqual([])
+
+  await expect(client.updateTeamProfile(directoryId, 'gone', {
+    description: '',
+    leaderMemberKey: null,
+    expectedProfileRevision: 0,
+  }))
+    .rejects.toMatchObject({ status: 404, code: 'TeamNotFound' })
+  for (const input of [
+    { description: 'x'.repeat(2001), leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: 'nul\u0000', leaderMemberKey: null, expectedProfileRevision: 0 },
+    // A control character at either end is refused, not trimmed away.
+    { description: '\u000bleading tab', leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: 'trailing\u001f', leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: '', leaderMemberKey: 7, expectedProfileRevision: 0 },
+    { leaderMemberKey: null, expectedProfileRevision: 0 },
+    { description: '', leaderMemberKey: null },
+    { description: '', leaderMemberKey: null, expectedProfileRevision: -1 },
+  ]) {
+    await expect(client.updateTeamProfile(directoryId, 'alpha', input))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  }
+})
+
+test('lists the Team description and leader for administration', async () => {
+  const { client } = createClient([
+    createTeamRow('alpha', 10, { description: '説明', leaderMemberKey: 'leader', profileRevision: 1 }),
+  ])
+
+  const directory = await client.getDirectoryAdministration(directoryId)
+
+  expect(directory.teams[0]).toMatchObject({
+    id: 'alpha',
+    description: '説明',
+    leaderMemberKey: 'leader',
+    profileRevision: 1,
+  })
+})
+
+/**
+ * Creates a stored Project member row.
+ *
+ * @param projectId - Project identifier.
+ * @param memberKey - Normalized member key.
+ * @returns The stored row.
+ */
+function createProjectMemberRow(projectId: string, memberKey: string) {
+  return {
+    directoryId,
+    entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}`,
+    entryType: 'project-member',
+    projectId,
+    memberKey,
+    email: memberKey,
+    role: 'manager',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-01T00:00:00.000Z',
+  }
+}
+
+/**
+ * Counts the items of a sent transaction.
+ *
+ * @param value - Transaction items as sent.
+ * @returns The number of items, or 0 when none were sent.
+ */
+function lengthOf(value: unknown) {
+  return listItems(value).length
+}
+
+/**
+ * Narrows an untrusted value to a plain record.
+ *
+ * @param value - Value to inspect.
+ * @returns Whether the value is a non-null object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+/**
+ * Reads the items of a sent transaction.
+ *
+ * @param value - Transaction items as sent.
+ * @returns The items, or an empty list when none were sent.
+ */
+function listItems(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+/** Caller authorization guards: the caller's member row and the Enterprise control row. */
+const callerAuthorization = [
+  {
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId: directoryId, recordKey: 'MEMBER#admin@example.com' },
+      ConditionExpression: '#version = :expectedVersion',
+    },
+  },
+  {
+    ConditionCheck: {
+      TableName: 'EnterpriseTable',
+      Key: { scopeKey: `WORKSPACE#${directoryId}`, recordKey: 'CONTROL' },
+      ConditionExpression: '#controlRevision = :expectedControlRevision',
+    },
+  },
+]
+
+test('adds a Project member insert-only, fenced by the caller authorization', async () => {
+  const rows = [
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'refero', 1),
+    createProjectMemberRow('refero', 'kept@example.com'),
+  ]
+  const { client, transactions } = createClient(rows)
+  const input = { role: 'viewer', email: 'sato@example.com' }
+
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'Sato@example.com', input, 3, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: true })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'kept@example.com', input, 3, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: false })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'admin@example.com', input, 7, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: true })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'beta', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )).rejects.toMatchObject({ status: 404 })
+
+  const [toOther, toSelf] = transactions().map(listItems)
+  expect(transactions()).toHaveLength(2)
+  expect(toOther?.slice(0, 2)).toEqual([
+    {
+      Put: expect.objectContaining({
+        Item: expect.objectContaining({ memberKey: 'sato@example.com', role: 'viewer' }),
+        ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      }),
+    },
+    {
+      Update: expect.objectContaining({
+        Key: { workspaceId: directoryId, recordKey: 'MEMBER#sato@example.com' },
+        ExpressionAttributeValues: expect.objectContaining({ ':expectedVersion': 3 }),
+      }),
+    },
+  ])
+  expect(toOther?.slice(-2)).toEqual(callerAuthorization)
+  // A caller adding themselves is guarded by the version update of their own row instead.
+  expect(toSelf?.[1]).toEqual({
+    Update: expect.objectContaining({
+      Key: { workspaceId: directoryId, recordKey: 'MEMBER#admin@example.com' },
+    }),
+  })
+  expect(toSelf).not.toContainEqual(callerAuthorization[0])
+  expect(toSelf?.at(-1)).toEqual(callerAuthorization[1])
+  expect(toSelf).toHaveLength(lengthOf(toOther) - 1)
+})
+
+test('keeps a Project role granted concurrently and refuses a revoked caller', async () => {
+  const rows: Array<Record<string, unknown>> = [
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'refero', 1),
+  ]
+  // Another administrator's grant lands after the first read, so the insert-only write fails.
+  const raced = createClient(rows, false, {}, [], 0, () => {
+    rows.push(createProjectMemberRow('refero', 'sato@example.com'))
+  })
+  const input = { role: 'viewer', email: 'sato@example.com' }
+  await expect(raced.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: false })
+  // The failed insert is followed by a read that finds the concurrent role.
+  expect(raced.transactions()).toHaveLength(1)
+  expect(raced.queryCount()).toBe(2)
+
+  const projectRows = [createTeamRow('alpha', 10), createProjectRow('alpha', 10, 'refero', 1)]
+  const probe = createClient(projectRows)
+  await probe.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )
+  const lastIndex = lengthOf(probe.transactions()[0]) - 1
+  // The Enterprise control row, the caller's last guard, has changed.
+  const revoked = createClient(projectRows, false, {}, [], lastIndex)
+  await expect(revoked.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )).rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
+})
+
+test('fences each Team-wide grant on its Team and Project still being active', async () => {
+  const rows = [createTeamRow('alpha', 10), createProjectRow('alpha', 10, 'refero', 1)]
+  const { client, transactions } = createClient(rows)
+  await client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', { role: 'viewer', email: 'sato@example.com' }, 3,
+  )
+
+  // An archive that commits after the read fails these checks, so the grant is not written.
+  expect(listItems(transactions()[0])).toEqual(expect.arrayContaining([
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+        ConditionExpression: '#entryType = :teamEntryType AND attribute_not_exists(archivedAt)',
+      }),
+    },
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000001#PROJECT#refero' },
+        ConditionExpression: '#entryType = :projectEntryType AND attribute_not_exists(archivedAt)',
+      }),
+    },
+  ]))
+})
+
+test('binds a Team-wide grant key to its input with a conditional receipt', async () => {
+  const { client, receipts } = createClient([])
+  const grantRequest = { idempotencyKeyHash: 'key-hash', requestFingerprint: 'member-request' }
+
+  await client.bindTeamGrantRequest(directoryId, grantRequest)
+
+  // The receipt sits outside the directory partition, and only the same input meets its condition.
+  expect(receipts()).toEqual([[{
+    Put: {
+      TableName: 'DirectoryTable',
+      Item: {
+        directoryId: `TEAM_GRANT_REQUEST#${encodeURIComponent(directoryId)}`,
+        entryKey: 'KEY#key-hash',
+        entryType: 'team-grant-request',
+        workspaceId: directoryId,
+        requestFingerprint: 'member-request',
+        createdAt: expect.any(String),
+      },
+      ConditionExpression: 'attribute_not_exists(#entryKey) OR #requestFingerprint = :requestFingerprint',
+      ExpressionAttributeNames: { '#entryKey': 'entryKey', '#requestFingerprint': 'requestFingerprint' },
+      ExpressionAttributeValues: { ':requestFingerprint': 'member-request' },
+    },
+  }]])
+
+  // Against stored receipts, the first input wins: it may repeat, and another input is refused.
+  const stored = new Map<string, string>()
+  /**
+   * Stores receipts and evaluates their write condition like DynamoDB does.
+   *
+   * @param command - Sent command; only receipt transactions are expected.
+   * @returns An empty response once the receipt is written.
+   */
+  const sendReceipt = async (command: SentCommand) => {
+    const [put] = listItems(command.input.TransactItems)
+    const item: unknown = isRecord(put) && isRecord(put.Put) ? put.Put.Item : undefined
+    if (!isRecord(item) || typeof item.entryKey !== 'string' || typeof item.requestFingerprint !== 'string') {
+      throw new Error('Expected a receipt Put.')
+    }
+    const fingerprint = stored.get(item.entryKey)
+    if (fingerprint !== undefined && fingerprint !== item.requestFingerprint) {
+      throw Object.assign(new Error('Transaction was canceled.'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+      })
+    }
+    stored.set(item.entryKey, item.requestFingerprint)
+    return {}
+  }
+  const stateful = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    // The fake implements only `send`, the one method the receipt write calls.
+    { send: sendReceipt } as unknown as DynamoDBDocumentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+  )
+  await stateful.bindTeamGrantRequest(directoryId, grantRequest)
+  await expect(stateful.bindTeamGrantRequest(directoryId, grantRequest)).resolves.toBeUndefined()
+  await expect(stateful.bindTeamGrantRequest(
+    directoryId,
+    { idempotencyKeyHash: 'key-hash', requestFingerprint: 'other-member-request' },
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  await expect(stateful.bindTeamGrantRequest(
+    directoryId,
+    { idempotencyKeyHash: 'other-hash', requestFingerprint: 'other-member-request' },
+  )).resolves.toBeUndefined()
+})
+
+test('does not check the leader twice when the caller leads the Team', async () => {
+  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+
+  await client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { description: '', leaderMemberKey: 'Admin@example.com', expectedProfileRevision: 0 },
+    undefined,
+    callerAuthorization,
+  )
+
+  expect(transactions()).toEqual([[
+    expect.objectContaining({ Update: expect.anything() }),
+    ...callerAuthorization,
+  ]])
+})
+
+test('answers a retried profile save as its success and refuses another stale request', async () => {
+  const saved = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, {
+      description: '説明',
+      profileRevision: 1,
+      profileRequestKey: `${saved.idempotencyKeyHash}:${saved.requestFingerprint}`,
+    }),
+  ])
+  const input = { description: '説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+
+  // The first save committed but its response was lost; the same request is answered again.
+  await expect(client.updateTeamProfile(directoryId, 'alpha', input, saved))
+    .resolves.toEqual({ teamId: 'alpha', description: '説明', profileRevision: 1 })
+  await expect(client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    input,
+    createRestoreContext('another-key', '/api/teams/alpha/profile'),
+  )).rejects.toMatchObject({ status: 409, code: 'TeamProfileConflict' })
+  expect(transactions()).toEqual([])
+})
+
+test('answers the same profile save sent twice at once as one success', async () => {
+  const context = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const input = { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+  const rows: Array<Record<string, unknown>> = [createTeamRow('alpha', 10)]
+  // The twin request commits after this one read the Team, so this one loses the revision.
+  const raced = createClient(rows, false, {}, [], 0, () => {
+    rows[0] = createTeamRow('alpha', 10, {
+      description: '新しい説明',
+      profileRevision: 1,
+      profileRequestKey: `${context.idempotencyKeyHash}:${context.requestFingerprint}`,
+    })
+  })
+  await expect(raced.client.updateTeamProfile(directoryId, 'alpha', input, context))
+    .resolves.toEqual({ teamId: 'alpha', description: '新しい説明', profileRevision: 1 })
+
+  // Another request losing the same race is still refused.
+  rows[0] = createTeamRow('alpha', 10)
+  const other = createRestoreContext('other-key', '/api/teams/alpha/profile')
+  await expect(raced.client.updateTeamProfile(directoryId, 'alpha', input, other))
+    .rejects.toMatchObject({ status: 409 })
+})
+
+test('refuses a profile save under a key already used with another input', async () => {
+  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+  const input = { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 }
+  await client.updateTeamProfile(
+    directoryId, 'alpha', input, createRestoreContext('profile-key', '/api/teams/alpha/profile'),
+  )
+
+  // The same key with another request is refused before the profile is written again.
+  await expect(client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { ...input, description: '別の説明', expectedProfileRevision: 1 },
+    createRestoreContext('profile-key', '/api/teams/alpha/profile/other'),
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  expect(transactions()).toHaveLength(1)
+})
+
+test('records the request of a profile save so its retry is recognized', async () => {
+  const context = createRestoreContext('profile-key', '/api/teams/alpha/profile')
+  const { client, transactions, receipts } = createClient([createTeamRow('alpha', 10)])
+
+  await client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { description: '新しい説明', leaderMemberKey: null, expectedProfileRevision: 0 },
+    context,
+  )
+
+  // The key is bound to this input before the profile is written.
+  expect(receipts()).toEqual([[{
+    Put: expect.objectContaining({
+      Item: expect.objectContaining({
+        entryKey: `KEY#${context.idempotencyKeyHash}`,
+        requestFingerprint: context.requestFingerprint,
+      }),
+    }),
+  }]])
+
+  expect(transactions()[0]).toEqual(expect.arrayContaining([{
+    Update: expect.objectContaining({
+      ExpressionAttributeValues: expect.objectContaining({
+        ':profileRequestKey': `${context.idempotencyKeyHash}:${context.requestFingerprint}`,
+      }),
+    }),
+  }]))
 })

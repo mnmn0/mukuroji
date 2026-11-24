@@ -75,6 +75,10 @@ const REPORT_RECORD_PREFIX = 'REPORT#'
 const SNAPSHOT_RECORD_PREFIX = 'SNAPSHOT#'
 const SNAPSHOT_ID_RECORD_PREFIX = 'SNAPSHOT_ID#'
 const DELIVERY_RECORD_PREFIX = 'DELIVERY#'
+/** Per-recipient delivery index rows (ADR 0064). */
+const DELIVERY_RECIPIENT_RECORD_PREFIX = 'DELIVERY_RECIPIENT#'
+/** Largest page of a recipient's delivery list. */
+export const MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE = 50
 const DEFAULT_EVIDENCE_LIMIT = 50
 const MAX_EVIDENCE_LIMIT = 200
 const MAX_EVIDENCE_CURSOR_LENGTH = 1_024
@@ -535,6 +539,30 @@ export type AnalyticsDeliveryReceiptResult = {
   receipt: AnalyticsDeliveryReceipt
 }
 
+/** One scheduled delivery to one recipient, indexed by the recipient (ADR 0064). */
+export type AnalyticsRecipientDelivery = {
+  /** Workspace that owns the delivery. */
+  workspaceId: string
+  /** Member key of the recipient. */
+  recipientMemberKey: string
+  /** Delivered report ID. */
+  reportId: string
+  /** Snapshot created for the recipient. */
+  snapshotId: string
+  /** Artifact format of the delivery. */
+  format: 'csv' | 'pdf'
+  /** Scheduled occurrence instant of the delivery. */
+  deliveredAt: string
+}
+
+/** One page of a recipient's deliveries, newest first. */
+export type AnalyticsRecipientDeliveryPage = {
+  /** Deliveries on this page. */
+  deliveries: AnalyticsRecipientDelivery[]
+  /** Cursor of the next page, bound to the Workspace and recipient. */
+  nextCursor?: string
+}
+
 /** Analytics report と immutable snapshot を保存する repository です。 */
 export type AnalyticsRepository = {
   /** Workspace report 一覧を cursor page で返します。ACL は API 境界で別途適用します。 */
@@ -585,6 +613,15 @@ export type AnalyticsRepository = {
     reportId: string,
     occurrenceKey: string,
   ): Promise<AnalyticsDeliveryReceipt | undefined>
+  /** Saves the recipient index row of a committed delivery; writing it again changes nothing. */
+  putRecipientDelivery(delivery: AnalyticsRecipientDelivery): Promise<void>
+  /** Lists a recipient's deliveries, newest first. */
+  listRecipientDeliveries(
+    workspaceId: string,
+    recipientMemberKey: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<AnalyticsRecipientDeliveryPage>
   /**
    * Reads the per-Work-Item Analytics history rows that exist for the given Work Items.
    *
@@ -4281,6 +4318,8 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
   private readonly snapshots = new Map<string, AnalyticsSnapshotRecord>()
   /** Workspace/occurrence ごとの idempotent receipt です。 */
   private readonly receipts = new Map<string, AnalyticsDeliveryReceipt>()
+  /** Recipient delivery index rows keyed by Workspace and record key. */
+  private readonly recipientDeliveries = new Map<string, AnalyticsRecipientDelivery>()
   /** Timestamp を生成する clock です。 */
   private readonly now: () => Date
 
@@ -4542,6 +4581,43 @@ export class InMemoryAnalyticsRepository implements AnalyticsRepository {
       deliveryMapKey(workspaceId, reportId, occurrenceKey),
     )
     return receipt === undefined ? undefined : structuredClone(receipt)
+  }
+
+  /** Saves the recipient index row of a committed delivery. */
+  async putRecipientDelivery(delivery: AnalyticsRecipientDelivery) {
+    const normalized = normalizeRecipientDelivery(delivery)
+    this.recipientDeliveries.set(
+      `${normalized.workspaceId}\0${createRecipientDeliveryRecordKey(normalized)}`,
+      normalized,
+    )
+  }
+
+  /** Lists a recipient's deliveries, newest first. */
+  async listRecipientDeliveries(
+    workspaceId: string,
+    recipientMemberKey: string,
+    limit: number,
+    cursor?: string,
+  ) {
+    const query = readRecipientDeliveryQuery(workspaceId, recipientMemberKey, limit, cursor)
+    const rows = [...this.recipientDeliveries.entries()]
+      .flatMap(([key, delivery]) => {
+        const recordKey = key.slice(query.workspaceId.length + 1)
+        return key.startsWith(`${query.workspaceId}\0`) && recordKey.startsWith(query.prefix)
+          ? [{ recordKey, delivery }]
+          : []
+      })
+      // Sort by code unit, like DynamoDB and the cursor boundary below, not by locale.
+      .sort((left, right) => compareRecordKeysDescending(left.recordKey, right.recordKey))
+      .filter((row) => query.after === undefined || row.recordKey < query.after)
+    const page = rows.slice(0, query.limit)
+    const last = page.at(-1)
+    return {
+      deliveries: page.map((row) => structuredClone(row.delivery)),
+      ...(rows.length > query.limit && last !== undefined
+        ? { nextCursor: createStorageCursor(query.scopeHash, { recordKey: last.recordKey }) }
+        : {}),
+    }
   }
 }
 
@@ -5107,6 +5183,183 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       ? undefined
       : readStoredDeliveryReceipt(response.Item)
   }
+
+  /** Saves the recipient index row of a committed delivery; the row is the same on every retry. */
+  async putRecipientDelivery(delivery: AnalyticsRecipientDelivery) {
+    const normalized = normalizeRecipientDelivery(delivery)
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          ...normalized,
+          entryType: 'analytics-delivery-recipient',
+          recordKey: createRecipientDeliveryRecordKey(normalized),
+        },
+      }))
+    } catch (error) {
+      throw persistenceError(error)
+    }
+  }
+
+  /** Lists a recipient's deliveries, newest first. */
+  async listRecipientDeliveries(
+    workspaceId: string,
+    recipientMemberKey: string,
+    limit: number,
+    cursor?: string,
+  ) {
+    const query = readRecipientDeliveryQuery(workspaceId, recipientMemberKey, limit, cursor)
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression:
+        'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+      ExpressionAttributeValues: {
+        ':workspaceId': query.workspaceId,
+        ':recordPrefix': query.prefix,
+      },
+      ...(query.after === undefined
+        ? {}
+        : { ExclusiveStartKey: { workspaceId: query.workspaceId, recordKey: query.after } }),
+      Limit: query.limit,
+      ScanIndexForward: false,
+    }))
+    const lastRecordKey = response.LastEvaluatedKey?.recordKey
+    return {
+      deliveries: (response.Items ?? []).map(readStoredRecipientDelivery),
+      ...(typeof lastRecordKey === 'string' && lastRecordKey.startsWith(query.prefix)
+        ? { nextCursor: createStorageCursor(query.scopeHash, { recordKey: lastRecordKey }) }
+        : {}),
+    }
+  }
+}
+
+/**
+ * Creates the record key of a recipient delivery row: the recipient's hashed member key, then the
+ * delivery instant, report, and snapshot, so one query lists a recipient's deliveries newest first.
+ *
+ * @param delivery - Normalized delivery.
+ * @returns The record key.
+ */
+function createRecipientDeliveryRecordKey(delivery: AnalyticsRecipientDelivery) {
+  // The snapshot ID tells apart two deliveries of one occurrence after a report edit re-runs it;
+  // a retry of the same receipt keeps its snapshot ID and so rewrites the same row.
+  return `${createRecipientDeliveryPrefix(delivery.recipientMemberKey)}${delivery.deliveredAt}#${delivery.reportId}#${delivery.snapshotId}`
+}
+
+/**
+ * Creates the record key prefix of one recipient's delivery rows.
+ *
+ * @param recipientMemberKey - Recipient member key.
+ * @returns The prefix; the member key is hashed so it never appears in the key.
+ */
+function createRecipientDeliveryPrefix(recipientMemberKey: string) {
+  const digest = createHash('sha256').update(recipientMemberKey).digest('hex').slice(0, 32)
+  return `${DELIVERY_RECIPIENT_RECORD_PREFIX}${digest}#`
+}
+
+/**
+ * Validates a recipient delivery.
+ *
+ * @param delivery - Delivery to save or a stored row.
+ * @returns The normalized delivery.
+ */
+function normalizeRecipientDelivery(delivery: AnalyticsRecipientDelivery): AnalyticsRecipientDelivery {
+  if (delivery.format !== 'csv' && delivery.format !== 'pdf') {
+    throw persistenceInvalid('Analytics recipient delivery format is invalid.')
+  }
+  return {
+    workspaceId: readIdentifier(delivery.workspaceId, 'Analytics delivery Workspace ID'),
+    recipientMemberKey: readIdentifier(delivery.recipientMemberKey, 'Analytics delivery recipient'),
+    reportId: readIdentifier(delivery.reportId, 'Analytics delivery report ID'),
+    snapshotId: readIdentifier(delivery.snapshotId, 'Analytics delivery snapshot ID'),
+    format: delivery.format,
+    deliveredAt: normalizeIsoTimestamp(delivery.deliveredAt, 'Analytics delivery instant'),
+  }
+}
+
+/**
+ * Reads a stored recipient delivery row.
+ *
+ * @param value - Stored row.
+ * @returns The delivery.
+ */
+function readStoredRecipientDelivery(value: Record<string, unknown>): AnalyticsRecipientDelivery {
+  if (
+    value.entryType !== 'analytics-delivery-recipient' ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recipientMemberKey !== 'string' ||
+    typeof value.reportId !== 'string' ||
+    typeof value.snapshotId !== 'string' ||
+    (value.format !== 'csv' && value.format !== 'pdf') ||
+    typeof value.deliveredAt !== 'string' ||
+    typeof value.recordKey !== 'string'
+  ) {
+    throw persistenceInvalid('Stored Analytics recipient delivery row is invalid.')
+  }
+  const delivery = normalizeRecipientDelivery({
+    workspaceId: value.workspaceId,
+    recipientMemberKey: value.recipientMemberKey,
+    reportId: value.reportId,
+    snapshotId: value.snapshotId,
+    format: value.format,
+    deliveredAt: value.deliveredAt,
+  })
+  // A row whose fields name another recipient than its key would leak into the wrong list.
+  if (createRecipientDeliveryRecordKey(delivery) !== value.recordKey) {
+    throw persistenceInvalid('Stored Analytics recipient delivery row does not match its key.')
+  }
+  return delivery
+}
+
+/**
+ * Orders record keys newest first by UTF-16 code unit, the order DynamoDB sorts keys in and the
+ * order the cursor boundary uses.
+ *
+ * @param left - First record key.
+ * @param right - Second record key.
+ * @returns A negative number when `left` sorts first.
+ */
+function compareRecordKeysDescending(left: string, right: string) {
+  if (left === right) return 0
+  return left > right ? -1 : 1
+}
+
+/**
+ * Validates a recipient delivery list request and its cursor.
+ *
+ * The cursor is bound to the Workspace and recipient, and its boundary must lie inside the
+ * recipient's rows, so a cursor never reads another member's deliveries.
+ *
+ * @param workspaceId - Workspace ID.
+ * @param recipientMemberKey - Recipient member key.
+ * @param limit - Requested page size.
+ * @param cursor - Cursor of a previous page.
+ * @returns The validated query.
+ */
+function readRecipientDeliveryQuery(
+  workspaceId: string,
+  recipientMemberKey: string,
+  limit: number,
+  cursor: string | undefined,
+) {
+  const normalizedWorkspaceId = readIdentifier(workspaceId, 'Analytics delivery Workspace ID')
+  const normalizedRecipient = readIdentifier(recipientMemberKey, 'Analytics delivery recipient')
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ANALYTICS_RECIPIENT_DELIVERY_PAGE) {
+    throw invalid('AnalyticsLimitInvalid', 'Analytics delivery page size is invalid.')
+  }
+  const prefix = createRecipientDeliveryPrefix(normalizedRecipient)
+  const scopeHash = createHash('sha256')
+    .update(`recipient-deliveries\0${normalizedWorkspaceId}\0${prefix}`)
+    .digest('hex')
+  let after: string | undefined
+  if (cursor !== undefined) {
+    const key = parseStorageCursor(cursor, scopeHash)
+    if (typeof key.recordKey !== 'string' || !key.recordKey.startsWith(prefix)) {
+      throw invalid('AnalyticsCursorInvalid', 'Analytics continuation cursor does not match this query.')
+    }
+    after = key.recordKey
+  }
+  return { workspaceId: normalizedWorkspaceId, prefix, scopeHash, limit, after }
 }
 
 function createReportDefinition(
@@ -5123,7 +5376,10 @@ function createReportDefinition(
   const teamId = input.teamId === undefined
     ? undefined
     : readIdentifier(input.teamId, 'Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = input.projectId === undefined
+    ? undefined
+    : readIdentifier(input.projectId, 'Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   return {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
     id: readRouteSafeReportId(input.id),
@@ -5134,6 +5390,7 @@ function createReportDefinition(
       : { description: readText(input.description, 'Analytics report description', 4_000) }),
     visibility,
     ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
     ownerMemberKey: readIdentifier(ownerMemberKey, 'Analytics report owner member key'),
     timeZone: normalizeTimeZone(input.timeZone, 'Analytics report time zone'),
     revision: 1,
@@ -5171,7 +5428,12 @@ function updateReportDefinition(
     : input.teamId === null
       ? undefined
       : readIdentifier(input.teamId, 'Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = input.projectId === undefined
+    ? current.projectId
+    : input.projectId === null
+      ? undefined
+      : readIdentifier(input.projectId, 'Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   const description = input.description === undefined
     ? current.description
     : input.description === null
@@ -5200,6 +5462,7 @@ function updateReportDefinition(
     ...(description === undefined ? { description: undefined } : { description }),
     visibility,
     ...(teamId === undefined ? { teamId: undefined } : { teamId }),
+    ...(projectId === undefined ? { projectId: undefined } : { projectId }),
     timeZone: input.timeZone === undefined
       ? current.timeZone
       : normalizeTimeZone(input.timeZone, 'Analytics report time zone'),
@@ -5225,7 +5488,10 @@ function normalizeStoredReport(value: unknown): AnalyticsReport {
   const teamId = value.teamId === undefined
     ? undefined
     : readIdentifier(value.teamId, 'Stored Analytics report Team ID')
-  validateVisibilityTeam(visibility, teamId)
+  const projectId = value.projectId === undefined
+    ? undefined
+    : readIdentifier(value.projectId, 'Stored Analytics report Project ID')
+  validateVisibilityScope(visibility, teamId, projectId)
   const description = value.description === undefined
     ? undefined
     : readText(value.description, 'Stored Analytics report description', 4_000)
@@ -5243,6 +5509,7 @@ function normalizeStoredReport(value: unknown): AnalyticsReport {
     ...(description === undefined ? {} : { description }),
     visibility,
     ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
     ownerMemberKey: readIdentifier(
       value.ownerMemberKey,
       'Stored Analytics report owner member key',
@@ -6117,21 +6384,38 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
 }
 
 function readVisibility(value: unknown): AnalyticsReport['visibility'] {
-  if (value === 'personal' || value === 'team' || value === 'shared') return value
+  if (value === 'personal' || value === 'team' || value === 'project' || value === 'shared') return value
   throw invalid('AnalyticsVisibilityInvalid', 'Analytics report visibility is invalid.')
 }
 
-function validateVisibilityTeam(
+/**
+ * Requires the Team and Project fields that the report visibility needs, and no others.
+ *
+ * @param visibility - Normalized report visibility.
+ * @param teamId - Team of a Team report, or the owner Team of a Project report.
+ * @param projectId - Project of a Project report.
+ */
+function validateVisibilityScope(
   visibility: AnalyticsReport['visibility'],
   teamId: string | undefined,
+  projectId: string | undefined,
 ) {
   if (visibility === 'team' && teamId === undefined) {
     throw invalid('AnalyticsVisibilityInvalid', 'Team reports require a Team ID.')
   }
-  if (visibility !== 'team' && teamId !== undefined) {
+  if (visibility === 'project' && (teamId === undefined || projectId === undefined)) {
+    throw invalid('AnalyticsVisibilityInvalid', 'Project reports require a Team ID and a Project ID.')
+  }
+  if (visibility !== 'team' && visibility !== 'project' && teamId !== undefined) {
     throw invalid(
       'AnalyticsVisibilityInvalid',
-      'Only Team reports can specify a Team ID.',
+      'Only Team and Project reports can specify a Team ID.',
+    )
+  }
+  if (visibility !== 'project' && projectId !== undefined) {
+    throw invalid(
+      'AnalyticsVisibilityInvalid',
+      'Only Project reports can specify a Project ID.',
     )
   }
 }
