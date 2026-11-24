@@ -13,13 +13,16 @@ import type {
   CustomerRequestSourceKind,
   CustomerRequestStatus,
   CustomerSavedView,
+  CustomerWorkspaceExport,
   CreateCustomerRequestFromTriageInput,
   CreateCustomerSavedViewInput,
   CustomerRequestImportance,
+  MergeCustomerInput,
   ProjectCustomerLinkList,
   UpdateCustomerContactInput,
   UpdateCustomerInput,
   UpdateCustomerRequestInput,
+  UpdateCustomerSavedViewInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -113,6 +116,77 @@ export async function createCustomerSavedView(
     body: JSON.stringify(input),
   })
   if (!isCustomerSavedView(data)) throw new CustomerApiError(502, 'Customer saved-view response is invalid.')
+  return data
+}
+
+/** Updates one saved Customer directory view with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param viewId Saved view to update.
+ * @param input Expected revision and the replacement name, filters, or grouping.
+ * @returns The updated saved view.
+ */
+export async function updateCustomerSavedView(
+  accessToken: string,
+  viewId: string,
+  input: UpdateCustomerSavedViewInput,
+): Promise<CustomerSavedView> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customers/views/${encodeURIComponent(viewId)}`,
+    accessToken,
+    jsonInit('PATCH', input),
+  )
+  if (!isCustomerSavedView(data)) throw new CustomerApiError(502, 'Customer saved-view response is invalid.')
+  return data
+}
+
+/** Deletes one saved Customer directory view with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param viewId Saved view to delete.
+ * @param expectedRevision Saved view revision observed before the delete.
+ */
+export async function deleteCustomerSavedView(
+  accessToken: string,
+  viewId: string,
+  expectedRevision: number,
+): Promise<void> {
+  await requestJson(
+    `${customersApiBaseUrl}/customers/views/${encodeURIComponent(viewId)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+    accessToken,
+    { method: 'DELETE' },
+  )
+}
+
+/** Loads the complete Customer export of the Workspace.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @returns The validated export envelope with Customers, contacts, Requests, and saved views.
+ */
+export async function getCustomerExport(accessToken: string): Promise<CustomerWorkspaceExport> {
+  const data = await requestJson(`${customersApiBaseUrl}/customers/export`, accessToken)
+  if (!isCustomerWorkspaceExport(data)) throw new CustomerApiError(502, 'Customer export response is invalid.')
+  return data
+}
+
+/** Merges one duplicate Customer into the Customer to keep.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param sourceCustomerId Duplicate Customer that is merged away.
+ * @param input Customer to keep and the revisions observed for both Customers.
+ * @returns The kept Customer's detail graph after the merge.
+ */
+export async function mergeCustomer(
+  accessToken: string,
+  sourceCustomerId: string,
+  input: MergeCustomerInput,
+): Promise<CustomerDetail> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customers/${encodeURIComponent(sourceCustomerId)}/merge`,
+    accessToken,
+    jsonInit('POST', input),
+  )
+  if (!isCustomerDetail(data)) throw new CustomerApiError(502, 'Customer detail response is invalid.')
   return data
 }
 
@@ -532,6 +606,17 @@ function isCustomerDetail(value: unknown): value is CustomerDetail {
     Array.isArray(value.requests) && value.requests.every(isCustomerRequest) &&
     Array.isArray(value.workItems) && value.workItems.every(isWorkItemSummary) &&
     Array.isArray(value.projects) && value.projects.every(isProjectSummary)
+}
+
+/** Validates the Customer export envelope without re-validating every exported record field. */
+function isCustomerWorkspaceExport(value: unknown): value is CustomerWorkspaceExport {
+  return isRecord(value) && value.schemaVersion === 1 && isString(value.workspaceId) &&
+    isString(value.exportedAt) &&
+    Array.isArray(value.customers) && value.customers.every(isCustomer) &&
+    Array.isArray(value.contacts) && value.contacts.every(isCustomerContact) &&
+    Array.isArray(value.requests) && value.requests.every(isCustomerRequest) &&
+    Array.isArray(value.views) && value.views.every(isCustomerSavedView) &&
+    Array.isArray(value.completionNotifications) && value.completionNotifications.every(isRecord)
 }
 
 /** Validates one saved Customer directory view. */
