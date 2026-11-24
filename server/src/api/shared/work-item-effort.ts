@@ -1,4 +1,9 @@
-import { isWorkItemEffortMinutes, isWorkItemProgressPercent } from '@mukuroji/contracts'
+import {
+  isWorkItemEffortMinutes,
+  isWorkItemProgressPercent,
+  type WorkItemContributorAssignment,
+  type WorkItemSchedule,
+} from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
 import type { WorkItemDependencies } from '../../app/composition/app-dependencies'
 import { workItemDependencies } from './app-dependencies'
@@ -95,6 +100,25 @@ export type TeamWorkItemEffort = {
   plannedEffortMinutes?: number
   /** Recorded remaining effort, or 0 for a completed or canceled Work Item; absent otherwise. */
   remainingEffortMinutes?: number
+  /** Project the Work Item is assigned to, used to apply the reader's Project visibility. */
+  projectId?: string
+  /**
+   * Local calendar dates over which contributor shares are placed: the schedule's range, or its
+   * due date; absent for an unscheduled Work Item.
+   */
+  window?: { fromDate: string, toDate: string }
+  /**
+   * Unfinished contributor shares of decided members with planned effort; absent for a completed
+   * or canceled Work Item and when there are none.
+   */
+  contributors?: Array<{
+    /** Contributor assignment ID within the Work Item. */
+    assignmentId: string
+    /** Contributing member. */
+    memberId: string
+    /** Planned effort of the share in minutes. */
+    plannedEffortMinutes: number
+  }>
 }
 
 /** Which Work Items {@link listTeamWorkItemEffort} reads. */
@@ -143,11 +167,18 @@ export async function listTeamWorkItemEffort(
       const terminal = issue.statusCategory === 'completed' || issue.statusCategory === 'canceled'
       const remainingEffortMinutes = terminal ? 0 : issue.remainingEffortMinutes
       const plannedEffortMinutes = issue.schedule.plannedEffortMinutes
-      if (plannedEffortMinutes === undefined && remainingEffortMinutes === undefined) continue
+      const contributors = terminal ? [] : listPlannedContributorShares(issue.contributorAssignments ?? [])
+      if (plannedEffortMinutes === undefined && remainingEffortMinutes === undefined && contributors.length === 0) {
+        continue
+      }
+      const window = readWorkItemScheduleWindow(issue.schedule)
       result.push({
         workItemId: issue.id,
         ...(plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }),
         ...(remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes }),
+        ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+        ...(window ? { window } : {}),
+        ...(contributors.length > 0 ? { contributors } : {}),
       })
     }
     if (response.nextStartAfterIssueId !== undefined && response.nextStartAfterIssueId === startAfterIssueId) {
@@ -156,4 +187,46 @@ export async function listTeamWorkItemEffort(
     startAfterIssueId = response.nextStartAfterIssueId
   } while (startAfterIssueId !== undefined)
   return result
+}
+
+/**
+ * Lists the contributor shares that still plan effort for a decided member.
+ *
+ * A role-only share has no member whose capacity it can use, and a `done` share or one without
+ * planned effort reserves nothing.
+ *
+ * @param assignments - Stored contributor assignments.
+ * @returns The shares capacity planning places on members.
+ */
+function listPlannedContributorShares(
+  assignments: readonly WorkItemContributorAssignment[],
+): NonNullable<TeamWorkItemEffort['contributors']> {
+  return assignments.flatMap((assignment) =>
+    assignment.memberUserId === undefined ||
+      assignment.status === 'done' ||
+      !assignment.plannedEffortMinutes
+      ? []
+      : [{
+          assignmentId: assignment.assignmentId,
+          memberId: assignment.memberUserId,
+          plannedEffortMinutes: assignment.plannedEffortMinutes,
+        }])
+}
+
+/**
+ * Reads the local dates a Work Item's schedule spans.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @returns The inclusive date range, the due date alone, or undefined when unscheduled.
+ */
+function readWorkItemScheduleWindow(schedule: WorkItemSchedule): TeamWorkItemEffort['window'] {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return undefined
+    case 'due-date':
+      return { fromDate: schedule.dueDate, toDate: schedule.dueDate }
+    case 'date-range':
+    case 'milestone':
+      return { fromDate: schedule.startDate, toDate: schedule.endDate }
+  }
 }

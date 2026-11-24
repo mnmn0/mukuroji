@@ -23,6 +23,8 @@ export type NotificationSettingsPanelContainerProps = {
   guardRequest?: PushRequestGuard
   /** Teams and Projects the member can mute; omitted while unknown. */
   muteTargets?: readonly NotificationMuteTeam[]
+  /** Member's display time zone, used as the quiet hours time zone when they are first turned on. */
+  memberTimeZone?: string
 }
 
 /**
@@ -37,6 +39,7 @@ export function NotificationSettingsPanelContainer({
   locale,
   onSessionError,
   guardRequest,
+  memberTimeZone,
   muteTargets,
 }: NotificationSettingsPanelContainerProps) {
   const controller = useNotificationPreferences(
@@ -52,6 +55,7 @@ export function NotificationSettingsPanelContainer({
         controller={controller}
         key={controller.preferences?.version ?? 'notification-settings-loading'}
         locale={locale}
+        memberTimeZone={memberTimeZone}
         muteTargets={muteTargets}
       />
       <PushDeviceSettings controller={pushDevice} locale={locale} />

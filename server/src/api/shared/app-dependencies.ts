@@ -130,11 +130,17 @@ export const workItemDependencies: WorkItemDependencies = {
   get calendarFeeds() {
     return requireAppDependencies().workItems.calendarFeeds
   },
+  get projectStatusShares() {
+    return requireAppDependencies().workItems.projectStatusShares
+  },
   get weeklyReports() {
     return requireAppDependencies().workItems.weeklyReports
   },
   get scheduleBaselines() {
     return requireAppDependencies().workItems.scheduleBaselines
+  },
+  get portfolioSnapshots() {
+    return requireAppDependencies().workItems.portfolioSnapshots
   },
   get cycleScheduleBaselines() {
     return requireAppDependencies().workItems.cycleScheduleBaselines

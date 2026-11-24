@@ -1,4 +1,4 @@
-import { childElement, childElements, escapeXml, parseXmlDocument, textContent, type XmlElement } from './xmlDocument'
+import { childElement, childElements, escapeXml, parseXmlDocument, textContent, type XmlElement } from '../../shared/lib/files/xmlDocument'
 
 /** Schedule dependency between two exported Work Items, from the successor's point of view. */
 export type MsProjectDependency = {

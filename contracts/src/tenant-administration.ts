@@ -1,3 +1,4 @@
+import type { PlanningUpdateTemplateSettings } from './planning-update-template'
 import type { WorkspaceTimeEntryCategorySettings } from './time-entry-categories'
 import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
 import type { WorkspaceCalendarSettings } from './workspace-calendar'
@@ -38,6 +39,8 @@ export type TenantProfile = {
   calendar?: WorkspaceCalendarSettings
   /** When unsubmitted weekly reports are reminded; absent until an administrator chooses. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /** Health update required fields and template; absent until an administrator chooses them. */
+  planningUpdateTemplate?: PlanningUpdateTemplateSettings
   /** Work categories offered for time entries; absent until an administrator chooses them. */
   timeEntryCategories?: WorkspaceTimeEntryCategorySettings
   /**
@@ -247,6 +250,8 @@ export type UpdateTenantProfileInput = {
   calendar?: WorkspaceCalendarSettings
   /** Weekly report reminder settings; omitted keeps the stored settings. */
   weeklyReportReminders?: WeeklyReportReminderSettings
+  /** Health update required fields and template; omitted keeps the stored settings. */
+  planningUpdateTemplate?: PlanningUpdateTemplateSettings
   /**
    * Work categories for time entries; omitted keeps the stored settings. A category already
    * offered may be retired but not removed.

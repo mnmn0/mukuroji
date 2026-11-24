@@ -1,6 +1,9 @@
 import {
   WORKSPACE_INVITATION_NAME_MAX_LENGTH,
   isWorkspaceInvitationEmail,
+  MEMBER_DISPLAY_NAME_MAX_LENGTH,
+  readMemberDisplayName,
+  type MemberProfile,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -13,6 +16,7 @@ import {
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceAccessTransactWriteItem,
   type WorkspaceInvitation,
+  type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../../modules/workspace-access/workspace-access'
@@ -190,6 +194,46 @@ function readWorkspaceVersion(value: unknown) {
   }
 
   return value
+}
+
+/**
+ * Reads the body of a display name change.
+ *
+ * @param body - Parsed request body.
+ * @returns The trimmed name (undefined removes it) and the member version read before the change.
+ * @throws WorkspaceAccessError 400 `InvalidWorkspaceMemberName` for a name that is not a string,
+ *   is too long, or holds control characters.
+ */
+function readMemberNameChange(body: unknown) {
+  const fields = typeof body === 'object' && body !== null ? body : {}
+  const name = readMemberDisplayName('name' in fields ? fields.name : undefined)
+  if (!name.ok) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidWorkspaceMemberName',
+      `Member name must be a string of at most ${MEMBER_DISPLAY_NAME_MAX_LENGTH} characters without control characters.`,
+    )
+  }
+  return {
+    name: name.name,
+    expectedVersion: readWorkspaceVersion('expectedVersion' in fields ? fields.expectedVersion : undefined),
+  }
+}
+
+/**
+ * Builds the signed-in member's profile response.
+ *
+ * @param member - The member's current row.
+ * @returns Profile fields the Web app shows and edits.
+ */
+function toMemberProfile(member: WorkspaceMember): MemberProfile {
+  return {
+    memberKey: member.memberKey,
+    email: member.email,
+    ...(member.name ? { name: member.name } : {}),
+    nameEditable: member.provisioningSource !== 'directory',
+    version: member.version,
+  }
 }
 
 async function handleWorkspaceInvitationDeliveryAction(
@@ -458,6 +502,103 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
       }
 
       return toProjectDataErrorResponse(c, error)
+    }
+  })
+
+  /** Returns the signed-in member's own profile. */
+  routeApp.get('/api/me/profile', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+        principal.directoryId,
+        principal.userKey,
+      )
+      if (!member) {
+        throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
+      }
+      c.header('Cache-Control', 'private, no-store')
+      return c.json({ profile: toMemberProfile(member) })
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toAuthErrorResponse(c, error)
+      }
+
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+  })
+
+  /** Changes the signed-in member's own display name. */
+  routeApp.put('/api/me/profile', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const input = readMemberNameChange(await readJson<unknown>(c.req))
+      // The name is part of the request fingerprint, so a retry with the same key and another
+      // name is refused instead of being taken for the saved rename.
+      const auditContext = createWorkspaceMutationContext(c, principal, {
+        expectedVersion: input.expectedVersion,
+        name: input.name ?? null,
+      })
+      const member = await workspaceDependencies.workspaceAccess.updateMemberName(
+        principal.directoryId,
+        principal.userKey,
+        principal.userKey,
+        input,
+        auditContext,
+      )
+      return c.json({ profile: toMemberProfile(member) })
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toAuthErrorResponse(c, error)
+      }
+
+      return toWorkspaceAccessErrorResponse(c, error)
+    }
+  })
+
+  /** Lets a Workspace administrator correct a member's display name. */
+  routeApp.put('/api/workspace/members/:memberKey/name', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceAdministration(principal)
+      const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
+      const input = readMemberNameChange(await readJson<unknown>(c.req))
+      const auditContext = createWorkspaceMutationContext(c, principal, {
+        expectedVersion: input.expectedVersion,
+        memberKey,
+        name: input.name ?? null,
+      })
+      const member = await workspaceDependencies.workspaceAccess.updateMemberName(
+        principal.directoryId,
+        principal.userKey,
+        memberKey,
+        input,
+        auditContext,
+      )
+      return c.json({ member })
+    } catch (error) {
+      if (error instanceof CognitoServiceError) {
+        return toAuthErrorResponse(c, error)
+      }
+
+      return toWorkspaceAccessErrorResponse(c, error)
     }
   })
 
