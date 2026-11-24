@@ -235,12 +235,18 @@ describe('OrgUnit structure read failures', () => {
     globalThis.fetch = fakeFetch
   }
 
-  test('shows a refused reader no OrgUnits, but keeps a server or network failure as an error', async () => {
+  test('shows a refused reader no OrgUnits, but keeps session-policy, server, and network failures as errors', async () => {
     answerWith(403, { code: 'WorkspaceRoleDenied', message: 'Guests cannot read the OrgUnit structure.' })
     expect(await readOrgStructureForDisplay('token')).toEqual({ orgUnits: [], teamAssignments: [], revision: 0 })
 
     answerWith(503, { code: 'OrgStructureUnavailable', message: 'Unavailable' })
     await expect(readOrgStructureForDisplay('token')).rejects.toBeInstanceOf(ProjectDirectoryApiError)
+
+    answerWith(403, { code: 'EnterpriseSessionIdleTimeout', message: 'Sign in again.' })
+    await expect(readOrgStructureForDisplay('token')).rejects.toMatchObject({ status: 403, code: 'EnterpriseSessionIdleTimeout' })
+
+    answerWith(403, { code: 'EnterpriseSessionIpDenied', message: 'Source IP is not allowed.' })
+    await expect(readOrgStructureForDisplay('token')).rejects.toMatchObject({ status: 403, code: 'EnterpriseSessionIpDenied' })
 
     const failingFetch: typeof fetch = async () => {
       throw new TypeError('Failed to fetch')

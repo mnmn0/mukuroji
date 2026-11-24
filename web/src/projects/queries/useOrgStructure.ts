@@ -1,5 +1,6 @@
 import type { OrgStructure } from '@mukuroji/contracts'
 import useSWR from 'swr'
+import { resolveEnterpriseSessionErrorAction } from '../../auth/enterpriseSessionErrors'
 import { getOrgStructure } from '../api/orgStructure'
 import { ProjectDirectoryApiError } from '../api/errors'
 
@@ -24,17 +25,24 @@ export function isOrgStructureKey(key: unknown): boolean {
  *
  * A member who may not read the structure, such as a guest, sees the Workspace as having no
  * OrgUnits. Any other failure is rethrown, so a screen can tell it apart from a Workspace that
- * has no OrgUnits and offer a retry.
+ * has no OrgUnits and offer a retry. A 403 from the Enterprise session policy, such as an idle
+ * timeout or a denied IP, is rethrown too, so it reaches the sign-in or recovery flow.
  *
  * @param accessToken - Bearer token.
  * @returns The structure, or an empty one when the reader may not see it.
- * @throws The read error for anything other than a refusal.
+ * @throws The read error for anything other than a refusal of the structure itself.
  */
 export async function readOrgStructureForDisplay(accessToken: string): Promise<OrgStructure> {
   try {
     return await getOrgStructure(accessToken)
   } catch (error) {
-    if (error instanceof ProjectDirectoryApiError && error.status === 403) return emptyOrgStructure
+    if (
+      error instanceof ProjectDirectoryApiError &&
+      error.status === 403 &&
+      resolveEnterpriseSessionErrorAction(error, '/').kind === 'stay'
+    ) {
+      return emptyOrgStructure
+    }
     throw error
   }
 }
