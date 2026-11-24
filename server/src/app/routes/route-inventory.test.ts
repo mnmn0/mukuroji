@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(606)
-  expect(new Set(inventory).size).toBe(602)
+  expect(inventory).toHaveLength(608)
+  expect(new Set(inventory).size).toBe(604)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -61,6 +61,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report/export')
   expect(inventory).toContain('GET /api/planning/cycles/:cycleId/schedule-baselines')
   expect(inventory).toContain('POST /api/planning/cycles/:cycleId/schedule-baselines')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -184,6 +186,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '33efce04bf7291f07e6adc836b5118a03efcdc2d6881a6610494b1f1477ac308',
+    'ccfd0efbb5c37dbb3a7ee80d454ace6a3bc0406c7f221c4102ec275b2d173857',
   )
 })
