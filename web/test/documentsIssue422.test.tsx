@@ -151,6 +151,28 @@ describe('Document editing and comments (#422)', () => {
       { userId: 'ann@example.com', offset: 4, length: 4 },
       { userId: 'ann.smith@example.com', offset: 13, length: 10 },
     ])
+    // A shorter token picked elsewhere does not cut a stored longer mention short.
+    const longer = {
+      body: 'Ask @Ann Smith today',
+      mentions: [{ userId: 'ann.smith@example.com', offset: 4, length: 10 }],
+    }
+    expect(resolveEditedDocumentMentions(longer, 'Ask @Ann Smith today, cc @Ann', ['ann@example.com'], people))
+      .toEqual([
+        { userId: 'ann.smith@example.com', offset: 4, length: 10 },
+        { userId: 'ann@example.com', offset: 25, length: 4 },
+      ])
+    // Stored `@Ann` is not read inside a stored `@Ann Smith`; it keeps its own occurrence.
+    const both = {
+      body: 'Hi @Ann Smith and @Ann',
+      mentions: [
+        { userId: 'ann.smith@example.com', offset: 3, length: 10 },
+        { userId: 'ann@example.com', offset: 18, length: 4 },
+      ],
+    }
+    expect(resolveEditedDocumentMentions(both, 'Hello @Ann Smith and @Ann', [], people)).toEqual([
+      { userId: 'ann.smith@example.com', offset: 6, length: 10 },
+      { userId: 'ann@example.com', offset: 21, length: 4 },
+    ])
   })
 
   test('puts an edited comment into the cached thread opened by a deep link', async () => {

@@ -67,12 +67,13 @@ export function resolveDocumentMentions(
 /**
  * Resolves the mention ranges of an edited comment.
  *
- * Tokens picked in the composer come first, the longest one winning, so picking `@Ann Smith`
- * where `@Ann` was mentioned mentions the newly picked member. A stored mention whose exact token
- * is still in the body, outside every picked token, keeps its member, so a member renamed since
- * the comment was written stays mentioned and an unrelated edit is not rejected. The n-th
- * remaining occurrence of a token takes the n-th stored mention with that token; typed
- * `@member-key` tokens in the rest of the body are read like in a new comment.
+ * Tokens picked in the composer and stored mentions whose exact token is still in the body are
+ * both candidates; where they overlap the longer token wins, and a picked token wins a tie. So
+ * picking `@Ann Smith` where `@Ann` was mentioned mentions the newly picked member, while a
+ * picked `@Ann` elsewhere never cuts a stored `@Ann Smith` short. A stored mention keeps its
+ * member, so a member renamed since the comment was written stays mentioned and an unrelated edit
+ * is not rejected. The n-th occurrence of a stored token takes the n-th stored mention with that
+ * token; typed `@member-key` tokens in the rest of the body are read like in a new comment.
  *
  * @param original - Stored body and mentions of the comment.
  * @param body - Edited plain text body.
@@ -93,21 +94,32 @@ export function resolveEditedDocumentMentions(
   }
   const picked: DocumentMention[] = findMemberMentionRanges(body, selectedMemberKeys, members)
     .map((range) => ({ length: range.length, offset: range.offset, userId: range.memberKey }))
-  const kept: DocumentMention[] = []
-  for (const [token, stored] of storedByToken) {
-    const occurrences = findTokenOccurrences(body, token)
-      .filter((offset) => {
-        const range = { offset, length: token.length }
-        return !overlapsMentionRanges(range, picked) && !overlapsMentionRanges(range, kept)
+  const storedCandidates: DocumentMention[] = []
+  // Longer stored tokens take their occurrences first, so `@Ann` is not read inside `@Ann Smith`.
+  const storedTokens = [...storedByToken].sort(([left], [right]) => right.length - left.length)
+  for (const [token, stored] of storedTokens) {
+    findTokenOccurrences(body, token)
+      .filter((offset) => !overlapsMentionRanges({ offset, length: token.length }, storedCandidates))
+      .slice(0, stored.length)
+      .forEach((offset, index) => {
+        const mention = stored[index]
+        if (mention) storedCandidates.push({ userId: mention.userId, offset, length: token.length })
       })
-    occurrences.slice(0, stored.length).forEach((offset, index) => {
-      const mention = stored[index]
-      if (mention) kept.push({ userId: mention.userId, offset, length: token.length })
-    })
   }
-  const typed = extractDocumentMentions(body)
-    .filter((mention) => !overlapsMentionRanges(mention, picked) && !overlapsMentionRanges(mention, kept))
-  return [...picked, ...kept, ...typed].sort((left, right) => left.offset - right.offset)
+  // Longest first; on equal length a picked token, then a stored one, then a typed key.
+  const candidates = [
+    ...picked.map((mention) => ({ mention, rank: 0 })),
+    ...storedCandidates.map((mention) => ({ mention, rank: 1 })),
+    ...extractDocumentMentions(body).map((mention) => ({ mention, rank: 2 })),
+  ].sort((left, right) =>
+    right.mention.length - left.mention.length ||
+    left.rank - right.rank ||
+    left.mention.offset - right.mention.offset)
+  const resolved: DocumentMention[] = []
+  for (const { mention } of candidates) {
+    if (!overlapsMentionRanges(mention, resolved)) resolved.push(mention)
+  }
+  return resolved.sort((left, right) => left.offset - right.offset)
 }
 
 /**
