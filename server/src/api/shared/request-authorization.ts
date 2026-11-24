@@ -730,6 +730,11 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
+  // Workload and personal time across Teams: each Team is then checked like its Team route, so a
+  // Team-scoped grant reaches only its Teams and never needs a Workspace-wide permission.
+  { method: 'GET', pathPattern: '/api/workload', permission: 'teams.read' },
+  { method: 'GET', pathPattern: '/api/time-tracking/my-timesheet', permission: 'teams.read' },
+  { method: 'POST', pathPattern: '/api/time-tracking/my-timesheet/submit', permission: 'teams.write' },
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
   // A member's own agent credentials: reading and revoking change nothing shared, while
@@ -1698,6 +1703,7 @@ function shouldEvaluateEnterpriseProjectScopes(
   if (/^\/api\/collections(?:\/|$)/u.test(path)) {
     return /^\/api\/collections\/(?:candidates|[^/]+\/items)(?:\/|$)/u.test(path)
   }
+  if (/^\/api\/(?:workload|time-tracking\/my-timesheet)(?:\/|$)/u.test(path)) return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }

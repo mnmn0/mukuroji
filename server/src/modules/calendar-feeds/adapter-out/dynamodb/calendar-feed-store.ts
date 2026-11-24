@@ -68,7 +68,7 @@ function tokenKey(tokenHash: string): string {
  * digest as a lookup row in the same partition, so deleting the Workspace partition removes
  * both. Replacing or revoking a token deletes its lookup row in the same transaction.
  */
-export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAuditContext> {
+export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAuditContext, TransactItem> {
   /** Existing Planning table name. */
   private readonly tableName: string
   /** Injected document client. */
@@ -140,9 +140,9 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
    * Stores a feed and its new token lookup row, deleting the previous lookup row, in one
    * transaction that fails when another request replaced the token first.
    *
-   * @param input - Feed, previous digest, and audit context.
+   * @param input - Feed, previous digest, audit context, and idempotency receipt.
    */
-  async save(input: CalendarFeedSaveInput<MutationAuditContext>): Promise<void> {
+  async save(input: CalendarFeedSaveInput<MutationAuditContext, TransactItem>): Promise<void> {
     const { record } = input
     const recordKey = feedKey(record)
     const audit = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
@@ -206,6 +206,7 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
           } satisfies TransactItem]
         : []),
       ...(audit ? [audit] : []),
+      ...(input.receiptCompletion ? [input.receiptCompletion] : []),
     ]
     await this.client.send(new TransactWriteCommand({ TransactItems: items }))
       .catch((error: unknown) => storageFailure(error, items.length))
@@ -271,7 +272,7 @@ export class DynamoDbCalendarFeedStore implements CalendarFeedStore<MutationAudi
 /**
  * Keeps feeds in memory for tests and local runs, with the same replace and revoke rules.
  */
-export class InMemoryCalendarFeedStore implements CalendarFeedStore {
+export class InMemoryCalendarFeedStore implements CalendarFeedStore<unknown, unknown> {
   /** Feeds keyed by Workspace and feed record key. */
   private readonly feeds = new Map<string, CalendarFeedRecord>()
   /** Feed record keys keyed by Workspace and token digest. */
@@ -308,7 +309,7 @@ export class InMemoryCalendarFeedStore implements CalendarFeedStore {
    *
    * @param input - Feed and previous digest.
    */
-  async save(input: CalendarFeedSaveInput<unknown>): Promise<void> {
+  async save(input: CalendarFeedSaveInput<unknown, unknown>): Promise<void> {
     const recordKey = feedKey(input.record)
     const key = `${input.workspaceId}\0${recordKey}`
     const current = this.feeds.get(key)
@@ -353,7 +354,7 @@ function auditMetadata(record: CalendarFeedRecord): Record<string, string> {
  * @param row - Raw row.
  * @param workspaceId - Partition the row was read from.
  * @returns The feed.
- * @throws CalendarFeedError 503 when the row is malformed.
+ * @throws CalendarFeedError `unavailable` when the row is malformed.
  */
 function parseFeedRow(row: Record<string, unknown>, workspaceId: string): CalendarFeedRecord {
   const kind = row.kind
@@ -404,7 +405,7 @@ function isFeedKind(value: unknown): value is CalendarFeedKind {
  * @returns The error.
  */
 function corruptFeed(): CalendarFeedError {
-  return new CalendarFeedError(503, 'CalendarFeedCorrupt', 'Calendar feed data is unavailable.')
+  return new CalendarFeedError('unavailable', 'CalendarFeedCorrupt', 'Calendar feed data is unavailable.')
 }
 
 /**
@@ -413,7 +414,7 @@ function corruptFeed(): CalendarFeedError {
  * @returns The error.
  */
 function conflict(): CalendarFeedError {
-  return new CalendarFeedError(409, 'CalendarFeedConflict', 'The calendar feed changed. Reload and try again.')
+  return new CalendarFeedError('conflict', 'CalendarFeedConflict', 'The calendar feed changed. Reload and try again.')
 }
 
 /** DynamoDB cancellation codes that mean the request may succeed if retried. */
@@ -455,8 +456,8 @@ function storageFailure(error: unknown, transactionSize = 0): never {
     const isConditionOrNone = (code: string | undefined) => code === 'None' || code === 'ConditionalCheckFailed'
     if (codes.includes('ConditionalCheckFailed') && codes.every(isConditionOrNone)) throw conflict()
     if (codes.some((code) => code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code))) {
-      throw new CalendarFeedError(503, 'CalendarFeedRetryable', 'Calendar feed storage is temporarily unavailable.', { cause: error })
+      throw new CalendarFeedError('unavailable', 'CalendarFeedRetryable', 'Calendar feed storage is temporarily unavailable.', { cause: error })
     }
   }
-  throw new CalendarFeedError(503, 'CalendarFeedStorageFailure', 'Calendar feed storage request failed.', { cause: error })
+  throw new CalendarFeedError('unavailable', 'CalendarFeedStorageFailure', 'Calendar feed storage request failed.', { cause: error })
 }

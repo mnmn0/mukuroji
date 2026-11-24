@@ -56,6 +56,8 @@ export type CustomerEditingProps = {
   onCreateCustomer: (input: CreateCustomerInput) => Promise<boolean>
   /** Updates a Customer. */
   onUpdateCustomer: (customerId: string, input: UpdateCustomerInput) => Promise<boolean>
+  /** Merges a duplicate Customer into the Customer to keep. Resolves true when it was merged. */
+  onMergeCustomer: (source: Customer, target: Customer) => Promise<boolean>
   /** Adds a contact to a Customer. */
   onCreateContact: (customerId: string, input: CreateCustomerContactInput) => Promise<boolean>
   /** Updates a contact. */

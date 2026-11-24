@@ -219,7 +219,7 @@ export interface WorkItemDependencies {
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
   /** Provides members' signed calendar feeds and their token lookup rows. */
-  calendarFeeds: CalendarFeedStore<MutationAuditContext>
+  calendarFeeds: CalendarFeedStore<MutationAuditContext, AutomationCompositionTransactionItem>
   /** Provides members' saved and submitted weekly reports. */
   weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */

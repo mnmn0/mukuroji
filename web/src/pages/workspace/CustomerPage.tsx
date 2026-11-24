@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import type { CustomerListInput, CustomerSavedView } from '@mukuroji/contracts'
 import { useCustomerEditing } from '../../customers/mutations/useCustomerEditing'
+import { useCustomerExport } from '../../customers/mutations/useCustomerExport'
 import { useCustomerSavedViewMutations } from '../../customers/mutations/useCustomerSavedViewMutations'
 import { useCustomer, useCustomerSavedViews, useCustomers } from '../../customers/queries/useCustomers'
 import { CustomerDirectoryView } from '../../customers/ui/CustomerDirectoryView'
 import type { CustomerEditingProps, CustomerProjectOption } from '../../customers/ui/CustomerEditors'
+import { downloadCustomerExport } from '../../customers/ui/downloadCustomerExport'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
@@ -68,6 +70,13 @@ export function CustomerPage() {
       () => Promise.all([refreshCustomers(), refreshDetail()]),
       [refreshCustomers, refreshDetail],
     ),
+    refreshDirectory: useCallback(() => refreshCustomers(), [refreshCustomers]),
+  })
+  // The export endpoint requires Customer management, the same capability that unlocks sensitive data.
+  const canExportCustomers = customerAccessEnabled && workspace.canViewCustomerSensitiveData
+  const customerExport = useCustomerExport({
+    accessToken: workspace.accessToken,
+    enabled: canExportCustomers,
   })
   const projectOptions = useMemo(() => listCustomerProjectOptions(workspace.teams), [workspace.teams])
   const editing = useMemo((): CustomerEditingProps | undefined => canEditCustomers ? {
@@ -82,6 +91,13 @@ export function CustomerPage() {
       return Boolean(created)
     },
     onUpdateCustomer: customerEditing.updateCustomer,
+    onMergeCustomer: async (source, target) => {
+      const merged = await customerEditing.mergeCustomer(source, target)
+      if (merged) {
+        navigate(`/customers/${encodeURIComponent(merged.customer.id)}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`)
+      }
+      return Boolean(merged)
+    },
     onCreateContact: customerEditing.createContact,
     onUpdateContact: customerEditing.updateContact,
     onDeleteContact: customerEditing.deleteContact,
@@ -120,6 +136,21 @@ export function CustomerPage() {
       ...(groupBy === undefined ? {} : { groupBy }),
     })
   }, [filters, groupBy, savedViewMutations])
+
+  const renameView = useCallback(
+    (view: CustomerSavedView, name: string) => savedViewMutations.update(view, { name }),
+    [savedViewMutations],
+  )
+
+  const replaceViewFilters = useCallback(
+    (view: CustomerSavedView) => savedViewMutations.update(view, { filters, groupBy: groupBy ?? null }),
+    [filters, groupBy, savedViewMutations],
+  )
+
+  const exportCustomers = useCallback(async () => {
+    const value = await customerExport.exportCustomers()
+    if (value) downloadCustomerExport(value)
+  }, [customerExport])
 
   useEffect(() => {
     document.title = `${t('customers.title')} | ${t('app.title')}`
@@ -181,7 +212,14 @@ export function CustomerPage() {
           search={search}
           savedViews={savedViews.data ?? []}
           isSavingView={savedViewMutations.isSaving}
-          saveViewError={savedViewMutations.hasError ? t('customers.filters.saveError') : undefined}
+          saveViewError={savedViewMutations.errorKey ? t(savedViewMutations.errorKey) : undefined}
+          onRenameView={renameView}
+          onReplaceViewFilters={replaceViewFilters}
+          onDeleteView={savedViewMutations.remove}
+          canExport={canExportCustomers}
+          isExporting={customerExport.isExporting}
+          exportError={customerExport.errorKey ? t(customerExport.errorKey) : undefined}
+          onExport={() => void exportCustomers()}
           t={t}
         /> : (
           <div className="workbench-panel p-8 text-sm text-[var(--workbench-muted)]" role="alert">

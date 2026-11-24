@@ -7,6 +7,26 @@ import type { CustomerEditingProps } from './CustomerEditors'
 
 const customer = customerFixture
 const detail = customerDetailFixture
+/** Second registration of the same organization, used by the merge story. */
+const duplicateCustomer = {
+  ...customerFixture,
+  id: 'customer-2',
+  name: 'Acme Industries Ltd.',
+  domain: 'acme-industries.example',
+  contactCount: 0,
+  requestCount: 0,
+  openRequestCount: 0,
+}
+/** Saved view used by the saved-view management story. */
+const savedView = {
+  id: 'view-1',
+  workspaceId: 'workspace-1',
+  name: 'Strategic accounts',
+  filters: { tier: 'strategic' as const },
+  revision: 1,
+  createdAt: customer.createdAt,
+  updatedAt: customer.updatedAt,
+}
 
 const meta = {
   title: 'Customers/CustomerDirectoryView',
@@ -27,6 +47,13 @@ const meta = {
     isSavingView: false,
     locale: 'en-US',
     onApplySavedView: () => undefined,
+    onRenameView: async () => true,
+    onReplaceViewFilters: async () => true,
+    onDeleteView: async () => true,
+    canExport: true,
+    isExporting: false,
+    exportError: undefined,
+    onExport: () => undefined,
     onFiltersChange: () => undefined,
     onGroupByChange: () => undefined,
     onLoadMoreCustomers: () => undefined,
@@ -74,9 +101,17 @@ export const Empty: Story = {
 /** Renders the directory for a member without sensitive-data access. */
 export const Restricted: Story = {
   args: {
+    canExport: false,
     canManageCustomerViews: false,
     canViewSensitiveData: false,
+    savedViews: [savedView],
     search: '',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.queryByRole('button', { name: 'Download export' })).not.toBeInTheDocument()
+    await expect(canvas.queryByRole('button', { name: 'Manage saved views' })).not.toBeInTheDocument()
+    await expect(canvas.queryByRole('button', { name: 'Merge duplicate' })).not.toBeInTheDocument()
   },
 }
 
@@ -86,6 +121,7 @@ const storyEditing: CustomerEditingProps = {
   projects: [{ id: 'project-1', name: 'Quarterly review' }, { id: 'project-2', name: 'Data export' }],
   onCreateCustomer: async () => true,
   onUpdateCustomer: async () => true,
+  onMergeCustomer: async () => true,
   onCreateContact: async () => true,
   onUpdateContact: async () => true,
   onDeleteContact: async () => true,
@@ -127,5 +163,47 @@ export const CreateCustomer: Story = {
 export const EditingError: Story = {
   args: {
     editing: { ...storyEditing, errorMessage: createTranslator('en')('customers.edit.error.conflict') },
+  },
+}
+
+/** A Customer manager renames, overwrites, or deletes a saved view. */
+export const ManageSavedViews: Story = {
+  args: { savedViews: [savedView] },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    if (window.matchMedia('(max-width: 760px)').matches) {
+      await userEvent.click(canvas.getByRole('button', { name: /Filters and sorting/ }))
+    }
+    await userEvent.click(canvas.getByRole('button', { name: 'Manage saved views' }))
+    const list = canvas.getByRole('list', { name: 'Saved views' })
+    await expect(within(list).getByRole('button', { name: 'Save current filters to Strategic accounts' })).toBeVisible()
+    await userEvent.click(within(list).getByRole('button', { name: 'Rename Strategic accounts' }))
+    await expect(within(list).getByRole('textbox', { name: 'View name' })).toHaveValue('Strategic accounts')
+    await expect(within(list).getByRole('button', { name: 'Save' })).toBeDisabled()
+  },
+}
+
+/** Export download in progress. */
+export const Exporting: Story = {
+  args: { isExporting: true },
+}
+
+/** A failed export is announced above the directory list. */
+export const ExportError: Story = {
+  args: { exportError: createTranslator('en')('customers.export.error') },
+}
+
+/** A Customer manager picks the Customer to keep and reviews what moves before merging. */
+export const MergeDuplicate: Story = {
+  args: { customers: [customer, duplicateCustomer], editing: storyEditing },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Merge Acme Industries into another customer' }))
+    const form = canvas.getByRole('form', { name: 'Merge into another customer' })
+    await expect(within(form).getByRole('button', { name: 'Review merge' })).toBeDisabled()
+    await userEvent.selectOptions(within(form).getByRole('combobox', { name: 'Customer to keep' }), 'customer-2')
+    await userEvent.click(within(form).getByRole('button', { name: 'Review merge' }))
+    await expect(within(form).getByRole('alert')).toHaveTextContent('Contacts (1) and requests (2) of Acme Industries move to Acme Industries Ltd., and Acme Industries is removed.')
+    await expect(within(form).getByRole('button', { name: 'Merge' })).toBeEnabled()
   },
 }

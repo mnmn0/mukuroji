@@ -95,13 +95,24 @@ test('replaces a token by deleting the old lookup row in the same transaction', 
   expect(JSON.stringify(items?.at(-1))).not.toContain('new-hash')
 })
 
+test('commits the idempotency receipt in the feed transaction', async () => {
+  const sent: SentCommand[] = []
+  const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, sent), 'Audit')
+  const receiptCompletion = { Put: { TableName: 'DeveloperPlatform', Item: { recordKey: 'IDEMPOTENCY#x' } } }
+  await store.save({ workspaceId: 'w', record, auditContext, receiptCompletion, now: record.issuedAt })
+  const items = sent[0]?.input.TransactItems
+  if (!Array.isArray(items)) throw new Error('Expected a transaction.')
+  expect(items.at(-1)).toEqual(receiptCompletion)
+  expect(items).toHaveLength(4)
+})
+
 test('maps a failed condition to a conflict', async () => {
   const error = Object.assign(new Error('cancelled'), {
     name: 'TransactionCanceledException',
     CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
   })
   const store = new DynamoDbCalendarFeedStore('Planning', fakeClient({}, [], error))
-  expect(store.remove({ workspaceId: 'w', record, now: record.issuedAt })).rejects.toMatchObject({ status: 409 })
+  expect(store.remove({ workspaceId: 'w', record, now: record.issuedAt })).rejects.toMatchObject({ category: 'conflict' })
 })
 
 test('finds a feed by its current token only', async () => {
