@@ -4692,6 +4692,13 @@ test('notifies every thread participant through the participant index, backfilli
     title: 'Long thread',
     blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
   })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
   const reply = async (memberKey: string, commentId: string) => client.createComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -4786,6 +4793,13 @@ test('keeps reading an older thread too large to backfill, even after the root a
     title: 'Large thread',
     blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
   })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
   const reply = async (memberKey: string, commentId: string) => client.createComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -4850,7 +4864,19 @@ test('keeps reading an older thread too large to backfill, even after the root a
 function createMemoryDocumentsRowStore(
   memory: ReturnType<typeof createMemoryDocumentClient>,
 ): DataMigrationRowStore {
+  /**
+   * Builds the map key of a stored row from its partition and sort keys.
+   *
+   * @param row - Stored row or key.
+   * @returns The `workspaceId|recordKey` key.
+   */
   const keyOf = (row: Readonly<Record<string, unknown>>) => `${String(row.workspaceId)}|${String(row.recordKey)}`
+  /**
+   * Reads the current stored row with a map key.
+   *
+   * @param key - `workspaceId|recordKey` key.
+   * @returns The row, or undefined when none is stored.
+   */
   const find = (key: string) => memory.items().find((row) => keyOf(row) === key)
   const keys = memory.items().map(keyOf).sort()
   return {
@@ -4886,6 +4912,13 @@ test('the participant index migration backfills older threads so replies read on
     title: 'Migrated thread',
     blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
   })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
   const reply = async (memberKey: string, commentId: string) => client.createComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -4936,6 +4969,11 @@ test('the participant index migration backfills older threads so replies read on
     maxPages: 100,
     maxWritesPerSecond: 1000,
   }
+  /**
+   * Verifies the participant index migration against the rows stored now.
+   *
+   * @returns The verification result.
+   */
   const verify = () => verifyDataMigration({
     definition: documentCommentParticipantIndexMigration,
     rowStore: runInput.rowStore,
@@ -5033,6 +5071,13 @@ test('replays an idempotent comment edit or delete without rewriting a newer cha
     mentions: [],
     commentId: 'comment-1',
   })
+  /**
+   * Edits the fixed comment of the test Document with the given body and idempotency key.
+   *
+   * @param body - New body.
+   * @param idempotencyKey - Idempotency key of the edit.
+   * @returns The edited comment.
+   */
   const edit = (body: string, idempotencyKey: string) => client.updateComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -5072,6 +5117,12 @@ test('replays an idempotent comment edit or delete without rewriting a newer cha
 
   await expect(edit('Different body', 'edit-key-1'))
     .rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
+  /**
+   * Deletes the fixed comment of the test Document with the given idempotency key.
+   *
+   * @param idempotencyKey - Idempotency key of the delete.
+   * @returns The deleted comment placeholder.
+   */
   const deleteWithKey = (idempotencyKey: string) => client.deleteComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -5084,6 +5135,23 @@ test('replays an idempotent comment edit or delete without rewriting a newer cha
   const deleted = await deleteWithKey('delete-key-1')
   expect(deleted).toMatchObject({ body: '', deletedAt: expect.any(String) })
   expect(await deleteWithKey('delete-key-1')).toEqual(deleted)
+  // A new key that deletes the comment again is recorded too, so it cannot then delete another one.
+  expect(await deleteWithKey('delete-key-2')).toEqual(deleted)
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Another',
+    mentions: [],
+    commentId: 'comment-2',
+  })
+  await expect(client.deleteComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'comment-2',
+    access: ownerAccess,
+    idempotencyKey: 'delete-key-2',
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentIdempotencyConflict' })
   // A key is bound to its actor: another member's identical key is not a replay of this one.
   await expect(client.updateComment({
     workspaceId: 'workspace-1',
@@ -5094,6 +5162,137 @@ test('replays an idempotent comment edit or delete without rewriting a newer cha
     mentions: [],
     idempotencyKey: 'edit-key-1',
   })).rejects.toMatchObject({ status: 403, code: 'DocumentCommentAuthorRequired' })
+})
+
+test('does not let a resolve and an edit or delete with the same timestamp undo each other', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory, () => new Date('2026-07-18T00:00:00.000Z'))
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Same millisecond',
+    blocks: [],
+  })
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Original',
+    mentions: [],
+    commentId: 'root',
+  })
+  /**
+   * Reads the stored row of the root comment.
+   *
+   * @returns The row.
+   */
+  const commentRow = () => {
+    const row = memory.items().find((item) => item.entryType === 'document-comment' && item.id === 'root')
+    if (row === undefined) throw new Error('The comment row should exist.')
+    return row
+  }
+  /**
+   * Commits a change to the comment row with the timestamp it already has, as a concurrent
+   * writer whose clock reads the same millisecond does, right before the next transaction.
+   *
+   * @param change - Fields the concurrent writer sets.
+   */
+  const concurrently = (change: Record<string, unknown>) => {
+    memory.beforeTransaction(() => memory.put({ ...commentRow(), ...change }))
+  }
+  const resolve = () => client.resolveComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    resolved: true,
+  })
+
+  concurrently({ body: 'Edited' })
+  await expect(resolve()).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Edited', resolved: false })
+
+  concurrently({ body: '', mentions: [], deletedAt: '2026-07-18T00:00:00.000Z' })
+  await expect(resolve()).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: '', deletedAt: expect.any(String) })
+
+  memory.put({ ...commentRow(), body: 'Edited', mentions: [], deletedAt: undefined })
+  concurrently({ resolved: true })
+  await expect(client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: 'root',
+    access: ownerAccess,
+    body: 'Edited again',
+    mentions: [],
+  })).rejects.toMatchObject({ status: 409, code: 'DocumentCommentConflict' })
+  expect(commentRow()).toMatchObject({ body: 'Edited', resolved: true })
+})
+
+test('names a keyed comment edit audit event by the change, so the key can change another Document or a later version', async () => {
+  const memory = createMemoryDocumentClient()
+  let clock = Date.parse('2026-07-18T00:00:00.000Z')
+  const client = createClient(memory, () => new Date(clock += 1_000), 'audit-events-table')
+  /**
+   * Creates a page with one comment of the owner.
+   *
+   * @param title - Page title.
+   * @returns The page ID.
+   */
+  const pageWithComment = async (title: string) => {
+    const document = await client.create({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title,
+      blocks: [{ id: 'block-a', type: 'paragraph', text: 'content' }],
+    })
+    await client.createComment({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      body: 'Original',
+      mentions: [],
+      commentId: 'comment-1',
+    })
+    return document.id
+  }
+  /**
+   * Edits the owner's comment with one fixed key and the audit context the API builds from it.
+   *
+   * @param documentId - Page that owns the comment.
+   * @param body - New body.
+   * @returns The edited comment.
+   */
+  const edit = (documentId: string, body: string) => client.updateComment({
+    workspaceId: 'workspace-1',
+    documentId,
+    commentId: 'comment-1',
+    access: ownerAccess,
+    body,
+    mentions: [],
+    idempotencyKey: 'shared-key',
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: ownerAccess.memberKey, kind: 'user', displayName: 'Owner' },
+      idempotencyKey: 'shared-key',
+      request: { method: 'PATCH', path: `/api/documents/${documentId}/comments/comment-1`, body: { body } },
+      source: { kind: 'api' },
+    }),
+  })
+  const first = await pageWithComment('First')
+  const second = await pageWithComment('Second')
+  expect(await edit(first, 'Edited first')).toMatchObject({ body: 'Edited first' })
+  // The receipt is per Document, so the same key edits the other Document's comment too.
+  expect(await edit(second, 'Edited second')).toMatchObject({ body: 'Edited second' })
+  // After the receipt expires, the key edits the comment again instead of meeting the first audit event.
+  clock += 31 * 24 * 60 * 60 * 1_000
+  expect(await edit(first, 'Edited again')).toMatchObject({ body: 'Edited again' })
+  const audited = memory.items().filter((item) => item.eventType === 'document.comment.updated')
+  expect(audited).toHaveLength(3)
 })
 
 test('records Document lifecycle, permission, public link, and export audit events with the change', async () => {
@@ -5389,6 +5588,13 @@ test('re-reads thread participants when a concurrent reply wins the comment-wind
     title: 'Concurrent replies',
     blocks: [],
   })
+  /**
+   * Adds a reply to the fixed root comment of the test Document, with an audit context of its own.
+   *
+   * @param memberKey - Member who replies.
+   * @param commentId - ID of the reply, also its idempotency key.
+   * @returns The created reply.
+   */
   const reply = (memberKey: string, commentId: string) => client.createComment({
     workspaceId: 'workspace-1',
     documentId: document.id,
@@ -5425,7 +5631,7 @@ test('re-reads thread participants when a concurrent reply wins the comment-wind
       updatedAt: '2026-07-18T00:00:00.000Z',
     })
     memory.put(createCommentParticipantItem('workspace-1', document.id, 'root', 'ren@example.com'))
-    throw transactionCancellationError(['None', 'None', 'None', 'ConditionalCheckFailed'])
+    // Kai's transaction then fails on its own comment window condition.
   })
 
   await reply('kai@example.com', 'reply-2')
@@ -6160,6 +6366,51 @@ test('keeps each paragraph block\'s references, footnotes, and structure to itse
       .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
   })
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+test('keeps table cells, CR-separated quotes, and lists around blank blocks as the app shows them in the export', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '| A | B |\n| - | - |\n| [guide][ref] | x |\n\n[ref]: </a|b> "T | U"' },
+      { id: 'block-2', type: 'paragraph', text: '> <div>\r> note\r> </div>' },
+      { id: 'block-3', type: 'paragraph', text: '1. Alpha' },
+      { id: 'block-4', type: 'checklist', items: [] },
+      { id: 'block-5', type: 'paragraph', text: '  ' },
+      { id: 'block-6', type: 'paragraph', text: '1. Beta' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  const nodes = readMarkdownNodes(exported)
+  // The expanded link keeps its cell: the table still has two cells per row, and the link its target.
+  const rows = nodes.filter((node) => node.type === 'tableRow')
+  expect(rows.map((row) => Array.isArray(row.children) ? row.children.length : 0)).toEqual([2, 2])
+  expect(nodes.filter((node) => node.type === 'link').map((node) => [node.url, node.title]))
+    .toEqual([['/a|b', 'T | U']])
+  // Only the HTML of the quote is escaped; each line stays in the quote.
+  const quote = nodes.find((node) => node.type === 'blockquote')
+  expect(quote).toBeDefined()
+  expect(findMarkdownHtml(exported)).toEqual([])
+  expect(exported).toContain('\r> ')
+  // The blank checklist and paragraph are left out, so the two lists still start at 1 apart.
+  const lists = nodes.filter((node) => node.type === 'list')
+  expect(lists.map((node) => [node.start, Array.isArray(node.children) ? node.children.length : 0]))
+    .toEqual([[1, 1], [1, 1]])
+})
+
+test('rewrites references and footnotes whose labels hold character references in the export', () => {
+  const page = createPage({
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'See [x][a&amp;b] and [y][] B[^c&amp;d]\n\n[a&amp;b]: /u\n[y]: /v\n\n[^c&amp;d]: note',
+    }],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  expect(exported).toStartWith('# Document\n\nSee [x](</u>) and [y](</v>) B[^1-1]\n')
+  expect(exported).toEndWith('\n[^1-1]: note\n')
+  const nodes = readMarkdownNodes(exported)
+  expect(nodes.filter((node) => node.type === 'link').map((node) => node.url)).toEqual(['/u', '/v'])
+  expect(nodes.filter((node) => node.type === 'definition')).toEqual([])
 })
 
 test('writes a task list nested in a paragraph list as it is, apart from a checklist block', () => {
@@ -8233,7 +8484,17 @@ function createMemoryDocumentClient() {
         const pending = new Map(
           [...stored].map(([key, item]) => [key, structuredClone(item)]),
         )
-        for (const action of transaction) applyTransactionAction(pending, action)
+        // As in DynamoDB, a cancelled transaction names the action whose condition failed.
+        transaction.forEach((action, index) => {
+          try {
+            applyTransactionAction(pending, action)
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') throw error
+            throw transactionCancellationError(
+              transaction.map((_, position) => position === index ? 'ConditionalCheckFailed' : 'None'),
+            )
+          }
+        })
         stored.clear()
         for (const [key, item] of pending) stored.set(key, item)
         return {}
@@ -8293,11 +8554,6 @@ function createMemoryDocumentClient() {
               ),
           )
         }
-        if (input.FilterExpression === 'parentCommentId = :rootCommentId AND entryType = :entryType') {
-          matches = matches.filter((candidate) =>
-            candidate.parentCommentId === values[':rootCommentId'] &&
-            candidate.entryType === values[':entryType'])
-        }
         matches = matches
           .sort((left, right) => String(left.recordKey).localeCompare(String(right.recordKey)))
         if (input.ScanIndexForward === false) matches.reverse()
@@ -8313,8 +8569,15 @@ function createMemoryDocumentClient() {
         )
         const page = matches.slice(0, limit)
         const hasNext = matches.length > page.length
+        // As in DynamoDB, the filter applies to the page read, so a page of unrelated rows comes
+        // back with no items and a key to read on from.
+        const items = input.FilterExpression === 'parentCommentId = :rootCommentId AND entryType = :entryType'
+          ? page.filter((candidate) =>
+              candidate.parentCommentId === values[':rootCommentId'] &&
+              candidate.entryType === values[':entryType'])
+          : page
         return {
-          Items: structuredClone(page),
+          Items: structuredClone(items),
           ...(hasNext && page.at(-1) !== undefined
             ? {
                 LastEvaluatedKey: {
@@ -8452,8 +8715,15 @@ function matchesCondition(
   if (condition === 'updatedAt = :updatedAt') {
     return current?.updatedAt === values[':updatedAt']
   }
-  if (condition === 'updatedAt = :updatedAt AND attribute_not_exists(deletedAt)') {
-    return current?.updatedAt === values[':updatedAt'] && current?.deletedAt === undefined
+  if (condition === 'updatedAt = :updatedAt AND resolved = :resolved AND attribute_not_exists(deletedAt)') {
+    return current?.updatedAt === values[':updatedAt'] &&
+      current?.resolved === values[':resolved'] &&
+      current?.deletedAt === undefined
+  }
+  if (condition === 'updatedAt = :updatedAt AND body = :body AND attribute_not_exists(deletedAt)') {
+    return current?.updatedAt === values[':updatedAt'] &&
+      current?.body === values[':body'] &&
+      current?.deletedAt === undefined
   }
   if (condition === 'preferenceRevision = :expectedPreferenceRevision') {
     return (

@@ -2,7 +2,7 @@ import { useId, useMemo, type AnchorHTMLAttributes } from 'react'
 import Markdown, { type Components, type Options } from 'react-markdown'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
-import { rehypePrefixFragmentLinks } from '../lib/markdownFragmentLinks'
+import { rehypePrefixFragmentLinks, remarkNumberFootnotes } from '../lib/markdownFragmentLinks'
 import { isMarkdownWithinParseLimits, MARKDOWN_RENDER_PARSE_LIMITS } from '../lib/markdownParseLimits'
 import { remarkHtmlAsText } from '../lib/markdownHtmlAsText'
 
@@ -80,6 +80,7 @@ export function SafeMarkdownLink(props: SafeMarkdownLinkProps) {
     'data-footnote-backref': props['data-footnote-backref'],
     'data-footnote-ref': props['data-footnote-ref'],
     id: props.id,
+    title: props.title,
   }
   return href.startsWith('#') ? (
     <a {...attributes} href={href}>{children}</a>
@@ -169,8 +170,8 @@ export function SafeMarkdown({
         ]}
         remarkRehypeOptions={{ clobberPrefix: footnotePrefix }}
         remarkPlugins={rawHtml === 'escape'
-          ? [remarkGfm, remarkHtmlAsText, ...remarkPlugins]
-          : [remarkGfm, ...remarkPlugins]}
+          ? [remarkGfm, remarkNumberFootnotes, remarkHtmlAsText, ...remarkPlugins]
+          : [remarkGfm, remarkNumberFootnotes, ...remarkPlugins]}
         skipHtml={rawHtml === 'skip'}
         urlTransform={(value) => sanitizeMarkdownUrl(value, acceptExtraUrl)}
       >

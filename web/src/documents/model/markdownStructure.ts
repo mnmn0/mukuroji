@@ -71,12 +71,17 @@ type ReferenceEdit = {
  * @param resolveLink - Optional rewriter of a link target, given the destination as the parser
  *   read it, with escapes and character references decoded; it returns the new target, or
  *   `undefined` to keep the target.
- * @returns The rewritten text and the structure of the file.
+ * @param maxExpansionLength - Most characters the written destinations and titles of references
+ *   may add up to. Every one of them stays in the page's text, so past this the page is too large;
+ *   the count stops the rewrite before a large text is built.
+ * @returns The rewritten text and the structure of the file, or `'too-large'` when the references
+ *   would make the page too large.
  */
 export function readMarkdownImportStructure(
   source: string,
   resolveLink?: (href: string) => string | undefined,
-): MarkdownImportStructure {
+  maxExpansionLength = Number.POSITIVE_INFINITY,
+): MarkdownImportStructure | 'too-large' {
   const root = parseMarkdown(source)
   const lineStarts = [0]
   for (let index = source.indexOf('\n'); index !== -1; index = source.indexOf('\n', index + 1)) {
@@ -120,8 +125,10 @@ export function readMarkdownImportStructure(
       footnoteReferences.push({ identifier: node.identifier, line: lineOf(range.start) })
     }
   }
+  const text = inlineMarkdownReferences(source, nodes, maxExpansionLength, resolveLink)
+  if (text === 'too-large') return text
   return {
-    text: inlineMarkdownReferences(source, nodes, resolveLink) ?? source,
+    text: text ?? source,
     topLevelBlocks,
     footnoteDefinitions,
     footnoteReferences,
@@ -146,15 +153,18 @@ export function isMarkdownImportWithinParseLimits(source: string): boolean {
  *
  * @param source - Markdown file.
  * @param nodes - Every node of its parse.
+ * @param maxExpansionLength - Most characters the written destinations and titles may add up to.
  * @param resolveLink - Optional rewriter of a definition's destination, which is resolved before
  *   it is written, since the written form is wrapped in `<>` and escaped.
- * @returns The rewritten file, or `undefined` when a reference's source is not as expected.
+ * @returns The rewritten file, `undefined` when a reference's source is not as expected, or
+ *   `'too-large'` when the written destinations and titles pass `maxExpansionLength`.
  */
 function inlineMarkdownReferences(
   source: string,
   nodes: readonly MarkdownNode[],
+  maxExpansionLength: number,
   resolveLink?: (href: string) => string | undefined,
-): string | undefined {
+): string | undefined | 'too-large' {
   const definitions = new Map<string, { url: string; title: string | null }>()
   for (const node of nodes) {
     // CommonMark uses the first definition of a label.
@@ -176,6 +186,8 @@ function inlineMarkdownReferences(
     return resolved.get(url)
   }
   const edits: ReferenceEdit[] = []
+  /** Characters the written destinations and titles add up to so far. */
+  let expansionLength = 0
   for (const node of nodes) {
     if (node.type !== 'linkReference' && node.type !== 'imageReference' && node.type !== 'definition') continue
     const range = readNodeRange(node)
@@ -186,16 +198,18 @@ function inlineMarkdownReferences(
       continue
     }
     const definition = typeof node.identifier === 'string' ? definitions.get(node.identifier) : undefined
-    if (!definition || typeof node.label !== 'string') return undefined
-    const labelSource = node.referenceType === 'full'
-      ? `[${node.label}]`
-      : node.referenceType === 'collapsed' ? '[]' : ''
-    if (!source.slice(start, end).endsWith(labelSource)) return undefined
+    if (!definition) return undefined
+    // The label is read from the source: the parser's `label` has character references decoded.
+    const labelLength = referenceLabelLength(source.slice(start, end), node.referenceType)
+    if (labelLength === undefined) return undefined
+    const destination = renderInlineDestination(definition, resolve(definition.url))
+    expansionLength += destination.length
+    if (expansionLength > maxExpansionLength) return 'too-large'
     edits.push({
       start,
       end,
-      keepEnd: end - labelSource.length,
-      suffix: renderInlineDestination(definition, resolve(definition.url)) + lineBreaksOf(labelSource),
+      keepEnd: end - labelLength,
+      suffix: destination + lineBreaksOf(source.slice(end - labelLength, end)),
     })
   }
   return applyReferenceEdits(source, 0, source.length, edits.sort((left, right) => left.start - right.start))
@@ -211,8 +225,30 @@ function lineBreaksOf(text: string): string {
   return '\n'.repeat(text.split('\n').length - 1)
 }
 
-/** A destination that reads back as written without `<>` or escapes. */
-const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
+/**
+ * Finds the length of the label part that ends a reference's source: `[label]` of a full
+ * reference, `[]` of a collapsed one, and nothing of a shortcut one.
+ *
+ * @param source - Source of the reference.
+ * @param referenceType - The parser's `referenceType`.
+ * @returns The length, or `undefined` when the source does not end as the type says.
+ */
+function referenceLabelLength(source: string, referenceType: unknown): number | undefined {
+  if (referenceType === 'shortcut') return 0
+  if (referenceType === 'collapsed') return source.endsWith('[]') ? 2 : undefined
+  if (referenceType !== 'full' || !source.endsWith(']')) return undefined
+  // A label holds no unescaped bracket, so it opens at the last `[` that is not escaped.
+  for (let index = source.length - 2; index >= 0; index -= 1) {
+    if (source[index] !== '[') continue
+    let backslashes = 0
+    while (source[index - 1 - backslashes] === '\\') backslashes += 1
+    if (backslashes % 2 === 0) return source.length - index
+  }
+  return undefined
+}
+
+/** A destination that reads back as written without `<>` or escapes, also in a table cell. */
+const PLAIN_DESTINATION = /^[^\s()<>\\&|]+$/u
 
 /**
  * Writes the inline destination and title of a link or image that used a definition.
@@ -226,9 +262,10 @@ const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
 function renderInlineDestination(definition: { url: string; title: string | null }, resolved?: string): string {
   const url = resolved !== undefined && PLAIN_DESTINATION.test(resolved)
     ? resolved
-    : `<${(resolved ?? definition.url).replace(/[\\<>&]/gu, '\\$&')}>`
+    : `<${(resolved ?? definition.url).replace(/[\\<>&|]/gu, '\\$&')}>`
   if (definition.title === null) return `(${url})`
-  const title = definition.title.replace(/[\\"&]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
+  // `|` is escaped, so a link in a table cell does not split the cell.
+  const title = definition.title.replace(/[\\"&|]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
   return `(${url} "${title}")`
 }
 

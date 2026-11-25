@@ -140,9 +140,9 @@ const DELIMITER_CELL = /^:?-+:?$/u
 
 /**
  * Markdown that can tie blank-separated parts of a file together: a reference or footnote
- * definition, a footnote reference, or a list item.
+ * definition, a footnote reference, or a list item, also inside a quote or a list.
  */
-const MAY_SPAN_BLOCKS = /^ {0,3}\[|\[\^|^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
+const MAY_SPAN_BLOCKS = /^[ \t>]*\[|\[\^|^[ \t>]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
 
 /** A link destination that reads back as written without `<>` or escapes. */
 const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
@@ -188,7 +188,10 @@ export function convertMarkdownToDocument(
     const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
     if (!checked.ok) return checked
   }
-  const structure = spans ? readMarkdownImportStructure(text, options.resolveLink) : undefined
+  // Every destination a reference is written with stays in the page's text, so references that
+  // add more than the page can hold are refused before the long text is built.
+  const structure = spans ? readMarkdownImportStructure(text, options.resolveLink, MAX_CONTENT_BYTES) : undefined
+  if (structure === 'too-large') return { ok: false, code: 'too-large' }
   const scanned = scanBlocks(
     structure?.text.split('\n') ?? sourceLines,
     options.createId,
@@ -513,8 +516,10 @@ function keepFileBlocksTogether(
   /** Whether a block starts with a footnote definition, so it moves to the blocks that use it. */
   const holdsDefinition = (range: MarkdownLineRange) =>
     structure.footnoteDefinitions.some(({ first }) => first === range.first)
-  const attachments = new Map<string, string[]>()
+  /** Text added to the end of each block, by block ID, each kept once by its key. */
+  const attachments = new Map<string, Array<{ key: string; text: string }>>()
   const moved = new Set<string>()
+  const sourceLines = structure.text.split('\n')
   for (const block of paragraphs) {
     const range = lines.get(block.id)
     if (!range || holdsDefinition(range)) continue
@@ -536,17 +541,47 @@ function keepFileBlocksTogether(
       const holder = paragraphAt(definition.first)
       if (!holder || holder === block) continue
       const attached = attachments.get(block.id) ?? []
-      if (!attached.includes(holder.id)) attachments.set(block.id, [...attached, holder.id])
-      moved.add(holder.id)
+      // A block that starts with the definition moves whole. A definition inside another block,
+      // such as a quote, is copied without the text around it, which stays where it is.
+      const holderStart = lines.get(holder.id)?.first
+      const nested = holderStart !== definition.first || !FOOTNOTE_DEFINITION_START.test(sourceLines[definition.first] ?? '')
+      const attachment = nested
+        ? { key: `footnote:${identifier}`, text: extractNestedDefinition(sourceLines, definition) }
+        : { key: `block:${holder.id}`, text: holder.text }
+      if (!attached.some(({ key }) => key === attachment.key)) attachments.set(block.id, [...attached, attachment])
+      if (!nested) moved.add(holder.id)
     }
   }
-  const textOf = new Map(paragraphs.map((block) => [block.id, block.text]))
   return joined.flatMap((block): ScannedBlock[] => {
     if (block.type !== 'paragraph') return [block]
     if (moved.has(block.id)) return []
-    const attached = (attachments.get(block.id) ?? []).map((id) => textOf.get(id) ?? '')
+    const attached = (attachments.get(block.id) ?? []).map(({ text }) => text)
     return [{ ...block, text: [block.text, ...attached].join('\n\n') }]
   })
+}
+
+/** A footnote definition at the start of a line, outside any container. */
+const FOOTNOTE_DEFINITION_START = /^ {0,3}\[\^/u
+
+/**
+ * Copies a footnote definition that sits inside another block, such as a quote or a list item,
+ * without that block's markers: the markers before `[^` on its first line are removed from every
+ * line of the definition that starts with them.
+ *
+ * @param lines - Source lines of the file.
+ * @param definition - Lines of the definition.
+ * @returns The definition's Markdown.
+ */
+function extractNestedDefinition(lines: readonly string[], definition: MarkdownLineRange): string {
+  const first = lines[definition.first] ?? ''
+  const prefix = first.slice(0, Math.max(0, first.indexOf('[^')))
+  // A quote marker may be written without its space on a blank line of the definition.
+  const barePrefix = prefix.trimEnd()
+  return lines.slice(definition.first, definition.last + 1)
+    .map((line) => line.startsWith(prefix)
+      ? line.slice(prefix.length)
+      : line.trimEnd() === barePrefix ? '' : line)
+    .join('\n')
 }
 
 /**

@@ -3792,10 +3792,22 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         Put: {
           TableName: this.tableName,
           Item: next,
-          ConditionExpression: 'updatedAt = :updatedAt',
-          ExpressionAttributeValues: {
-            ':updatedAt': stored.updatedAt,
-          },
+          // The row is written whole, so an edit or delete that committed with the same
+          // timestamp must also fail the condition instead of being undone.
+          ...(stored.deletedAt === undefined
+            ? {
+                ConditionExpression: 'updatedAt = :updatedAt AND body = :body AND attribute_not_exists(deletedAt)',
+                ExpressionAttributeValues: {
+                  ':updatedAt': stored.updatedAt,
+                  ':body': stored.body,
+                },
+              }
+            : {
+                ConditionExpression: 'updatedAt = :updatedAt',
+                ExpressionAttributeValues: {
+                  ':updatedAt': stored.updatedAt,
+                },
+              }),
         },
       },
       ...authorizationGuardConditionChecks(
@@ -3951,7 +3963,23 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     }
     if (stored.deletedAt !== undefined) {
       // A retried delete whose first response was lost finds the comment already deleted.
-      if (action === 'deleted') return stripCommentStorageFields(stored)
+      if (action === 'deleted') {
+        // A keyed request still records its key, so the key cannot later delete another comment.
+        // The comment and its audit event are not written again.
+        if (idempotency !== undefined) {
+          try {
+            await this.client.send(new TransactWriteCommand({
+              TransactItems: [commentMutationReceiptPut(this.tableName, input, action, idempotency, stored, this.now())],
+            }))
+          } catch (error) {
+            if (!isConditionalFailure(error)) throw normalizeDynamoError(error)
+            const replay = await this.readCommentMutationReplay(input.workspaceId, input.documentId, idempotency)
+            if (replay !== undefined) return replay
+            throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
+          }
+        }
+        return stripCommentStorageFields(stored)
+      }
       throw new DocumentError(409, 'DocumentCommentDeleted', 'The comment was deleted.')
     }
     const now = this.now().toISOString()
@@ -3963,9 +3991,19 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       (stored.parentCommentId === undefined
         ? ''
         : `&rootCommentId=${encodeURIComponent(stored.parentCommentId)}`)
+    // The receipt decides whether a keyed request is a retry. The audit event is named by the
+    // change it records: the Document, the comment, and the version it replaces. The same key can
+    // then change a comment of another Document, or the same comment after its receipt expired,
+    // without meeting the audit event of the earlier change, which outlives the receipt.
+    const auditContext = input.auditContext === undefined
+      ? undefined
+      : deriveMutationAuditPartContext(
+          input.auditContext,
+          `document-comment-${action}:${input.documentId}:${stored.id}:${stored.updatedAt}`,
+        )
     const auditPut = createMutationAuditEventPut(
       this.auditTableName,
-      input.auditContext,
+      auditContext,
       {
         directoryId: input.workspaceId,
         eventType: `document.comment.${action}`,
@@ -4015,9 +4053,11 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         Put: {
           TableName: this.tableName,
           Item: next,
-          ConditionExpression: 'updatedAt = :updatedAt AND attribute_not_exists(deletedAt)',
+          // A resolve that committed with the same timestamp must also fail the condition.
+          ConditionExpression: 'updatedAt = :updatedAt AND resolved = :resolved AND attribute_not_exists(deletedAt)',
           ExpressionAttributeValues: {
             ':updatedAt': stored.updatedAt,
+            ':resolved': stored.resolved,
           },
         },
       },

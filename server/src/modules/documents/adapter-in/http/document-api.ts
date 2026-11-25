@@ -49,6 +49,7 @@ import type {
   DocumentProjectRole,
   UpdateDocumentCommentRequest,
 } from '../../document-types'
+import { DOCUMENT_MENTION_MAX_COUNT } from '../../domain/document-limits'
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
@@ -2006,7 +2007,7 @@ function parseEditDocumentCommentInput(value: unknown): { body: string; mentions
  * @throws DocumentError when the list or a mention is invalid.
  */
 function parseDocumentCommentMentions(value: unknown): DocumentMention[] {
-  if (!Array.isArray(value) || value.length > 20) {
+  if (!Array.isArray(value) || value.length > DOCUMENT_MENTION_MAX_COUNT) {
     throw new DocumentError(400, 'InvalidDocumentMention', 'Comment mentions are invalid.')
   }
   return value.map((mention: unknown) => {
@@ -2038,21 +2039,8 @@ function parseCreateDocumentCommentInput(value: unknown): CreateDocumentCommentI
     'InvalidDocumentComment',
     'Parent comment ID is invalid.',
   )
-  if (!Array.isArray(input.mentions) || input.mentions.length > 20) {
-    throw new DocumentError(400, 'InvalidDocumentMention', 'Comment mentions are invalid.')
-  }
-  for (const mention of input.mentions) {
-    if (
-      !isRecord(mention) ||
-      typeof mention.userId !== 'string' ||
-      !Number.isSafeInteger(mention.offset) ||
-      !Number.isSafeInteger(mention.length) ||
-      (mention.offset as number) < 0 ||
-      (mention.length as number) < 1
-    ) {
-      throw new DocumentError(400, 'InvalidDocumentMention', 'A comment mention is invalid.')
-    }
-  }
+  // Validated as an edit's mentions are; the input itself is kept, as its fingerprint is.
+  parseDocumentCommentMentions(input.mentions)
   validateDocumentCommentAnchor(input.anchor)
   return input as unknown as CreateDocumentCommentInput
 }

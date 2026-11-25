@@ -60,10 +60,20 @@ function splitHtmlNodeLines(
   end: number,
   value: string,
 ): MarkdownSourceRange[] {
-  const valueLines = value.split('\n')
+  // CR, LF, and CRLF each end a line, as for the parser.
+  const valueLines = value.split(/\r\n|\r|\n/u)
   const ranges: MarkdownSourceRange[] = []
   let lineStart = start
-  text.slice(start, end).split('\n').forEach((line, index) => {
+  const source = text.slice(start, end)
+  const lineBreak = /\r\n|\r|\n/gu
+  const lines: Array<{ line: string; breakLength: number }> = []
+  let from = 0
+  for (let match = lineBreak.exec(source); match !== null; match = lineBreak.exec(source)) {
+    lines.push({ line: source.slice(from, match.index), breakLength: match[0].length })
+    from = match.index + match[0].length
+  }
+  lines.push({ line: source.slice(from), breakLength: 0 })
+  lines.forEach(({ line, breakLength }, index) => {
     const lineEnd = lineStart + line.length
     if (index === 0) {
       ranges.push({ start: lineStart, end: lineEnd })
@@ -75,7 +85,7 @@ function splitHtmlNodeLines(
         : lineStart + (/^[ \t>]*/u.exec(line)?.[0].length ?? 0)
       ranges.push({ start: contentStart, end: lineEnd, continuesNode: true })
     }
-    lineStart = lineEnd + 1
+    lineStart = lineEnd + breakLength
   })
   return ranges.filter((range) => range.end > range.start)
 }
@@ -236,29 +246,73 @@ function localizeMarkdownReferences(text: string, scope: string): string | undef
       edits.push(...escapeLiteralFootnoteCarets(text, start, end))
       continue
     }
+    // Labels are read from the source: the parser's `label` has character references decoded.
     const source = text.slice(start, end)
-    const label = typeof node.label === 'string' ? node.label : undefined
     const identifier = typeof node.identifier === 'string' ? node.identifier : undefined
     if (node.type === 'linkReference' || node.type === 'imageReference') {
       const definition = identifier === undefined ? undefined : definitions.get(identifier)
-      if (definition === undefined || label === undefined) return undefined
-      const labelSource = node.referenceType === 'full'
-        ? `[${label}]`
-        : node.referenceType === 'collapsed' ? '[]' : ''
-      if (!source.endsWith(labelSource)) return undefined
-      edits.push({ start, end, keepEnd: end - labelSource.length, suffix: renderInlineDestination(definition) })
+      const labelLength = referenceLabelLength(source, node.referenceType)
+      if (definition === undefined || labelLength === undefined) return undefined
+      edits.push({ start, end, keepEnd: end - labelLength, suffix: renderInlineDestination(definition) })
     } else if (node.type === 'definition') {
       edits.push({ start, end, keepEnd: start, suffix: '' })
     } else if (node.type === 'footnoteReference' || node.type === 'footnoteDefinition') {
       const renamed = identifier === undefined ? undefined : footnoteLabels.get(identifier)
-      const labelSource = `[^${label ?? ''}]`
-      if (renamed === undefined || label === undefined || !source.startsWith(labelSource)) return undefined
-      edits.push({ start, end: start + labelSource.length, keepEnd: start, suffix: `[^${renamed}]` })
+      const labelLength = footnoteLabelLength(source)
+      if (renamed === undefined || labelLength === undefined) return undefined
+      edits.push({ start, end: start + labelLength, keepEnd: start, suffix: `[^${renamed}]` })
     }
   }
   const localized = applyReferenceEdits(text, 0, text.length, edits.sort((left, right) => left.start - right.start))
   // A definition removed at the end leaves its blank lines behind; they show nothing.
   return definitions.size === 0 ? localized : localized?.replace(/(?:\n[ \t]*)+$/u, '')
+}
+
+/**
+ * Finds the length of the label part that ends a link or image reference's source: `[label]` of
+ * a full reference, `[]` of a collapsed one, and nothing of a shortcut one.
+ *
+ * @param source - Source of the reference.
+ * @param referenceType - The parser's `referenceType`.
+ * @returns The length, or `undefined` when the source does not end as the type says.
+ */
+function referenceLabelLength(source: string, referenceType: unknown): number | undefined {
+  if (referenceType === 'shortcut') return 0
+  if (referenceType === 'collapsed') return source.endsWith('[]') ? 2 : undefined
+  if (referenceType !== 'full' || !source.endsWith(']')) return undefined
+  // A label holds no unescaped bracket, so it opens at the last `[` that is not escaped.
+  for (let index = source.length - 2; index >= 0; index -= 1) {
+    if (source[index] === '[' && !isEscapedAt(source, index)) return source.length - index
+  }
+  return undefined
+}
+
+/**
+ * Finds the length of the `[^label]` that starts a footnote reference's or definition's source.
+ *
+ * @param source - Source of the footnote reference or definition.
+ * @returns The length, or `undefined` when the source does not start with a label.
+ */
+function footnoteLabelLength(source: string): number | undefined {
+  if (!source.startsWith('[^')) return undefined
+  // A label holds no unescaped bracket, so it closes at the first `]` that is not escaped.
+  for (let index = 2; index < source.length; index += 1) {
+    if (source[index] === ']' && !isEscapedAt(source, index)) return index + 1
+  }
+  return undefined
+}
+
+/**
+ * Tells whether the character at an offset follows an odd number of backslashes.
+ *
+ * @param text - Source text.
+ * @param index - Offset of the character.
+ * @returns Whether a backslash escapes it.
+ */
+function isEscapedAt(text: string, index: number): boolean {
+  let backslashes = 0
+  while (text[index - 1 - backslashes] === '\\') backslashes += 1
+  return backslashes % 2 === 1
 }
 
 /**
@@ -276,10 +330,8 @@ function escapeLiteralFootnoteCarets(text: string, start: number, end: number): 
   const edits: ReferenceEdit[] = []
   for (let index = Math.max(start, 1); index < end; index += 1) {
     if (text[index] !== '^' || text[index - 1] !== '[') continue
-    // A `[` after an odd number of backslashes is escaped already and opens no footnote.
-    let backslashes = 0
-    while (text[index - 2 - backslashes] === '\\') backslashes += 1
-    if (backslashes % 2 === 0) edits.push({ start: index, end: index, keepEnd: index, suffix: '\\' })
+    // An escaped `[` opens no footnote.
+    if (!isEscapedAt(text, index - 1)) edits.push({ start: index, end: index, keepEnd: index, suffix: '\\' })
   }
   return edits
 }
@@ -302,9 +354,11 @@ function isReferenceNodeType(type: unknown): boolean {
  * @returns `(<url> "title")`, escaped so it reads back as the same destination and title.
  */
 function renderInlineDestination(definition: MarkdownDefinition): string {
-  const url = definition.url.replace(/[\\<>&]/gu, '\\$&')
+  // `|` is escaped too, so a link in a table cell does not split the cell; the escape reads back
+  // as `|` outside a table as well.
+  const url = definition.url.replace(/[\\<>&|]/gu, '\\$&')
   if (definition.title === null) return `(<${url}>)`
-  const title = definition.title.replace(/[\\"&]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
+  const title = definition.title.replace(/[\\"&|]/gu, '\\$&').replace(/\r\n?|\n/gu, ' ')
   return `(<${url}> "${title}")`
 }
 

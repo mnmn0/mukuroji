@@ -98,4 +98,23 @@ describe('Markdown footnotes on a page with several bodies', () => {
 
     expectOwnFootnotes(sections)
   })
+
+  test('gives a reused label and a label named like its reuse their own reference ids', () => {
+    const html = renderToStaticMarkup(
+      <SafeMarkdown bodyMarkdown={'A[^a], again[^a], B[^a-2]\n\n[^a]: First.\n\n[^a-2]: Second.'} rawHtml="escape" />,
+    )
+    const referenceIds = [...html.matchAll(/<a[^>]*data-footnote-ref[^>]*>/gu)]
+      .map((match) => /id="([^"]*)"/u.exec(match[0])?.[1] ?? '')
+    expect(referenceIds).toHaveLength(3)
+    expect(new Set(referenceIds).size).toBe(3)
+    // Each back link points at a reference of its own footnote.
+    const backHrefs = [...html.matchAll(/<a[^>]*data-footnote-backref[^>]*>/gu)]
+      .map((match) => /href="#([^"]*)"/u.exec(match[0])?.[1] ?? '')
+    expect(backHrefs).toEqual([referenceIds[0], referenceIds[1], referenceIds[2]])
+  })
+
+  test('shows the title of a link', () => {
+    expect(renderToStaticMarkup(<SafeMarkdown bodyMarkdown={'[Steps](https://example.com "For admins")'} rawHtml="escape" />))
+      .toContain('title="For admins"')
+  })
 })

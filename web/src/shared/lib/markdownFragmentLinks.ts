@@ -80,3 +80,43 @@ function prefixFragmentLinks(node: HtmlNode, rewrite: FragmentRewrite) {
     prefixFragmentLinks(child, rewrite)
   }
 }
+
+/** The Markdown syntax tree shape {@link remarkNumberFootnotes} reads and writes. */
+type MarkdownTreeNode = {
+  /** mdast node kind, such as `footnoteReference`. */
+  type: string
+  /** Normalized label of a footnote reference or definition. */
+  identifier?: unknown
+  /** Label of a footnote reference or definition as written. */
+  label?: unknown
+  /** Child nodes of a parent node. */
+  children?: MarkdownTreeNode[]
+}
+
+/**
+ * Remark plugin that renames every footnote label of one body to `f<n>`, numbered by first use.
+ * The renderer names the n-th reuse of label `a` `fnref-a-n`, which is also the first reference
+ * of a label `a-n`; numbered labels never end like a reuse, so every reference keeps its own id
+ * and each footnote links back to its own reference. Footnotes show their number, not their
+ * label, so the rendering does not change.
+ *
+ * @returns A transformer that rewrites the syntax tree in place.
+ */
+export function remarkNumberFootnotes() {
+  return (tree: MarkdownTreeNode) => {
+    const numbers = new Map<string, string>()
+    const pending: MarkdownTreeNode[] = [tree]
+    for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+      if (
+        (node.type === 'footnoteReference' || node.type === 'footnoteDefinition') &&
+        typeof node.identifier === 'string'
+      ) {
+        const number = numbers.get(node.identifier) ?? `f${numbers.size + 1}`
+        numbers.set(node.identifier, number)
+        node.identifier = number
+        node.label = number
+      }
+      if (node.children) pending.push(...node.children)
+    }
+  }
+}

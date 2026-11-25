@@ -1219,6 +1219,9 @@ function renderMarkdown(
     }
     switch (block.type) {
       case 'paragraph': {
+        // A blank paragraph shows nothing; written out, it would only add blank lines, which do
+        // not keep the blocks around it apart.
+        if (/^[ \t\r\n]*$/u.test(block.text)) break
         // The parser takes far longer than the text's length on some input, such as many
         // emphasis delimiters or deeply nested lists, so a paragraph past the limits, or past what
         // the page has left, is written as literal text without being parsed.
@@ -1263,6 +1266,8 @@ function renderMarkdown(
         )
         break
       case 'checklist': {
+        // An empty checklist shows nothing and is left out, so its neighbours are compared directly.
+        if (block.items.length === 0) break
         const checklist = block.items
           .map((item) => `- [${item.checked ? 'x' : ' '}] ${escapeMarkdownText(item.text)}`)
           .join('\n')
@@ -1401,7 +1406,8 @@ function createMarkdownParseBudget(): MarkdownParseBudget {
  * @returns The text's load, or `undefined` when it has more than `maxLines` lines.
  */
 function measureMarkdownParseLoad(text: string, maxLines: number): MarkdownParseLoad | undefined {
-  const lines = text.split('\n')
+  // CR, LF, and CRLF each end a line, as for the parser.
+  const lines = text.split(/\r\n|\r|\n/u)
   if (lines.length > maxLines) return undefined
   let containers = 0
   let nesting = 0

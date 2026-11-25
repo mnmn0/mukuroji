@@ -53,6 +53,11 @@ Issue #422 で、Document comment の返信を thread の作成者とそれま�
   - 同じ key の再送は receipt の結果を返し、comment を書き換えない。fingerprint が違えば
     `409 DocumentCommentIdempotencyConflict` を返す。
   - 書き込み競合で transaction が失敗したときも、receipt を読み直して replay を確かめる。
+  - 削除済みの comment をまだ記録のない key で削除したときも、comment と audit event は書かずに
+    receipt だけを書く。その key で別の comment を削除すると fingerprint の違いで 409 になる。
+  - 再送かどうかは receipt で決めるので、audit event ID は request の key に Document・comment・
+    置き換える版（読んだ `updatedAt`）を加えて作る。同じ key で別の Document の comment を変えるときや、
+    receipt の期限が切れた後に同じ comment を変えるときに、残っている前の audit event と衝突しない。
   - 編集の API は、Document に comment できることを確かめてから receipt を読み、記録済みなら
     mention の member 検証より前にその結果を返す。最初の試行の後で mention した member が
     Workspace を離れても、再送は 400 にならない。新しい編集は従来どおり member を検証する。

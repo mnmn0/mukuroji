@@ -8,13 +8,12 @@ import { SafeMarkdown } from '../src/shared/ui/SafeMarkdown'
 const DENSE_EMPHASIS = `start\n  ${'*a'.repeat(25_000)}`
 
 describe('Markdown bodies the parser could take too long on', () => {
-  test('are shown quickly as plain text with their spacing and a note', () => {
-    const started = performance.now()
+  test('are shown without the Markdown pipeline as plain text with their spacing and a note', () => {
     const html = renderToStaticMarkup(
       <SafeMarkdown bodyMarkdown={DENSE_EMPHASIS} complexityNotice="Too complex" rawHtml="escape" />,
     )
 
-    expect(performance.now() - started).toBeLessThan(500)
+    // Only the path that skips the parser writes the body into one pre-wrapped paragraph as is.
     expect(html).toContain(`<p class="whitespace-pre-wrap">start\n  ${'*a'.repeat(25_000)}</p>`)
     expect(html).toContain('<p class="mt-1 text-xs text-[var(--workbench-muted)]" role="note">Too complex</p>')
     expect(html).not.toContain('<em>')

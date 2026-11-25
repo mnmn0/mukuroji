@@ -462,6 +462,34 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     ])
   })
 
+  test('copies only a footnote definition inside a quote, keeping the quote where it is', () => {
+    expect(blocksOf('A[^n]\n\nB[^n]\n\n> Quoted\n>\n> [^n]: Note\n').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['A[^n]\n\n[^n]: Note', 'B[^n]\n\n[^n]: Note', '> Quoted\n>\n> [^n]: Note'])
+  })
+
+  test('reads a reference definition inside a quote, and a label with a character reference', () => {
+    expect(blocksOf('> [guide]: https://example.com/g\n\nRead [guide].').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      // The definition is removed; the quote that held it is left empty.
+      .toEqual(['> ', 'Read [guide](<https://example.com/g>).'])
+    expect(blocksOf('See [here][a&amp;b] and [ok][c].\n\n[a&amp;b]: https://example.com/a\n[c]: https://example.com/c')
+      .map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['See [here](<https://example.com/a>) and [ok](<https://example.com/c>).'])
+  })
+
+  test('keeps a reference link in a table cell from splitting the cell', () => {
+    const blocks = blocksOf('| A | B |\n| - | - |\n| [guide][r] | x |\n\n[r]: <https://example.com/a|b> "T | U"')
+    expect(blocks[0]).toMatchObject({ type: 'table', columns: ['A', 'B'] })
+    const table = blocks[0]
+    if (table?.type !== 'table') throw new Error('The table should import.')
+    expect(table.rows.map((row) => row.cells.length)).toEqual([2])
+  })
+
+  test('refuses references that would make the page too large before writing them out', () => {
+    const destination = `https://example.com/${'a'.repeat(2_000)}`
+    const source = `${Array.from({ length: 200 }, () => '[x][d]').join(' ')}\n\n[d]: ${destination}`
+    expect(convert(source)).toEqual({ ok: false, code: 'too-large' })
+  })
+
   test('keeps a task item nested in another list in that list, and reads a task list as a checklist', () => {
     // The server export writes this paragraph as it is (see the nested task list export test in
     // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts), so the

@@ -194,6 +194,20 @@ export function DocumentEditor({
       </div>
 
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+        {canEditBlocks && document.blocks.length > 0 ? (
+          <div className="grid min-w-0 gap-2">
+            <button
+              aria-expanded={insertIndex === 0}
+              className="justify-self-start rounded-md px-2 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
+              onClick={() => setInsertIndex((current) => current === 0 ? undefined : 0)}
+              type="button"
+            >
+              <span aria-hidden="true">+ </span>
+              {t('documents.editor.insertAtTop')}
+            </button>
+            {insertIndex === 0 ? <InsertBlockMenu onInsert={insertBlock} t={t} /> : null}
+          </div>
+        ) : null}
         {document.blocks.map((block, index) => (
           <div className="grid min-w-0 gap-2" key={block.id}>
             <EditableBlock
@@ -223,7 +237,6 @@ export function DocumentEditor({
         <div className="relative mt-5">
           <button
             aria-expanded={insertIndex === document.blocks.length}
-            aria-haspopup="menu"
             className="flex min-h-10 items-center gap-2 rounded-md px-3 text-sm font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
             onClick={() =>
               setInsertIndex((current) =>
@@ -250,7 +263,8 @@ export function DocumentEditor({
 }
 
 /**
- * Menu of block types that can be inserted at one position.
+ * Buttons of the block types that can be inserted at one position, as a labelled group: each is
+ * an ordinary button reached with Tab.
  *
  * @param props - Insert callback and translator.
  * @returns The block type menu.
@@ -268,14 +282,13 @@ function InsertBlockMenu({
     <div
       aria-label={t('documents.editor.addBlock')}
       className="grid w-[min(520px,calc(100vw-44px))] grid-cols-2 gap-1 rounded-lg border border-[var(--workbench-border)] bg-surface p-2 shadow-[0_18px_50px_rgba(23,32,29,0.16)] sm:grid-cols-3"
-      role="menu"
+      role="group"
     >
       {insertableBlockTypes.map((type) => (
         <button
           className="flex min-h-12 items-center gap-3 rounded-md px-3 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
           key={type}
           onClick={() => onInsert(type)}
-          role="menuitem"
           type="button"
         >
           <span

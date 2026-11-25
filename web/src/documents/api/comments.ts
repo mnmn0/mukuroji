@@ -94,7 +94,7 @@ export async function createDocumentComment(
     accessToken,
     createJsonMutationInit('POST', input, context),
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
 }
 
 /**
@@ -111,7 +111,7 @@ export async function resolveDocumentComment(
     accessToken,
     createJsonMutationInit('POST', { resolved: true }, context),
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
 }
 
 /**
@@ -136,7 +136,7 @@ export async function updateDocumentComment(
     accessToken,
     createJsonMutationInit('PATCH', input, context),
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
 }
 
 /**
@@ -159,7 +159,7 @@ export async function deleteDocumentComment(
     accessToken,
     { headers: createMutationHeaders(context), method: 'DELETE' },
   )
-  return readObjectValue(value, 'comment') as DocumentComment
+  return readCommentResponse(value)
 }
 
 function createJsonMutationInit(
@@ -229,9 +229,50 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
-function readObjectValue(value: unknown, key: string) {
-  const record = readRecord(value)
-  const nested = record[key]
-  return nested && typeof nested === 'object' ? nested : value
+/**
+ * Reads the comment of a comment mutation response, checking its fields first.
+ *
+ * @param value - Parsed response body.
+ * @returns The comment.
+ * @throws DocumentsApiError when the response holds no valid comment.
+ */
+function readCommentResponse(value: unknown): DocumentComment {
+  const comment = readRecord(value).comment
+  if (!isDocumentComment(comment)) {
+    throw new DocumentsApiError(200, 'Documents API returned an invalid comment.', 'InvalidDocumentsResponse')
+  }
+  return comment
 }
 
+/**
+ * Tells whether a value has the fields of a Document comment.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a comment.
+ */
+function isDocumentComment(value: unknown): value is DocumentComment {
+  if (typeof value !== 'object' || value === null) return false
+  const record = readRecord(value)
+  const optionalString = (field: unknown) => field === undefined || typeof field === 'string'
+  const anchor = readRecord(record.anchor)
+  return typeof record.id === 'string' &&
+    typeof record.documentId === 'string' &&
+    typeof record.body === 'string' &&
+    typeof record.authorUserId === 'string' &&
+    typeof record.resolved === 'boolean' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string' &&
+    typeof anchor.type === 'string' &&
+    optionalString(record.parentCommentId) &&
+    optionalString(record.resolvedByUserId) &&
+    optionalString(record.resolvedAt) &&
+    optionalString(record.editedAt) &&
+    optionalString(record.deletedAt) &&
+    Array.isArray(record.mentions) &&
+    record.mentions.every((mention: unknown) => {
+      const entry = readRecord(mention)
+      return typeof entry.userId === 'string' &&
+        typeof entry.offset === 'number' &&
+        typeof entry.length === 'number'
+    })
+}

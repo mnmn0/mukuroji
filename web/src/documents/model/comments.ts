@@ -192,7 +192,8 @@ const documentMentionPattern =
   /(^|[\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】])@([^\s,;:!?()[\]{}"'、。！？：；（）［］｛｝「」『』【】]+)/gu
 
 /**
- * Replaces one comment in a loaded list with the server's copy after an edit or delete.
+ * Replaces one comment in a loaded list with the server's copy after an edit or delete. A comment
+ * ID is unique only in its Document, so only the comment of the same Document is replaced.
  *
  * @param comments - Loaded comments, or undefined before the first read.
  * @param changed - Comment returned by the server.
@@ -202,6 +203,14 @@ export function replaceLoadedDocumentComment<T extends readonly DocumentComment[
   comments: T,
   changed: DocumentComment,
 ): T | DocumentComment[] {
-  if (!comments?.some((comment) => comment.id === changed.id)) return comments
-  return comments.map((comment) => comment.id === changed.id ? changed : comment)
+  /**
+   * Tells whether a loaded comment is the one the server changed.
+   *
+   * @param comment - Loaded comment.
+   * @returns Whether both its Document and its ID match.
+   */
+  const isChanged = (comment: DocumentComment) =>
+    comment.documentId === changed.documentId && comment.id === changed.id
+  if (!comments?.some(isChanged)) return comments
+  return comments.map((comment) => isChanged(comment) ? changed : comment)
 }

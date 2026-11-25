@@ -106,6 +106,9 @@ describe('Document editing and comments (#422)', () => {
     // A thread without the comment, or one not read yet, is left as it is.
     expect(replaceLoadedDocumentComment([root], edited)).toEqual([root])
     expect(replaceLoadedDocumentComment(undefined, edited)).toBeUndefined()
+    // A comment with the same ID in another Document is not the one that changed.
+    const otherDocument = { ...reply, documentId: 'other-document' }
+    expect(replaceLoadedDocumentComment([root, otherDocument], edited)).toEqual([root, otherDocument])
   })
 
   test('keeps the stored mention of a renamed member when an unrelated part is edited', () => {
@@ -307,6 +310,8 @@ describe('Document editing and comments (#422)', () => {
     expect(html).toContain('aria-label="Delete row 1"')
     expect(html).toContain('aria-label="Delete column 2"')
     expect(html).toContain('aria-label="Insert a block below"')
+    // A block can also be inserted before the first one.
+    expect(html).toContain('Insert a block at the top')
     expect(html).toContain('aria-pressed="false"')
   })
 

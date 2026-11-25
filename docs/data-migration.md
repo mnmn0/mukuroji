@@ -67,8 +67,10 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
   checkpoint の続きから再開します。
 - 書き込みは `--max-writes-per-second`（既定 25）の間隔を空けます。
 - 1 page を書き終えるたびに checkpoint を compare-and-set で保存します。page の途中で失敗した場合、
-  checkpoint は前の page のままで、再実行するとその page を読み直します。書き込み済みの row は
-  `migrated` に分類されるので二重には書きません（`alreadyMigrated` として数えます）。
+  checkpoint は前の page のままで、再実行するとその page を読み直します。row を置き換える migration では、
+  書き込み済みの row は `migrated` に分類されるので二重には書きません（`alreadyMigrated` として数えます）。
+  派生 row を作る migration では元の row が `pending` のままなので、読み直した page の派生 row を同じ内容で
+  書き直します（[派生 row の作成](#派生-row-の作成kind-derive)）。
 - segment ごとに lease（5 分）を取り、別の実行が有効な lease を持つ segment には `LEASE_HELD` で
   止まります。期限が切れた lease は引き継ぎます。page の処理中も、残りが半分を切ると書き込みの前に
   lease を compare-and-set で延長し、負けたら（別の実行に取られたら）その時点で書き込みをやめて
@@ -78,7 +80,8 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
   `PARTITION_PLAN_MISMATCH`、`DEFINITION_MISMATCH` で止まります。別の table を移行するときは、別の
   checkpoint table を使います。
 - page の途中で止まった場合も、その page で書き込んだ行数は実行の report と run record に含めます。
-  checkpoint の累計には含めず、再開時に `alreadyMigrated` として数えます。
+  checkpoint の累計には含めず、row を置き換える migration では再開時に `alreadyMigrated` として数えます。
+  派生 row を作る migration では、再開時にその page の派生 row をもう一度書きます。
 
 ### Row の置き換え
 

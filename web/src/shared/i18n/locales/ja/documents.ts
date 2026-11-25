@@ -264,6 +264,7 @@ export const documentsMessages = {
   'documents.editor.preview': 'プレビュー',
   'documents.editor.backToEdit': '編集に戻る',
   'documents.editor.insertBelow': '下にブロックを挿入',
+  'documents.editor.insertAtTop': '先頭にブロックを挿入',
   'documents.editor.deleteRow': '行を削除',
   'documents.editor.deleteColumn': '列を削除',
   'documents.editor.mermaidSource': 'Mermaid のソース（図には描画しません）',

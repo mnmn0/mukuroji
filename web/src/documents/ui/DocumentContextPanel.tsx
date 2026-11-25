@@ -932,10 +932,12 @@ function CommentCard({
     event.preventDefault()
     const body = editDraft?.body.trim() ?? ''
     if (!editDraft || !onEdit || !body || isSaving) return
+    const submitted = editDraft
     const saved = await runChange(() =>
-      onEdit(comment.id, body, resolveEditedDocumentMentions(comment, body, editDraft.mentionMemberKeys, mentionMembers)),
+      onEdit(comment.id, body, resolveEditedDocumentMentions(comment, body, submitted.mentionMemberKeys, mentionMembers)),
     )
-    if (saved) setEditDraft(undefined)
+    // Text typed while the save ran was not sent, so the form stays open with it.
+    if (saved) setEditDraft((current) => current === submitted ? undefined : current)
   }
 
   return (

@@ -148,7 +148,9 @@ thread の返信はそのまま残り、画面は「このコメントは削除�
 `COMMENT_MUTATION#<documentId>#<hash>` の receipt（operation・comment・入力の fingerprint と
 結果の comment を持ち、30 日の TTL）に、変更と同じ transaction で記録します。同じ key の
 再送は comment を書き換えずに最初の結果を返し（その後の新しい編集を巻き戻さない）、同じ key で
-別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。記録済みの
+別の操作・comment・入力を送ると `409 DocumentCommentIdempotencyConflict` を返します。削除済みの comment を新しい key で削除した場合も key を
+receipt に記録します。audit event は Document・comment・置き換える版ごとに別の ID を持つので、同じ key で
+別の Document の comment を変えても、receipt の期限後に同じ comment を変えても衝突しません。記録済みの
 編集の再送は mention の member 検証より前に結果を返すので、その後 mention した member が Workspace を
 離れても失敗しません。通知一覧を返す直前にも current Document ACL を再評価するため、通知作成後に private
 化・archive された Document は表示されません。
@@ -243,7 +245,7 @@ sanitize 済み renderer（`web/src/shared/ui/SafeMarkdown.tsx`）で、raw HTML
 表示し、外部 URL の画像は読み込みません。Work Item key の link と `attachment:` 添付はコメント
 だけの機能で、paragraph では文字のまま表示します。
 Editor 右上の「プレビュー」で編集中のページを表示どおりに確認できます。Block は各 block の
-「+」から直下に挿入でき、table は行と列を個別に削除できます（列は 1 つ以上残します）。
+「+」から直下に、最初の block の上の「先頭にブロックを挿入」から先頭に挿入でき、table は行と列を個別に削除できます（列は 1 つ以上残します）。
 Diagram block の `text` 形式は `A → B` の流れとして描画します。Mermaid の描画 library は同梱して
 いないため、新しい diagram では Mermaid を選べず、取り込み済みの Mermaid は source として表示します。
 
@@ -299,7 +301,12 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   link と画像は inline の link（`[text](<url> "title")`）に書き換えて定義を消し、脚注の label は
   `<書き出しの中の block の番号>-<番号>` に付け替えます（中身のない段落は書き出しません）。
   定義のない `[^2-1]` のような文字は、付け替えた別の block の脚注を指さないよう `[\^2-1]` と書きます
-  （表示は同じ文字のままです）。
+  （表示は同じ文字のままです）。label は文字参照（`&amp;` など）を含んでいても書いたとおりに読み、
+  行き先と title の `|` は escape するので、表の cell の中の link も cell を分けません。中身のない
+  段落・空白だけの段落・項目のないチェック項目は書き出さず、その前後の block を直接比べます。
+  解析の上限は CR・LF・CRLF をどれも改行として数えます。脚注の id は描画ごとに label を番号に
+  付け替えてから作るので、`[^a]` の 2 回目と `[^a-2]` の参照が同じ id になりません。link の title は
+  表示します。
   隣り合う 2 つの block は、別々に解析した結果とつないで解析した結果を比べ、top-level の block の
   種類・開始位置・list の番号・見出しの level が変わる場合（`1. Alpha` と `1. Beta` が 1 つの list に
   なる、行頭に空白がある段落が前の list の続きになる、など）は、間に何も表示しない参照の定義
@@ -315,14 +322,20 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   の数と ASCII 記号の数のそれぞれ 2 乗の和、行数、行頭の list と引用の記号の数、1 行の入れ子 8 段まで）
   を設けます。上限を超える段落は解析せず、ASCII 記号をすべて escape した文字として書き、上限を超える
   チェック項目は解析せずに前後へ `[mukuroji-block-boundary]: #` を入れます。
-  そのため書き出したページを取り込み直しても段落の表示は変わりません。この変更より前に取り込んだ段落は escape を外して保存
+  上限を超えずに Markdown のまま書いた段落は、書き出したページを取り込み直しても表示が変わりません。
+  上限（ページ全体の残りを含む）を超えて文字として書いた段落は、取り込み直すと書式のない文字として
+  表示されます（強調の記号なども文字のまま出ます）。この変更より前に取り込んだ段落は escape を外して保存
   しているため、`*` などを含むと強調として表示されることがあります。
 - 取り込みでは、ファイル全体を同じ parser で解析し、定義を使う link と画像を inline の link に
   書き換えてから定義を消します（書き出しの `[mukuroji-block-boundary]: #` もここで消えます）。空行で
   分かれていても 1 つの top-level の block（空行を含む list など）は 1 つの段落 block にまとめ、
   チェック項目の block にするのは、行頭をそろえたチェック項目だけの top-level の list に限ります
   （別の list の中に入れ子になったチェック項目は、その list の段落 block に残します）。
-  脚注の定義はそれを使う段落 block の末尾へ移します。脚注の定義が別の脚注を使う場合は、その定義も
+  脚注の定義はそれを使う段落 block の末尾へ移します（引用などの中にある定義は、定義の部分だけを写し、
+  周りの本文は元の位置に残します）。参照の定義が引用や list の中にあっても同じように使います。
+  展開した link の行き先と title の `|` は escape するので、表の cell の中の link が cell を分けません。
+  展開した行き先と title が合わせてページに入りきらない長さになる場合は、展開する前にページが大きすぎる
+  として断ります。脚注の定義が別の脚注を使う場合は、その定義も
   たどって一緒に移します（同じ脚注は 1 度だけ移すので、互いに使う脚注でも止まります）。
   フォルダごとの取り込みでは、参照の定義が別のファイルを指す場合も、定義の行き先を `<>` で書き直す
   前に取り込むページへの link に変えます。inline の link の `<other.md>` のように `<>` で書いた行き先や
@@ -331,7 +344,6 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   ファイルだけで行い、大きすぎる表は解析の前に断ります。書き出しと同じ理由で、記号が密な部分や深い
   入れ子があって上限（書き出しより緩く、1 回の解析が約 1 秒に収まる値）を超えるファイルは全体を
   解析せず、行ごとの読み取りだけで取り込みます（参照の定義は inline にしません）。
-- folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
 
 ### 同梱テンプレートと宿題の Work Item 化
 

@@ -264,6 +264,7 @@ export const documentsMessages = {
   'documents.editor.preview': 'Preview',
   'documents.editor.backToEdit': 'Back to editing',
   'documents.editor.insertBelow': 'Insert a block below',
+  'documents.editor.insertAtTop': 'Insert a block at the top',
   'documents.editor.deleteRow': 'Delete row',
   'documents.editor.deleteColumn': 'Delete column',
   'documents.editor.mermaidSource': 'Mermaid source (not drawn as a diagram)',
