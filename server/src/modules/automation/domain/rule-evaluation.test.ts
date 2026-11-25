@@ -48,6 +48,25 @@ describe('Automation rule domain', () => {
         },
       },
     }, { ...event, eventType: 'automation.schedule' })).toBe(true)
+    const dueSchedule: AutomationTrigger = {
+      type: 'schedule',
+      schedule: {
+        frequency: 'daily',
+        interval: 1,
+        timeZone: 'UTC',
+        localTime: '09:00',
+        startDate: '2026-07-22',
+        catchUpPolicy: 'skip',
+      },
+      dueWorkItems: { daysBefore: 1 },
+    }
+    const dueEvent = (teamId: string) => ({
+      ...event,
+      eventType: 'automation.schedule',
+      metadata: { teamId, issueId: 'issue-1' },
+    })
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: dueSchedule }, dueEvent('core'))).toBe(true)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: dueSchedule }, dueEvent('ops'))).toBe(false)
   })
 
   test('validates due-soon schedules and assignee notifications', () => {

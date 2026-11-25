@@ -156,6 +156,8 @@ export type AutomationManagementPanelProps = {
   onDryRunRule?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
   /** Picker choices of the rule definition editor. */
   ruleEditorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule, which depend on its owner Team; overrides `ruleEditorOptions`. */
+  ruleEditorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
   /** Inbound Webhook endpoint 作成 callback です。 */
   onCreateWebhook?: (
     input: CreateAutomationInboundWebhookEndpointInput,
@@ -248,6 +250,7 @@ export function AutomationManagementPanel({
   readOnly = false,
   recurringWork,
   ruleEditorOptions,
+  ruleEditorOptionsFor,
   rules,
   teams,
   templates,
@@ -356,6 +359,7 @@ export function AutomationManagementPanel({
             teams={teams}
             webhookEndpoints={webhooks.filter((endpoint) => endpoint.purpose !== 'triage')}
             editorOptions={ruleEditorOptions}
+            editorOptionsFor={ruleEditorOptionsFor}
             onCreate={onCreateRule}
             onDelete={onDeleteRule}
             onDryRun={onDryRunRule}
@@ -452,6 +456,8 @@ type RulesTabProps = {
   onDryRun?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
   /** Picker choices of the rule definition editor. */
   editorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule; overrides `editorOptions`. */
+  editorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
 }
 
 /** Picker choices used when the container gives none. */
@@ -473,6 +479,7 @@ const emptyRuleEditorOptions: AutomationRuleEditorOptions = {
 function RulesTab({
   busyOperation,
   editorOptions = emptyRuleEditorOptions,
+  editorOptionsFor,
   locale,
   onCreate,
   onDelete,
@@ -580,7 +587,7 @@ function RulesTab({
                 isSaving={busyOperation === `rule:update:${id}`}
                 key={id}
                 locale={locale}
-                options={editorOptions}
+                options={editorOptionsFor ? editorOptionsFor(rule) : editorOptions}
                 rule={rule}
                 onCancel={() => changeEditingRule(undefined)}
                 onDryRun={onDryRun}

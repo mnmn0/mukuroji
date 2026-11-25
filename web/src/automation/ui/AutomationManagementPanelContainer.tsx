@@ -1,4 +1,5 @@
 import type {
+  AutomationRule,
   AutomationTemplate,
   AutomationTemplateApplication,
   UpdateAutomationTemplateInput,
@@ -147,22 +148,37 @@ export function AutomationManagementPanelContainer({
 
   const initialTab = readInitialTab()
   const workspaceAccess = useWorkspaceAccess(accessToken, canManage)
-  const ruleEditorOptions = useMemo<AutomationRuleEditorOptions>(() => {
-    // A Team rule may only reach its own Team's Projects and the templates it may use (ADR 0087).
-    const editorTeams = isTeamScope ? teams.filter((team) => team.id === ownerTeamId) : teams
+  const ruleEditorOptions = useMemo<AutomationRuleEditorOptions>(() => ({
+    members: (workspaceAccess.data?.members ?? [])
+      .filter((member) => member.status === 'active')
+      .map((member) => ({ id: member.memberKey, label: member.name ?? member.email })),
+    teams: teams.map((team) => ({ id: team.id, label: team.name })),
+    projects: listProjectOptions(teams),
+    statuses: data?.statusOptions ?? [],
+    customFields: data?.customFieldOptions ?? [],
+    workItemTemplates: [],
+  }), [data, teams, workspaceAccess.data])
+  /**
+   * Narrows the editor choices to what the edited rule's owner may use: a Team rule only reaches its
+   * own Team's Projects and the templates it may use, a Workspace rule only Workspace templates.
+   */
+  const ruleEditorOptionsFor = useMemo(() => (rule: AutomationRule): AutomationRuleEditorOptions => {
+    const allTemplates = loadedData?.templates ?? []
+    const usableTemplates = rule.ownerTeamId === undefined
+      ? selectWorkspaceTemplateOptions(allTemplates)
+      : selectTeamTemplateOptions(allTemplates, rule.ownerTeamId)
+    const editorTeams = rule.ownerTeamId === undefined
+      ? teams
+      : teams.filter((team) => team.id === rule.ownerTeamId)
     return {
-      members: (workspaceAccess.data?.members ?? [])
-        .filter((member) => member.status === 'active')
-        .map((member) => ({ id: member.memberKey, label: member.name ?? member.email })),
+      ...ruleEditorOptions,
       teams: editorTeams.map((team) => ({ id: team.id, label: team.name })),
       projects: listProjectOptions(editorTeams),
-      statuses: data?.statusOptions ?? [],
-      customFields: data?.customFieldOptions ?? [],
-      workItemTemplates: ((isTeamScope ? templateOptions : data?.templates) ?? [])
+      workItemTemplates: usableTemplates
         .filter((template) => template.kind === 'work-item' && template.enabled)
         .map((template) => ({ id: template.id, label: template.name })),
     }
-  }, [data, isTeamScope, ownerTeamId, teams, templateOptions, workspaceAccess.data])
+  }, [loadedData, ruleEditorOptions, teams])
   const planningParentsQuery = useAutomationPlanningParents(
     accessToken,
     canManageWorkspace && (data?.templates ?? []).some(hasPlanningEntities),
@@ -185,6 +201,7 @@ export function AutomationManagementPanelContainer({
       readOnly={!canManage}
       recurringWork={data?.recurringWork ?? []}
       ruleEditorOptions={ruleEditorOptions}
+      ruleEditorOptionsFor={ruleEditorOptionsFor}
       rules={data?.rules ?? []}
       teams={teams.map((team) => ({ id: team.id, name: team.name }))}
       templates={data?.templates ?? []}

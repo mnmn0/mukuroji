@@ -1016,6 +1016,8 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
     teamId,
     workItemId: workItemId.trim(),
     rule: {
+      // The owner Team decides who may try the rule and which Work Items it may be tried on.
+      ...(rule.ownerTeamId === undefined ? {} : { ownerTeamId: rule.ownerTeamId }),
       name: update.name ?? rule.name,
       enabled: rule.enabled,
       trigger: rule.trigger,
