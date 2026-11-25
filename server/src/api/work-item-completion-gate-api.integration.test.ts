@@ -409,13 +409,16 @@ test('reports the Gate state through the Public API without changing the Work It
 })
 
 /**
- * Records the completion Gate override each Work Item update commits with.
+ * Records the completion Gate override, and the caller authorization checks, each Work Item update
+ * commits with.
  *
- * @returns Overrides received by the persistence fake, `undefined` for an update without one.
+ * @returns `overrides`: what the persistence fake received, `undefined` for an update without one;
+ *   `fencedMembers`: the Workspace member keys whose rows each update conditions on.
  */
 function captureGateOverrides() {
   const teamIssues = getTestAppDependencies().workItems.teamIssues
   const overrides: unknown[] = []
+  const fencedMembers: string[][] = []
   setTestAppDependencies({
     teamIssues: createTeamIssuesFake({
       async getTeamIssueDetail(...args) {
@@ -423,17 +426,21 @@ function captureGateOverrides() {
       },
       async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
         overrides.push(input.completionGateOverridden)
+        fencedMembers.push((input.authorizationConditionChecks ?? []).flatMap((check) => {
+          const recordKey: unknown = check.ConditionCheck?.Key?.recordKey
+          return typeof recordKey === 'string' && recordKey.startsWith('MEMBER#') ? [recordKey] : []
+        }))
         return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
       },
     }),
   })
-  return overrides
+  return { overrides, fencedMembers }
 }
 
 test('lets a manager complete past the Gate with a reason and records the overridden conditions', async () => {
   configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
   configureGate({ acceptanceCriteria: 'required', humanApproval: 'warn' })
-  const overrides = captureGateOverrides()
+  const { overrides, fencedMembers } = captureGateOverrides()
 
   const response = await patchWorkItem({
     workflowStatusId: 'done',
@@ -446,17 +453,20 @@ test('lets a manager complete past the Gate with a reason and records the overri
     reason: 'Customer accepted the release in the review meeting.',
     conditions: ['acceptance-criteria'],
   }])
+  // The manager roles that allowed the override are fenced, so a revocation before commit fails it.
+  expect(fencedMembers).toEqual([[expect.stringMatching(/^MEMBER#/)]])
 })
 
 test('records no override when the Gate does not block the update', async () => {
   configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [metCriterion] })
   configureGate({ acceptanceCriteria: 'required' })
-  const overrides = captureGateOverrides()
+  const { overrides, fencedMembers } = captureGateOverrides()
 
   const response = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Not needed' } })
 
   expect(response.status).toBe(200)
   expect(overrides).toEqual([undefined])
+  expect(fencedMembers).toEqual([[]])
 })
 
 test('rejects a Gate override from a member and an override without a reason', async () => {

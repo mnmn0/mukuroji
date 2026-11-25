@@ -36,7 +36,7 @@ const stateLabelKeys = {
 export type WorkItemCompletionGateStatusProps = {
   /** Team completion Gate, if any. */
   policy: WorkItemCompletionGatePolicy | undefined
-  /** Acceptance criteria stored on the Work Item. */
+  /** Acceptance criteria to evaluate: the open draft while one is edited, else the saved list. */
   acceptanceCriteria: readonly WorkItemAcceptanceCriterion[] | undefined
   /**
    * Approval counts of the Work Item. The API leaves the summary out when the Work Item has no

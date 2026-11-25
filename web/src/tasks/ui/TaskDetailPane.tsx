@@ -79,7 +79,7 @@ import {
   WorkItemContributorsEditor,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
-import { readAcceptanceCriteriaDraftSubmission } from '../../work-items/model/acceptanceCriteria'
+import { readAcceptanceCriteriaDraftSubmission, selectCompletionGateAcceptanceCriteria } from '../../work-items/model/acceptanceCriteria'
 import { readCompletionGateOverrideSubmission } from '../../work-items/model/completionGateOverride'
 import { WorkItemAcceptanceCriteriaEditor } from '../../work-items/ui/WorkItemAcceptanceCriteriaEditor'
 import { WorkItemCompletionGateStatus } from '../../work-items/ui/WorkItemCompletionGateStatus'
@@ -1133,7 +1133,10 @@ export function TaskDetailPane({
         readOnly={isReadOnly}
       />
       <WorkItemCompletionGateStatus
-        acceptanceCriteria={(issue ?? currentTask).acceptanceCriteria}
+        acceptanceCriteria={selectCompletionGateAcceptanceCriteria(
+          acceptanceCriteriaDraftState.draft.rows,
+          (issue ?? currentTask).acceptanceCriteria,
+        )}
         approvalSummary={(issue ?? currentTask).approvalSummary}
         locale={locale}
         {...(canCorrectActualDates && !isReadOnly && (issue ?? currentTask).statusCategory !== 'completed'

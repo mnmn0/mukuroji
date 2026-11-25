@@ -756,7 +756,8 @@ export async function prepareConfiguredUpdateWorkItem(
       : { fileProofing: options.relationDependencies.fileProofing },
     {
       expectedRevision: input.expectedRevision,
-      ...(options.completionGateOverrideReason === undefined
+      // The override is a person's exception: a service account or another credential never gets one.
+      ...(options.completionGateOverrideReason === undefined || rulePrincipal.kind !== 'person'
         ? {}
         : { overrideReason: options.completionGateOverrideReason }),
     },
@@ -785,7 +786,12 @@ export async function prepareConfiguredUpdateWorkItem(
   return {
     ...inputWithoutTypeChangeResolution,
     // The status was entered by the caller's roles, so the write fails when they change first.
-    ...withWorkflowRoleConditionChecks(inputWithoutTypeChangeResolution, rulePrincipal, judgedActorRoles),
+    // An override was allowed by the caller's manager roles, so it is fenced the same way.
+    ...withWorkflowRoleConditionChecks(
+      inputWithoutTypeChangeResolution,
+      rulePrincipal,
+      judgedActorRoles || gateFence.override !== undefined,
+    ),
     workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,

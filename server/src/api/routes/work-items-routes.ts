@@ -5355,6 +5355,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       if (overrideRequest.reason !== undefined) {
         // Only a manager of the Work Item may complete it past the Team's completion Gate. An update
         // that also moves it to another Project needs the manager role on both sides of the move.
+        // An enterprise service account can hold manager permissions, but the override is for people.
+        if (principal.principalKind === 'service-account') {
+          throw new ProjectDataError(
+            403,
+            'ProjectAccessDenied',
+            'Only a person can override the completion Gate.',
+          )
+        }
         const projectIds = new Set([
           detail.issue.assignedProjectId,
           'assignedProjectId' in body
