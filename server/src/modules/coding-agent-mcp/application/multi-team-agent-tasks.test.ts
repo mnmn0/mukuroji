@@ -112,6 +112,8 @@ function teamApi(teamId: string, tasks: AgentTask[], runs: AgentRunRecord[] = []
       return { schemaVersion: 1, teamId, projectId, lifecycleState: 'active', revision: 1, tags: [], repositoryUrls: [] }
     },
     document: unexpected,
+    async attachments() { return [] },
+    attachmentDownload: unexpected,
   }
   return { teamId, api, calls }
 }
