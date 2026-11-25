@@ -21,6 +21,9 @@ export type DynamoDbMemberProjectReaderOptions = {
 /**
  * Creates a reader of the active Projects a member belongs to, with each Project's managers.
  *
+ * Archiving a Team leaves its Project rows unarchived, so a Project counts as active only when
+ * its owning Team is active too.
+ *
  * @param options - DocumentClient, table name, and paging bounds.
  * @returns A function that reads one member's Projects from the Workspace directory partition.
  * @throws Error from the reader when a Workspace exceeds the page bound or a row is malformed.
@@ -34,8 +37,10 @@ export function createDynamoDbMemberProjectReader(
   const maxPages = options.maxPages ?? defaultMaxPages
   return async (workspaceId, memberKey) => {
     const normalizedMemberKey = memberKey.trim().toLowerCase()
-    // A Project ID names one Project of the Workspace; its Team comes from the Project row.
-    const activeProjectTeams = new Map<string, string>()
+    // A Project's Team comes from the Project row. The Team rows are read in the same query and
+    // may come after the Project rows, so the Teams are checked once every page is read.
+    const activeProjectTeams = new Map<string, Set<string>>()
+    const activeTeamIds = new Set<string>()
     const memberProjectIds = new Set<string>()
     const managers = new Map<string, Set<string>>()
     let exclusiveStartKey: Record<string, unknown> | undefined
@@ -54,11 +59,14 @@ export function createDynamoDbMemberProjectReader(
       }))
       pages += 1
       for (const item of response.Items ?? []) {
+        if (item.entryType === 'team' && item.archivedAt === undefined) {
+          activeTeamIds.add(requireText(item.teamId, 'Project directory Team ID'))
+        }
         if (item.entryType === 'project' && item.archivedAt === undefined) {
-          activeProjectTeams.set(
-            requireText(item.projectId, 'Project directory project ID'),
-            requireText(item.teamId, 'Project directory Team ID'),
-          )
+          const projectId = requireText(item.projectId, 'Project directory project ID')
+          const projectTeams = activeProjectTeams.get(projectId) ?? new Set<string>()
+          projectTeams.add(requireText(item.teamId, 'Project directory Team ID'))
+          activeProjectTeams.set(projectId, projectTeams)
         }
         if (item.entryType !== 'project-member' || item.archivedAt !== undefined) continue
         const projectId = requireText(item.projectId, 'Project member project ID')
@@ -74,12 +82,11 @@ export function createDynamoDbMemberProjectReader(
     } while (exclusiveStartKey)
 
     return [...memberProjectIds]
-      .flatMap((projectId): ExpiringMemberProject[] => {
-        const teamId = activeProjectTeams.get(projectId)
-        return teamId === undefined
-          ? []
-          : [{ teamId, projectId, managerMemberKeys: [...(managers.get(projectId) ?? [])].sort() }]
-      })
+      .flatMap((projectId): ExpiringMemberProject[] =>
+        [...(activeProjectTeams.get(projectId) ?? [])]
+          .filter((teamId) => activeTeamIds.has(teamId))
+          .map((teamId) => ({ teamId, projectId, managerMemberKeys: [...(managers.get(projectId) ?? [])].sort() }))
+      )
       .sort((left, right) =>
         left.teamId.localeCompare(right.teamId) || left.projectId.localeCompare(right.projectId)
       )
