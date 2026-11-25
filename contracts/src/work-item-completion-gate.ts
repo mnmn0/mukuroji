@@ -182,6 +182,51 @@ export function evaluateWorkItemCompletionGate(
 }
 
 /**
+ * State of one completion Gate condition the Team evaluates.
+ *
+ * - `met`: the condition holds.
+ * - `unmet`: the state was read and does not meet the condition.
+ * - `unavailable`: the state could not be read, so the condition counts as unmet.
+ */
+export type WorkItemCompletionGateConditionState = 'met' | WorkItemCompletionGateFailureReason
+
+/** One `warn` or `required` completion Gate condition with whether the Work Item meets it. */
+export type WorkItemCompletionGateConditionStatus = {
+  /** Condition the Team evaluates. */
+  condition: WorkItemCompletionGateConditionId
+  /** Requirement the Team set for the condition. */
+  requirement: Exclude<WorkItemCompletionGateRequirement, 'off'>
+  /** Whether the Work Item meets the condition. */
+  state: WorkItemCompletionGateConditionState
+  /** Short English explanation of an unmet or unavailable condition; absent when it is met. */
+  message?: string
+}
+
+/**
+ * Lists every condition a completion Gate evaluates with whether the Work Item meets it, for a
+ * checklist that shows met conditions as well as unmet ones.
+ *
+ * @param policy - Team completion Gate, if any.
+ * @param state - Acceptance criteria and approval counts of the Work Item.
+ * @returns Every `warn` or `required` condition in display order; empty when the Gate is off.
+ */
+export function describeWorkItemCompletionGate(
+  policy: WorkItemCompletionGatePolicy | undefined,
+  state: WorkItemCompletionGateState,
+): WorkItemCompletionGateConditionStatus[] {
+  const statuses: WorkItemCompletionGateConditionStatus[] = []
+  for (const condition of WORK_ITEM_COMPLETION_GATE_CONDITIONS) {
+    const requirement = getWorkItemCompletionGateRequirement(policy, condition)
+    if (requirement === 'off') continue
+    const failure = evaluateWorkItemCompletionGateCondition(condition, state)
+    statuses.push(failure
+      ? { condition, requirement, state: failure.reason, message: failure.message }
+      : { condition, requirement, state: 'met' })
+  }
+  return statuses
+}
+
+/**
  * Evaluates one completion Gate condition.
  *
  * @param condition - Condition to evaluate.
