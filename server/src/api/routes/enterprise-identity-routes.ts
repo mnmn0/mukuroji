@@ -78,6 +78,7 @@ import {
 } from '../../modules/workspace-access/document-manager-lifecycle'
 import {
   authenticationDependencies,
+  developerPlatformDependencies,
   enforceActiveTenantForRequest,
   requireAppDependencies,
   workItemDependencies,
@@ -106,7 +107,8 @@ import {
   readJson,
   toAuthErrorResponse,
 } from '../shared/http'
-import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { reconcileDirectoryMemberAccess, summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { createDirectoryMemberReconciliationPorts } from '../../app/composition/member-credential-revoker'
 import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
@@ -1633,18 +1635,29 @@ async function applyEnterpriseScimUserState(
             memberKey,
           )
         : undefined
-    await workspaceDependencies.workspaceAccess.reconcileDirectoryMember?.(user.workspaceId, {
-      memberKey,
-      email: user.emails[0] ?? user.userName,
-      name: user.displayName,
-      role: workspaceRole,
-      externalIdentityId: user.userId,
-      expectedVersion: existing?.version,
-      expectedPlanningRevision,
-      ...(expectedDocumentAuthorizationRevision === undefined
-        ? {}
-        : { expectedDocumentAuthorizationRevision }),
-    }, auditContext)
+    const reconciliationPorts = createDirectoryMemberReconciliationPorts(
+      workspaceDependencies.workspaceAccess,
+      developerPlatformDependencies,
+    )
+    if (reconciliationPorts) {
+      await reconcileDirectoryMemberAccess(reconciliationPorts, {
+        workspaceId: user.workspaceId,
+        existing,
+        member: {
+          memberKey,
+          email: user.emails[0] ?? user.userName,
+          name: user.displayName,
+          role: workspaceRole,
+          externalIdentityId: user.userId,
+          expectedVersion: existing?.version,
+          expectedPlanningRevision,
+          ...(expectedDocumentAuthorizationRevision === undefined
+            ? {}
+            : { expectedDocumentAuthorizationRevision }),
+        },
+        auditContext,
+      })
+    }
     await authenticationDependencies.cognito.enableWorkspaceUser?.(memberKey)
   } else if (existing) {
     await requireWorkspaceMemberHasNoManagedProjects(user.workspaceId, memberKey)

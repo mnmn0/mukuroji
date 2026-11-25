@@ -65,6 +65,11 @@ export {
   type ManagedMemberCredentialRevocationPorts,
 } from './application/managed-member-credential-revocation'
 export {
+  reconcileDirectoryMemberAccess,
+  type DirectoryMemberReconciliationInput,
+  type DirectoryMemberReconciliationPorts,
+} from './application/directory-member-reconciliation'
+export {
   updateMemberMembership,
   type MemberMembershipUpdateInput,
   type MemberMembershipUpdatePorts,

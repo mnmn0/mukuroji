@@ -1,7 +1,9 @@
 import { revokeMemberCredentials } from '../../modules/developer-platform'
 import type {
+  DirectoryMemberReconciliationPorts,
   ManagedMemberCredentialRevocationPorts,
   MemberCredentialRevoker,
+  WorkspaceAccessClient,
 } from '../../modules/workspace-access'
 import type { DeveloperPlatformDependencies, WorkspaceDependencies } from './app-dependencies'
 
@@ -44,3 +46,22 @@ export function createManagedMemberCredentialRevocationPorts({
   }
 }
 
+/**
+ * Connects the directory member reconciliation to the Workspace store and the developer platform.
+ *
+ * @param workspaceAccess - Workspace store that reconciles directory members.
+ * @param developerPlatform - API key and OAuth application adapters.
+ * @returns The ports, or undefined when the store cannot reconcile directory members.
+ */
+export function createDirectoryMemberReconciliationPorts(
+  workspaceAccess: Pick<WorkspaceAccessClient, 'reconcileDirectoryMember'>,
+  developerPlatform: MemberCredentialRevocationAdapters,
+): DirectoryMemberReconciliationPorts | undefined {
+  const { reconcileDirectoryMember } = workspaceAccess
+  if (!reconcileDirectoryMember) return undefined
+  return {
+    reconcileDirectoryMember: (workspaceId, input, auditContext) =>
+      reconcileDirectoryMember.call(workspaceAccess, workspaceId, input, auditContext),
+    revokeMemberCredentials: createMemberCredentialRevoker(developerPlatform),
+  }
+}
