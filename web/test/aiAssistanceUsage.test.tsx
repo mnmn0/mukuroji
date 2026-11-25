@@ -24,7 +24,7 @@ describe('AI usage API', () => {
     expect(urls[0]).toEndWith('/api/ai-assistance/usage?month=2026-11')
   })
 
-  test('rejects a negative count or a malformed month, and drops unknown fields', async () => {
+  test('rejects a negative count, a malformed month, or an over-long member ID, and drops unknown fields', async () => {
     globalThis.fetch = async () => Response.json({
       ...aiAssistanceUsageFixture,
       totals: { ...aiAssistanceUsageFixture.totals, inputTokens: -1 },
@@ -32,6 +32,16 @@ describe('AI usage API', () => {
     await expect(getAiAssistanceUsage('access-token')).rejects.toBeDefined()
 
     globalThis.fetch = async () => Response.json({ ...aiAssistanceUsageFixture, month: '2026-13' })
+    await expect(getAiAssistanceUsage('access-token')).rejects.toBeDefined()
+
+    const longMember = { ...aiAssistanceUsageFixture.members[0], memberId: 'm'.repeat(320) }
+    globalThis.fetch = async () => Response.json({ ...aiAssistanceUsageFixture, members: [longMember] })
+    expect((await getAiAssistanceUsage('access-token')).members[0]?.memberId).toHaveLength(320)
+
+    globalThis.fetch = async () => Response.json({
+      ...aiAssistanceUsageFixture,
+      members: [{ ...longMember, memberId: 'm'.repeat(321) }],
+    })
     await expect(getAiAssistanceUsage('access-token')).rejects.toBeDefined()
 
     globalThis.fetch = async () => Response.json({ ...aiAssistanceUsageFixture, unexpected: true })

@@ -280,7 +280,7 @@ function parseAiAssistanceUsageSummary(value: unknown): AiAssistanceUsageSummary
     return { ...parseUsageTotals(entry), task: entry.task }
   })
   const members = value.members.map((entry: unknown): AiAssistanceMemberUsage => {
-    if (!isRecord(entry) || !isIdentifier(entry.memberId)) throw invalidResponseError()
+    if (!isRecord(entry) || !isMemberIdentifier(entry.memberId)) throw invalidResponseError()
     return { ...parseUsageTotals(entry), memberId: entry.memberId }
   })
   const monthlyTokenLimit = value.monthlyTokenLimit
@@ -478,6 +478,23 @@ function isModelIdArray(value: unknown): value is string[] {
 }
 
 /** Validates one normalized bounded identifier. */
+/** Longest member identifier the server records in a usage counter. */
+const MAX_MEMBER_IDENTIFIER_LENGTH = 320
+
+/**
+ * Checks a member identifier from a usage summary, which allows up to 320 characters like the
+ * server's member counters.
+ *
+ * @param value - Unknown value from the response.
+ * @returns Whether the value is a trimmed, non-empty member identifier.
+ */
+function isMemberIdentifier(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= MAX_MEMBER_IDENTIFIER_LENGTH &&
+    value === value.trim()
+}
+
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length >= 1 &&
