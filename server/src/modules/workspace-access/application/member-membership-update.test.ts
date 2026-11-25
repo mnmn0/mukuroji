@@ -42,6 +42,7 @@ function createPorts(current: WorkspaceMember | undefined, updated: WorkspaceMem
     },
     async revokeMemberCredentials(_workspaceId, memberKey, actorMemberKey) {
       calls.push(`revoke:${memberKey}:${actorMemberKey}`)
+      return { revokedApiKeyIds: [], revokedOAuthAppIds: [] }
     },
   }
   return { ports, calls }

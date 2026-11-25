@@ -1,12 +1,12 @@
 import type { Hono } from 'hono'
 import { createMemberOffboardingPorts } from '../../app/composition/member-offboarding'
 import { CognitoServiceError } from '../../modules/authentication'
-import { revokeMemberCredentials } from '../../modules/developer-platform'
+import { createManagedMemberCredentialRevocationPorts } from '../../app/composition/member-credential-revoker'
 import {
   WorkspaceAccessError,
   readMemberAccessExpiry,
   readMemberOffboarding,
-  type WorkspaceRole,
+  revokeManagedMemberCredentials,
 } from '../../modules/workspace-access'
 import {
   developerPlatformDependencies,
@@ -20,20 +20,6 @@ import {
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { readWorkspaceEmail, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
-
-/**
- * Allows a credential revocation only on a member the administrator may manage, as for role
- * changes and deactivation: owners act on everyone, admins on members and guests.
- *
- * @param actorRole - Workspace role of the signed-in administrator.
- * @param targetRole - Workspace role of the member whose credentials are revoked.
- * @throws WorkspaceAccessError 403 `WorkspaceRoleDenied` when the actor may not manage the target.
- */
-function requireCanManageMember(actorRole: WorkspaceRole, targetRole: WorkspaceRole) {
-  if (actorRole === 'owner') return
-  if (actorRole === 'admin' && (targetRole === 'member' || targetRole === 'guest')) return
-  throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'The Workspace role cannot manage this member.')
-}
 
 /** Access expiry change read from a request body. */
 type MemberAccessExpiryChange = {
@@ -132,16 +118,17 @@ export function registerWorkspaceMemberOffboardingRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
       const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
-      const member = await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, memberKey)
-      if (!member) {
-        throw new WorkspaceAccessError(404, 'WorkspaceMemberNotFound', 'Workspace member was not found.')
-      }
-      requireCanManageMember(principal.workspaceRole, member.role)
-      return c.json(await revokeMemberCredentials(
-        developerPlatformDependencies,
-        principal.directoryId,
-        member.memberKey,
-        principal.userKey,
+      return c.json(await revokeManagedMemberCredentials(
+        createManagedMemberCredentialRevocationPorts({
+          workspace: workspaceDependencies,
+          developerPlatform: developerPlatformDependencies,
+        }),
+        {
+          workspaceId: principal.directoryId,
+          actorMemberKey: principal.userKey,
+          actorRole: principal.workspaceRole,
+          memberKey,
+        },
       ))
     } catch (error) {
       if (error instanceof CognitoServiceError) {

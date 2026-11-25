@@ -1,6 +1,6 @@
-import { revokeMemberCredentials } from '../../modules/developer-platform'
 import type { MemberMembershipUpdatePorts } from '../../modules/workspace-access'
 import type { DeveloperPlatformDependencies, WorkspaceDependencies } from './app-dependencies'
+import { createMemberCredentialRevoker } from './member-credential-revoker'
 
 /** Adapters the Workspace member role and status update is wired to. */
 export type MemberMembershipUpdateAdapters = {
@@ -26,8 +26,6 @@ export function createMemberMembershipUpdatePorts({
     getMember: (workspaceId, memberKey) => workspaceAccess.getMember(workspaceId, memberKey),
     updateMember: (workspaceId, actorMemberKey, memberKey, input, auditContext) =>
       workspaceAccess.updateMember(workspaceId, actorMemberKey, memberKey, input, auditContext),
-    revokeMemberCredentials: async (workspaceId, memberKey, actorMemberKey) => {
-      await revokeMemberCredentials(developerPlatform, workspaceId, memberKey, actorMemberKey)
-    },
+    revokeMemberCredentials: createMemberCredentialRevoker(developerPlatform),
   }
 }

@@ -4,6 +4,7 @@ import type {
   UpdateWorkspaceMemberInput,
   WorkspaceMember,
 } from '../workspace-access'
+import type { MemberCredentialRevoker } from './member-credential-revoker'
 
 /** Ports the Workspace member role and status update use case needs. */
 export type MemberMembershipUpdatePorts = {
@@ -18,7 +19,7 @@ export type MemberMembershipUpdatePorts = {
     auditContext: MutationAuditContext | undefined,
   ): Promise<WorkspaceMember>
   /** Revokes every API key and OAuth app the member created; repeating it is harmless. */
-  revokeMemberCredentials(workspaceId: string, memberKey: string, actorMemberKey: string): Promise<void>
+  revokeMemberCredentials: MemberCredentialRevoker
 }
 
 /** Input of {@link updateMemberMembership}. */

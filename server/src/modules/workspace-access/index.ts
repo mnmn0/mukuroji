@@ -55,6 +55,15 @@ export {
   type WorkspaceMemberStatus,
   type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'
+export type {
+  MemberCredentialRevoker,
+  RevokedMemberCredentials,
+} from './application/member-credential-revoker'
+export {
+  revokeManagedMemberCredentials,
+  type ManagedMemberCredentialRevocationInput,
+  type ManagedMemberCredentialRevocationPorts,
+} from './application/managed-member-credential-revocation'
 export {
   updateMemberMembership,
   type MemberMembershipUpdateInput,
