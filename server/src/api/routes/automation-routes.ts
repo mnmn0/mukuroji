@@ -2863,17 +2863,14 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const principal = await authenticateAutomationPrincipal(c)
       const input = validateCreateAutomationRuleInput(await readAutomationJson(c))
       await requireDelegatedManagement(principal, input.ownerTeamId)
-      if (input.ownerTeamId !== undefined) {
-        await assertAutomationActionsUseOwnerTeamProjects(
-          principal.directoryId,
-          input.ownerTeamId,
-          input.actions,
-        )
-      }
+      const ownerTeamId = input.ownerTeamId
       return c.json(await automationDependencies.ruleTemplates.createRule(
         principal.directoryId,
         input,
         c.req.header('Idempotency-Key')?.trim() || undefined,
+        ownerTeamId === undefined
+          ? undefined
+          : (actions) => assertAutomationActionsUseOwnerTeamProjects(principal.directoryId, ownerTeamId, actions),
       ), 201)
     } catch (error) {
       return toAutomationErrorResponse(c, error)
@@ -2893,17 +2890,14 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         throw new AutomationError('not-found', 'AutomationRuleNotFound', 'Automation rule was not found.')
       }
       await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
-      if (current.ownerTeamId !== undefined && Array.isArray(input.actions)) {
-        await assertAutomationActionsUseOwnerTeamProjects(
-          principal.directoryId,
-          current.ownerTeamId,
-          validateCreateAutomationRuleInput({ ...current, actions: input.actions }).actions,
-        )
-      }
+      const ownerTeamId = current.ownerTeamId
       return c.json(await automationDependencies.ruleTemplates.updateRule(
         principal.directoryId,
         c.req.param('ruleId'),
         input,
+        ownerTeamId === undefined
+          ? undefined
+          : (actions) => assertAutomationActionsUseOwnerTeamProjects(principal.directoryId, ownerTeamId, actions),
       ))
     } catch (error) {
       return toAutomationErrorResponse(c, error)

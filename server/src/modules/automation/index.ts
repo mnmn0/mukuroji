@@ -37,6 +37,7 @@ export {
   type AutomationInboundWebhookSecretCleanup,
   type AutomationInboundWebhookSecretReference,
   type AutomationInboundWebhookSecretStore,
+  type AutomationPinnedActionsGuard,
   type AutomationRecurringSchedulePort,
   type AutomationRepository,
   type AutomationRuleTemplatePort,

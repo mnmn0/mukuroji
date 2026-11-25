@@ -52,6 +52,7 @@ import type {
   AutomationInboundWebhookProvisioning,
   AutomationInboundWebhookProvisioningOperation,
   AutomationInboundWebhookSecretCleanup,
+  AutomationPinnedActionsGuard,
   AutomationRepository,
 } from '../../application/ports'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
@@ -304,7 +305,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Rule を作成します。 */
-  async createRule(workspaceId: string, input: CreateAutomationRuleInput, idempotencyKey?: string) {
+  async createRule(
+    workspaceId: string,
+    input: CreateAutomationRuleInput,
+    idempotencyKey?: string,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
+  ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
     const normalized = validateCreateAutomationRuleInput(input)
@@ -361,6 +367,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         requestedDefinition.ownerTeamId,
       ),
     }
+    await assertPinnedActions?.(definition.actions)
     const now = new Date().toISOString()
     const nextRunAt = definition.trigger.type === 'schedule'
       ? getNextRecurringOccurrence(definition.trigger.schedule, new Date(now))
@@ -416,7 +423,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Rule を revision CAS 付きで更新します。 */
-  async updateRule(workspaceId: string, ruleId: string, input: UpdateAutomationRuleInput) {
+  async updateRule(
+    workspaceId: string,
+    ruleId: string,
+    input: UpdateAutomationRuleInput,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
+  ) {
     const current = await this.requireRule(workspaceId, ruleId)
     assertExpectedRevision(current.revision, input.expectedRevision)
     assertOwnerTeamUnchanged(input, current.ownerTeamId)
@@ -444,6 +456,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const pinnedActions = input.actions === undefined
       ? current.actions
       : await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions, current.ownerTeamId)
+    if (input.actions !== undefined) await assertPinnedActions?.(pinnedActions)
     const scheduleChanged = normalized.trigger.type === 'schedule' && (
       current.trigger.type !== 'schedule' ||
       canonicalString(current.trigger.schedule) !== canonicalString(normalized.trigger.schedule)

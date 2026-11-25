@@ -1,4 +1,5 @@
 import type {
+  AutomationAction,
   AutomationRule,
   AutomationTemplate,
   AutomationTemplateApplication,
@@ -10,6 +11,15 @@ import type {
   UpdateAutomationTemplateInput,
   WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
+
+/**
+ * Checks the actions of a rule after their template versions are pinned and before the rule is
+ * written, so the check sees the exact template versions the rule will run with.
+ *
+ * @param actions - Rule actions with `templateVersion` set on template create actions.
+ * @throws When the pinned actions are not allowed for the rule.
+ */
+export type AutomationPinnedActionsGuard = (actions: readonly AutomationAction[]) => Promise<void>
 
 /** Persistence capability required by Rule and Template use cases. */
 export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
@@ -46,12 +56,14 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     workspaceId: string,
     input: CreateAutomationRuleInput,
     idempotencyKey?: string,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
   ): Promise<AutomationRule>
   /** Updates a rule with revision compare-and-swap. */
   updateRule(
     workspaceId: string,
     ruleId: string,
     input: UpdateAutomationRuleInput,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
   ): Promise<AutomationRule>
   /** Deletes a rule with revision compare-and-swap. */
   deleteRule(workspaceId: string, ruleId: string, expectedRevision: number): Promise<void>

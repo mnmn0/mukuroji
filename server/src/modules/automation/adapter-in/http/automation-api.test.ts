@@ -66,6 +66,7 @@ import type {
   AutomationInboundWebhookSecretStore,
 } from '../../automation-inbound-webhook'
 import type {
+  AutomationAction,
   AutomationTemplate,
   AutomationTemplateApplication,
   AutomationTemplateApplicationResult,
@@ -5750,37 +5751,50 @@ test('lets a Team manager create and change rules of their own Team only', async
   configureFakeProjectClients(true, { workspaceRole: 'member', role: 'manager' })
   const created: unknown[] = []
   const updated: unknown[] = []
+  /** Pins template create actions to version 2, as the repository does before writing. */
+  const pinTemplates = (actions: readonly AutomationAction[]) => actions.map((action) =>
+    action.type === 'create' && action.templateId ? { ...action, templateVersion: 2 } : action
+  )
+  /** Builds a Work Item template whose payload assigns the given Project. */
+  const projectTemplate = (templateId: string, version: number, assignedProjectId: string) => ({
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: templateId,
+    workspaceId: 'user#demo@example.com',
+    kind: 'work-item' as const,
+    name: 'Follow-up',
+    enabled: true,
+    version,
+    revision: version,
+    payload: {
+      title: 'Follow up',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+      assignedProjectId,
+    },
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  })
   setTestAppDependencies({
     ruleTemplates: createAutomationRuleTemplatePort({
-      async createRule(_workspaceId, input) {
+      async createRule(_workspaceId, input, _idempotencyKey, assertPinnedActions) {
+        await assertPinnedActions?.(pinTemplates(input.actions))
         created.push(input)
         return createStoredTeamRule(input.ownerTeamId)
       },
       async getRule(_workspaceId, ruleId) {
         return createStoredTeamRule(ruleId === 'rule-workspace' ? undefined : 'core-team')
       },
-      async updateRule(_workspaceId, _ruleId, input) {
+      async updateRule(_workspaceId, _ruleId, input, assertPinnedActions) {
+        if (input.actions) await assertPinnedActions?.(pinTemplates(input.actions))
         updated.push(input)
         return createStoredTeamRule('core-team')
       },
+      // Version 1 was current when the request arrived; version 2, pinned on save, moved the
+      // template to another Team's Project.
       async getTemplate(_workspaceId, templateId) {
-        return {
-          schemaVersion: AUTOMATION_SCHEMA_VERSION,
-          id: templateId,
-          workspaceId: 'user#demo@example.com',
-          kind: 'work-item',
-          name: 'Other Team follow-up',
-          enabled: true,
-          version: 1,
-          revision: 1,
-          payload: {
-            title: 'Follow up',
-            schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
-            assignedProjectId: 'other-team-project',
-          },
-          createdAt: '2026-07-16T00:00:00.000Z',
-          updatedAt: '2026-07-16T00:00:00.000Z',
-        }
+        return projectTemplate(templateId, 1, 'core-project')
+      },
+      async getTemplateVersion(_workspaceId, templateId, version) {
+        return projectTemplate(templateId, version, version === 2 ? 'other-team-project' : 'core-project')
       },
     }),
   })
@@ -5814,7 +5828,12 @@ test('lets a Team manager create and change rules of their own Team only', async
   })
   const otherTeamTemplateProject = await post({
     ...teamRuleBody,
-    actions: [{ type: 'create', templateId: 'template-other-project' }],
+    actions: [{ type: 'create', templateId: 'template-moved' }],
+  })
+  const otherTeamTemplateProjectOnUpdate = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, actions: [{ type: 'create', templateId: 'template-moved' }] }),
   })
   const formTrigger = await post({ ...teamRuleBody, trigger: { type: 'form', formId: 'form-1' } })
   const stopOwn = await app.request('/api/automation/rules/rule-team', {
@@ -5838,6 +5857,7 @@ test('lets a Team manager create and change rules of their own Team only', async
     otherTeamProject,
     otherTeamUpdate,
     otherTeamTemplateProject,
+    otherTeamTemplateProjectOnUpdate,
     formTrigger,
   ]) {
     expect(response.status).toBe(403)

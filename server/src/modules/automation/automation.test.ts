@@ -591,6 +591,41 @@ describe('automation management create idempotency', () => {
     expect(disabledRule.actions[0]).toMatchObject({ templateVersion: 2 })
   })
 
+  test('checks rule actions with the template versions it pins before writing', async () => {
+    const { documentClient } = createIdempotencyDocumentClient()
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'work-item',
+      name: 'Follow-up',
+      enabled: true,
+      payload: { schedule: createDefaultUnscheduledWorkItemSchedule(), title: 'Follow up' },
+    })
+    const seen: unknown[] = []
+    const input = {
+      ownerTeamId: 'core',
+      name: 'Create a follow-up',
+      enabled: true,
+      trigger: { type: 'status' as const, toStatusId: 'done' },
+      actions: [{ type: 'create' as const, templateId: template.id }],
+    }
+
+    await expect(client.createRule('workspace-1', input, undefined, async (actions) => {
+      seen.push(actions)
+      throw new Error('rejected by the guard')
+    })).rejects.toThrow('rejected by the guard')
+    expect(seen).toEqual([[{ type: 'create', templateId: template.id, templateVersion: template.version }]])
+    expect(await client.listRules('workspace-1')).toEqual([])
+
+    const rule = await client.createRule('workspace-1', input, undefined, async () => undefined)
+    await expect(client.updateRule('workspace-1', rule.id, {
+      expectedRevision: rule.revision,
+      actions: input.actions,
+    }, async () => {
+      throw new Error('rejected on update')
+    })).rejects.toThrow('rejected on update')
+    expect((await client.getRule('workspace-1', rule.id))?.revision).toBe(rule.revision)
+  })
+
   test('keeps Team definitions on their own Team templates and their owner Team fixed', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
     const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
