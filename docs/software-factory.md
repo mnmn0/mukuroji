@@ -628,7 +628,12 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   Run がある場合は、表示が新しい Run に限られることを示す。
 - `MUKUROJI_MCP_PROJECT_ID` を設定した MCP は、Project 外のタスクの Run を `ownRuns` / `otherRuns` に
   含めず、`heartbeat` と `finish_run` も `out_of_scope` で拒否する。
-- `instanceId` hash と `credentialId` は保存するが、Slice 1 ではどの API も返さない。
+- `instanceId` hash と `credentialId` は保存し、Web の Run 一覧と Factory board の Run に `startedBy` として
+  Team manager にだけ返す（#412）。API key の名前は Workspace の API key 一覧から引き、読めない場合は ID だけを返す。
+  Public API の `AgentRun` は閉じた schema のため返さない。
+- Team の Agent settings の `acceptNewRuns`（既定 `true`、この項目がない保存済み row も `true`）が `false` の間、
+  start・resume・take over は `409 not_ready`（pointer `/acceptNewRuns`）で拒否する。いずれも設定 row の revision の
+  ConditionCheck と一緒に確定するため、判定後に切り替わった場合も確定しない。実行中の Run はそのまま続く。
 - MCP の `get_next_task` は、自 instance の Run があり、かつ Work Item がまだ `started` のものだけを
   `in_progress` とする。Run 一覧の index は結果整合のため、index にない `started` タスクはすべて
   claim を強整合で読み（同時 10 件ずつ）、自 instance の Run を `ownRuns` に含める。`get_task` の

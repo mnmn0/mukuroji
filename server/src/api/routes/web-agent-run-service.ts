@@ -48,7 +48,7 @@ import {
   retryProgressFencedClose,
   withVisibleProjectBriefs,
 } from '../shared/agent-run-access'
-import { authenticationDependencies, workItemDependencies } from '../shared/app-dependencies'
+import { authenticationDependencies, developerPlatformDependencies, workItemDependencies } from '../shared/app-dependencies'
 import {
   canAccessAssignedProject,
   canWorkspaceBusinessWrite,
@@ -143,14 +143,51 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @param run - Stored run.
  * @param canRelease - Whether the viewer may release the run while it is active.
  * @param now - Read time.
+ * @param usage - Usage attributed to the run, if any.
+ * @param credentialNames - API key names for a Team manager; the starting credential is shown only when given.
  * @returns Run view.
  */
-function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date, usage?: AgentRunUsage): AgentRunView {
+function toAgentRunView(
+  run: StoredAgentRun,
+  canRelease: boolean,
+  now: Date,
+  usage?: AgentRunUsage,
+  credentialNames?: ReadonlyMap<string, string>,
+): AgentRunView {
+  const credentialName = credentialNames?.get(run.credentialId)
   return {
     ...toAgentRun(run, now),
     canRelease: run.state === 'active' && canRelease,
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
+    ...(credentialNames === undefined
+      ? {}
+      : {
+          startedBy: {
+            credentialId: run.credentialId,
+            ...(credentialName === undefined ? {} : { credentialName }),
+            instanceIdHash: run.instanceIdHash,
+          },
+        }),
+  }
+}
+
+/**
+ * Reads the API key names of a Workspace so a Team manager sees which credential started a run. A
+ * failed read only leaves the names out; the credential IDs are still shown.
+ *
+ * @param manager - Whether the viewer manages the Team; other viewers get no credentials.
+ * @param directoryId - Workspace ID.
+ * @returns Names by credential ID for a manager, otherwise undefined.
+ */
+async function readCredentialNamesForManager(manager: boolean, directoryId: string): Promise<ReadonlyMap<string, string> | undefined> {
+  if (!manager) return undefined
+  try {
+    const apiKeys = await developerPlatformDependencies.apiKeys.listApiKeys(directoryId)
+    return new Map(apiKeys.map((apiKey) => [apiKey.id, apiKey.name]))
+  } catch (error) {
+    console.warn('Agent Run credential names could not be read.', error instanceof Error ? error.name : 'unknown')
+    return new Map()
   }
 }
 
@@ -176,6 +213,7 @@ export async function listWebWorkItemAgentRuns(
     isTeamManager(principal, teamId),
     canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
   ])
+  const credentialNames = await readCredentialNamesForManager(manager, principal.directoryId)
   const now = new Date()
   // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
   const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
@@ -186,6 +224,7 @@ export async function listWebWorkItemAgentRuns(
       writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
       now,
       usages[index],
+      credentialNames,
     )),
     hasMore: page.nextCursor !== undefined,
     ...(usageTotal === undefined ? {} : { usageTotal }),
@@ -674,6 +713,7 @@ export async function listWebTeamAgentRunBoard(
     isTeamManager(principal, teamId),
     canWriteTeamForRelease(principal, teamId),
   ])
+  const credentialNames = await readCredentialNamesForManager(manager, principal.directoryId)
   const finished = { workItemIds: [...new Set([...recent.workItemIds, ...failed.workItemIds])] }
   const nextContinuation = encodeBoardContinuation({
     since,
@@ -702,7 +742,7 @@ export async function listWebTeamAgentRunBoard(
         ...(workItem.assignedProjectId === undefined ? {} : { assignedProjectId: workItem.assignedProjectId }),
         assigneeUserId: workItem.assigneeUserId,
       },
-      ...(run === undefined ? {} : { run: toAgentRunView(run, canRelease, now) }),
+      ...(run === undefined ? {} : { run: toAgentRunView(run, canRelease, now, undefined, credentialNames) }),
       ...(latestReport === undefined ? {} : { latestReport }),
     }
     return classifyFactoryBoardItem(item, now) === undefined ? undefined : item
@@ -873,6 +913,7 @@ export async function updateWebAgentSettings(
     summary: 'Agent settings were updated.',
     changes: [
       { field: 'leaseMinutes', before: before.leaseMinutes, after: update.leaseMinutes },
+      { field: 'acceptNewRuns', before: before.acceptNewRuns, after: update.acceptNewRuns },
       {
         field: 'allowTakeoverAfterLeaseExpiry',
         before: before.allowTakeoverAfterLeaseExpiry,

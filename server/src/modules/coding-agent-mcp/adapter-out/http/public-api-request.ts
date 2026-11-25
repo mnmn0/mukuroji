@@ -38,7 +38,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
   invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
   not_resumable: 'This task is not in a status the Team allows agents to resume from (agentSettings.resumableStatusIds in get_configuration). Do not continue it; ask the user.',
-  not_ready: 'This task is not ready for agents: it is not in a Ready status, or the Team requires acceptance criteria and the task has none (check get_task and the agentSettings acceptance criteria field in get_configuration). Do not start it; pick another task with get_next_task or ask the user.',
+  not_ready: 'This task is not ready for agents: the Team has stopped accepting new Agent Runs (agentSettings.acceptNewRuns is false in get_configuration), it is not in a Ready status, or the Team requires acceptance criteria and the task has none (check get_task and the agentSettings acceptance criteria field in get_configuration). Do not start it; pick another task with get_next_task or ask the user.',
 }
 
 /** Reads a bounded response while always releasing its stream, including on overflow. */

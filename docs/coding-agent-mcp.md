@@ -75,7 +75,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 Team が1つだけなら、ツールと結果は従来と同じです。Project は1つの Team に属するため、`MUKUROJI_MCP_PROJECT_ID` は Team が1つのときだけ指定できます。
 
 - `get_configuration` は、各Teamの設定・brief・catalog を `teams` に並べて返します。
-- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。
+- `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら新しいRunを受け付けているTeam、次に先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。`acceptingNewRuns: false` は、すべてのTeamが新しいRunの受付を止めているときだけ返します。
 - `list_tasks` は指定した順にTeamを続けて読みます。`nextCursor` には次に読むTeamが含まれます。
 - `get_work_status` は全Teamの件数を足し、進行中のタスクに `teamId` を付けます。
 - タスクIDやRun IDを受け取るツールは、そのタスクやRunを持つTeamを自分で探します。ステータスIDは、そのタスクのTeamのcatalogから選んでください。
@@ -317,10 +317,10 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 
 | ツール | 用途 |
 | --- | --- |
-| `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、設定Projectのcharter（`projectCharter`）、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
+| `get_configuration` | 接続先Team・担当者、Agent settings（新しい Run の受付可否 `acceptNewRuns`、lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、設定Projectのcharter（`projectCharter`）、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
 | `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）、`relatedDocuments`（link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページ。続きは `list_task_documents`。Document endpoint のない古い server と、所有者が Document を読めない場合は `null`）、`questions`（このタスクの `blocker`・`handoff` 報告を新しい順に最大 20 件。人が回答した報告は `answer` に回答を持つ。回答 endpoint のない古い server と、読み取りが拒否された場合は `null`）、`attachments`（download できる添付ファイル。添付 endpoint のない古い server と、所有者がファイルを読めない場合は `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
-| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す |
+| `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す。Teamが新しいRunの受付を止めている間は、自インスタンスのRun以外を提示せず `action: none` と `acceptingNewRuns: false` を返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
 | `list_task_documents` | タスクに link された Document のうち credential 所有者が閲覧できるものを `{ id, title }` でページ取得。見えない Document は除くため、`hasMore: true` の空ページもある |

@@ -36,6 +36,7 @@ export const agentSettingsFixture: AgentSettings = {
   },
   fileFailedRunsToTriage: true,
   fileStalledRunsToTriage: false,
+  acceptNewRuns: true,
   updatedAt: '2026-10-20T03:15:00.000Z',
   updatedBy: 'member-avery',
 }
