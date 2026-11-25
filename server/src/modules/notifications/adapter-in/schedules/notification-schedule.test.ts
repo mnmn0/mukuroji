@@ -2030,6 +2030,9 @@ describe('member access expiry notices', () => {
         teamId: 'core-team',
         projectId: 'api',
         deepLink: '/teams/core-team/members',
+        // The projection rereads this member's expiry, so a cleared or moved one is not announced.
+        accessExpiryMemberKey: 'guest@example.com',
+        accessExpiresAt: '2026-11-28T00:00:00.000Z',
         notificationCandidates: [{ memberKey: 'lead@example.com', reason: 'member-access-expiry' }],
       }),
       expect.objectContaining({

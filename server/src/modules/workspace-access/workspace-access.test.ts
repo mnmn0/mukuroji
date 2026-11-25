@@ -3881,6 +3881,67 @@ test('returns the saved member when a committed access expiry change is retried 
   expect(retry.inputs).toEqual([])
 })
 
+test('binds the idempotency key of an unchanged access expiry request to its input', async () => {
+  const owner = createWorkspaceMember('demo@example.com', 'owner')
+  const guest = createWorkspaceMember('guest@example.com', 'guest')
+  const first = createMemberNameClient([owner, guest])
+  // Clearing an expiry the guest does not have changes nothing but still records the request.
+  await expect(first.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { expectedVersion: 1 },
+    createAccessExpiryAuditContext('clear-key', null),
+  )).resolves.toEqual(guest)
+  expect(first.inputs[0]).toMatchObject({
+    TransactItems: [
+      { ConditionCheck: { Key: { recordKey: 'MEMBER#demo@example.com' } } },
+      { ConditionCheck: { Key: { recordKey: 'MEMBER#guest@example.com' }, ExpressionAttributeValues: { ':expectedVersion': 1 } } },
+      {
+        Put: {
+          TableName: 'AuditTable',
+          Item: { eventType: 'member.access-expiry-changed', changes: [], metadata: { expectedVersion: 1, unchanged: true } },
+        },
+      },
+    ],
+  })
+  const transactItems = first.inputs[0]?.TransactItems
+  const auditPut = Array.isArray(transactItems) ? transactItems[2] : undefined
+  const auditItem = typeof auditPut === 'object' && auditPut !== null && 'Put' in auditPut
+    ? auditPut.Put.Item
+    : undefined
+  const recorded = createMemberNameClient([owner, guest], auditItem ? [auditItem] : [])
+
+  // The same request again is answered as before.
+  await expect(recorded.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { expectedVersion: 1 },
+    createAccessExpiryAuditContext('clear-key', null),
+  )).resolves.toEqual(guest)
+  // The same key with an expiry is refused instead of setting it.
+  const expiry = '2026-08-01T00:00:00.000Z'
+  await expect(recorded.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { accessExpiresAt: expiry, expectedVersion: 1 },
+    createAccessExpiryAuditContext('clear-key', expiry),
+  )).rejects.toMatchObject({ status: 409, code: 'WorkspaceIdempotencyConflict' })
+
+  // After another update moved the member on, the original request is still answered, not a conflict.
+  const later = createMemberNameClient([owner, { ...guest, accessExpiresAt: expiry, version: 2 }], auditItem ? [auditItem] : [])
+  await expect(later.client.updateMemberAccessExpiry(
+    workspaceId,
+    owner.memberKey,
+    guest.memberKey,
+    { expectedVersion: 1 },
+    createAccessExpiryAuditContext('clear-key', null),
+  )).resolves.toMatchObject({ accessExpiresAt: expiry, version: 2 })
+  expect(later.inputs).toEqual([])
+})
+
 test('lists every member row, deactivated members included, for name readers', async () => {
   const active = createWorkspaceMember('sato@example.com', 'member')
   const deactivated = { ...createWorkspaceMember('suzuki@example.com', 'member', 'deactivated'), name: '鈴木 改名' }

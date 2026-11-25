@@ -56,6 +56,12 @@
 - **事前の通知**: 通知 schedule が、7 日以内に期限が来るメンバーの所属 Project のマネージャーへ
   `workspace-member.access-expiring` を 1 回ずつ送ります。期限を変えると、もう一度送ります。
   entity ID と冪等キーに member key（メールアドレス）は入れず、digest にします。
+  - 通知の metadata には、対象のメンバーと、通知した期限の値を持たせます（週報の reminder が作成者を持つのと同じ）。
+    通知を作る projection と、Slack・Email などの外部配信は、送る直前に member row を強整合で読み直します。
+    期限が外れた、別の値に変わった、過ぎた、またはメンバーが利用停止になった場合は送りません。
+    projection は member row の期限と status を条件にして、通知と同じ transaction に入れます。
+    これで、走査のあとに管理者が期限を外したり延ばしたりしても、古い期限の通知はマネージャーに届きません。
+    この 2 つの値を持たない古い event は送りません。
 
 ## 検討した選択肢
 
@@ -76,6 +82,10 @@
 - 受け入れる欠点:
   - Public API の request ごとに member row を 1 回、強整合で読みます。
   - 自動停止の job は Cognito の global sign-out を呼びません。`signInsRevokedAt` を記録し、読み取り時の判定で止めます。
+    この判定（`auth_time` が `signInsRevokedAt` 以前の token を拒否する）は、SSO の token だけでなく
+    password の token にも効かせます。これで、job が利用停止したメンバーを管理者が再有効化しても、
+    期限切れ前に始まった password session（refresh token で発行し直した access token を含む）は戻りません。
+    password の token は 401 `WorkspaceSessionRevoked` で拒否します。
   - 自動の job は資格情報を失効しません。作成者の確認で止まります。管理者は一覧から失効できます。
     利用停止中のメンバーを再有効化するときは、更新の前に本人の資格情報を失効します。
     これで、job が利用停止したメンバーを戻しても、以前の API キーは使えないままです。

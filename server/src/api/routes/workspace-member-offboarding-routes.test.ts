@@ -234,3 +234,51 @@ test('sets and clears a member access expiry with validated input', async () => 
   }
   expect(updates).toHaveLength(2)
 })
+
+/**
+ * Builds an unsigned password-session access token whose sign-in began at the given time.
+ *
+ * @param authTimeSeconds - Sign-in time in seconds since the epoch.
+ * @returns The access token, as the fake Cognito GetUser accepts it.
+ */
+function createPasswordAccessToken(authTimeSeconds: number) {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify({
+      auth_time: authTimeSeconds,
+      // A refresh issues a new `iat` but keeps the original `auth_time`.
+      iat: Math.floor(Date.now() / 1_000),
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      token_use: 'access',
+    })).toString('base64url'),
+    'test-signature',
+  ].join('.')
+}
+
+test('refuses a password sign-in from before the expiry cutoff after the member is reactivated', async () => {
+  configureFakeProjectClients(true, { projectAccesses: [] })
+  // The access expiry job recorded a cutoff instead of a Cognito global sign-out, and an admin
+  // reactivated the member afterwards.
+  const signInsRevokedAt = new Date(Date.now() - 60_000).toISOString()
+  const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getActiveMember(workspaceIdToRead, memberKey) {
+        const member = await workspaceAccess.getActiveMember(workspaceIdToRead, memberKey)
+        return member ? { ...member, signInsRevokedAt } : undefined
+      },
+    },
+  })
+  const requestCurrentUser = (accessToken: string) => app.request('/api/auth/me', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  const nowSeconds = Math.floor(Date.now() / 1_000)
+
+  const beforeCutoff = await requestCurrentUser(createPasswordAccessToken(nowSeconds - 600))
+  expect(beforeCutoff.status).toBe(401)
+  expect(await beforeCutoff.json()).toMatchObject({ code: 'WorkspaceSessionRevoked' })
+  // A token without a readable sign-in time fails closed.
+  expect((await requestCurrentUser('test-token')).status).toBe(401)
+  expect((await requestCurrentUser(createPasswordAccessToken(nowSeconds - 5))).status).toBe(200)
+})

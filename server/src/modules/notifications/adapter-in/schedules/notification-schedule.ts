@@ -1536,6 +1536,10 @@ function createMemberAccessExpiryAuditEvent(
       // The recipient manages this Project and the member belongs to it.
       projectId: candidate.projectId,
       deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/members`,
+      // The projection and the external channels reread this member's expiry before they notify,
+      // so a notice whose expiry was cleared or moved after this scan is dropped.
+      accessExpiryMemberKey: candidate.memberKey,
+      accessExpiresAt: candidate.accessExpiresAt,
       notificationCandidates: [{ memberKey: candidate.recipientMemberKey, reason: MEMBER_ACCESS_EXPIRY_REASON }],
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
