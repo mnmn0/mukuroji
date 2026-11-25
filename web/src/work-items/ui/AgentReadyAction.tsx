@@ -39,7 +39,9 @@ const blockReasonKeys: Record<AgentReadyBlockReason, MessageKey> = {
  * @returns The candidate state, its reasons, and the action when it applies.
  */
 export function AgentReadyAction({ task, configuration, settings, activeRun, onMoveToStatus, t }: AgentReadyActionProps) {
-  const [moveState, setMoveState] = useState<{ status: 'idle' | 'moving' | 'failed' } | { status: 'moved'; statusName: string }>({ status: 'idle' })
+  const [moveState, setMoveState] = useState<
+    { status: 'idle' | 'moving' | 'failed' } | { status: 'moved'; statusId: string; statusName: string }
+  >({ status: 'idle' })
   if (settings.status !== 'loaded' || activeRun.status !== 'loaded') {
     const loading = settings.status !== 'unavailable' && activeRun.status !== 'unavailable'
     return (
@@ -52,7 +54,9 @@ export function AgentReadyAction({ task, configuration, settings, activeRun, onM
   const blockedByCount = task.relationIds.filter((relationId) => relationId.startsWith('blockedBy:')).length
 
   /**
-   * Saves the target status once and reports the result next to the action.
+   * Saves the target status once and reports the result next to the action. Some screens report a
+   * failed update themselves without rejecting, so success is shown only once the saved Work Item
+   * has the target status.
    * @param statusId - Target workflow status ID.
    * @param statusName - Target status name shown after the save.
    */
@@ -61,7 +65,7 @@ export function AgentReadyAction({ task, configuration, settings, activeRun, onM
     setMoveState({ status: 'moving' })
     try {
       await onMoveToStatus(statusId)
-      setMoveState({ status: 'moved', statusName })
+      setMoveState({ status: 'moved', statusId, statusName })
     } catch {
       setMoveState({ status: 'failed' })
     }
@@ -101,7 +105,7 @@ export function AgentReadyAction({ task, configuration, settings, activeRun, onM
       {blockedByCount > 0 && transition.kind !== 'blocked' ? (
         <p className="text-xs leading-5 text-[var(--workbench-muted)]">{t('agents.handoff.ready.blockedByNote').replace('{count}', String(blockedByCount))}</p>
       ) : null}
-      {moveState.status === 'moved' ? (
+      {moveState.status === 'moved' && task.workflowStatusId === moveState.statusId ? (
         <p className="text-xs font-medium text-[var(--workbench-primary-text)]" role="status">{t('agents.handoff.ready.moved').replace('{status}', moveState.statusName)}</p>
       ) : null}
       {moveState.status === 'failed' ? (
