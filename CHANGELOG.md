@@ -24,6 +24,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- MCP: `mcp.mjs --heartbeat` を追加しました。agent の hooks から呼ぶと、MCP server と同じ設定と instance ID で
+  その instance の `active` Run の lease を延長します。instance ごとに 1 分に 1 回までで、失敗しても終了コード 0 で終わります（#356）。
 - server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
   `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
   `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。
