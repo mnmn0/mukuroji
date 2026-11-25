@@ -922,6 +922,12 @@ function CommentCard({
     }
   }
 
+  /**
+   * Saves the edited body and its mentions, and closes the form when the save succeeds.
+   *
+   * @param event - Submit event of the edit form.
+   * @returns A promise that settles when the save has finished or been skipped.
+   */
   const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const body = editDraft?.body.trim() ?? ''

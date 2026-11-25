@@ -267,10 +267,14 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - 段落・リスト・引用・リンク・画像・HTML は、backslash escape も含めて Markdown のまま paragraph
   block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
   描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は
-  描画しません。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の開始
-  `<` だけを escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。
+  描画しません。Markdown 書き出しは paragraph の text を Markdown のまま書き、raw HTML の部分だけを
+  escape します（引用の `>`、autolink、code span と fenced code の中身はそのまま）。画面は HTML の部分を
+  文字のまま表示するので、書き出しでもその部分の記号をすべて backslash で escape し、
+  `<div>\n**literal**\n</div>` の `**` が太字にならないようにします。HTML block の 2 行目以降の
+  行頭の空白は文字参照（`&#32;`）にし、escape 後に indent の code block にならないようにします。
   raw HTML は、画面の描画と同じ CommonMark + GFM の parser（`mdast-util-from-markdown` と
   `micromark-extension-gfm`）で段落を解析して見つけ、HTML block と inline HTML の範囲だけを escape します。
+  引用やリストの中の HTML block は、行頭の `>` や indent を除いた HTML の部分だけを escape します。
   そのため複数行にまたがる code span や fence の判定も描画と一致します。HTML block を escape すると
   中の行が新たに HTML になることがあるので、HTML が無くなるまで解析し直し、数回で収まらない場合は
   段落全体の HTML の開始を escape します。

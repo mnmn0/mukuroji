@@ -1548,12 +1548,17 @@ const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
  */
 const MARKDOWN_HTML_ESCAPE_MAX_PASSES = 4
 
-/** Source range of one raw HTML node, as offsets into the parsed text. */
+/** ASCII punctuation, each of which a backslash makes literal in CommonMark. */
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/gu
+
+/** Source range of the text of one raw HTML node on one line, as offsets into the parsed text. */
 export type MarkdownSourceRange = {
   /** Offset of the first character. */
   start: number
   /** Offset after the last character. */
   end: number
+  /** Whether the range is a later line of its node, so it starts a line of the node's text. */
+  continuesNode?: boolean
 }
 
 /**
@@ -1607,11 +1612,13 @@ function renderMarkdownParagraph(text: string, markdown: MarkdownInspector): str
  * Escapes the raw HTML in Markdown, so the exported file never carries runnable HTML.
  *
  * The text is parsed with the same CommonMark and GFM grammar the app renders paragraphs with,
- * and only the source ranges of HTML blocks and inline HTML are changed. Blockquote markers,
- * autolinks, code spans (also across lines), fenced code, and backslash escapes stay as written,
- * so the text imports back with the same rendering. If HTML is still found after a few passes,
- * every raw HTML start in the text is escaped instead, which is safe but may show a backslash
- * inside code.
+ * and only the text of HTML blocks and inline HTML is changed. The app shows that text literally,
+ * so every Markdown character in it is escaped too: `<div>\n**x**\n</div>` stays literal instead
+ * of turning bold once the tags are escaped. Markdown outside those nodes, including blockquote
+ * markers, autolinks, code spans (also across lines), fenced code, and backslash escapes, stays
+ * as written, so the text imports back with the same rendering. If HTML is still found after a
+ * few passes, every raw HTML start in the text is escaped instead, which is safe but may show a
+ * backslash inside code.
  *
  * @param value - Markdown text.
  * @param findHtml - Finds the raw HTML ranges in Markdown.
@@ -1624,13 +1631,29 @@ function escapeMarkdownHtml(value: string, findHtml: MarkdownHtmlFinder): string
     if (ranges.length === 0) return text
     let escaped = ''
     let index = 0
-    for (const { start, end } of ranges) {
-      escaped += text.slice(index, start) + escapeRawHtmlStarts(text.slice(start, end))
+    for (const { start, end, continuesNode } of ranges) {
+      escaped += text.slice(index, start) + escapeHtmlNodeText(text.slice(start, end), continuesNode === true)
       index = end
     }
     text = escaped + text.slice(index)
   }
   return findHtml(text).length === 0 ? text : escapeRawHtmlStarts(value)
+}
+
+/**
+ * Escapes the text of one raw HTML node on one line so Markdown shows it literally, as the app
+ * does. Every ASCII punctuation character is backslash-escaped. On a later line of the node, the
+ * leading spaces and tabs become character references, so the line cannot become indented code
+ * once the node is no longer HTML.
+ *
+ * @param text - Text of the node on one line.
+ * @param continuesNode - Whether the text starts a later line of the node.
+ * @returns Markdown that shows the text literally.
+ */
+function escapeHtmlNodeText(text: string, continuesNode: boolean): string {
+  const escaped = text.replace(ASCII_PUNCTUATION, '\\$&')
+  if (!continuesNode) return escaped
+  return escaped.replace(/^[ \t]+/u, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
 }
 
 /**

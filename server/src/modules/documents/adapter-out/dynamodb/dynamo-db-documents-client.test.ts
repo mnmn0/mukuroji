@@ -5979,6 +5979,71 @@ test('exports a private canonical document through a redacted viewer projection'
   })
 })
 
+test('exports the text of an HTML node as literal Markdown that imports back unchanged', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '<div>\n**literal**\n</div>' },
+      { id: 'block-2', type: 'paragraph', text: '> <div>\n>     _x_ [y](z)\n> </div>\n\n**bold** stays' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  const literalBlock = '\\<div\\>\n\\*\\*literal\\*\\*\n\\<\\/div\\>'
+  // The blockquote marker stays; the node's indentation becomes character references, so the
+  // line cannot turn into indented code. Markdown outside the node is exported as written.
+  const quotedBlock = '> \\<div\\>\n> &#32;&#32;&#32;&#32;\\_x\\_ \\[y\\]\\(z\\)\n> \\<\\/div\\>'
+  expect(exported).toContain(`\n${literalBlock}\n\n${quotedBlock}\n\n**bold** stays\n`)
+  expect(findMarkdownHtml(exported)).toEqual([])
+  // A Markdown viewer shows the node's text as the app does, with no emphasis or link.
+  expect(readMarkdownNodeTypes(literalBlock)).toEqual(['root', 'paragraph', 'text'])
+  expect(readMarkdownText(literalBlock)).toBe('<div>\n**literal**\n</div>')
+  expect(readMarkdownNodeTypes(quotedBlock)).toEqual(['root', 'blockquote', 'paragraph', 'text'])
+  expect(readMarkdownNodeTypes('**bold** stays')).toContain('strong')
+
+  // Import keeps each paragraph's Markdown as written, so exporting the imported page again
+  // gives the same file.
+  const imported = createPage({
+    blocks: [literalBlock, quotedBlock, '**bold** stays']
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
+})
+
+/**
+ * Lists the distinct node types of parsed Markdown, outermost first.
+ *
+ * @param markdown - Markdown text.
+ * @returns Node types in the order they are first met, depth first.
+ */
+function readMarkdownNodeTypes(markdown: string): string[] {
+  const types = new Set<string>()
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null || !('type' in node)) continue
+    types.add(String(node.type))
+    if ('children' in node && Array.isArray(node.children)) pending.push(...node.children)
+  }
+  return [...types]
+}
+
+/**
+ * Joins the text a Markdown viewer shows for parsed Markdown.
+ *
+ * @param markdown - Markdown text.
+ * @returns The concatenated values of the text nodes.
+ */
+function readMarkdownText(markdown: string): string {
+  let text = ''
+  const pending: unknown[] = [fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })]
+  while (pending.length > 0) {
+    const node = pending.shift()
+    if (typeof node !== 'object' || node === null) continue
+    if ('type' in node && node.type === 'text' && 'value' in node) text += String(node.value)
+    if ('children' in node && Array.isArray(node.children)) pending.unshift(...node.children)
+  }
+  return text
+}
+
 /**
  * Lists the raw HTML a CommonMark and GFM renderer finds in Markdown.
  *
@@ -6032,35 +6097,39 @@ test('renders escaped Markdown/JSON/SVG and validates unsafe or oversized payloa
   const markdown = renderDocumentExport(page, 'markdown', markdownInspector)
   const json = renderDocumentExport(page, 'json', markdownInspector)
   expect(markdown.fileName).toBe('Export - document.md')
-  expect(markdown.content).toContain('\\<script>alert(1)\\</script>')
-  // Only raw HTML is escaped: the blockquote marker, an autolink, and code keep their text.
-  expect(markdown.content).toContain('\n> quoted \\<b>tag\\</b> and `a<b>c` and <https://example.com>\n')
+  expect(markdown.content).toContain('\\<script\\>alert\\(1\\)\\<\\/script\\>')
+  // Only the text of raw HTML is escaped, every Markdown character of it, so it stays literal as
+  // in the app: the blockquote marker, an autolink, and code keep their text.
+  expect(markdown.content).toContain('\n> quoted \\<b\\>tag\\<\\/b\\> and `a<b>c` and <https://example.com>\n')
   expect(markdown.content).toContain('\n```html\n<div>kept</div>\n```\n')
   // An escaped `<` stays as written; after an escaped backslash, `<` still starts HTML.
-  expect(markdown.content).toContain('\nalready \\<div> and \\\\\\<span>\n')
+  expect(markdown.content).toContain('\nalready \\<div> and \\\\\\<span\\>\n')
   // A backslash-escaped backtick opens no code span, so the HTML after it is still escaped; the
   // rest of an escaped run can open one.
-  expect(markdown.content).toContain('\n\\`\\<img src=x onerror=alert(1)>`\n')
+  expect(markdown.content).toContain('\n\\`\\<img src\\=x onerror\\=alert\\(1\\)\\>`\n')
   expect(markdown.content).toContain('\nrun \\``<b>`\n')
   // A backtick in a backtick fence's info string makes the line text, not a fence, so the HTML
   // after it is escaped; only a bare marker line closes a fence.
-  expect(markdown.content).toContain('\n```a`b\n\\<img src=x onerror=alert(1)>\n')
+  expect(markdown.content).toContain('\n```a`b\n\\<img src\\=x onerror\\=alert\\(1\\)\\>\n')
   expect(markdown.content).toContain('\n```\n``` <b>\n<i>still code</i>\n```\n')
   // A code span may cross lines; its content stays as written. A `<div>` line is different: it
-  // starts an HTML block that interrupts the paragraph, so there is no code span to keep.
+  // starts an HTML block that interrupts the paragraph and takes the next line, so there is no
+  // code span to keep.
   expect(markdown.content).toContain('\nspan `first\n<b>bold</b>\nlast` end\n')
-  expect(markdown.content).toContain('\nspan `first\n\\<div>\nlast` end\n')
-  // Every tag of an HTML block is escaped, including a backslash-escaped one, which is raw HTML
-  // inside the block and becomes text once the block is escaped.
-  expect(markdown.content).toContain('\n\\<div>\n\\<span>inner\\</span>\n\\</div>\n')
-  expect(markdown.content).toContain('\n\\<div>\n\\<i>raw\\</i>\n')
-  expect(markdown.content).toContain('\n> - item \\<img src=x onerror=alert(1)> \\<!-- note -->\n')
-  expect(markdown.content).toContain('\n| \\<b>x\\</b> `<c>` |\n')
+  expect(markdown.content).toContain('\nspan `first\n\\<div\\>\nlast\\` end\n')
+  // Every tag of an HTML block is escaped. A backslash inside the block is the block's literal
+  // text, as the app shows it, so it is escaped as well.
+  expect(markdown.content).toContain('\n\\<div\\>\n\\<span\\>inner\\<\\/span\\>\n\\<\\/div\\>\n')
+  expect(markdown.content).toContain('\n\\<div\\>\n\\\\\\<i\\>raw\\<\\/i\\>\n')
+  expect(markdown.content).toContain(
+    '\n> - item \\<img src\\=x onerror\\=alert\\(1\\)\\> \\<\\!\\-\\- note \\-\\-\\>\n',
+  )
+  expect(markdown.content).toContain('\n| \\<b\\>x\\<\\/b\\> `<c>` |\n')
   // A fence left open is closed inside its own paragraph, so it cannot pair with the next one.
   expect(markdown.content).toContain('\n```\n```\n\n```\n<img src=x onerror=alert(1)>\n```\n')
   // A list's open fence is closed by the next paragraph's fence only once joined; the check of
   // the whole file escapes the HTML that the joined text exposes.
-  expect(markdown.content).toContain('\\<img src=x onerror=alert(2)>')
+  expect(markdown.content).toContain('\\<img src\\=x onerror\\=alert\\(2\\)\\>')
   expect(markdown.content).toContain('\n## After\n')
   // The exported file has no raw HTML for any Markdown renderer.
   expect(findMarkdownHtml(markdown.content)).toEqual([])

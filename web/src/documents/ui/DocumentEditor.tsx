@@ -683,9 +683,21 @@ function TableBlockEditor({
     })
   }
 
+  /**
+   * Removes one row from the table.
+   *
+   * @param rowIndex - Index of the row to remove.
+   * @returns Nothing; the changed block is passed to `onChange`.
+   */
   const deleteRow = (rowIndex: number) => {
     onChange({ ...block, rows: block.rows.filter((_, index) => index !== rowIndex) })
   }
+  /**
+   * Removes one column and its cell in every row. The last remaining column is kept.
+   *
+   * @param columnIndex - Index of the column to remove.
+   * @returns Nothing; the changed block is passed to `onChange`.
+   */
   const deleteColumn = (columnIndex: number) => {
     if (block.columns.length <= 1) return
     onChange({

@@ -16,7 +16,8 @@ const FENCE_OPENER = /^ {0,3}(`{3,}|~{3,})/u
 
 /**
  * Finds the source ranges of HTML blocks and inline HTML in Markdown, parsed with the CommonMark
- * and GFM grammar (micromark) that the web app renders paragraphs with.
+ * and GFM grammar (micromark) that the web app renders paragraphs with. A node spanning several
+ * lines gives one range per line, without the markers of a blockquote or list around it.
  *
  * @param text - Markdown text.
  * @returns Non-overlapping ranges in source order.
@@ -34,12 +35,49 @@ const findMarkdownHtmlRanges: MarkdownHtmlFinder = (text) => {
       if (start === undefined || end === undefined || end < start) {
         throw new TypeError('A Markdown HTML node has no source position.')
       }
-      ranges.push({ start, end })
+      ranges.push(...splitHtmlNodeLines(text, start, end, typeof node.value === 'string' ? node.value : ''))
       continue
     }
     if (Array.isArray(node.children)) pending.push(...node.children)
   }
   return ranges.sort((left, right) => left.start - right.start)
+}
+
+/**
+ * Splits the source of one HTML node into the ranges of its own text on each line. A later line
+ * of a node inside a blockquote or list starts with the container's markers, which belong to the
+ * container and are left out, so escaping the node's text never changes the container.
+ *
+ * @param text - Markdown text.
+ * @param start - Offset of the node's first character.
+ * @param end - Offset after the node's last character.
+ * @param value - The node's text without container markers.
+ * @returns One range per non-empty line, in source order.
+ */
+function splitHtmlNodeLines(
+  text: string,
+  start: number,
+  end: number,
+  value: string,
+): MarkdownSourceRange[] {
+  const valueLines = value.split('\n')
+  const ranges: MarkdownSourceRange[] = []
+  let lineStart = start
+  text.slice(start, end).split('\n').forEach((line, index) => {
+    const lineEnd = lineStart + line.length
+    if (index === 0) {
+      ranges.push({ start: lineStart, end: lineEnd })
+    } else {
+      const valueLine = valueLines[index]
+      // When the node's line cannot be matched, only the container markers are left out.
+      const contentStart = valueLine !== undefined && line.endsWith(valueLine)
+        ? lineEnd - valueLine.length
+        : lineStart + (/^[ \t>]*/u.exec(line)?.[0].length ?? 0)
+      ranges.push({ start: contentStart, end: lineEnd, continuesNode: true })
+    }
+    lineStart = lineEnd + 1
+  })
+  return ranges.filter((range) => range.end > range.start)
 }
 
 /**
@@ -50,7 +88,7 @@ const findMarkdownHtmlRanges: MarkdownHtmlFinder = (text) => {
  */
 function isMarkdownNodeRecord(
   value: unknown,
-): value is { type: unknown; position?: unknown; children?: unknown } {
+): value is { type: unknown; value?: unknown; position?: unknown; children?: unknown } {
   return typeof value === 'object' && value !== null && 'type' in value
 }
 
