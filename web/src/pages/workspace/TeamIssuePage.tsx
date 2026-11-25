@@ -369,10 +369,6 @@ export function TeamIssuePage() {
       ? { issueId: artifactIssueId, kind: 'work-item', teamId }
       : undefined,
   [artifactIssueId, teamId])
-  const artifacts = useFileArtifacts({
-    accessToken,
-    scope: issueFileScope,
-  })
   const {
     data: issueDetail,
     error: detailError,
@@ -384,6 +380,16 @@ export function TeamIssuePage() {
     teamId,
     resolvedSelectedIssueId,
   )
+  /** Re-reads the Work Item detail after a file or approval change, so the completion Gate sees new approval counts. */
+  const refreshIssueDetailAfterArtifactChange = useCallback(async () => {
+    await mutateIssueDetail()
+  }, [mutateIssueDetail])
+  const artifacts = useFileArtifacts({
+    accessToken,
+    // An approval change alters the Work Item's approval summary, which the completion Gate reads.
+    onRefreshed: refreshIssueDetailAfterArtifactChange,
+    scope: issueFileScope,
+  })
   const screenIssues = issueDetail?.issue
     ? issues.map((issue) => issue.id === issueDetail.issue.id ? issueDetail.issue : issue)
     : issues
