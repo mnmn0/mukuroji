@@ -566,6 +566,83 @@
         ],
         "type": "object"
       },
+      "AgentRunQuestion": {
+        "additionalProperties": false,
+        "description": "A blocker or handoff report of an agent, with the answer a person recorded.",
+        "properties": {
+          "answer": {
+            "$ref": "#/components/schemas/AgentRunReportAnswer"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunArtifact"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "changedFileCount": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "commentId": {
+            "description": "Comment saved with the report.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "progress",
+              "blocker",
+              "verification",
+              "artifact",
+              "handoff"
+            ],
+            "type": "string"
+          },
+          "runId": {
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Server-assigned position of the report within its run, starting at 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "verifications": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunVerification"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "runId",
+          "teamId",
+          "workItemId",
+          "sequence",
+          "kind",
+          "commentId",
+          "verifications",
+          "artifacts",
+          "createdAt"
+        ],
+        "type": "object"
+      },
       "AgentRunReport": {
         "additionalProperties": false,
         "description": "Structured report saved with the comment an agent posted for its run.",
@@ -637,6 +714,36 @@
           "verifications",
           "artifacts",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "AgentRunReportAnswer": {
+        "additionalProperties": false,
+        "description": "A person's answer to a blocker or handoff report, also saved as that person's Work Item comment.",
+        "properties": {
+          "answeredAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "answeredBy": {
+            "description": "Member who answered.",
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "commentId": {
+            "description": "Work Item comment saved with the answer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "answeredBy",
+          "answeredAt",
+          "commentId"
         ],
         "type": "object"
       },
@@ -4626,6 +4733,28 @@
           "teamId",
           "workItemId",
           "revision"
+        ],
+        "type": "object"
+      },
+      "WorkItemAgentRunQuestionsResponse": {
+        "additionalProperties": false,
+        "description": "Newest blocker and handoff reports of a Work Item with the answers people recorded.",
+        "properties": {
+          "hasMore": {
+            "description": "True when older questions were left out.",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunQuestion"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
         ],
         "type": "object"
       },
@@ -12146,6 +12275,99 @@
         "summary": "Read the actual start and end dates of a Work Item",
         "tags": [
           "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/agent-run-questions": {
+      "get": {
+        "operationId": "listPublicWorkItemAgentRunQuestions",
+        "parameters": [
+          {
+            "description": "Work Item ID",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemAgentRunQuestionsResponse"
+                }
+              }
+            },
+            "description": "Agent questions with their answers",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "List the newest blocker and handoff reports of a Work Item with their answers",
+        "tags": [
+          "Agent Runs"
         ]
       }
     },

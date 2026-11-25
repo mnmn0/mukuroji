@@ -485,6 +485,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/agent-runs/:runId/release',
     permission: 'work-items.write',
   },
+  // Answering a report writes a Work Item comment, so it needs the same grant as a comment.
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/work-items/:workItemId/agent-runs/:runId/reports/:sequence/answer',
+    permission: 'work-items.write',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/agent-settings',

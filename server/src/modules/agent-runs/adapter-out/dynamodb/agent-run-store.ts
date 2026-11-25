@@ -13,6 +13,7 @@ import {
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
   type AgentRunOutcome,
+  type AgentRunReportAnswer,
   type AgentSettings,
 } from '@mukuroji/contracts'
 import {
@@ -25,13 +26,16 @@ import {
   type StoredAgentRunClaim,
   type ValidatedAgentSettingsUpdate,
 } from '../../domain/agent-run'
-import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
+import { isAgentRunQuestionReport, readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
   createAgentRunIntegrityError,
   createAgentRunNotActiveError,
 } from '../../domain/agent-run-error'
+
+/** How far before a run's start the lookup of one of its reports begins, in milliseconds. */
+const reportLookupStartMarginMilliseconds = 60_000
 
 /** One item of a DynamoDB write transaction. */
 export type AgentRunTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
@@ -405,6 +409,16 @@ export interface AgentRunStore {
    */
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
   /**
+   * Builds the write that records a person's answer on a `blocker` or `handoff` report. It fails when
+   * the report is gone or its answer changed since it was read, so two people never overwrite each
+   * other's answer. A report read with an answer is answered again only in place of that answer, whose
+   * comment the caller found deleted.
+   * @param report - Report as read.
+   * @param answer - Answer to record.
+   * @returns The conditional report update.
+   */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[]
+  /**
    * Lists one Work Item's structured reports, newest first, with strongly consistent reads.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
@@ -414,6 +428,14 @@ export interface AgentRunStore {
    * @returns One page of reports.
    */
   listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage>
+  /**
+   * Reads one report of a run with a strongly consistent read. Only the reports written while the run
+   * held its Work Item are searched, so the read does not depend on how many reports the Work Item has.
+   * @param run - Run the report belongs to.
+   * @param sequence - Position of the report within the run.
+   * @returns The report, or undefined when the run has no such report.
+   */
+  getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined>
   /**
    * Commits a standalone transaction of Agent Run writes and caller items.
    * @param items - Agent Run writes first, then audit or receipt writes.
@@ -757,6 +779,25 @@ function parseReportDetails(item: Record<string, unknown>): AgentRunReportDetail
 }
 
 /**
+ * Parses the answer stored on a report row and fails closed on any unexpected shape.
+ *
+ * @param value - Stored answer.
+ * @returns The answer.
+ */
+function parseReportAnswer(value: unknown): AgentRunReportAnswer {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw createAgentRunIntegrityError()
+  const record: Record<string, unknown> = { ...value }
+  const answer = {
+    body: storedString(record, 'body'),
+    answeredBy: storedString(record, 'answeredBy'),
+    answeredAt: storedTimestamp(record, 'answeredAt'),
+    commentId: storedString(record, 'commentId'),
+  }
+  if (Object.keys(record).length !== 4) throw createAgentRunIntegrityError()
+  return answer
+}
+
+/**
  * Parses a stored report row and fails closed on any unexpected shape.
  *
  * @param item - Stored row.
@@ -789,9 +830,11 @@ function parseReport(
     ...parseReportDetails(item),
     createdAt: storedTimestamp(item, 'createdAt'),
     createdBy: storedString(item, 'createdBy'),
+    ...(item.answer === undefined ? {} : { answer: parseReportAnswer(item.answer) }),
   }
   if (
     !kind ||
+    (report.answer !== undefined && !isAgentRunQuestionReport(report)) ||
     sequence < 1 ||
     item.directoryTeamId !== createAgentRunPartition(expected.directoryId, expected.teamId) ||
     item.workspaceId !== expected.directoryId ||
@@ -1638,6 +1681,72 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       ? encodeCursor({ directoryTeamId: last.directoryTeamId, recordKey: last.recordKey })
       : undefined
     return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  async getRunReport(run: StoredAgentRun, sequence: number): Promise<StoredAgentRunReport | undefined> {
+    if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > run.reportCount) return undefined
+    const partition = createAgentRunPartition(run.directoryId, run.teamId)
+    const prefix = reportRecordKeyPrefix(run.workItemId)
+    // Report keys sort by creation time, and every report of the run was written between its start and
+    // its last report, so only that range is read. '~' sorts after every run ID character.
+    const lastReportAt = run.lastReportAt ?? run.startedAt
+    // A resumed run's start can sit a few milliseconds after the clock when its predecessor started
+    // late, so the range starts a margin earlier; the filter keeps only this run's report.
+    const from = new Date(Date.parse(run.startedAt) - reportLookupStartMarginMilliseconds).toISOString()
+    let next: Record<string, unknown> | undefined
+    do {
+      const response = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: '#directoryTeamId = :partition AND #recordKey BETWEEN :from AND :to',
+        FilterExpression: '#runId = :runId AND #sequence = :sequence',
+        ExpressionAttributeNames: {
+          '#directoryTeamId': 'directoryTeamId',
+          '#recordKey': 'recordKey',
+          '#runId': 'runId',
+          '#sequence': 'sequence',
+        },
+        ExpressionAttributeValues: {
+          ':partition': partition,
+          ':from': `${prefix}${from}`,
+          ':to': `${prefix}${lastReportAt}#~`,
+          ':runId': run.runId,
+          ':sequence': sequence,
+        },
+        ConsistentRead: true,
+        ExclusiveStartKey: next,
+      }))
+      const item = response.Items?.[0]
+      if (item !== undefined) {
+        return parseReport(item, { directoryId: run.directoryId, teamId: run.teamId, workItemId: run.workItemId })
+      }
+      next = response.LastEvaluatedKey
+    } while (next !== undefined)
+    return undefined
+  }
+
+  /** @inheritdoc */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
+    if (!isAgentRunQuestionReport(report)) {
+      throw new TypeError('createReportAnswerItems requires a blocker or handoff report.')
+    }
+    const previous = report.answer
+    return [{
+      Update: {
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(report.directoryId, report.teamId), recordKey: reportRecordKey(report) },
+        UpdateExpression: 'SET #answer = :answer',
+        ConditionExpression: previous === undefined
+          ? 'attribute_exists(#recordKey) AND #commentId = :commentId AND attribute_not_exists(#answer)'
+          : 'attribute_exists(#recordKey) AND #commentId = :commentId AND #answer.#commentId = :previousCommentId',
+        ExpressionAttributeNames: { '#answer': 'answer', '#recordKey': 'recordKey', '#commentId': 'commentId' },
+        ExpressionAttributeValues: {
+          ':answer': { ...answer },
+          ':commentId': report.commentId,
+          ...(previous === undefined ? {} : { ':previousCommentId': previous.commentId }),
+        },
+      },
+    }]
   }
 
   /** @inheritdoc */

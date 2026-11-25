@@ -397,6 +397,55 @@ export type AgentRunReport = {
   changedFileCount?: number
   /** UTC ISO 8601 time the report was saved. */
   createdAt: string
+  /** A person's answer to a `blocker` or `handoff` report; absent until someone answers. */
+  answer?: AgentRunReportAnswer
+}
+
+/** Report kinds that ask a person to decide, and that a person can answer. */
+export const AGENT_RUN_QUESTION_REPORT_KINDS = ['blocker', 'handoff'] as const satisfies readonly AgentRunReportKind[]
+
+/** Longest answer to a report that a person can send, in characters. */
+export const AGENT_RUN_REPORT_ANSWER_MAX_LENGTH = 10_000
+
+/**
+ * Longest answer a report read returns, in characters. An answer is read as its Work Item comment now
+ * stands, and an edited comment may be as long as any comment.
+ */
+export const AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH = 20_000
+
+/** A person's recorded answer to a `blocker` or `handoff` report. */
+export type AgentRunReportAnswer = {
+  /** Answer text as Markdown, as its comment now stands; at most {@link AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH} characters. */
+  body: string
+  /** Workspace member who answered. */
+  answeredBy: string
+  /** UTC ISO 8601 time of the answer. */
+  answeredAt: string
+  /** Work Item comment that carries the answer in the discussion. */
+  commentId: string
+}
+
+/** Request body that records a person's answer to a `blocker` or `handoff` report. */
+export type AnswerAgentRunReportRequest = {
+  /** Answer text as Markdown, 1 to {@link AGENT_RUN_REPORT_ANSWER_MAX_LENGTH} characters. */
+  body: string
+}
+
+/** Response of a recorded answer. */
+export type AnswerAgentRunReportResponse = {
+  /** The answered report. */
+  report: AgentRunReport
+}
+
+/** Most questions one Work Item question list returns. */
+export const AGENT_RUN_QUESTIONS_MAX_ITEMS = 20
+
+/** The newest `blocker` and `handoff` reports of a Work Item, with their answers. */
+export type WorkItemAgentRunQuestionsResponse = {
+  /** Questions, newest first. */
+  items: AgentRunReport[]
+  /** True when older questions exist. */
+  hasMore: boolean
 }
 
 /** Request body that saves a structured report and its comment for an agent's own run. */

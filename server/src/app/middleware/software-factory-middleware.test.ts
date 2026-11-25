@@ -8,6 +8,7 @@ import { registerSoftwareFactoryMiddleware } from './software-factory-middleware
 const SOFTWARE_FACTORY_REQUESTS: readonly (readonly [method: string, path: string])[] = [
   ['GET', '/api/teams/team-1/work-items/item-1/agent-runs'],
   ['GET', '/api/teams/team-1/work-items/item-1/agent-run-reports'],
+  ['POST', '/api/teams/team-1/work-items/item-1/agent-runs/run_1/reports/1/answer'],
   ['GET', '/api/teams/team-1/agent-runs'],
   ['GET', '/api/teams/team-1/agent-runs/analytics'],
   ['GET', '/api/teams/team-1/agent-runs/history'],
@@ -16,6 +17,7 @@ const SOFTWARE_FACTORY_REQUESTS: readonly (readonly [method: string, path: strin
   ['PUT', '/api/teams/team-1/agent-settings'],
   ['POST', '/api/v1/work-items/item-1/agent-runs'],
   ['GET', '/api/v1/work-items/item-1/agent-runs'],
+  ['GET', '/api/v1/work-items/item-1/agent-run-questions'],
   ['POST', '/api/v1/work-items/item-1/agent-runs/resume'],
   ['POST', '/api/v1/work-items/item-1/agent-runs/run-1/take-over'],
   ['GET', '/api/v1/agent-runs'],

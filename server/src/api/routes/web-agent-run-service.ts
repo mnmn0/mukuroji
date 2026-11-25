@@ -61,6 +61,7 @@ import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-
 import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceMemberNamesForDisplay, type TeamPermissionContext } from '../shared/workspace-access'
+import { withCurrentAnswer } from './web-agent-run-answer-service'
 
 /**
  * Checks whether the principal manages the Team.
@@ -256,7 +257,8 @@ export async function listWebWorkItemAgentRunReports(
   const page = await workItemDependencies.agentRuns.listWorkItemReports(principal.directoryId, teamId, workItemId, undefined, limit)
   const items: AgentRunReport[] = []
   let bytes = 0
-  for (const stored of page.reports) {
+  const current = await Promise.all(page.reports.map((stored) => withCurrentAnswer(principal.directoryId, stored)))
+  for (const stored of current) {
     const report = toAgentRunReport(stored)
     bytes += Buffer.byteLength(JSON.stringify(report))
     // The newest report is always returned, so a page is never empty while reports exist.

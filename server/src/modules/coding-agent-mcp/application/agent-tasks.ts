@@ -18,6 +18,7 @@ import {
   type AgentTask,
   type AgentTaskAttachment,
   type AgentTaskDocument,
+  type AgentTaskQuestions,
   type AgentTaskFilters,
   type AgentWorkItemApi,
 } from './work-item-api'
@@ -480,16 +481,17 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      const [acceptanceCriteria, effort, actualDates, hierarchy, relatedDocuments, attachments] = await Promise.all([
+      const [acceptanceCriteria, effort, actualDates, hierarchy, relatedDocuments, questions, attachments] = await Promise.all([
         api.acceptanceCriteria(id),
         api.effort(id),
         api.actualDates(id),
         api.hierarchy(id),
         readRelatedDocumentsForTask(id),
+        readQuestionsForTask(id),
         readAttachmentsForTask(id),
       ])
-      // The task may have moved to another Project while its linked Documents and files were read.
-      if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
+      // The task may have moved to another Project while its linked Documents, questions, and files were read.
+      if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (questions?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
         inScope(await api.get(id))
       }
       return {
@@ -499,6 +501,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         actualDates: actualDates ?? null,
         hierarchy: hierarchy ?? null,
         relatedDocuments,
+        questions,
         attachments,
         blockers: await blockers(task),
         activeRun,
@@ -877,6 +880,22 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       throw error
     }
   }
+  /**
+   * Reads a task's agent questions and their answers for get_task without failing the task read.
+   *
+   * @param id - Task ID.
+   * @returns The questions, each with `answer` once a person answered, or null when the server
+   * predates answers or the credential owner may not read them.
+   */
+  async function readQuestionsForTask(id: string): Promise<AgentTaskQuestions | null> {
+    try {
+      return await api.questions(id) ?? null
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'forbidden') return null
+      throw error
+    }
+  }
+
 }
 
 /**
