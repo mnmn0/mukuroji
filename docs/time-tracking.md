@@ -24,6 +24,8 @@ Rejected entries return to `rejected` and can be edited and submitted again. A m
 - `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, Work Item, or work category (`groupBy=category`).
 - `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
 - `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets. A budget carries its `teamId`; a Project budget is stored under `TIME_BUDGET#project#<teamId>#<projectId>` because Project IDs are unique only within their Team, and a Team budget under `TIME_BUDGET#team#<teamId>`.
+- A budget per period is saved with the same `PUT` plus `periodBudget: true`, `periodFrom`, and `periodTo`, under `...#PERIOD#<from>#<to>` next to the scope's default budget ([ADR 0077](adr/0077-time-budget-per-period.md)). Saving the same period replaces it at the expected revision; a period overlapping another budget per period of the scope is rejected with 409 `TimeBudgetPeriodOverlap`, and a scope holds at most 40 (409 `TimeBudgetPeriodLimit`). `DELETE /api/teams/:teamId/time-budget/periods/:periodFrom/:periodTo?expectedRevision=N` and the same path under `/projects/:projectId` delete one (204, 404 when missing, 409 on a stale revision). The optional `expectedUpdatedAt` query, and the same field in the `PUT` body, also names the save time read, so a delete or save read before the period was deleted and saved again, which restarts at the same revision, is rejected with 409.
+- With `budgetScope`, the summary returns as `budget` the scope's budget per period whose period equals `from`–`to` exactly, or else the default budget, and lists the scope's budgets per period in `budgetPeriods`. The Project budget report keeps using the default budget.
 - `GET /api/teams/:teamId/projects/:projectId/budget-report` and `.../budget-report/export` (CSV) return the Project budget against actual report with earned value figures. See [Project budget report and earned value](#project-budget-report-and-earned-value).
 - `GET /api/teams/:teamId/time-entry-policy` returns the Team's overlap and daily total checks with `canEdit`; `PUT` saves them. See [Overlap and daily total checks](#overlap-and-daily-total-checks).
 
@@ -57,7 +59,7 @@ Reopening requires a non-empty `reason` and removes the close. Both operations w
 
 Only a caller who manages every Project of the Team (a system administrator or a direct enterprise Team grant with `teams.manage`) may close or reopen; a manager of only some Projects receives `TimePeriodCloseDenied`. Every member of the Team can list the closed months.
 
-The entry write transaction also rechecks the close row of every month its intervals can touch in any timezone, so a close or reopen that lands between the check and the write cancels the write with `409 TimePeriodClosed`; the client reloads and retries. Per-period budgets from #398 are not implemented yet.
+The entry write transaction also rechecks the close row of every month its intervals can touch in any timezone, so a close or reopen that lands between the check and the write cancels the write with `409 TimePeriodClosed`; the client reloads and retries.
 
 The Web **Month close** view of the Team time tracking page lists the closed months, closes a month in the member's display timezone (the browser's when none is saved), and reopens one with a reason. The approval view lists approved and locked entries with **Return**, which calls the `return` action with a reason.
 

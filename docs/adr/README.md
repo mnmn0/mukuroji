@@ -100,6 +100,7 @@
 | [0074](0074-member-display-name-on-member-row.md) | メンバーの表示名を member row に保存し、本人と管理者が version 条件付きの更新で変える。SCIM の member と Cognito の `name` は変えない | 提案 |
 | [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
 | [0076](0076-workspace-wide-time-period-close.md) | Workspace 単位の月の締めは Team ごとの締め row をまとめて作る | 提案 |
+| [0077](0077-time-budget-per-period.md) | 期間ごとの予算は、期間を key に含めた別の予算 row として保存する | 提案 |
 | [0081](0081-notification-web-push-transport.md) | 通知の Web Push を自前の RFC 8291 暗号化と VAPID で送り、Email と同じ配信 queue に push channel を足す | 提案 |
 | [0082](0082-notification-email-digest-and-feedback.md) | 通知 Email の digest を配信時にまとめ、SES の bounce・complaint を EventBridge と SQS で受けて宛先を止める | 提案 |
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
