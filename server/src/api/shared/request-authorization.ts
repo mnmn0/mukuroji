@@ -505,6 +505,16 @@ const enterpriseRoutePermissionRules = [
     permission: 'files.write',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/deliverables',
+    permission: 'files.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/approvals*',
+    permission: 'files.approve',
+  },
+  {
     method: '*',
     pathPattern: '/api/teams/:teamId/issues/:issueId/comments/:commentId/files*',
     permission: 'files.write',

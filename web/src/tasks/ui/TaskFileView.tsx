@@ -1,6 +1,9 @@
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { triggerDeveloperExportDownload } from '../../shared/lib/files/fileDownload'
 import type { WorkspaceMember } from '../../workspace/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
+import type { ProjectDeliverablesController } from '../../files/queries/useProjectDeliverables'
+import { ProjectDeliverablesPanel } from '../../files/ui/ProjectDeliverablesPanel'
 import { ProjectFilesPanel } from '../../files/ui/ProjectFilesPanel'
 import {
   TaskViewHeading,
@@ -17,6 +20,10 @@ export type TaskFileViewProps = {
   locale: Locale
   /** Project file state and mutation controller. */
   projectFiles: FileArtifactsController
+  /** Deliverables of the Project and its readable Work Items; the list is hidden without it. */
+  projectDeliverables?: ProjectDeliverablesController
+  /** Project ID used to name the deliverables CSV. */
+  projectId?: string
   /** Translator used for file-view labels. */
   t: TaskFileTranslator
   /** Workspace members used for file actor labels and permissions. */
@@ -32,7 +39,9 @@ export type TaskFileViewProps = {
 export function TaskFileView({
   currentWorkspaceMemberKey,
   locale,
+  projectDeliverables,
   projectFiles,
+  projectId,
   t,
   workspaceMembers,
 }: TaskFileViewProps) {
@@ -44,6 +53,14 @@ export function TaskFileView({
         t={t}
         titleKey="tasks.view.file"
       />
+      {projectDeliverables ? (
+        <ProjectDeliverablesPanel
+          controller={projectDeliverables}
+          exportFileName={`${projectId ?? 'project'}-deliverables`}
+          locale={locale}
+          onDownloadCsv={downloadCsv}
+        />
+      ) : null}
       <ProjectFilesPanel
         controller={projectFiles}
         currentMemberKey={currentWorkspaceMemberKey}
@@ -52,4 +69,14 @@ export function TaskFileView({
       />
     </div>
   )
+}
+
+/**
+ * Offers CSV text as a UTF-8 file download that spreadsheet apps read correctly.
+ *
+ * @param csv - CSV text.
+ * @param fileName - Offered file name.
+ */
+function downloadCsv(csv: string, fileName: string) {
+  triggerDeveloperExportDownload(new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' }), fileName)
 }

@@ -30,6 +30,7 @@ import {
 } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
+  FILE_APPROVAL_MAX_REVIEWERS,
   FileProofingError,
   type ApprovalSummaryFence,
   type PendingWorkItemApprovalCompletionTransition,
@@ -61,7 +62,9 @@ import { readJson } from './http'
 import {
   canMemberViewWorkItemScope,
   createMemberWorkItemVisibilityReads,
+  type MemberWorkItemVisibilityScope,
 } from './member-work-item-visibility'
+import { loadProjectFileProofingContext } from './collaboration-access'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
 import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
@@ -96,10 +99,65 @@ export async function requireApprovalReviewers(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  const visibilityReads = createMemberWorkItemVisibilityReads(workspaceId, dependencies)
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, ...(assignedProjectId ? { assignedProjectId } : {}), permissions: ['work-items.read', 'files.read'] },
+    reviewerMemberKeys,
+    (memberKey) => assignedProjectId
+      ? `Reviewer "${memberKey}" cannot view the assigned project.`
+      : `Reviewer "${memberKey}" cannot view the Work Item team.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer of a Project file approval to be active and able to read the Project's
+ * files and record a decision on them. The decision endpoint requires `files.approve`, so a
+ * member who could not decide is never chosen. The approval shows no Work Item, so
+ * `work-items.read` is not required.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project that holds the file.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ */
+export async function requireProjectFileApprovalReviewers(
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  reviewerMemberKeys: readonly string[],
+  dependencies: AutomationActionExecutorDependencies =
+    ambientAutomationActionExecutorDependencies,
+) {
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, assignedProjectId: projectId, permissions: ['files.read', 'files.approve'] },
+    reviewerMemberKeys,
+    (memberKey) => `Reviewer "${memberKey}" cannot review the Project files.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer to be an active member holding the given permissions on the scope.
+ *
+ * @param scope - Team or Project scope and the permissions each reviewer needs on it.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param deniedMessage - Builds the message of a reviewer who lacks access.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ * @throws FileProofingError `409` for an inactive reviewer or one without access.
+ */
+async function requireReviewersWithScopeAccess(
+  scope: MemberWorkItemVisibilityScope,
+  reviewerMemberKeys: readonly string[],
+  deniedMessage: (memberKey: string) => string,
+  dependencies: AutomationActionExecutorDependencies,
+) {
+  const visibilityReads = createMemberWorkItemVisibilityReads(scope.workspaceId, dependencies)
   return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
     const member = await dependencies.workspaceAccess.getActiveMember(
-      workspaceId,
+      scope.workspaceId,
       memberKey,
     )
     if (!member) {
@@ -109,32 +167,40 @@ export async function requireApprovalReviewers(
         `Reviewer "${memberKey}" is not an active Workspace member.`,
       )
     }
-    const canView = await canMemberViewWorkItemScope(
-      member,
-      {
-        workspaceId,
-        teamId,
-        ...(assignedProjectId ? { assignedProjectId } : {}),
-        permissions: ['work-items.read', 'files.read'],
-      },
-      dependencies,
-      visibilityReads,
-    )
-    if (!canView) {
-      throw new FileProofingError(
-        409,
-        'ApprovalReviewerAccessDenied',
-        assignedProjectId
-          ? `Reviewer "${memberKey}" cannot view the assigned project.`
-          : `Reviewer "${memberKey}" cannot view the Work Item team.`,
-      )
+    if (!await canMemberViewWorkItemScope(member, scope, dependencies, visibilityReads)) {
+      throw new FileProofingError(409, 'ApprovalReviewerAccessDenied', deniedMessage(memberKey))
     }
     return member
   }))
 }
 
 /**
- * Lists reviewer approvals after current Work Item authorization checks.
+ * Validates and normalizes the reviewer member keys of an approval request body.
+ *
+ * @param value - Untrusted `reviewerMemberKeys` value.
+ * @returns Lower-cased, de-duplicated reviewer keys.
+ * @throws FileProofingError `400 InvalidApprovalReviewers` for a missing, malformed, or too long list.
+ */
+export function normalizeApprovalReviewerMemberKeys(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > FILE_APPROVAL_MAX_REVIEWERS ||
+    value.some((memberKey) => typeof memberKey !== 'string' || !memberKey.trim() || memberKey.length > 320)
+  ) {
+    throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Approval reviewers are required.')
+  }
+  const reviewerMemberKeys = [...new Set(
+    value.flatMap((memberKey) => typeof memberKey === 'string' ? [memberKey.trim().toLowerCase()] : []),
+  )]
+  if (reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS) {
+    throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Too many approval reviewers.')
+  }
+  return reviewerMemberKeys
+}
+
+/**
+ * Lists reviewer approvals after current Work Item or Project authorization checks.
  *
  * @param principal - Current authenticated Workspace principal.
  * @param options - Reviewer projection cursor and requested authorized result limit.
@@ -168,16 +234,20 @@ export async function listAuthorizedReviewerApprovals(
     )
     if (sourcePageBudget !== undefined) sourcePageBudget.remaining -= 1
     const authorized = await Promise.all(page.approvals.map(async (approval) => {
-      if (!approval.teamId || !approval.issueId) {
+      if (!approval.teamId || (!approval.issueId && !approval.projectId)) {
         return undefined
       }
       try {
-        await loadAuthorizedTeamIssue(
-          principal,
-          approval.teamId,
-          approval.issueId,
-          'viewer',
-        )
+        if (approval.issueId) {
+          await loadAuthorizedTeamIssue(
+            principal,
+            approval.teamId,
+            approval.issueId,
+            'viewer',
+          )
+        } else if (approval.projectId) {
+          await loadProjectFileProofingContext(principal, approval.teamId, approval.projectId)
+        }
         return approval
       } catch (error) {
         if (isReviewerApprovalAuthorizationMiss(error)) {

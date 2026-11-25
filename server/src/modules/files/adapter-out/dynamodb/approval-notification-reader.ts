@@ -16,9 +16,14 @@ type ApprovalNotificationClient = {
  */
 export function createApprovalNotificationReader(client: ApprovalNotificationClient, tableName: string): ApprovalNotificationReader {
   return async (source) => {
-    const scopeKey = createFileProofingScopeKey({
-      workspaceId: source.workspaceId, teamId: source.teamId, issueId: source.issueId, kind: 'work-item',
-    })
+    if (!source.issueId && !source.projectId) throw invalidSource()
+    const scopeKey = createFileProofingScopeKey(source.issueId
+      ? { workspaceId: source.workspaceId, teamId: source.teamId, issueId: source.issueId, kind: 'work-item' }
+      : { workspaceId: source.workspaceId, teamId: source.teamId, projectId: source.projectId, kind: 'project' })
+    /** Checks the parent identity a row carries; a Project row has no Work Item. */
+    const hasSourceParent = (row: Record<string, unknown>) => source.issueId
+      ? row.issueId === source.issueId
+      : row.issueId === undefined && row.projectId === source.projectId
     /** Reads a canonical row without using an eventually consistent index. */
     const read = async (recordKey: string) => (await client.send(new GetCommand({
       TableName: tableName, Key: { scopeKey, recordKey }, ConsistentRead: true,
@@ -27,9 +32,9 @@ export function createApprovalNotificationReader(client: ApprovalNotificationCli
     const approval = await read(approvalKey)
     if (!approval) return false
     if (approval.scopeKey !== scopeKey || approval.recordKey !== approvalKey || approval.entryType !== 'approval' ||
-      approval.workspaceId !== source.workspaceId || approval.teamId !== source.teamId || approval.issueId !== source.issueId ||
+      approval.workspaceId !== source.workspaceId || approval.teamId !== source.teamId || !hasSourceParent(approval) ||
       approval.id !== source.approvalId) throw invalidSource()
-    if (approval.subjectType === 'work-item') return source.fileId === undefined && !source.guest
+    if (approval.subjectType === 'work-item') return source.issueId !== undefined && source.fileId === undefined && !source.guest
     if (approval.subjectType !== undefined && approval.subjectType !== 'file-version' ||
       typeof approval.fileId !== 'string' || !approval.fileId.trim() ||
       typeof approval.versionId !== 'string' || !approval.versionId.trim()) throw invalidSource()
@@ -38,7 +43,7 @@ export function createApprovalNotificationReader(client: ApprovalNotificationCli
     const file = await read(fileKey)
     if (!file) return false
     if (file.scopeKey !== scopeKey || file.recordKey !== fileKey || file.entryType !== 'file' ||
-      file.workspaceId !== source.workspaceId || file.teamId !== source.teamId || file.issueId !== source.issueId ||
+      file.workspaceId !== source.workspaceId || file.teamId !== source.teamId || !hasSourceParent(file) ||
       file.fileId !== approval.fileId || typeof file.guestAccess !== 'boolean') throw invalidSource()
     return file.deletedAt === undefined && (!source.guest || file.guestAccess)
   }

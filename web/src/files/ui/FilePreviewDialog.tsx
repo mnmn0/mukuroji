@@ -69,9 +69,14 @@ export function FilePreviewDialog({
   const [isSaving, setIsSaving] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
   const [saveFailed, setSaveFailed] = useState(false)
+  const [busyAnnotationId, setBusyAnnotationId] = useState<string>()
+  const [annotationActionFailed, setAnnotationActionFailed] = useState(false)
   const annotationSaveOperationRef = useRef(0)
   const selectedVersionKey = `${file.id}:${selectedVersion.id}`
   const selectedVersionKeyRef = useRef(selectedVersionKey)
+  // Advances on every version selection, so a result started on version A is dropped after
+  // A -> B -> A even though the key is A again: the list was reloaded in between.
+  const versionSelectionGenerationRef = useRef(0)
   const getAnnotations = controller.getAnnotations
   const getVersionAccess = controller.getVersionAccess
 
@@ -85,6 +90,7 @@ export function FilePreviewDialog({
     }
 
     annotationSaveOperationRef.current += 1
+    versionSelectionGenerationRef.current += 1
     selectedVersionKeyRef.current = selectedVersionKey
     setIsSaving(false)
     setSaveFailed(false)
@@ -213,6 +219,57 @@ export function FilePreviewDialog({
         : baseAnchor)
   }
 
+  const unresolvedAnnotationCount = annotations.filter((annotation) => !annotation.resolvedAt).length
+
+  /**
+   * Resolves, reopens, or deletes one annotation of the selected version.
+   *
+   * @param annotation - Annotation to change.
+   * @param action - Change to apply.
+   */
+  const changeAnnotation = async (
+    annotation: FileAnnotation,
+    action: 'resolve' | 'reopen' | 'delete',
+  ) => {
+    if (busyAnnotationId) return
+    const operationKey = selectedVersionKey
+    const operationGeneration = versionSelectionGenerationRef.current
+    /** Tells whether the version the change started on is still the same selection. */
+    const isSameSelection = () =>
+      selectedVersionKeyRef.current === operationKey &&
+      versionSelectionGenerationRef.current === operationGeneration
+    setBusyAnnotationId(annotation.id)
+    setAnnotationActionFailed(false)
+    try {
+      if (action === 'delete') {
+        const deleted = await controller.deleteAnnotation(file, selectedVersion, annotation)
+        if (!isSameSelection()) return
+        if (deleted) {
+          setAnnotations((current) => current.filter((candidate) => candidate.id !== annotation.id))
+        } else {
+          setAnnotationActionFailed(true)
+        }
+        return
+      }
+      const changed = await controller.setAnnotationResolution(
+        file,
+        selectedVersion,
+        annotation,
+        action === 'resolve',
+      )
+      if (!isSameSelection()) return
+      if (changed) {
+        setAnnotations((current) => current.map((candidate) =>
+          candidate.id === changed.id ? changed : candidate
+        ))
+      } else {
+        setAnnotationActionFailed(true)
+      }
+    } finally {
+      setBusyAnnotationId(undefined)
+    }
+  }
+
   const saveAnnotation = async () => {
     const bodyMarkdown = annotationBody.trim()
 
@@ -317,6 +374,7 @@ export function FilePreviewDialog({
                 const nextVersionId = event.target.value
 
                 annotationSaveOperationRef.current += 1
+                versionSelectionGenerationRef.current += 1
                 selectedVersionKeyRef.current = `${file.id}:${nextVersionId}`
                 setIsSaving(false)
                 setSaveFailed(false)
@@ -394,8 +452,17 @@ export function FilePreviewDialog({
           <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-surface p-4 max-[880px]:border-l-0 max-[880px]:border-t">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold text-[var(--workbench-text)]">{t('files.annotation.title')}</h2>
-              <span className="workbench-badge">{annotations.length}</span>
+              <span className="workbench-badge" data-testid="annotation-unresolved-count">
+                {t('files.annotation.unresolvedCount')
+                  .replace('{unresolved}', String(unresolvedAnnotationCount))
+                  .replace('{total}', String(annotations.length))}
+              </span>
             </div>
+            {annotationActionFailed ? (
+              <p className="mt-2 text-xs font-semibold text-fg-red-700" role="alert">
+                {t('files.error.request')}
+              </p>
+            ) : null}
             {pendingAnchor ? (
               <div className="mt-4 grid gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                 <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
@@ -459,9 +526,13 @@ export function FilePreviewDialog({
             ) : null}
             <ol className="mt-4 grid gap-3">
               {annotations.map((annotation, index) => (
-                <li className="rounded-lg border border-[var(--workbench-border)] bg-surface p-3" key={annotation.id}>
+                <li
+                  className={`rounded-lg border border-[var(--workbench-border)] p-3 ${annotation.resolvedAt ? 'bg-[var(--workbench-surface-muted)]' : 'bg-surface'}`}
+                  data-testid={`annotation-${annotation.id}`}
+                  key={annotation.id}
+                >
                   <div className="flex items-start gap-2">
-                    <span className="grid h-6 w-6 flex-none place-items-center rounded-full bg-tone-0f766e text-[0.65rem] font-bold text-white">
+                    <span className={`grid h-6 w-6 flex-none place-items-center rounded-full text-[0.65rem] font-bold text-white ${annotation.resolvedAt ? 'bg-slate-400' : 'bg-tone-0f766e'}`}>
                       {index + 1}
                     </span>
                     <div className="min-w-0 flex-1">
@@ -472,10 +543,43 @@ export function FilePreviewDialog({
                         {formatAnnotationPosition(annotation.anchor, t)}
                       </p>
                     </div>
+                    {annotation.resolvedAt ? (
+                      <span className="workbench-badge flex-none">{t('files.annotation.resolved')}</span>
+                    ) : null}
                   </div>
                   <div className="mt-2 text-sm">
                     <SafeCommentBody bodyMarkdown={annotation.bodyMarkdown} />
                   </div>
+                  {annotation.resolvedAt && annotation.resolvedByMemberKey ? (
+                    <p className="mt-2 text-[0.68rem] font-medium text-[var(--workbench-muted)]">
+                      {t('files.annotation.resolvedBy')
+                        .replace('{name}', resolveMemberName(annotation.resolvedByMemberKey, members))}
+                    </p>
+                  ) : null}
+                  {annotation.capabilities.canResolve || annotation.capabilities.canDelete ? (
+                    <div className="mt-2 flex flex-wrap justify-end gap-2">
+                      {annotation.capabilities.canDelete ? (
+                        <button
+                          className="workbench-button-secondary h-7 px-2.5 text-xs disabled:opacity-50"
+                          disabled={busyAnnotationId !== undefined}
+                          onClick={() => void changeAnnotation(annotation, 'delete')}
+                          type="button"
+                        >
+                          {t('files.annotation.delete')}
+                        </button>
+                      ) : null}
+                      {annotation.capabilities.canResolve ? (
+                        <button
+                          className="workbench-button-secondary h-7 px-2.5 text-xs disabled:opacity-50"
+                          disabled={busyAnnotationId !== undefined}
+                          onClick={() => void changeAnnotation(annotation, annotation.resolvedAt ? 'reopen' : 'resolve')}
+                          type="button"
+                        >
+                          {t(annotation.resolvedAt ? 'files.annotation.reopen' : 'files.annotation.resolve')}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ol>
@@ -988,7 +1092,7 @@ function AnnotationPins({
         return (
           <span
             aria-label={t('files.annotation.pinLabel').replace('{number}', String(number))}
-            className="absolute grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-surface bg-tone-0f766e text-[0.68rem] font-bold text-white shadow-lg"
+            className={`absolute grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-surface text-[0.68rem] font-bold text-white shadow-lg ${annotation.resolvedAt ? 'bg-slate-400' : 'bg-tone-0f766e'}`}
             key={annotation.id}
             role="img"
             style={{
