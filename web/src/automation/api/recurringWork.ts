@@ -146,6 +146,7 @@ function isRecurringWork(value: unknown): value is RecurringWork {
     typeof value.workspaceId === 'string' &&
     typeof value.teamId === 'string' &&
     typeof value.name === 'string' &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&
     isNonnegativeSafeInteger(value.revision) &&

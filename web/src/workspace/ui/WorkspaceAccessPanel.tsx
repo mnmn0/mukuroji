@@ -20,6 +20,7 @@ import {
   resendWorkspaceInvitation,
   revokeWorkspaceInvitation,
   updateWorkspaceMember,
+  updateWorkspaceMemberAccessExpiry,
   WorkspaceAccessApiError,
   type CreateWorkspaceInvitationInput,
   type UpdateWorkspaceMemberInput,
@@ -59,6 +60,8 @@ import {
 } from '../model/memberDirectory'
 import { WorkspaceBulkInvitePanel } from './WorkspaceBulkInvitePanel'
 import { MemberWorkHandoverDialogContainer } from './MemberWorkHandoverDialogContainer'
+import { MemberOffboardingDialogContainer } from './MemberOffboardingDialogContainer'
+import { formatAccessExpiryLastDay, hasMemberAccessExpired } from '../model/memberAccessExpiry'
 
 /**
  * Tells whether a failed direct-role load is worth reporting. A caller without security access
@@ -182,6 +185,14 @@ type WorkspaceAccessPanelProps = {
   onResetMemberCredential?: (
     memberKey: string,
     action: WorkspaceMemberCredentialAction,
+  ) => Promise<void>
+  /**
+   * Sets or clears a member's access expiry; absent hides the expiry editor.
+   */
+  onUpdateMemberAccessExpiry?: (
+    memberKey: string,
+    accessExpiresAt: string | null,
+    expectedVersion: number,
   ) => Promise<void>
   /**
    * Member keys of the system administrators, for owners and admins. Absent while unknown.
@@ -545,6 +556,21 @@ export function WorkspaceAccessPanelContainer({
         await refresh()
       }}
       onRenameMember={renameMember}
+      onUpdateMemberAccessExpiry={async (memberKey, accessExpiresAt, expectedVersion) => {
+        const input = { accessExpiresAt, expectedVersion }
+        try {
+          await mutationRequestRunner.run(
+            `workspace-member:access-expiry:${memberKey}`,
+            JSON.stringify(input),
+            (context) => updateWorkspaceMemberAccessExpiry(accessToken, memberKey, input, context),
+            shouldRetainWorkspaceMutationContext,
+          )
+        } catch (error) {
+          await retryLoad({ keepRetainedContexts: true })
+          throw error
+        }
+        await refresh()
+      }}
       onUpdateMember={async (memberKey, input) => {
         await mutationRequestRunner.run(
           `workspace-member:update:${memberKey}`,
@@ -593,6 +619,7 @@ export function WorkspaceAccessPanel({
   signInSecurity,
   signInSecurityLoadFailed = false,
   onRetrySignInSecurity,
+  onUpdateMemberAccessExpiry,
   systemAdministratorMemberKeys,
   systemAdministratorsLoadFailed = false,
   memberRoleAssignments,
@@ -603,6 +630,7 @@ export function WorkspaceAccessPanel({
 }: WorkspaceAccessPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [handoverMember, setHandoverMember] = useState<WorkspaceMember>()
+  const [offboardingMemberKey, setOffboardingMemberKey] = useState<string>()
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member')
   const [isInviting, setIsInviting] = useState(false)
   const [operationErrorMessage, setOperationErrorMessage] = useState<string | undefined>()
@@ -656,6 +684,10 @@ export function WorkspaceAccessPanel({
   ).length
   const availableInviteRoles = getManageableRoles(access)
   const canInvite = access.capabilities.canInvite && availableInviteRoles.length > 0 && Boolean(onInvite)
+  // The dialog reads the member from the latest list, so a saved expiry or a new version shows at once.
+  const offboardingMember = offboardingMemberKey === undefined
+    ? undefined
+    : access.members.find((member) => member.memberKey === offboardingMemberKey)
   const hasManagementCapability = access.capabilities.canInvite ||
     access.capabilities.canManageMembers ||
     access.capabilities.canManageAdmins
@@ -941,7 +973,31 @@ export function WorkspaceAccessPanel({
           onRetryMemberRoleAssignments={onRetryMemberRoleAssignments}
           onRetrySignInSecurity={onRetrySignInSecurity}
           {...(memberHandover ? { onOpenHandover: setHandoverMember } : {})}
+          {...(memberHandover ? { onOpenOffboarding: (member: WorkspaceMember) => setOffboardingMemberKey(member.memberKey) } : {})}
         />
+        {memberHandover && offboardingMember ? (
+          <MemberOffboardingDialogContainer
+            accessToken={memberHandover.accessToken}
+            canEditAccessExpiry={Boolean(onUpdateMemberAccessExpiry) &&
+              canManageWorkspaceMember(access, offboardingMember) &&
+              offboardingMember.memberKey !== access.currentMember.memberKey &&
+              offboardingMember.status === 'active' &&
+              offboardingMember.role !== 'owner'}
+            key={offboardingMember.memberKey}
+            locale={locale}
+            member={offboardingMember}
+            members={access.members}
+            t={t}
+            onClose={() => setOffboardingMemberKey(undefined)}
+            onOpenWorkHandover={() => {
+              setOffboardingMemberKey(undefined)
+              setHandoverMember(offboardingMember)
+            }}
+            onSaveAccessExpiry={async (accessExpiresAt, expectedVersion) => {
+              await onUpdateMemberAccessExpiry?.(offboardingMember.memberKey, accessExpiresAt, expectedVersion)
+            }}
+          />
+        ) : null}
         {memberHandover && handoverMember ? (
           <MemberWorkHandoverDialogContainer
             accessToken={memberHandover.accessToken}
@@ -1033,6 +1089,7 @@ function WorkspaceMemberLedger({
   onRetryMemberRoleAssignments,
   onRetrySignInSecurity,
   onOpenHandover,
+  onOpenOffboarding,
 }: {
   access: WorkspaceAccess
   canChangeSystemAdministrator: boolean
@@ -1051,7 +1108,10 @@ function WorkspaceMemberLedger({
   onRetrySignInSecurity?: () => void
   /** Opens the handover of a member's open Work Items; absent hides the action. */
   onOpenHandover?: (member: WorkspaceMember) => void
+  /** Opens what a member must hand over before deactivation; absent hides the action. */
+  onOpenOffboarding?: (member: WorkspaceMember) => void
 }) {
+  const now = new Date()
   const systemAdministrators = systemAdministratorMemberKeys === undefined
     ? undefined
     : new Set(systemAdministratorMemberKeys)
@@ -1262,10 +1322,23 @@ function WorkspaceMemberLedger({
                     </div>
                   </td>
                   <td className="px-4 py-4 max-[760px]:py-2">
-                    <AccessStatusBadge
-                      label={t(`workspace.access.memberStatus.${member.status}`)}
-                      tone={member.status === 'active' ? 'success' : 'neutral'}
-                    />
+                    <div className="flex flex-col gap-1.5">
+                      <AccessStatusBadge
+                        label={t(`workspace.access.memberStatus.${member.status}`)}
+                        tone={member.status === 'active' ? 'success' : 'neutral'}
+                      />
+                      {member.status === 'active' && member.accessExpiresAt ? (
+                        <span data-testid={`workspace-member-access-expiry-${createAccessTestId(member.memberKey)}`}>
+                          <AccessStatusBadge
+                            label={hasMemberAccessExpired(member.accessExpiresAt, now)
+                              ? t('workspace.access.members.accessExpired')
+                              : t('workspace.access.members.accessExpires')
+                                .replace('{date}', formatAccessExpiryDate(member.accessExpiresAt, locale))}
+                            tone={hasMemberAccessExpired(member.accessExpiresAt, now) ? 'danger' : 'warning'}
+                          />
+                        </span>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="px-4 py-4 max-[760px]:py-2">
                     <label className="relative grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)] min-[761px]:min-w-[150px]">
@@ -1342,6 +1415,16 @@ function WorkspaceMemberLedger({
                           onClick={() => onOpenHandover(member)}
                         >
                           {t('workspace.access.action.handover')}
+                        </button>
+                      ) : null}
+                      {onOpenOffboarding && canManage && !isCurrentMember && member.status === 'active' ? (
+                        <button
+                          className="workbench-button-secondary min-h-10 px-3"
+                          data-testid={`workspace-member-offboarding-${createAccessTestId(member.memberKey)}`}
+                          type="button"
+                          onClick={() => onOpenOffboarding(member)}
+                        >
+                          {t('workspace.access.action.offboarding')}
                         </button>
                       ) : null}
                       <button
@@ -1976,6 +2059,20 @@ function getInvitationRailClassName(status: WorkspaceInvitationStatus) {
   }
 
   return 'border-l-tone-6fbfb4'
+}
+
+/**
+ * Formats the last day a member may work.
+ *
+ * @param accessExpiresAt - ISO 8601 instant access ends.
+ * @param locale - Display locale.
+ * @returns The localized date.
+ */
+function formatAccessExpiryDate(accessExpiresAt: string, locale: Locale) {
+  const lastDay = formatAccessExpiryLastDay(accessExpiresAt)
+  if (!lastDay) return accessExpiresAt
+  return new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', { dateStyle: 'medium' })
+    .format(new Date(`${lastDay}T00:00:00`))
 }
 
 function formatAccessDate(value: string, locale: Locale) {

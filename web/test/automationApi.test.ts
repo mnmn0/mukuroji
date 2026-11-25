@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { loadOwnedAutomationExecutions } from '../src/automation/queries/loadOwnedAutomationExecutions'
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AutomationInboundWebhookEndpoint,
@@ -17,6 +18,7 @@ import {
   getAutomationExecutions,
   getAutomationInboundWebhookEndpoint,
   getAutomationInboundWebhookEndpoints,
+  getAutomationManagementScopes,
   getAutomationRules,
   previewAutomationTemplateApplication,
   getAutomationTemplateApplication,
@@ -485,5 +487,62 @@ describe('inbound webhook endpoint compatibility', () => {
     installFetchRecorder({ endpoints: [legacy] })
     const listed = await getAutomationInboundWebhookEndpoints('access-token')
     expect(listed).toEqual([{ ...legacy, purpose: 'automation' }])
+  })
+})
+
+describe('automation management scopes', () => {
+  test('reads the Workspace flag and the managed Teams, and rejects another shape', async () => {
+    const requests: string[] = []
+    let body: unknown = { workspace: false, teamIds: ['core-team'] }
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify(body), { status: 200 })
+    }) as typeof fetch
+
+    expect(await getAutomationManagementScopes('token')).toEqual({ workspace: false, teamIds: ['core-team'] })
+    expect(requests[0]).toEndWith('/automation/management-scopes')
+    body = { workspace: 'yes', teamIds: [] }
+    await expect(getAutomationManagementScopes('token')).rejects.toMatchObject({ code: 'InvalidAutomationResponse' })
+  })
+})
+
+describe('Team execution history', () => {
+  test('follows the execution cursor until it has the Team runs', async () => {
+    const requests: string[] = []
+    const pages = [
+      { executions: [{ ...deadLetterAutomationExecutionFixture, id: 'run-other', ownerTeamId: 'ops-team' }], nextCursor: 'cursor-2' },
+      { executions: [{ ...deadLetterAutomationExecutionFixture, id: 'run-team', ownerTeamId: 'core-team' }] },
+    ]
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify(pages[requests.length - 1]), { status: 200 })
+    }) as typeof fetch
+
+    const page = await loadOwnedAutomationExecutions('token', 'core-team')
+
+    expect(page.executions.map((execution) => execution.id)).toEqual(['run-team'])
+    expect(page.nextCursor).toBeUndefined()
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toContain('cursor=cursor-2')
+  })
+
+  test('returns the cursor to continue when the page cap stops the search', async () => {
+    const requests: string[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify({
+        executions: [{ ...deadLetterAutomationExecutionFixture, id: `run-${requests.length}`, ownerTeamId: 'ops-team' }],
+        nextCursor: `cursor-${requests.length + 1}`,
+      }), { status: 200 })
+    }) as typeof fetch
+
+    const page = await loadOwnedAutomationExecutions('token', 'core-team')
+    const next = await loadOwnedAutomationExecutions('token', 'core-team', page.nextCursor)
+
+    expect(page.executions).toEqual([])
+    expect(page.nextCursor).toBe('cursor-11')
+    expect(requests).toHaveLength(20)
+    expect(requests[10]).toContain('cursor=cursor-11')
+    expect(next.nextCursor).toBe('cursor-21')
   })
 })

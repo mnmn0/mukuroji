@@ -2,6 +2,7 @@ import { type CuratedContextActorSnapshot, type EnterprisePermissionId } from '@
 import type { Context } from 'hono'
 import { type AppDependencies } from '../../app/composition/app-dependencies'
 import {
+  createOrgStructureRevisionConditionCheck,
   ProjectDataError,
   projectRoleWeights,
   type ProjectAccessEntry,
@@ -17,6 +18,7 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../../modules/workspace-access/workspace-access'
+import { isManagerProjectAccess } from '../../modules/workspace-access/domain/member-deactivation-blockers'
 import { type CustomerAuthorizationScope } from '../../modules/customers'
 import { type TriageAuthorizationConditionChecks } from '../../modules/triage'
 import {
@@ -89,6 +91,11 @@ export type ProjectPrincipal = {
    * 認証・認可時に読んだ Enterprise CONTROL revision です。
    */
   enterpriseIdentityControlRevision?: number
+  /**
+   * OrgUnit structure revision read to expand the principal's OrgUnit scopes (ADR 0097). Present
+   * only when an OrgUnit scope was resolved, so mutations fence on it at commit time.
+   */
+  enterpriseOrgStructureRevision?: number
   /**
    * Current request の enterprise authorization で評価した resource です。
    */
@@ -457,6 +464,42 @@ export function createEnterpriseControlAuthorizationConditionCheck(
 }
 
 /**
+ * Creates the commit-time fence on the OrgUnit structure that expanded the principal's OrgUnit
+ * scopes (ADR 0097), so a Team removed from an OrgUnit after authorization rejects the mutation.
+ *
+ * @param principal - Authorized Workspace principal.
+ * @returns One condition check when an OrgUnit scope was resolved, otherwise none.
+ */
+export function createOrgStructureAuthorizationConditionChecks(
+  principal: Pick<WorkspacePrincipal, 'directoryId' | 'enterpriseOrgStructureRevision'>,
+) {
+  const revision = principal.enterpriseOrgStructureRevision
+  if (revision === undefined) return []
+  return [createOrgStructureRevisionConditionCheck(
+    getEnv('PROJECT_DIRECTORY_TABLE_NAME') ?? 'mukuroji-project-directory-local',
+    principal.directoryId,
+    revision,
+  )]
+}
+
+/**
+ * Creates every commit-time Enterprise authorization fence of a principal: the CONTROL revision
+ * and, when OrgUnit scopes were resolved, the OrgUnit structure revision.
+ *
+ * @param principal - Enterprise-authorized Workspace principal.
+ * @returns Condition checks to add to the mutation transaction.
+ */
+export function createEnterpriseAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+): TriageAuthorizationConditionChecks {
+  const controlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+  return [
+    ...(controlCheck ? [controlCheck] : []),
+    ...createOrgStructureAuthorizationConditionChecks(principal),
+  ]
+}
+
+/**
  * Creates a commit-time fence on the Enterprise identity CONTROL revision that was read.
  *
  * @param workspaceId - Workspace whose Enterprise identity state was read.
@@ -651,7 +694,7 @@ export async function requireWorkspaceMemberHasNoManagedProjects(
   memberKey: string,
 ) {
   const managedProject = (await workspaceDependencies.projectDirectory.getProjectAccessList(directoryId, memberKey))
-    .find((access) => access.role === 'manager')
+    .find(isManagerProjectAccess)
 
   if (managedProject) {
     throw new WorkspaceAccessError(

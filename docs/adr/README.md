@@ -107,9 +107,13 @@
 | [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
 | [0085](0085-workflow-transition-actor-roles-and-status-requirements.md) | Workflow の遷移を実行できる役割と status ごとの必須項目を configuration に持ち、人の操作だけに許す | 提案 |
 | [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 提案 |
+| [0087](0087-team-owned-automation-definitions.md) | Automation 定義と Request form に所有 Team を持たせ、Team manager に自 Team の分の管理を任せる | 提案 |
 | [0088](0088-requester-index-and-scopeless-notifications.md) | 依頼者ごとの索引行を Request Intake table に置き、依頼者への通知を scope なしの event で届ける | 提案 |
 | [0089](0089-calendar-connector-event-sync.md) | Google Calendar / Outlook の予定を既存の connector link で双方向に同期する | 提案 |
 | [0090](0090-automation-due-soon-and-business-day-schedules.md) | 期限前の rule は通知用の期限 index から Work Item を選び、営業日の繰り返しは実行時に Team の稼働カレンダーで数える | 提案 |
+| [0091](0091-document-version-pin-and-approval.md) | 名前付き version を TTL なしの snapshot で残し、承認は成果物の Work Item に既存の approval として作る | 提案 |
 | [0093](0093-project-deliverables-and-project-file-approval.md) | Project の成果物一覧を Work Item の閲覧判定から読み、Project file の承認を Project partition に置く | 提案 |
 | [0094](0094-workspace-file-type-policy.md) | 添付できるファイル形式を contracts の catalog で持ち、Workspace は既定との差分だけを tenant profile に保存する | 提案 |
+| [0095](0095-member-offboarding-and-access-expiry.md) | メンバーの利用期限を読み取り時に効かせ、毎時の job で無効化する。無効化で本人の API キーを失効する | 提案 |
 | [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |
+| [0097](0097-org-units.md) | OrgUnit（部門）で Team を束ね、部門のロールは配下の Team scope に展開して評価する | 提案 |

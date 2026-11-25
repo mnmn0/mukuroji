@@ -40,6 +40,7 @@ export {
   type AutomationInboundWebhookSecretCleanup,
   type AutomationInboundWebhookSecretReference,
   type AutomationInboundWebhookSecretStore,
+  type AutomationPinnedActionsGuard,
   type AutomationDueWorkItem,
   type AutomationDueWorkItemSource,
   type AutomationRecurringSchedulePort,
@@ -72,6 +73,7 @@ export {
   type BulkReassignMemberWorkItem,
 } from './domain/bulk-reassign-member'
 export {
+  assertTemplateTargetWithinOwnerTeam,
   validateApplyAutomationTemplateInput,
   listProjectTemplateWbsNumbers,
   validateAutomationInboundWebhookLifecycleInput,
@@ -97,12 +99,17 @@ export {
 } from './domain/recurring-schedule'
 export {
   evaluateAutomationCondition,
+  matchesAutomationRuleOwnerTeam,
   matchesAutomationTrigger,
   type AutomationConditionContext,
   type AutomationEvent,
   type AutomationEventChange,
 } from './domain/rule-evaluation'
-export { validateCreateAutomationRuleInput } from './domain/rule-validation'
+export {
+  assertAutomationRuleTeamScope,
+  teamScopeViolation,
+  validateCreateAutomationRuleInput,
+} from './domain/rule-validation'
 export { createPendingAutomationExecution } from './application/pending-execution'
 export { createAutomationScheduleShard } from './application/schedule-shard'
 export {

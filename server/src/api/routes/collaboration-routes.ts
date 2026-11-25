@@ -262,6 +262,9 @@ export function registerCollaborationRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         expectedThreadVersion: request.expectedThreadVersion,
         commentId: request.commentId,

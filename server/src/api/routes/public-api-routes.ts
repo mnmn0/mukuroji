@@ -1130,6 +1130,8 @@ function isPublicWorkItemTemplateFor(
 ): template is Extract<AutomationTemplate, { kind: 'work-item' }> {
   return template.kind === 'work-item' &&
     template.enabled &&
+    // A Team-owned template serves only its own Team (ADR 0087).
+    (template.ownerTeamId === undefined || template.ownerTeamId === teamId) &&
     (template.payload.teamId === undefined || template.payload.teamId === teamId)
 }
 
@@ -4085,6 +4087,21 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       rateLimits: createForwardingClient(() => developerPlatformDependencies.rateLimits),
       enforceActiveWorkspace: async (workspaceId) => {
         await enforceActiveTenantForWorkspace(workspaceId)
+      },
+      requireActiveCredentialSubject: async (credential) => {
+        // An API key or OAuth token acts as its creator, so it stops working the moment the
+        // creator is deactivated or their access expires, whatever the route (ADR 0095).
+        const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+          credential.workspaceId,
+          credential.subjectUserId,
+        )
+        if (!member) {
+          throw new PublicApiServiceError(
+            403,
+            'forbidden',
+            'The credential owner is not an active Workspace member.',
+          )
+        }
       },
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),

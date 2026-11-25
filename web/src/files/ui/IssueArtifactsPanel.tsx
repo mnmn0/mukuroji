@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import type {
   ApprovalRequest,
   FileAttachment,
@@ -602,6 +603,18 @@ function ApprovalRequestForm({
   )
 }
 
+/**
+ * Builds the Document page path that opens a version's review.
+ *
+ * @param documentId - Document that owns the version.
+ * @param versionId - Version under approval.
+ * @returns The Document path with the version review deep link.
+ */
+function createDocumentVersionReviewPath(documentId: string, versionId: string) {
+  const query = new URLSearchParams({ context: 'versions', versionId })
+  return `/documents/${encodeURIComponent(documentId)}?${query.toString()}`
+}
+
 function ApprovalCard({
   approval,
   controller,
@@ -622,7 +635,12 @@ function ApprovalCard({
   const [comment, setComment] = useState('')
   const subjectLabel = approval.subjectType === 'work-item'
     ? t('approval.subject.workItem')
-    : file?.name ?? approval.fileId ?? t('approval.subject.fileUnavailable')
+    : approval.subjectType === 'document-version'
+      ? t('approval.subject.documentVersion')
+      : file?.name ?? approval.fileId ?? t('approval.subject.fileUnavailable')
+  const documentVersionPath = approval.subjectType === 'document-version'
+    ? createDocumentVersionReviewPath(approval.documentId, approval.versionId)
+    : undefined
   const requesterLabel = approval.requestedByKind === 'service'
     ? t('approval.requester.automation')
     : resolveMemberName(approval.requestedByMemberKey, members)
@@ -655,6 +673,14 @@ function ApprovalCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">{subjectLabel}</p>
+          {documentVersionPath ? (
+            <Link
+              className="mt-1 inline-block text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
+              to={documentVersionPath}
+            >
+              {t('approval.subject.openDocumentVersion')}
+            </Link>
+          ) : null}
           <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">
             {t('approval.dueValue').replace('{date}', formatApprovalDate(approval.dueAt))}
           </p>

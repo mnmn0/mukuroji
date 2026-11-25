@@ -1,3 +1,4 @@
+import { listDelegatedManagementScopes } from './team-delegated-management'
 import {
   type EnterprisePermissionId,
   type EnterpriseRoutePermissionRule,
@@ -50,11 +51,12 @@ import {
   type EnterpriseRequestAccessInput,
   type EnterpriseTeamAccess,
   getVerifiedEnterpriseAuthenticationMethods,
-  hasUnqualifiedEnterpriseProjectScope,
+  hasDirectoryDependentEnterpriseScope,
   isEnterpriseSsoConfigured,
   isEnterpriseExternalMember,
   normalizeEnterpriseEmailDomain,
-  qualifyEnterpriseProjectScopes,
+  readEnterpriseScopeDirectory,
+  resolveEnterpriseDirectoryScopes,
   readCognitoAuthenticationMethods,
   readStableEnterpriseServiceAccountSnapshot,
   requireEnterpriseCognitoSsoAppClientConfiguration,
@@ -296,6 +298,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'GET',
     pathPattern: '/api/workspace/members/sign-in-security',
+    permission: 'members.manage',
+  },
+  // What a departing member manages, owns, and created is for administrators (ADR 0095).
+  {
+    method: 'GET',
+    pathPattern: '/api/workspace/members/:memberKey/offboarding',
     permission: 'members.manage',
   },
   // Applying or previewing a Workspace calendar change rewrites Work Item schedules (ADR 0058).
@@ -796,6 +804,10 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/projects/quick-access',
     permission: 'projects.read',
   },
+  // Replacing the OrgUnit structure decides which Teams an OrgUnit role reaches, so it is
+  // Workspace administration and never reachable through an OrgUnit or Team scoped role.
+  { method: 'PUT', pathPattern: '/api/org-structure', permission: 'workspace.manage' },
+  { method: 'GET', pathPattern: '/api/org-structure', permission: 'workspace.read' },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
   // Workload and personal time across Teams: each Team is then checked like its Team route, so a
@@ -896,26 +908,44 @@ const enterpriseRoutePermissionRules = [
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
 
 /**
- * Refuses a locally verified access token whose sign-in began before the member was signed out.
+ * Refuses an access token whose sign-in began before the member was signed out.
  *
- * Directory deprovisioning signs the member out everywhere in Cognito, which only reaches tokens
- * Cognito itself checks. Enterprise SSO tokens are verified by the API, so a sign-in started
- * before that sign-out stays refused here, also after the member is reactivated.
+ * Directory deprovisioning and the access expiry job record a sign-in cutoff on the member row
+ * (ADR 0095). Cognito global sign-out, where it runs, only reaches tokens Cognito itself checks,
+ * and the expiry job does not call it at all, so the cutoff is what keeps a sign-in started before
+ * it refused, also after the member is reactivated. It applies to every Cognito session: an
+ * enterprise SSO token verified by the API and a password token Cognito accepted through GetUser
+ * alike. The sign-in time is the token's `auth_time`, which a refresh keeps, so a refresh token
+ * issued before the cutoff cannot mint a usable access token either; a token without a readable
+ * sign-in time fails closed.
  *
- * @param accessToken - Access token whose signature was already verified.
+ * @param accessToken - Access token whose signature was already verified, locally or by Cognito.
  * @param signInsRevokedAt - When the member was signed out everywhere (ISO 8601), if ever.
+ * @param ssoSession - Whether the token is an attested enterprise SSO session, which keeps the
+ *   SSO-specific error code; a password session gets `WorkspaceSessionRevoked`.
+ * @throws WorkspaceAccessError 401 when the sign-in began at or before the cutoff.
  */
-function requireSignInAfterMemberSignOut(accessToken: string, signInsRevokedAt: string | undefined) {
+function requireSignInAfterMemberSignOut(
+  accessToken: string,
+  signInsRevokedAt: string | undefined,
+  ssoSession: boolean,
+) {
   if (!signInsRevokedAt) return
   const revokedAt = Date.parse(signInsRevokedAt)
   const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
   const signedInAt = readNumericClaim(claims?.auth_time) ?? readNumericClaim(claims?.iat)
   if (Number.isNaN(revokedAt) || signedInAt === undefined || signedInAt * 1_000 <= revokedAt) {
-    throw new WorkspaceAccessError(
-      401,
-      'EnterpriseSsoSessionRequired',
-      'Single sign-on is required for this Workspace account.',
-    )
+    throw ssoSession
+      ? new WorkspaceAccessError(
+        401,
+        'EnterpriseSsoSessionRequired',
+        'Single sign-on is required for this Workspace account.',
+      )
+      : new WorkspaceAccessError(
+        401,
+        'WorkspaceSessionRevoked',
+        'This sign-in was ended. Sign in again.',
+      )
   }
 }
 
@@ -979,9 +1009,11 @@ export async function authenticateWorkspacePrincipal(
   if (!workspaceMember) {
     throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
   }
-  if (ssoSessionAuthenticationMethods) {
-    requireSignInAfterMemberSignOut(accessToken, workspaceMember.signInsRevokedAt)
-  }
+  requireSignInAfterMemberSignOut(
+    accessToken,
+    workspaceMember.signInsRevokedAt,
+    ssoSessionAuthenticationMethods !== undefined,
+  )
 
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
   const recoveryAccount = snapshot.breakGlassAccounts.find((account) =>
@@ -1089,20 +1121,20 @@ export async function authenticateWorkspacePrincipal(
     directoryGroupMemberships,
   } = directoryPrincipal
   const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+    hasDirectoryDependentEnterpriseScope(compatibleRoleAssignments) ||
+    hasDirectoryDependentEnterpriseScope(compatibleGroupMappings)
   const enterpriseDirectory = needsProjectScopeQualification
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? await readEnterpriseScopeDirectory(
+        workspaceDependencies.projectDirectory,
         principal.directoryId,
-        'ja',
-        true,
+        [...compatibleRoleAssignments, ...compatibleGroupMappings],
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleRoleAssignments, enterpriseDirectory)
     : compatibleRoleAssignments
   const qualifiedGroupMappings = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleGroupMappings, enterpriseDirectory)
     : compatibleGroupMappings
   const requiredPermissions = context
     ? resolveRoutePermissions(
@@ -1282,6 +1314,9 @@ export async function authenticateWorkspacePrincipal(
       : { enterprisePermissions: requestAccess.permissions }),
     enterpriseIdentityControlRevision:
       snapshot.controlRevision,
+    ...(enterpriseDirectory?.orgStructure?.revision === undefined
+      ? {}
+      : { enterpriseOrgStructureRevision: enterpriseDirectory.orgStructure.revision }),
     enterpriseAuthorizationResource: requestAccess.resource,
     enterpriseGrantedRoutePermission: requestAccess.grantedRoutePermission,
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
@@ -1380,20 +1415,20 @@ async function authenticateEnterpriseServiceAccount(
         },
       ]
       const needsProjectScopeQualification =
-        hasUnqualifiedEnterpriseProjectScope(serviceAccountAssignments) ||
-        hasUnqualifiedEnterpriseProjectScope(snapshot.groupMappings)
+        hasDirectoryDependentEnterpriseScope(serviceAccountAssignments) ||
+        hasDirectoryDependentEnterpriseScope(snapshot.groupMappings)
       const enterpriseDirectory = needsProjectScopeQualification
-        ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        ? await readEnterpriseScopeDirectory(
+            workspaceDependencies.projectDirectory,
             workspaceId,
-            'ja',
-            true,
+            [...serviceAccountAssignments, ...snapshot.groupMappings],
           )
         : undefined
       const qualifiedServiceAccountAssignments = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(serviceAccountAssignments, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(serviceAccountAssignments, enterpriseDirectory)
         : serviceAccountAssignments
       const qualifiedGroupMappings = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(snapshot.groupMappings, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(snapshot.groupMappings, enterpriseDirectory)
         : snapshot.groupMappings
       const enterpriseAuthorizationEvaluation = {
         principal: serviceAccountPrincipal,
@@ -2125,6 +2160,53 @@ export async function requireRequestAdministration(c: Context) {
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
   requireWorkspaceAdministration(principal)
   return principal
+}
+
+/**
+ * Reports which Request form scopes the caller can change. Enterprise role holders are judged
+ * by the Workspace `requests.manage` grant, because the read route admits `requests.read`.
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The Workspace flag and the Teams whose forms the caller can change.
+ * @throws RequestIntakeError when the bearer token is missing.
+ */
+export async function readRequestFormManagementScopes(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  return listDelegatedManagementScopes(principal, 'requests.manage')
+}
+
+/**
+ * Authenticates a Request form manager: a Workspace administrator, or a Team manager who
+ * manages the forms scoped to their own Teams (ADR 0087).
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The principal and the form scopes it manages.
+ * @throws RequestIntakeError when the caller manages no form scope.
+ */
+export async function requireRequestFormManagement(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  const scopes = await listDelegatedManagementScopes(principal)
+  if (!scopes.workspace && scopes.teamIds.length === 0) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Workspace owner or admin access, or Team manager access, is required.',
+    )
+  }
+  return {
+    directoryId: principal.directoryId,
+    userKey: principal.userKey,
+    workspace: scopes.workspace,
+    teamIds: scopes.teamIds,
+  }
 }
 
 /**

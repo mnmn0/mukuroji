@@ -40,6 +40,7 @@ import {
 } from '../../../enterprise-identity'
 import { createEnterpriseCognitoInspectionCache } from '../../../enterprise-identity'
 import { createEnterpriseSsoAuthenticationMethod } from '../../../enterprise-identity'
+import { isWorkspaceMemberRowActive } from '../../../workspace-access'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
@@ -1321,7 +1322,7 @@ async function isRealtimeSessionAuthorized(
   if (
     !member ||
     member.entryType !== 'workspace-member' ||
-    member.status !== 'active' ||
+    !isWorkspaceMemberRowActive(member, new Date()) ||
     normalizeMemberKey(String(member.memberKey ?? member.email ?? '')) !== memberKey
   ) {
     return false
@@ -1480,7 +1481,7 @@ async function isRealtimeDocumentSessionAuthorized(
   if (
     !member ||
     member.entryType !== 'workspace-member' ||
-    member.status !== 'active' ||
+    !isWorkspaceMemberRowActive(member, new Date()) ||
     normalizeMemberKey(String(member.memberKey ?? member.email ?? '')) !== memberKey
   ) {
     return false

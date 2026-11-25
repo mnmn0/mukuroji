@@ -1,15 +1,16 @@
+import { resolveOrgUnitPath, type OrgUnit } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 
 /**
  * Enterprise Security panel scope derived from the Workspace directory.
  */
 export type WorkspaceSecurityScopeOption = {
-  /** Stable Workspace, Team, or Project identifier. */
+  /** Stable Workspace, OrgUnit, Team, or Project identifier. */
   id: string
   /** User-facing scope name. */
   name: string
   /** Resource level represented by the option. */
-  type: 'workspace' | 'team' | 'project'
+  type: 'workspace' | 'org-unit' | 'team' | 'project'
   /** Teams that own a Project option; a shared Project lists every owning Team. */
   parentIds?: string[]
 }
@@ -19,11 +20,13 @@ export type WorkspaceSecurityScopeOption = {
  *
  * @param teams - Workspace Team and Project directory.
  * @param workspaceLabel - Localized label for the root Workspace scope.
- * @returns Workspace, Team, and deduplicated Project scope options.
+ * @param orgUnits - OrgUnits of the Workspace, each offered with its full path as its name.
+ * @returns Workspace, OrgUnit, Team, and deduplicated Project scope options.
  */
 export function createWorkspaceSecurityScopeOptions(
   teams: readonly ProjectDirectoryTeam[],
   workspaceLabel: string,
+  orgUnits: readonly OrgUnit[] = [],
 ): WorkspaceSecurityScopeOption[] {
   const projects = new Map<
     string,
@@ -52,6 +55,11 @@ export function createWorkspaceSecurityScopeOptions(
       name: workspaceLabel,
       type: 'workspace',
     },
+    ...orgUnits.map((orgUnit): WorkspaceSecurityScopeOption => ({
+      id: orgUnit.id,
+      name: resolveOrgUnitPath(orgUnits, orgUnit.id).map((unit) => unit.name).join(' / '),
+      type: 'org-unit',
+    })),
     ...teams.map((team): WorkspaceSecurityScopeOption => ({
       id: team.id,
       name: team.name,

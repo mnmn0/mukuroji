@@ -32,6 +32,15 @@ export {
 } from './adapter-out/dynamodb/project-directory-client'
 export { createDirectoryProjectId } from './domain/project-key'
 export {
+  readReplaceOrgStructureCommand,
+  type ReplaceOrgStructureCommand,
+} from './domain/org-structure'
+export {
+  createOrgStructureKey,
+  createOrgStructureRevisionConditionCheck,
+  ORG_STRUCTURE_ENTRY_TYPE,
+} from './adapter-out/dynamodb/org-structure-item'
+export {
   createProjectCharter,
   createProjectCharterPerson,
   isStoredProjectCharter,

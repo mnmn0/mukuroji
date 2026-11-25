@@ -354,9 +354,11 @@ enablement、external session lifetime 上限、許可 guest domain を version 
   再評価します。
 - IP allowlist は直接の transport source を使います。`X-Forwarded-For` は immediate source が
   明示した trusted proxy の場合だけ評価し、先頭値を無条件に信頼しません。
-- Guest/external restriction は role grant より優先する permission ceiling です。現行 model に
-  guest membership expiry と自動 deactivation scheduler はなく、guest の時間制限は
-  `maximumSessionLifetimeMinutes` による session 上限です。
+- Guest/external restriction は role grant より優先する permission ceiling です。session の時間制限は
+  `maximumSessionLifetimeMinutes` です。membership の期限は Workspace member row の任意の
+  `accessExpiresAt` で持ちます（ADR 0095）。期限を過ぎた member は membership の確認（sign-in、API、
+  Public API の credential 作成者確認、Webhook 配信）で active として扱わず、scheduled-jobs の
+  `member-access-expiry` job が毎時、手動の利用停止と同じ確認を通して deactivation を書き込みます。
 
 ### Session refresh と sign-out
 
@@ -383,9 +385,15 @@ client の設定）で、「ログイン状態を保持」を選ぶと localStor
   場合に備えて）署名・issuer・client を確かめたうえで記録します。
 - Directory deprovisioning は Cognito user を無効化するので、SSO の token も `AdminGetUser` の時点で
   拒否されます。同時に member に `signInsRevokedAt` を記録し、再有効化された後も、それより前に
-  始まった sign-in（`auth_time`）の SSO token は拒否します（Cognito の global sign-out と同じ扱い）。
-  管理者による password reset の「全 session からの sign-out」も同じ `signInsRevokedAt` を記録します。
+  始まった sign-in（`auth_time`）の token は拒否します（Cognito の global sign-out と同じ扱い）。
+  管理者による password reset の「全 session からの sign-out」と、利用期限による自動の利用停止（ADR 0095）も
+  同じ `signInsRevokedAt` を記録します。
   Cognito の global sign-out の前と後に 1 回ずつ書くので、sign-out の途中で終わった SSO sign-in も拒否されます。
+  この判定は SSO の token だけでなく、Cognito の GetUser で確かめた password の token にも効きます。
+  利用期限の job は global sign-out を呼ばないため、再有効化の後に期限切れ前の password session
+  （refresh で発行し直した token を含む。`auth_time` は refresh で変わりません）が戻らないようにするためです。
+  password の token は 401 `WorkspaceSessionRevoked` で拒否し、もう一度サインインを求めます。
+  `auth_time` も `iat` も読めない token は拒否します。
 - Break-glass activation は access token ごとに結び付くので、更新後の token には引き継ぎません。
 
 IP policy の誤設定に備えて、保存前に caller の現在 IP への影響を preview します。ただし

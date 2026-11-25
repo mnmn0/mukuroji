@@ -30,6 +30,7 @@ export function createPendingAutomationExecution(
     workspaceId: rule.workspaceId,
     ruleId: rule.id,
     ruleVersion: rule.version,
+    ...(rule.ownerTeamId === undefined ? {} : { ownerTeamId: rule.ownerTeamId }),
     triggerEventId: event.eventId,
     status: 'pending',
     attempts: 0,

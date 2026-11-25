@@ -56,6 +56,8 @@ export function buildEnterpriseIdentityWorkers(
 ): EnterpriseIdentityWorkerResources {
   const {
     auditEventsTable,
+    developerPlatformKey,
+    developerPlatformTable,
     documentsTable,
     enterpriseIdentityTable,
     enterpriseIdentityTokenHashKeySecret,
@@ -110,6 +112,14 @@ export function buildEnterpriseIdentityWorkers(
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId,
+        // A directory reactivation revokes the member's old API keys and OAuth
+        // apps (ADR 0095). Revocation does not encrypt or decrypt, so the key
+        // IDs only satisfy the store's configuration and carry no KMS grant.
+        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: developerPlatformKey.keyArn,
+        DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
+        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
+        DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
+        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: developerPlatformKey.keyArn,
         DOCUMENTS_TABLE_NAME: documentsTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         // Secret ARNs only: the worker reads both values at cold start.
@@ -163,6 +173,23 @@ export function buildEnterpriseIdentityWorkers(
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
     resources: [documentsTable.tableArn],
+  }));
+  // Revoking a reactivated member's API keys and OAuth apps rewrites their
+  // records and removes their authentication rows in one transaction.
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: [
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:DeleteItem',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ],
+    resources: [developerPlatformTable.tableArn],
+  }));
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:Query'],
+    resources: [`${developerPlatformTable.tableArn}/index/LookupKeyIndex`],
   }));
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:Query'],

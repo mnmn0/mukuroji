@@ -11,7 +11,7 @@ export type MemberWorkHandoverDialogContainerProps = {
   workspaceId: string
   /** Member whose open work is handed over. */
   member: WorkspaceMember
-  /** Every Workspace member; active non-guest members other than `member` can take over. */
+  /** Every Workspace member; active, unexpired non-guest members other than `member` can take over. */
   members: readonly WorkspaceMember[]
   /** Localized message resolver. */
   t: (key: MessageKey) => string
