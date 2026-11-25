@@ -11,6 +11,12 @@ export type MarkdownLineRange = {
   last: number
 }
 
+/** A top-level block of a Markdown file and the lines it covers. */
+export type MarkdownTopLevelBlock = MarkdownLineRange & {
+  /** mdast node kind of the block, such as `list` or `blockquote`. */
+  type: string
+}
+
 /** A footnote definition and the lines it covers. */
 export type MarkdownFootnoteDefinition = MarkdownLineRange & {
   /** Normalized footnote label. */
@@ -37,7 +43,7 @@ export type MarkdownImportStructure = {
    */
   text: string
   /** Lines of each top-level block of the file. */
-  topLevelBlocks: MarkdownLineRange[]
+  topLevelBlocks: MarkdownTopLevelBlock[]
   /** Footnote definitions of the file. */
   footnoteDefinitions: MarkdownFootnoteDefinition[]
   /** Footnote references of the file. */
@@ -104,11 +110,17 @@ export function readMarkdownImportStructure(
     return low
   }
   const nodes = listMarkdownNodes(root)
-  const topLevelBlocks: MarkdownLineRange[] = []
+  const topLevelBlocks: MarkdownTopLevelBlock[] = []
   for (const child of Array.isArray(root.children) ? root.children : []) {
     const range = isMarkdownNode(child) ? readNodeRange(child) : undefined
     // The end is exclusive; a block ending at a line start belongs to the line before it.
-    if (range) topLevelBlocks.push({ first: lineOf(range.start), last: lineOf(Math.max(range.start, range.end - 1)) })
+    if (range && isMarkdownNode(child) && typeof child.type === 'string') {
+      topLevelBlocks.push({
+        first: lineOf(range.start),
+        last: lineOf(Math.max(range.start, range.end - 1)),
+        type: child.type,
+      })
+    }
   }
   const footnoteDefinitions: MarkdownFootnoteDefinition[] = []
   const footnoteReferences: MarkdownFootnoteReference[] = []

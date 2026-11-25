@@ -9,6 +9,7 @@ import {
   readMarkdownImportStructure,
   type MarkdownImportStructure,
   type MarkdownLineRange,
+  type MarkdownTopLevelBlock,
 } from './markdownStructure'
 
 /**
@@ -140,9 +141,9 @@ const DELIMITER_CELL = /^:?-+:?$/u
 
 /**
  * Markdown that can tie blank-separated parts of a file together: a reference or footnote
- * definition, a footnote reference, or a list item, also inside a quote or a list.
+ * definition, a footnote reference, a quote, or a list item, also inside a quote or a list.
  */
-const MAY_SPAN_BLOCKS = /^[ \t>]*\[|\[\^|^[ \t>]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
+const MAY_SPAN_BLOCKS = /^[ \t>]*\[|\[\^|^ {0,3}>|^[ \t>]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/mu
 
 /** A link destination that reads back as written without `<>` or escapes. */
 const PLAIN_DESTINATION = /^[^\s()<>\\&]+$/u
@@ -199,9 +200,11 @@ export function convertMarkdownToDocument(
     structure?.topLevelBlocks,
   )
   if (!scanned.ok) return scanned
-  let body = structure === undefined
+  const together = structure === undefined
     ? scanned.blocks
-    : keepFileBlocksTogether(scanned.blocks, scanned.paragraphLines, structure)
+    : keepFileBlocksTogether(scanned.blocks, scanned.paragraphLines, structure, MAX_CONTENT_BYTES)
+  if (together === 'too-large') return { ok: false, code: 'too-large' }
+  let body = together
 
   let title = options.fallbackTitle
   let titleTaken = false
@@ -264,16 +267,17 @@ export function titleFromMarkdownFileName(fileName: string): string {
  * @param lines - Source lines without line terminators.
  * @param createId - ID factory.
  * @param resolveLink - Optional rewriter of link targets.
- * @param topLevelBlocks - Lines of each top-level block of the parsed file, when it was parsed.
- *   A task item becomes a checklist only in a top-level list of task items alone; one nested in
- *   another list, or next to other items, stays in that list's paragraph Markdown.
+ * @param topLevelBlocks - Lines and kinds of each top-level block of the parsed file, when it was
+ *   parsed. A list, quote, or footnote definition is kept whole in paragraph Markdown, so a code
+ *   fence, heading, table, divider, or task item nested in it keeps its place instead of becoming
+ *   a block of its own. Only a top-level list of task items alone becomes a checklist.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
   lines: readonly string[],
   createId: (prefix: string) => string,
   resolveLink?: (href: string) => string | undefined,
-  topLevelBlocks?: readonly MarkdownLineRange[],
+  topLevelBlocks?: readonly MarkdownTopLevelBlock[],
 ):
   | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
@@ -286,6 +290,15 @@ function scanBlocks(
     : (raw) => raw
   /** Whether each top-level block is a list of task items alone, once worked out. */
   const checklistBlocks = new Map<MarkdownLineRange, boolean>()
+  /** Containers kept whole in paragraph Markdown, by their first line. */
+  const containers = new Map(
+    (topLevelBlocks ?? [])
+      .filter((block) =>
+        CONTAINER_BLOCK_TYPES.has(block.type) &&
+        block.last > block.first &&
+        !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks))
+      .map((block) => [block.first, block]),
+  )
   let paragraph: string[] = []
   let paragraphFirstLine = 0
   const flushParagraph = () => {
@@ -324,6 +337,16 @@ function scanBlocks(
     if (line.trim() === '') {
       flushParagraph()
       index += 1
+      continue
+    }
+
+    const container = containers.get(index)
+    if (container !== undefined) {
+      // A list, quote, or footnote definition is one block when rendered, so every line of it,
+      // blank ones included, stays in the paragraph, whatever blocks are nested in it.
+      if (paragraph.length === 0) paragraphFirstLine = index
+      paragraph.push(...lines.slice(index, container.last + 1))
+      index = container.last + 1
       continue
     }
 
@@ -467,13 +490,18 @@ function isTaskItemList(lines: readonly string[], range: MarkdownLineRange): boo
  * @param blocks - Scanned blocks, in order.
  * @param paragraphLines - Source lines of each paragraph block, by block ID.
  * @param structure - Structure of the whole file.
- * @returns The blocks with split paragraphs joined and footnotes moved to their use.
+ * @param maxCopiedLength - Most characters the footnote definitions copied to the blocks that use
+ *   them may add up to. Each copy stays in the page's text, so past this the page is too large;
+ *   the count stops before the copies are built.
+ * @returns The blocks with split paragraphs joined and footnotes moved to their use, or
+ *   `'too-large'` when the copied definitions would make the page too large.
  */
 function keepFileBlocksTogether(
   blocks: readonly ScannedBlock[],
   paragraphLines: ReadonlyMap<string, MarkdownLineRange>,
   structure: MarkdownImportStructure,
-): ScannedBlock[] {
+  maxCopiedLength: number,
+): ScannedBlock[] | 'too-large' {
   const lines = new Map(paragraphLines)
   const joined: ScannedBlock[] = []
   for (const block of blocks) {
@@ -520,6 +548,8 @@ function keepFileBlocksTogether(
   const attachments = new Map<string, Array<{ key: string; text: string }>>()
   const moved = new Set<string>()
   const sourceLines = structure.text.split('\n')
+  /** Characters of the definitions added to blocks so far. */
+  let copiedLength = 0
   for (const block of paragraphs) {
     const range = lines.get(block.id)
     if (!range || holdsDefinition(range)) continue
@@ -548,7 +578,11 @@ function keepFileBlocksTogether(
       const attachment = nested
         ? { key: `footnote:${identifier}`, text: extractNestedDefinition(sourceLines, definition) }
         : { key: `block:${holder.id}`, text: holder.text }
-      if (!attached.some(({ key }) => key === attachment.key)) attachments.set(block.id, [...attached, attachment])
+      if (!attached.some(({ key }) => key === attachment.key)) {
+        copiedLength += attachment.text.length
+        if (copiedLength > maxCopiedLength) return 'too-large'
+        attachments.set(block.id, [...attached, attachment])
+      }
       if (!nested) moved.add(holder.id)
     }
   }
@@ -559,6 +593,12 @@ function keepFileBlocksTogether(
     return [{ ...block, text: [block.text, ...attached].join('\n\n') }]
   })
 }
+
+/**
+ * Kinds of top-level blocks that can hold other blocks, which import keeps whole in one paragraph
+ * block so that what is nested in them keeps its place.
+ */
+const CONTAINER_BLOCK_TYPES: ReadonlySet<string> = new Set(['list', 'blockquote', 'footnoteDefinition'])
 
 /** A footnote definition at the start of a line, outside any container. */
 const FOOTNOTE_DEFINITION_START = /^ {0,3}\[\^/u

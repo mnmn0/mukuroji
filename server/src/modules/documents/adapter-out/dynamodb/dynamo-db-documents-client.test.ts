@@ -6413,6 +6413,49 @@ test('rewrites references and footnotes whose labels hold character references i
   expect(nodes.filter((node) => node.type === 'definition')).toEqual([])
 })
 
+test('writes references as plain text when rewriting them would grow the export past the limit', () => {
+  const destination = `https://example.com/${'a'.repeat(45_000)}`
+  const text = `${Array.from({ length: 490 }, () => '[r]').join(' ')}\n\n[r]: ${destination}`
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text },
+      { id: 'block-2', type: 'paragraph', text: 'See [guide][g].\n\n[g]: https://example.com/g' },
+    ],
+  })
+  const exported = renderDocumentExport(page, 'markdown', markdownInspector).content
+  // 490 inline copies of the destination would be over 22 MB; the paragraph stays as written text.
+  expect(exported.length).toBeLessThan(200_000)
+  expect(exported).toContain('\\[r\\] \\[r\\]')
+  // The other paragraph's reference is still rewritten.
+  expect(exported).toContain('See [guide](<https://example.com/g>).')
+})
+
+test('writes blocks nested in a paragraph list, quote, or footnote as they are', () => {
+  const page = createPage({
+    blocks: NESTED_BLOCK_PARAGRAPHS
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same paragraphs.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(NESTED_BLOCK_EXPORT)
+})
+
+/** Paragraphs that nest a fence, a heading, a divider, or a table in a list, quote, or footnote. */
+const NESTED_BLOCK_PARAGRAPHS = [
+  '- parent\n\n  ```js\n  child()\n  ```',
+  '1. step\n\n   # Heading in item\n\n   ---',
+  '- item\n\n  | A | B |\n  | - | - |\n  | 1 | 2 |',
+  '> quote\n>\n> | A | B |\n> | - | - |\n> | 1 | 2 |',
+  'Note[^n]\n\n[^n]: first\n\n    ```js\n    code()\n    ```',
+]
+
+/** Markdown export of {@link NESTED_BLOCK_PARAGRAPHS}; the web import test reads it too. */
+const NESTED_BLOCK_EXPORT = [
+  '# Document',
+  ...NESTED_BLOCK_PARAGRAPHS.slice(0, -1),
+  // The footnote gets the label of its block.
+  'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
+].join('\n\n') + '\n'
+
 test('writes a task list nested in a paragraph list as it is, apart from a checklist block', () => {
   const page = createPage({
     blocks: [

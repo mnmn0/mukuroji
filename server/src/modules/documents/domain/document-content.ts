@@ -1213,6 +1213,8 @@ function renderMarkdown(
   /** Isolated lists, which need a block boundary next to a part that is parsed. */
   const fencedParts = new Set<number>()
   const budget = createMarkdownParseBudget()
+  /** Characters that rewriting references into inline links may still add to the page. */
+  const expansion = { left: MARKDOWN_EXPORT_MAX_REFERENCE_EXPANSION }
   for (const block of blocks) {
     if (block.type === 'heading' || block.type === 'table' || block.type === 'code' || block.type === 'diagram') {
       isolatedParts.add(parts.length)
@@ -1234,7 +1236,7 @@ function renderMarkdown(
         // runnable HTML, and the page imports back with the same rendering.
         // Footnote labels are named by the block's place in the file, which an export of the
         // exported file keeps, so exporting it again gives the same labels.
-        const rendered = renderMarkdownParagraph(block.text, markdown, String(parts.length))
+        const rendered = renderMarkdownParagraph(block.text, markdown, String(parts.length), expansion)
         // An empty paragraph, such as one that held only definitions, shows nothing and is left out.
         if (rendered === '') break
         plainParts.set(parts.length, renderPlainMarkdownParagraph(block.text))
@@ -1314,6 +1316,13 @@ function renderMarkdown(
  * a part grows with the square of its delimiters and punctuation, and with its lines and list or
  * quote markers, so the page limits are on the sum of squares and the sums.
  */
+/**
+ * Most characters the inline destinations and titles of rewritten references may add to one
+ * export. Many short references to a long definition would otherwise grow the file far past the
+ * page; a paragraph whose references do not fit in what is left is written as plain text.
+ */
+const MARKDOWN_EXPORT_MAX_REFERENCE_EXPANSION = 1_000_000
+
 const MARKDOWN_EXPORT_PARSE_LIMITS = {
   /** Most emphasis, strikethrough, closing bracket, and table delimiters of one part. */
   partDelimiters: 500,
@@ -1788,9 +1797,11 @@ export type MarkdownInspector = {
    *
    * @param text - Markdown of one block.
    * @param scope - Name of the block, unique in the file, used in its footnote labels.
-   * @returns The rewritten Markdown, or `undefined` when a reference cannot be rewritten safely.
+   * @param maxExpansion - Most characters the written destinations and titles may add up to.
+   * @returns The rewritten Markdown, or `undefined` when a reference cannot be rewritten safely
+   *   or the written destinations and titles would pass `maxExpansion`.
    */
-  localizeReferences: (text: string, scope: string) => string | undefined
+  localizeReferences: (text: string, scope: string, maxExpansion: number) => string | undefined
   /**
    * Tells whether two Markdown texts joined by a blank line keep the top-level blocks each has on
    * its own: the same number and kinds of blocks, and the same list numbering.
@@ -1810,12 +1821,21 @@ export type MarkdownInspector = {
  * @param text - Paragraph Markdown.
  * @param markdown - Reads Markdown with the app's Markdown grammar.
  * @param scope - Name of the block, unique in the file.
+ * @param expansion - Characters rewritten references may still add to the page; what this
+ *   paragraph adds is taken from it.
  * @returns Markdown for the paragraph.
  */
-function renderMarkdownParagraph(text: string, markdown: MarkdownInspector, scope: string): string {
+function renderMarkdownParagraph(
+  text: string,
+  markdown: MarkdownInspector,
+  scope: string,
+  expansion: { left: number },
+): string {
   // Each block is rendered on its own in the app, so its reference definitions and footnotes must
-  // not reach the other blocks of the joined file.
-  const localized = markdown.localizeReferences(text, scope)
+  // not reach the other blocks of the joined file. References that would grow the page past the
+  // limit are not rewritten, and the paragraph is written as plain text instead.
+  const localized = markdown.localizeReferences(text, scope, expansion.left)
+  if (localized !== undefined) expansion.left -= Math.max(0, localized.length - text.length)
   // A shortcut reference named like the block boundary would link to it in the joined file.
   if (localized === undefined || /mukuroji-block-boundary/iu.test(localized)) {
     return renderPlainMarkdownParagraph(text)

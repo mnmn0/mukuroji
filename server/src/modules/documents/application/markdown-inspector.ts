@@ -204,9 +204,12 @@ type MarkdownDefinition = {
  *
  * @param text - Markdown of one block.
  * @param scope - Name of the block, unique in the file.
- * @returns The rewritten Markdown, or `undefined` when a reference's source is not as expected.
+ * @param maxExpansion - Most characters the written destinations and titles may add up to; they
+ *   are counted before the text is built.
+ * @returns The rewritten Markdown, or `undefined` when a reference's source is not as expected or
+ *   the written destinations and titles pass `maxExpansion`.
  */
-function localizeMarkdownReferences(text: string, scope: string): string | undefined {
+function localizeMarkdownReferences(text: string, scope: string, maxExpansion: number): string | undefined {
   const root = parseMarkdown(text)
   const definitions = new Map<string, MarkdownDefinition>()
   const footnoteLabels = new Map<string, string>()
@@ -235,6 +238,8 @@ function localizeMarkdownReferences(text: string, scope: string): string | undef
     }
   }
   const edits: ReferenceEdit[] = []
+  /** Characters the written destinations and titles add up to so far. */
+  let expansion = 0
   for (const node of nodes) {
     const start = readMarkdownOffset(node.position, 'start')
     const end = readMarkdownOffset(node.position, 'end')
@@ -253,7 +258,10 @@ function localizeMarkdownReferences(text: string, scope: string): string | undef
       const definition = identifier === undefined ? undefined : definitions.get(identifier)
       const labelLength = referenceLabelLength(source, node.referenceType)
       if (definition === undefined || labelLength === undefined) return undefined
-      edits.push({ start, end, keepEnd: end - labelLength, suffix: renderInlineDestination(definition) })
+      const destination = renderInlineDestination(definition)
+      expansion += destination.length
+      if (expansion > maxExpansion) return undefined
+      edits.push({ start, end, keepEnd: end - labelLength, suffix: destination })
     } else if (node.type === 'definition') {
       edits.push({ start, end, keepEnd: start, suffix: '' })
     } else if (node.type === 'footnoteReference' || node.type === 'footnoteDefinition') {

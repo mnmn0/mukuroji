@@ -457,8 +457,7 @@ describe('Markdown import of a file whose blocks reference each other', () => {
   test('keeps a loose list in one block and drops the block boundary of an export', () => {
     expect(blocksOf('- a\n\n- b\n\n[mukuroji-block-boundary]: #\n\n- c')).toEqual([
       { id: 'block-1', text: '- a\n\n- b', type: 'paragraph' },
-      // The second item was scanned as its own block before it was joined, so it used an ID.
-      { id: 'block-3', text: '- c', type: 'paragraph' },
+      { id: 'block-2', text: '- c', type: 'paragraph' },
     ])
   })
 
@@ -488,6 +487,29 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     const destination = `https://example.com/${'a'.repeat(2_000)}`
     const source = `${Array.from({ length: 200 }, () => '[x][d]').join(' ')}\n\n[d]: ${destination}`
     expect(convert(source)).toEqual({ ok: false, code: 'too-large' })
+  })
+
+  test('refuses footnote copies that would make the page too large before writing them out', () => {
+    const source = `${Array.from({ length: 300 }, (_, index) => `Use ${index}[^n]`).join('\n\n')}\n\n[^n]: ${'note '.repeat(400)}`
+    expect(convert(source)).toEqual({ ok: false, code: 'too-large' })
+  })
+
+  test('keeps a fence, heading, divider, or table nested in a list, quote, or footnote where it is', () => {
+    // The server export of these paragraphs (see the nested block export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts).
+    const paragraphs = [
+      '- parent\n\n  ```js\n  child()\n  ```',
+      '1. step\n\n   # Heading in item\n\n   ---',
+      '- item\n\n  | A | B |\n  | - | - |\n  | 1 | 2 |',
+      '> quote\n>\n> | A | B |\n> | - | - |\n> | 1 | 2 |',
+      'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
+    ]
+    const result = convert(`# Document\n\n${paragraphs.join('\n\n')}\n`)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type)).toEqual(paragraphs)
+    // A fence and a heading outside any container still become blocks of their own.
+    expect(blocksOf('- item\n\n```js\ncode()\n```\n\n# Title\n\nafter').map((block) => block.type))
+      .toEqual(['paragraph', 'code', 'heading', 'paragraph'])
   })
 
   test('keeps a task item nested in another list in that list, and reads a task list as a checklist', () => {
