@@ -969,9 +969,10 @@ export type CompleteConnectorOAuthOutput = {
 export const CONNECTOR_OAUTH_CALLBACK_APP_PATH = '/settings/connectors/oauth-callback'
 
 /**
- * 外部 resource と Work Item の link 対象種別です。
+ * 外部 resource と Work Item の link 対象種別です。`calendar-event` は Google Calendar /
+ * Outlook Calendar の終日の予定です（ADR 0089）。
  */
-export type ExternalResourceType = 'issue' | 'merge-request' | 'commit' | 'deploy'
+export type ExternalResourceType = 'issue' | 'merge-request' | 'commit' | 'deploy' | 'calendar-event'
 
 /**
  * 外部 link の同期方向です。
@@ -1070,13 +1071,14 @@ export type CreateExternalWorkItemLinkInput = {
    */
   resourceType: ExternalResourceType
   /**
-   * Provider 内で一意な外部 resource ID です。
+   * Provider 内で一意な外部 resource ID です。`calendar-event` で省略すると、接続先の
+   * カレンダーに Work Item の予定を新しく作ってその ID を使います。
    */
-  externalId: string
+  externalId?: string
   /**
-   * Provider UI で外部 resource を開く HTTPS URL です。
+   * Provider UI で外部 resource を開く HTTPS URL です。`externalId` と一緒に省略します。
    */
-  externalUrl: string
+  externalUrl?: string
   /**
    * ISSUE-123 のような利用者向け識別子です。
    */

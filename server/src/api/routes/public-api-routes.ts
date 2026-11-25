@@ -33,6 +33,7 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import { createMutationAuditContext, type MutationAuditContext } from '../../modules/audit/audit'
 import {
+  calculateWorkItemScheduleDurationDays,
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
   createWorkItemAuthorizationChangedError,
@@ -45,6 +46,7 @@ import {
   type TeamIssueResponseItem,
   type WorkItemIdempotencyTransaction,
   type WorkItemAuthorizationSnapshot,
+  WorkItemScheduleError,
 } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
@@ -110,8 +112,10 @@ import {
 } from '../../modules/developer-platform/adapter-out/dynamodb/connector-sync-persistence'
 import {
   ConnectorSyncEngine,
+  toConnectorEventScheduleField,
   type ConnectorSyncHealthReporter,
   type ConnectorWorkItemGateway,
+  type ConnectorWorkItemRejection,
   type ConnectorWorkItemSnapshot,
 } from '../../modules/developer-platform/connector-sync-runtime'
 import {
@@ -2477,7 +2481,7 @@ type ConnectorRuntimeBundle = {
 }
 
 /** Canonical Work Item service を connector worker の current-RBAC/CAS boundary へ適合します。 */
-function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
+export function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
   return {
     async authorize(workspaceId, actorUserId, teamId, workItemId, write) {
       try {
@@ -2629,17 +2633,41 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
               detail.issue.assignedProjectId,
               'member',
             )
-            return { detail, permission }
+            const schedule = input.patch.schedule === undefined
+              ? undefined
+              : await readConnectorScheduleChange(
+                  principal,
+                  input.teamId,
+                  input.workItemId,
+                  detail.issue.schedule,
+                  input.patch.schedule,
+                )
+            return { detail, permission, schedule }
           },
         )
         const { principal, authorizationSnapshot } = authorization
-        const { detail, permission } = authorization.value
+        const { detail, permission, schedule } = authorization.value
         if (detail.issue.revision !== input.expectedRevision) {
           await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
           return {
             kind: 'conflict',
             workItem: toConnectorWorkItemSnapshot(detail.issue),
           }
+        }
+        if (schedule?.kind === 'rejected') {
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
+          return {
+            kind: 'rejected',
+            workItem: toConnectorWorkItemSnapshot(detail.issue),
+            reason: schedule.reason,
+          }
+        }
+        if (
+          schedule?.dependencyAuthorizationSnapshot &&
+          schedule.dependencyAuthorizationSnapshot.planningRevision !==
+            authorizationSnapshot.planningRevision
+        ) {
+          throw createWorkItemAuthorizationChangedError()
         }
         const body = normalizeTeamIssueInput({
           expectedRevision: input.expectedRevision,
@@ -2650,6 +2678,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           ...(input.patch.status !== undefined
             ? { workflowStatusId: input.patch.status }
             : {}),
+          ...(schedule ? { schedule: schedule.schedule } : {}),
         }, permission.team)
         const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
           input.workspaceId,
@@ -2774,6 +2803,134 @@ function toConnectorWorkItemSnapshot(
     title: issue.title,
     ...(issue.description ? { description: issue.description } : {}),
     status: issue.workflowStatusId,
+    ...toConnectorEventScheduleField(issue.schedule),
+    ...(issue.schedule.mode === 'unscheduled' ? {} : { scheduleMode: issue.schedule.mode }),
+  }
+}
+
+/**
+ * Reads the schedule a calendar event moves a Work Item to, or why the Work Item cannot take it.
+ * Like a Public API schedule update, a move that changes the dates of a Work Item with schedule
+ * dependencies is refused, because dependent Work Items need a preview and confirmation.
+ *
+ * @param principal - Connector actor authorized to update the Work Item.
+ * @param teamId - Owning Team.
+ * @param workItemId - Team-local Work Item ID.
+ * @param current - Stored schedule.
+ * @param dates - Inclusive event dates.
+ * @returns The new schedule with the Planning fence it was checked against, or the refusal.
+ */
+async function readConnectorScheduleChange(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+  current: WorkItemSchedule,
+  dates: { startDate: string, endDate: string },
+): Promise<
+  | {
+    /** The schedule can be written. */
+    kind: 'accepted'
+    /** New schedule. */
+    schedule: WorkItemSchedule
+    /** Planning fence of the dependency check, when the dates move. */
+    dependencyAuthorizationSnapshot?: WorkItemAuthorizationSnapshot
+  }
+  | {
+    /** The schedule cannot be written. */
+    kind: 'rejected'
+    /** Why the schedule cannot be written. */
+    reason: ConnectorWorkItemRejection
+  }
+> {
+  let schedule: WorkItemSchedule
+  try {
+    schedule = moveScheduleToCalendarDates(current, dates)
+  } catch (error) {
+    if (error instanceof ConnectorRuntimeError && error.code === 'ConnectorCalendarDatesInvalid') {
+      return { kind: 'rejected', reason: 'calendar-dates-invalid' }
+    }
+    // An event that spans more than the planning horizon is dates the Work Item cannot take, not
+    // a failure of the poll.
+    if (error instanceof WorkItemScheduleError && error.code === 'InvalidWorkItemScheduleRange') {
+      return { kind: 'rejected', reason: 'calendar-dates-invalid' }
+    }
+    throw error
+  }
+  if (!changesWorkItemSchedulePlacement(schedule, current)) return { kind: 'accepted', schedule }
+  try {
+    return {
+      kind: 'accepted',
+      schedule,
+      dependencyAuthorizationSnapshot: await createDependencyFencedWorkItemAuthorizationSnapshot(
+        principal,
+        teamId,
+        workItemId,
+      ),
+    }
+  } catch (error) {
+    if (error instanceof PlanningError && error.code === 'PlanningWorkItemDependencyInUse') {
+      return { kind: 'rejected', reason: 'schedule-dependency' }
+    }
+    throw error
+  }
+}
+
+/**
+ * Moves a Work Item schedule to the dates of its calendar event (ADR 0089). The schedule keeps its
+ * mode and calendar policy: a deadline takes the event's last day, a milestone its first day, and
+ * a date range both days with the working days counted again. A Work Item without dates gets a
+ * deadline for a one-day event and a date range otherwise.
+ *
+ * @param current - Current schedule.
+ * @param dates - Inclusive event dates.
+ * @returns The new schedule.
+ * @throws ConnectorRuntimeError when the dates hold no working day for a date range.
+ */
+function moveScheduleToCalendarDates(
+  current: WorkItemSchedule,
+  dates: { startDate: string, endDate: string },
+): WorkItemSchedule {
+  const toRange = (): WorkItemSchedule => {
+    const durationDays = calculateWorkItemScheduleDurationDays(
+      dates.startDate,
+      dates.endDate,
+      current.calendarPolicy,
+    )
+    if (durationDays === 0) {
+      throw new ConnectorRuntimeError(
+        'ConnectorCalendarDatesInvalid',
+        'The calendar event covers no working day of the Work Item calendar.',
+      )
+    }
+    return {
+      calendarPolicy: current.calendarPolicy,
+      ...(current.plannedEffortMinutes === undefined
+        ? {}
+        : { plannedEffortMinutes: current.plannedEffortMinutes }),
+      mode: 'date-range',
+      startDate: dates.startDate,
+      endDate: dates.endDate,
+      durationDays,
+    }
+  }
+  switch (current.mode) {
+    case 'due-date':
+      return { ...current, dueDate: dates.endDate }
+    case 'milestone':
+      return { ...current, startDate: dates.startDate, endDate: dates.startDate }
+    case 'date-range':
+      return toRange()
+    case 'unscheduled':
+      return dates.startDate === dates.endDate
+        ? {
+            calendarPolicy: current.calendarPolicy,
+            ...(current.plannedEffortMinutes === undefined
+              ? {}
+              : { plannedEffortMinutes: current.plannedEffortMinutes }),
+            mode: 'due-date',
+            dueDate: dates.endDate,
+          }
+        : toRange()
   }
 }
 
@@ -3054,6 +3211,35 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
   async resolveConflict(principal, conflictId, input) {
     return (await requireConfiguredConnectorAuthorization())
       .resolveConflict(principal, conflictId, input)
+  },
+  /**
+   * Creates the provider resource of a new link through the sync engine.
+   *
+   * @param input - Workspace, installation, Work Item, resource type, and operation ID.
+   * @returns The resource's ID and URL, and the baseline that pairs it with the Work Item
+   *   revision it was created from.
+   */
+  async createLinkedResource(input) {
+    const resource = await (await requireConfiguredConnectorSyncEngine()).createLinkedResource(input)
+    return {
+      externalId: resource.record.externalId,
+      externalUrl: resource.record.externalUrl,
+      baseline: resource,
+    }
+  },
+  /**
+   * Records the baseline of a link created with `createLinkedResource` as its first synchronized
+   * state, carrying the Work Item revision the resource was created from.
+   *
+   * @param input - Workspace, created link, and baseline.
+   * @returns Nothing.
+   */
+  async initializeLinkedResourceSync(input) {
+    await (await requireConfiguredConnectorSyncEngine()).initializeLinkedResourceSync({
+      workspaceId: input.workspaceId,
+      link: input.link,
+      resource: input.baseline,
+    })
   },
 }
 

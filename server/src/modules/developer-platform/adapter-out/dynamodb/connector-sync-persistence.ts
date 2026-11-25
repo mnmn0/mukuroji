@@ -27,8 +27,10 @@ import {
 import {
   ConnectorRuntimeError,
 } from '../../connector-oauth'
+import { applyConflictSnapshotRefresh } from '../../connector-sync-runtime'
 import type {
   CommitConnectorSyncStateInput,
+  ConnectorConflictSnapshotRefresh,
   ConnectorSyncConflictPage,
   ConnectorSyncPersistence,
   PersistedConnectorSyncState,
@@ -813,17 +815,23 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       operationId: string
       /** Claim timestamp です。 */
       startedAt: string
+      /** この試行だけを表す claim ID です。 */
+      claimId?: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(input.operationId, 'Resolution operation ID')
     const startedAt = requireTimestamp(input.startedAt, 'Resolution claim timestamp')
+    const claimId = input.claimId === undefined
+      ? undefined
+      : requireIdentifier(input.claimId, 'Resolution claim ID')
     return this.claimConflictResolutionWithRetry(
       workspaceId,
       conflictId,
       operationId,
       startedAt,
+      claimId,
       0,
     )
   }
@@ -834,6 +842,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictId: string,
     operationId: string,
     startedAt: string,
+    claimId: string | undefined,
     retryCount: number,
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const value = await this.getRow(workspaceId, conflictRecordKey(conflictId))
@@ -850,6 +859,10 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
           ? 'same-operation' as const
           : 'busy' as const
       }
+      // Release matches a claim by its start time, so a claim taken over from an expired one must
+      // start later. An attempt that read the clock no later than the expired claim, and then
+      // stalled past its lease, retries with a new time instead.
+      if (!(Date.parse(startedAt) > claimedAt)) return 'busy' as const
     }
     const next: ConnectorSyncConflictRow = {
       ...row,
@@ -857,6 +870,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
         ...row.value,
         resolutionOperationId: operationId,
         resolutionStartedAt: startedAt,
+        ...(claimId === undefined ? {} : { resolutionClaimId: claimId }),
       },
       version: row.version + 1,
     }
@@ -879,6 +893,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
           conflictId,
           operationId,
           startedAt,
+          claimId,
           retryCount + 1,
         )
       }
@@ -891,6 +906,8 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     workspaceIdValue: string,
     conflictIdValue: string,
     operationIdValue: string,
+    refresh?: ConnectorConflictSnapshotRefresh,
+    claimId?: string,
   ) {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
@@ -903,11 +920,16 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     const row = readConflictRow(value)
     if (
       row.value.conflict.status !== 'open' ||
-      row.value.resolutionOperationId !== operationId
+      row.value.resolutionOperationId !== operationId ||
+      // A claim the same operation took again after this attempt's lease expired is not this one.
+      (claimId !== undefined && row.value.resolutionClaimId !== claimId)
     ) return false
-    const nextValue = { ...row.value }
+    const nextValue = refresh
+      ? applyConflictSnapshotRefresh(row.value, refresh)
+      : { ...row.value }
     delete nextValue.resolutionOperationId
     delete nextValue.resolutionStartedAt
+    delete nextValue.resolutionClaimId
     try {
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,
