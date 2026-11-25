@@ -321,6 +321,25 @@ Group mapping CRUD は `/api/enterprise/security/group-mappings`、custom role C
 preview して confirmation token を要求し、assignment、group mapping、active service account から
 参照中の role は、参照をすべて付け替えるまで削除できません。
 
+## System administrator
+
+System administrator は Cognito の `SystemAdminGroups`（既定 `mukuroji-system-admins`）の member で、API は
+request ごとに現在の group を読んで判定します。Workspace owner は
+`PUT /api/workspace/members/:memberKey/system-administrator`（`{ "systemAdministrator": boolean }`）で付与・解除
+できます（ADR 0067）。付与は先頭の group への追加、解除は設定したすべての group からの削除です。
+
+- caller は active な Workspace owner だけで、自分自身は変えられません
+  （`403 WorkspaceRoleDenied`、`409 WorkspaceSelfSystemAdministratorChange`）。
+- 対象は active member で、Cognito user の directory 属性がこの Workspace と一致する必要があります
+  （`409 MemberSystemAdministratorUnavailable`）。guest には付与できません（`409 WorkspaceGuestSystemAdministrator`）。
+- すでに要求どおりでも audit と進捗 record は書いて完了にし、Cognito は変えません（同じ key の遅れた再送が、
+  その間の別の変更を戻さないため）。
+- audit event `member.system-administrator-granted|revoked` と進捗 record を、actor と対象の version の
+  ConditionCheck と同じ transaction で書いてから Cognito を変えます。同じ Idempotency-Key の再送は、管理者による
+  password・MFA リセットと同じく、完了済みなら何もせず、Cognito を変え始めた後なら繰り返しません。
+- `GET /api/workspace/members/sign-in-security` は `systemAdministratorMemberKeys` に active member のうち
+  system administrator の member key を返します。group を読めない場合は省きます。
+
 ## MFA, session, re-authentication, IP and guest policy
 
 `PUT /api/enterprise/security/policy` は MFA requirement、interactive session lifetime、

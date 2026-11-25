@@ -914,6 +914,29 @@ describe('capacity planning reviews and retention', () => {
     expect(otherView.members[0].timeOff.every((timeOff) => timeOff.reason === undefined)).toBe(true)
   })
 
+  test('records a workload profile change in the same write', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = createReviewService(repository)
+    const input = {
+      workspaceId: 'workspace-1', teamId: 'team-1', memberId: 'member-2', skills: [], timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(), holidays: [], actorMemberId: 'manager-1',
+    }
+    await service.saveMemberProfile({ ...input, expectedRevision: 0, expectedTeamRevision: 0 }, { auditContext })
+    await service.saveMemberProfile({ ...input, timeZone: 'Asia/Tokyo', expectedRevision: 1, expectedTeamRevision: 1 }, { auditContext })
+
+    expect(repository.auditLog.map((audit) => audit.events.map((event) => event.eventType))).toEqual([
+      ['workload.profile.created'],
+      ['workload.profile.updated'],
+    ])
+    expect(repository.auditLog[1].events[0]).toMatchObject({
+      entityId: 'team-1',
+      target: { type: 'workload-profile', id: 'member-2' },
+      changes: [{ field: 'timeZone', before: 'UTC', after: 'Asia/Tokyo' }],
+      metadata: { memberId: 'member-2', teamId: 'team-1' },
+    })
+    expect(repository.auditLog[1].events[0].metadata).not.toHaveProperty('notificationCandidates')
+  })
+
   test('reviews time off at its own revision and records who reviewed it', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     const service = createReviewService(repository)

@@ -215,6 +215,8 @@ export type TimeBudget = {
   schemaVersion: typeof TIME_TRACKING_SCHEMA_VERSION
   /** Owning Workspace identifier. */
   workspaceId: string
+  /** Team that owns the scope; Project IDs are unique only within their Team. */
+  teamId: string
   /** Budget scope. */
   scopeType: 'team' | 'project'
   /** Team or Project identifier selected by scopeType. */

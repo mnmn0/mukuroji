@@ -730,7 +730,7 @@ export class CapacityPlanningService {
     validateSchedule(input.schedule)
     const skills = normalizeStringList(input.skills, 'Skills', MAX_SKILLS)
     const holidays = normalizeHolidays(input.holidays)
-    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state, events) => {
       const current = state.profiles.find((profile) => profile.memberId === input.memberId)
       if ((current?.revision ?? 0) !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'WorkloadProfileRevisionConflict', 'The workload profile was changed by another request.')
@@ -757,6 +757,7 @@ export class CapacityPlanningService {
         updatedAt: timestamp,
       }
       replaceById(state.profiles, profile, 'memberId')
+      events.push(createProfileAuditEvent(input, current, profile))
       return profile
     }, options)
   }
@@ -2562,6 +2563,8 @@ type WorkloadAuditScope = {
   actorMemberId: string
 }
 
+/** Profile fields recorded in audit changes; absences are recorded by their own events. */
+const PROFILE_AUDIT_FIELDS = ['displayName', 'role', 'skills', 'calendarSource', 'timeZone', 'schedule', 'holidays'] as const
 /** Time-off fields recorded in audit changes; the free-text reason is redacted. */
 const TIME_OFF_AUDIT_FIELDS = ['fromDate', 'toDate', 'minutesPerDay', 'status', 'reason'] as const
 /** Request fields recorded in audit changes. */
@@ -2602,6 +2605,31 @@ function createTimeOffAuditEvent(
     summary: `Time off ${next.fromDate} – ${next.toDate} ${action}`,
     recipients: [{ memberKey: memberId, reason: 'time-off-review' }],
     metadata: { memberId, timeOffId: next.id, status: next.status },
+  })
+}
+
+/**
+ * Builds the audit event for a member's workload profile change.
+ *
+ * @param scope - Workspace, Team, and actor.
+ * @param previous - Profile before the change, or undefined when it was created.
+ * @param next - Profile after the change.
+ * @returns The audit event input.
+ */
+function createProfileAuditEvent(
+  scope: WorkloadAuditScope,
+  previous: WorkloadMemberProfile | undefined,
+  next: WorkloadMemberProfile,
+): MutationAuditEventInput {
+  const action = previous ? 'updated' : 'created'
+  return createWorkloadAuditEvent(scope, {
+    eventType: `workload.profile.${action}`,
+    action: `workload_profile_${action}`,
+    target: { type: 'workload-profile', id: next.memberId },
+    changes: createAuditFieldChanges(previous ? { ...previous } : undefined, { ...next }, PROFILE_AUDIT_FIELDS),
+    summary: `Workload profile ${action}`,
+    recipients: [],
+    metadata: { memberId: next.memberId },
   })
 }
 

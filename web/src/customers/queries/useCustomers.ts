@@ -7,6 +7,7 @@ import {
   getCustomerSavedViews,
   getCustomers,
   getProjectCustomerImpact,
+  getProjectCustomerLinks,
 } from '../api'
 
 const customerQueryConfig = {
@@ -126,6 +127,22 @@ export function useProjectCustomerImpact(
   const query = useSWR(
     key,
     ([, token, id]) => getProjectCustomerImpact(token, id),
+    customerQueryConfig,
+  )
+  return { ...query, key }
+}
+
+/** Loads the Customers linked to each Project, for the Project directory and overview.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param enabled Whether the query is allowed to run.
+ * @returns SWR state for the Project to Customer links.
+ */
+export function useProjectCustomerLinks(accessToken: string | undefined, enabled: boolean) {
+  const key = accessToken && enabled ? ['project-customer-links', accessToken] as const : null
+  const query = useSWR(
+    key,
+    ([, token]) => getProjectCustomerLinks(token),
     customerQueryConfig,
   )
   return { ...query, key }

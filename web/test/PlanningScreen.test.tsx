@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { PlanningEntity } from '@mukuroji/contracts'
+import type { PlanningEntity, PlanningUpdateTarget } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   emptyPlanningSnapshotFixture,
@@ -737,6 +737,33 @@ describe('PlanningScreen', () => {
       labels.loadingMoreHistory,
       '</button>',
     )).toContain('disabled=""')
+  })
+
+  test('opens the detail pane for a selected Team update target', () => {
+    const projectDetail = createProjectUpdateDetail()
+    const projectSummary = planningSnapshotFixture.updateTargets.find(
+      (candidate) => candidate.target.type === 'project',
+    )
+    if (!projectSummary || projectSummary.target.type !== 'project') {
+      throw new Error('Planning Project fixture is incomplete.')
+    }
+    const teamTarget: PlanningUpdateTarget = { type: 'team', teamId: projectSummary.target.teamId }
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="portfolio"
+        initialSelectedUpdateTarget={teamTarget}
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+        updateTargetDetails={[{
+          summary: { ...projectDetail.summary, context: undefined, target: teamTarget, title: 'Core team' },
+          updateView: createPlanningTargetUpdateView({ ...projectSummary, target: teamTarget }),
+        }]}
+      />,
+    )
+    const detailHtml = sliceElement(html, 'data-testid="planning-update-detail-pane"', '</aside>')
+
+    expect(detailHtml).toContain(labels.teamTarget)
+    expect(detailHtml).toContain('Core team')
   })
 
   test('keeps Project health and update freshness independent in the detail pane', () => {
