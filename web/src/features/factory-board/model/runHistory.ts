@@ -22,6 +22,8 @@ export type RunHistory = {
   rows: RunHistoryRow[]
   /** True when any Team left runs of the period out. */
   hasMore: boolean
+  /** Names of the Teams left out because the viewer may not read their Run history. */
+  deniedTeamNames?: readonly string[]
 }
 
 /**
@@ -109,12 +111,21 @@ export function readRunHistoryPeriodDays(value: string | null): RunHistoryPeriod
  *
  * @param histories - One response per Team.
  * @param teamNames - Display names by Team ID; the ID is shown for an unknown Team.
- * @returns Merged rows and whether any Team left runs out.
+ * @param deniedTeamIds - Teams left out because the viewer may not read their Run history.
+ * @returns Merged rows, whether any Team left runs out, and the names of the Teams left out.
  */
-export function mergeRunHistories(histories: readonly TeamAgentRunHistoryResponse[], teamNames: Readonly<Record<string, string>>): RunHistory {
+export function mergeRunHistories(
+  histories: readonly TeamAgentRunHistoryResponse[],
+  teamNames: Readonly<Record<string, string>>,
+  deniedTeamIds: readonly string[] = [],
+): RunHistory {
   const rows = histories.flatMap((history) => history.runs.map((run) => ({ ...run, teamName: teamNames[history.teamId] ?? history.teamId })))
   rows.sort((left, right) => (right.finishedAt ?? '').localeCompare(left.finishedAt ?? '') || left.runId.localeCompare(right.runId))
-  return { rows, hasMore: histories.some((history) => history.hasMore) }
+  return {
+    rows,
+    hasMore: histories.some((history) => history.hasMore),
+    ...(deniedTeamIds.length > 0 ? { deniedTeamNames: deniedTeamIds.map((teamId) => teamNames[teamId] ?? teamId) } : {}),
+  }
 }
 
 /**

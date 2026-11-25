@@ -11,6 +11,7 @@ import {
 } from '../src/features/factory-board/model/runHistory'
 import { RunHistoryView, type RunHistoryFilterState } from '../src/features/factory-board/ui/RunHistoryView'
 import { createRunHistoryLabels } from '../src/features/factory-board/ui/runHistoryLabels'
+import { readAgentRunHistories } from '../src/features/factory-board/queries/useFactoryBoard'
 import { getTeamAgentRunHistory } from '../src/work-items/api/agentRuns'
 
 const originalFetch = globalThis.fetch
@@ -130,6 +131,28 @@ describe('Run history API', () => {
     expect(url.searchParams.has('assigneeUserId')).toBe(false)
   })
 
+  test('leaves out a Team whose history the viewer may not read, and fails on other errors', async () => {
+    /**
+     * Answers team-a with a run and team-b with the given status.
+     *
+     * @param status - Status of team-b's response.
+     */
+    const respond = (status: number) => {
+      globalThis.fetch = Object.assign(async (input: RequestInfo | URL) => {
+        if (String(input).includes('/teams/team-b/')) {
+          return new Response(JSON.stringify({ code: 'WorkspacePermissionDenied', message: 'Denied' }), { status, headers: { 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify(response('team-a', [entry('team-a', 1)])), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }, { preconnect: originalFetch.preconnect })
+    }
+    respond(403)
+    const history = await readAgentRunHistories('token', ['team-a', 'team-b'], 7, {}, { 'team-a': 'Alpha', 'team-b': 'Beta' })
+    expect(history.rows.map((row) => row.teamName)).toEqual(['Alpha'])
+    expect(history.deniedTeamNames).toEqual(['Beta'])
+    respond(500)
+    await expect(readAgentRunHistories('token', ['team-a', 'team-b'], 7, {}, {})).rejects.toThrow()
+  })
+
   test('rejects a response for another Team or with an active run', async () => {
     respondWith(response('team-b', []))
     await expect(getTeamAgentRunHistory('token', 'team-a', { from: '2026-11-13T00:00:00.000Z', to: '2026-11-20T00:00:00.000Z' })).rejects.toThrow()
@@ -183,6 +206,12 @@ describe('RunHistoryView', () => {
     const failed = render({ errorMessage: 'Run 履歴を読み込めませんでした。' })
     expect(failed).toContain('role="alert"')
     expect(failed).toContain('もう一度読み込む')
+  })
+
+  test('names the Teams left out for lack of permission', () => {
+    const markup = render({ history: { rows: [], hasMore: false, deniedTeamNames: ['Beta', 'Gamma'] } })
+    expect(markup).toContain('Beta, Gamma の Run 履歴を読む権限がないため、含めていません。')
+    expect(render({ history: { rows: [], hasMore: false } })).not.toContain('run-history-denied-teams')
   })
 
   test('disables the download until runs are shown', () => {

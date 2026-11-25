@@ -130,6 +130,7 @@ export const factoryBoardMessages = {
   'factoryBoard.history.loadError': 'The Run history could not be loaded.',
   'factoryBoard.history.empty': 'No runs match these filters.',
   'factoryBoard.history.noTeams': 'You cannot view any Team.',
+  'factoryBoard.history.deniedTeams': 'Runs of {teams} are not included because you cannot read their Run history.',
   'factoryBoard.history.incomplete': 'The read limit was reached, so some runs are not shown. Choose a shorter period or narrower filters.',
   'factoryBoard.history.count': '{count} runs',
   'factoryBoard.history.download': 'Download CSV',

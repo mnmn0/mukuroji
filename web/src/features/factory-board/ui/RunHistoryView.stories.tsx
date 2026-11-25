@@ -156,3 +156,13 @@ export const Truncated: Story = {
     await expect(within(canvasElement).getByRole('note')).toHaveTextContent(labels.incomplete)
   },
 }
+
+/** One Team's history may not be read by the viewer; the rest is shown and that Team is named. */
+export const DeniedTeam: Story = {
+  args: { history: { ...history, deniedTeamNames: ['Mobile'] } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('run-history-denied-teams')).toHaveTextContent(labels.deniedTeams.replace('{teams}', 'Mobile'))
+    await expect(canvas.getAllByTestId('run-history-row')).toHaveLength(5)
+  },
+}

@@ -130,6 +130,7 @@ export const factoryBoardMessages = {
   'factoryBoard.history.loadError': 'Run 履歴を読み込めませんでした。',
   'factoryBoard.history.empty': '条件に一致する Run はありません。',
   'factoryBoard.history.noTeams': '閲覧できる Team がありません。',
+  'factoryBoard.history.deniedTeams': '{teams} の Run 履歴を読む権限がないため、含めていません。',
   'factoryBoard.history.incomplete': '読み込み上限に達したため、表示されていない Run があります。期間を短くするか、条件を絞ってください。',
   'factoryBoard.history.count': '{count} 件',
   'factoryBoard.history.download': 'CSV をダウンロード',

@@ -49,6 +49,8 @@ export type RunHistoryLabels = {
   noTeams: string
   /** Notice that some runs were left out. */
   incomplete: string
+  /** Notice naming the Teams left out for lack of permission, with a `{teams}` placeholder. */
+  deniedTeams: string
   /** Number of shown runs with a `{count}` placeholder. */
   count: string
   /** CSV download action. */
@@ -93,6 +95,7 @@ export function createRunHistoryLabels(locale: Locale): RunHistoryLabels {
     empty: t('factoryBoard.history.empty'),
     noTeams: t('factoryBoard.history.noTeams'),
     incomplete: t('factoryBoard.history.incomplete'),
+    deniedTeams: t('factoryBoard.history.deniedTeams'),
     count: t('factoryBoard.history.count'),
     download: t('factoryBoard.history.download'),
     headings: {
