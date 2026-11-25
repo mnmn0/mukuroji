@@ -1154,7 +1154,9 @@ function PreviewUnavailable({
   return (
     <div className="max-w-sm rounded-lg border border-white/15 bg-white/5 px-5 py-6 text-center">
       <p className="text-sm font-semibold text-white">{t(key)}</p>
-      <p className="mt-2 text-xs leading-5 text-fg-slate-300">{t('files.scan.description')}</p>
+      <p className="mt-2 text-xs leading-5 text-fg-slate-300">
+        {t(status === 'failed' ? 'files.scan.failedDescription' : 'files.scan.description')}
+      </p>
     </div>
   )
 }

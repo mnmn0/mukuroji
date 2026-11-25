@@ -92,6 +92,7 @@ const SAFE_API_ROUTE_AREAS = new Set([
   'documents',
   'enterprise',
   'health',
+  'my-requests',
   'notification-preferences',
   'notifications',
   'planning',

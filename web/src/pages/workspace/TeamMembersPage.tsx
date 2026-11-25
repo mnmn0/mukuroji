@@ -19,6 +19,8 @@ import {
 import { TeamWorkloadView } from '../../workload/ui/TeamWorkloadView'
 import { useTeamReminderSettings } from '../../notifications/mutations/useTeamReminderSettings'
 import { TeamReminderSettingsPanel } from '../../notifications/ui/TeamReminderSettingsPanel'
+import { useSlackDestination } from '../../notifications/mutations/useSlackDestination'
+import { SlackDestinationPanel } from '../../notifications/ui/SlackDestinationPanel'
 
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 const emptyWorkspaceTasks: CanonicalWorkItem[] = []
@@ -57,6 +59,12 @@ export function TeamMembersPage() {
     activeTeam?.id,
     granularity,
     workspace.canLoadWorkspaceData && Boolean(activeTeam),
+  )
+  const slackChannelOwner = useMemo(() => activeTeam ? { teamId: activeTeam.id } : undefined, [activeTeam])
+  const slackChannel = useSlackDestination(
+    workspace.canLoadWorkspaceData ? workspace.accessToken : undefined,
+    slackChannelOwner,
+    workspace.locale,
   )
   const assignmentMutation = useMoveWorkloadAssignment({
     accessToken: workspace.accessToken,
@@ -146,6 +154,7 @@ export function TeamMembersPage() {
         {activeTeam && !reminderSettings.isUnavailable
           ? <TeamReminderSettingsPanel controller={reminderSettings} t={t} />
           : null}
+        {activeTeam ? <SlackDestinationPanel controller={slackChannel} key={activeTeam.id} kind="team" t={t} /> : null}
       </div>
     </WorkspaceRouteContent>
   )

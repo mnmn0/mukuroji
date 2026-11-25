@@ -57,6 +57,9 @@ function createAutomationSchedulePort(
     async completeRecurringWork() {
       return unexpectedAutomationSchedulePortCall()
     },
+    async deferRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
     async deleteRecurringWork() {
       return unexpectedAutomationSchedulePortCall()
     },
@@ -1108,6 +1111,109 @@ describe('automation schedule handler', () => {
     expect(actionExecutions).toBe(1)
   })
 
+  test('recovers a reservation nobody claimed from the saved rule version', async () => {
+    const rule = createScheduledRule()
+    const event = {
+      eventId: 'event-running',
+      eventType: 'work-item.updated',
+      workspaceId: rule.workspaceId,
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+    }
+    let execution: AutomationExecution = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-running-1',
+      workspaceId: rule.workspaceId,
+      ruleId: rule.id,
+      ruleVersion: rule.version,
+      triggerEventId: event.eventId,
+      status: 'pending',
+      attempts: 0,
+      actions: [{
+        actionIndex: 0,
+        actionId: 'automation-running-1:action:0000',
+        status: 'pending',
+        attempts: 0,
+      }],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    }
+    let actionExecutions = 0
+    const client = createAutomationSchedulePort({
+      async getExecution() {
+        return structuredClone(execution)
+      },
+      async claimExecution(candidate, now, leaseExpiresAt) {
+        if (
+          candidate.status !== execution.status ||
+          candidate.attempts !== execution.attempts ||
+          (execution.nextRetryAt && execution.nextRetryAt > now.toISOString())
+        ) {
+          return false
+        }
+        execution = {
+          ...execution,
+          status: 'running',
+          attempts: execution.attempts + 1,
+          nextRetryAt: leaseExpiresAt,
+        }
+        return true
+      },
+      async getRuleVersion() {
+        return structuredClone(rule)
+      },
+      async getExecutionEvent() {
+        return structuredClone(event)
+      },
+      async hasActionReceipt() {
+        return false
+      },
+      async putActionReceipt() {
+        return true
+      },
+      async saveExecution(updated) {
+        execution = structuredClone(updated)
+        return true
+      },
+    })
+
+    // The rule may be deleted meanwhile; recovery reads only the saved version and event.
+    const early = await processDueAutomationExecution(
+      structuredClone(execution),
+      new Date('2026-07-16T00:04:59.000Z'),
+      {
+        client,
+        entitlement: enabledAutomationEntitlement,
+        actionExecutor: {
+          async execute() {
+            actionExecutions += 1
+          },
+        },
+      },
+    )
+    expect(early.status).toBe('pending')
+    const result = await processDueAutomationExecution(
+      structuredClone(execution),
+      new Date('2026-07-16T00:05:00.000Z'),
+      {
+        client,
+        entitlement: enabledAutomationEntitlement,
+        actionExecutor: {
+          async execute() {
+            actionExecutions += 1
+          },
+        },
+      },
+    )
+
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      attempts: 1,
+    })
+    expect(execution.nextRetryAt).toBeUndefined()
+    expect(actionExecutions).toBe(1)
+  })
+
   test('advances durable inbound secret cleanup only after DeleteSecret succeeds', async () => {
     const cleanup: AutomationInboundWebhookSecretCleanup = {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -1248,6 +1354,15 @@ function createRecurringExecutionHarness(definition: RecurringWork) {
     async getExecutionEvent(_workspaceId, executionId) {
       return structuredClone(events.get(executionId))
     },
+    async listExecutions(query) {
+      return {
+        executions: [...executions.values()]
+          .filter((execution) => execution.ruleId === query.ruleId)
+          .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+          .slice(0, query.limit)
+          .map((execution) => structuredClone(execution)),
+      }
+    },
     async claimExecution(candidate, now, leaseExpiresAt, definitionGuard) {
       const callback = beforeClaim
       beforeClaim = undefined
@@ -1313,3 +1428,871 @@ function createRecurringExecutionHarness(definition: RecurringWork) {
     },
   }
 }
+
+describe('due-soon schedule rules and business-day Recurring Work', () => {
+  test('runs a due-soon rule once per open Work Item due that many days after the occurrence', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        ...createScheduledRule().trigger,
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'skip',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    const notified: string[] = []
+    const requestedDueDates: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          const assignee = context.event.workItem?.assigneeUserId
+          notified.push(`${String(context.event.metadata?.issueId)}:${String(assignee)}`)
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(workspaceId, dueDate) {
+          expect(workspaceId).toBe('workspace-1')
+          requestedDueDates.push(dueDate)
+          return [
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+            { teamId: 'core', workItemId: 'item-1', dueDate },
+            { teamId: 'core', workItemId: 'moved', dueDate },
+            { teamId: 'core', workItemId: 'done', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: workItemId === 'moved' ? '2026-08-01' : '2026-07-19',
+              statusCategory: workItemId === 'done' ? 'completed' : 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+    const now = new Date('2026-07-16T00:00:30.000Z')
+
+    const first = await processScheduledAutomationRule(rule, now, dependencies)
+    const second = await processScheduledAutomationRule(rule, now, dependencies)
+
+    expect(requestedDueDates).toEqual(['2026-07-19'])
+    expect(notified).toEqual(['item-1:member-item-1', 'item-2:member-item-2'])
+    expect(first.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
+    expect(second).toEqual(first)
+  })
+
+  test('resumes the rest of a late skip-policy due-soon occurrence after a partial fan-out', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'skip',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    let crashOnSecondItem = true
+    const notified: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (crashOnSecondItem && execution.triggerEventId.endsWith(':item-2')) {
+          crashOnSecondItem = false
+          throw new Error('worker stopped')
+        }
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async listExecutions(query) {
+        return {
+          executions: [...executions.values()]
+            .filter((execution) => execution.ruleId === query.ruleId)
+            .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+            .slice(0, query.limit)
+            .map((execution) => structuredClone(execution)),
+        }
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          notified.push(String(context.event.metadata?.issueId))
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(_workspaceId, dueDate) {
+          return [
+            { teamId: 'core', workItemId: 'item-1', dueDate },
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: '2026-07-19',
+              statusCategory: 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    await expect(processScheduledAutomationRule(
+      rule,
+      new Date('2026-07-16T00:00:30.000Z'),
+      dependencies,
+    )).rejects.toThrow('worker stopped')
+    const resumed = await processScheduledAutomationRule(
+      currentRule,
+      new Date('2026-07-16T00:10:00.000Z'),
+      dependencies,
+    )
+
+    expect(notified).toEqual(['item-1', 'item-2'])
+    expect(resumed.lastRunAt).toBe('2026-07-16T00:00:00.000Z')
+    expect(resumed.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
+  })
+
+  test('resumes a late skip-policy due-soon occurrence after its run Work Items leave the due list', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'skip',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    let crashOnSecondItem = true
+    const notified: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (crashOnSecondItem && execution.triggerEventId.endsWith(':item-2')) {
+          crashOnSecondItem = false
+          throw new Error('worker stopped')
+        }
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async listExecutions(query) {
+        return {
+          executions: [...executions.values()]
+            .filter((execution) => execution.ruleId === query.ruleId)
+            .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+            .slice(0, query.limit)
+            .map((execution) => structuredClone(execution)),
+        }
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          notified.push(String(context.event.metadata?.issueId))
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(_workspaceId, dueDate) {
+          // item-1 is completed after the first run, so it leaves the due list.
+          return [
+            ...(crashOnSecondItem ? [{ teamId: 'core', workItemId: 'item-1', dueDate }] : []),
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: '2026-07-19',
+              statusCategory: 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    await expect(processScheduledAutomationRule(
+      rule,
+      new Date('2026-07-16T00:00:30.000Z'),
+      dependencies,
+    )).rejects.toThrow('worker stopped')
+    const resumed = await processScheduledAutomationRule(
+      currentRule,
+      new Date('2026-07-16T00:10:00.000Z'),
+      dependencies,
+    )
+
+    expect(notified).toEqual(['item-1', 'item-2'])
+    expect(resumed.lastRunAt).toBe('2026-07-16T00:00:00.000Z')
+    expect(resumed.nextRunAt).toBe('2026-07-17T00:00:00.000Z')
+  })
+
+  test('finishes a started due-soon fan-out under the latest policy before the newest occurrence', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'latest',
+        },
+        dueWorkItems: { daysBefore: 3 },
+      },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    }
+    const executions = new Map<string, AutomationExecution>()
+    const receipts = new Set<string>()
+    let currentRule = rule
+    let crashOnSecondItem = true
+    const notified: string[] = []
+    const client = createAutomationSchedulePort({
+      async reserveExecution(execution) {
+        if (crashOnSecondItem && execution.triggerEventId.endsWith(':item-2')) {
+          crashOnSecondItem = false
+          throw new Error('worker stopped')
+        }
+        if (executions.has(execution.id)) return 'duplicate'
+        executions.set(execution.id, structuredClone(execution))
+        return 'created'
+      },
+      async getExecution(_workspaceId, executionId) {
+        return structuredClone(executions.get(executionId))
+      },
+      async listExecutions(query) {
+        return {
+          executions: [...executions.values()]
+            .filter((execution) => execution.ruleId === query.ruleId)
+            .sort((first, second) => second.startedAt.localeCompare(first.startedAt))
+            .slice(0, query.limit)
+            .map((execution) => structuredClone(execution)),
+        }
+      },
+      async claimExecution(candidate, _now, leaseExpiresAt) {
+        const current = executions.get(candidate.id)
+        if (!current || current.status !== candidate.status || current.attempts !== candidate.attempts) {
+          return false
+        }
+        current.status = 'running'
+        current.attempts += 1
+        current.nextRetryAt = leaseExpiresAt
+        executions.set(current.id, structuredClone(current))
+        return true
+      },
+      async saveExecution(execution) {
+        executions.set(execution.id, structuredClone(execution))
+        return true
+      },
+      async hasActionReceipt(_workspaceId, executionId, actionId) {
+        return receipts.has(`${executionId}:${actionId}`)
+      },
+      async putActionReceipt(_workspaceId, executionId, actionId) {
+        const receipt = `${executionId}:${actionId}`
+        if (receipts.has(receipt)) return false
+        receipts.add(receipt)
+        return true
+      },
+      async completeScheduledRule(_workspaceId, _ruleId, expectedRevision, lastRunAt, nextRunAt) {
+        if (currentRule.revision !== expectedRevision) throw new Error('revision conflict')
+        currentRule = { ...currentRule, revision: currentRule.revision + 1, lastRunAt, nextRunAt }
+        return structuredClone(currentRule)
+      },
+      async getRule() {
+        return structuredClone(currentRule)
+      },
+    })
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          notified.push(String(context.event.metadata?.issueId))
+        },
+      },
+      dueWorkItems: {
+        async listOpenWorkItemsDueOn(_workspaceId, dueDate) {
+          // item-1 is completed after the first run, so it leaves the due list.
+          return [
+            ...(crashOnSecondItem ? [{ teamId: 'core', workItemId: 'item-1', dueDate }] : []),
+            { teamId: 'core', workItemId: 'item-2', dueDate },
+          ]
+        },
+      },
+      workItems: {
+        async getTeamIssueDetail(_workspaceId, _teamId, workItemId) {
+          return {
+            issue: {
+              id: workItemId,
+              assigneeUserId: `member-${workItemId}`,
+              dueDate: '2026-07-19',
+              statusCategory: 'unstarted',
+            },
+          }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    await expect(processScheduledAutomationRule(
+      rule,
+      new Date('2026-07-16T00:00:30.000Z'),
+      dependencies,
+    )).rejects.toThrow('worker stopped')
+    const resumed = await processScheduledAutomationRule(
+      currentRule,
+      new Date('2026-07-17T00:10:00.000Z'),
+      dependencies,
+    )
+
+    // The started July 16 fan-out finishes item-2; the July 17 occurrence finds no Work Item due
+    // on July 20, since every item is due on July 19.
+    expect(notified).toEqual(['item-1', 'item-2'])
+    expect(resumed.lastRunAt).toBe('2026-07-17T00:00:00.000Z')
+    expect(resumed.nextRunAt).toBe('2026-07-18T00:00:00.000Z')
+  })
+
+  test('rejects a due-soon rule when the schedule has no due Work Item source', async () => {
+    const rule: AutomationRule = {
+      ...createScheduledRule(),
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'Asia/Tokyo',
+          localTime: '09:00',
+          startDate: '2026-07-16',
+          catchUpPolicy: 'skip',
+        },
+        dueWorkItems: { daysBefore: 0 },
+      },
+    }
+    const client = createAutomationSchedulePort({
+      async getRule() {
+        return structuredClone(rule)
+      },
+      async getExecution() {
+        return undefined
+      },
+    })
+
+    await expect(processScheduledAutomationRule(rule, new Date('2026-07-16T00:00:00.000Z'), {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute() {
+          throw new Error('No action runs without the source.')
+        },
+      },
+    })).rejects.toThrow('Due Work Item lookup is not configured.')
+  })
+
+  test('does not catch up business-day months that passed before the current next run', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-01-01',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'all',
+      },
+      // Paused since April and re-enabled with the next run on 2026-08-01.
+      lastRunAt: '2026-04-01T00:00:00.000Z',
+      nextRunAt: '2026-08-01T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    let current = structuredClone(definition)
+    const occurrences: string[] = []
+    const client: AutomationSchedulePort = {
+      ...harness.client,
+      async getRecurringWork() {
+        return structuredClone(current)
+      },
+      async deferRecurringWork(_workspaceId, _id, _revision, nextRunAt) {
+        current = { ...current, revision: current.revision + 1, nextRunAt }
+        harness.setCurrentDefinition(current)
+        return structuredClone(current)
+      },
+    }
+
+    const deferred = await processRecurringWorkDefinition(definition, new Date('2026-08-01T00:00:00.000Z'), {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() }
+        },
+      },
+    })
+
+    expect(occurrences).toEqual([])
+    // 2026-08-01 is a Saturday, so the first business day is Monday the 3rd; it wakes daily until then.
+    expect(deferred.nextRunAt).toBe('2026-08-02T00:00:00.000Z')
+  })
+
+  test('does not run a business-day time that passed before the schedule was changed', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-01-01',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'latest',
+      },
+      // Changed to the first business day on August 10, after this month's (August 3) had passed.
+      lastRunAt: '2026-07-01T00:00:00.000Z',
+      scheduleChangedAt: '2026-08-10T01:00:00.000Z',
+      nextRunAt: '2026-08-11T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    let current = structuredClone(definition)
+    const occurrences: string[] = []
+    const client: AutomationSchedulePort = {
+      ...harness.client,
+      async getRecurringWork() {
+        return structuredClone(current)
+      },
+      async deferRecurringWork(_workspaceId, _id, _revision, nextRunAt) {
+        current = { ...current, revision: current.revision + 1, nextRunAt }
+        harness.setCurrentDefinition(current)
+        return structuredClone(current)
+      },
+    }
+
+    const deferred = await processRecurringWorkDefinition(definition, new Date('2026-08-11T00:00:00.000Z'), {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set<string>() }
+        },
+      },
+    })
+
+    expect(occurrences).toEqual([])
+    expect(deferred.nextRunAt).toBe('2026-09-01T00:00:00.000Z')
+  })
+
+  test('retries a started business-day run on its day even after the calendar moves the business day', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'skip',
+      },
+      nextRunAt: '2026-08-03T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    let holidays = new Set<string>()
+    let failNext = true
+    const occurrences: string[] = []
+    const dependencies = {
+      client: harness.client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          if (failNext) {
+            failNext = false
+            throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          }
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    // 2026-08-03 is the first business day (Monday); the first attempt fails and waits for a retry.
+    const pending = await processRecurringWorkDefinition(definition, new Date('2026-08-03T00:00:10.000Z'), dependencies)
+    expect(pending.lastRunAt).toBeUndefined()
+    // The Team then marks August 3 as a holiday, which would move the first business day to the 4th.
+    holidays = new Set(['2026-08-03'])
+    const completed = await processRecurringWorkDefinition(pending, new Date('2026-08-03T06:00:00.000Z'), dependencies)
+
+    expect(occurrences).toEqual(['2026-08-03T00:00:00.000Z'])
+    expect(completed.lastRunAt).toBe('2026-08-03T00:00:00.000Z')
+    expect(completed.nextRunAt).toBe('2026-09-01T00:00:00.000Z')
+  })
+
+  test('retries a started business-day run at its time even after the local time is edited', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'skip',
+      },
+      nextRunAt: '2026-08-03T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    const holidays = new Set<string>()
+    let failNext = true
+    const occurrences: string[] = []
+    const dependencies = {
+      client: harness.client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          if (failNext) {
+            failNext = false
+            throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          }
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    // 2026-08-03 is the first business day (Monday); the first attempt fails and waits for a retry.
+    const pending = await processRecurringWorkDefinition(definition, new Date('2026-08-03T00:00:10.000Z'), dependencies)
+    expect(pending.lastRunAt).toBeUndefined()
+    // The administrator then moves the schedule to 10:00 while the 09:00 run waits for a retry.
+    const edited: RecurringWork = {
+      ...pending,
+      revision: pending.revision + 1,
+      schedule: { ...pending.schedule, localTime: '10:00' },
+      scheduleChangedAt: '2026-08-03T00:30:00.000Z',
+      nextRunAt: '2026-08-03T01:00:00.000Z',
+    }
+    harness.setCurrentDefinition(edited)
+    const completed = await processRecurringWorkDefinition(edited, new Date('2026-08-03T06:00:00.000Z'), dependencies)
+
+    expect(occurrences).toEqual(['2026-08-03T00:00:00.000Z'])
+    expect(completed.lastRunAt).toBe('2026-08-03T00:00:00.000Z')
+    // The next run follows the edited schedule.
+    expect(completed.nextRunAt).toBe('2026-09-01T01:00:00.000Z')
+  })
+
+  test('advances past the month of a resumed business-day run whose local time was edited on calendar day n', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'skip',
+      },
+      nextRunAt: '2026-09-01T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    const holidays = new Set<string>()
+    let failNext = true
+    const occurrences: string[] = []
+    const dependencies = {
+      client: harness.client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          if (failNext) {
+            failNext = false
+            throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          }
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    // 2026-09-01 (Tuesday) is both calendar day 1 and the first business day; the first attempt fails.
+    const pending = await processRecurringWorkDefinition(definition, new Date('2026-09-01T00:00:10.000Z'), dependencies)
+    expect(pending.lastRunAt).toBeUndefined()
+    // The administrator then moves the schedule to 10:00 while the 09:00 run waits for a retry.
+    const edited: RecurringWork = {
+      ...pending,
+      revision: pending.revision + 1,
+      schedule: { ...pending.schedule, localTime: '10:00' },
+      scheduleChangedAt: '2026-09-01T00:10:00.000Z',
+      nextRunAt: '2026-09-01T01:00:00.000Z',
+    }
+    harness.setCurrentDefinition(edited)
+    const completed = await processRecurringWorkDefinition(edited, new Date('2026-09-01T06:00:00.000Z'), dependencies)
+
+    expect(occurrences).toEqual(['2026-09-01T00:00:00.000Z'])
+    expect(completed.lastRunAt).toBe('2026-09-01T00:00:00.000Z')
+    // September is done, so the edited 10:00 slot on the same day is not a next run.
+    expect(completed.nextRunAt).toBe('2026-10-01T01:00:00.000Z')
+  })
+
+  test('defers a business-day Recurring Work to its working day and runs it there', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'skip',
+      },
+      // Calendar day 1 is the earliest day the first business day can fall on.
+      nextRunAt: '2026-08-01T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    let current = structuredClone(definition)
+    const client: AutomationSchedulePort = {
+      ...harness.client,
+      async getRecurringWork() {
+        return structuredClone(current)
+      },
+      async deferRecurringWork(_workspaceId, _id, expectedRevision, nextRunAt) {
+        expect(expectedRevision).toBe(current.revision)
+        current = { ...current, revision: current.revision + 1, nextRunAt }
+        harness.setCurrentDefinition(current)
+        return structuredClone(current)
+      },
+      async completeRecurringWork(_workspaceId, _id, expectedRevision, lastRunAt, nextRunAt) {
+        expect(expectedRevision).toBe(current.revision)
+        current = { ...current, revision: current.revision + 1, lastRunAt, nextRunAt }
+        harness.setCurrentDefinition(current)
+        return structuredClone(current)
+      },
+    }
+    let created = 0
+    const dependencies = {
+      client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute() {
+          created += 1
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar(workspaceId, teamId) {
+          expect([workspaceId, teamId]).toEqual(['workspace-1', 'core-team'])
+          // 2026-08-01 is a Saturday and 2026-08-03 a holiday, so the first business day is the 4th.
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays: new Set(['2026-08-03']) }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    // Until the business day comes, the definition wakes every day at its local time.
+    let deferred = definition
+    for (const [now, next] of [
+      ['2026-08-01T00:00:00.000Z', '2026-08-02T00:00:00.000Z'],
+      ['2026-08-02T00:00:00.000Z', '2026-08-03T00:00:00.000Z'],
+      ['2026-08-03T00:00:00.000Z', '2026-08-04T00:00:00.000Z'],
+    ] as const) {
+      deferred = await processRecurringWorkDefinition(deferred, new Date(now), dependencies)
+      expect(deferred.nextRunAt).toBe(next)
+    }
+    expect(created).toBe(0)
+
+    const completed = await processRecurringWorkDefinition(
+      deferred,
+      new Date('2026-08-04T00:00:10.000Z'),
+      dependencies,
+    )
+    expect(created).toBe(1)
+    expect(completed.lastRunAt).toBe('2026-08-04T00:00:00.000Z')
+    // 2026-09-01 is a Tuesday.
+    expect(completed.nextRunAt).toBe('2026-09-01T00:00:00.000Z')
+  })
+})

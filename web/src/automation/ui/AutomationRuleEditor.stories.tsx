@@ -77,3 +77,43 @@ export const RelationTrigger: Story = {
     locale: 'ja',
   },
 }
+
+/** Approval decision trigger that starts a rule when an approval request is decided. */
+export const ApprovalDecisionTrigger: Story = {
+  args: {
+    initialSchedule: undefined,
+    initialTriggerType: 'approval',
+    locale: 'ja',
+  },
+}
+
+/** Daily schedule with the due-soon days field, for rules such as "notify the assignee 3 days before". */
+export const DueSoonSchedule: Story = {
+  args: {
+    initialSchedule: {
+      catchUpPolicy: 'skip',
+      frequency: 'daily',
+      interval: 1,
+      localTime: '09:00',
+      startDate: '2026-03-01',
+      timeZone: 'Asia/Tokyo',
+    },
+    locale: 'ja',
+  },
+}
+
+/** Monthly schedule that runs on the last day of each month. */
+export const MonthlyLastDay: Story = {
+  args: {
+    initialSchedule: {
+      catchUpPolicy: 'latest',
+      frequency: 'monthly',
+      interval: 1,
+      localTime: '18:00',
+      monthlyDay: 'last-day',
+      startDate: '2026-03-01',
+      timeZone: 'Asia/Tokyo',
+    },
+    locale: 'ja',
+  },
+}

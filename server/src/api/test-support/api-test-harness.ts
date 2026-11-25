@@ -731,6 +731,7 @@ function createWorkspaceAccessFake(
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
     revokeMemberSignIns: async () => undefined,
+    recordMemberSignIn: async () => undefined,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
@@ -874,6 +875,7 @@ function createTeamIssuesFake(
     createTriageDuplicateContextTransactionItems: () => {
       throw new Error('Unexpected Team Issues client call.')
     },
+    createSourceRequesterCompletionTransactionItems: unsupported,
     getTeamIssues: unsupported,
     listMemberWorkItemReferences: unsupported,
     getTeamIssuesByReferences: unsupported,
@@ -1668,6 +1670,8 @@ function configureFakeProjectClients(
     unassignedIssue?: boolean
     workspaceRole?: WorkspaceRole
     workspaceReconcileFailures?: number
+    /** Error that the member sign-in record fake throws after observing the call. */
+    workspaceSignInError?: Error
     workspaceStatus?: WorkspaceMemberStatus
     /** Invitation provisioning 時に Cognito user が存在しない状態を再現します。 */
     workspaceUserMissing?: boolean
@@ -1900,6 +1904,7 @@ function configureFakeProjectClients(
       name?: string
     }>,
     workspaceReconciliations: [] as string[],
+    workspaceSignIns: [] as string[],
     mfaChallenges: [] as Array<{
       challenge: string
       code: string
@@ -3032,6 +3037,10 @@ function configureFakeProjectClients(
         }
 
         return createWorkspaceMember(input.memberKey)
+      },
+      async recordMemberSignIn(_workspaceId, memberKey) {
+        calls.workspaceSignIns.push(memberKey)
+        if (options.workspaceSignInError) throw options.workspaceSignInError
       },
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
         calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })

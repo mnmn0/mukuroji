@@ -18,6 +18,8 @@ import {
   type Tag,
 } from '@aws-sdk/client-s3'
 import {
+  AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
+  AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
   isCanonicalWorkItemKey,
   parseNotificationMessage,
   type EnterpriseIdentitySnapshot,
@@ -27,6 +29,10 @@ import {
 } from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
+import {
+  REQUEST_REQUESTER_EVENT_TYPE_PREFIX,
+  REQUEST_REQUESTER_NOTIFICATION_REASON,
+} from '../../../request-intake'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -65,6 +71,8 @@ import {
   requiresCurrentWorkItemContributor,
   isSlackNotificationEligible,
   isNotificationRoutedToChannel,
+  enqueueChannelPost,
+  type ChannelPostEnqueueDependencies,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
   type NotificationRoutingSubject,
@@ -232,6 +240,8 @@ export interface CollaborationProjectionDependencies {
   weeklyReportReminders?: WeeklyReportReminderRevalidator
   /** Rereads Milestones and their watches; without it every Milestone notification is dropped. */
   planningMilestones?: PlanningMilestoneNotificationRevalidator
+  /** Queues Team and Project channel posts; without it no channel receives posts. */
+  channelPosts?: ChannelPostEnqueueDependencies
 }
 
 /** Reads the current state a Milestone notification depends on. */
@@ -987,6 +997,10 @@ async function processRecord(
       parentCondition,
     )),
   )
+  if (dependencies.channelPosts) {
+    // Planning update activity is posted under the target's current Team and Project.
+    await enqueueChannelPost(currentPlanningActivityEvent ?? authorizationEvent, dependencies.channelPosts)
+  }
   await publishRealtimeInvalidation(event, dependencies.realtime)
   await markProjectionProcessed(event.eventId)
 }
@@ -1665,8 +1679,11 @@ export function createNotificationProjectionDeliveryState(
   subject: NotificationRoutingSubject,
 ): NotificationProjectionDeliveryState {
   const deliveryPlan = createNotificationDeliveryPlan(preferences, occurredAt)
+  // A requester notification belongs to the Inbox only: it is never sent by Email, Slack, or
+  // Push, whatever the member's channel preferences (ADR 0088).
+  const inboxOnly = subject.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
   const routed = (channel: keyof NotificationPreferences['channels']) =>
-    isNotificationRoutedToChannel(preferences, subject, channel)
+    (!inboxOnly || channel === 'inApp') && isNotificationRoutedToChannel(preferences, subject, channel)
   const inboxState = routed('inApp') ? 'unread' : 'archived'
 
   return {
@@ -2546,6 +2563,16 @@ export async function hasCurrentSystemAdminMembership(
 }
 
 /**
+ * Automation events addressed to chosen Workspace members rather than to readers of a Work Item.
+ * A recipient needs only Workspace read access, the same access that reads execution history.
+ */
+const workspaceAutomationNotificationEventTypes: ReadonlySet<string> = new Set([
+  'automation.notification.requested',
+  AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
+  AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
+])
+
+/**
  * Rechecks active membership and current scoped content permissions.
  * @param event - Notification with refreshed canonical resource scope.
  * @param memberKey - Normalized recipient key.
@@ -2594,9 +2621,18 @@ async function isEligibleRecipient(
   let permissionCeiling: EnterprisePermissionId[] | undefined
   const readOnlyRecipient = event.notificationCandidates.length > 0 &&
     event.notificationCandidates.every((candidate) => candidate.reason === 'watcher')
-  const selectedWorkspaceRecipient = event.eventType === 'automation.notification.requested' &&
+  const selectedWorkspaceRecipient = (
+    workspaceAutomationNotificationEventTypes.has(event.eventType) ||
+    // A requester is told about their own request with only the form title, so Workspace read
+    // is enough, as for an Automation notification sent to chosen members.
+    event.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
+  ) &&
     !event.teamId && !event.projectId && !event.issueId && !event.planningTargetId &&
-    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && candidate.reason === 'automation')
+    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && (
+      event.eventType.startsWith(REQUEST_REQUESTER_EVENT_TYPE_PREFIX)
+        ? candidate.reason === REQUEST_REQUESTER_NOTIFICATION_REASON
+        : candidate.reason === 'automation'
+    ))
   const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
     : event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read'
   if (enforceContentAuthorization) {
@@ -3493,4 +3529,76 @@ function requireEnv(name: string) {
   }
 
   return value
+}
+
+/** Source of a queued Team or Project channel post, as saved when it was queued. */
+export type ChannelPostSourceScope = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Audit event type of the post. */
+  eventType: string
+  /** Team of the source when queued. */
+  teamId: string
+  /** Project of the source when queued, when it had one. */
+  projectId?: string
+  /** Work Item of a due or overdue event. */
+  issueId?: string
+  /** Due date a due or overdue event was scheduled for. */
+  dueDate?: string
+  /** Planning entity of a Milestone event. */
+  entityId?: string
+  /** Planning update target record of a health update event. */
+  planningTargetRecordKey?: string
+}
+
+/**
+ * Rechecks, before a channel post is sent, that its source still exists, is not archived, and
+ * still sits in the Team and Project it was queued for. A Work Item moved to another Project, an
+ * archived Project update target, or a moved Milestone is no longer posted to the old channel. A
+ * due or overdue reminder also needs the Work Item to be open, on the same due date, and still in
+ * that stage, as the scheduled reminder itself does.
+ * Event types this check does not know fail closed.
+ *
+ * @param source - Source saved on the queued post.
+ * @param planningMilestones - Milestone reader; without it Milestone posts are dropped.
+ * @returns Whether the post may still be sent.
+ */
+export async function isCurrentChannelPostSource(
+  source: ChannelPostSourceScope,
+  planningMilestones: PlanningMilestoneNotificationRevalidator | undefined,
+): Promise<boolean> {
+  const event: AuditProjectionEvent = {
+    eventId: 'channel-post-recheck',
+    eventType: source.eventType,
+    workspaceId: source.workspaceId,
+    occurredAt: new Date().toISOString(),
+    notificationCandidates: [],
+    outboxStatus: 'pending',
+    teamId: source.teamId,
+    ...(source.projectId ? { projectId: source.projectId } : {}),
+    ...(source.issueId ? { issueId: source.issueId } : {}),
+    ...(source.dueDate ? { dueDate: source.dueDate } : {}),
+    ...(source.entityId ? { entityId: source.entityId } : {}),
+    ...(source.planningTargetRecordKey ? { planningTargetRecordKey: source.planningTargetRecordKey } : {}),
+  }
+  const reminderReason = scheduledWorkItemNotificationReasons.get(source.eventType)
+  if (reminderReason) {
+    if (!source.issueId || !source.dueDate) return false
+    const scope = await readCurrentWorkItemScope(event)
+    return scope.checked && scope.exists && scope.archived !== true &&
+      scope.statusCategory !== 'completed' && scope.statusCategory !== 'canceled' &&
+      scope.projectId === source.projectId &&
+      scope.dueDate === source.dueDate &&
+      isScheduledStageStillCurrent(reminderReason, event, scope.localDate)
+  }
+  if (planningUpdatePublishEventTypes.has(source.eventType)) {
+    if (!source.planningTargetRecordKey) return false
+    const scope = await readCurrentPlanningUpdateScope(event)
+    return scope.checked && scope.exists && !scope.archived &&
+      scope.teamId === source.teamId && scope.projectId === source.projectId
+  }
+  if (planningMilestoneNotificationEventTypes.has(source.eventType)) {
+    return await isCurrentPlanningMilestoneNotification(event, planningMilestones)
+  }
+  return false
 }

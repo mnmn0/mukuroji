@@ -87,6 +87,8 @@ export {
 export {
   MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES,
   WorkItemCompletionGateError,
+  WorkflowRuleError,
+  assertWorkflowRules,
   WorkItemConfigurationError,
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,

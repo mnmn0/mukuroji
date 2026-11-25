@@ -2,10 +2,18 @@ import {
   crossesWorkItemBaselineSlipThreshold,
   parseWorkItemBaselineSlipChange,
   isWorkItemRelationEventType,
+  type AutomationApprovalDecision,
   type AutomationCondition,
   type AutomationTrigger,
   type AutomationValue,
 } from '@mukuroji/contracts'
+
+/** Approval decision recorded by each approval audit event type. */
+const APPROVAL_DECISION_BY_EVENT_TYPE: ReadonlyMap<string, AutomationApprovalDecision> = new Map([
+  ['approval.completed', 'approved'],
+  ['approval.rejected', 'rejected'],
+  ['approval.changes-requested', 'changes-requested'],
+])
 
 /** A field change carried by a durable Automation trigger event. */
 export type AutomationEventChange = {
@@ -110,6 +118,10 @@ export function matchesAutomationTrigger(
       return commentKind !== undefined && (
         trigger.kind === undefined || trigger.kind === 'any' || trigger.kind === commentKind
       )
+    }
+    case 'approval': {
+      const decision = APPROVAL_DECISION_BY_EVENT_TYPE.get(event.eventType)
+      return decision !== undefined && (trigger.decision === undefined || trigger.decision === decision)
     }
     case 'relation':
       return isWorkItemRelationEventType(event.eventType) && (

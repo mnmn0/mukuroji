@@ -125,6 +125,37 @@ test('creates a direct object upload session without accepting file bytes in the
   }])
 })
 
+test('tells the client why a file type was refused and which types it may attach', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async createUpload() {
+        throw new FileProofingError(415, 'FileTypeNotAllowed', 'This file type cannot be attached.', {
+          fileTypeRejection: { reason: 'dangerous', allowedFileTypes: ['pdf', 'markdown'] },
+        })
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/issue-1/files/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'upload-session-exe',
+    },
+    body: JSON.stringify({ contentType: 'application/x-msdownload', fileName: 'setup.exe', sizeBytes: 4096 }),
+  })
+
+  expect(response.status).toBe(415)
+  expect(await response.json()).toEqual({
+    code: 'FileTypeNotAllowed',
+    message: 'This file type cannot be attached.',
+    reason: 'dangerous',
+    allowedFileTypes: ['pdf', 'markdown'],
+  })
+})
+
 test('does not issue file access URLs without authentication or a clean scan', async () => {
   configureFakeProjectClients(true, { role: 'viewer' })
   let accessCalls = 0
