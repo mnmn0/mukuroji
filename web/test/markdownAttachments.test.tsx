@@ -14,6 +14,7 @@ import {
   markdownAttachmentMaxSizeBytes,
   readMarkdownAttachmentBatchMessages,
   readMarkdownAttachmentFileId,
+  readScopedMarkdownAttachmentMessages,
 } from '../src/files/model/markdownAttachments'
 import { describeFileTypeRejection } from '../src/files/model/fileTypeRejection'
 import type { MarkdownAttachmentUpload } from '../src/files/mutations/useMarkdownAttachmentUpload'
@@ -37,6 +38,20 @@ describe('markdown attachment model', () => {
       .toBe('This Workspace does not accept this file type. You can attach: .md, .markdown, .xlsm')
     expect(describeFileTypeRejection({ reason: 'dangerous', allowedFileTypes: [] }, t))
       .toBe('Programs, scripts, and other dangerous types cannot be attached. This Workspace accepts no file types.')
+  })
+
+  test('shows upload messages only in the Work Item scope that produced them', () => {
+    const rejection: FileTypeRejection = { reason: 'not-allowed', allowedFileTypes: ['pdf'] }
+    const scopeA = JSON.stringify({ kind: 'work-item', workItemId: 'A' })
+    const scopeB = JSON.stringify({ kind: 'work-item', workItemId: 'B' })
+    const fromA = { scopeKey: scopeA, messages: { fileTypeRejection: rejection, errorKey: 'files.error.upload' } }
+
+    expect(readScopedMarkdownAttachmentMessages(fromA, scopeA)).toEqual(fromA.messages)
+    // First render after the editor moved to B: A's rejection is not shown, without waiting for an effect.
+    expect(readScopedMarkdownAttachmentMessages(fromA, scopeB)).toBeUndefined()
+    // An upload started in A that finishes after the move stores A's messages, which B never shows.
+    expect(readScopedMarkdownAttachmentMessages({ scopeKey: scopeA, messages: { errorKey: 'files.error.upload' } }, scopeB))
+      .toBeUndefined()
   })
 
   test('reports an upload failure that follows a type rejection in the same batch', () => {

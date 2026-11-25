@@ -77,6 +77,31 @@ export function readMarkdownAttachmentBatchMessages(
 }
 
 /**
+ * Editor messages together with the file scope, such as the Work Item, whose upload produced them.
+ */
+export type ScopedMarkdownAttachmentMessages<Messages> = {
+  /** Key of the file scope the upload started in. */
+  scopeKey: string
+  /** Messages produced by that upload. */
+  messages: Messages
+}
+
+/**
+ * Returns stored editor messages only while the editor still shows the scope they belong to,
+ * so another Work Item's rejection or failure is never shown, not even for one render.
+ *
+ * @param stored - Messages with the scope of the upload that produced them.
+ * @param scopeKey - Key of the file scope the editor shows now.
+ * @returns The messages when the scopes match, otherwise `undefined`.
+ */
+export function readScopedMarkdownAttachmentMessages<Messages>(
+  stored: ScopedMarkdownAttachmentMessages<Messages>,
+  scopeKey: string,
+): Messages | undefined {
+  return stored.scopeKey === scopeKey ? stored.messages : undefined
+}
+
+/**
  * Builds the Markdown that refers to an uploaded file: an image for inline-safe images,
  * otherwise a link that downloads the file.
  *

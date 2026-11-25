@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react'
+import { useCallback, useState, type ClipboardEvent, type DragEvent } from 'react'
 import type { FileTypeRejection } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createMarkdownAttachmentReference,
   findMarkdownAttachmentRejection,
   readMarkdownAttachmentBatchMessages,
+  readScopedMarkdownAttachmentMessages,
+  type ScopedMarkdownAttachmentMessages,
 } from '../model/markdownAttachments'
 import type { FileArtifactsController } from './useFileArtifacts'
 
@@ -72,6 +74,16 @@ export type MarkdownAttachmentUpload = {
 }
 
 /**
+ * Refusal and failure messages of the last attempt in one file scope.
+ */
+type MarkdownAttachmentMessages = {
+  /** Message for a refused or failed file. */
+  errorKey?: MessageKey
+  /** Why the server refused a file because of its type. */
+  fileTypeRejection?: FileTypeRejection
+}
+
+/**
  * Connects paste, drop, and a file picker in a Markdown editor to the Work Item file upload.
  * Files go through the same presigned PUT and malware scan as the Files panel; the body only
  * stores an `attachment:<fileId>` reference, which is shown once the scan is clean.
@@ -86,23 +98,18 @@ export function useMarkdownAttachmentUpload({
   onUploadingChange,
 }: UseMarkdownAttachmentUploadOptions): MarkdownAttachmentUpload {
   const [isUploading, setIsUploading] = useState(false)
-  const [errorKey, setErrorKey] = useState<MessageKey>()
-  const [fileTypeRejection, setFileTypeRejection] = useState<FileTypeRejection>()
   const canAttach = Boolean(controller?.scope?.kind === 'work-item' && controller.capabilities.canUpload) && !disabled
   const scopeKey = controller?.scope ? JSON.stringify(controller.scope) : ''
-  // The scope shown now; an upload started for another Work Item must not report into this one.
-  const currentScopeKeyRef = useRef(scopeKey)
-
-  useEffect(() => {
-    currentScopeKeyRef.current = scopeKey
-    setErrorKey(undefined)
-    setFileTypeRejection(undefined)
-  }, [scopeKey])
+  // Messages keep the scope of the upload that produced them, so another Work Item's
+  // rejection or failure is hidden from the first render after the scope changes.
+  const [storedMessages, setStoredMessages] = useState<ScopedMarkdownAttachmentMessages<MarkdownAttachmentMessages>>(
+    () => ({ scopeKey, messages: {} }),
+  )
+  const { errorKey, fileTypeRejection } = readScopedMarkdownAttachmentMessages(storedMessages, scopeKey) ?? {}
 
   const attachFiles = useCallback(async (files: readonly File[]) => {
     if (!controller || !canAttach || files.length === 0 || isUploading) return
-    setErrorKey(undefined)
-    setFileTypeRejection(undefined)
+    const operationScopeKey = scopeKey
     const accepted: File[] = []
     let rejection: MessageKey | undefined
     for (const file of files) {
@@ -110,10 +117,9 @@ export function useMarkdownAttachmentUpload({
       if (findMarkdownAttachmentRejection(file) === 'tooLarge') rejection = 'files.markdown.tooLarge'
       else accepted.push(file)
     }
-    if (rejection) setErrorKey(rejection)
+    setStoredMessages({ scopeKey: operationScopeKey, messages: rejection ? { errorKey: rejection } : {} })
     if (accepted.length === 0) return
 
-    const operationScopeKey = scopeKey
     setIsUploading(true)
     onUploadingChange?.(true)
     try {
@@ -124,10 +130,11 @@ export function useMarkdownAttachmentUpload({
           rejected = rejection
         },
       })
-      if (currentScopeKeyRef.current !== operationScopeKey) return
-      const messages = readMarkdownAttachmentBatchMessages(succeeded, rejected)
-      if (messages.fileTypeRejection) setFileTypeRejection(messages.fileTypeRejection)
-      if (messages.errorKey) setErrorKey(messages.errorKey)
+      const batchMessages = readMarkdownAttachmentBatchMessages(succeeded, rejected)
+      // Keep messages that a later attempt in another scope has stored since this one started.
+      setStoredMessages((current) => current.scopeKey === operationScopeKey
+        ? { scopeKey: operationScopeKey, messages: { ...current.messages, ...batchMessages } }
+        : current)
     } finally {
       setIsUploading(false)
       onUploadingChange?.(false)
