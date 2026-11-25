@@ -3,6 +3,7 @@ import type {
   WorkspaceMemberMfaStatus,
   WorkspaceMemberOffboarding,
   WorkspaceMemberOffboardingCredential,
+  WorkspaceMemberOffboardingProject,
   WorkspaceMemberPasswordResetAvailability,
   WorkspaceMemberSignInSecurity,
 } from '@mukuroji/contracts'
@@ -337,35 +338,40 @@ function parseMemberOffboarding(value: unknown): WorkspaceMemberOffboarding | un
   ) {
     return undefined
   }
-  const managedProjects = value.managedProjects.flatMap((project: unknown) =>
-    isRecord(project) && typeof project.projectId === 'string'
-      ? [{
+  // One malformed element fails the whole summary, so it is not shown as an empty list.
+  const managedProjects = parseEvery(value.managedProjects, (project): WorkspaceMemberOffboardingProject | undefined =>
+    isRecord(project) &&
+    typeof project.projectId === 'string' &&
+    (project.teamId === undefined || typeof project.teamId === 'string') &&
+    (project.name === undefined || typeof project.name === 'string')
+      ? {
           projectId: project.projectId,
           ...(typeof project.teamId === 'string' ? { teamId: project.teamId } : {}),
           ...(typeof project.name === 'string' ? { name: project.name } : {}),
-        }]
-      : []
+        }
+      : undefined
   )
-  const ownedPlanningEntities = value.ownedPlanningEntities.flatMap((entity: unknown) =>
+  const ownedPlanningEntities = parseEvery(value.ownedPlanningEntities, (entity) =>
     isRecord(entity) &&
     typeof entity.id === 'string' &&
     typeof entity.title === 'string' &&
     isPlanningEntityType(entity.type)
-      ? [{ id: entity.id, type: entity.type, title: entity.title }]
-      : []
+      ? { id: entity.id, type: entity.type, title: entity.title }
+      : undefined
   )
-  const credentials = value.credentials.flatMap((credential: unknown): WorkspaceMemberOffboardingCredential[] => {
+  const credentials = parseEvery(value.credentials, (credential): WorkspaceMemberOffboardingCredential | undefined => {
     if (!isRecord(credential) || typeof credential.id !== 'string' || typeof credential.name !== 'string') {
-      return []
+      return undefined
     }
     const kind = credential.kind === 'api-key' || credential.kind === 'oauth-app' ? credential.kind : undefined
-    return kind ? [{ id: credential.id, kind, name: credential.name }] : []
+    return kind ? { id: credential.id, kind, name: credential.name } : undefined
   })
-  const webhooks = value.webhooks.flatMap((webhook: unknown) =>
+  const webhooks = parseEvery(value.webhooks, (webhook) =>
     isRecord(webhook) && typeof webhook.id === 'string' && typeof webhook.name === 'string'
-      ? [{ id: webhook.id, name: webhook.name }]
-      : []
+      ? { id: webhook.id, name: webhook.name }
+      : undefined
   )
+  if (!managedProjects || !ownedPlanningEntities || !credentials || !webhooks) return undefined
   return {
     memberKey: value.memberKey,
     ...(typeof value.accessExpiresAt === 'string' ? { accessExpiresAt: value.accessExpiresAt } : {}),
@@ -378,6 +384,23 @@ function parseMemberOffboarding(value: unknown): WorkspaceMemberOffboarding | un
     webhooks,
     canDeactivate: value.canDeactivate,
   }
+}
+
+/**
+ * Parses every element of a list, failing the whole list when one element is malformed.
+ *
+ * @param values - Untrusted list elements.
+ * @param parse - Parser of one element; undefined marks it malformed.
+ * @returns The parsed elements, or undefined when any element is malformed.
+ */
+function parseEvery<T>(values: readonly unknown[], parse: (value: unknown) => T | undefined): T[] | undefined {
+  const parsed: T[] = []
+  for (const value of values) {
+    const element = parse(value)
+    if (element === undefined) return undefined
+    parsed.push(element)
+  }
+  return parsed
 }
 
 /**

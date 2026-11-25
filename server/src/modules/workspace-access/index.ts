@@ -54,6 +54,7 @@ export {
   type WorkspaceMemberVersionConditionInput,
   type WorkspaceMemberStatus,
   type WorkspaceAccessTransactWriteItem,
+  type MemberCredentialRevocationRecord,
 } from './workspace-access'
 export type {
   MemberCredentialRevoker,

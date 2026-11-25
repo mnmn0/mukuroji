@@ -1,11 +1,13 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import {
-  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
-} from '../documents/adapter-out/dynamodb/document-authorization'
+import type {
+  DocumentAuthorizationRevisionMutationPort,
+  PrepareDocumentAuthorizationRevisionMutationRequest,
+} from '../documents'
 import {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
+  type WorkspaceAccessTransactWriteItem,
   type WorkspaceMember,
 } from './workspace-access'
 import {
@@ -56,17 +58,44 @@ function memberItem(memberKey: string, overrides: Partial<WorkspaceMember> = {})
 }
 
 /**
+ * Fake Documents revision port that contributes one Put on the Documents table, so the test checks
+ * that Workspace Access joins the contribution without depending on the Documents adapter.
+ */
+const documentRevisionPort: DocumentAuthorizationRevisionMutationPort<WorkspaceAccessTransactWriteItem> = {
+  /**
+   * Builds the fake revision contribution.
+   *
+   * @param input - Revision mutation request.
+   * @returns A Put on the Documents table carrying the request.
+   */
+  prepareAuthorizationRevisionMutation(input: PrepareDocumentAuthorizationRevisionMutationRequest) {
+    return {
+      Put: {
+        TableName: 'DocumentsTable',
+        Item: {
+          workspaceId: input.workspaceId,
+          revision: input.expectedRevision + 1,
+          updatedAt: input.updatedAt,
+        },
+      },
+    }
+  },
+}
+
+/**
  * Creates a Workspace access client over a scripted document client.
  *
  * @param items - Member rows by member key.
  * @param commands - Receives every command sent.
  * @param onTransact - Optional transaction handler.
+ * @param onScan - Optional Scan handler replacing the single page of every row.
  * @returns The client.
  */
 function createClient(
   items: Record<string, Record<string, unknown>>,
   commands: RecordedCommand[],
   onTransact?: (input: Record<string, unknown>) => unknown,
+  onScan?: (input: Record<string, unknown>) => unknown,
 ) {
   const documentClient = {
     async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
@@ -76,6 +105,9 @@ function createClient(
         const recordKey = typeof key === 'object' && key !== null && 'recordKey' in key ? key.recordKey : ''
         const memberKey = String(recordKey).replace(/^MEMBER#/u, '')
         return { Item: items[memberKey] }
+      }
+      if (command.constructor.name === 'ScanCommand' && onScan) {
+        return onScan(command.input)
       }
       if (command.constructor.name === 'QueryCommand' || command.constructor.name === 'ScanCommand') {
         return { Items: Object.values(items) }
@@ -96,7 +128,7 @@ function createClient(
     'PlanningTable',
     null,
     undefined,
-    new DynamoDbDocumentAuthorizationRevisionMutationAdapter('DocumentsTable'),
+    documentRevisionPort,
   )
 }
 
@@ -108,6 +140,16 @@ test('reads an access expiry only as a future timestamp within the allowed windo
   expect(() => readMemberAccessExpiry('2026-12-31', now)).toThrow(RangeError)
   expect(() => readMemberAccessExpiry('2040-01-01T00:00:00.000Z', now)).toThrow(RangeError)
   expect(() => readMemberAccessExpiry(1_800_000_000_000, now)).toThrow(RangeError)
+})
+
+test('refuses an access expiry without a UTC offset or with an impossible date', () => {
+  expect(readMemberAccessExpiry('2026-12-31T15:00-05:00', now)).toBe('2026-12-31T20:00:00.000Z')
+  // Without an offset, Date.parse reads local time, so the same input would differ by host.
+  expect(() => readMemberAccessExpiry('2026-12-31T15:00:00', now)).toThrow(RangeError)
+  expect(() => readMemberAccessExpiry('2027-02-30T00:00:00.000Z', now)).toThrow(RangeError)
+  expect(() => readMemberAccessExpiry('2026-12-31T24:00:00.000Z', now)).toThrow(RangeError)
+  expect(() => readMemberAccessExpiry('2026-12-31T15:00:00+24:00', now)).toThrow(RangeError)
+  expect(readMemberAccessExpiry('2028-02-29T00:00:00.000Z', now)).toBe('2028-02-29T00:00:00.000Z')
 })
 
 test('treats a passed or unreadable expiry as expired and never expires an owner', () => {
@@ -127,6 +169,25 @@ test('treats a stored member row as active only while it is active and unexpired
   // A malformed expiry fails closed.
   expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: 0 }, now)).toBe(false)
   expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: 'soon' }, now)).toBe(false)
+  // A future expiry that is not the canonical UTC form the adapter writes also fails closed.
+  expect(isWorkspaceMemberRowActive({ status: 'active', accessExpiresAt: '2026-12-31T15:00:00+09:00' }, now))
+    .toBe(false)
+})
+
+test('reads every Scan page of expired members, including after an empty filtered page', async () => {
+  const commands: RecordedCommand[] = []
+  const lastKey = { workspaceId, recordKey: 'MEMBER#a@example.com' }
+  const expired = memberItem('guest@example.com', { accessExpiresAt: '2026-11-23T00:00:00.000Z' })
+  const client = createClient({}, commands, undefined, (input) =>
+    input.ExclusiveStartKey === undefined
+      ? { Items: [], LastEvaluatedKey: lastKey }
+      : { Items: [expired] })
+
+  const members = await client.listMembersWithAccessExpiringBefore(now)
+
+  const scans = commands.filter((command) => command.name === 'ScanCommand')
+  expect(scans.map((scan) => scan.input.ExclusiveStartKey)).toEqual([undefined, lastKey])
+  expect(members.map((entry) => entry.member.memberKey)).toEqual(['guest@example.com'])
 })
 
 test('refuses sign-in and membership checks for a member whose access expired', async () => {
@@ -192,6 +253,7 @@ test('refuses an access expiry on an owner, on oneself, and from an admin for an
     'demo@example.com': memberItem('demo@example.com', { role: 'owner', version: 1 }),
     'admin@example.com': memberItem('admin@example.com', { role: 'admin', version: 1 }),
     'owner2@example.com': memberItem('owner2@example.com', { role: 'owner' }),
+    'admin2@example.com': memberItem('admin2@example.com', { role: 'admin' }),
   }, commands)
   const input = { accessExpiresAt: '2026-12-31T00:00:00.000Z', expectedVersion: 3 }
 
@@ -201,7 +263,7 @@ test('refuses an access expiry on an owner, on oneself, and from an admin for an
     ...input,
     expectedVersion: 1,
   })).rejects.toMatchObject({ code: 'WorkspaceMemberAccessExpiryNotAllowed' })
-  await expect(client.updateMemberAccessExpiry(workspaceId, 'admin@example.com', 'owner2@example.com', input))
+  await expect(client.updateMemberAccessExpiry(workspaceId, 'admin@example.com', 'admin2@example.com', input))
     .rejects.toMatchObject({ code: 'WorkspaceRoleDenied' })
   expect(commands.some((command) => command.name === 'TransactWriteCommand')).toBe(false)
 })

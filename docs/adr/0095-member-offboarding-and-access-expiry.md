@@ -29,13 +29,22 @@
 - **資格情報の失効**: 手動の利用停止に成功したら、本人が作った API キーと OAuth アプリを失効します。
   - 失効は冪等です。利用停止のあとで失効に失敗した場合は、`POST /api/workspace/members/:memberKey/credentials/revoke` で
     やり直せます。
+  - この route は、失効する資格情報の ID を、失効の前に `Idempotency-Key` から決まる audit event
+    （`member.credentials-revoked`）に記録します。応答が失われて同じ key で再送したときは、記録した ID だけを
+    失効して同じ結果を返します。最初の request のあとで作られた資格情報は失効しません。
+    同じ key で別の request を送ると 409 `WorkspaceIdempotencyConflict` です。
   - Public API は、Workspace の lifecycle を確かめた直後に、資格情報の作成者が active なメンバーかを
     `getActiveMember` で確かめます。active でなければ 403 にします。
   - これで、失効が漏れた資格情報や、期限切れで自動停止を待つメンバーの資格情報も使えません。
 - **利用期限**: Workspace の member row に任意の `accessExpiresAt` を持ちます。
   - 設定は `PUT /api/workspace/members/:memberKey/access-expiry` で行い、version 条件と audit event を付けます。
   - 期限は未来の 5 年以内に限ります。owner、利用停止中のメンバー、自分自身には設定できません。
-  - 再有効化や owner への変更で期限を外します。
+  - 管理者による再有効化や owner への変更で期限を外します。
+  - ディレクトリ同期（SCIM の API と group job worker）は、期限を過ぎて利用停止中のメンバーを再有効化しません。
+    IdP がユーザーを有効と報告するのは定常の状態で、アクセスを延ばす判断ではないためです。
+    そのメンバーは変更せずに残し、管理者が再有効化したときだけ戻って期限が外れます。
+    期限前に利用停止したメンバーをディレクトリ同期で戻す場合と、active なメンバーの同期では、
+    管理者が付けた期限を残します。
 - **読み取り時に効かせる**: `getActiveMember`、`listActiveMembers`、`reconcileAuthenticatedMember` は、
   期限を過ぎたメンバーを active として扱いません。
   - 期限を過ぎた時点で、サインイン、API、Public API、Webhook の配信がすべて止まります。job の実行を待ちません。
@@ -59,6 +68,7 @@
   - 通知の metadata には、対象のメンバーと、通知した期限の値を持たせます（週報の reminder が作成者を持つのと同じ）。
     通知を作る projection と、Slack・Email などの外部配信は、送る直前に member row を強整合で読み直します。
     期限が外れた、別の値に変わった、過ぎた、またはメンバーが利用停止になった場合は送りません。
+    受け取る人が今もその Project のマネージャーかも確かめ、走査のあとでマネージャーを外れた人には送りません。
     projection は member row の期限と status を条件にして、通知と同じ transaction に入れます。
     これで、走査のあとに管理者が期限を外したり延ばしたりしても、古い期限の通知はマネージャーに届きません。
     この 2 つの値を持たない古い event は送りません。

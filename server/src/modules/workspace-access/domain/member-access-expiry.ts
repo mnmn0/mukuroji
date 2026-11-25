@@ -42,7 +42,50 @@ export function isWorkspaceMemberRowActive(
   if (row.status !== 'active') return false
   if (row.accessExpiresAt === undefined) return true
   if (typeof row.accessExpiresAt !== 'string') return false
+  if (!isCanonicalUtcTimestamp(row.accessExpiresAt)) return false
   return !isMemberAccessExpired({ accessExpiresAt: row.accessExpiresAt }, now)
+}
+
+/**
+ * Reports whether a value is a canonical UTC timestamp, the only form a member row stores.
+ *
+ * @param value - Stored timestamp.
+ * @returns Whether the value is exactly what `Date.prototype.toISOString` writes for it.
+ */
+export function isCanonicalUtcTimestamp(value: string): boolean {
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString() === value
+}
+
+/**
+ * Pattern of the accepted expiry input: an ISO 8601 date and time with seconds optional,
+ * fractional seconds optional, and a required UTC offset (`Z` or `±HH:MM`).
+ */
+const MEMBER_ACCESS_EXPIRY_INPUT_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/u
+
+/**
+ * Reports whether an expiry input names a real calendar date and time with an explicit UTC
+ * offset, so `Date.parse` neither reads it as local time nor rolls an impossible date over.
+ *
+ * @param value - Untrusted expiry input.
+ * @returns Whether the value has a valid shape, calendar date, time of day, and offset.
+ */
+function isMemberAccessExpiryInput(value: string): boolean {
+  const match = MEMBER_ACCESS_EXPIRY_INPUT_PATTERN.exec(value)
+  if (match === null) return false
+  const [, year, month, day, hour, minute, second, offsetHour, offsetMinute] = match
+  const monthNumber = Number(month)
+  const dayNumber = Number(day)
+  if (monthNumber < 1 || monthNumber > 12 || dayNumber < 1) return false
+  // Day 0 of the next month is the last day of this month.
+  const daysInMonth = new Date(Date.UTC(Number(year), monthNumber, 0)).getUTCDate()
+  if (dayNumber > daysInMonth) return false
+  if (Number(hour) > 23 || Number(minute) > 59 || Number(second ?? '0') > 59) return false
+  if (offsetHour !== undefined && (Number(offsetHour) > 23 || Number(offsetMinute) > 59)) {
+    return false
+  }
+  return true
 }
 
 /**
@@ -71,7 +114,7 @@ export function readMemberAccessExpiry(value: unknown, now: Date): string | unde
     throw new RangeError('Access expiry must be an ISO 8601 timestamp or null.')
   }
   const expiresAt = Date.parse(value)
-  if (!Number.isFinite(expiresAt) || !/^\d{4}-\d{2}-\d{2}T/u.test(value)) {
+  if (!Number.isFinite(expiresAt) || !isMemberAccessExpiryInput(value)) {
     throw new RangeError('Access expiry must be an ISO 8601 timestamp or null.')
   }
   if (expiresAt <= now.getTime()) {

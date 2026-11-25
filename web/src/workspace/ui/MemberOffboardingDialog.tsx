@@ -45,8 +45,10 @@ export type MemberOffboardingDialogProps = {
    * Saves or clears the member's access expiry.
    *
    * @param accessExpiresAt - ISO 8601 instant access ends, or null to clear it.
+   * @param expectedVersion - Member version the change was made against, so a change another
+   *   administrator saved meanwhile is reported as a conflict instead of overwritten.
    */
-  onSaveAccessExpiry: (accessExpiresAt: string | null) => Promise<void>
+  onSaveAccessExpiry: (accessExpiresAt: string | null, expectedVersion: number) => Promise<void>
   /** Opens the handover of the member's open Work Items; absent hides the link. */
   onOpenWorkHandover?: () => void
   /** Display locale of dates. */
@@ -85,6 +87,18 @@ export function MemberOffboardingDialog({
   const lastDayId = useId()
   const [successorKey, setSuccessorKey] = useState('')
   const [lastDay, setLastDay] = useState(() => formatAccessExpiryLastDay(member.accessExpiresAt))
+  // The member version the last-day field was filled from, with the value it was filled with.
+  const [expiryBase, setExpiryBase] = useState(() => ({
+    version: member.version,
+    lastDay: formatAccessExpiryLastDay(member.accessExpiresAt),
+  }))
+  if (member.version !== expiryBase.version && lastDay === expiryBase.lastDay) {
+    // The field was not edited, so it follows the member's newer expiry and version. An edited
+    // field keeps the version it was based on, and saving it reports the conflict.
+    const next = { version: member.version, lastDay: formatAccessExpiryLastDay(member.accessExpiresAt) }
+    setExpiryBase(next)
+    setLastDay(next.lastDay)
+  }
   const [busy, setBusy] = useState<OffboardingStep>()
   const [errorMessage, setErrorMessage] = useState<string>()
   const dialogRef = useModalFocus<HTMLElement>(() => {
@@ -340,7 +354,13 @@ export function MemberOffboardingDialog({
                       disabled={busy !== undefined || !lastDayExpiry || lastDayExpiry === member.accessExpiresAt}
                       type="button"
                       onClick={() => {
-                        if (lastDayExpiry) void run('expiry-save', () => onSaveAccessExpiry(lastDayExpiry))
+                        if (lastDayExpiry) {
+                          void run('expiry-save', async () => {
+                            await onSaveAccessExpiry(lastDayExpiry, expiryBase.version)
+                            // The saved value is no longer an edit, so the newer version is taken up.
+                            setExpiryBase({ version: expiryBase.version, lastDay })
+                          })
+                        }
                       }}
                     >
                       {t('workspace.access.offboarding.expiry.save')}
@@ -352,8 +372,10 @@ export function MemberOffboardingDialog({
                         disabled={busy !== undefined}
                         type="button"
                         onClick={() => void run('expiry-clear', async () => {
-                          await onSaveAccessExpiry(null)
+                          // Clearing acts on the expiry shown now, so it is based on the latest version.
+                          await onSaveAccessExpiry(null, member.version)
                           setLastDay('')
+                          setExpiryBase({ version: member.version, lastDay: '' })
                         })}
                       >
                         {t('workspace.access.offboarding.expiry.clear')}

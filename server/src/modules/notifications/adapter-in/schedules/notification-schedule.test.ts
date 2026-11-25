@@ -19,6 +19,7 @@ import {
   createPlanningUpdateNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
 } from '../../../planning'
+import { createWorkspaceMemberAuditEntityId } from '../../../audit'
 import { createDynamoDbProjectManagerReader } from '../../adapter-out/dynamodb/project-manager-reader'
 import { createDynamoDbScheduledWorkItemSource } from '../../adapter-out/dynamodb/scheduled-work-item-source'
 import {
@@ -2016,6 +2017,7 @@ describe('member access expiry notices', () => {
       await runNotificationSchedule(createRunOptions(recording.client, {
         now: new Date('2026-11-24T00:00:00.000Z'),
         memberAccessExpiryReader,
+        workspaceAuditPseudonymKey: '0'.repeat(64),
       }))
       return recording.commands
         .filter(({ name }) => name === 'PutCommand')
@@ -2041,8 +2043,11 @@ describe('member access expiry notices', () => {
       }),
     ])
     expect(notices[0]).toMatchObject({ summary: expect.stringContaining('Guest') })
-    // The member's email address stays out of the entity ID.
+    // The member's email address stays out of the entity ID: it is the keyed member pseudonym.
     expect(String(notices[0]?.entityId)).not.toContain('guest@example.com')
+    expect(notices[0]?.entityId).toBe(
+      createWorkspaceMemberAuditEntityId('workspace-1', 'guest@example.com', '0'.repeat(64)),
+    )
 
     const retried = await run()
     expect(retried.map((notice) => notice.eventId)).toEqual(notices.map((notice) => notice.eventId))

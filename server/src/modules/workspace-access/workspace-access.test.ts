@@ -2675,19 +2675,20 @@ test('provisions a new directory member with an immutable external identity', as
   })
 })
 
-test('clears an expired access expiry when the directory reactivates a member, and keeps it otherwise (ADR 0095)', async () => {
+test('keeps a member whose access expired deactivated on directory sync, and keeps a set expiry otherwise (ADR 0095)', async () => {
   /**
    * Reconciles one directory member and returns the result with the member update it wrote.
    *
    * @param status - Membership status before the reconciliation.
-   * @returns The reconciled member and the member Update item.
+   * @param accessExpiresAt - Stored access expiry of the member.
+   * @returns The reconciled member, the member Update item, and whether a transaction was sent.
    */
-  const reconcile = async (status: WorkspaceMember['status']) => {
+  const reconcile = async (status: WorkspaceMember['status'], accessExpiresAt: string) => {
     const target = {
       ...createWorkspaceMember('sato@example.com', 'member', status, 4),
       provisioningSource: 'directory' as const,
       externalIdentityId: 'scim-user-123',
-      accessExpiresAt: '2026-07-01T00:00:00.000Z',
+      accessExpiresAt,
       ...(status === 'deactivated' ? { deactivatedAt: '2026-07-01T01:00:00.000Z' } : {}),
     }
     const inputs: Array<Record<string, unknown>> = []
@@ -2711,7 +2712,7 @@ test('clears an expired access expiry when the directory reactivates a member, a
       externalIdentityId: 'scim-user-123',
       expectedPlanningRevision: 0,
     }, createAuditContext(`directory-reconcile-${status}`))
-    const transaction = inputs.at(-1)
+    const transaction = inputs.find((input) => 'TransactItems' in input)
     const items = transaction && Array.isArray(transaction.TransactItems) ? transaction.TransactItems : []
     const first: unknown = items[0]
     const update = typeof first === 'object' && first !== null && 'Update' in first ? first.Update : undefined
@@ -2719,16 +2720,28 @@ test('clears an expired access expiry when the directory reactivates a member, a
       ? update.UpdateExpression
       : undefined
     // A newly provisioned member has no expiry field at all, so it is read through `in`.
-    return { member, accessExpiresAt: 'accessExpiresAt' in member ? member.accessExpiresAt : undefined, expression }
+    return {
+      member,
+      accessExpiresAt: 'accessExpiresAt' in member ? member.accessExpiresAt : undefined,
+      expression,
+      wrote: transaction !== undefined,
+    }
   }
 
-  const reactivated = await reconcile('deactivated')
-  expect(reactivated.member).toMatchObject({ status: 'active' })
-  expect(reactivated.accessExpiresAt).toBeUndefined()
-  expect(reactivated.expression).toContain('REMOVE deactivatedAt, accessExpiresAt')
+  // The directory reporting the user active does not undo a deactivation by expiry; only an
+  // administrator's reactivation clears the expiry.
+  const expired = await reconcile('deactivated', '2026-07-01T00:00:00.000Z')
+  expect(expired.member).toMatchObject({ status: 'deactivated', accessExpiresAt: '2026-07-01T00:00:00.000Z' })
+  expect(expired.wrote).toBe(false)
 
-  const reconciled = await reconcile('active')
-  expect(reconciled.accessExpiresAt).toBe('2026-07-01T00:00:00.000Z')
+  // A member deactivated before a future expiry comes back with that expiry kept.
+  const reactivated = await reconcile('deactivated', '2026-08-01T00:00:00.000Z')
+  expect(reactivated.member).toMatchObject({ status: 'active' })
+  expect(reactivated.accessExpiresAt).toBe('2026-08-01T00:00:00.000Z')
+  expect(reactivated.expression).not.toContain('accessExpiresAt')
+
+  const reconciled = await reconcile('active', '2026-08-01T00:00:00.000Z')
+  expect(reconciled.accessExpiresAt).toBe('2026-08-01T00:00:00.000Z')
   expect(reconciled.expression).not.toContain('accessExpiresAt')
 })
 
@@ -4038,4 +4051,56 @@ test('shows the last sign-in in the access snapshot to owners and admins only', 
   expect(activeMember).toBeDefined()
   expect(activeMember?.memberKey).toBe('sato@example.com')
   expect(activeMember).not.toHaveProperty('lastSignedInAt')
+})
+
+test('keeps a member-wide credential revocation receipt under the idempotency key', async () => {
+  const auditItems = new Map<string, Record<string, unknown>>()
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      const input = command.input
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const items = Array.isArray(input.TransactItems) ? input.TransactItems : []
+        for (const item of items) {
+          const put: unknown = typeof item === 'object' && item !== null && 'Put' in item ? item.Put : undefined
+          const row: unknown = typeof put === 'object' && put !== null && 'Item' in put ? put.Item : undefined
+          if (typeof row === 'object' && row !== null && 'eventId' in row && typeof row.eventId === 'string') {
+            auditItems.set(row.eventId, { ...row })
+          }
+        }
+        return {}
+      }
+      if (command.constructor.name === 'GetCommand') {
+        const key = input.Key
+        const eventId = typeof key === 'object' && key !== null && 'eventId' in key ? key.eventId : undefined
+        return { Item: typeof eventId === 'string' ? auditItems.get(eventId) : undefined }
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+  const context = createAuditContext('revoke-credentials-1')
+  const credentials = { apiKeyIds: ['key-1'], oauthAppIds: ['app-1'] }
+
+  expect(await client.findMemberCredentialRevocation(workspaceId, 'sato@example.com', context)).toBeUndefined()
+  expect(await client.recordMemberCredentialRevocation(workspaceId, 'sato@example.com', credentials, context))
+    .toEqual(credentials)
+  expect(await client.findMemberCredentialRevocation(workspaceId, 'sato@example.com', context)).toEqual(credentials)
+
+  // The same key sent with another request body is refused.
+  const otherRequest = createMutationAuditContext({
+    workspaceId,
+    actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+    idempotencyKey: 'revoke-credentials-1',
+    correlationId: 'correlation-revoke-credentials-1',
+    occurredAt: now.toISOString(),
+    request: { method: 'POST', path: '/api/workspace/test-mutation', body: { memberKey: 'other@example.com' } },
+    source: { kind: 'api', requestId: 'request-revoke-credentials-1' },
+  })
+  await expect(client.findMemberCredentialRevocation(workspaceId, 'sato@example.com', otherRequest))
+    .rejects.toMatchObject({ code: 'WorkspaceIdempotencyConflict' })
 })

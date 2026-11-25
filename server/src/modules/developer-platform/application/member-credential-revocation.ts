@@ -64,6 +64,8 @@ export async function listMemberActiveCredentials(
  * @param workspaceId - Workspace of the member.
  * @param memberKey - Member whose credentials are revoked.
  * @param actorUserId - Administrator or system actor recorded in the audit events.
+ * @param limitTo - When given, only the member's credentials with these IDs are revoked, so a
+ *   repeated request revokes the set it recorded and not credentials created since.
  * @returns The IDs of the credentials revoked.
  */
 export async function revokeMemberCredentials(
@@ -71,8 +73,15 @@ export async function revokeMemberCredentials(
   workspaceId: string,
   memberKey: string,
   actorUserId: string,
+  limitTo?: MemberCredentialRevocationResult,
 ): Promise<MemberCredentialRevocationResult> {
-  const credentials = await listMemberActiveCredentials(ports, workspaceId, memberKey)
+  const active = await listMemberActiveCredentials(ports, workspaceId, memberKey)
+  const credentials = limitTo
+    ? {
+        apiKeys: active.apiKeys.filter((apiKey) => limitTo.revokedApiKeyIds.includes(apiKey.id)),
+        oauthApps: active.oauthApps.filter((oauthApp) => limitTo.revokedOAuthAppIds.includes(oauthApp.id)),
+      }
+    : active
   for (const apiKey of credentials.apiKeys) {
     await ports.apiKeys.revokeApiKey({ workspaceId, apiKeyId: apiKey.id, actorUserId })
   }

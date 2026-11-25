@@ -1,4 +1,4 @@
-import { revokeMemberCredentials } from '../../modules/developer-platform'
+import { listMemberActiveCredentials, revokeMemberCredentials } from '../../modules/developer-platform'
 import type {
   DirectoryMemberReconciliationPorts,
   ManagedMemberCredentialRevocationPorts,
@@ -19,8 +19,8 @@ export type MemberCredentialRevocationAdapters = Pick<DeveloperPlatformDependenc
 export function createMemberCredentialRevoker(
   developerPlatform: MemberCredentialRevocationAdapters,
 ): MemberCredentialRevoker {
-  return (workspaceId, memberKey, actorId) =>
-    revokeMemberCredentials(developerPlatform, workspaceId, memberKey, actorId)
+  return (workspaceId, memberKey, actorId, limitTo) =>
+    revokeMemberCredentials(developerPlatform, workspaceId, memberKey, actorId, limitTo)
 }
 
 /**
@@ -42,7 +42,22 @@ export function createManagedMemberCredentialRevocationPorts({
   const { workspaceAccess } = workspace
   return {
     getMember: (workspaceId, memberKey) => workspaceAccess.getMember(workspaceId, memberKey),
+    listMemberCredentials: async (workspaceId, memberKey) => {
+      const credentials = await listMemberActiveCredentials(developerPlatform, workspaceId, memberKey)
+      return {
+        revokedApiKeyIds: credentials.apiKeys.map((apiKey) => apiKey.id),
+        revokedOAuthAppIds: credentials.oauthApps.map((oauthApp) => oauthApp.id),
+      }
+    },
     revokeMemberCredentials: createMemberCredentialRevoker(developerPlatform),
+    ...(workspaceAccess.findMemberCredentialRevocation && workspaceAccess.recordMemberCredentialRevocation
+      ? {
+          receipts: {
+            find: workspaceAccess.findMemberCredentialRevocation.bind(workspaceAccess),
+            record: workspaceAccess.recordMemberCredentialRevocation.bind(workspaceAccess),
+          },
+        }
+      : {}),
   }
 }
 

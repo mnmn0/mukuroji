@@ -893,7 +893,7 @@ export const workspaceMessages = {
   'workspace.access.offboarding.work.description': 'Work Items they own or contribute to can move to another member with Hand over work. They do not block deactivation.',
   'workspace.access.offboarding.work.open': 'Open Hand over work',
   'workspace.access.offboarding.credentials.title': 'API keys and OAuth apps',
-  'workspace.access.offboarding.credentials.note': 'They are revoked when the member is deactivated. You can revoke them now.',
+  'workspace.access.offboarding.credentials.note': 'Deactivating the member here revokes them. Automatic deactivation at the access expiry does not revoke them, but they stop working once the access expires. You can revoke them now.',
   'workspace.access.offboarding.credentials.revoke': 'Revoke all',
   'workspace.access.offboarding.credentials.apiKey': 'API key',
   'workspace.access.offboarding.credentials.oauthApp': 'OAuth app',

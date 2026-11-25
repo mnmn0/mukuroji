@@ -10,6 +10,8 @@ import {
   calculateAuditExpiresAt,
   createAuditEvent,
   createMutationAuditContext,
+  createWorkspaceMemberAuditEntityId,
+  readWorkspaceAuditPseudonymKey,
 } from '../../../audit'
 import {
   createPlanningUpdateNextNotificationAtRecordKey,
@@ -155,6 +157,11 @@ export type NotificationScheduleRunOptions = {
    * expiry notice is emitted.
    */
   memberAccessExpiryReader?: ScheduledMemberAccessExpiryReader
+  /**
+   * Workspace Audit pseudonym key that names the member in an access expiry notice. Without it the
+   * key is read from `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` when a notice is due.
+   */
+  workspaceAuditPseudonymKey?: string
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -643,13 +650,22 @@ export async function runNotificationSchedule(
       now,
       new Date(now.getTime() + MEMBER_ACCESS_EXPIRY_NOTICE_DAYS * 86_400_000),
     )
+    // Read only when a notice is due, so a run with no expiring member needs no key.
+    let pseudonymKey = options.workspaceAuditPseudonymKey
     for (const member of expiring) {
       const projects = await memberAccessExpiryReader.readMemberProjects(member.workspaceId, member.memberKey)
       for (const candidate of evaluateMemberAccessExpiryNotices(member, projects)) {
+        pseudonymKey ??= readWorkspaceAuditPseudonymKey()
         await putScheduledAuditEvent(
           options.documentClient,
           auditEventsTableName,
-          createMemberAccessExpiryAuditEvent(candidate, now, auditRetentionDays, options.requestId),
+          createMemberAccessExpiryAuditEvent(
+            candidate,
+            pseudonymKey,
+            now,
+            auditRetentionDays,
+            options.requestId,
+          ),
           result,
         )
       }
@@ -1470,6 +1486,7 @@ function createWeeklyReportReminderAuditEvent(
  * the recipient manages and the member belongs to.
  *
  * @param candidate - Member, expiry, recipient, and Project.
+ * @param pseudonymKey - Workspace Audit pseudonym key.
  * @param now - Schedule execution instant.
  * @param auditRetentionDays - Audit event retention.
  * @param requestId - Schedule execution ID.
@@ -1477,16 +1494,18 @@ function createWeeklyReportReminderAuditEvent(
  */
 function createMemberAccessExpiryAuditEvent(
   candidate: MemberAccessExpiryNoticeCandidate,
+  pseudonymKey: string,
   now: Date,
   auditRetentionDays: number,
   requestId?: string,
 ) {
-  // Member keys are email addresses, so the entity ID carries only a digest of the member.
-  const memberDigest = createHash('sha256')
-    .update([candidate.workspaceId, candidate.memberKey].join('\0'))
-    .digest('hex')
-    .slice(0, 32)
-  const entityId = `member-access/${memberDigest}`
+  // Member keys are email addresses, so the entity ID is the keyed Workspace member pseudonym
+  // that every Audit writer uses for this member.
+  const entityId = createWorkspaceMemberAuditEntityId(
+    candidate.workspaceId,
+    candidate.memberKey,
+    pseudonymKey,
+  )
   const occurredAt = now.toISOString()
   const idempotencyDigest = createHash('sha256').update([
     candidate.workspaceId,

@@ -19,8 +19,9 @@ export type MemberOffboardingDialogContainerProps = {
    * Saves or clears the member's access expiry and reloads the member list.
    *
    * @param accessExpiresAt - ISO 8601 instant access ends, or null to clear it.
+   * @param expectedVersion - Member version the change was made against.
    */
-  onSaveAccessExpiry: (accessExpiresAt: string | null) => Promise<void>
+  onSaveAccessExpiry: (accessExpiresAt: string | null, expectedVersion: number) => Promise<void>
   /** Opens the handover of the member's open Work Items; absent hides the link. */
   onOpenWorkHandover?: () => void
   /** Display locale of dates. */
@@ -62,9 +63,9 @@ export function MemberOffboardingDialogContainer({
       onReload={() => {
         void mutate()
       }}
-      onSaveAccessExpiry={async (accessExpiresAt) => {
+      onSaveAccessExpiry={async (accessExpiresAt, expectedVersion) => {
         try {
-          await onSaveAccessExpiry(accessExpiresAt)
+          await onSaveAccessExpiry(accessExpiresAt, expectedVersion)
         } finally {
           await mutate()
         }

@@ -110,6 +110,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
+    workspaceAuditPseudonymSecret,
   } = input.dataStores;
   const { auditRetentionDays, notificationReminderDefaultDays } = input.parameters;
 
@@ -126,6 +127,9 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
       NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      // Secret ARN only: an access expiry notice names the member by the Workspace audit
+      // pseudonym (ADR 0095), and the job reads the key at cold start.
+      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY_SECRET_ARN: workspaceAuditPseudonymSecret.secretArn,
       PLANNING_TABLE_NAME: planningTable.tableName,
       PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -134,6 +138,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
     },
     grant: (grantee) => {
+      workspaceAuditPseudonymSecret.grantRead(grantee);
       // Planning update targets, and the weekly report rows that decide who is reminded.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],

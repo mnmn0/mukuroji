@@ -118,6 +118,10 @@ export type MemberOffboardingPorts = {
 /**
  * Names the Project of a manager role, finding its Team in the directory.
  *
+ * A Project ID is reserved across the Workspace, so at most one Team holds it. When the access
+ * names no Team and more than one Team holds the ID anyway, the Team is left unresolved rather
+ * than guessed.
+ *
  * @param access - The member's manager role.
  * @param teams - Teams of the Project directory.
  * @returns The Project row of the summary.
@@ -126,10 +130,11 @@ function toOffboardingProject(
   access: MemberOffboardingProjectAccess,
   teams: readonly MemberOffboardingDirectoryTeam[],
 ): WorkspaceMemberOffboardingProject {
-  const team = teams.find((candidate) =>
+  const holders = teams.filter((candidate) =>
     (access.teamId === undefined || candidate.id === access.teamId) &&
     candidate.projects.some((project) => project.id === access.projectId)
   )
+  const team = holders.length === 1 ? holders[0] : undefined
   const name = team?.projects.find((project) => project.id === access.projectId)?.name
   const teamId = access.teamId ?? team?.id
   return {

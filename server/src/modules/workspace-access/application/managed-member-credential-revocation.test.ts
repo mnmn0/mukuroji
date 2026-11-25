@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { WorkspaceRole } from '../domain/workspace-role'
-import type { WorkspaceMember } from '../workspace-access'
+import { createMutationAuditContext } from '../../audit'
+import type { MemberCredentialRevocationRecord, WorkspaceMember } from '../workspace-access'
 import {
   revokeManagedMemberCredentials,
   type ManagedMemberCredentialRevocationPorts,
@@ -29,6 +30,9 @@ function createPorts(role: WorkspaceRole | undefined) {
   const ports: ManagedMemberCredentialRevocationPorts = {
     async getMember() {
       return member
+    },
+    async listMemberCredentials() {
+      return { revokedApiKeyIds: ['key-1'], revokedOAuthAppIds: [] }
     },
     async revokeMemberCredentials(_workspaceId, memberKey, actorId) {
       revocations.push(`${memberKey}:${actorId}`)
@@ -73,4 +77,48 @@ test('refuses an admin acting on another admin, and a missing member, without re
   const missing = createPorts(undefined)
   await expect(run(missing.ports, 'owner')).rejects.toMatchObject({ status: 404, code: 'WorkspaceMemberNotFound' })
   expect(missing.revocations).toEqual([])
+})
+
+test('records the set under the idempotency key and revokes only that set on a replay', async () => {
+  const { ports } = createPorts('member')
+  const receipts = new Map<string, MemberCredentialRevocationRecord>()
+  const limits: unknown[] = []
+  let listed = ['key-1']
+  ports.listMemberCredentials = async () => ({ revokedApiKeyIds: listed, revokedOAuthAppIds: ['app-1'] })
+  ports.revokeMemberCredentials = async (_workspaceId, _memberKey, _actorId, limitTo) => {
+    limits.push(limitTo)
+    return limitTo ?? { revokedApiKeyIds: [], revokedOAuthAppIds: [] }
+  }
+  ports.receipts = {
+    async find(_workspaceId, _memberKey, auditContext) {
+      return receipts.get(auditContext.idempotencyKeyHash)
+    },
+    async record(_workspaceId, _memberKey, credentials, auditContext) {
+      receipts.set(auditContext.idempotencyKeyHash, credentials)
+      return credentials
+    },
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'admin@example.com', kind: 'user' },
+    idempotencyKey: 'revoke-1',
+    request: { method: 'POST', path: '/api/workspace/members/sato%40example.com/credentials/revoke', body: {} },
+    source: { kind: 'api' },
+  })
+  const revoke = () => revokeManagedMemberCredentials(ports, {
+    workspaceId: 'workspace-1',
+    actorMemberKey: 'admin@example.com',
+    actorRole: 'owner',
+    memberKey: 'sato@example.com',
+    auditContext,
+  })
+
+  const first = await revoke()
+  // The member created another key before the lost response was retried.
+  listed = ['key-1', 'key-2']
+  const replayed = await revoke()
+
+  expect(first).toEqual({ revokedApiKeyIds: ['key-1'], revokedOAuthAppIds: ['app-1'] })
+  expect(replayed).toEqual(first)
+  expect(limits).toEqual([first, first])
 })

@@ -736,6 +736,8 @@ function createWorkspaceAccessFake(
     revokeMemberSignIns: async () => undefined,
     recordMemberSignIn: async () => undefined,
     reconcileDirectoryMember: unsupported,
+    findMemberCredentialRevocation: async () => undefined,
+    recordMemberCredentialRevocation: async () => undefined,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
   } satisfies Required<WorkspaceAccessClient>

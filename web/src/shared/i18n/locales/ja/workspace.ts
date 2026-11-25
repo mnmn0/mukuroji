@@ -893,7 +893,7 @@ export const workspaceMessages = {
   'workspace.access.offboarding.work.description': '責任者や Contributor の Work Item は、担当の引き継ぎで別のメンバーへ移せます。利用停止は止めません。',
   'workspace.access.offboarding.work.open': '担当の引き継ぎを開く',
   'workspace.access.offboarding.credentials.title': 'API キーと OAuth アプリ',
-  'workspace.access.offboarding.credentials.note': '利用停止すると自動で失効します。先に失効させることもできます。',
+  'workspace.access.offboarding.credentials.note': 'ここで利用停止すると自動で失効します。利用期限による自動停止では失効しませんが、期限を過ぎると使えなくなります。先に失効させることもできます。',
   'workspace.access.offboarding.credentials.revoke': 'すべて失効する',
   'workspace.access.offboarding.credentials.apiKey': 'API キー',
   'workspace.access.offboarding.credentials.oauthApp': 'OAuth アプリ',

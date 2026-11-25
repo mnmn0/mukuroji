@@ -993,8 +993,8 @@ export function WorkspaceAccessPanel({
               setOffboardingMemberKey(undefined)
               setHandoverMember(offboardingMember)
             }}
-            onSaveAccessExpiry={async (accessExpiresAt) => {
-              await onUpdateMemberAccessExpiry?.(offboardingMember.memberKey, accessExpiresAt, offboardingMember.version)
+            onSaveAccessExpiry={async (accessExpiresAt, expectedVersion) => {
+              await onUpdateMemberAccessExpiry?.(offboardingMember.memberKey, accessExpiresAt, expectedVersion)
             }}
           />
         ) : null}

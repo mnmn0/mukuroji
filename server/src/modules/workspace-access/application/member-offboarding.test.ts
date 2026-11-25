@@ -23,6 +23,8 @@ type FakeState = {
   planning?: Array<{ id: string, ownerMemberKey: string, archivedAt?: string }>
   /** Whether a private Document would lose its last manager. */
   managesPrivateDocuments?: boolean
+  /** Teams of the directory; defaults to one Team holding both Projects. */
+  teams?: Array<{ id: string, projects: Array<{ id: string, name: string }> }>
 }
 
 /**
@@ -68,7 +70,8 @@ function createPorts(state: FakeState): MemberOffboardingPorts {
         return state.accesses ?? []
       },
       async listTeams() {
-        return [{ id: 'core', projects: [{ id: 'refero', name: 'Refero' }, { id: 'other', name: 'Other' }] }]
+        return state.teams ??
+          [{ id: 'core', projects: [{ id: 'refero', name: 'Refero' }, { id: 'other', name: 'Other' }] }]
       },
     },
     planning: {
@@ -129,6 +132,19 @@ test('allows deactivation only of an active member with nothing left to hand ove
   expect((await read({ member: {}, planning: [{ id: 'cycle-1', ownerMemberKey: leaver }] })).canDeactivate).toBe(false)
   expect((await read({ member: {}, managesPrivateDocuments: true })).canDeactivate).toBe(false)
   expect((await read({ member: { status: 'deactivated' } })).canDeactivate).toBe(false)
+})
+
+test('leaves the Team of a managed Project unresolved rather than guessing between Teams', async () => {
+  const summary = await readMemberOffboarding(createPorts({
+    member: {},
+    accesses: [{ projectId: 'refero', role: 'manager' }],
+    teams: [
+      { id: 'core', projects: [{ id: 'refero', name: 'Refero' }] },
+      { id: 'edge', projects: [{ id: 'refero', name: 'Refero copy' }] },
+    ],
+  }), workspaceId, leaver)
+
+  expect(summary.managedProjects).toEqual([{ projectId: 'refero' }])
 })
 
 test('reports a missing member as not found', async () => {

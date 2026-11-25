@@ -37,6 +37,7 @@ import {
 import { canWorkspaceRoleManageMember, type WorkspaceRole } from './domain/workspace-role'
 import {
   canMemberAccessExpire,
+  isCanonicalUtcTimestamp,
   isMemberAccessExpired,
 } from './domain/member-access-expiry'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
@@ -46,6 +47,8 @@ export type { WorkspaceRole } from './domain/workspace-role'
 const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
 const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
 const WORKSPACE_IDENTITY_LIFECYCLE_VERSION = 2
+/** Audit event that records, as its receipt, the credentials a member-wide revocation revokes. */
+const MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE = 'member.credentials-revoked'
 const MANUAL_COGNITO_CLEANUP_MESSAGE =
   'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.'
 const WORKSPACE_INVITATION_AUDIT_FIELDS = [
@@ -401,6 +404,14 @@ export type ReconcileDirectoryWorkspaceMemberInput = {
   expectedDocumentAuthorizationRevision?: number
 }
 
+/** Credentials a member-wide revocation request set out to revoke, as its receipt records them. */
+export type MemberCredentialRevocationRecord = {
+  /** IDs of the API keys. */
+  apiKeyIds: string[]
+  /** IDs of the OAuth applications. */
+  oauthAppIds: string[]
+}
+
 /** Directory reconciliation で member を停止する入力です。 */
 export type DeprovisionDirectoryWorkspaceMemberInput = {
   /** Directory provider 側の immutable identity ID です。 */
@@ -715,6 +726,38 @@ export interface WorkspaceAccessClient {
     input: ReconcileDirectoryWorkspaceMemberInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
+  /**
+   * Reads the credentials an earlier request with the same idempotency key set out to revoke.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials, or undefined when no request with the key was recorded.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  findMemberCredentialRevocation?(
+    workspaceId: string,
+    memberKey: string,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined>
+  /**
+   * Records, under the request's idempotency key, the credentials a member-wide revocation
+   * revokes, before it revokes them.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param credentials - Credentials the request revokes.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials: these, or those of a concurrent request with the same key;
+   *   undefined when the store keeps no audit events.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  recordMemberCredentialRevocation?(
+    workspaceId: string,
+    memberKey: string,
+    credentials: MemberCredentialRevocationRecord,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined>
   /**
    * Records that the member was signed out everywhere, so locally verified access tokens of
    * earlier sign-ins (enterprise SSO) are refused like Cognito global sign-out refuses the rest.
@@ -3365,6 +3408,111 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return current
   }
 
+  /**
+   * Reads the credentials an earlier request with the same idempotency key set out to revoke.
+   *
+   * The receipt is an audit event whose ID is derived from the request's idempotency key, so a
+   * replay after a lost response revokes the same credentials instead of scanning again and
+   * catching credentials created since.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials, or undefined when no request with the key was recorded.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  async findMemberCredentialRevocation(
+    workspaceId: string,
+    memberKey: string,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined> {
+    if (!this.auditTableName) return undefined
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const entityId = this.createMemberAuditEntityId(normalizedWorkspaceId, normalizeMemberKey(memberKey))
+    const eventId = createAuditEventId(
+      auditContext,
+      MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE,
+      { type: 'member', id: entityId },
+      0,
+    )
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.auditTableName,
+      Key: { directoryId: normalizedWorkspaceId, eventId },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const event = normalizeAuditEvent(response.Item)
+    if (
+      event.eventType !== MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE ||
+      event.entity.id !== entityId ||
+      event.requestFingerprint !== auditContext.requestFingerprint ||
+      event.actor.id !== auditContext.actor.id
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceIdempotencyConflict',
+        'This idempotency key was already used for a different operation.',
+      )
+    }
+    const apiKeyIds = event.metadata?.apiKeyIds
+    const oauthAppIds = event.metadata?.oauthAppIds
+    if (!isStringArray(apiKeyIds) || !isStringArray(oauthAppIds)) throw invalidWorkspaceDataError()
+    return { apiKeyIds, oauthAppIds }
+  }
+
+  /**
+   * Records, under the request's idempotency key, the credentials a member-wide revocation
+   * revokes, before it revokes them, so a replay finishes the same set.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member whose credentials are revoked.
+   * @param credentials - Credentials the request revokes.
+   * @param auditContext - Audit context of the request, carrying its idempotency key.
+   * @returns The recorded credentials: these, or those of a concurrent request with the same key;
+   *   undefined when the client keeps no audit events.
+   * @throws WorkspaceAccessError 409 when the key was used for another request.
+   */
+  async recordMemberCredentialRevocation(
+    workspaceId: string,
+    memberKey: string,
+    credentials: MemberCredentialRevocationRecord,
+    auditContext: MutationAuditContext,
+  ): Promise<MemberCredentialRevocationRecord | undefined> {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const normalizedMemberKey = normalizeMemberKey(memberKey)
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE,
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, normalizedMemberKey),
+      action: 'credentials-revoked',
+      occurredAt: this.clock().toISOString(),
+      changes: [],
+      metadata: {
+        kind: 'workspace-member',
+        apiKeyIds: [...credentials.apiKeyIds],
+        oauthAppIds: [...credentials.oauthAppIds],
+      },
+      sequence: 0,
+    })
+    if (!auditPut) return undefined
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: [auditPut] }))
+      return credentials
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        // A concurrent request with the same key recorded first; its set is the one revoked.
+        const recorded = await this.findMemberCredentialRevocation(
+          normalizedWorkspaceId,
+          normalizedMemberKey,
+          auditContext,
+        )
+        if (recorded) return recorded
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
   /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
   async reconcileDirectoryMember(
     workspaceId: string,
@@ -3495,10 +3643,13 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    // As in updateMember, a reactivation starts without an expiry, so a member whose access
-    // expired is not refused and deactivated again at once. Ordinary reconciliation of an active
-    // member keeps the expiry an administrator set.
-    const becameReactivated = existing.status === 'deactivated'
+    // The directory reporting a user active is its steady state, not a decision to extend access,
+    // so a member whose access expiry passed stays deactivated and unchanged. Only an
+    // administrator's reactivation brings them back and clears the expiry (ADR 0095). Any other
+    // reconciliation, a reactivation included, keeps the expiry an administrator set.
+    if (existing.status === 'deactivated' && isMemberAccessExpired(existing, this.clock())) {
+      return existing
+    }
     const nextMember = {
       ...existing,
       email,
@@ -3508,7 +3659,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       provisioningSource: 'directory',
       externalIdentityId,
       deactivatedAt: undefined,
-      accessExpiresAt: becameReactivated ? undefined : existing.accessExpiresAt,
       version: existing.version + 1,
       updatedAt: nowIso,
     } satisfies WorkspaceMember
@@ -3588,7 +3738,6 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       'version = version + :one',
     ]
     const removeExpressions = ['deactivatedAt']
-    if (becameReactivated) removeExpressions.push('accessExpiresAt')
     const name = normalizeOptional(input.name)
     if (name) {
       updateExpressions.push('#name = :name')
@@ -4744,15 +4893,25 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
 }
 
 /**
+ * Narrows a stored value to a list of strings.
+ *
+ * @param value - Stored value.
+ * @returns Whether every element is a string.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((element) => typeof element === 'string')
+}
+
+/**
  * Reads a stored sign-in cutoff, refusing a value that is not a canonical UTC timestamp.
  *
  * @param value - Stored `signInsRevokedAt`.
  * @returns The cutoff.
  */
 function readSignInCutoff(value: unknown) {
-  if (typeof value !== 'string') throw invalidWorkspaceDataError()
-  const time = Date.parse(value)
-  if (Number.isNaN(time) || new Date(time).toISOString() !== value) throw invalidWorkspaceDataError()
+  if (typeof value !== 'string' || !isCanonicalUtcTimestamp(value)) {
+    throw invalidWorkspaceDataError()
+  }
   return value
 }
 

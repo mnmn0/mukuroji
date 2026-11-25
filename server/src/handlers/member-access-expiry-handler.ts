@@ -1,13 +1,11 @@
 import { createLazySingleton } from '../app/composition/lazy-singleton'
 import { createProductionMemberAccessExpiryRun } from '../app/composition/member-access-expiry'
 import { createRuntimeControlGuardedHandler } from '../app/composition/runtime-control'
-import { createWorkerSecretEnvironmentHydrator } from '../app/composition/worker-secret-environment'
+import { hydrateWorkspaceAuditPseudonymSecret } from '../app/composition/workspace-audit-pseudonym-secret'
 
 const getProductionRun = createLazySingleton(createProductionMemberAccessExpiryRun)
 // The deactivation audit event pseudonymizes the member with the Workspace audit key.
-const hydrateSecrets = createWorkerSecretEnvironmentHydrator([
-  'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
-])
+const hydrateSecrets = hydrateWorkspaceAuditPseudonymSecret
 
 /**
  * Deactivates the members whose access expiry has passed after admission.

@@ -45,7 +45,9 @@ export type MemberMembershipUpdateInput = {
  * deactivated and stay revoked when the member comes back (ADR 0095). The access expiry job
  * deactivates without revoking, so a reactivation the actor may make revokes first; doing it
  * before the update keeps a failed reactivation safe to repeat. A deactivation revokes after the
- * update, and repeating the request after a failed revocation finishes it.
+ * update. When that revocation fails, the member is already deactivated at a newer version, so
+ * repeating the request revokes before the update: the credentials are revoked even when the
+ * update then reports that the member changed.
  *
  * @param ports - Member and credential ports.
  * @param input - Actor, member, change, and audit context.
@@ -56,9 +58,11 @@ export async function updateMemberMembership(
   ports: MemberMembershipUpdatePorts,
   input: MemberMembershipUpdateInput,
 ): Promise<WorkspaceMember> {
-  if (input.update.status === 'active') {
+  if (input.update.status !== undefined) {
     const current = await ports.getMember(input.workspaceId, input.memberKey)
-    // Only a reactivation the actor may make revokes anything; the update refuses the rest.
+    // Only a change the actor may make to a deactivated member revokes anything here: a
+    // reactivation, or a repeated deactivation finishing a revocation that failed. The update
+    // refuses the rest.
     if (
       current?.status === 'deactivated' &&
       canWorkspaceRoleManageMember(input.actorRole, current.role, input.update.role ?? current.role)

@@ -15,10 +15,12 @@ export type RevokedMemberCredentials = {
  * @param workspaceId - Workspace of the member.
  * @param memberKey - Member whose credentials are revoked.
  * @param actorId - Member or service that asked for the revocation.
+ * @param limitTo - When given, only these of the member's credentials are revoked.
  * @returns The revoked credentials.
  */
 export type MemberCredentialRevoker = (
   workspaceId: string,
   memberKey: string,
   actorId: string,
+  limitTo?: RevokedMemberCredentials,
 ) => Promise<RevokedMemberCredentials>

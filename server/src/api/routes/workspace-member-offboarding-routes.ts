@@ -106,7 +106,8 @@ export function registerWorkspaceMemberOffboardingRoutes(routeApp: Hono): void {
    * Revokes every API key and OAuth application a member created.
    *
    * Deactivation already does this; the route lets an administrator do it beforehand, or finish
-   * it when the deactivation succeeded but the revocation did not.
+   * it when the deactivation succeeded but the revocation did not. The set revoked is recorded
+   * under the request's `Idempotency-Key`, so a replay revokes and returns that same set.
    */
   routeApp.post('/api/workspace/members/:memberKey/credentials/revoke', async (c) => {
     const accessToken = readBearerAccessToken(c)
@@ -118,6 +119,7 @@ export function registerWorkspaceMemberOffboardingRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
       const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
+      const auditContext = createWorkspaceMutationContext(c, principal, { memberKey })
       return c.json(await revokeManagedMemberCredentials(
         createManagedMemberCredentialRevocationPorts({
           workspace: workspaceDependencies,
@@ -128,6 +130,7 @@ export function registerWorkspaceMemberOffboardingRoutes(routeApp: Hono): void {
           actorMemberKey: principal.userKey,
           actorRole: principal.workspaceRole,
           memberKey,
+          auditContext,
         },
       ))
     } catch (error) {

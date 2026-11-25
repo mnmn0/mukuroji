@@ -43,6 +43,7 @@ import {
   processCollaborationProjectionBatch,
   projectsSubscribedWatchers,
   readMemberAccessExpiryNoticeFence,
+  isCurrentMemberAccessExpiryRecipient,
   publishRealtimeInvalidation,
   refreshPlanningScheduledNotificationEvent,
   refreshScheduledNotificationEvent,
@@ -160,6 +161,20 @@ function createRealtimeEnterpriseSnapshot(
 const unscopedRoutingSubject = { eventType: 'comment.created', reasons: ['mention'] }
 
 describe('collaboration projection pure helpers', () => {
+  test('sends an access expiry notice only to a current manager of its Project', () => {
+    const event = { eventType: 'workspace-member.access-expiring', projectId: 'platform' }
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'former@example.com', role: 'member' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'other', memberKey: 'elsewhere@example.com', role: 'manager' },
+    ]
+
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'Lead@example.com', directory)).toBe(true)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'former@example.com', directory)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient({ eventType: 'comment.created' }, 'former@example.com', directory)).toBe(true)
+  })
+
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
     const keys = [
       'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
@@ -3124,6 +3139,7 @@ describe('collaboration projection pure helpers', () => {
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => { process.env[key] = key })
     const scannedExpiry = new Date(Date.now() + 3 * 86_400_000).toISOString()
+    let leadRole = 'manager'
     let guestRow: Record<string, unknown> | undefined = {
       entryType: 'workspace-member', memberKey: 'guest@example.com', role: 'guest', status: 'active',
       accessExpiresAt: scannedExpiry,
@@ -3146,7 +3162,7 @@ describe('collaboration projection pure helpers', () => {
           return { Items: [
             { entryType: 'team', teamId: 'core' },
             { entryType: 'project', teamId: 'core', projectId: 'platform' },
-            { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
+            { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: leadRole },
             { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'member' },
           ], $metadata: {} }
         }
@@ -3213,6 +3229,11 @@ describe('collaboration projection pure helpers', () => {
       guestRow = { ...guestRow, status: 'active' }
       expect(await processCollaborationProjectionBatch({ Records: [record('legacy', {})] }, dependencies))
         .toEqual({ batchItemFailures: [] })
+      // The recipient stepped down from managing the Project after the scan.
+      leadRole = 'member'
+      expect(await processCollaborationProjectionBatch({ Records: [record('demoted')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      leadRole = 'manager'
       expect(projectedIds()).toEqual(['current'])
 
       // The same fence runs again before an external channel sends.

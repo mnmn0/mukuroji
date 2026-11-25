@@ -66,3 +66,13 @@ test('records the acting administrator on every revoked credential', async () =>
     'oauth-app:app-1:admin@example.com',
   ])
 })
+
+test('revokes only the listed credentials when a set is given', async () => {
+  const { ports, revocations } = createPorts()
+
+  expect(await revokeMemberCredentials(ports, 'workspace-1', 'sato@example.com', 'admin@example.com', {
+    revokedApiKeyIds: ['key-0'],
+    revokedOAuthAppIds: ['app-1'],
+  })).toEqual({ revokedApiKeyIds: [], revokedOAuthAppIds: ['app-1'] })
+  expect(revocations).toEqual(['oauth-app:app-1:admin@example.com'])
+})

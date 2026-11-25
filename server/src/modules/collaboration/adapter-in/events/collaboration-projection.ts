@@ -980,6 +980,7 @@ async function processRecord(
       candidates.map(async (candidate) =>
         isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
         isCurrentWeeklyReportRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
+        isCurrentMemberAccessExpiryRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -2196,6 +2197,33 @@ export function toPlanningUpdateProjectMemberCandidates(
 }
 
 /**
+ * Reports whether a recipient may still receive a member access expiry notice (ADR 0095).
+ *
+ * The notice is for the managers of the Project it was scanned for, so a recipient who stepped
+ * down from managing that Project after the scan is not told.
+ *
+ * @param event - Event whose Project the notice is authorized against.
+ * @param memberKey - Recipient member key.
+ * @param directoryItems - Current Project directory rows.
+ * @returns True for other events, or when the recipient still manages the event's Project.
+ */
+export function isCurrentMemberAccessExpiryRecipient(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId'>,
+  memberKey: string,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (event.eventType !== MEMBER_ACCESS_EXPIRING_EVENT_TYPE) return true
+  const normalized = normalizeMemberKey(memberKey)
+  return Boolean(event.projectId) && directoryItems.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === event.projectId &&
+    item.role === 'manager' &&
+    item.archivedAt === undefined &&
+    normalizeMemberKey(item.memberKey) === normalized
+  )
+}
+
+/**
  * Reports whether a recipient may receive a Work Item escalation as a current Project manager.
  *
  * @param event - Scheduled event whose Project scope reflects the current Work Item.
@@ -3031,6 +3059,7 @@ export async function authorizeNotificationDelivery(
   }
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
   if (!isCurrentWeeklyReportRecipient(refreshed, memberKey, directory)) return false
+  if (!isCurrentMemberAccessExpiryRecipient(refreshed, memberKey, directory)) return false
   if (
     currentPlanningActivityEvent &&
     !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&

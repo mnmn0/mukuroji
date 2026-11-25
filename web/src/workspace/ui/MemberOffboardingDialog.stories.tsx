@@ -108,9 +108,9 @@ export const SetAccessExpiry: Story = {
     await userEvent.clear(input)
     await userEvent.type(input, '2026-12-24')
     await userEvent.click(canvas.getByTestId('member-offboarding-expiry-save'))
-    await expect(args.onSaveAccessExpiry).toHaveBeenCalledWith(new Date(2026, 11, 25).toISOString())
+    await expect(args.onSaveAccessExpiry).toHaveBeenCalledWith(new Date(2026, 11, 25).toISOString(), leaver.version)
     await userEvent.click(canvas.getByTestId('member-offboarding-expiry-clear'))
-    await expect(args.onSaveAccessExpiry).toHaveBeenLastCalledWith(null)
+    await expect(args.onSaveAccessExpiry).toHaveBeenLastCalledWith(null, leaver.version)
   },
 }
 

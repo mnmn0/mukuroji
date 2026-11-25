@@ -109,4 +109,26 @@ describe('updateMemberMembership', () => {
     await expect(run(ports, 'owner', 'deactivated')).rejects.toThrow('refused')
     expect(calls).toEqual([])
   })
+
+  test('finishes a failed revocation when the deactivation is repeated at a stale version', async () => {
+    const { ports, calls } = createPorts(createMember('member', 'deactivated'), createMember('member', 'deactivated'))
+    ports.updateMember = async () => {
+      calls.push('update')
+      throw new Error('version conflict')
+    }
+
+    await expect(run(ports, 'owner', 'deactivated')).rejects.toThrow('version conflict')
+    expect(calls).toEqual(['revoke:sato@example.com:owner@example.com', 'update'])
+  })
+
+  test('does not revoke a deactivated member the actor may not manage', async () => {
+    const { ports, calls } = createPorts(createMember('admin', 'deactivated'), createMember('admin', 'deactivated'))
+    ports.updateMember = async () => {
+      calls.push('update')
+      throw new Error('refused')
+    }
+
+    await expect(run(ports, 'admin', 'deactivated')).rejects.toThrow('refused')
+    expect(calls).toEqual(['update'])
+  })
 })
