@@ -97,6 +97,10 @@ export function composeCodingAgentMcp(environment: Record<string, string | undef
   }
   const config = parsed.data
   const teamIds = readTeamIds(config.MUKUROJI_MCP_TEAM_ID, config.MUKUROJI_MCP_TEAM_IDS)
+  // A Project belongs to one Team, so a Project restriction only makes sense for one Team.
+  if (teamIds.length > 1 && config.MUKUROJI_MCP_PROJECT_ID !== undefined) {
+    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_PROJECT_ID needs exactly one Team. Remove it or configure a single Team.')
+  }
   const apiFor = (teamId: string) => createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId })
   // One Team keeps the single-Team server unchanged; several Teams route each task to its Team.
   const api = teamIds.length === 1 ? apiFor(teamIds[0]) : teamIds.map((teamId) => ({ teamId, api: apiFor(teamId) }))

@@ -658,6 +658,17 @@ test('the workspace profile needs only the origin and token, and rejects an unkn
   })).not.toThrow()
 })
 
+test('a Project restriction needs exactly one Team', () => {
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a,team-b',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).toThrow('MUKUROJI_MCP_PROJECT_ID needs exactly one Team')
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).not.toThrow()
+})
+
 describe('readTeamIds', () => {
   test('keeps the single Team of an older configuration', () => {
     expect(readTeamIds('team-a', undefined)).toEqual(['team-a'])

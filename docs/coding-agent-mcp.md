@@ -72,7 +72,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 ### 複数のTeamを扱う
 
 `MUKUROJI_MCP_TEAM_IDS` で2つ以上のTeamを指定すると、1つのMCP設定で、すべてのTeamの担当タスクを扱います。
-Team が1つだけなら、ツールと結果は従来と同じです。
+Team が1つだけなら、ツールと結果は従来と同じです。Project は1つの Team に属するため、`MUKUROJI_MCP_PROJECT_ID` は Team が1つのときだけ指定できます。
 
 - `get_configuration` は、各Teamの設定・brief・catalog を `teams` に並べて返します。
 - `get_next_task` は全Teamを調べ、自分の実行中Run、再開、新しい作業の順に選びます。同じ順位なら先に書いたTeamを優先し、選んだタスクのTeamを `teamId` で返します。

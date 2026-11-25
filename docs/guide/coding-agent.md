@@ -61,6 +61,7 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 複数の Team で担当している場合は、`MUKUROJI_MCP_TEAM_IDS` に Team ID を並べると、1つの設定で全 Team の担当タスクを扱えます。
 `get_next_task` は全 Team から次の作業を選び、同じ優先度なら先に書いた Team を選びます。
 タスクを作る Team は `create_task` の `teamId` で選べます。省略すると、最初に書いた Team に作ります。
+複数の Team を並べた場合は `MUKUROJI_MCP_PROJECT_ID` を指定できません。
 
 ### Workspace 全体を読む（Workspace profile）
 
