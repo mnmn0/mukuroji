@@ -189,7 +189,12 @@ export function convertMarkdownToDocument(
     if (!checked.ok) return checked
   }
   const structure = spans ? readMarkdownImportStructure(text, options.resolveLink) : undefined
-  const scanned = scanBlocks(structure?.text.split('\n') ?? sourceLines, options.createId, options.resolveLink)
+  const scanned = scanBlocks(
+    structure?.text.split('\n') ?? sourceLines,
+    options.createId,
+    options.resolveLink,
+    structure?.topLevelBlocks,
+  )
   if (!scanned.ok) return scanned
   let body = structure === undefined
     ? scanned.blocks
@@ -256,12 +261,16 @@ export function titleFromMarkdownFileName(fileName: string): string {
  * @param lines - Source lines without line terminators.
  * @param createId - ID factory.
  * @param resolveLink - Optional rewriter of link targets.
+ * @param topLevelBlocks - Lines of each top-level block of the parsed file, when it was parsed.
+ *   A task item becomes a checklist only in a top-level list of task items alone; one nested in
+ *   another list, or next to other items, stays in that list's paragraph Markdown.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
   lines: readonly string[],
   createId: (prefix: string) => string,
   resolveLink?: (href: string) => string | undefined,
+  topLevelBlocks?: readonly MarkdownLineRange[],
 ):
   | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
@@ -272,6 +281,8 @@ function scanBlocks(
   const rewrite: LinkRewriter = resolveLink
     ? (raw) => rewriteLinkTargets(raw, resolveLink)
     : (raw) => raw
+  /** Whether each top-level block is a list of task items alone, once worked out. */
+  const checklistBlocks = new Map<MarkdownLineRange, boolean>()
   let paragraph: string[] = []
   let paragraphFirstLine = 0
   const flushParagraph = () => {
@@ -340,7 +351,7 @@ function scanBlocks(
       continue
     }
 
-    if (TASK_ITEM.test(line)) {
+    if (TASK_ITEM.test(line) && startsChecklist(lines, index, topLevelBlocks, checklistBlocks)) {
       flushParagraph()
       const items: DocumentChecklistItem[] = []
       let task = TASK_ITEM.exec(line)
@@ -351,7 +362,7 @@ function scanBlocks(
           checked: task[1] !== ' ',
         })
         index += 1
-        task = TASK_ITEM.exec(lines[index] ?? '')
+        task = startsChecklist(lines, index, topLevelBlocks, checklistBlocks) ? TASK_ITEM.exec(lines[index] ?? '') : null
       }
       blocks.push({ id: createId('block'), type: 'checklist', items })
       continue
@@ -398,6 +409,51 @@ function scanBlocks(
   }
   flushParagraph()
   return { ok: true, blocks, paragraphLines }
+}
+
+/**
+ * Tells whether a task item line may be read as a checklist item. Without a parsed file, every
+ * task item line may. Otherwise the line's top-level block must be a list of task items alone,
+ * all at the indent of its first line, as the export writes a checklist; a task item nested in
+ * another item, or in a list with other items, would lose its place in that list as a checklist.
+ *
+ * @param lines - Source lines.
+ * @param index - Line of the task item.
+ * @param topLevelBlocks - Lines of each top-level block of the parsed file.
+ * @param cache - Answers already worked out, by top-level block.
+ * @returns Whether the line may start or continue a checklist.
+ */
+function startsChecklist(
+  lines: readonly string[],
+  index: number,
+  topLevelBlocks: readonly MarkdownLineRange[] | undefined,
+  cache: Map<MarkdownLineRange, boolean>,
+): boolean {
+  if (topLevelBlocks === undefined) return true
+  const range = topLevelBlocks.find(({ first, last }) => first <= index && index <= last)
+  if (range === undefined) return true
+  const known = cache.get(range)
+  if (known !== undefined) return known
+  const answer = isTaskItemList(lines, range)
+  cache.set(range, answer)
+  return answer
+}
+
+/**
+ * Tells whether a top-level block is a list of task items alone, all at its first line's indent.
+ *
+ * @param lines - Source lines.
+ * @param range - Lines of the block.
+ * @returns Whether every non-blank line is such a task item.
+ */
+function isTaskItemList(lines: readonly string[], range: MarkdownLineRange): boolean {
+  const indent = /^[ \t]*/u.exec(lines[range.first] ?? '')?.[0] ?? ''
+  for (let line = range.first; line <= range.last; line += 1) {
+    const text = lines[line] ?? ''
+    if (text.trim() === '') continue
+    if (!TASK_ITEM.test(text) || /^[ \t]*/u.exec(text)?.[0] !== indent) return false
+  }
+  return true
 }
 
 /**

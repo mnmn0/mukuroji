@@ -79,6 +79,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
   （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
   rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
+- server API / MCP: `GET /api/v1/work-items/{workItemId}/documents/{documentId}` と `read_document` が返す Markdown で、
+  段落の text を escape せずに Markdown のまま返すようにしました。raw HTML の部分だけを escape し、参照の定義を使う
+  link と画像は inline の link に書き換えて定義を消し、脚注の label は `<block の番号>-<番号>` に付け替えます。
+  定義のない `[^…]` は `[\^…]` と書き、隣の block とつながる段落の間には何も表示しない定義
+  `[mukuroji-block-boundary]: #` を入れます。response の形と field は変わりません（#422）。
 
 ### Fixed
 

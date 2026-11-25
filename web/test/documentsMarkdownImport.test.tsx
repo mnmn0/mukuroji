@@ -462,6 +462,25 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     ])
   })
 
+  test('keeps a task item nested in another list in that list, and reads a task list as a checklist', () => {
+    // The server export writes this paragraph as it is (see the nested task list export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts), so the
+    // round trip gives the same paragraph back instead of a checklist that lost its parent.
+    const nested = '- parent\n\n  - [ ] child\n  - [x] done'
+    // The export puts a block boundary between two lists Markdown would join.
+    const exported = `# Document\n\n${nested}\n\n[mukuroji-block-boundary]: #\n\n- [ ] top\n- [x] finished\n`
+    const result = convert(exported)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([nested, 'checklist'])
+    expect(result.blocks[1]).toMatchObject({
+      type: 'checklist',
+      items: [{ text: 'top', checked: false }, { text: 'finished', checked: true }],
+    })
+    expect(blocksOf('- [ ] a\n- b').map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual(['- [ ] a\n- b'])
+  })
+
   test('reads an exported page back into blocks that render as the page did', () => {
     const result = convert(BLOCK_SCOPED_EXPORT)
     if (!result.ok) throw new Error(`conversion failed: ${result.code}`)

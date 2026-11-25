@@ -6162,6 +6162,26 @@ test('keeps each paragraph block\'s references, footnotes, and structure to itse
   expect(renderDocumentExport(imported, 'markdown', markdownInspector).content).toBe(exported)
 })
 
+test('writes a task list nested in a paragraph list as it is, apart from a checklist block', () => {
+  const page = createPage({
+    blocks: [
+      { id: 'block-1', type: 'paragraph', text: '- parent\n\n  - [ ] child\n  - [x] done' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [
+          { id: 'item-1', text: 'top', checked: false },
+          { id: 'item-2', text: 'finished', checked: true },
+        ],
+      },
+    ],
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same two blocks.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(
+    '# Document\n\n- parent\n\n  - [ ] child\n  - [x] done\n\n[mukuroji-block-boundary]: #\n\n- [ ] top\n- [x] finished\n',
+  )
+})
+
 test('keeps a literal footnote token from naming the footnote another block gets in the export', () => {
   const page = createPage({
     blocks: [
