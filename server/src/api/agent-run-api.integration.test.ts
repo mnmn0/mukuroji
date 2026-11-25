@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { classifyFactoryBoardItem, type AgentRunReportKind, type TeamAgentRunBoardResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
+import { classifyFactoryBoardItem, type AgentRunReportKind, type EnterpriseRoleAssignment, type TeamAgentRunBoardResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicAgentTelemetryService } from './routes/public-agent-telemetry-service'
 import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
@@ -2040,6 +2040,47 @@ describe('Web Agent Run routes', () => {
     expect(refused.status).toBe(403)
     expect(await refused.json()).toMatchObject({ code: 'CollaborationAuthorizationChanged' })
     expect(store.state.reports.get(`${workspaceId}|core-team|${held.runId}|1`)?.answer).toBeUndefined()
+  })
+
+  test('lets an Enterprise Work Item writer without Team editing answer a report', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = { ...createHeldRun('task-1'), reportCount: 1 }
+    store.seed(held)
+    store.state.reports.set(`${workspaceId}|core-team|${held.runId}|1`, {
+      schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence: 1,
+      kind: 'blocker', commentId: 'cmt_1', verifications: [], artifacts: [], createdAt: '2026-10-22T00:00:00.000Z', createdBy: 'demo@example.com',
+    })
+    const enterpriseIdentity = new InMemoryEnterpriseIdentityClient()
+    await enterpriseIdentity.putCustomRole({
+      workspaceId, roleId: 'custom:work-item-writer', name: 'Work Item writer', permissions: ['work-items.read', 'work-items.write'],
+      guestAssignable: false, revision: 1, createdAt: '2026-10-22T00:00:00.000Z', updatedAt: '2026-10-22T00:00:00.000Z',
+    })
+    const getSnapshot = enterpriseIdentity.getSnapshot.bind(enterpriseIdentity)
+    const assignment: EnterpriseRoleAssignment = {
+      workspaceId, assignmentId: 'work-item-writer', principalKind: 'member', principalId: 'demo@example.com',
+      roleId: 'custom:work-item-writer', scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }
+    enterpriseIdentity.getSnapshot = async (id) => ({ ...(await getSnapshot(id)), roleAssignments: [assignment] })
+    setTestAppDependencies({
+      enterpriseIdentity,
+      collaboration: createCollaborationStub({
+        /**
+         * Refuses the comment, which shows the request got past route authorization.
+         *
+         * @returns Never.
+         */
+        async createComment() {
+          throw new CollaborationError(409, 'CommentConflict', 'Stopped after authorization.')
+        },
+      }),
+    })
+    const response = await app.request(
+      `http://localhost/api/teams/core-team/work-items/task-1/agent-runs/${held.runId}/reports/1/answer`,
+      { method: 'POST', headers, body: JSON.stringify({ body: 'Go ahead.' }) },
+    )
+    // The route asks for `work-items.write`, as a comment does, rather than the generic `teams.write`.
+    expect(await response.json()).toMatchObject({ code: 'CommentConflict' })
+    expect(response.status).toBe(409)
   })
 
   test('stops the question list at its byte budget so the MCP client can read it', async () => {
