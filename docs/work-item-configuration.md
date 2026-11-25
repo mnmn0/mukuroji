@@ -225,9 +225,11 @@ Configuration の `completionGate` は、Work Item が completed category の st
 - Public API は共通の error 形式に写し、`409`、`code: "conflict"`、`retryable: false` と、満たされない条件ごとに `errors[]` の `code: "gate_not_satisfied"` を返す。`message` は条件名で始まる。`ApiProblem.code` の enum は広げない。
 - 承認の決定で完了する場合は、決定中の承認を承認済みとして数えて判定する。満たされなければ決定ごと拒否し、Work Item の更新と同じ `409 WorkItemCompletionGateNotSatisfied` と `unmetConditions` を返す。
 
-承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない（Web の表示は未実装）。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
+承認の件数を読めなかったとき、承認の条件は `reason: "unavailable"` として満たされない扱いにする（fail-closed）。`warn` の条件は判定しても server は拒否しない。受け入れ条件は Work Item の row にあり、更新の revision 条件で固定される。判定する更新の `expectedRevision` が判定した revision と違えば `409 WorkItemRevisionConflict` を返す。承認の条件が `required` で満たされたときは、判定した承認の件数（file proofing table の `APPROVAL_SUMMARY` row）を更新の transaction の条件に入れる。判定の後に承認が作られたり決定されたりすると、更新は `409` で失敗する。承認の決定で完了する場合は同じ row を決定の transaction が更新するので、別の条件ではなく、その更新に判定時の件数を条件として付ける。設定の変更は他の configuration と同じく監査に残る。
 
-CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、Web の設定画面と達成状況の表示、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
+Web では、設定画面（ワークフローとフィールド）の「完了 Gate」で条件ごとに「使わない」「警告」「必須」を選ぶ。Work Item 詳細には、`warn` か `required` の条件がある Team でだけ、受け入れ条件の下に「完了 Gate」のチェックリストを出す。条件ごとに満たしているか、要求が警告か必須かを示し、保存済みの受け入れ条件と Work Item の承認の集計（`approvalSummary`。承認が無い Work Item では応答から省かれるので 0 件として数える）から contract の `describeWorkItemCompletionGate` で求める。表示は目安で、完了できるかは更新のときの server の判定で決まる。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
 
 ### 遷移を実行できる役割と状態ごとの必須項目
 

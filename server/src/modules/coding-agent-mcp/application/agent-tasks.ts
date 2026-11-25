@@ -441,6 +441,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
           readyStatusIds: agentSettings.readyStatusIds,
           resumableStatusIds: agentSettings.resumableStatusIds,
           requireAcceptanceCriteria: agentSettings.requireAcceptanceCriteria,
+          acceptNewRuns: agentSettings.acceptNewRuns,
           ...(agentSettings.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: agentSettings.acceptanceCriteriaFieldId }),
         },
         brief: composeBrief(agentSettings, scope.assignedProjectId),
@@ -522,6 +523,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         .map((run) => tasks.find((task) => task.id === run.workItemId && task.statusCategory === 'started'))
         .find((task) => task !== undefined)
       if (resumed) return { action: 'in_progress', task: resumed, blockedCount: 0, skipped: [], ...runSummary }
+      // While the Team does not accept new runs, nothing can be started or resumed.
+      if (!settings.acceptNewRuns) return { action: 'none', task: null, blockedCount: 0, skipped: [], acceptingNewRuns: false, ...runSummary }
       const resumableStatusIds = new Set(settings.resumableStatusIds)
       const skipped: { taskId: string; reason: SkippedTaskReason }[] = []
       /**

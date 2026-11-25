@@ -36,6 +36,7 @@ import {
 import { pruneWorkflowStatusRequiredCustomFields } from '../model/workflowRules'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
+import { CompletionGateConfigurationSection } from './CompletionGateConfigurationSection'
 import { ParentCompletionPolicyConfigurationSection } from './ParentCompletionPolicyConfigurationSection'
 import { ProgressModeConfigurationSection } from './ProgressModeConfigurationSection'
 import { WorkflowRulesConfigurationSection } from './WorkflowRulesConfigurationSection'
@@ -272,6 +273,11 @@ function WorkItemConfigurationPanelContent({
               onChange={setDraft}
             />
             <ParentCompletionPolicyConfigurationSection
+              configuration={draft}
+              locale={locale}
+              onChange={setDraft}
+            />
+            <CompletionGateConfigurationSection
               configuration={draft}
               locale={locale}
               onChange={setDraft}
