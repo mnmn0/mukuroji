@@ -171,6 +171,24 @@ export function takeSessionDraft(key: string, owner: string | undefined): unknow
 }
 
 /**
+ * Tells whether a preserved draft waits for an input, without handing it back.
+ *
+ * A page uses it to open the form that restores the draft, such as a form that is closed until
+ * the member opens it.
+ *
+ * @param key - Identifies the input.
+ * @param owner - Account now signed in to this tab.
+ * @returns Whether {@link takeSessionDraft} would return a value for this account.
+ */
+export function hasSessionDraft(key: string, owner: string | undefined): boolean {
+  if (!owner) return false
+  const stored = readStoredDrafts()
+  if (stored?.owner !== owner) return false
+  const draft = stored.drafts[key]
+  return draft !== undefined && Date.now() - draft.savedAt <= maxDraftAgeMilliseconds
+}
+
+/**
  * Removes this tab's preserved drafts, and the values of inputs that unmounted moments ago,
  * unless they belong to the account that just signed in.
  *

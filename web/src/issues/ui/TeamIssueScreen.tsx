@@ -147,6 +147,8 @@ import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarc
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
 import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
+import { createWorkItemCreateSessionDraftKey } from '../../work-items/model/workItemCreateSessionDraft'
+import { hasPendingSessionDraft } from '../../auth/useSessionDraft'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -264,7 +266,10 @@ export function TeamIssueScreen({
     category: 'all',
     customFieldId: '',
   })
-  const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
+  const createSessionDraftKey = createWorkItemCreateSessionDraftKey(['team', teamId])
+  // A create form whose text was kept when the session ended opens again so the text comes back.
+  const [isCreateOpen, setIsCreateOpen] = useState(() =>
+    defaultCreateIssueOpen || hasPendingSessionDraft(createSessionDraftKey))
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
@@ -1608,7 +1613,8 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
+                    // A Team switch starts a new form, so text typed for one Team is never kept for another.
+                    key={`create-issue-${teamId}-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     calendarPolicy={workingCalendar}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
@@ -1690,6 +1696,7 @@ export function TeamIssueScreen({
                         }
                       }
                     }}
+                    sessionDraftKey={createSessionDraftKey}
                     projects={createIssueProjects ?? activeTeam?.projects ?? []}
                     t={t}
                     workspaceMembers={workspaceMembers}

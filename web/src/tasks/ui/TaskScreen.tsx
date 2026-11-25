@@ -212,6 +212,8 @@ import {
 import { resolveTaskActualDateUndo } from '../model/taskActualDates'
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
+import { createWorkItemCreateSessionDraftKey } from '../../work-items/model/workItemCreateSessionDraft'
+import { hasPendingSessionDraft } from '../../auth/useSessionDraft'
 import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
@@ -782,7 +784,10 @@ export function TaskScreen({
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
   const [isDetailOpen, setIsDetailOpen] = useState(true)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
-  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
+  const createTaskSessionDraftKey = createWorkItemCreateSessionDraftKey(['project', projectId])
+  // A create form whose title was kept when the session ended opens again so the title comes back.
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(() =>
+    defaultCreateTaskOpen || hasPendingSessionDraft(createTaskSessionDraftKey))
   const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
   const createTemplates = useWorkItemCreateTemplates(accessToken, isCreateTaskOpen && Boolean(onCreateTask))
   const createTemplateTeamId = createTaskContext?.teamId ?? activeProjectTeamId
@@ -3836,6 +3841,7 @@ export function TaskScreen({
                 }}
                 projectId={createDestinationProjectId}
                 projectName={createDestinationProjectName}
+                {...(createDestinationProjectId === projectId ? { sessionDraftKey: createTaskSessionDraftKey } : {})}
                 teamName={createDestinationTeamName}
                 t={t}
                 workspaceMembers={workspaceMembers}
