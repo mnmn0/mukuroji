@@ -1213,14 +1213,32 @@
       },
       "CreateExternalWorkItemLinkInput": {
         "additionalProperties": false,
+        "else": {
+          "required": [
+            "externalId",
+            "externalUrl"
+          ]
+        },
+        "if": {
+          "properties": {
+            "resourceType": {
+              "const": "calendar-event"
+            }
+          },
+          "required": [
+            "resourceType"
+          ]
+        },
         "properties": {
           "displayKey": {
             "type": "string"
           },
           "externalId": {
+            "description": "Provider resource ID. Required except for calendar-event, which must omit it: Mukuroji creates the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
+            "description": "HTTPS URL of the resource in the provider UI. Required except for calendar-event, which must omit it.",
             "format": "uri",
             "type": "string"
           },
@@ -1232,7 +1250,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },
@@ -1253,10 +1272,24 @@
           "teamId",
           "installationId",
           "resourceType",
-          "externalId",
-          "externalUrl",
           "syncDirection"
         ],
+        "then": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "externalId"
+                ]
+              },
+              {
+                "required": [
+                  "externalUrl"
+                ]
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "CreateImportInput": {
@@ -1363,14 +1396,32 @@
       },
       "CreatePublicExternalWorkItemLinkInput": {
         "additionalProperties": false,
+        "else": {
+          "required": [
+            "externalId",
+            "externalUrl"
+          ]
+        },
+        "if": {
+          "properties": {
+            "resourceType": {
+              "const": "calendar-event"
+            }
+          },
+          "required": [
+            "resourceType"
+          ]
+        },
         "properties": {
           "displayKey": {
             "type": "string"
           },
           "externalId": {
+            "description": "Provider resource ID. Required except for calendar-event, which must omit it: Mukuroji creates the event on the connected calendar from the Work Item dates.",
             "type": "string"
           },
           "externalUrl": {
+            "description": "HTTPS URL of the resource in the provider UI. Required except for calendar-event, which must omit it.",
             "format": "uri",
             "type": "string"
           },
@@ -1382,7 +1433,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },
@@ -1399,10 +1451,24 @@
         "required": [
           "installationId",
           "resourceType",
-          "externalId",
-          "externalUrl",
           "syncDirection"
         ],
+        "then": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "externalId"
+                ]
+              },
+              {
+                "required": [
+                  "externalUrl"
+                ]
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "CreatePublicWorkItemCommentRequest": {
@@ -1807,7 +1873,8 @@
               "issue",
               "merge-request",
               "commit",
-              "deploy"
+              "deploy",
+              "calendar-event"
             ],
             "type": "string"
           },

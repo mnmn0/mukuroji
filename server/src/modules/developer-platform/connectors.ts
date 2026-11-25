@@ -77,6 +77,19 @@ export type ConnectorCredential = {
   scopes: string[]
 }
 
+/**
+ * All-day dates of a calendar event, both inclusive local `YYYY-MM-DD` dates (ADR 0089).
+ * A one-day event has the same start and end date.
+ */
+export type ConnectorEventSchedule = {
+  /** First day of the event. */
+  startDate: string
+  /** Last day of the event, inclusive. */
+  endDate: string
+  /** IANA time zone of the Work Item calendar, for providers that tie all-day events to one. */
+  timeZone?: string
+}
+
 /** Connector から Work Item へ取り込む normalized external record です。 */
 export type ConnectorExternalRecord = {
   /** Provider 内で一意な resource ID です。 */
@@ -95,6 +108,8 @@ export type ConnectorExternalRecord = {
   description?: string
   /** Provider status の normalized value です。 */
   status?: string
+  /** Calendar event dates; only `calendar-event` records carry them. */
+  schedule?: ConnectorEventSchedule
   /** Provider payload の non-secret metadata です。 */
   metadata: Record<string, unknown>
   /** mukuroji が送信した更新を識別する loop guard です。 */
@@ -115,6 +130,8 @@ export type ConnectorOutboundMutation = {
   description?: string
   /** Provider へ反映する normalized status です。 */
   status?: string
+  /** Dates written to a `calendar-event` resource. */
+  schedule?: ConnectorEventSchedule
   /** Echo webhook を識別する loop guard です。 */
   originMarker: string
   /** Provider retry に渡す stable idempotency operation ID です。 */
@@ -122,6 +139,15 @@ export type ConnectorOutboundMutation = {
   /** Provider conditional write に使う直前 external version です。 */
   expectedExternalVersion?: string
 }
+
+/**
+ * Work Item contents used to create a new provider resource for a link (ADR 0089). The provider
+ * assigns the resource ID, so the mutation has none.
+ */
+export type ConnectorCreateMutation = Omit<
+  ConnectorOutboundMutation,
+  'externalId' | 'expectedExternalVersion'
+>
 
 /** Provider page の normalized cursor response です。 */
 export type ConnectorPage<T> = {
@@ -147,10 +173,27 @@ export interface ConnectorAdapter {
     resourceType: ExternalResourceType,
     cursor?: string,
   ): Promise<ConnectorPage<ConnectorExternalRecord>>
+  /**
+   * Reads one provider resource as it is now. Only providers with a built-in resource protocol,
+   * such as calendars, implement it.
+   */
+  read?(
+    credential: ConnectorCredential,
+    resourceType: ExternalResourceType,
+    externalId: string,
+  ): Promise<ConnectorExternalRecord>
   /** Work Item mutation を provider resource へ反映します。 */
   push(
     credential: ConnectorCredential,
     mutation: ConnectorOutboundMutation,
+  ): Promise<ConnectorExternalRecord>
+  /**
+   * Creates a provider resource from a Work Item. Only providers that can own the linked resource,
+   * such as calendars, implement it. Retrying the same `operationId` returns the same resource.
+   */
+  create?(
+    credential: ConnectorCredential,
+    mutation: ConnectorCreateMutation,
   ): Promise<ConnectorExternalRecord>
 }
 
@@ -396,6 +439,11 @@ export function decideConnectorInboundSync(input: {
   originSigningSecret: string
   /** Rotation grace period 中に検証だけ許可する旧 HMAC secrets です。 */
   previousOriginSigningSecrets?: readonly string[]
+  /**
+   * How versions compare. `opaque` versions, such as ETags, only say whether a resource changed,
+   * so only an equal version is stale. Defaults to `ordered`.
+   */
+  versionOrdering?: 'ordered' | 'opaque'
 }): ConnectorSyncDecision {
   if (input.eventId === input.state.lastExternalEventId) {
     return { kind: 'duplicate', reason: 'External event was already processed.' }
@@ -417,7 +465,9 @@ export function decideConnectorInboundSync(input: {
   }
   if (
     input.state.lastExternalVersion &&
-    compareExternalVersions(input.externalVersion, input.state.lastExternalVersion) <= 0
+    (input.versionOrdering === 'opaque'
+      ? input.externalVersion === input.state.lastExternalVersion
+      : compareExternalVersions(input.externalVersion, input.state.lastExternalVersion) <= 0)
   ) {
     return { kind: 'stale', reason: 'External resource version is not newer than the synced version.' }
   }

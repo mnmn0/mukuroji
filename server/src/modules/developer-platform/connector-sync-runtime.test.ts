@@ -1236,7 +1236,7 @@ describe('ConnectorSyncEngine', () => {
     )).toBe('paused')
   })
 
-  test('releases a resolution claim when validation fails before provider writes', async () => {
+  test('releases a resolution claim with the current Work Item when validation fails before provider writes', async () => {
     const fixture = await createRuntimeFixture()
     const conflict = await createConflictFixture(fixture)
     const conflictSnapshot = fixture.getWorkItem()
@@ -1252,7 +1252,8 @@ describe('ConnectorSyncEngine', () => {
       { resolution: 'use-local' },
     )).rejects.toMatchObject({ code: 'ConnectorSyncConflictChanged' })
 
-    fixture.setWorkItem(conflictSnapshot)
+    // The failed attempt released the claim with the Work Item as it is now, so choosing the
+    // Work Item again resolves the conflict without another poll.
     await expect(fixture.engine.resolveConflict(
       { workspaceId: 'workspace-1', userId: 'resolver-2' },
       conflict.id,

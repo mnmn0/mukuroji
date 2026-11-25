@@ -891,4 +891,9 @@ export const workItemsMessages = {
   'workItems.crossProject.column.assignee': '責任者',
   'workItems.crossProject.column.contributors': 'Contributor',
   'workItems.crossProject.column.dueDate': '期限',
+  'workItems.externalLinks.description':
+    'Issue、merge request、commit、deploy、カレンダーの予定をこの Work Item と同期します。',
+  'workItems.externalLinks.calendarEventHint':
+    '接続した account の既定カレンダーに、この Work Item の日付で終日の予定を作成します。日付のない Work Item には作成できません。',
+  'workItems.externalLinks.resourceType.calendarEvent': 'カレンダーの予定',
 } as const

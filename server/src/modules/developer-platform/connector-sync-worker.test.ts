@@ -705,7 +705,7 @@ function createWorkerFixture(options: {
   const pollCalls: Array<{
     workspaceId: string
     installationId: string
-    resourceType: 'issue' | 'merge-request' | 'commit' | 'deploy'
+    resourceType: 'issue' | 'merge-request' | 'commit' | 'deploy' | 'calendar-event'
     cursor?: string
     maximumPages?: number
   }> = []

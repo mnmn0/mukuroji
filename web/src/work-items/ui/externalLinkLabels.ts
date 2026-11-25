@@ -2,7 +2,7 @@ import type {
   ExternalResourceType,
   ExternalSyncDirection,
 } from '@mukuroji/contracts'
-import type { Locale } from '../../shared/i18n/i18n'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 
 /**
  * External link panel で表示する locale-aware 文言です。
@@ -72,6 +72,8 @@ export type WorkItemExternalLinksLabels = {
   externalUrlPlaceholder: string
   /** Display key input placeholder です。 */
   displayKeyPlaceholder: string
+  /** カレンダーの予定を Work Item の日付から作成することの説明です。 */
+  calendarEventHint: string
   /** Resource type の表示名です。 */
   resourceTypeLabels: Record<ExternalResourceType, string>
   /** Sync direction の表示名です。 */
@@ -90,12 +92,11 @@ export function createWorkItemExternalLinksLabels(
   locale: Locale,
 ): WorkItemExternalLinksLabels {
   const ja = locale === 'ja'
+  const t = createTranslator(locale)
 
   return {
     title: ja ? '外部リンク' : 'External links',
-    description: ja
-      ? 'Issue、merge request、commit、deploy をこの Work Item と同期します。'
-      : 'Synchronize issues, merge requests, commits, and deployments with this Work Item.',
+    description: t('workItems.externalLinks.description'),
     readOnly: ja ? '参照のみ' : 'Read only',
     loading: ja ? '外部リンクを読み込み中' : 'Loading external links',
     loadError: ja ? '外部リンクを読み込めませんでした。' : 'External links could not be loaded.',
@@ -138,11 +139,13 @@ export function createWorkItemExternalLinksLabels(
     externalIdPlaceholder: ja ? '例: 12345 または commit SHA' : 'e.g. 12345 or commit SHA',
     externalUrlPlaceholder: 'https://github.com/org/repository/issues/123',
     displayKeyPlaceholder: ja ? '例: GH-123' : 'e.g. GH-123',
+    calendarEventHint: t('workItems.externalLinks.calendarEventHint'),
     resourceTypeLabels: {
       issue: 'Issue',
       'merge-request': 'Merge request',
       commit: 'Commit',
       deploy: ja ? 'Deploy' : 'Deployment',
+      'calendar-event': t('workItems.externalLinks.resourceType.calendarEvent'),
     },
     syncDirectionLabels: {
       inbound: 'Provider → mukuroji',
