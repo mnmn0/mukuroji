@@ -277,6 +277,20 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 - ページの Markdown export は表の各行の間に空行を入れるので、その形の表も table block に戻します。
 - フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
   `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
+- 見出し・チェック項目・表の cell・埋め込みのタイトルは本文を Markdown として描画せず、書いたとおりの
+  文字を表示します（チェック項目と表の cell は `[label](/documents/<id>)` のページへの link だけを link に
+  します）。そのため取り込みは、描画すると同じ文字になる Markdown だけをこれらの block にし、強調・code
+  span・ほかの場所への link・画像・HTML・脚注・文字参照（`&amp;` など）・取り消し線を含む見出し・list・
+  表・link は、全体を paragraph block の Markdown として残します（チェック項目の list は 1 つの項目でも
+  当てはまれば list 全体を残します）。判定は `web/src/documents/model/markdownNativeBlocks.ts` が block の
+  種類ごとに、描画と同じ parser の結果と block が表示する文字を比べて行います。URL や mail address を
+  そのまま書いた部分は、block でも同じ文字が表示される（link にはならない）ので、そのまま block にします。
+  記号を含む行は描画と同じ parser で解析しますが（数百行ずつまとめて解析します）、1 ファイルで解析する
+  合計が 3 万文字を超えた後の行は解析せず paragraph block の Markdown として残します（表示は変わりません）。
+  どの block も表示しない区切り線（`---`）は、捨てずに paragraph block の Markdown として残します。
+  Markdown 書き出しは、これらの block の文字を `\`、`*`、`&`、`~` などの記号を escape して書き、見出しの
+  末尾の `#` も escape し、ページへの link は Markdown の link として書くので、書き出したファイルを
+  取り込み直すと同じ種類の block に戻ります。
 - 段落・リスト・引用・リンク・画像・HTML は、backslash escape も含めて Markdown のまま paragraph
   block の text として残します。paragraph は Markdown として表示するので、リスト・引用・リンクは
   描画され、`\*literal\*` のような escape は文字のまま、HTML は文字のまま表示されます。画像は

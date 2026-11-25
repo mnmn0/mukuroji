@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type {
-  ApplyDocumentOperationsInput,
-  CreateDocumentInput,
-  DocumentBlock,
+import {
+  splitDocumentPageLinks,
+  type ApplyDocumentOperationsInput,
+  type CreateDocumentInput,
+  type DocumentBlock,
 } from '@mukuroji/contracts'
 import {
   hasImportPlaceholder,
@@ -11,7 +12,6 @@ import {
   MARKDOWN_FOLDER_IMPORT_MAX_FILES,
   planMarkdownFolderImport,
   resolveImportedPageLinks,
-  splitDocumentPageLinks,
   type MarkdownFolderFile,
   type MarkdownFolderImportPlan,
 } from '../src/documents/model/markdownFolderImport'

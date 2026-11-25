@@ -6456,6 +6456,60 @@ const NESTED_BLOCK_EXPORT = [
   'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
 ].join('\n\n') + '\n'
 
+test('writes native blocks so that their Markdown renders the text the page shows', () => {
+  const page = createPage({
+    title: 'Plan #',
+    blocks: [
+      { id: 'block-1', type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a #' },
+      {
+        id: 'block-2',
+        type: 'checklist',
+        items: [
+          { id: 'item-1', text: 'Read [Setup](/documents/doc-1) first', checked: false },
+          { id: 'item-2', text: 'See https://example.com/x', checked: true },
+          { id: 'item-3', text: '**not bold** & `not code` <b>', checked: false },
+        ],
+      },
+      {
+        id: 'block-3',
+        type: 'table',
+        columns: ['A', 'B | C'],
+        rows: [
+          {
+            id: 'row-1',
+            cells: [
+              { id: 'cell-1', text: '[Setup](/documents/doc-1)' },
+              { id: 'cell-2', text: 'line\nbreak' },
+            ],
+          },
+          { id: 'row-2', cells: [{ id: 'cell-3', text: '~x~' }, { id: 'cell-4', text: '' }] },
+        ],
+      },
+      { id: 'block-4', type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },
+    ],
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same blocks.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(NATIVE_BLOCK_EXPORT)
+})
+
+/** Markdown export of the native blocks above; the web import test reads it too. */
+const NATIVE_BLOCK_EXPORT = [
+  '# Plan \\#',
+  '## Price \\&amp; \\~\\~sale\\~\\~ for C# a \\#',
+  [
+    '- [ ] Read [Setup](/documents/doc-1) first',
+    '- [x] See https://example.com/x',
+    '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\>',
+  ].join('\n'),
+  [
+    '| A | B \\| C |',
+    '| --- | --- |',
+    '| [Setup](/documents/doc-1) | line<br>break |',
+    '| \\~x\\~ |  |',
+  ].join('\n'),
+  '[Guide \\&amp; \\~more\\~](https://example.com/g)',
+].join('\n\n') + '\n'
+
 test('writes a paragraph shaped like a native block with a footnote or reference as it is', () => {
   const page = createPage({
     blocks: REFERENCING_NATIVE_PARAGRAPHS

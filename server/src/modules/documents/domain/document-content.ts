@@ -1,3 +1,4 @@
+import { splitDocumentPageLinks } from '@mukuroji/contracts'
 import type {
   DocumentBlock,
   DocumentDetail,
@@ -1202,7 +1203,7 @@ function renderMarkdown(
   blocks: readonly DocumentBlock[],
   markdown: MarkdownInspector,
 ): string {
-  const parts = [`# ${escapeMarkdownText(title)}`]
+  const parts = [`# ${escapeMarkdownHeadingText(title)}`]
   /** Plain-text fallbacks of paragraph parts, by part index. */
   const plainParts = new Map<number, string>()
   /**
@@ -1244,7 +1245,7 @@ function renderMarkdown(
         break
       }
       case 'heading':
-        parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
+        parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownHeadingText(block.text)}`)
         break
       case 'table': {
         // Rows are joined by single newlines: a blank line ends a GFM table.
@@ -1271,7 +1272,7 @@ function renderMarkdown(
         // An empty checklist shows nothing and is left out, so its neighbours are compared directly.
         if (block.items.length === 0) break
         const checklist = block.items
-          .map((item) => `- [${item.checked ? 'x' : ' '}] ${escapeMarkdownText(item.text)}`)
+          .map((item) => `- [${item.checked ? 'x' : ' '}] ${renderMarkdownLinkedText(item.text)}`)
           .join('\n')
         // A list past the parse budget is not parsed; boundaries keep it apart from its neighbours.
         if (!budget.take(checklist)) {
@@ -1282,7 +1283,7 @@ function renderMarkdown(
         break
       }
       case 'embed':
-        parts.push(`[${escapeMarkdownText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
+        parts.push(`[${escapeMarkdownNativeText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
         break
       case 'diagram':
         parts.push(
@@ -1742,6 +1743,45 @@ function escapeMarkdownText(value: string): string {
   return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
 }
 
+/**
+ * Escapes the text of a block the page shows as written, such as a checklist item or an embed
+ * title, so the Markdown renders those same characters: a character reference or a strikethrough
+ * would otherwise render differently, and the import would keep the block as a paragraph.
+ *
+ * @param value - Text the page shows.
+ * @returns Escaped Markdown text.
+ */
+function escapeMarkdownNativeText(value: string): string {
+  return escapeMarkdownText(value).replace(/[&~]/gu, '\\$&')
+}
+
+/**
+ * Escapes the text of a heading, which the page shows as written. A closing run of `#` would
+ * otherwise be read as the end of the heading and dropped.
+ *
+ * @param value - Heading text.
+ * @returns Escaped Markdown text for after the heading's `#` marker.
+ */
+function escapeMarkdownHeadingText(value: string): string {
+  return escapeMarkdownNativeText(value).replace(/(^|[ \t])#(?=#*[ \t]*$)/u, '$1\\#')
+}
+
+/**
+ * Writes the text of a checklist item or a table cell, which the page shows as written apart from
+ * links to other pages: those are written as Markdown links, so the Markdown renders them as
+ * links too, and the rest is escaped.
+ *
+ * @param value - Stored text.
+ * @returns Markdown text.
+ */
+function renderMarkdownLinkedText(value: string): string {
+  return splitDocumentPageLinks(value)
+    .map((segment) => segment.type === 'text'
+      ? escapeMarkdownNativeText(segment.text)
+      : `[${escapeMarkdownNativeText(segment.label)}](${segment.href})`)
+    .join('')
+}
+
 /** The start of a raw HTML tag, comment, declaration, or processing instruction. */
 const RAW_HTML_START = /<(?=\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!|\?)/gu
 
@@ -2000,7 +2040,7 @@ function escapeRawHtmlStarts(text: string): string {
  * @returns Escaped table-cell text.
  */
 function escapeMarkdownTableCell(value: string): string {
-  return escapeMarkdownText(value).replaceAll('|', '\\|').replace(/\r?\n/gu, '<br>')
+  return renderMarkdownLinkedText(value).replaceAll('|', '\\|').replace(/\r?\n/gu, '<br>')
 }
 
 /**

@@ -4,6 +4,7 @@ import type {
   DocumentHeadingBlock,
   DocumentTableRow,
 } from '@mukuroji/contracts'
+import { createNativeBlockChecker } from './markdownNativeBlocks'
 import {
   isMarkdownImportWithinParseLimits,
   readMarkdownImportStructure,
@@ -186,7 +187,7 @@ export function convertMarkdownToDocument(
   // made inline.
   const spans = MAY_SPAN_BLOCKS.test(text) && isMarkdownImportWithinParseLimits(text)
   if (spans) {
-    const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
+    const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink, undefined, undefined, false)
     if (!checked.ok) return checked
   }
   // Every destination a reference is written with stays in the page's text, so references that
@@ -279,6 +280,9 @@ export function titleFromMarkdownFileName(fileName: string): string {
  *   show the label instead of the footnote, and the definition, which only a paragraph block
  *   carries along, would be lost. A link that uses a reference definition needs none of this,
  *   since its destination is already written inline.
+ * @param checkNative - Whether a heading, checklist, table, or embed is made only of Markdown it
+ *   shows exactly, keeping other Markdown as a paragraph. A scan that only looks for an oversized
+ *   table leaves this off, which spares the parses.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
@@ -287,6 +291,7 @@ function scanBlocks(
   resolveLink?: (href: string) => string | undefined,
   topLevelBlocks?: readonly MarkdownTopLevelBlock[],
   footnoteLines?: readonly number[],
+  checkNative = true,
 ):
   | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
@@ -299,18 +304,87 @@ function scanBlocks(
     : (raw) => raw
   /** Whether each top-level block is a list of task items alone, once worked out. */
   const checklistBlocks = new Map<MarkdownLineRange, boolean>()
+  /** Rewritten lines, by line, read once each when a native block is checked against them. */
+  const rewrittenLines = new Map<number, string>()
+  /** Whether a heading, checklist item, table, or embed would show its Markdown exactly. */
+  const nativeBlocks = createNativeBlockChecker(
+    lines.length,
+    (line) => {
+      const known = rewrittenLines.get(line)
+      if (known !== undefined) return known
+      const source = rewrite(lines[line] ?? '')
+      rewrittenLines.set(line, source)
+      return source
+    },
+    (kind, line) => {
+      if (kind === 'heading') {
+        const heading = ATX_HEADING.exec(line)
+        return heading?.[1] ? unescapeMarkdown(removeClosingHashes(heading[2] ?? '')) : undefined
+      }
+      if (kind === 'task') {
+        const task = TASK_ITEM.exec(line)
+        return task ? unescapeMarkdown((task[2] ?? '').trim()) : undefined
+      }
+      const link = readStandaloneLink(line)
+      return link ? unescapeMarkdown(link.label).trim() : undefined
+    },
+  )
+  /**
+   * Tells whether a task item line renders as the checklist item read from it would show it.
+   *
+   * @param line - Index of the task item line.
+   * @returns Whether a checklist item shows it exactly.
+   */
+  const showsTaskLineExactly = (line: number) => {
+    const task = TASK_ITEM.exec(lines[line] ?? '')
+    return task !== null && (!checkNative || nativeBlocks.shows('task', line, readTask(task).text))
+  }
+  /**
+   * Reads a task item the way a checklist item stores it.
+   *
+   * @param task - Match of a task item line.
+   * @returns The item's text and check state.
+   */
+  const readTask = (task: RegExpExecArray) => ({
+    text: unescapeMarkdown(rewrite((task[2] ?? '').trim())),
+    checked: task[1] !== ' ',
+  })
+  /**
+   * Tells whether every task item line of a top-level block renders as its checklist item shows.
+   *
+   * @param range - Lines of the block.
+   * @returns Whether a checklist shows the whole block exactly.
+   */
+  const everyTaskLineShownExactly = (range: MarkdownLineRange) => {
+    for (let line = range.first; line <= range.last; line += 1) {
+      if ((lines[line] ?? '').trim() !== '' && !showsTaskLineExactly(line)) return false
+    }
+    return true
+  }
   /** Top-level blocks kept whole in paragraph Markdown, by their first line. */
   const containers = new Map(
     (topLevelBlocks ?? [])
       .filter((block) =>
-        holdsLine(footnoteLines, block) || (
-          CONTAINER_BLOCK_TYPES.has(block.type) &&
-          block.last > block.first &&
-          !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks)))
+        holdsLine(footnoteLines, block) ||
+        (CONTAINER_BLOCK_TYPES.has(block.type) && (
+          !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks)
+            ? block.last > block.first
+            // A list of task items with an item a checklist would show otherwise stays whole.
+            : !everyTaskLineShownExactly(block))))
       .map((block) => [block.first, block]),
   )
   let paragraph: string[] = []
   let paragraphFirstLine = 0
+  /**
+   * Adds source lines to the paragraph being read.
+   *
+   * @param first - First line to add.
+   * @param end - Line after the last one to add.
+   */
+  const addParagraphLines = (first: number, end: number) => {
+    if (paragraph.length === 0) paragraphFirstLine = first
+    paragraph.push(...lines.slice(first, end))
+  }
   const flushParagraph = () => {
     if (paragraph.length === 0) return
     const raw = paragraph.join('\n')
@@ -321,13 +395,18 @@ function scanBlocks(
     const url = link
       ? (resolveLink?.(link.href) ?? (!link.angle && isEmbeddableUrl(link.href) ? link.href : undefined))
       : undefined
-    if (link && url) {
-      const title = unescapeMarkdown(link.label).trim()
+    const title = link ? unescapeMarkdown(link.label).trim() : ''
+    // An embed shows its title as written, so a link whose text renders otherwise stays a
+    // paragraph, as does a link without text, which the embed would show as its URL.
+    if (
+      link && url && title !== '' && title.length <= MAX_TITLE_LENGTH && range.first === range.last &&
+      (!checkNative || nativeBlocks.shows('embed', range.first, title))
+    ) {
       blocks.push({
         id: createId('block'),
         type: 'embed',
         url,
-        ...(title ? { title: title.slice(0, MAX_TITLE_LENGTH) } : {}),
+        title,
       })
       return
     }
@@ -377,67 +456,80 @@ function scanBlocks(
 
     const heading = ATX_HEADING.exec(line)
     if (heading?.[1]) {
-      flushParagraph()
-      blocks.push({
-        type: 'raw-heading',
-        rawLevel: heading[1].length,
-        text: unescapeMarkdown(removeClosingHashes(heading[2] ?? '')),
-      })
+      const text = unescapeMarkdown(removeClosingHashes(heading[2] ?? ''))
+      // A heading shows its text as written, so one that renders otherwise stays a paragraph.
+      if (!checkNative || nativeBlocks.shows('heading', index, text)) {
+        flushParagraph()
+        blocks.push({ type: 'raw-heading', rawLevel: heading[1].length, text })
+        index += 1
+        continue
+      }
+      addParagraphLines(index, index + 1)
       index += 1
       continue
     }
 
     if (TASK_ITEM.test(line) && startsChecklist(lines, index, topLevelBlocks, checklistBlocks)) {
-      flushParagraph()
-      const items: DocumentChecklistItem[] = []
-      let task = TASK_ITEM.exec(line)
+      const tasks: Array<{ text: string; checked: boolean; shown: boolean }> = []
+      let end = index
+      let task: RegExpExecArray | null = TASK_ITEM.exec(line)
       while (task) {
-        items.push({
-          id: createId('item'),
-          text: unescapeMarkdown(rewrite((task[2] ?? '').trim())),
-          checked: task[1] !== ' ',
-        })
-        index += 1
-        task = startsChecklist(lines, index, topLevelBlocks, checklistBlocks) ? TASK_ITEM.exec(lines[index] ?? '') : null
+        tasks.push({ ...readTask(task), shown: showsTaskLineExactly(end) })
+        end += 1
+        task = startsChecklist(lines, end, topLevelBlocks, checklistBlocks) ? TASK_ITEM.exec(lines[end] ?? '') : null
       }
-      blocks.push({ id: createId('block'), type: 'checklist', items })
+      // A checklist item shows its text as written, so a list with an item that renders
+      // otherwise stays paragraph Markdown, whole.
+      if (tasks.every(({ shown }) => shown)) {
+        flushParagraph()
+        const items = tasks.map(({ text, checked }): DocumentChecklistItem => ({ id: createId('item'), text, checked }))
+        blocks.push({ id: createId('block'), type: 'checklist', items })
+      } else {
+        addParagraphLines(index, end)
+      }
+      index = end
       continue
     }
 
     const table = readTableStart(lines, index)
     if (table) {
-      flushParagraph()
       const columns = splitTableRow(line, rewrite)
       if (columns.length > MAX_TABLE_COLUMNS) {
         return { ok: false, code: 'table-too-large' }
       }
-      const rows: DocumentTableRow[] = []
-      let rowIndex = nextTableRowIndex(lines, table.delimiterIndex + 1, table.spaced)
+      /** The header, delimiter, and body row lines, which the table renders from. */
+      const tableLines = [line, lines[table.delimiterIndex] ?? '']
+      const rows: string[][] = []
+      let end = table.delimiterIndex + 1
+      let rowIndex = nextTableRowIndex(lines, end, table.spaced)
       while (rowIndex !== undefined) {
         if (rows.length === MAX_TABLE_ROWS) {
           return { ok: false, code: 'table-too-large' }
         }
-        const cells = splitTableRow(lines[rowIndex] ?? '', rewrite)
-        rows.push({
-          id: createId('row'),
-          cells: columns.map((_, column) => ({
-            id: createId('cell'),
-            text: cells[column] ?? '',
-          })),
-        })
-        index = rowIndex + 1
-        rowIndex = nextTableRowIndex(lines, index, table.spaced)
+        const rowLine = lines[rowIndex] ?? ''
+        const cells = splitTableRow(rowLine, rewrite)
+        tableLines.push(rowLine)
+        rows.push(columns.map((_, column) => cells[column] ?? ''))
+        end = rowIndex + 1
+        rowIndex = nextTableRowIndex(lines, end, table.spaced)
       }
-      index = Math.max(index, table.delimiterIndex + 1)
-      blocks.push({ id: createId('block'), type: 'table', columns, rows })
+      // A table cell shows its text as written, apart from links to other pages, so a table
+      // with a cell that renders otherwise stays paragraph Markdown.
+      if (!checkNative || nativeBlocks.showsTable(tableLines.map(rewrite), columns, rows)) {
+        flushParagraph()
+        const tableRows = rows.map((cells): DocumentTableRow => ({
+          id: createId('row'),
+          cells: cells.map((text) => ({ id: createId('cell'), text })),
+        }))
+        blocks.push({ id: createId('block'), type: 'table', columns, rows: tableRows })
+      } else {
+        addParagraphLines(index, end)
+      }
+      index = end
       continue
     }
 
-    if (THEMATIC_BREAK.test(line)) {
-      flushParagraph()
-      index += 1
-      continue
-    }
+    // No block shows a divider, so a thematic break stays in paragraph Markdown, which renders it.
 
     if (paragraph.length === 0) paragraphFirstLine = index
     paragraph.push(line)

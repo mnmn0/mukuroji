@@ -141,12 +141,14 @@ describe('Markdown import', () => {
     ])
   })
 
-  test('keeps lists, quotes, links, and HTML as plain paragraph text', () => {
+  test('keeps lists, quotes, links, HTML, and dividers as plain paragraph text', () => {
     const blocks = blocksOf('- one\n- two\n\n> quote\n\n[link](javascript:alert(1)) <b>x</b>\n\n---\n')
     expect(blocks).toEqual([
       { id: 'block-1', text: '- one\n- two', type: 'paragraph' },
       { id: 'block-2', text: '> quote', type: 'paragraph' },
       { id: 'block-3', text: '[link](javascript:alert(1)) <b>x</b>', type: 'paragraph' },
+      // No block shows a divider, so it stays in paragraph Markdown instead of being dropped.
+      { id: 'block-4', text: '---', type: 'paragraph' },
     ])
   })
 
@@ -477,10 +479,13 @@ describe('Markdown import of a file whose blocks reference each other', () => {
 
   test('keeps a reference link in a table cell from splitting the cell', () => {
     const blocks = blocksOf('| A | B |\n| - | - |\n| [guide][r] | x |\n\n[r]: <https://example.com/a|b> "T | U"')
-    expect(blocks[0]).toMatchObject({ type: 'table', columns: ['A', 'B'] })
+    // A table cell shows a link to another place as written, so the table stays paragraph
+    // Markdown, which renders the link in a cell of its own.
     const table = blocks[0]
-    if (table?.type !== 'table') throw new Error('The table should import.')
-    expect(table.rows.map((row) => row.cells.length)).toEqual([2])
+    if (table?.type !== 'paragraph') throw new Error('The table should stay a paragraph.')
+    const markup = renderParagraph(table.text)
+    expect(markup.match(/<td>/gu)).toHaveLength(2)
+    expect(markup).toContain('href="https://example.com/a%7Cb"')
   })
 
   test('refuses references that would make the page too large before writing them out', () => {
@@ -541,31 +546,112 @@ describe('Markdown import of a file whose blocks reference each other', () => {
       '# Heading[^3-1]\n\n[^3-1]: heading note',
       '[Guide[^4-1]](https://example.com/g)\n\n[^4-1]: link note',
     ]
-    const result = convert(`# Document\n\n${paragraphs.join('\n\n')}\n\n- [ ] see [guide](<https://example.com/g>)\n`)
+    // The reference link is written inline by the export, and a checklist item shows a link to
+    // another place as written, so this paragraph stays a paragraph too.
+    const inlined = '- [ ] see [guide](<https://example.com/g>)'
+    const result = convert(`# Document\n\n${[...paragraphs, inlined].join('\n\n')}\n`)
     if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
     expect(result.title).toBe('Document')
     expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
-      .toEqual([...paragraphs, 'checklist'])
-    // A reference link written inline by the export stays in the checklist item with its target.
-    expect(result.blocks[4]).toMatchObject({
-      type: 'checklist',
-      items: [{ text: 'see [guide](<https://example.com/g>)', checked: false }],
-    })
+      .toEqual([...paragraphs, inlined])
     for (const text of paragraphs.map((paragraph) => renderParagraph(paragraph))) {
       expect(text).toContain('data-footnote-ref')
     }
+  })
 
-    // A reference link has its destination written inline, so its block keeps the definition and
-    // stays native.
-    expect(blocksOf('- [ ] see [guide][g]\n\n# Head [g]\n\n[g]: https://example.com/g'))
-      .toMatchObject([
-        { type: 'checklist', items: [{ text: 'see [guide](<https://example.com/g>)' }] },
-        { type: 'heading', text: 'Head [g](<https://example.com/g>)' },
-      ])
-    // Without footnotes or references, the same blocks are still native.
-    expect(blocksOf('- [ ] task\n\n| A |\n| - |\n| 1 |\n\n# Heading\n\n[Guide](https://example.com/g)')
-      .map((block) => block.type))
-      .toEqual(['checklist', 'table', 'heading', 'embed'])
+  test('reads exported native blocks back into the same native blocks', () => {
+    // The server export of these blocks (see the native block export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts).
+    const exported = [
+      '# Plan \\#',
+      '## Price \\&amp; \\~\\~sale\\~\\~ for C# a \\#',
+      [
+        '- [ ] Read [Setup](/documents/doc-1) first',
+        '- [x] See https://example.com/x',
+        '- [ ] \\*\\*not bold\\*\\* \\& \\`not code\\` \\<b\\>',
+      ].join('\n'),
+      [
+        '| A | B \\| C |',
+        '| --- | --- |',
+        '| [Setup](/documents/doc-1) | line<br>break |',
+        '| \\~x\\~ |  |',
+      ].join('\n'),
+      '[Guide \\&amp; \\~more\\~](https://example.com/g)',
+    ].join('\n\n') + '\n'
+    const result = convert(exported)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Plan #')
+    expect(result.blocks).toMatchObject([
+      { type: 'heading', level: 1, text: 'Price &amp; ~~sale~~ for C# a #' },
+      {
+        type: 'checklist',
+        items: [
+          { text: 'Read [Setup](/documents/doc-1) first', checked: false },
+          { text: 'See https://example.com/x', checked: true },
+          { text: '**not bold** & `not code` <b>', checked: false },
+        ],
+      },
+      {
+        type: 'table',
+        columns: ['A', 'B | C'],
+        rows: [
+          { cells: [{ text: '[Setup](/documents/doc-1)' }, { text: 'line\nbreak' }] },
+          { cells: [{ text: '~x~' }, { text: '' }] },
+        ],
+      },
+      { type: 'embed', url: 'https://example.com/g', title: 'Guide &amp; ~more~' },
+    ])
+  })
+
+  test('makes a native block only of Markdown the native block shows as it renders', () => {
+    /**
+     * Converts Markdown and names each block by its type, or by its text when it is a paragraph.
+     *
+     * @param source - Markdown text.
+     * @returns The type or paragraph text of each block.
+     */
+    const kinds = (source: string) =>
+      blocksOf(source).map((block) => block.type === 'paragraph' ? block.text : block.type)
+    // A heading shows plain text; a bare URL shows the same characters. (A lone `#` heading
+    // would become the title.)
+    expect(kinds('## Plain \\*text\\*\n\n## See https://example.com')).toEqual(['heading', 'heading'])
+    for (const heading of ['# **Bold**', '# Use `code`', '# [Guide](https://example.com)', '# a &amp; b', '# <b>x</b>', '# ~~gone~~']) {
+      expect(kinds(heading)).toEqual([heading])
+    }
+    // A checklist item shows plain text and links to other pages.
+    expect(kinds('- [ ] plain \\_x\\_\n- [x] [Setup](/documents/doc-1) and www.example.com')).toEqual(['checklist'])
+    for (const item of [
+      '- [ ] read [guide](https://example.com)',
+      '- [ ] **important**',
+      '- [ ] run `make`',
+      '- [ ] <b>x</b>',
+      '- [ ] ~~done~~',
+      '- [ ] a &amp; b',
+      '- [ ] ![pic](/i.png)',
+      '- [ ] [Setup](/documents/doc-1 "Title")',
+    ]) {
+      expect(kinds(`- [ ] plain\n${item}`)).toEqual([`- [ ] plain\n${item}`])
+    }
+    // Five spaces after the marker make the item's text indented code.
+    expect(kinds('-     [ ] code')).toEqual(['-     [ ] code'])
+    // A list of task items stays whole, blank lines included, when one item renders otherwise.
+    expect(kinds('- [ ] plain\n\n- [ ] **bold**')).toEqual(['- [ ] plain\n\n- [ ] **bold**'])
+    // A table cell shows plain text, links to other pages, and line breaks.
+    expect(kinds('| A | B |\n| - | - |\n| [Setup](/documents/doc-1) | a<br>b |')).toEqual(['table'])
+    for (const cell of ['**x**', '[x](https://example.com)', '`x`', '<i>x</i>']) {
+      const table = `| A | B |\n| - | - |\n| ${cell} | y |`
+      expect(kinds(table)).toEqual([table])
+    }
+    // Past the parse budget of one file, what still needs a parse stays paragraph Markdown,
+    // which renders as written.
+    const items = (count: number) => Array.from({ length: count }, () => '- [ ] a\\_b').join('\n')
+    expect(kinds(items(100))).toEqual(['checklist'])
+    expect(kinds(items(4000))).toEqual([items(4000)])
+    // An embed shows its title as plain text.
+    expect(kinds('[Guide](https://example.com/g)')).toEqual(['embed'])
+    for (const link of ['[**Guide**](https://example.com/g)', '[a &amp; b](https://example.com/g)', '[](https://example.com/g)']) {
+      expect(kinds(link)).toEqual([link])
+    }
   })
 
   test('reads an exported page back into blocks that render as the page did', () => {

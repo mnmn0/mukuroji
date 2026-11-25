@@ -84,7 +84,10 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   link と画像は inline の link に書き換えて定義を消し、脚注の label は `<block の番号>-<番号>` に付け替えます。
   定義のない `[^…]` は `[\^…]` と書き、隣の block とつながる段落の間には何も表示しない定義
   `[mukuroji-block-boundary]: #` を入れます。参照の書き換えで増える長さが 1 回で 1,000,000 文字を超える
-  段落は、書き換えずに平文で書きます。response の形と field は変わりません（#422）。
+  段落は、書き換えずに平文で書きます。見出し・チェック項目・表の cell・埋め込みのタイトルは、`&` と `~` と
+  見出し末尾の `#` も escape して書いた文字のとおりに表示されるようにし、チェック項目と表の cell の中の
+  ページへの link（`[label](/documents/<id>)`）は escape せず Markdown の link として書きます。
+  response の形と field は変わりません（#422）。
 
 ### Fixed
 
