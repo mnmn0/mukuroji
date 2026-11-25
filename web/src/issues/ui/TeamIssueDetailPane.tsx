@@ -732,6 +732,21 @@ function IssueDetailContent({
   }
 
   /**
+   * Saves only a new workflow status for the handoff Ready action, under the same pending lock as the editor form.
+   *
+   * @param workflowStatusId - Target workflow status ID.
+   */
+  const moveToWorkflowStatus = async (workflowStatusId: string) => {
+    if (!onUpdateIssue) return
+    setIssueUpdatePending(true)
+    try {
+      await onUpdateIssue(issue.id, { workflowStatusId })
+    } finally {
+      setIssueUpdatePending(false)
+    }
+  }
+
+  /**
    * Saves the estimate, remaining effort, and manual progress on their own, outside the editor form.
    *
    * @param change - Validated effort and progress change.
@@ -1271,7 +1286,7 @@ function IssueDetailContent({
             accessToken={accessToken}
             configuration={configuration}
             includeDescription={hasDescriptionSection}
-            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending ? (workflowStatusId) => onUpdateIssue(issue.id, { workflowStatusId }) : undefined}
+            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending ? moveToWorkflowStatus : undefined}
             t={t}
             task={issue}
           />
