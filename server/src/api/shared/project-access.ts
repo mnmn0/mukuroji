@@ -18,6 +18,7 @@ import {
   type WorkspaceMemberStatus,
   type WorkspaceRole,
 } from '../../modules/workspace-access/workspace-access'
+import { isManagerProjectAccess } from '../../modules/workspace-access/domain/member-deactivation-blockers'
 import { type CustomerAuthorizationScope } from '../../modules/customers'
 import { type TriageAuthorizationConditionChecks } from '../../modules/triage'
 import {
@@ -693,7 +694,7 @@ export async function requireWorkspaceMemberHasNoManagedProjects(
   memberKey: string,
 ) {
   const managedProject = (await workspaceDependencies.projectDirectory.getProjectAccessList(directoryId, memberKey))
-    .find((access) => access.role === 'manager')
+    .find(isManagerProjectAccess)
 
   if (managedProject) {
     throw new WorkspaceAccessError(

@@ -89,6 +89,8 @@ function createDependencies(
     signedOut: [] as string[],
     reconciled: [] as unknown[],
     deprovisioned: [] as unknown[],
+    /** Credential revocations and reconciliations in the order they ran. */
+    sequence: [] as string[],
   }
   const dependencies = {
     enterpriseIdentity: {
@@ -133,6 +135,7 @@ function createDependencies(
         auditContext: unknown,
       ) {
         calls.reconciled.push({ input, auditContext })
+        calls.sequence.push('reconcile')
         return {} as never
       },
       async deprovisionDirectoryMember(
@@ -181,6 +184,10 @@ function createDependencies(
         calls.signedOut.push(userId)
       },
     },
+    async revokeMemberCredentials(_workspaceId: string, memberKey: string, actorId: string) {
+      calls.sequence.push(`revoke:${memberKey}:${actorId}`)
+      return { revokedApiKeyIds: [], revokedOAuthAppIds: [] }
+    },
     ...overrides,
   } as unknown as EnterpriseScimGroupJobWorkerDependencies
   return { calls, dependencies }
@@ -212,6 +219,33 @@ test('applies an active group member with guest role, revision fence, audit, and
       occurredAt: now,
     },
   })
+})
+
+test('revokes old credentials before the directory reactivates a deactivated member (ADR 0095)', async () => {
+  const active = createDependencies()
+  await applyEnterpriseScimGroupJobUser(createApplyInput(), active.dependencies)
+  // Reconciling a member who is already active leaves their credentials alone.
+  expect(active.calls.sequence).toEqual(['reconcile'])
+
+  const base = createDependencies()
+  const { calls, dependencies } = createDependencies({
+    workspaceAccess: {
+      ...base.dependencies.workspaceAccess,
+      async getMember(workspaceId, memberKey) {
+        const member = await base.dependencies.workspaceAccess.getMember(workspaceId, memberKey)
+        return member && { ...member, status: 'deactivated' }
+      },
+      async reconcileDirectoryMember(workspaceId, input, auditContext) {
+        calls.sequence.push('reconcile')
+        return await base.dependencies.workspaceAccess.reconcileDirectoryMember(workspaceId, input, auditContext)
+      },
+    },
+  })
+
+  await applyEnterpriseScimGroupJobUser(createApplyInput(), dependencies)
+
+  expect(calls.sequence).toEqual(['revoke:managed@example.com:scim-directory:idp-1', 'reconcile'])
+  expect(calls.enabled).toEqual(['managed@example.com'])
 })
 
 test('guards inactive users before deprovisioning and signs out only after success', async () => {

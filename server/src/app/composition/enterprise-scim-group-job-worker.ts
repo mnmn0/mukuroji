@@ -17,6 +17,9 @@ import {
   createEnterpriseScimGroupJobProcessor,
 } from '../../modules/enterprise-identity/enterprise-scim-group-job-worker'
 import { DynamoDbPlanningClient } from '../../modules/planning/planning'
+import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import type { MemberCredentialRevoker } from '../../modules/workspace-access'
+import { createMemberCredentialRevoker } from './member-credential-revoker'
 import { createProductionTenantWorkspaceAccess } from './tenant-administration'
 
 /**
@@ -36,5 +39,20 @@ export function createEnterpriseScimGroupJobWorkerProcessor():
     planning: new DynamoDbPlanningClient(),
     projectManagerGuard: new DynamoDbEnterpriseScimProjectManagerGuard(),
     cognito: new AwsEnterpriseScimGroupJobCognitoClient(),
+    revokeMemberCredentials: createLazyMemberCredentialRevoker(),
   })
+}
+
+/**
+ * Creates a credential revoker that connects to the developer platform store on first use, so
+ * only a directory reactivation depends on that store's configuration.
+ *
+ * @returns The revoker.
+ */
+function createLazyMemberCredentialRevoker(): MemberCredentialRevoker {
+  let revoker: MemberCredentialRevoker | undefined
+  return (workspaceId, memberKey, actorId) => {
+    revoker ??= createMemberCredentialRevoker(createDynamoDbDeveloperPlatformAdapters())
+    return revoker(workspaceId, memberKey, actorId)
+  }
 }

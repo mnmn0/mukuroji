@@ -53,7 +53,7 @@ const reasonCategories: ReadonlyArray<readonly [NotificationCategory, ReadonlySe
   ])],
   ['status', new Set(['status-change', 'archive-change'])],
   ['comment', new Set(['reply'])],
-  ['reminder', new Set(['timesheet', 'weekly-report', 'weekly-report-escalation'])],
+  ['reminder', new Set(['timesheet', 'weekly-report', 'weekly-report-escalation', 'member-access-expiry'])],
 ]
 
 const dueEventTypes = new Set([

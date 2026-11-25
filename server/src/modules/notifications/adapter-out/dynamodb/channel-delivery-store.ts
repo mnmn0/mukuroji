@@ -319,6 +319,14 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     (typeof row.weeklyReportWeekStart !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(row.weeklyReportWeekStart))
   ) throw invalidRow()
   if (
+    row.accessExpiryMemberKey !== undefined &&
+    (typeof row.accessExpiryMemberKey !== 'string' || !row.accessExpiryMemberKey.trim())
+  ) throw invalidRow()
+  if (
+    row.accessExpiresAt !== undefined &&
+    (typeof row.accessExpiresAt !== 'string' || !Number.isFinite(Date.parse(row.accessExpiresAt)))
+  ) throw invalidRow()
+  if (
     row.timeEntryIds !== undefined &&
     (!Array.isArray(row.timeEntryIds) ||
       row.timeEntryIds.length === 0 ||
@@ -345,6 +353,8 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
       ? { weeklyReportAuthorMemberKey: row.weeklyReportAuthorMemberKey }
       : {}),
     ...(typeof row.weeklyReportWeekStart === 'string' ? { weeklyReportWeekStart: row.weeklyReportWeekStart } : {}),
+    ...(typeof row.accessExpiryMemberKey === 'string' ? { accessExpiryMemberKey: row.accessExpiryMemberKey } : {}),
+    ...(typeof row.accessExpiresAt === 'string' ? { accessExpiresAt: row.accessExpiresAt } : {}),
     ...(timeEntryIds ? { timeEntryIds } : {}),
     ...(typeof row.timesheetDueBefore === 'string' ? { timesheetDueBefore: row.timesheetDueBefore } : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
