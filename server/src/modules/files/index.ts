@@ -36,6 +36,7 @@ export {
   type FileProofingCollection,
   type FileProofingFileLookup,
   type FileProofingScope,
+  type FileTypeSettingsSource,
   type FileUploadSession,
   type FileVersionAccess,
   type ListReviewerApprovalsOptions,

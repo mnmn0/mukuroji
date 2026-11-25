@@ -11,7 +11,8 @@ export interface SlackNotificationJobInput extends ScheduleWorkerInput {
 }
 
 /**
- * Defines the every-minute job that drains the sparse Slack delivery queue.
+ * Defines the every-minute job that drains the sparse Slack delivery queue: personal
+ * notifications and Team and Project channel posts.
  *
  * @param scope - Stack scope used to preserve stable construct identities.
  * @param input - Shared storage, configuration, runtime controls, and the web origin.
@@ -75,7 +76,8 @@ export function defineSlackNotificationJob(
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['cognito-idp:AdminListGroupsForUser'], resources: [parameters.cognitoUserPoolArn] }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
-        resources: [scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: 'mukuroji/automation-webhooks/*/slack/*', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
+        // Personal destinations, and Team and Project channel destinations (#399, ADR 0086).
+        resources: ['slack', 'slack-channel'].map((directory) => scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: `mukuroji/automation-webhooks/*/${directory}/*`, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })),
       }));
     },
   };

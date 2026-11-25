@@ -7,7 +7,9 @@ import { useMemo, useRef, useState } from 'react'
 import { createMutationRequestRunner, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { AutomationManagementPanel } from './AutomationManagementPanel'
+import type { AutomationRuleEditorOptions } from './AutomationRuleDefinitionEditor'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
   AutomationApiError,
@@ -16,6 +18,10 @@ import {
   createAutomationRule,
   createAutomationTemplate,
   createRecurringWork,
+  deleteAutomationRule,
+  deleteAutomationTemplate,
+  deleteRecurringWork,
+  dryRunAutomationRule,
   duplicateAutomationTemplate,
   getAutomationTemplateApplication,
   pauseAutomationInboundWebhookEndpoint,
@@ -90,6 +96,19 @@ export function AutomationManagementPanelContainer({
   }
 
   const initialTab = readInitialTab()
+  const workspaceAccess = useWorkspaceAccess(accessToken, canManage)
+  const ruleEditorOptions = useMemo<AutomationRuleEditorOptions>(() => ({
+    members: (workspaceAccess.data?.members ?? [])
+      .filter((member) => member.status === 'active')
+      .map((member) => ({ id: member.memberKey, label: member.name ?? member.email })),
+    teams: teams.map((team) => ({ id: team.id, label: team.name })),
+    projects: listProjectOptions(teams),
+    statuses: data?.statusOptions ?? [],
+    customFields: data?.customFieldOptions ?? [],
+    workItemTemplates: (data?.templates ?? [])
+      .filter((template) => template.kind === 'work-item' && template.enabled)
+      .map((template) => ({ id: template.id, label: template.name })),
+  }), [data, teams, workspaceAccess.data])
   const planningParentsQuery = useAutomationPlanningParents(
     accessToken,
     canManage && (data?.templates ?? []).some(hasPlanningEntities),
@@ -108,6 +127,7 @@ export function AutomationManagementPanelContainer({
       canViewWebhooks={canManage}
       readOnly={!canManage}
       recurringWork={data?.recurringWork ?? []}
+      ruleEditorOptions={ruleEditorOptions}
       rules={data?.rules ?? []}
       teams={teams.map((team) => ({ id: team.id, name: team.name }))}
       templates={data?.templates ?? []}
@@ -133,6 +153,20 @@ export function AutomationManagementPanelContainer({
           (context) => updateAutomationRule(accessToken, rule.id, input, context),
         )
       } : undefined}
+      onUpdateRule={canManage ? (rule, input) => runMutation(
+        `rule:update:${rule.id}`,
+        input,
+        (context) => updateAutomationRule(accessToken, rule.id, input, context),
+      ) : undefined}
+      onDeleteRule={canManage ? (rule) => {
+        const input = { expectedRevision: rule.revision }
+        return runMutation(
+          `rule:delete:${rule.id}`,
+          input,
+          (context) => deleteAutomationRule(accessToken, rule.id, input, context),
+        )
+      } : undefined}
+      onDryRunRule={canManage ? (input) => dryRunAutomationRule(accessToken, input) : undefined}
       onCreateWebhook={canManage ? (input) => runMutation(
         'webhook:create',
         input,
@@ -212,6 +246,14 @@ export function AutomationManagementPanelContainer({
         { expectedRevision: template.revision },
         (context) => duplicateAutomationTemplate(accessToken, template.id, context),
       ) : undefined}
+      onDeleteTemplate={canManage ? (template) => {
+        const input = { expectedRevision: template.revision }
+        return runMutation(
+          `template:delete:${template.id}`,
+          input,
+          (context) => deleteAutomationTemplate(accessToken, template.id, input, context),
+        )
+      } : undefined}
       onUpdateTemplate={canManage ? (template, input) => runMutation(
         `template:update:${template.id}`,
         input,
@@ -255,6 +297,14 @@ export function AutomationManagementPanelContainer({
           (context) => updateRecurringWork(accessToken, definition.id, input, context),
         )
       } : undefined}
+      onDeleteRecurringWork={canManage ? (definition) => {
+        const input = { expectedRevision: definition.revision }
+        return runMutation(
+          `recurring:delete:${definition.id}`,
+          input,
+          (context) => deleteRecurringWork(accessToken, definition.id, input, context),
+        )
+      } : undefined}
       onRetryExecution={canManage ? (execution) => runMutation(
         `execution:retry:${execution.id}`,
         { executionId: execution.id, attempts: execution.attempts },
@@ -273,6 +323,21 @@ export function AutomationManagementPanelContainer({
 function hasPlanningEntities(template: AutomationTemplate) {
   return template.kind === 'project' &&
     ((template.payload.phases?.length ?? 0) > 0 || (template.payload.milestones?.length ?? 0) > 0)
+}
+
+/**
+ * Lists each Project once, labelled with its Team, for the rule editor's Project picker.
+ *
+ * @param teams - Teams with their Projects.
+ * @returns Project options in Team order.
+ */
+function listProjectOptions(teams: ProjectDirectoryTeam[]) {
+  const seen = new Set<string>()
+  return teams.flatMap((team) => team.projects.flatMap((project) => {
+    if (seen.has(project.id)) return []
+    seen.add(project.id)
+    return [{ id: project.id, label: `${team.name} / ${project.name}` }]
+  }))
 }
 
 function readInitialTab() {

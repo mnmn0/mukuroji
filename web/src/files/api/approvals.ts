@@ -1,7 +1,8 @@
 import type { ApprovalRequest } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { FileResourceScope } from '../model/fileScope'
 import { FilesApiError } from './errors'
-import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
+import { createFileOwnerPath } from './fileScopePath'
 
 /**
  * approval request 作成入力です。
@@ -62,20 +63,17 @@ export type CancelApprovalRequestInput = {
   expectedRevision: number
 }
 
-const filesApiBaseUrl = resolveApiBaseUrl()
-
 /**
- * Work Item の file version に approval request を作成します。
+ * Work Item または Project の file version に approval request を作成します。
  */
 export function createApprovalRequest(
-  teamId: string,
-  issueId: string,
+  scope: FileResourceScope,
   accessToken: string,
   input: CreateApprovalRequestInput,
   context: MutationRequestContext,
 ) {
   return requestJson<{ approval: ApprovalRequest }>(
-    `${createWorkItemPath(teamId, issueId)}/approvals`,
+    `${createFileOwnerPath(scope)}/approvals`,
     accessToken,
     {
       body: JSON.stringify(input),
@@ -92,15 +90,14 @@ export function createApprovalRequest(
  * reviewer の approval decision を保存します。
  */
 export function createApprovalDecision(
-  teamId: string,
-  issueId: string,
+  scope: FileResourceScope,
   approvalId: string,
   accessToken: string,
   input: CreateApprovalDecisionInput,
   context: MutationRequestContext,
 ) {
   return requestJson<{ approval: ApprovalRequest }>(
-    `${createWorkItemPath(teamId, issueId)}/approvals/${encodeURIComponent(approvalId)}/decisions`,
+    `${createFileOwnerPath(scope)}/approvals/${encodeURIComponent(approvalId)}/decisions`,
     accessToken,
     {
       body: JSON.stringify(input),
@@ -117,15 +114,14 @@ export function createApprovalDecision(
  * Requester または cancel 権限を持つ user が approval request を取り消します。
  */
 export function cancelApprovalRequest(
-  teamId: string,
-  issueId: string,
+  scope: FileResourceScope,
   approvalId: string,
   accessToken: string,
   input: CancelApprovalRequestInput,
   context: MutationRequestContext,
 ) {
   return requestJson<{ approval: ApprovalRequest }>(
-    `${createWorkItemPath(teamId, issueId)}/approvals/${encodeURIComponent(approvalId)}/cancel`,
+    `${createFileOwnerPath(scope)}/approvals/${encodeURIComponent(approvalId)}/cancel`,
     accessToken,
     {
       body: JSON.stringify(input),
@@ -136,10 +132,6 @@ export function cancelApprovalRequest(
       method: 'POST',
     },
   )
-}
-
-function createWorkItemPath(teamId: string, issueId: string) {
-  return `${filesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`
 }
 
 async function requestJson<TResponse>(

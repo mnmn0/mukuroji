@@ -409,6 +409,34 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/notification-reminders',
     permission: 'teams.manage',
   },
+  // Slack destinations (#399): Team channels belong to Team managers, Project channels to Project
+  // managers; the routes then check the caller's role on that Team or Project.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/notification-channel',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/notification-channel*',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel*',
+    permission: 'projects.manage',
+  },
+  // The caller's own Slack destination changes no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/notification-preferences/slack-destination*',
+    permission: 'workspace.read',
+  },
   {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
@@ -481,6 +509,16 @@ const enterpriseRoutePermissionRules = [
     method: '*',
     pathPattern: '/api/teams/:teamId/projects/:projectId/files*',
     permission: 'files.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/deliverables',
+    permission: 'files.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/approvals*',
+    permission: 'files.approve',
   },
   {
     method: '*',
@@ -850,6 +888,13 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'GET',
     pathPattern: '/api/ai-assistance*',
+    permission: 'workspace.read',
+  },
+  // Answering a question about one's own request is self-service; the route still proves the
+  // member sent the request.
+  {
+    method: 'POST',
+    pathPattern: '/api/my-requests/:submissionId/replies',
     permission: 'workspace.read',
   },
   { method: 'GET', pathPattern: '/api/*', permission: 'workspace.read' },

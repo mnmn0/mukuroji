@@ -136,8 +136,14 @@ async function hasWorkItemScopeAccess(
   if (snapshot.workspaceId !== scope.workspaceId) return false
   const boundary = resolveNotificationRecipientBoundary(snapshot, memberKey, member.email, member.role)
   if (!boundary.allowed) return false
+  // A ceiling the Workspace configured binds every route. Without a configured policy, the
+  // request boundary applies the default external ceiling only to Enterprise-evaluated access and
+  // leaves legacy access to the legacy handlers, so the default ceiling is applied below with the
+  // Enterprise evaluation only. The default holds every read permission, so read checks are the
+  // same either way; a write-like permission such as `files.approve` follows the request boundary.
   if (
     boundary.permissionCeiling &&
+    snapshot.policy !== undefined &&
     !scope.permissions.every((permission) => boundary.permissionCeiling?.includes(permission))
   ) {
     return false

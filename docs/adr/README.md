@@ -100,8 +100,16 @@
 | [0074](0074-member-display-name-on-member-row.md) | メンバーの表示名を member row に保存し、本人と管理者が version 条件付きの更新で変える。SCIM の member と Cognito の `name` は変えない | 提案 |
 | [0075](0075-workload-time-off-approval-and-row-retention.md) | 要員計画の休暇は承認済みだけを capacity から引き、取消済みと古い row を書き込みのたびに整理する | 提案 |
 | [0076](0076-workspace-wide-time-period-close.md) | Workspace 単位の月の締めは Team ごとの締め row をまとめて作る | 提案 |
+| [0077](0077-time-budget-per-period.md) | 期間ごとの予算は、期間を key に含めた別の予算 row として保存する | 提案 |
 | [0081](0081-notification-web-push-transport.md) | 通知の Web Push を自前の RFC 8291 暗号化と VAPID で送り、Email と同じ配信 queue に push channel を足す | 提案 |
 | [0082](0082-notification-email-digest-and-feedback.md) | 通知 Email の digest を配信時にまとめ、SES の bounce・complaint を EventBridge と SQS で受けて宛先を止める | 提案 |
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
 | [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
+| [0085](0085-workflow-transition-actor-roles-and-status-requirements.md) | Workflow の遷移を実行できる役割と status ごとの必須項目を configuration に持ち、人の操作だけに許す | 提案 |
+| [0086](0086-slack-destinations-and-channel-posts.md) | Slack の送信先を画面から登録し、Project・Team の channel 投稿を既存の Slack index に相乗りさせる | 提案 |
+| [0088](0088-requester-index-and-scopeless-notifications.md) | 依頼者ごとの索引行を Request Intake table に置き、依頼者への通知を scope なしの event で届ける | 提案 |
+| [0090](0090-automation-due-soon-and-business-day-schedules.md) | 期限前の rule は通知用の期限 index から Work Item を選び、営業日の繰り返しは実行時に Team の稼働カレンダーで数える | 提案 |
+| [0093](0093-project-deliverables-and-project-file-approval.md) | Project の成果物一覧を Work Item の閲覧判定から読み、Project file の承認を Project partition に置く | 提案 |
+| [0094](0094-workspace-file-type-policy.md) | 添付できるファイル形式を contracts の catalog で持ち、Workspace は既定との差分だけを tenant profile に保存する | 提案 |
 | [0095](0095-member-offboarding-and-access-expiry.md) | メンバーの利用期限を読み取り時に効かせ、毎時の job で無効化する。無効化で本人の API キーを失効する | 提案 |
+| [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |

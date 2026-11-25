@@ -62,6 +62,7 @@ import {
 } from './work-item-access'
 import {
   getWorkItemConfigurationTableName,
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { requireActiveWorkspaceAssignee, type TeamPermissionReadContext } from './workspace-access'
@@ -187,6 +188,7 @@ export async function preflightProjectTemplateWorkItems(
         teamId,
         normalizeTeamIssueInput(createTemplateWorkItemBody(principal, workItem), team),
         configuration,
+        AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
       )
       typeIds[workItem.index] = configured.workItemTypeId
       const parentTypeId = workItem.parentIndex === undefined ? undefined : typeIds[workItem.parentIndex]
@@ -249,7 +251,13 @@ export async function createProjectTemplateWorkItems(
     const projectFence = await requireAssignedProjectAcceptsNewWorkItems(directoryId, team, projectId)
     // The schedule keeps the Team calendar pinned when the application was reserved, so its
     // working-day offsets and durations keep their template meaning on every retry (ADR 0058).
-    const configuredBody = await prepareConfiguredCreateWorkItem(directoryId, teamId, body, configuration)
+    const configuredBody = await prepareConfiguredCreateWorkItem(
+      directoryId,
+      teamId,
+      body,
+      configuration,
+      AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
+    )
     const response = await workItemDependencies.teamIssues.createTeamIssue(
       directoryId,
       teamId,

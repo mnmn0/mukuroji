@@ -2,10 +2,12 @@
 export type ApprovalNotificationSource = {
   /** Canonical tenant identifier. */
   workspaceId: string
-  /** Parent Work Item's owning Team. */
+  /** Team that owns the parent Work Item or Project. */
   teamId: string
-  /** Parent Work Item identifier. */
-  issueId: string
+  /** Parent Work Item identifier; absent for a Project file approval. */
+  issueId?: string
+  /** Parent Project identifier, read only when the approval has no parent Work Item. */
+  projectId?: string
   /** Approval identifier captured by the audit event. */
   approvalId: string
   /** Captured file subject, absent for legacy rows or Work Item approvals. */

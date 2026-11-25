@@ -33,6 +33,16 @@ export interface AutomationRecurringSchedulePort {
     lastRunAt: string,
     nextRunAt: string,
   ): Promise<RecurringWork>
+  /**
+   * Moves a recurring definition's next run later without completing a slot, for a business-day
+   * schedule whose working day falls after the run the definition was due for.
+   */
+  deferRecurringWork(
+    workspaceId: string,
+    recurringWorkId: string,
+    expectedRevision: number,
+    nextRunAt: string,
+  ): Promise<RecurringWork>
   /** Deletes a recurring definition with revision compare-and-swap. */
   deleteRecurringWork(
     workspaceId: string,

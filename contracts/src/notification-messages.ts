@@ -110,9 +110,37 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'Health update published ({health}): {excerpt}',
     ja: 'Health update が公開されました（{health}）: {excerpt}',
   },
+  'automation.execution-dead-lettered': {
+    en: 'Automation rule "{ruleName}" failed and stopped retrying.',
+    ja: 'Automation rule「{ruleName}」の実行が失敗し、再試行を止めました。',
+  },
+  'automation.rule-rate-limited': {
+    en: 'Automation rule "{ruleName}" was skipped because it reached its rate limit.',
+    ja: 'Automation rule「{ruleName}」が実行回数の上限に達したため、実行を飛ばしました。',
+  },
   'analytics.report-delivered': {
     en: 'A scheduled report snapshot is ready.',
     ja: '定期配信のスナップショットができました。',
+  },
+  'request.more-info-requested': {
+    en: 'The team asked a question about your request.',
+    ja: '依頼について担当から質問が届きました。',
+  },
+  'request.rejected': {
+    en: 'Your request was declined.',
+    ja: '依頼は見送られました。',
+  },
+  'request.duplicate': {
+    en: 'Your request was closed as a duplicate of another request.',
+    ja: '依頼は別の依頼と重複として整理されました。',
+  },
+  'request.accepted': {
+    en: 'Your request was accepted as a Work Item.',
+    ja: '依頼が受理され、Work Item になりました。',
+  },
+  'request.completed': {
+    en: 'The Work Item for your request was completed.',
+    ja: '依頼の Work Item が完了しました。',
   },
 } as const satisfies Record<string, Record<NotificationMessageLocale, string>>
 

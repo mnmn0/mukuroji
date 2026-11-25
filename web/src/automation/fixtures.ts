@@ -10,6 +10,7 @@ import {
   type AutomationTemplateApplication,
   type RecurringWork,
 } from '@mukuroji/contracts'
+import type { AutomationRuleEditorOptions } from './ui/AutomationRuleDefinitionEditor'
 
 const fixtureTimestamp = '2026-07-16T00:00:00.000Z'
 
@@ -422,4 +423,24 @@ export const triageInboundWebhookEndpointFixture: AutomationInboundWebhookEndpoi
   purpose: 'triage',
   triageRouting: { teamId: 'core-team' },
   endpointUrl: 'https://api.example.com/api/automation/inbound-webhooks/triage-opaque-endpoint',
+}
+
+/** Picker choices of the rule definition editor, as an administrator of the demo Workspace sees them. */
+export const automationRuleEditorOptionsFixture: AutomationRuleEditorOptions = {
+  members: [
+    { id: 'owner@example.com', label: 'Owner' },
+    { id: 'sato@example.com', label: 'Sato' },
+  ],
+  teams: [{ id: 'core-team', label: 'Core Team' }],
+  projects: [{ id: 'project-1', label: 'Core Team / Website renewal' }],
+  statuses: [
+    { id: 'in-progress', label: 'In progress' },
+    { id: 'in-review', label: 'In review' },
+    { id: 'done', label: 'Done' },
+  ],
+  customFields: [
+    { id: 'estimate', label: 'Estimate', valueType: 'number' },
+    { id: 'customer', label: 'Customer' },
+  ],
+  workItemTemplates: [{ id: 'template-onboarding', label: 'Onboarding checklist' }],
 }

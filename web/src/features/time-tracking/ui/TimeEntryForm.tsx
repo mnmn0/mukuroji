@@ -4,6 +4,7 @@ import type { TimeEntryDraftInput } from '../api/timeEntries'
 import { maxTimeEntryMinutes } from '../model/timeEntryLifecycle'
 import { countLocalDaysBetween, resolveLocalInstant, shiftLocalDate, toLocalDateKey, toLocalTimeInput } from '../model/timePeriod'
 import { describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
+import { useTimeEntryFormSessionDraft } from './useTimeEntryFormSessionDraft'
 
 /** A Work Item a member may record time on. */
 export type TimeEntryWorkItemOption = {
@@ -29,6 +30,11 @@ export type TimeEntryFormProps = {
   onSave: (input: TimeEntryDraftInput) => Promise<void>
   /** Closes the form without saving. */
   onCancel: () => void
+  /**
+   * Identifies a new entry's form, so its input survives an ended session and comes back after
+   * the same account signs in again. Without it nothing is kept.
+   */
+  sessionDraftKey?: string
 }
 
 /**
@@ -46,18 +52,31 @@ export function TimeEntryForm({
   fixedWorkItemId,
   onCancel,
   onSave,
+  sessionDraftKey,
   t,
   workItemOptions = [],
 }: TimeEntryFormProps) {
   const id = useId()
   const [error, setError] = useState<string>()
   const [isSaving, setIsSaving] = useState(false)
-  const selectedWorkItemId = entry?.workItemId ?? fixedWorkItemId
-  const hasSelectedOption = workItemOptions.some((option) => option.id === selectedWorkItemId)
   const [startDate, setStartDate] = useState(() => entry ? toLocalDateKey(entry.startAt) : defaultDate)
   const [endDate, setEndDate] = useState(() => entry ? toLocalDateKey(entry.endAt) : defaultDate)
   // Last complete start date, so a date typed in pieces still moves the end date once it is whole.
   const [anchorStartDate, setAnchorStartDate] = useState(startDate)
+  // Held in state, so the chosen Work Item stays selected while the options load or change.
+  const [selectedWorkItemId, setSelectedWorkItemId] = useState(() => entry?.workItemId ?? fixedWorkItemId ?? '')
+  const sessionDraft = useTimeEntryFormSessionDraft(sessionDraftKey, (draft) => {
+    if (draft.fields.workItemId !== undefined) setSelectedWorkItemId(draft.fields.workItemId)
+    const restoredStartDate = draft.fields.date
+    const restoredEndDate = draft.fields.endDate
+    if (restoredStartDate !== undefined) {
+      setStartDate(restoredStartDate)
+      setAnchorStartDate(restoredStartDate)
+    }
+    if (restoredEndDate !== undefined) setEndDate(restoredEndDate)
+  })
+  const restoredFields = sessionDraft.restored?.fields
+  const hasSelectedOption = workItemOptions.some((option) => option.id === selectedWorkItemId)
 
   /**
    * Moves the start date and carries the end date along by the same number of days.
@@ -116,6 +135,7 @@ export function TimeEntryForm({
     setIsSaving(true)
     try {
       await onSave({ workItemId, startAt, endAt, description: readText('description'), billable: data.get('billable') === 'on' })
+      sessionDraft.forget()
     } catch (saveError) {
       setError(describeTimeTrackingFailure(t, saveError))
     } finally {
@@ -127,18 +147,24 @@ export function TimeEntryForm({
     <form
       aria-label={entry ? t('timeTracking.form.editTitle') : t('timeTracking.form.createTitle')}
       className="grid min-w-0 gap-3 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3"
+      key={sessionDraft.formKey}
       noValidate
+      onChange={sessionDraft.handleChange}
       onSubmit={(event) => { void submit(event) }}
     >
+      {sessionDraft.restored ? (
+        <p className="text-xs font-semibold text-fg-amber-900" role="status">{t('timeTracking.form.sessionDraftRestored')}</p>
+      ) : null}
       {fixedWorkItemId ? null : (
         <label className="grid min-w-0 gap-1 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={`${id}-work-item`}>
           {t('timeTracking.form.workItem')}
           <select
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={selectedWorkItemId ?? ''}
             id={`${id}-work-item`}
             name="workItemId"
+            onChange={(event) => setSelectedWorkItemId(event.target.value)}
             required
+            value={selectedWorkItemId}
           >
             <option value="">{t('timeTracking.form.workItemPlaceholder')}</option>
             {selectedWorkItemId && !hasSelectedOption ? <option value={selectedWorkItemId}>{selectedWorkItemId}</option> : null}
@@ -163,7 +189,7 @@ export function TimeEntryForm({
           {t('timeTracking.form.start')}
           <input
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry ? toLocalTimeInput(entry.startAt) : '09:00'}
+            defaultValue={entry ? toLocalTimeInput(entry.startAt) : restoredFields?.start ?? '09:00'}
             id={`${id}-start`}
             name="start"
             required
@@ -186,7 +212,7 @@ export function TimeEntryForm({
           {t('timeTracking.form.end')}
           <input
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry ? toLocalTimeInput(entry.endAt) : '10:00'}
+            defaultValue={entry ? toLocalTimeInput(entry.endAt) : restoredFields?.end ?? '10:00'}
             id={`${id}-end`}
             name="end"
             required
@@ -198,14 +224,14 @@ export function TimeEntryForm({
         {t('timeTracking.form.description')}
         <textarea
           className="workbench-input min-h-16 w-full min-w-0 px-3 py-2"
-          defaultValue={entry?.description ?? ''}
+          defaultValue={entry?.description ?? restoredFields?.description ?? ''}
           id={`${id}-description`}
           maxLength={4000}
           name="description"
         />
       </label>
       <label className="flex items-center gap-2 text-sm font-medium text-[var(--workbench-text)]">
-        <input defaultChecked={entry?.billable ?? false} name="billable" type="checkbox" />
+        <input defaultChecked={entry?.billable ?? sessionDraft.restored?.billable ?? false} name="billable" type="checkbox" />
         {t('timeTracking.form.billable')}
       </label>
       {error ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{error}</p> : null}
@@ -213,7 +239,7 @@ export function TimeEntryForm({
         <button className="workbench-button-primary min-h-9 px-4" disabled={isSaving} type="submit">
           {entry ? t('timeTracking.form.saveChanges') : t('timeTracking.form.create')}
         </button>
-        <button className="workbench-button-secondary min-h-9 px-4" disabled={isSaving} onClick={onCancel} type="button">
+        <button className="workbench-button-secondary min-h-9 px-4" disabled={isSaving} onClick={() => { sessionDraft.forget(); onCancel() }} type="button">
           {t('timeTracking.form.cancel')}
         </button>
       </div>

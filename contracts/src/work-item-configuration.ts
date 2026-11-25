@@ -27,6 +27,10 @@ export type WorkflowStatusDefinition = {
   sortOrder: number
   /** UI 表示に利用できる色 token です。 */
   color?: string
+  /** Built-in fields a Work Item must have before it enters this status; absent means none. */
+  requiredFields?: import('./work-item-workflow-rules').WorkflowStatusRequiredField[]
+  /** Custom fields a Work Item must have before it enters this status; absent means none. */
+  requiredCustomFieldIds?: string[]
 }
 
 /**
@@ -37,6 +41,11 @@ export type WorkflowTransition = {
   fromStatusId: string
   /** 遷移先 status ID です。 */
   toStatusId: string
+  /**
+   * Roles that may run the transition; absent or empty lets anyone who can update the Work Item run it.
+   * A restricted transition is run only by a person, never by an automation or a developer credential.
+   */
+  allowedActorRoles?: import('./work-item-workflow-rules').WorkflowTransitionActorRole[]
 }
 
 /**

@@ -44,6 +44,12 @@ import {
   type AcceptanceCriteriaDraft,
 } from '../../work-items/ui/useAcceptanceCriteriaDraft'
 import { WorkItemTemplatePicker } from './WorkItemTemplatePicker'
+import { useSessionDraft } from '../../auth/useSessionDraft'
+import {
+  createWorkItemCreateSessionDraft,
+  parseWorkItemCreateSessionDraft,
+  type WorkItemCreateSessionDraft,
+} from '../../work-items/model/workItemCreateSessionDraft'
 
 /**
  * Renders the panel that creates a Work Item in the active Team.
@@ -65,6 +71,7 @@ export function CreateIssuePanel({
   onRetryTemplates,
   onSubmit,
   projects,
+  sessionDraftKey,
   t,
   templateLoadFailed = false,
   templates = [],
@@ -93,6 +100,11 @@ export function CreateIssuePanel({
   onCancel: () => void
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
+  /**
+   * Identifies the Team's new Work Item form, so its title and description survive an ended
+   * session and come back after the same account signs in again. Without it nothing is kept.
+   */
+  sessionDraftKey?: string
   t: (key: MessageKey) => string
   /** Whether the Work Item templates could not be loaded. */
   templateLoadFailed?: boolean
@@ -107,6 +119,19 @@ export function CreateIssuePanel({
 }) {
   const today = formatLocalDateInputValue()
   const formId = useId()
+  const [sessionDraft, setSessionDraft] = useState<WorkItemCreateSessionDraft>()
+  const [restoredSessionDraft, setRestoredSessionDraft] = useState<WorkItemCreateSessionDraft>()
+  useSessionDraft<WorkItemCreateSessionDraft>({
+    key: sessionDraftKey,
+    value: sessionDraft,
+    parse: parseWorkItemCreateSessionDraft,
+    onRestore: (draft) => {
+      // Text typed since the form came back wins over the kept one.
+      if (sessionDraft) return
+      setRestoredSessionDraft(draft)
+      setSessionDraft(draft)
+    },
+  })
   const draftCriteria = duplicateDraft?.acceptanceCriteria ?? []
   const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState<AcceptanceCriteriaDraft>(() =>
     createNewWorkItemAcceptanceCriteriaDraft(draftCriteria))
@@ -173,6 +198,17 @@ export function CreateIssuePanel({
         className="grid min-w-0 gap-4"
         data-testid="create-issue-form"
         id={formId}
+        // Restored text remounts the fields so they start from it.
+        key={restoredSessionDraft ? 'restored' : 'initial'}
+        onChange={(event) => {
+          const formData = new FormData(event.currentTarget)
+          const title = formData.get('title')
+          const description = formData.get('description')
+          setSessionDraft(createWorkItemCreateSessionDraft(
+            typeof title === 'string' ? title : '',
+            typeof description === 'string' ? description : '',
+          ))
+        }}
         onSubmit={(event) => {
           event.preventDefault()
           if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
@@ -256,6 +292,11 @@ export function CreateIssuePanel({
             testId="create-issue-template"
           />
         ) : null}
+        {restoredSessionDraft ? (
+          <p className="text-xs font-semibold text-fg-amber-900" role="status">
+            {t('tasks.create.sessionDraftRestored')}
+          </p>
+        ) : null}
         {duplicateDraft ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-issue-duplicate-note">
             {duplicateDraft.sourceTemplate
@@ -268,7 +309,7 @@ export function CreateIssuePanel({
             {t('issues.create.title')}
             <input
               className="workbench-input h-10 w-full min-w-0 px-3"
-              defaultValue={duplicateDraft?.title}
+              defaultValue={restoredSessionDraft?.title ?? duplicateDraft?.title}
               name="title"
               placeholder={t('issues.create.titlePlaceholder')}
               required
@@ -373,7 +414,7 @@ export function CreateIssuePanel({
           {t('issues.create.description')}
           <textarea
             className="workbench-input min-h-20 w-full min-w-0 px-3 py-2"
-            defaultValue={duplicateDraft?.description}
+            defaultValue={restoredSessionDraft?.description ?? duplicateDraft?.description}
             name="description"
             placeholder={t('issues.create.descriptionPlaceholder')}
           />

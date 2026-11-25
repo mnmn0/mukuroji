@@ -1357,6 +1357,33 @@ describe('restore drill AWS primitives', () => {
     }
   })
 
+  test('skips an annotation delete receipt as an auxiliary File Proofing row', async () => {
+    const fixture = createFixture()
+    fixture.dynamodb.scanPages.push({
+      $metadata: {},
+      Count: 1,
+      Items: [{
+        scopeKey: { S: 'WORKSPACE#workspace-1#TEAM#core#PROJECT#refero' },
+        recordKey: { S: 'ANNOTATION_DELETE#annotation_delete_1' },
+        entryType: { S: 'annotation-delete-receipt' },
+        fileId: { S: 'file-1' },
+        expiresAt: { N: '1790000000' },
+      }],
+      ScannedCount: 1,
+    })
+    await expect(fixture.operations.scanFileProofingPage(createFileRestoreTable())).resolves.toEqual({})
+
+    const unknownFixture = createFixture()
+    unknownFixture.dynamodb.scanPages.push({
+      $metadata: {},
+      Count: 1,
+      Items: [{ entryType: { S: 'annotation-delete' } }],
+      ScannedCount: 1,
+    })
+    await expect(unknownFixture.operations.scanFileProofingPage(createFileRestoreTable()))
+      .rejects.toMatchObject({ code: 'FILE_ROW_INVALID' })
+  })
+
   test('decodes only finite numbers before strict File integer validation', async () => {
     const finiteFixture = createFixture()
     finiteFixture.dynamodb.scanPages.push({

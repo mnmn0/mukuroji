@@ -3,9 +3,11 @@ import type {
   ApprovalRequest,
   FileAnnotation,
   FileAttachment,
+  FileTypeRejection,
   FileVersion,
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { uploadFilesInOrder } from './fileUploadBatch'
 import {
   cancelApprovalRequest,
   completeFileVersionUpload,
@@ -19,6 +21,7 @@ import {
   createProjectFileUpload,
   createProjectFileVersionUpload,
   createWorkItemFileUpload,
+  deleteFileAnnotation,
   deleteProjectFile,
   deleteWorkItemFile,
   getFileAnnotations,
@@ -26,6 +29,7 @@ import {
   getProjectFileAnnotations,
   getProjectFileVersionAccess,
   putPresignedFile,
+  setFileAnnotationResolution,
   type CreateApprovalDecisionInput,
   type CreateApprovalRequestInput,
   type CreateFileAnnotationInput,
@@ -33,6 +37,7 @@ import {
   type FileVersionAccess,
   FilesApiError,
 } from '../api'
+import type { FileResourceScope } from '../model/fileScope'
 import { useFileArtifactCollection } from '../queries/useFileArtifactCollection'
 
 const emptyCapabilities: FileCollectionCapabilities = {
@@ -46,35 +51,7 @@ const emptyApprovals: ApprovalRequest[] = []
 /**
  * File controller が参照する resource scope です。
  */
-export type FileArtifactScope =
-  | {
-      /**
-       * Team-owned Work Item scope です。
-       */
-      kind: 'work-item'
-      /**
-       * Work Item を所有する Team ID です。
-       */
-      teamId: string
-      /**
-       * Work Item ID です。
-       */
-      issueId: string
-    }
-  | {
-      /**
-       * Team 内 Project scope です。
-       */
-      kind: 'project'
-      /**
-       * Project を表示している Team ID です。
-       */
-      teamId: string
-      /**
-       * Project ID です。
-       */
-      projectId: string
-    }
+export type FileArtifactScope = FileResourceScope
 
 /**
  * useFileArtifacts の入力です。
@@ -88,6 +65,11 @@ export type UseFileArtifactsOptions = {
    * file を読み書きする resource scope です。
    */
   scope?: FileArtifactScope
+  /**
+   * Called after the file and approval collection is reloaded, so views derived from the same
+   * files (such as the Project deliverables list) can reload too. Its failure is ignored.
+   */
+  onRefreshed?: () => Promise<void> | void
 }
 
 /**
@@ -110,6 +92,12 @@ export type FileUploadOptions = {
    * Called once per file after its upload is completed, with the stored file and version.
    */
   onUploaded?: (file: FileAttachment, version: FileVersion) => void
+  /**
+   * Called when the server refuses a file because of its type, with the reason and the types the
+   * Workspace accepts. When given, the refused file is skipped and the remaining files still
+   * upload; without it, the first refusal stops the batch.
+   */
+  onFileTypeRejected?: (rejection: FileTypeRejection) => void
 }
 
 /**
@@ -158,6 +146,10 @@ export type FileArtifactsController = {
    */
   mutationErrorCode?: string
   /**
+   * 直近の upload が形式で拒否されたときの理由と、Workspace が受け付ける形式です。
+   */
+  mutationFileTypeRejection?: FileTypeRejection
+  /**
    * Shell が認証 policy error を一元処理するための raw load/mutation errors です。
    */
   sessionErrors?: readonly unknown[]
@@ -185,6 +177,23 @@ export type FileArtifactsController = {
     version: FileVersion,
     input: CreateFileAnnotationInput,
   ) => Promise<FileAnnotation | undefined>
+  /**
+   * Annotation を解決済みにするか、未解決へ戻します。失敗時は `undefined` を返します。
+   */
+  setAnnotationResolution: (
+    file: FileAttachment,
+    version: FileVersion,
+    annotation: FileAnnotation,
+    resolved: boolean,
+  ) => Promise<FileAnnotation | undefined>
+  /**
+   * 自分が書いた annotation を削除します。
+   */
+  deleteAnnotation: (
+    file: FileAttachment,
+    version: FileVersion,
+    annotation: FileAnnotation,
+  ) => Promise<boolean>
   /**
    * file version に approval request を作成します。
    */
@@ -215,6 +224,7 @@ export type FileArtifactsController = {
  */
 export function useFileArtifacts({
   accessToken,
+  onRefreshed,
   scope,
 }: UseFileArtifactsOptions): FileArtifactsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
@@ -231,6 +241,7 @@ export function useFileArtifacts({
   const [mutationError, setMutationError] = useState<{
     code?: string
     status?: number
+    fileTypeRejection?: FileTypeRejection
     token: symbol
   }>()
   const [mutatingToken, setMutatingToken] = useState<symbol>()
@@ -248,7 +259,9 @@ export function useFileArtifacts({
 
   const refresh = useCallback(async () => {
     await mutate()
-  }, [mutate])
+    // A derived view reloads on its own; its failure never fails this file mutation.
+    void Promise.resolve(onRefreshed?.()).catch(() => undefined)
+  }, [mutate, onRefreshed])
 
   const runMutation = useCallback(async <T,>(
     requestToken: symbol,
@@ -265,7 +278,12 @@ export function useFileArtifacts({
     } catch (caughtError) {
       if (currentOperationTokenRef.current === requestToken) {
         setMutationError(caughtError instanceof FilesApiError
-          ? { code: caughtError.code, status: caughtError.status, token: requestToken }
+          ? {
+              code: caughtError.code,
+              status: caughtError.status,
+              fileTypeRejection: caughtError.fileTypeRejection,
+              token: requestToken,
+            }
           : { status: 500, token: requestToken })
       }
       throw caughtError
@@ -285,7 +303,7 @@ export function useFileArtifacts({
     let hasCreatedUploadSession = false
 
     try {
-      for (const selectedFile of selectedFiles) {
+      await uploadFilesInOrder(selectedFiles, async (selectedFile) => {
         const input = {
           contentType: selectedFile.type || 'application/octet-stream',
           fileName: selectedFile.name,
@@ -360,14 +378,19 @@ export function useFileArtifacts({
               ),
         )
         options.onUploaded?.(completed.file, completed.version)
-      }
+      }, options.onFileTypeRejected)
 
       return true
     } catch (uploadError) {
       console.error('File upload failed:', uploadError)
       if (currentOperationTokenRef.current === operationToken) {
         setMutationError(uploadError instanceof FilesApiError
-          ? { code: uploadError.code, status: uploadError.status, token: operationToken }
+          ? {
+              code: uploadError.code,
+              status: uploadError.status,
+              fileTypeRejection: uploadError.fileTypeRejection,
+              token: operationToken,
+            }
           : { status: 500, token: operationToken })
       }
       return false
@@ -471,16 +494,80 @@ export function useFileArtifacts({
               context,
             ),
       )
-
+      // The new annotation is unresolved, so the file and approval counts change.
+      await refresh().catch(() => undefined)
       return response.annotation
     } catch (annotationError) {
       console.error('File annotation failed:', annotationError)
       return undefined
     }
-  }, [accessToken, operationToken, runMutation, scope, scopeKey])
+  }, [accessToken, operationToken, refresh, runMutation, scope, scopeKey])
+
+  const changeAnnotationResolution = useCallback(async (
+    file: FileAttachment,
+    version: FileVersion,
+    annotation: FileAnnotation,
+    resolved: boolean,
+  ) => {
+    if (!accessToken || !scope) {
+      return undefined
+    }
+
+    try {
+      const response = await runMutation(
+        operationToken,
+        `file:annotation:resolution:${scopeKey}:${file.id}:${version.id}:${annotation.id}`,
+        JSON.stringify([annotation.id, resolved]),
+        (context) => setFileAnnotationResolution(
+          scope,
+          file.id,
+          version.id,
+          annotation.id,
+          resolved,
+          accessToken,
+          context,
+        ),
+      )
+      await refresh().catch(() => undefined)
+      return response.annotation
+    } catch (resolutionError) {
+      console.error('File annotation resolution failed:', resolutionError)
+      return undefined
+    }
+  }, [accessToken, operationToken, refresh, runMutation, scope, scopeKey])
+
+  const removeAnnotation = useCallback(async (
+    file: FileAttachment,
+    version: FileVersion,
+    annotation: FileAnnotation,
+  ) => {
+    if (!accessToken || !scope) {
+      return false
+    }
+
+    try {
+      await runMutation(
+        operationToken,
+        `file:annotation:delete:${scopeKey}:${file.id}:${version.id}:${annotation.id}`,
+        annotation.id,
+        (context) => deleteFileAnnotation(scope, file.id, version.id, annotation.id, accessToken, context),
+      )
+      await refresh().catch(() => undefined)
+      return true
+    } catch (deleteError) {
+      if (isAnnotationAlreadyGone(deleteError)) {
+        // The annotation no longer exists, whether an earlier attempt deleted it or someone
+        // else did, so the delete reached its goal and the list must drop it.
+        await refresh().catch(() => undefined)
+        return true
+      }
+      console.error('File annotation delete failed:', deleteError)
+      return false
+    }
+  }, [accessToken, operationToken, refresh, runMutation, scope, scopeKey])
 
   const requestApproval = useCallback(async (input: CreateApprovalRequestInput) => {
-    if (!accessToken || !scope || scope.kind !== 'work-item' || isMutating) {
+    if (!accessToken || !scope || isMutating) {
       return false
     }
 
@@ -491,7 +578,7 @@ export function useFileArtifacts({
         operationToken,
         `approval:create:${scopeKey}:${input.fileId}:${input.versionId}`,
         JSON.stringify(input),
-        (context) => createApprovalRequest(scope.teamId, scope.issueId, accessToken, input, context),
+        (context) => createApprovalRequest(scope, accessToken, input, context),
       )
       await refresh()
       return true
@@ -507,7 +594,7 @@ export function useFileArtifacts({
     approval: ApprovalRequest,
     input: CreateApprovalDecisionInput,
   ) => {
-    if (!accessToken || !scope || scope.kind !== 'work-item' || isMutating) {
+    if (!accessToken || !scope || isMutating) {
       return false
     }
 
@@ -519,8 +606,7 @@ export function useFileArtifacts({
         `approval:decision:${scopeKey}:${approval.id}`,
         JSON.stringify(input),
         (context) => createApprovalDecision(
-          scope.teamId,
-          scope.issueId,
+          scope,
           approval.id,
           accessToken,
           input,
@@ -541,7 +627,7 @@ export function useFileArtifacts({
   }, [accessToken, isMutating, operationToken, refresh, runMutation, scope, scopeKey])
 
   const cancelApproval = useCallback(async (approval: ApprovalRequest) => {
-    if (!accessToken || !scope || scope.kind !== 'work-item' || isMutating) {
+    if (!accessToken || !scope || isMutating) {
       return false
     }
 
@@ -553,8 +639,7 @@ export function useFileArtifacts({
         `approval:cancel:${scopeKey}:${approval.id}`,
         JSON.stringify([approval.id, approval.revision]),
         (context) => cancelApprovalRequest(
-          scope.teamId,
-          scope.issueId,
+          scope,
           approval.id,
           accessToken,
           { expectedRevision: approval.revision },
@@ -608,6 +693,7 @@ export function useFileArtifacts({
     capabilities: data?.capabilities ?? emptyCapabilities,
     createAnnotation: addAnnotation,
     decideApproval,
+    deleteAnnotation: removeAnnotation,
     deleteFile: removeFile,
     files,
     getAnnotations,
@@ -616,10 +702,12 @@ export function useFileArtifacts({
     isLoading: Boolean(isConfigured && isLoading),
     isMutating,
     mutationErrorCode: currentMutationError?.code,
+    mutationFileTypeRejection: currentMutationError?.fileTypeRejection,
     mutationErrorStatus: currentMutationError?.status,
     refresh,
     requestApproval,
     sessionErrors: [error, currentMutationError],
+    setAnnotationResolution: changeAnnotationResolution,
     scope,
     uploadFiles,
     viewerCacheKey: accessToken,
@@ -628,6 +716,7 @@ export function useFileArtifacts({
     addAnnotation,
     approvals,
     cancelApproval,
+    changeAnnotationResolution,
     data?.capabilities,
     decideApproval,
     error,
@@ -639,6 +728,7 @@ export function useFileArtifacts({
     isMutating,
     currentMutationError,
     refresh,
+    removeAnnotation,
     removeFile,
     requestApproval,
     scope,
@@ -646,4 +736,14 @@ export function useFileArtifacts({
   ])
 
   return controller
+}
+
+/**
+ * Tells whether an annotation delete failed only because the annotation is already gone.
+ *
+ * @param error - Error thrown by the delete request.
+ * @returns Whether the API answered `404 AnnotationNotFound`.
+ */
+function isAnnotationAlreadyGone(error: unknown): boolean {
+  return error instanceof FilesApiError && error.status === 404 && error.code === 'AnnotationNotFound'
 }
