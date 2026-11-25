@@ -137,8 +137,26 @@ function findMarkdownOpenBlock(text: string): MarkdownOpenBlock | undefined {
  * @returns The parsed tree.
  */
 function parseMarkdown(text: string): unknown {
-  return fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  const cached = recentMarkdownTrees.get(text)
+  if (cached !== undefined) return cached
+  const tree: unknown = fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+  recentMarkdownTrees.set(text, tree)
+  if (recentMarkdownTrees.size > RECENT_MARKDOWN_TREE_COUNT) {
+    const oldest = recentMarkdownTrees.keys().next()
+    if (!oldest.done) recentMarkdownTrees.delete(oldest.value)
+  }
+  return tree
 }
+
+/**
+ * Trees an export reads again kept by {@link parseMarkdown}: a paragraph is read to escape it,
+ * to check that it stays closed, and again in the checks with each neighbour. The trees are only
+ * read, never changed.
+ */
+const RECENT_MARKDOWN_TREE_COUNT = 8
+
+/** The last parsed trees, by source text, oldest first. */
+const recentMarkdownTrees = new Map<string, unknown>()
 
 /** One rewrite of a source range; nested rewrites inside the kept part are applied too. */
 type ReferenceEdit = {

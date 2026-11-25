@@ -442,6 +442,18 @@ describe('Markdown import of a file whose blocks reference each other', () => {
     expect(html).not.toContain('[^b]')
   })
 
+  test('reads a file the parser could take too long on by lines only', () => {
+    const dense = '*a'.repeat(3_001)
+    expect(blocksOf(`[guide][ref]\n\n${dense}\n\n[ref]: https://example.com`)).toEqual([
+      { id: 'block-1', text: '[guide][ref]', type: 'paragraph' },
+      { id: 'block-2', text: dense, type: 'paragraph' },
+      { id: 'block-3', text: '[ref]: https://example.com', type: 'paragraph' },
+    ])
+    expect(blocksOf(`[guide][ref]\n\n${'- '.repeat(9)}deep\n\n[ref]: /r`)[0]).toEqual(
+      { id: 'block-1', text: '[guide][ref]', type: 'paragraph' },
+    )
+  })
+
   test('keeps a loose list in one block and drops the block boundary of an export', () => {
     expect(blocksOf('- a\n\n- b\n\n[mukuroji-block-boundary]: #\n\n- c')).toEqual([
       { id: 'block-1', text: '- a\n\n- b', type: 'paragraph' },

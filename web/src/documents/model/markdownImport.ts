@@ -5,6 +5,7 @@ import type {
   DocumentTableRow,
 } from '@mukuroji/contracts'
 import {
+  isMarkdownWithinParseLimits,
   readMarkdownImportStructure,
   type MarkdownImportStructure,
   type MarkdownLineRange,
@@ -178,9 +179,11 @@ export function convertMarkdownToDocument(
   const text = sourceLines.join('\n')
   // Each block is rendered on its own, so the file's reference definitions are applied before it
   // is split, and blocks the file joins, such as a loose list or a footnote, are put back together.
-  // The file is parsed only when it has a definition, a footnote, or a list item, and only after a
-  // line scan with throwaway IDs has rejected oversized tables.
-  const spans = MAY_SPAN_BLOCKS.test(text)
+  // The file is parsed only when it has a definition, a footnote, or a list item, is within the
+  // parse limits, and a line scan with throwaway IDs has not rejected an oversized table.
+  // A file the parser could take too long on is split by lines only, as before references were
+  // made inline.
+  const spans = MAY_SPAN_BLOCKS.test(text) && isMarkdownWithinParseLimits(text)
   if (spans) {
     const checked = scanBlocks(sourceLines, () => 'unused', options.resolveLink)
     if (!checked.ok) return checked
@@ -806,7 +809,8 @@ type LinkDestination = {
 /**
  * Reads the destination and optional title of an inline link, from just after its `(` up to the
  * closing `)`. A destination is either written in `<>`, which may hold spaces, or is a run
- * without spaces or parentheses. The scan is linear.
+ * without spaces or parentheses. Each part stops at a character that every following link also
+ * has, so rescanning after a failed read does not grow with the text.
  *
  * @param text - Raw Markdown text.
  * @param open - Offset just after the `(`.
@@ -847,8 +851,12 @@ function readLinkDestination(text: string, open: number): LinkDestination | unde
   const quote = text[close]
   if (close > end && (quote === '"' || quote === "'" || quote === '(')) {
     const closing = quote === '(' ? ')' : quote
+    // A title in parentheses holds no unescaped `(`, so the scan stops at the next link's `(`;
+    // a quoted title stops at the next same quote. Each scan ends where the next could start.
     let index = close + 1
-    while (index < text.length && text[index] !== closing) index += text[index] === '\\' ? 2 : 1
+    while (index < text.length && text[index] !== closing && !(quote === '(' && text[index] === '(')) {
+      index += text[index] === '\\' ? 2 : 1
+    }
     if (text[index] !== closing) return undefined
     titled = true
     close = skipSpace(index + 1)

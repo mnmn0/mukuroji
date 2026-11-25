@@ -1205,9 +1205,28 @@ function renderMarkdown(
   const parts = [`# ${escapeMarkdownText(title)}`]
   /** Plain-text fallbacks of paragraph parts, by part index. */
   const plainParts = new Map<number, string>()
+  /**
+   * Parts that cannot join a neighbour or carry raw HTML, so the export does not parse them: the
+   * title, headings, tables, fenced code, and paragraphs written as literal text.
+   */
+  const isolatedParts = new Set([0])
+  /** Isolated lists, which need a block boundary next to a part that is parsed. */
+  const fencedParts = new Set<number>()
+  const budget = createMarkdownParseBudget()
   for (const block of blocks) {
+    if (block.type === 'heading' || block.type === 'table' || block.type === 'code' || block.type === 'diagram') {
+      isolatedParts.add(parts.length)
+    }
     switch (block.type) {
       case 'paragraph': {
+        // The parser takes far longer than the text's length on some input, such as many
+        // emphasis delimiters or deeply nested lists, so a paragraph past the limits, or past what
+        // the page has left, is written as literal text without being parsed.
+        if (!budget.take(block.text)) {
+          isolatedParts.add(parts.length)
+          parts.push(renderLiteralMarkdownParagraph(block.text))
+          break
+        }
         // Paragraph text is Markdown already, so only raw HTML is escaped: the file never carries
         // runnable HTML, and the page imports back with the same rendering.
         // Footnote labels are named by the block's place in the file, which an export of the
@@ -1243,13 +1262,18 @@ function renderMarkdown(
           ),
         )
         break
-      case 'checklist':
-        parts.push(
-          block.items
-            .map((item) => `- [${item.checked ? 'x' : ' '}] ${escapeMarkdownText(item.text)}`)
-            .join('\n'),
-        )
+      case 'checklist': {
+        const checklist = block.items
+          .map((item) => `- [${item.checked ? 'x' : ' '}] ${escapeMarkdownText(item.text)}`)
+          .join('\n')
+        // A list past the parse budget is not parsed; boundaries keep it apart from its neighbours.
+        if (!budget.take(checklist)) {
+          isolatedParts.add(parts.length)
+          fencedParts.add(parts.length)
+        }
+        parts.push(checklist)
         break
+      }
       case 'embed':
         parts.push(`[${escapeMarkdownText(block.title ?? block.url)}](${escapeMarkdownUrl(block.url)})`)
         break
@@ -1262,10 +1286,165 @@ function renderMarkdown(
         )
     }
   }
-  // Each paragraph was checked on its own; the assembled file is checked again, so a construct
-  // that spans blocks can never leave raw HTML. Only the `<br>` of table cells is expected.
-  return escapeMarkdownHtml(`${joinMarkdownBlocks(parts, plainParts, markdown)}\n`, (text) =>
-    markdown.findHtml(text).filter(({ start, end }) => text.slice(start, end) !== '<br>'))
+  // Each paragraph was checked on its own; each run of parts that can join is checked again
+  // together, so a construct that spans blocks can never leave raw HTML. The isolated parts
+  // between the runs hold no raw HTML and join nothing, so they are not parsed.
+  const sections: string[] = []
+  let run: string[] = []
+  for (const entry of joinMarkdownBlocks(parts, plainParts, { isolated: isolatedParts, fenced: fencedParts }, markdown)) {
+    if (!entry.isolated) {
+      run.push(entry.text)
+      continue
+    }
+    if (run.length > 0) sections.push(escapeMarkdownHtml(run.join('\n\n'), markdown.findHtml))
+    run = []
+    sections.push(entry.text)
+  }
+  if (run.length > 0) sections.push(escapeMarkdownHtml(run.join('\n\n'), markdown.findHtml))
+  return `${sections.join('\n\n')}\n`
+}
+
+/**
+ * Limits of the Markdown one export parses, per part and for the whole page. The parse time of
+ * a part grows with the square of its delimiters and punctuation, and with its lines and list or
+ * quote markers, so the page limits are on the sum of squares and the sums.
+ */
+const MARKDOWN_EXPORT_PARSE_LIMITS = {
+  /** Most emphasis, strikethrough, closing bracket, and table delimiters of one part. */
+  partDelimiters: 500,
+  /** Most of the squares of those counts of all the parts parsed. */
+  documentDelimiterSquares: 1_500_000,
+  /** Most ASCII punctuation characters of one part. */
+  partPunctuation: 2_000,
+  /** Most of the squares of those counts of all the parts parsed. */
+  documentPunctuationSquares: 20_000_000,
+  /** Most lines of one part. */
+  partLines: 1_000,
+  /** Most lines of all the parts parsed. */
+  documentLines: 5_000,
+  /** Most list and quote markers at line starts of one part. */
+  partContainers: 1_000,
+  /** Most of those markers of all the parts parsed. */
+  documentContainers: 5_000,
+  /** Most list and quote markers at the start of one line. */
+  nesting: 8,
+} as const
+
+/** One list or quote marker at the start of a line, with the spaces before and after it. */
+const MARKDOWN_CONTAINER_MARKER = /^[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))[ \t]?/u
+
+/** How much parse work a Markdown text gives, as measured by {@link measureMarkdownParseLoad}. */
+type MarkdownParseLoad = {
+  /** Emphasis, strikethrough, closing bracket, and table delimiters. */
+  delimiters: number
+  /** ASCII punctuation characters. */
+  punctuation: number
+  /** Lines. */
+  lines: number
+  /** List and quote markers at line starts. */
+  containers: number
+  /** Most list and quote markers at the start of one line. */
+  nesting: number
+}
+
+/** What is left of the Markdown parse work of one export. */
+type MarkdownParseBudget = {
+  /**
+   * Takes a part's work from the budget when it fits in the limits of one part and in what is
+   * left; a part that does not fit takes nothing and must be written without parsing.
+   *
+   * @param text - Markdown of the part.
+   * @returns Whether the part may be parsed.
+   */
+  take: (text: string) => boolean
+}
+
+/**
+ * Creates the parse budget of one export. The parser takes far longer than a text's length on
+ * some input, such as dense emphasis or brackets, deep nesting, or many list lines, and each
+ * parsed part is read several times, so the work is bounded per part and for the page.
+ *
+ * @returns A budget with the whole page's work left.
+ */
+function createMarkdownParseBudget(): MarkdownParseBudget {
+  const limits = MARKDOWN_EXPORT_PARSE_LIMITS
+  let delimiterSquares = limits.documentDelimiterSquares
+  let punctuationSquares = limits.documentPunctuationSquares
+  let lines = limits.documentLines
+  let containers = limits.documentContainers
+  return {
+    take: (text) => {
+      const load = measureMarkdownParseLoad(text, limits.partLines)
+      if (
+        load === undefined || load.nesting > limits.nesting ||
+        load.delimiters > limits.partDelimiters || load.delimiters ** 2 > delimiterSquares ||
+        load.punctuation > limits.partPunctuation || load.punctuation ** 2 > punctuationSquares ||
+        load.lines > lines ||
+        load.containers > limits.partContainers || load.containers > containers
+      ) {
+        return false
+      }
+      delimiterSquares -= load.delimiters ** 2
+      punctuationSquares -= load.punctuation ** 2
+      lines -= load.lines
+      containers -= load.containers
+      return true
+    },
+  }
+}
+
+/**
+ * Measures, in one linear scan, what makes the Markdown parser slow on a text.
+ *
+ * @param text - Markdown text.
+ * @param maxLines - Most lines worth measuring.
+ * @returns The text's load, or `undefined` when it has more than `maxLines` lines.
+ */
+function measureMarkdownParseLoad(text: string, maxLines: number): MarkdownParseLoad | undefined {
+  const lines = text.split('\n')
+  if (lines.length > maxLines) return undefined
+  let containers = 0
+  let nesting = 0
+  for (const line of lines) {
+    let rest = line
+    let depth = 0
+    for (
+      let marker = MARKDOWN_CONTAINER_MARKER.exec(rest);
+      marker && marker[0] !== '';
+      marker = MARKDOWN_CONTAINER_MARKER.exec(rest)
+    ) {
+      depth += 1
+      rest = rest.slice(marker[0].length)
+    }
+    containers += depth
+    nesting = Math.max(nesting, depth)
+  }
+  let delimiters = 0
+  let punctuation = 0
+  for (const character of text) {
+    if (character === '*' || character === '_' || character === '~' || character === ']' || character === '|') {
+      delimiters += 1
+    }
+    if (ASCII_PUNCTUATION_CHARACTER.test(character)) punctuation += 1
+  }
+  return { delimiters, punctuation, lines: lines.length, containers, nesting }
+}
+
+/** One ASCII punctuation character. */
+const ASCII_PUNCTUATION_CHARACTER = /^[!-/:-@[-`{-~]$/u
+
+/**
+ * Writes paragraph text as literal Markdown text without parsing it: every ASCII punctuation
+ * character is escaped, so no Markdown or HTML is left, and the leading spaces and tabs of each
+ * line become character references, so no line becomes indented code.
+ *
+ * @param text - Paragraph Markdown.
+ * @returns Markdown that shows the text as written.
+ */
+function renderLiteralMarkdownParagraph(text: string): string {
+  return text
+    .replace(ASCII_PUNCTUATION, '\\$&')
+    .replace(/^[ \t]+/gmu, (indent) => indent.replaceAll(' ', '&#32;').replaceAll('\t', '&#9;'))
 }
 
 /**
@@ -1651,40 +1830,63 @@ function renderMarkdownParagraph(text: string, markdown: MarkdownInspector, scop
  */
 const MARKDOWN_BLOCK_BOUNDARY = '[mukuroji-block-boundary]: #'
 
+/** One part of the joined file, or a boundary written between two parts. */
+type JoinedMarkdownPart = {
+  /** Markdown of the part. */
+  text: string
+  /** Whether the part joins no neighbour and holds no raw HTML, so it is not parsed again. */
+  isolated: boolean
+}
+
 /**
  * Joins the Markdown of the blocks with blank lines, so each block keeps the structure it has on
  * its own, as the app renders every block separately. Where two neighbours would merge, such as
  * two lists or an indented paragraph after a list, {@link MARKDOWN_BLOCK_BOUNDARY} is written
  * between them; a paragraph that still merges is written as plain text. Only neighbours are
- * compared, since no block is let continue into the next one.
+ * compared, since no block is let continue into the next one, and a pair with an isolated part
+ * is not compared.
  *
  * @param parts - Markdown of each block, in order.
  * @param plainParts - Plain-text fallbacks of paragraph parts, by index.
+ * @param unparsed - Indexes of the parts that are not parsed: `isolated` parts join no
+ *   neighbour, and `fenced` ones are lists, kept apart from a neighbour by a boundary.
  * @param markdown - Reads Markdown with the app's Markdown grammar.
- * @returns The joined Markdown.
+ * @returns The parts and boundaries of the joined file, in order.
  */
 function joinMarkdownBlocks(
   parts: readonly string[],
   plainParts: ReadonlyMap<number, string>,
+  unparsed: { isolated: ReadonlySet<number>; fenced: ReadonlySet<number> },
   markdown: MarkdownInspector,
-): string {
-  const joined: string[] = []
+): JoinedMarkdownPart[] {
+  const joined: JoinedMarkdownPart[] = []
+  /** Whether the last part is a list that was not parsed. */
+  let previousFenced = false
   for (const [index, part] of parts.entries()) {
+    const isolated = unparsed.isolated.has(index)
+    const fenced = unparsed.fenced.has(index)
     const previous = joined.at(-1)
-    if (previous === undefined || markdown.keepsBlocksApart(previous, part)) {
-      joined.push(part)
+    if (previous !== undefined && (fenced || previousFenced)) {
+      // A list that was not parsed may join a part next to it, which a boundary prevents.
+      joined.push({ text: MARKDOWN_BLOCK_BOUNDARY, isolated: true }, { text: part, isolated })
+      previousFenced = fenced
+      continue
+    }
+    previousFenced = fenced
+    if (previous === undefined || isolated || previous.isolated || markdown.keepsBlocksApart(previous.text, part)) {
+      joined.push({ text: part, isolated })
       continue
     }
     if (
-      markdown.keepsBlocksApart(previous, MARKDOWN_BLOCK_BOUNDARY) &&
+      markdown.keepsBlocksApart(previous.text, MARKDOWN_BLOCK_BOUNDARY) &&
       markdown.keepsBlocksApart(MARKDOWN_BLOCK_BOUNDARY, part)
     ) {
-      joined.push(MARKDOWN_BLOCK_BOUNDARY, part)
+      joined.push({ text: MARKDOWN_BLOCK_BOUNDARY, isolated: false }, { text: part, isolated: false })
       continue
     }
-    joined.push(plainParts.get(index) ?? part)
+    joined.push({ text: plainParts.get(index) ?? part, isolated: false })
   }
-  return joined.join('\n\n')
+  return joined
 }
 
 /**
