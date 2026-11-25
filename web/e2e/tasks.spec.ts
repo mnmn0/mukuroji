@@ -709,6 +709,7 @@ async function mockAuthenticatedTaskPage(
         createdAt: '2026-07-01T00:00:00.000Z',
         email: 'demo@example.com',
         id: 'workspace-member-demo',
+        lastSignedInAt: '2026-07-10T09:00:00.000Z',
         memberKey: 'demo@example.com',
         name: 'Demo User',
         role: 'owner',
@@ -13566,6 +13567,22 @@ test.describe('authenticated task page', () => {
     await row.getByRole('button', { name: '保存', exact: true }).click()
     await expect(row.getByRole('button', { name: '表示名を修正' })).toBeVisible()
     expect(renameBodies).toEqual([{ name: '佐藤 花子', expectedVersion: 2 }])
+  })
+
+  test('Issue #432: 管理者がメンバーの最終ログインを見て、古い順に並べ替えられる', async ({ page }) => {
+    await page.goto('/settings/workspace')
+    const firstRow = page.getByTestId('workspace-member-ledger').locator('tbody tr').first()
+    await expect(page.getByTestId('workspace-member-last-sign-in-demo-example-com'))
+      .toContainText('最終ログイン: 2026/07/10')
+    await expect(page.getByTestId('workspace-member-last-sign-in-sato-example-com'))
+      .toHaveText('最終ログイン: 記録なし')
+    await expect(firstRow).toHaveAttribute('data-testid', 'workspace-member-demo-example-com')
+
+    // sato has no recorded sign-in, so it comes first.
+    await page.getByTestId('workspace-member-sort').selectOption('last-sign-in')
+    await expect(firstRow).toHaveAttribute('data-testid', 'workspace-member-sato-example-com')
+    await page.getByTestId('workspace-member-sort').selectOption('default')
+    await expect(firstRow).toHaveAttribute('data-testid', 'workspace-member-demo-example-com')
   })
 
   test('設定画面で Workspace member と invitation lifecycle を確認付きで管理できる', async ({ page }) => {
