@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import type { ChannelPostContent } from '../../application/ports/channel-posts'
 import { DynamoDbChannelPostStore, channelPostShards } from './channel-post-store'
 
@@ -36,17 +36,26 @@ async function queuedStore(contents: ChannelPostContent[]) {
       }
       if (command instanceof QueryCommand) {
         const shard = command.input.ExpressionAttributeValues?.[':shard']
-        const due = [...rows.values()].filter((row) => row.slackQueueShard === shard)
-        const start = Number(command.input.ExclusiveStartKey?.offset ?? 0)
-        const page = due.slice(start, start + 1)
+        // Resume after the last returned row, as DynamoDB does, even if earlier rows changed partition.
+        const all = [...rows.values()]
+        const after = command.input.ExclusiveStartKey?.eventId
+        const from = after === undefined ? 0 : all.findIndex((row) => row.eventId === after) + 1
+        const due = all.slice(from).filter((row) => row.slackQueueShard === shard)
+        const page = due.slice(0, 1)
         return {
           Items: page,
-          ...(start + 1 < due.length ? { LastEvaluatedKey: { offset: start + 1 } } : {}),
+          ...(due.length > 1 ? { LastEvaluatedKey: { eventId: page[0]?.eventId } } : {}),
         }
       }
       if (command instanceof GetCommand) {
         const key = command.input.Key ?? {}
         return { Item: rows.get(`${String(key.recipientKey)}|${String(key.notificationKey)}`) }
+      }
+      if (command instanceof UpdateCommand) {
+        const key = command.input.Key ?? {}
+        const row = rows.get(`${String(key.recipientKey)}|${String(key.notificationKey)}`)
+        if (row) row.slackQueueShard = command.input.ExpressionAttributeValues?.[':failed']
+        return {}
       }
       throw new Error('Unexpected command')
     },
@@ -54,7 +63,7 @@ async function queuedStore(contents: ChannelPostContent[]) {
   const store = new DynamoDbChannelPostStore(client, 'notifications')
   for (const content of contents) await store.enqueue(content, now)
   const shardOf = (eventId: string) => [...rows.values()].find((row) => row.eventId === eventId)?.slackQueueShard
-  return { store, shardOf }
+  return { store, shardOf, rows }
 }
 
 test('reads past unreadable candidates to the valid posts behind them, and refuses a source from another Team', async () => {
@@ -68,9 +77,14 @@ test('reads past unreadable candidates to the valid posts behind them, and refus
   expect(ids).toHaveLength(3)
   expect(channelPostShards()).toContain(String(target))
   const [mismatched, valid, later] = ids
-  const { store } = await queuedStore([post(String(mismatched), 'other-team'), post(String(valid)), post(String(later))])
+  const { store, rows } = await queuedStore([post(String(mismatched), 'other-team'), post(String(valid)), post(String(later))])
 
   const page = await store.listDue(String(target), now, 2)
   expect(page.invalidCount).toBe(1)
   expect(page.posts.map((queued) => queued.eventId)).toEqual([String(valid), String(later)])
+  // The unreadable row leaves the due partition, so the next run is not held back by it.
+  const moved = [...rows.values()].find((row) => row.eventId === mismatched)
+  expect(moved?.slackQueueShard).toBe(String(target).replace('slack-channel#', 'slack-channel-failed#'))
+  const next = await store.listDue(String(target), now, 2)
+  expect(next.invalidCount).toBe(0)
 })

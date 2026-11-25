@@ -251,7 +251,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
     const posts: ChannelPost[] = []
     let invalidCount = 0
     let startKey: Record<string, unknown> | undefined
-    // Unreadable rows stay queued and fail the run; later pages keep valid posts moving past them.
+    // Unreadable rows move to the failed partition and fail the run, so they never hold back later posts.
     for (let pageCount = 0; pageCount < maximumDuePages && posts.length < limit; pageCount += 1) {
       const page = await this.#client.send(new QueryCommand({
         TableName: this.#tableName, IndexName: 'SlackDeliveryIndex',
@@ -274,6 +274,7 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
           if (post) posts.push(post)
         } catch {
           invalidCount += 1
+          await this.#quarantine(candidate.recipientKey, candidate.notificationKey, shard)
         }
       }
       startKey = page.LastEvaluatedKey
@@ -344,6 +345,26 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
         ...(failed ? { ':next': post.nextAttemptAt, ':failedShard': post.shard.replace('slack-channel#', 'slack-channel-failed#') } : {}),
       },
     }))
+  }
+
+  /**
+   * Moves an unreadable queued row out of the due partition, keeping it for inspection.
+   * @param recipientKey - Row partition key.
+   * @param notificationKey - Row sort key.
+   * @param shard - Due partition it was listed under.
+   */
+  async #quarantine(recipientKey: string, notificationKey: string, shard: string): Promise<void> {
+    try {
+      await this.#client.send(new UpdateCommand({
+        TableName: this.#tableName,
+        Key: { recipientKey, notificationKey },
+        UpdateExpression: 'SET slackQueueShard = :failed',
+        ConditionExpression: 'slackQueueShard = :shard',
+        ExpressionAttributeValues: { ':failed': shard.replace('slack-channel#', 'slack-channel-failed#'), ':shard': shard },
+      }))
+    } catch {
+      // The run still fails on the unreadable row; the next run tries the move again.
+    }
   }
 
   /**

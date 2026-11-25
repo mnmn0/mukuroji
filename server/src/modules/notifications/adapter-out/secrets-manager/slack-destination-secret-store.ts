@@ -118,7 +118,7 @@ export class SecretsManagerSlackDestinationSecretStore implements SlackDestinati
       await this.#client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: webhookUrl }))
       return 'stored'
     } catch (error) {
-      if (isNamedError(error, 'InvalidRequestException')) return 'name-pending'
+      if (isNamedError(error, 'InvalidRequestException')) return await this.#pendingDeletionOrFail(secretId)
       if (!isNamedError(error, 'ResourceNotFoundException')) throw destinationUnavailable()
     }
     try {
@@ -129,9 +129,27 @@ export class SecretsManagerSlackDestinationSecretStore implements SlackDestinati
       }))
       return 'stored'
     } catch (error) {
-      if (isNamedError(error, 'InvalidRequestException') || isNamedError(error, 'ResourceExistsException')) return 'name-pending'
+      if (isNamedError(error, 'InvalidRequestException') || isNamedError(error, 'ResourceExistsException')) {
+        return await this.#pendingDeletionOrFail(secretId)
+      }
       throw destinationUnavailable()
     }
+  }
+
+  /**
+   * Tells a just-deleted secret whose name is not released yet from any other refusal.
+   * @param secretId - Server-derived secret name.
+   * @returns `name-pending` when the secret is marked deleted or already gone.
+   * @throws Error for any other state, such as a secret managed by another service.
+   */
+  async #pendingDeletionOrFail(secretId: string): Promise<'name-pending'> {
+    try {
+      const described = await this.#client.send(new DescribeSecretCommand({ SecretId: secretId }))
+      if (described.DeletedDate !== undefined) return 'name-pending'
+    } catch (error) {
+      if (isNamedError(error, 'ResourceNotFoundException')) return 'name-pending'
+    }
+    throw destinationUnavailable()
   }
 
   /** @inheritdoc */
