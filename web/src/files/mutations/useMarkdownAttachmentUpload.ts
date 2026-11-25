@@ -4,6 +4,7 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createMarkdownAttachmentReference,
   findMarkdownAttachmentRejection,
+  readMarkdownAttachmentBatchMessages,
 } from '../model/markdownAttachments'
 import type { FileArtifactsController } from './useFileArtifacts'
 
@@ -43,7 +44,8 @@ export type MarkdownAttachmentUpload = {
    */
   isUploading: boolean
   /**
-   * Message for the last refused or failed file, cleared by the next attempt.
+   * Message for the last refused or failed file, cleared by the next attempt. It can be set
+   * together with {@link fileTypeRejection} when one file of a batch was refused and another failed.
    */
   errorKey?: MessageKey
   /**
@@ -112,8 +114,9 @@ export function useMarkdownAttachmentUpload({
           rejected = rejection
         },
       })
-      if (rejected) setFileTypeRejection(rejected)
-      else if (!succeeded) setErrorKey('files.error.upload')
+      const messages = readMarkdownAttachmentBatchMessages(succeeded, rejected)
+      if (messages.fileTypeRejection) setFileTypeRejection(messages.fileTypeRejection)
+      if (messages.errorKey) setErrorKey(messages.errorKey)
     } finally {
       setIsUploading(false)
       onUploadingChange?.(false)

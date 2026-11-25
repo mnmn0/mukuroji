@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { FileAttachment } from '@mukuroji/contracts'
+import type { FileAttachment, FileTypeRejection } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   blockedVideoFileFixture,
@@ -12,9 +12,12 @@ import {
   findInlineImageVersion,
   findMarkdownAttachmentRejection,
   markdownAttachmentMaxSizeBytes,
+  readMarkdownAttachmentBatchMessages,
   readMarkdownAttachmentFileId,
 } from '../src/files/model/markdownAttachments'
 import { describeFileTypeRejection } from '../src/files/model/fileTypeRejection'
+import type { MarkdownAttachmentUpload } from '../src/files/mutations/useMarkdownAttachmentUpload'
+import { MarkdownAttachmentControls } from '../src/files/ui/MarkdownAttachmentControls'
 import { MarkdownAttachmentReactContext } from '../src/files/ui/markdownAttachmentContext'
 import { MarkdownDescriptionField } from '../src/issues/ui/MarkdownDescriptionField'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
@@ -34,6 +37,32 @@ describe('markdown attachment model', () => {
       .toBe('This Workspace does not accept this file type. You can attach: .md, .markdown, .xlsm')
     expect(describeFileTypeRejection({ reason: 'dangerous', allowedFileTypes: [] }, t))
       .toBe('Programs, scripts, and other dangerous types cannot be attached. This Workspace accepts no file types.')
+  })
+
+  test('reports an upload failure that follows a type rejection in the same batch', () => {
+    const rejection: FileTypeRejection = { reason: 'dangerous', allowedFileTypes: ['pdf'] }
+    // script.js is refused for its type, then report.pdf fails to upload.
+    expect(readMarkdownAttachmentBatchMessages(false, rejection))
+      .toEqual({ fileTypeRejection: rejection, errorKey: 'files.error.upload' })
+    expect(readMarkdownAttachmentBatchMessages(true, rejection)).toEqual({ fileTypeRejection: rejection })
+    expect(readMarkdownAttachmentBatchMessages(false)).toEqual({ errorKey: 'files.error.upload' })
+    expect(readMarkdownAttachmentBatchMessages(true)).toEqual({})
+
+    const upload: MarkdownAttachmentUpload = {
+      attachFiles: async () => undefined,
+      canAttach: true,
+      errorKey: 'files.error.upload',
+      fileTypeRejection: rejection,
+      handleDragOver: () => undefined,
+      handleDrop: () => undefined,
+      handlePaste: () => undefined,
+      isUploading: false,
+    }
+    const markup = renderToStaticMarkup(<MarkdownAttachmentControls t={t} upload={upload} />)
+    expect(markup).toContain('The file could not be uploaded.')
+    expect(markup).toContain(describeFileTypeRejection(rejection, t))
+    expect(markup.indexOf('The file could not be uploaded.'))
+      .toBeLessThan(markup.indexOf(describeFileTypeRejection(rejection, t)))
   })
 
   test('writes images as image references and other files as links, escaping the label', () => {

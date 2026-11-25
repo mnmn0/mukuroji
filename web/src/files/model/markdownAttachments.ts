@@ -1,4 +1,4 @@
-import type { FileAttachment, FileVersion } from '@mukuroji/contracts'
+import type { FileAttachment, FileTypeRejection, FileVersion } from '@mukuroji/contracts'
 
 /**
  * URL scheme that Markdown bodies use to point at a file attached to the same Work Item.
@@ -46,6 +46,34 @@ export function findMarkdownAttachmentRejection(
 ): MarkdownAttachmentRejection | undefined {
   if (file.size <= 0 || file.size > markdownAttachmentMaxSizeBytes) return 'tooLarge'
   return undefined
+}
+
+/**
+ * Messages a Markdown editor shows after uploading a batch of files.
+ */
+export type MarkdownAttachmentBatchMessages = {
+  /** Why the server refused a file of the batch because of its type, if it did. */
+  fileTypeRejection?: FileTypeRejection
+  /** Message for a file that failed for another reason, which stops the rest of the batch. */
+  errorKey?: 'files.error.upload'
+}
+
+/**
+ * Decides what to report after a batch upload. A type rejection skips only that file, so a later
+ * file can still fail; both are reported so the failure is not hidden behind the rejection.
+ *
+ * @param succeeded - Whether the batch finished without a failure other than a type rejection.
+ * @param fileTypeRejection - Last type rejection reported during the batch, if any.
+ * @returns The messages to show; empty when every file was uploaded.
+ */
+export function readMarkdownAttachmentBatchMessages(
+  succeeded: boolean,
+  fileTypeRejection?: FileTypeRejection,
+): MarkdownAttachmentBatchMessages {
+  return {
+    ...(fileTypeRejection ? { fileTypeRejection } : {}),
+    ...(succeeded ? {} : { errorKey: 'files.error.upload' }),
+  }
 }
 
 /**
