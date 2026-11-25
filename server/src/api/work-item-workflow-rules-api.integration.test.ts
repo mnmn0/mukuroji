@@ -279,3 +279,30 @@ test('does not require a custom field that the Work Item\'s Project cannot hold'
 
   expect(response.status).toBe(200)
 })
+
+test('counts the acceptance criteria a create body supplies against the target status', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  configureRules({ review: { requiredFields: ['acceptance-criteria'] } })
+  /** Creates a Work Item directly in review with the given criteria. */
+  const create = (acceptanceCriteria: unknown[]) => app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Ready for review',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'demo@example.com',
+      schedule: { mode: 'unscheduled', calendarPolicy: { kind: 'all-days' } },
+      priority: 'medium',
+      workflowStatusId: 'review',
+      acceptanceCriteria,
+    }),
+  })
+
+  const missing = await create([])
+  expect(missing.status).toBe(409)
+  expect(await missing.json()).toMatchObject({ code: 'WorkflowStatusRequirementsNotMet' })
+  const supplied = await create([{ text: criterion.text, satisfied: false }])
+  // The workflow rules pass; the create then reaches the test double's store, which this test does not set up.
+  expect(supplied.status).not.toBe(409)
+  expect(await supplied.json()).not.toMatchObject({ code: 'WorkflowStatusRequirementsNotMet' })
+})

@@ -35,6 +35,7 @@ import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
 import { principalManagesTeamWorkItem, type ProjectPrincipal } from './project-access'
+import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
 import { requireActiveWorkspaceAssignee, type TeamPermissionContext } from './workspace-access'
 
 /**
@@ -360,8 +361,8 @@ export async function prepareConfiguredCreateWorkItem(
       actor: resolveWorkflowRuleActor(rulePrincipal, { assignedProjectId: projectId }, projectId),
       state: () => createWorkflowRuleWorkItemState(
         input.schedule,
-        // A create body carries no acceptance criteria.
-        0,
+        // The create body's criteria are normalized the same way the create route stores them.
+        readNewWorkItemAcceptanceCriteria(input.acceptanceCriteria)?.length ?? 0,
         customFieldValues,
       ),
     })
