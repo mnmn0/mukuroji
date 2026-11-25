@@ -38,7 +38,7 @@ Link mode は次の3種類である。
 
 Invalid、expired、revoked、archived link は同じ `RequestFormUnavailable` response を返す。public GET は `definition` と短命 one-time submission session だけを返し、Workspace ID、Team、Project、workflow、assignee、role、capability、rate-limit 設定を返さない。submit 成功 response も opaque receipt、confirmation、reply thread token だけである。
 
-Form 管理、legacy queue read、attachment download は Workspace owner/admin に限定する。
+Form 管理は Workspace owner/admin と、Team scope の form に限りその Team の Team manager（Team の全 active Project の manager で、Workspace の業務データを書ける member。[ADR 0087](adr/0087-team-owned-automation-definitions.md)）が行う。Team manager の一覧は自分が管理する Team の form だけを返し、Workspace scope の form や他の Team の form の参照・更新・publish、scope を Workspace や他の Team へ変える更新は `403 RequestFormScopeDenied`。Enterprise の role を持つ member は今までどおり Workspace の `requests.manage` が要る。`GET /api/request-forms/management-scopes` は呼び出し元が変更できる form の範囲を `{ workspace, teamIds }` で返す（Enterprise の role を持つ member は `requests.manage` で判定）。legacy queue read と attachment download は Workspace owner/admin に限定する。
 Team Triage の read/action はそれぞれ対象 Team の viewer/member access を再検証し、
 guest は source の `guestVisible` projection 以外を読めない。外部 thread token は追加情報
 reply だけを許可し、任意の宛先、routing、status、assignee を指定できない。
@@ -133,7 +133,7 @@ Signed-in requester:
 - `GET /api/my-requests/{submissionId}`
 - `POST /api/my-requests/{submissionId}/replies`
 
-Workspace admin:
+Workspace admin（form は Team manager も自 Team の分）:
 
 - `GET|POST /api/request-forms`
 - `GET|PUT /api/request-forms/{formId}`

@@ -133,6 +133,7 @@ function isAutomationExecution(value: unknown): value is AutomationExecution {
     typeof value.workspaceId === 'string' &&
     typeof value.ruleId === 'string' &&
     isNonnegativeSafeInteger(value.ruleVersion) &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.triggerEventId === 'string' &&
     automationExecutionStatuses.some((status) => status === value.status) &&
     isNonnegativeSafeInteger(value.attempts) &&

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { AutomationTrigger } from '@mukuroji/contracts'
 import {
   evaluateAutomationCondition,
+  matchesAutomationRuleOwnerTeam,
   matchesAutomationTrigger,
   type AutomationEvent,
 } from './rule-evaluation'
@@ -24,6 +25,50 @@ const event: AutomationEvent = {
 }
 
 describe('Automation rule domain', () => {
+  test('runs a Team rule only for its own Team Work Items, and a schedule rule always', () => {
+    const status: AutomationTrigger = { type: 'status', toStatusId: 'done' }
+    const coreEvent = { ...event, metadata: { teamId: 'core', issueId: 'issue-1' } }
+    const opsEvent = { ...event, metadata: { teamId: 'ops', issueId: 'issue-2' } }
+
+    expect(matchesAutomationRuleOwnerTeam({ trigger: status }, opsEvent)).toBe(true)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: status }, coreEvent)).toBe(true)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: status }, opsEvent)).toBe(false)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: status }, event)).toBe(false)
+    expect(matchesAutomationRuleOwnerTeam({
+      ownerTeamId: 'core',
+      trigger: {
+        type: 'schedule',
+        schedule: {
+          frequency: 'daily',
+          interval: 1,
+          timeZone: 'UTC',
+          localTime: '09:00',
+          startDate: '2026-07-22',
+          catchUpPolicy: 'skip',
+        },
+      },
+    }, { ...event, eventType: 'automation.schedule' })).toBe(true)
+    const dueSchedule: AutomationTrigger = {
+      type: 'schedule',
+      schedule: {
+        frequency: 'daily',
+        interval: 1,
+        timeZone: 'UTC',
+        localTime: '09:00',
+        startDate: '2026-07-22',
+        catchUpPolicy: 'skip',
+      },
+      dueWorkItems: { daysBefore: 1 },
+    }
+    const dueEvent = (teamId: string) => ({
+      ...event,
+      eventType: 'automation.schedule',
+      metadata: { teamId, issueId: 'issue-1' },
+    })
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: dueSchedule }, dueEvent('core'))).toBe(true)
+    expect(matchesAutomationRuleOwnerTeam({ ownerTeamId: 'core', trigger: dueSchedule }, dueEvent('ops'))).toBe(false)
+  })
+
   test('validates due-soon schedules and assignee notifications', () => {
     const schedule = {
       frequency: 'daily',

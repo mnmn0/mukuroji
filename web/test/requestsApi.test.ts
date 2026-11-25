@@ -4,6 +4,7 @@ import {
   createRequestAttachmentAccess,
   getPublicRequestForm,
   getRequestForm,
+  getRequestFormManagementScopes,
   getRequestForms,
   getRequestQueue,
   getRequestThread,
@@ -168,3 +169,19 @@ function installFetchRecorder(responseBodies: unknown[]) {
 
   return requests
 }
+
+describe('request form management scopes', () => {
+  test('reads the scopes from the Request API and rejects another shape', async () => {
+    const requests: string[] = []
+    let body: unknown = { workspace: false, teamIds: ['core-team'] }
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input))
+      return new Response(JSON.stringify(body), { status: 200 })
+    }) as typeof fetch
+
+    expect(await getRequestFormManagementScopes('token')).toEqual({ workspace: false, teamIds: ['core-team'] })
+    expect(requests[0]).toEndWith('/request-forms/management-scopes')
+    body = { workspace: true, teamIds: [1] }
+    await expect(getRequestFormManagementScopes('token')).rejects.toMatchObject({ code: 'InvalidRequestIntakeResponse' })
+  })
+})

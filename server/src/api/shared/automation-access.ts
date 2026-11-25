@@ -480,7 +480,8 @@ async function validateAutomationWorkItemConfigurationUsage(
   for (const rule of rules) {
     if (!rule.enabled) continue
     try {
-      await validateRuleCreateActions(rule)
+      // A Team rule creates in its owner Team when the payload names no Team (ADR 0087).
+      await validateRuleCreateActions(rule, rule.ownerTeamId)
     } catch (error) {
       throw createAutomationConfigurationUsageError(
         `Enabled Automation Rule "${rule.id}" create actions`,
@@ -543,7 +544,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         }
         await validateRuleCreateActions(
           rule,
-          readAutomationMetadataText(event, 'teamId'),
+          readAutomationMetadataText(event, 'teamId') ?? rule.ownerTeamId,
         )
       }
     } catch (error) {
