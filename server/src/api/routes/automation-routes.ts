@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto'
 import {
+  AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
+  AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT,
+  AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  createNotificationMessage,
   type AutomationAction,
+  type AutomationExecution,
   type AutomationExecutionStatus,
+  type AutomationRule,
   type AutomationInboundWebhookDeliveryResponse,
   type AutomationTemplateApplication,
   type AutomationValue,
@@ -15,6 +21,7 @@ import {
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
   type WorkItemConfiguration,
+  type WorkItemScheduleWeekday,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -72,6 +79,8 @@ import {
   isBulkReassignMemberUndoApplied,
   listBulkReassignMemberRemovedShares,
   createAutomationCommentId,
+  deleteUnusedAutomationTemplate,
+  dryRunAutomationRule,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
   normalizeAutomationActionFailure,
@@ -89,11 +98,15 @@ import {
   validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
+  validateDeleteAutomationDefinitionInput,
   validateUpdateAutomationInboundWebhookEndpointInput,
   verifyAutomationInboundWebhookSignature,
   type AutomationActionExecutionContext,
   type AutomationActionExecutor,
   type AutomationEvent,
+  type AutomationExecutionFailureKind,
+  type AutomationExecutionFailureNotifier,
+  type AutomationWorkCalendarSource,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
   type AutomationInboundWebhookSecretReference,
@@ -184,10 +197,13 @@ import {
 } from '../shared/search-access'
 import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
+  loadAuthorizedTeamIssue,
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
+  createPersonWorkflowRulePrincipal,
   prepareConfiguredCreateWorkItem,
   validateWorkItemConfigurationReferences,
 } from '../shared/work-item-configuration'
@@ -1078,6 +1094,7 @@ function createApiBulkOperationAdapter(
           loaded.detail.issue,
           body,
           configuration,
+          createPersonWorkflowRulePrincipal(principal, loaded.context),
         )
     // Only a member reassignment changes contributors; the successor is fenced in the write.
     const configuredBody = configuration === undefined || action.type !== 'reassign-member'
@@ -1363,6 +1380,7 @@ function createApiBulkOperationAdapter(
             loaded.detail.issue,
             normalizedBody,
             undoConfiguration,
+            createPersonWorkflowRulePrincipal(principal, loaded.context),
           )
       // A share the handover merged away comes back under its own ID with its own role, and every
       // member brought back is checked as newly assigned.
@@ -1822,7 +1840,7 @@ export function createAutomationActionExecutor(
           await emitAutomationOutboxEvent(
             'automation.notification.requested',
             action.title,
-            action.recipientMemberKeys,
+            readAutomationNotificationRecipients(action, context),
             context,
             { body: action.body ?? '' },
             dependencies,
@@ -1884,6 +1902,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
     ),
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     { relationDependencies: dependencies },
   )
   if ('assigneeUserId' in configuredBody) {
@@ -2144,6 +2163,7 @@ async function executeAutomationWorkItemCreate(
       ),
     },
     configuration,
+    AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   )
   const assignee = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(
@@ -2420,6 +2440,27 @@ async function executeAutomationComment(
 }
 
 /**
+ * Lists the members a notify action reaches: its listed keys, plus the assignee of the Work Item
+ * the rule runs for when the action asks for it and the Work Item has one.
+ *
+ * @param action - Validated notify action.
+ * @param context - Durable Automation execution context.
+ * @returns Distinct recipient member keys.
+ */
+function readAutomationNotificationRecipients(
+  action: Extract<AutomationAction, { type: 'notify' }>,
+  context: AutomationActionExecutionContext,
+): string[] {
+  const assignee = action.notifyAssignee === true
+    ? context.event.workItem?.assigneeUserId
+    : undefined
+  return [...new Set([
+    ...action.recipientMemberKeys,
+    ...(typeof assignee === 'string' && assignee.trim() ? [assignee.trim()] : []),
+  ])]
+}
+
+/**
  * Appends an Automation notification or approval event to the audit outbox.
  *
  * @param eventType - Stable audit event type.
@@ -2515,6 +2556,167 @@ function createAutomationMutationContext(
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {
   return [...(context.event.automationRuleLineage ?? []), context.execution.ruleId]
+}
+
+/** Bucket length of rate-limit notifications, so a busy rule reports at most once an hour. */
+const AUTOMATION_RATE_LIMIT_NOTIFICATION_BUCKET_MS = 60 * 60_000
+
+/** Settings page that lists Automation execution history. */
+const AUTOMATION_EXECUTION_HISTORY_PATH = '/settings/workspace?automationTab=runs'
+
+/** Sunday-based weekday number of each work calendar weekday. */
+const WORK_CALENDAR_WEEKDAY_NUMBERS: Record<WorkItemScheduleWeekday, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+}
+
+/**
+ * Creates the source a business-day Recurring Work reads its Team's effective work calendar from.
+ *
+ * @param dependencies - Work calendar reads.
+ * @returns The work calendar source.
+ */
+export function createAutomationWorkCalendarSource(
+  dependencies: Pick<AutomationActionExecutorDependencies, 'workCalendarSources'> =
+    ambientAutomationActionExecutorDependencies,
+): AutomationWorkCalendarSource {
+  return {
+    async readTeamWorkCalendar(workspaceId, teamId) {
+      const policy = await readWorkspaceWorkItemCalendarPolicy(
+        workspaceId,
+        { teamId },
+        dependencies.workCalendarSources,
+      )
+      return {
+        workingWeekdays: new Set(policy.workingWeekdays.map((weekday) =>
+          WORK_CALENDAR_WEEKDAY_NUMBERS[weekday])),
+        holidays: new Set(policy.holidays),
+      }
+    },
+  }
+}
+
+/**
+ * Creates the reporter that tells a rule's creator and the Workspace administrators that the
+ * rule dead-lettered or hit its rate limit, through their Inbox.
+ *
+ * The notification is an audit event with a deterministic ID: one per dead-lettered attempt, and
+ * one per rule and hour for rate-limit skips, so a redelivered outcome does not notify twice.
+ *
+ * @param dependencies - Ports for the member list and the audit outbox.
+ * @returns The failure notifier.
+ */
+export function createAutomationExecutionFailureNotifier(
+  dependencies: Pick<AutomationActionExecutorDependencies, 'auditEvents' | 'workspaceAccess'> =
+    ambientAutomationActionExecutorDependencies,
+): AutomationExecutionFailureNotifier {
+  return {
+    async notify(rule, execution, kind) {
+      const recipients = await listAutomationFailureRecipients(rule, dependencies)
+      if (recipients.length === 0) return
+      const auditEvents = dependencies.auditEvents
+      if (!getConfiguredAuditTableName() || !auditEvents.putEvent) {
+        throw new AutomationError('unavailable', 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
+      }
+      await auditEvents.putEvent(createAutomationFailureAuditEvent(rule, execution, kind, recipients))
+    },
+  }
+}
+
+/**
+ * Lists who hears about a rule failure: its creator while still an active member, then the
+ * active owners and administrators, up to the administrator limit.
+ *
+ * @param rule - Failed rule.
+ * @param dependencies - Member list port.
+ * @returns Unique recipient member keys.
+ */
+async function listAutomationFailureRecipients(
+  rule: AutomationRule,
+  dependencies: Pick<AutomationActionExecutorDependencies, 'workspaceAccess'>,
+) {
+  const members = await dependencies.workspaceAccess.listActiveMembers(rule.workspaceId)
+  const active = members.filter((member) => member.status === 'active')
+  const recipients = new Set<string>()
+  if (rule.createdByMemberKey && active.some((member) => member.memberKey === rule.createdByMemberKey)) {
+    recipients.add(rule.createdByMemberKey)
+  }
+  const administrators = active
+    .filter((member) => member.role === 'owner' || member.role === 'admin')
+    .map((member) => member.memberKey)
+    .sort()
+    .slice(0, AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT)
+  for (const memberKey of administrators) recipients.add(memberKey)
+  return [...recipients]
+}
+
+/**
+ * Builds the Workspace-scoped audit event that carries one rule failure notification.
+ *
+ * @param rule - Failed rule version.
+ * @param execution - Saved failed execution.
+ * @param kind - Which failure happened.
+ * @param recipients - Members to notify.
+ * @returns The immutable audit event.
+ */
+function createAutomationFailureAuditEvent(
+  rule: AutomationRule,
+  execution: AutomationExecution,
+  kind: AutomationExecutionFailureKind,
+  recipients: string[],
+): AuditEventV1 {
+  const deadLetter = kind === 'dead-letter'
+  const occurredAt = execution.completedAt ?? new Date().toISOString()
+  const bucket = Math.floor(Date.parse(occurredAt) / AUTOMATION_RATE_LIMIT_NOTIFICATION_BUCKET_MS)
+  const idempotencyKey = deadLetter
+    ? `automation-dead-letter:${execution.id}:${execution.attempts}`
+    : `automation-rate-limited:${rule.id}:${bucket}`
+  const eventType = deadLetter
+    ? AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE
+    : AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE
+  const summary = deadLetter
+    ? `Automation rule "${rule.name}" failed and stopped retrying.`
+    : `Automation rule "${rule.name}" was skipped because it reached its rate limit.`
+  const requestBody = deadLetter
+    ? { executionId: execution.id, attempts: execution.attempts }
+    : { ruleId: rule.id, bucket }
+  return createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: rule.workspaceId,
+      actor: { id: `automation:${rule.id}`, kind: 'service', displayName: 'mukuroji automation' },
+      idempotencyKey,
+      correlationId: execution.id,
+      occurredAt,
+      request: {
+        method: 'AUTOMATION',
+        path: `/automation/rules/${rule.id}/failures`,
+        body: requestBody,
+      },
+      source: { kind: 'system', requestId: execution.id, route: 'automation-failure-notification' },
+    }),
+    eventType,
+    entity: { type: 'automation-rule', id: rule.id },
+    summary,
+    expiresAt: calculateAuditExpiresAt(occurredAt, getConfiguredAuditRetentionDays()),
+    metadata: {
+      ruleId: rule.id,
+      ruleVersion: rule.version,
+      executionId: execution.id,
+      ...(execution.errorCode ? { errorCode: execution.errorCode } : {}),
+      deepLink: AUTOMATION_EXECUTION_HISTORY_PATH,
+      notificationTitle: rule.name,
+      notificationMessage: createNotificationMessage(
+        deadLetter ? 'automation.execution-dead-lettered' : 'automation.rule-rate-limited',
+        { ruleName: rule.name },
+      ),
+      notificationCandidates: recipients.map((memberKey) => ({ memberKey, reason: 'automation' })),
+    },
+  })
 }
 
 function readAutomationWorkItemTarget(event: AutomationEvent) {
@@ -2758,6 +2960,35 @@ async function completeAcceptedTriageWebhookDelivery(
   }
 }
 
+/**
+ * Reads a required identifier of a dry run request.
+ *
+ * @param value - Untrusted body field.
+ * @param label - Field name used in the error.
+ * @returns The trimmed identifier.
+ */
+function requireAutomationDryRunText(value: unknown, label: string) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text || text.length > 256) {
+    throw new AutomationError(
+      'invalid-input',
+      'InvalidAutomationDryRunInput',
+      `Dry run ${label} must be a non-empty string of at most 256 characters.`,
+    )
+  }
+  return text
+}
+
+/**
+ * Narrows a Work Item snapshot to the Automation values conditions read.
+ *
+ * @param value - Cloned Work Item.
+ * @returns Whether every field is an Automation value.
+ */
+function isAutomationValueRecord(value: unknown): value is Record<string, AutomationValue> {
+  return isRecord(value) && isAutomationValue(value)
+}
+
 function toAutomationErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
@@ -2805,7 +3036,61 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         principal.directoryId,
         input,
         c.req.header('Idempotency-Key')?.trim() || undefined,
+        principal.workspaceMember.memberKey,
       ), 201)
+    } catch (error) {
+      return toAutomationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Workspace 管理者が保存前の rule を一つの Work Item に当てはめ、一致するかと各 action の予定を
+   * 返します。Action は実行しません。
+   */
+  routeApp.post('/api/automation/rule-dry-runs', async (c) => {
+    try {
+      const principal = await authenticateAutomationPrincipal(c, true)
+      const body = await readAutomationJson(c)
+      const rule = validateCreateAutomationRuleInput(body.rule)
+      const teamId = requireAutomationDryRunText(body.teamId, 'Team ID')
+      const workItemId = requireAutomationDryRunText(body.workItemId, 'Work Item ID')
+      await requireAutomationTeam(principal.directoryId, teamId)
+      // Workspace administration does not grant every Project, so the dry run reads the Work Item
+      // only when the administrator could view it; otherwise its values would leak through the plan.
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      // A JSON round trip drops unset fields, as the stored event snapshot does.
+      const workItem: unknown = JSON.parse(JSON.stringify(detail.issue))
+      if (!isAutomationValueRecord(workItem)) {
+        throw new AutomationError(
+          'unavailable',
+          'AutomationDryRunWorkItemUnavailable',
+          'The Work Item cannot be read as Automation values.',
+        )
+      }
+      return c.json(dryRunAutomationRule(rule, principal.directoryId, workItem))
+    } catch (error) {
+      return toAutomationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Workspace 管理者が automation rule を削除します。実行中や再試行待ちの execution は、保存済み
+   * の rule version を使って最後まで動きます。
+   */
+  routeApp.delete('/api/automation/rules/:ruleId', async (c) => {
+    try {
+      const principal = await authenticateAutomationPrincipal(c, true)
+      const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
+      const ruleId = c.req.param('ruleId')
+      if (!await automationDependencies.ruleTemplates.getRule(principal.directoryId, ruleId)) {
+        throw new AutomationError('not-found', 'AutomationRuleNotFound', 'Automation rule was not found.')
+      }
+      await automationDependencies.ruleTemplates.deleteRule(
+        principal.directoryId,
+        ruleId,
+        input.expectedRevision,
+      )
+      return c.body(null, 204)
     } catch (error) {
       return toAutomationErrorResponse(c, error)
     }
@@ -3273,6 +3558,27 @@ export function registerAutomationRoutes(routeApp: Hono): void {
     }
   })
 
+  /**
+   * Workspace 管理者が template を削除します。Rule の create action や recurring 定義が使っている
+   * template は削除できません。
+   */
+  routeApp.delete('/api/automation/templates/:templateId', async (c) => {
+    try {
+      const principal = await authenticateAutomationPrincipal(c, true)
+      const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
+      const templateId = c.req.param('templateId')
+      await deleteUnusedAutomationTemplate(
+        automationDependencies,
+        principal.directoryId,
+        templateId,
+        input.expectedRevision,
+      )
+      return c.body(null, 204)
+    } catch (error) {
+      return toAutomationErrorResponse(c, error)
+    }
+  })
+
   /** Workspace の recurring Work 定義を返します。 */
   routeApp.get('/api/recurring-work', async (c) => {
     try {
@@ -3322,6 +3628,26 @@ export function registerAutomationRoutes(routeApp: Hono): void {
     }
   })
 
+  /** Workspace 管理者が recurring Work 定義を削除します。作成済みの Work Item は残ります。 */
+  routeApp.delete('/api/recurring-work/:recurringWorkId', async (c) => {
+    try {
+      const principal = await authenticateAutomationPrincipal(c, true)
+      const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
+      const recurringWorkId = c.req.param('recurringWorkId')
+      if (!await automationDependencies.recurringSchedules.getRecurringWork(principal.directoryId, recurringWorkId)) {
+        throw new AutomationError('not-found', 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
+      }
+      await automationDependencies.recurringSchedules.deleteRecurringWork(
+        principal.directoryId,
+        recurringWorkId,
+        input.expectedRevision,
+      )
+      return c.body(null, 204)
+    } catch (error) {
+      return toAutomationErrorResponse(c, error)
+    }
+  })
+
   /** Automation execution history と partial action state を返します。 */
   routeApp.get('/api/automation/executions', async (c) => {
     try {
@@ -3350,6 +3676,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const engine = new AutomationEngine(
         automationDependencies.executions,
         createAutomationActionExecutor(),
+        createAutomationExecutionFailureNotifier(),
       )
       return c.json(await engine.retryExecution(principal.directoryId, executionId, event))
     } catch (error) {

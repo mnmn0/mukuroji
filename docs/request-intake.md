@@ -86,6 +86,37 @@ deterministic Work Item ID と receipt から既存結果を返すため、respo
 Work Item を作らない。Submission、Triage Entry、Work Item のそれぞれから source を
 双方向に追跡できる。
 
+## Requester view and notifications
+
+`auth-required` / `internal` link から signed-in member が送った submission は、正規化した
+member key を `requesterUserId` として保存する。`public` link の submit は session があっても
+requester を記録せず、匿名の挙動を変えない。保存と同じ transaction で
+`WORKSPACE#<workspaceId>` partition に `REQUESTER#<memberKey>#SUBMISSION#<submissionId>` の
+`requester-submission` index row を追加する。Submission ID は作成時刻で始まるため、
+`GET /api/my-requests` は1回の Query を降順に読み、cursor は検証済みの prefix 内に限る。
+Index row は `workspaceId` を持ち、tenant export / delete の対象になる。
+
+Requester 向けの read / reply は、保存された `requesterUserId` と認証済み member が一致する
+submission だけを返し、他人の submission は存在しないものと同じ `404` にする。Response は
+form title、状況、受付番号、requester thread（staff message と requester reply だけ）に限り、
+回答、routing、triage owner、event summary（却下理由など）、重複先を含めない。Reply は
+thread link と同じ rate limit と冪等 receipt を共有し、Enterprise の権限は自分の設定と同じ self-service（`workspace.read`）として扱う。
+
+Work Item は requester が現在その Team / Project で `work-items.read` を持つ場合（Team / Project 単位の Enterprise 付与と従来の Project 参加を含み、Work Item の route と同じ判定）だけ key・title・status category を返し、
+読めない場合は `restricted` として完了したかどうかだけを返す。
+Triage の重複操作で既存 Work Item に統合した依頼は、submission の `requesterOutcome: duplicate`
+を保存し、Work Item への link を残したまま依頼者には「重複」と表示する。
+
+追加情報の依頼、見送り、重複、受付（Work Item 作成または既存 Work Item への link）、作成した
+Work Item の完了は、同じ transaction の audit outbox に `request.requester.<kind>` event を書く。
+Event は Team / Project / Work Item scope を持たず、form title と定型文だけを
+`notificationMessage` に入れ、deep link は `/my-requests?requestId=…` にする。Collaboration
+projection は scope のない requester event を reason `requester` の候補だけに配り、Inbox は
+読み取り時に submission がまだその member のものかを確かめる。完了通知のため、Form から作った
+Work Item は API に返さない `sourceRequester`（member key と form title）を持ち、完了遷移の
+transaction の最後に notification を追加する。Work Item の更新だけでなく、完了遷移付きの承認で
+完了した場合も、承認 decision の transaction の最後に同じ notification を追加する。通知は受信箱だけに届け、member の channel 設定にかかわらず Email・Slack・Push には送らない。判断は ADR 0088 を参照する。
+
 ## API
 
 Public/shared:
@@ -95,6 +126,12 @@ Public/shared:
 - `POST /api/request-intake/{token}/submissions`
 - `GET /api/request-threads/{threadToken}`
 - `POST /api/request-threads/{threadToken}/replies`
+
+Signed-in requester:
+
+- `GET /api/my-requests`（`limit`、`cursor`）
+- `GET /api/my-requests/{submissionId}`
+- `POST /api/my-requests/{submissionId}/replies`
 
 Workspace admin:
 

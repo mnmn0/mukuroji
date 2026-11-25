@@ -108,6 +108,7 @@ WBS（親子の階層と WBS 番号 1.2.3）は、Team の **Issues**（`/teams/
   既定では「Work Item」1種類だけです。
 - 子が未完了のまま親を完了にしたときの扱い（警告 / 拒否）は Team の設定で決まります。
 - Team に完了 Gate（受け入れ条件の全達成、判断待ちの承認なし、承認済みの承認あり）が設定されていると、条件を満たさない Work Item は完了にできず、満たしていない条件が示されます。
+- Team のワークフローで「承認済み」などへの遷移を Project マネージャーや担当者に限っている場合、ほかの人が状態を変えると拒否され、実行できる役割が示されます。状態ごとに必須の項目（期限、受け入れ条件、独自項目）が空のときも、その状態には移せず、足りない項目が示されます。
 - 1 Team あたり 1,000 件を超えると階層表示はできません。
 
 Project の画面で Team に公開したビューは、その Project の管理者（または Team の管理者）が **この Project の既定** にできます。
@@ -435,6 +436,19 @@ Team 全体の近況も同じように出せます。**ポートフォリオ** �
 関係者は **アップデート**（`/updates`）で既読管理・前回との比較・コメント・リアクションができ、
 「注意・遅延」「未提出」「提出期限超過」のフィードで遅れている Project を探せます。
 AI assistance が有効な Workspace では、「Planning draft を生成」で下書きを作れます。
+
+### Project・Team の Slack channel に流す
+
+Project の **概要**（`/projects/<Project ID>/overview`）の **Project の Slack channel** に、Project の channel の
+Slack Incoming Webhook URL を登録すると、近況の公開（健全性の悪化を含む）、Milestone の完了と日程変更、
+Work Item の期限当日と期限超過がその channel に投稿されます。投稿には対象画面へのリンクが付きます。
+Team の **メンバー**（`/teams/<Team ID>/members`）の **Team の Slack channel** に登録すると、専用の channel を
+持たない Project と Team 直下の Work Item の投稿がそちらに流れます。
+
+- 登録・変更・削除・**テスト送信** ができるのは Project マネージャーと Team マネージャーです。ほかのメンバーには登録の有無だけが見えます。
+- **channel 名** は画面の表示用です。**投稿の言語** で日本語か英語を選べます。
+- 登録した URL は画面に表示されません。URL を変えるときは新しい URL を入れて保存し、名前や言語だけを変えるときは URL を空のまま保存します。
+- channel の参加者全員が投稿を読めます。Project の内容を見てよい人だけの channel を選んでください。
 
 ### メンバーの週報を読む
 
