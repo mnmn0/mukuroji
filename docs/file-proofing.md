@@ -9,8 +9,8 @@
 - upload/download URL は認証済み API だけが発行し、既定で upload 600 秒、download 300 秒で失効する。
 - bucket は public access を全面拒否し、TLS、SSE-S3、versioning を必須にする。
 - object key は `workspaces/<workspaceId>/files/<fileId>/<versionId>` とし、request から S3 key を受け取らない。file 名は key に含めず DynamoDB と download 時の `Content-Disposition` だけに持たせ、長い日本語名でも S3 の key 上限 (1,024 byte) を超えないようにする。以前の version は末尾に encode 済み file 名を持つ key のまま読み書きする。
-- upload session は MIME type、byte 数、file 名を検証し、最大 2 GiB に制限する。`Content-Type`、`Content-Length`、`If-None-Match: *`、upload tag を署名対象にし、同じ論理 version の上書きを拒否する。object size は完了 API でも再検証する。
-- GuardDuty Malware Protection が `GuardDutyMalwareScanStatus=NO_THREATS_FOUND` を付与するまで、API は access URL を発行せず、bucket policy も browser など API/GuardDuty 以外の principal による object read を拒否する。API execution role の例外は upload metadata と scan tag の検証に使い、access URL は clean と判定した immutable S3 VersionId にだけ固定する。`THREATS_FOUND` は `blocked`、scan failure/unsupported は `failed` として扱う。
+- upload session は file 名・MIME type から形式を決め、byte 数を検証し、最大 2 GiB に制限する。形式は `contracts/src/file-types.ts` の catalog の 1 つで、file 名の最後の拡張子で決め、拡張子がないときだけ MIME で決める。最後の拡張子か MIME が実行形式・script・HTML・SVG などの危険な形式なら、Workspace の設定に関わらず `415 FileTypeNotAllowed`（`reason: dangerous`）にする。catalog にない形式は `unrecognized`、Workspace が止めている形式は `not-allowed` で、body の `allowedFileTypes` に Workspace が受け付ける形式の id を返す。保存する `contentType` と S3 の署名に使う MIME は catalog の正規の MIME にする。Workspace の設定は tenant profile の `fileTypes`（既定との差分）で、保存済み version の整合性検査は Workspace の設定ではなく catalog 全体で行う（ADR 0094）。`Content-Type`、`Content-Length`、`If-None-Match: *`、upload tag を署名対象にし、同じ論理 version の上書きを拒否する。object size は完了 API でも再検証する。
+- GuardDuty Malware Protection が `GuardDutyMalwareScanStatus=NO_THREATS_FOUND` を付与するまで、API は access URL を発行せず、bucket policy も browser など API/GuardDuty 以外の principal による object read を拒否する。API execution role の例外は upload metadata と scan tag の検証に使い、access URL は clean と判定した immutable S3 VersionId にだけ固定する。`THREATS_FOUND` は `blocked`、scan failure/unsupported は `failed` として扱う。パスワード付きの圧縮ファイルなど scan できない形式は `failed` になり、画面は「スキャンできません」と、パスワードを外すか別の形式で添付し直す案内を出す。
 - Upload object は最初に `mukuroji-upload=pending` を持ち、clean scan を確認した API だけが `completed` へ更新する。未使用 URL や delete 後に再利用された旧 PUT URL が作った孤立 current object は 1 日後に lifecycle で失効する。
 - Upload 完了は immutable S3 VersionId と `scanning` repair state を DynamoDB に先に確定し、その後に clean tag を保持した `completed` 更新と `available` 反映を行う。後半が一時失敗しても次回 read で同じ VersionId を再検証できる。
 - Delete 確定後は各 immutable S3 VersionId に `mukuroji-deleted=true` を設定し、bucket policy が API や署名済み URL を含む全 principal の read を拒否する。GuardDuty と upload 完了 tag は上書きせず保持する。
@@ -29,6 +29,7 @@ recordKey = FILE#<fileId>
           | FILE_APPROVAL#<fileId>#<approvalId>
           | APPROVAL_SUMMARY
           | DOWNLOAD#<downloadId>
+          | ANNOTATION_DELETE#<receiptId>
 ```
 
 Comment attachment は親 Work Item partition に保存し、`targetType=comment` / `targetId=<commentId>` で区別する。File row は全 version の immutable object key、scan state、現在 version、guest access、soft-delete retention を保持する。Approval main row は `subjectType=file-version|work-item` と `requestedByKind=member|service` を持つ。`FILE_APPROVAL` row は file-version subject だけに作成し、file delete 時に関連 approval/reviewer metadata を file prefix の強整合 Query だけで列挙する逆引き projection で、approval state と同じ transaction で保存する。Work Item subject は file row や逆引き row を要求しない。download URL の発行は URL 自体ではなく actor/file/version/time だけを履歴に残す。
@@ -49,18 +50,49 @@ GET  /api/teams/{teamId}/issues/{issueId}/files/{fileId}/versions/{versionId}/ac
 
 Version 差し替えは `POST .../files/{fileId}/versions` で開始時に version 番号を採番する。upload 完了時は、完了した version の番号が現在 version より大きいときだけ現在 version を切り替える。先に採番した version が後から完了しても検証済みとして記録するだけで、現在 version は戻さない。annotation は `GET|POST .../versions/{versionId}/annotations` を使う。Image は正規化 x/y、PDF は x/y + 1 始まり page、video は x/y + millisecond timecode を保存する。
 
-Approval は次の endpoint を使う。
+Annotation の解決・再開・削除は次の endpoint を使う。
+
+```text
+POST   .../versions/{versionId}/annotations/{annotationId}/resolve
+POST   .../versions/{versionId}/annotations/{annotationId}/reopen
+DELETE .../versions/{versionId}/annotations/{annotationId}
+```
+
+解決と再開は scope に書き込める member（guest 以外）なら誰でも行え、`resolvedAt` と `resolvedByMemberKey` を annotation row に保存・削除する。削除は作成者だけが行える。どちらも file が削除されていないことを `ConditionCheck` で確かめ、解決状態または作成者を条件にした Put / Delete と `annotation.resolved` / `annotation.reopened` / `annotation.deleted` の audit event を同じ transaction で保存する。すでに目的の状態にある解決・再開は変更せずに現在の annotation を返す。削除は同じ transaction で `ANNOTATION_DELETE#` receipt（scope と idempotency key hash から決めた ID、作成者・file・version・annotation・request fingerprint、`FILE_RETENTION_DAYS` 後の TTL）を保存する。応答が失われた削除を同じ作成者・対象・`Idempotency-Key` で再送すると、annotation がなくても receipt と一致すれば 204 を返す。fingerprint が異なる key の再利用は 409 `IdempotencyKeyReused`、存在しなかった annotation や別の key による削除は 404 `AnnotationNotFound` のままにする。receipt の prefix は `ANNOTATION#` で始まらないため、annotation の Query には含まれない。Annotation は version に紐づき、次の version へは引き継がない。
+
+scope の一覧（`GET .../files`）は `ANNOTATION#` prefix も Query し、各 file の現在 version と各 file-version approval の対象 version に残る未解決 annotation の件数を `unresolvedAnnotationCount` として返す。
+
+Approval は次の endpoint を使う。Project に直接添付した file の approval は、同じ形の `/api/teams/{teamId}/projects/{projectId}/approvals` 配下を使う。
 
 ```text
 POST /api/teams/{teamId}/issues/{issueId}/approvals
 POST /api/teams/{teamId}/issues/{issueId}/approvals/{approvalId}/decisions
 POST /api/teams/{teamId}/issues/{issueId}/approvals/{approvalId}/cancel
+POST /api/teams/{teamId}/projects/{projectId}/approvals
+POST /api/teams/{teamId}/projects/{projectId}/approvals/{approvalId}/decisions
+POST /api/teams/{teamId}/projects/{projectId}/approvals/{approvalId}/cancel
 GET  /api/approvals/reviewer?limit=50&cursor=<opaque>
 ```
+
+Project file の approval row は Project partition に保存し、`issueId` を持たない。subject は `file-version` だけで、完了時に遷移する Work Item がないため `completionTransition` は 400 `ApprovalCompletionTransitionUnsupported` で拒否する。Reviewer は Project の file を読んで判断を記録できる（Enterprise role では Project の `files.read` と、decision endpoint が要求する `files.approve` を持つ）active member に限り、Work Item を出さないため `work-items.read` は求めない。判断を記録できない member を選べると、pending approval が版の差し替えと削除を止めたままになるため、選出時と decision 時で同じ権限を確認する。Guest など外部メンバーの permission ceiling も decision の request 境界と同じく、設定済みの外部アクセス policy があるときか Enterprise role で判定するときだけ適用し、policy のない Workspace の guest は従来どおり Project の閲覧権限で選べる。Reviewer Inbox と外部通知は Project の現在の閲覧権限と file の削除・guest 共有を再確認してから表示・配信する。Audit event の entity は Project で、deep link は Project の画面（`/projects/{projectId}/issues`）を指す。Focus は Work Item に紐づく approval だけを扱う。
 
 Request は最大 20 人の active Workspace reviewer と期限を必須にし、decision comment は 2,000 文字までに制限する。Reviewer decision は approval revision で optimistic concurrency を行い、`approved` / `rejected` / `changes-requested` を保存する。File-version subject の pending approval 中は対象 version の差し替えと file delete を拒否する。Member requester または manager は revision 条件付き cancel で reviewer projection、pending count、summary を同じ transaction 内で解除できる。Automation の service requester は member identity として cancel できず、manager capability が必要になる。全 reviewer が承認した transaction では、Request 時に現在の configuration から選択・保存した完了先 workflow status へ canonical Work Item を遷移する。Decision 直前に configuration と Work Item を強整合 read し、両方の revision を transaction 条件に含めるため、完了先 transition の削除や同時更新は 409 conflict として全体を rollback する。Legacy Work Item は read-only のため Approval mutation の対象にしない。Approval row、reviewer projection、任意の File pending count、summary、Work Item transition、audit/outbox event のいずれかが競合した場合も全体を rollback する。
 
 `approval.requested` と `approval.completed` は reviewer、member requester の notification candidate、deep link、subject/requester kind、workflow transition、automation hook を metadata に持つ。現在の event consumer は notification projection を行い、automation engine は同じ durable event を idempotent trigger として利用する。
+
+## Project の成果物一覧
+
+```text
+GET /api/teams/{teamId}/projects/{projectId}/deliverables?approval=all|unapproved|pending|approved&unresolvedOnly=true&limit=50&cursor=<opaque>
+```
+
+Project に直接添付した file と、Project の Work Item（comment 添付を含む）の file を 1 つの一覧で返す。各行は file（最新 version と scan 状態）、添付先（Project または Work Item の key・タイトル）、現在 version の承認状態（取り消されていない最新の file-version approval。なければ `none`）、現在 version の未解決 annotation 件数、更新日を持つ。
+
+- 1 page は Project の Work Item 一覧（`assignedProjectId` index）の順に `limit`（既定 50、最大 100）件の Work Item を読み、その Work Item の file をすべて返す。1 page 目だけ Project 自体の file も含める。`nextCursor` は Work Item 一覧の opaque cursor をそのまま使う。page 内は file の更新日の新しい順に並べる。
+- 読む Work Item は、URL の Team が所有し、現在の `assignedProjectId` が URL の Project で、archive されておらず、呼び出し元が Project を閲覧できるものに限る。index は結果整合のため、候補の canonical Work Item を strongly consistent read で読み直し、その現在の割り当て・archive・閲覧権限で判定してから添付を読む。file row に保存された作成時の Project ではなく Work Item の現在の割り当てで判定するため、別 Project へ移した Work Item の添付は出ない。Enterprise role で Project の `work-items.read` を持たない人には Work Item を読まず、Project 自体の file だけを返す。Guest には `guestAccess` の file だけを返す。
+- Work Item ごとの partition は `FILE#` を先に Query し、表示できる file がある partition だけ `APPROVAL#` と `ANNOTATION#` を Query する。同時に読む partition は 8 件までにする。
+- 承認状態と未解決の絞り込みは page 内で行うため、条件に合う行がない page もある。CSV 出力は Web が全 page を読んで作り、`nextCursor` がなくなるまで読む（同じ cursor が再び返ったときだけ失敗にする）。
+- 一覧と CSV の範囲は URL の 1 Team に限る。Web は選択した Team、なければ Project を持つ唯一の Team を使い、表示中の Work Item の順序には依存しない。同じ Project ID が複数の Team にあり Team を選んでいないときは読まず、Team を選ぶよう案内する。Work Item の Project 変更・archive・復元・一括操作の後は一覧を背景で再取得する。
 
 ## Audit / retention
 

@@ -30,6 +30,7 @@ import {
 } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
+  FILE_APPROVAL_MAX_REVIEWERS,
   FileProofingError,
   type ApprovalSummaryFence,
   type PendingWorkItemApprovalCompletionTransition,
@@ -39,6 +40,8 @@ import {
 import {
   WorkItemCompletionGateError,
   WorkItemConfigurationError,
+  WorkflowRuleError,
+  assertWorkflowRules,
   assertWorkItemTypeChangeResolution,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
@@ -59,16 +62,22 @@ import { readJson } from './http'
 import {
   canMemberViewWorkItemScope,
   createMemberWorkItemVisibilityReads,
+  type MemberWorkItemVisibilityScope,
 } from './member-work-item-visibility'
+import { loadProjectFileProofingContext } from './collaboration-access'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
 import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from './work-item-access'
 import {
   createWorkItemTypeRelationConfigurationTransactionItems,
+  createWorkflowRuleWorkItemState,
   getWorkItemConfigurationTableName,
   readWorkItemTypeChangeResolution,
   requireActiveCustomFieldPeople,
+  resolveWorkflowRuleActor,
+  withWorkflowRoleConditionChecks,
+  type WorkflowRulePrincipal,
 } from './work-item-configuration'
 import { toWorkspaceAccessErrorResponse } from './workspace-access'
 
@@ -90,10 +99,65 @@ export async function requireApprovalReviewers(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  const visibilityReads = createMemberWorkItemVisibilityReads(workspaceId, dependencies)
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, ...(assignedProjectId ? { assignedProjectId } : {}), permissions: ['work-items.read', 'files.read'] },
+    reviewerMemberKeys,
+    (memberKey) => assignedProjectId
+      ? `Reviewer "${memberKey}" cannot view the assigned project.`
+      : `Reviewer "${memberKey}" cannot view the Work Item team.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer of a Project file approval to be active and able to read the Project's
+ * files and record a decision on them. The decision endpoint requires `files.approve`, so a
+ * member who could not decide is never chosen. The approval shows no Work Item, so
+ * `work-items.read` is not required.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project that holds the file.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ */
+export async function requireProjectFileApprovalReviewers(
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  reviewerMemberKeys: readonly string[],
+  dependencies: AutomationActionExecutorDependencies =
+    ambientAutomationActionExecutorDependencies,
+) {
+  return await requireReviewersWithScopeAccess(
+    { workspaceId, teamId, assignedProjectId: projectId, permissions: ['files.read', 'files.approve'] },
+    reviewerMemberKeys,
+    (memberKey) => `Reviewer "${memberKey}" cannot review the Project files.`,
+    dependencies,
+  )
+}
+
+/**
+ * Requires every reviewer to be an active member holding the given permissions on the scope.
+ *
+ * @param scope - Team or Project scope and the permissions each reviewer needs on it.
+ * @param reviewerMemberKeys - Normalized reviewer member keys.
+ * @param deniedMessage - Builds the message of a reviewer who lacks access.
+ * @param dependencies - Ports used for membership and access checks.
+ * @returns Active reviewer membership records.
+ * @throws FileProofingError `409` for an inactive reviewer or one without access.
+ */
+async function requireReviewersWithScopeAccess(
+  scope: MemberWorkItemVisibilityScope,
+  reviewerMemberKeys: readonly string[],
+  deniedMessage: (memberKey: string) => string,
+  dependencies: AutomationActionExecutorDependencies,
+) {
+  const visibilityReads = createMemberWorkItemVisibilityReads(scope.workspaceId, dependencies)
   return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
     const member = await dependencies.workspaceAccess.getActiveMember(
-      workspaceId,
+      scope.workspaceId,
       memberKey,
     )
     if (!member) {
@@ -103,32 +167,40 @@ export async function requireApprovalReviewers(
         `Reviewer "${memberKey}" is not an active Workspace member.`,
       )
     }
-    const canView = await canMemberViewWorkItemScope(
-      member,
-      {
-        workspaceId,
-        teamId,
-        ...(assignedProjectId ? { assignedProjectId } : {}),
-        permissions: ['work-items.read', 'files.read'],
-      },
-      dependencies,
-      visibilityReads,
-    )
-    if (!canView) {
-      throw new FileProofingError(
-        409,
-        'ApprovalReviewerAccessDenied',
-        assignedProjectId
-          ? `Reviewer "${memberKey}" cannot view the assigned project.`
-          : `Reviewer "${memberKey}" cannot view the Work Item team.`,
-      )
+    if (!await canMemberViewWorkItemScope(member, scope, dependencies, visibilityReads)) {
+      throw new FileProofingError(409, 'ApprovalReviewerAccessDenied', deniedMessage(memberKey))
     }
     return member
   }))
 }
 
 /**
- * Lists reviewer approvals after current Work Item authorization checks.
+ * Validates and normalizes the reviewer member keys of an approval request body.
+ *
+ * @param value - Untrusted `reviewerMemberKeys` value.
+ * @returns Lower-cased, de-duplicated reviewer keys.
+ * @throws FileProofingError `400 InvalidApprovalReviewers` for a missing, malformed, or too long list.
+ */
+export function normalizeApprovalReviewerMemberKeys(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > FILE_APPROVAL_MAX_REVIEWERS ||
+    value.some((memberKey) => typeof memberKey !== 'string' || !memberKey.trim() || memberKey.length > 320)
+  ) {
+    throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Approval reviewers are required.')
+  }
+  const reviewerMemberKeys = [...new Set(
+    value.flatMap((memberKey) => typeof memberKey === 'string' ? [memberKey.trim().toLowerCase()] : []),
+  )]
+  if (reviewerMemberKeys.length > FILE_APPROVAL_MAX_REVIEWERS) {
+    throw new FileProofingError(400, 'InvalidApprovalReviewers', 'Too many approval reviewers.')
+  }
+  return reviewerMemberKeys
+}
+
+/**
+ * Lists reviewer approvals after current Work Item or Project authorization checks.
  *
  * @param principal - Current authenticated Workspace principal.
  * @param options - Reviewer projection cursor and requested authorized result limit.
@@ -162,16 +234,20 @@ export async function listAuthorizedReviewerApprovals(
     )
     if (sourcePageBudget !== undefined) sourcePageBudget.remaining -= 1
     const authorized = await Promise.all(page.approvals.map(async (approval) => {
-      if (!approval.teamId || !approval.issueId) {
+      if (!approval.teamId || (!approval.issueId && !approval.projectId)) {
         return undefined
       }
       try {
-        await loadAuthorizedTeamIssue(
-          principal,
-          approval.teamId,
-          approval.issueId,
-          'viewer',
-        )
+        if (approval.issueId) {
+          await loadAuthorizedTeamIssue(
+            principal,
+            approval.teamId,
+            approval.issueId,
+            'viewer',
+          )
+        } else if (approval.projectId) {
+          await loadProjectFileProofingContext(principal, approval.teamId, approval.projectId)
+        }
         return approval
       } catch (error) {
         if (isReviewerApprovalAuthorizationMiss(error)) {
@@ -249,6 +325,10 @@ export function toFileProofingErrorResponse(c: Context, error: unknown) {
     // An approval decision that would complete the Work Item reports the Gate like a Work Item update.
     return c.json(error.toResponseBody(), 409)
   }
+  if (error instanceof WorkflowRuleError) {
+    // An approval decision that changes the status reports workflow rules like a Work Item update.
+    return c.json(error.toResponseBody(), error.status === 403 ? 403 : 409)
+  }
   if (!(error instanceof FileProofingError)) {
     console.error(error)
     return c.json({ message: 'File proofing data is unavailable.' }, 502)
@@ -269,7 +349,11 @@ export function toFileProofingErrorResponse(c: Context, error: unknown) {
     ? error.status
     : 502
 
-  return c.json({ code: error.code, message: error.message }, status)
+  return c.json({
+    code: error.code,
+    message: error.message,
+    ...error.fileTypeRejection,
+  }, status)
 }
 
 /** File approval mutation が canonical Work Item だけを対象にすることを保証します。 */
@@ -296,6 +380,7 @@ export function requireCanonicalFileProofingWorkItem(
  * @param teamId - Owning Team identifier.
  * @param workItem - Canonical Work Item being approved.
  * @param completionTransition - Requested target workflow status.
+ * @param rulePrincipal - Who decides the approval, for the workflow's transition actor roles.
  * @param dependencies - Ports used to read workflow configuration.
  * @returns A transaction-ready completion transition snapshot.
  */
@@ -304,10 +389,11 @@ export function resolveFileApprovalCompletionTransition(
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  rulePrincipal: WorkflowRulePrincipal,
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, true)
+  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, rulePrincipal)
 }
 
 /**
@@ -331,7 +417,8 @@ export async function validateFileApprovalCompletionTransition(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ): Promise<void> {
-  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, false)
+  // Requesting an approval changes no status, so the workflow rules are judged at the decision.
+  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, undefined)
 }
 
 /**
@@ -342,7 +429,8 @@ export async function validateFileApprovalCompletionTransition(
  * @param workItem - Canonical Work Item being approved.
  * @param completionTransition - Requested target workflow status.
  * @param dependencies - Ports used to read workflow configuration.
- * @param applyParentCompletionPolicy - Whether to check and fence the Work Item's open children.
+ * @param decider - Who decides the approval when the decision applies the transition; `undefined`
+ *   when an approval request only names it.
  * @returns A transaction-ready completion transition snapshot.
  */
 async function resolveCompletionTransition(
@@ -351,8 +439,10 @@ async function resolveCompletionTransition(
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
   dependencies: AutomationActionExecutorDependencies,
-  applyParentCompletionPolicy: boolean,
+  decider: WorkflowRulePrincipal | undefined,
 ) {
+  // The decision is when the status changes, so open children and workflow rules apply only then.
+  const applyParentCompletionPolicy = decider !== undefined
   try {
     const resolved = await dependencies.workItemConfigurations.getTeamConfiguration(
       directoryId,
@@ -374,6 +464,20 @@ async function resolveCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    if (decider) {
+      assertWorkflowRules(resolved.configuration, {
+        workItemTypeId: workItem.workItemTypeId,
+        projectId: workItem.assignedProjectId,
+        fromStatusId: currentStatus.workflowStatusId,
+        toStatusId: nextStatus.workflowStatusId,
+        actor: resolveWorkflowRuleActor(decider, workItem, workItem.assignedProjectId),
+        state: () => createWorkflowRuleWorkItemState(
+          workItem.schedule,
+          workItem.acceptanceCriteria?.length ?? 0,
+          workItem.customFieldValues,
+        ),
+      })
+    }
     // The approval being decided is still stored as pending, so it is counted as approved here.
     // Its decision updates the approval counts, so the counts the Gate judged are required by that
     // update rather than by a separate condition check on the same row.
@@ -437,8 +541,8 @@ async function resolveCompletionTransition(
       ...(gateFence.observedApprovals ? { expectedApprovalSummary: gateFence.observedApprovals } : {}),
     }
   } catch (error) {
-    // The Gate's unmet conditions are part of its response, so the error keeps its own type.
-    if (error instanceof WorkItemCompletionGateError) throw error
+    // The Gate's and workflow rules' unmet conditions are part of their responses, so they keep their types.
+    if (error instanceof WorkItemCompletionGateError || error instanceof WorkflowRuleError) throw error
     if (error instanceof WorkItemConfigurationError) {
       throw new FileProofingError(error.status, error.code, error.message, { cause: error })
     }
@@ -465,11 +569,14 @@ export function hasApprovalSummaryContent(summary: ApprovalSummary) {
  * @param current - Current Work Item.
  * @param input - Request input.
  * @param resolved - Resolved Work Item configuration.
+ * @param rulePrincipal - Who makes the change, for the workflow's transition actor roles.
  * @param options - Optional dependency overrides for relation validation and the approval read,
  *   and acceptance criterion marks a caller sends outside `input`.
  * @returns The validated update and its configuration transaction items.
  * @throws WorkItemCompletionGateError when the change completes the Work Item while a required
  *   completion Gate condition is unmet.
+ * @throws WorkflowRuleError when the actor may not make the status change, or a field the target
+ *   status requires is empty.
  */
 export async function prepareConfiguredUpdateWorkItem(
   directoryId: string,
@@ -477,6 +584,7 @@ export async function prepareConfiguredUpdateWorkItem(
   current: TeamIssueResponseItem,
   input: UpdateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
+  rulePrincipal: WorkflowRulePrincipal,
   options: {
     relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> &
       Partial<Pick<WorkItemDependencies, 'fileProofing'>>
@@ -593,6 +701,20 @@ export async function prepareConfiguredUpdateWorkItem(
     projectId,
     targetWorkItemType.id,
   )
+  const sameWorkflow = !typeChanged || currentWorkflow.id === targetWorkflow.id
+  const judgedActorRoles = assertWorkflowRules(resolved.configuration, {
+    workItemTypeId: targetWorkItemType.id,
+    projectId,
+    // Another workflow has no transition from the current status, so its target is entered directly.
+    fromStatusId: sameWorkflow ? currentWorkflowStatus.workflowStatusId : undefined,
+    toStatusId: nextWorkflowStatus.workflowStatusId,
+    actor: resolveWorkflowRuleActor(rulePrincipal, current, projectId),
+    state: () => createWorkflowRuleWorkItemState(
+      'schedule' in input && input.schedule !== undefined ? input.schedule : current.schedule,
+      readCompletionGateAcceptanceCriteria(current, input, options.acceptanceCriteriaMarks).length,
+      customFieldValues,
+    ),
+  })
   const relationTransactionItems = typeChanged
     ? await createWorkItemTypeRelationConfigurationTransactionItems(
         directoryId,
@@ -648,6 +770,8 @@ export async function prepareConfiguredUpdateWorkItem(
   )
   return {
     ...inputWithoutTypeChangeResolution,
+    // The status was entered by the caller's roles, so the write fails when they change first.
+    ...withWorkflowRoleConditionChecks(inputWithoutTypeChangeResolution, rulePrincipal, judgedActorRoles),
     workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,

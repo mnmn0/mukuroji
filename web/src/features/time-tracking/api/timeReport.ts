@@ -45,8 +45,12 @@ export type SaveTimeBudgetInput = {
   periodFrom?: string
   /** Inclusive local period end as `YYYY-MM-DD`. */
   periodTo?: string
+  /** Whether this saves the scope's budget for exactly this period instead of its default budget. */
+  periodBudget?: boolean
   /** Revision being replaced, or 0 for a new budget. */
   expectedRevision: number
+  /** Update time of the budget being replaced, which tells it apart from one deleted and saved again. */
+  expectedUpdatedAt?: string
 }
 
 const groupByValues = new Set<string>(['day', 'week', 'user', 'project', 'work-item', 'category'])
@@ -74,8 +78,9 @@ export function createTimeReportQuery(input: TimeReportInput): string {
  */
 export function readTimeBudget(value: unknown): TimeBudget | undefined {
   if (!isRecord(value)) return undefined
-  const { schemaVersion, workspaceId, teamId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, revision, updatedAt } = value
+  const { schemaVersion, workspaceId, teamId, scopeType, scopeId, amountMinor, currency, periodFrom, periodTo, periodBudget, revision, updatedAt } = value
   if (
+    (periodBudget !== undefined && periodBudget !== true) ||
     schemaVersion !== 1 || typeof workspaceId !== 'string' || typeof teamId !== 'string' ||
     (scopeType !== 'team' && scopeType !== 'project') ||
     typeof scopeId !== 'string' || !isNonnegativeSafeInteger(amountMinor) || typeof currency !== 'string' ||
@@ -94,6 +99,7 @@ export function readTimeBudget(value: unknown): TimeBudget | undefined {
     currency,
     ...(periodFrom === undefined ? {} : { periodFrom }),
     ...(periodTo === undefined ? {} : { periodTo }),
+    ...(periodBudget === true ? { periodBudget } : {}),
     revision,
     updatedAt,
   }
@@ -109,10 +115,11 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
   if (!isRecord(value)) return undefined
   const {
     from, to, timeZone, groupBy, totalMinutes, totalBillableMinutes, totalEstimateMinutes,
-    totalActualCostMinor, totalActualCostByCurrency, budget, costsRedacted, canManageTeam,
+    totalActualCostMinor, totalActualCostByCurrency, budget, budgetPeriods, costsRedacted, canManageTeam,
   } = value
   const groups = readSummaryGroups(value.groups)
   const parsedBudget = budget === undefined ? undefined : readTimeBudget(budget)
+  const parsedBudgetPeriods = budgetPeriods === undefined ? undefined : readTimeBudgetPeriods(budgetPeriods)
   if (
     typeof from !== 'string' || typeof to !== 'string' || typeof timeZone !== 'string' ||
     typeof groupBy !== 'string' || !groupByValues.has(groupBy) || !groups ||
@@ -120,7 +127,8 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
     !isFiniteNumber(totalEstimateMinutes) ||
     (totalActualCostMinor !== undefined && !isFiniteNumber(totalActualCostMinor)) ||
     (totalActualCostByCurrency !== undefined && !isNumberRecord(totalActualCostByCurrency)) ||
-    (budget !== undefined && !parsedBudget) || typeof costsRedacted !== 'boolean'
+    (budget !== undefined && !parsedBudget) || (budgetPeriods !== undefined && !parsedBudgetPeriods) ||
+    typeof costsRedacted !== 'boolean'
   ) {
     return undefined
   }
@@ -139,9 +147,27 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
     ...(totalActualCostMinor === undefined ? {} : { totalActualCostMinor }),
     ...(totalActualCostByCurrency === undefined ? {} : { totalActualCostByCurrency }),
     ...(parsedBudget ? { budget: parsedBudget } : {}),
+    ...(parsedBudgetPeriods ? { budgetPeriods: parsedBudgetPeriods } : {}),
     costsRedacted,
     canManageTeam: parsedCanManageTeam,
   }
+}
+
+/**
+ * Validates a scope's budgets per period from the API.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The budgets, or undefined when any is invalid or lacks its period.
+ */
+function readTimeBudgetPeriods(value: unknown): TimeBudget[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const budgets: TimeBudget[] = []
+  for (const item of value) {
+    const budget = readTimeBudget(item)
+    if (!budget?.periodBudget || !budget.periodFrom || !budget.periodTo) return undefined
+    budgets.push(budget)
+  }
+  return budgets
 }
 
 /**
@@ -239,10 +265,40 @@ export async function saveTimeBudget(
       currency: input.currency,
       ...(input.periodFrom ? { periodFrom: input.periodFrom } : {}),
       ...(input.periodTo ? { periodTo: input.periodTo } : {}),
+      ...(input.periodBudget ? { periodBudget: true } : {}),
       expectedRevision: input.expectedRevision,
+      ...(input.expectedUpdatedAt ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
     }),
   })
   const budget = isRecord(data) ? readTimeBudget(data.budget) : undefined
   if (!budget) throw createInvalidTimeTrackingResponseError('Time budget')
   return budget
+}
+
+/**
+ * Deletes one of a Team's or Project's budgets per period.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param teamId - Team that owns the budget or its Project.
+ * @param scope - Team or Project budget.
+ * @param budget - Budget per period to delete, whose revision is expected.
+ */
+export async function deleteTimeBudgetPeriod(
+  accessToken: string,
+  teamId: string,
+  scope: TimeReportBudgetScope,
+  budget: Pick<TimeBudget, 'periodFrom' | 'periodTo' | 'revision' | 'updatedAt'>,
+): Promise<void> {
+  if (!budget.periodFrom || !budget.periodTo) throw createInvalidTimeTrackingResponseError('Time budget period')
+  const scopePath = scope.scopeType === 'team' ? '' : `/projects/${encodeURIComponent(scope.projectId)}`
+  // The save time tells this budget from one saved again for the same period after a delete.
+  const query = new URLSearchParams({ expectedRevision: String(budget.revision), expectedUpdatedAt: budget.updatedAt })
+  await requestTimeTrackingJson(
+    createTeamTimeTrackingUrl(
+      teamId,
+      `${scopePath}/time-budget/periods/${encodeURIComponent(budget.periodFrom)}/${encodeURIComponent(budget.periodTo)}?${query.toString()}`,
+    ),
+    accessToken,
+    { method: 'DELETE' },
+  )
 }

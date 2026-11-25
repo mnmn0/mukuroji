@@ -86,6 +86,7 @@ export type RestoreDrillAwsPartition = 'aws' | 'aws-cn' | 'aws-us-gov'
 /** Auxiliary File Proofing row kinds that do not own immutable object versions. */
 const FILE_PROOFING_AUXILIARY_ENTRY_TYPES = new Set([
   'annotation',
+  'annotation-delete-receipt',
   'approval',
   'approval-summary',
   'download',

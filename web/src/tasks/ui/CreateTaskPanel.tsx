@@ -9,6 +9,12 @@ import type { ChangeEvent } from 'react'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
+import { useSessionDraft } from '../../auth/useSessionDraft'
+import {
+  createWorkItemCreateSessionDraft,
+  parseWorkItemCreateSessionDraft,
+  type WorkItemCreateSessionDraft,
+} from '../../work-items/model/workItemCreateSessionDraft'
 import {
   createDefaultCustomFieldValues,
   isCustomFieldApplicable,
@@ -102,6 +108,11 @@ export type CreateTaskPanelProps = {
   projectId: string
   /** Display name of the destination Project. */
   projectName?: string
+  /**
+   * Identifies the Project's new Work Item form, so its title survives an ended session and comes
+   * back after the same account signs in again. Without it nothing is kept.
+   */
+  sessionDraftKey?: string
   /** Display name of the destination Team. */
   teamName?: string
   /** Resolves localized labels. */
@@ -142,6 +153,7 @@ export function CreateTaskPanel({
   onSubmit,
   projectId,
   projectName,
+  sessionDraftKey,
   teamName,
   t,
   templateLoadFailed = false,
@@ -156,6 +168,19 @@ export function CreateTaskPanel({
   const [carriesContributors, setCarriesContributors] = useState(true)
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [title, setTitle] = useState(duplicateDraft?.title ?? '')
+  const [isSessionDraftRestored, setIsSessionDraftRestored] = useState(false)
+  useSessionDraft<WorkItemCreateSessionDraft>({
+    key: sessionDraftKey,
+    value: createWorkItemCreateSessionDraft(title, ''),
+    parse: parseWorkItemCreateSessionDraft,
+    onRestore: (draft) => {
+      // Text typed since the form came back wins over the kept one.
+      if (title.trim() || !draft.title.trim()) return
+      setTitle(draft.title)
+      setIsSessionDraftRestored(true)
+      markDirty()
+    },
+  })
   const [isPanelSubmitting, setIsPanelSubmitting] = useState(false)
   const submissionInFlightRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -501,6 +526,11 @@ export function CreateTaskPanel({
             templates={templates}
             testId="create-task-template"
           />
+        ) : null}
+        {isSessionDraftRestored && title.trim() ? (
+          <p className="text-xs font-semibold text-fg-amber-900" role="status">
+            {t('tasks.create.sessionDraftRestored')}
+          </p>
         ) : null}
         {duplicateDraft ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-task-duplicate-note">

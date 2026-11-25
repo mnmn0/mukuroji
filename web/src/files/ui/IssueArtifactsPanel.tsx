@@ -8,6 +8,7 @@ import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
 import { FilePreviewDialog } from './FilePreviewDialog'
 import type { ApprovalDecision } from '../api'
+import { describeFileTypeRejection } from '../model/fileTypeRejection'
 import type { FileArtifactsController } from '../mutations/useFileArtifacts'
 
 const maximumApprovalReviewerCount = 20
@@ -183,7 +184,9 @@ function IssueArtifactsPanelContent({
       ) : null}
       {controller.mutationErrorStatus ? (
         <p className="mx-5 mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-fg-red-700" role="alert">
-          {resolveFileErrorMessage(controller.mutationErrorStatus, controller.mutationErrorCode, t)}
+          {controller.mutationFileTypeRejection
+            ? describeFileTypeRejection(controller.mutationFileTypeRejection, t)
+            : resolveFileErrorMessage(controller.mutationErrorStatus, controller.mutationErrorCode, t)}
         </p>
       ) : null}
 
@@ -229,11 +232,11 @@ function IssueArtifactsPanelContent({
         )}
       </div>
 
-      {controller.scope?.kind === 'work-item' ? (
+      {controller.scope ? (
         <ApprovalSection
           approvals={controller.approvals}
           controller={controller}
-          completionTransitions={completionTransitions}
+          completionTransitions={controller.scope.kind === 'work-item' ? completionTransitions : []}
           currentMemberKey={currentMemberKey}
           error={approvalError}
           files={visibleFiles}
@@ -312,6 +315,14 @@ function FileRow({
           {file.targetType === 'comment' ? ` · ${t('files.target.comment')}` : ''}
           {file.guestAccess ? ` · ${t('files.guestAccess')}` : ''}
         </p>
+        {file.unresolvedAnnotationCount ? (
+          <span className="workbench-badge-warning mt-1 inline-flex" data-testid={`file-unresolved-${file.id}`}>
+            {t('files.unresolvedBadge').replace('{count}', String(file.unresolvedAnnotationCount))}
+          </span>
+        ) : null}
+        {version.scanStatus === 'failed' ? (
+          <p className="mt-1 text-xs font-medium leading-5 text-fg-red-700">{t('files.scan.failedDescription')}</p>
+        ) : null}
       </div>
       <span className="text-xs font-semibold text-[var(--workbench-muted)]">
         {t('files.version.label').replace('{number}', String(version.number))}
@@ -650,6 +661,11 @@ function ApprovalCard({
           <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">
             {t('approval.requestedByValue').replace('{name}', requesterLabel)}
           </p>
+          {approval.unresolvedAnnotationCount ? (
+            <span className="workbench-badge-warning mt-1 inline-flex" data-testid={`approval-unresolved-${approval.id}`}>
+              {t('files.unresolvedBadge').replace('{count}', String(approval.unresolvedAnnotationCount))}
+            </span>
+          ) : null}
         </div>
         <span className={resolveApprovalBadgeClassName(approval.status)}>{t(`approval.status.${approval.status}`)}</span>
       </div>

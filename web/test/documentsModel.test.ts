@@ -409,6 +409,59 @@ describe('Document operation chunk saving', () => {
     )
   })
 
+  /** Verifies a caller learns of each saved chunk before a later one is sent. */
+  test('reports each saved chunk while later chunks are still to be sent', async () => {
+    const reported: Array<{ ids: string[]; revision: number }> = []
+    let calls = 0
+    let reportedBeforeSecondChunk: number[] = []
+    await saveDocumentOperationChunks(
+      operations,
+      7,
+      async (revision) => {
+        calls += 1
+        if (calls === 2) {
+          reportedBeforeSecondChunk = reported.map((entry) => entry.revision)
+          throw new Error('session ended')
+        }
+        return { committedRevision: revision + 1, document: { ...documentRecordFixture, revision: revision + 1 } }
+      },
+      (chunk, committedRevision) => reported.push({ ids: chunk.map((operation) => operation.operationId), revision: committedRevision }),
+    ).catch(() => undefined)
+
+    // The first chunk is reported before the second one is sent, and the failed one never is.
+    expect(reportedBeforeSecondChunk).toEqual([8])
+    expect(reported).toEqual([{ ids: ['operation-0', 'operation-1', 'operation-2', 'operation-3'], revision: 8 }])
+  })
+
+  /** Verifies a chunk the API committed counts as saved even when reading its detail fails. */
+  test('reports a committed chunk before its detail is read and does not keep it for retry', async () => {
+    const reported: number[] = []
+    let reportedBeforeDetailFailed: number[] = []
+    let capturedError: unknown
+    try {
+      await saveDocumentOperationChunks(
+        operations,
+        7,
+        async (revision, _chunk, onCommitted) => {
+          onCommitted(revision + 1)
+          reportedBeforeDetailFailed = [...reported]
+          throw new Error('session ended')
+        },
+        (_chunk, committedRevision) => reported.push(committedRevision),
+      )
+    } catch (error) {
+      capturedError = error
+    }
+
+    expect(reportedBeforeDetailFailed).toEqual([8])
+    expect(reported).toEqual([8])
+    if (!(capturedError instanceof DocumentOperationChunkSaveError)) throw new Error('Expected a chunk save error.')
+    expect(capturedError.lastCommittedRevision).toBe(8)
+    expect(capturedError.lastSavedDocument).toBeUndefined()
+    expect(capturedError.remainingOperations.map((operation) => operation.operationId)[0]).toBe('operation-4')
+    expect(capturedError.remainingOperations).toHaveLength(5)
+  })
+
   test('refreshes every affected cache after a partial operation save', async () => {
     const lastSavedDocument = {
       ...documentRecordFixture,

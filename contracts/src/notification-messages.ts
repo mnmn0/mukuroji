@@ -114,6 +114,26 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'A scheduled report snapshot is ready.',
     ja: '定期配信のスナップショットができました。',
   },
+  'request.more-info-requested': {
+    en: 'The team asked a question about your request.',
+    ja: '依頼について担当から質問が届きました。',
+  },
+  'request.rejected': {
+    en: 'Your request was declined.',
+    ja: '依頼は見送られました。',
+  },
+  'request.duplicate': {
+    en: 'Your request was closed as a duplicate of another request.',
+    ja: '依頼は別の依頼と重複として整理されました。',
+  },
+  'request.accepted': {
+    en: 'Your request was accepted as a Work Item.',
+    ja: '依頼が受理され、Work Item になりました。',
+  },
+  'request.completed': {
+    en: 'The Work Item for your request was completed.',
+    ja: '依頼の Work Item が完了しました。',
+  },
 } as const satisfies Record<string, Record<NotificationMessageLocale, string>>
 
 /**

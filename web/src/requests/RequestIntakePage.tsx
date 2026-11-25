@@ -3,7 +3,7 @@ import type {
   RequestSubmissionActionInput,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
@@ -337,6 +337,9 @@ export function RequestIntakePage() {
               </div>
             </div>
             <div className="flex flex-none items-center gap-3">
+              <Link className="workbench-button-secondary inline-flex min-h-10 items-center px-4" to="/my-requests">
+                {t('requests.mine.title')}
+              </Link>
               <div className="hidden text-right min-[721px]:block">
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('workspace.user.label')}</p>
                 <p className="mt-1 max-w-[220px] truncate text-sm font-semibold text-[var(--workbench-text)]">{userLabel}</p>

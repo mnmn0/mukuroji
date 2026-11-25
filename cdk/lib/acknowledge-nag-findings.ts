@@ -212,7 +212,13 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   // The trailing wildcard also covers the Secrets Manager ARN's generated suffix.
   [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
-    ['SlackNotificationJobPolicy/Resource'],
+    ['SlackNotificationJobPolicy/Resource', 'ApiNotificationSlackDestinationSecretPolicy/Resource'],
+  ],
+  // Team and Project channel destinations (#399) live under the tenant's `slack-channel` subdirectory;
+  // the API writes them for managers and the Slack job reads them.
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack-channel/*]',
+    ['SlackNotificationJobPolicy/Resource', 'ApiNotificationSlackDestinationSecretPolicy/Resource'],
   ],
   // SES authorizes the sending identity (the address or its domain). The statement's
   // ses:FromAddress condition pins every message to the configured NotificationEmailSender.
@@ -475,6 +481,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-inbound-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack-channel/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]',
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',

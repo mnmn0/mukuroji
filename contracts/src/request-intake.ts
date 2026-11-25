@@ -1,5 +1,5 @@
 import type { WorkItemPriority } from './work-items'
-import type { CustomFieldValue } from './work-item-configuration'
+import type { CustomFieldValue, WorkflowStatusCategory } from './work-item-configuration'
 
 /** 現在の Request Form schema version です。 */
 export const REQUEST_FORM_SCHEMA_VERSION = 1 as const
@@ -589,6 +589,13 @@ export type RequestSubmission = {
   duplicateOfSubmissionId?: string
   /** 変換済み canonical Work Item 参照です。 */
   workItem?: RequestWorkItemReference
+  /**
+   * How a converted request was resolved for its requester. `duplicate` means Triage closed it
+   * as a duplicate of the linked Work Item; absent means it was accepted as that Work Item.
+   */
+  requesterOutcome?: 'duplicate'
+  /** Member key of the Workspace member who sent the request through an authenticated link. */
+  requesterUserId?: string
   /** Thread に保存された bounded plain text message です。 */
   messages: RequestSubmissionMessage[]
   /**
@@ -728,4 +735,67 @@ export type RequestEmailEnvelope = {
   textBody: string
   /** Provider が message を受信した ISO 8601 timestamp です。 */
   receivedAt: string
+}
+
+/**
+ * The Work Item made from one of the requester's own requests, as the requester may see it.
+ * `visible` carries the key, title, and status only when the requester can read the Work Item;
+ * `restricted` says only whether the work is completed.
+ */
+export type MyRequestWorkItem =
+  | {
+      /** The requester can read the Work Item. */
+      visibility: 'visible'
+      /** Team that owns the Work Item. */
+      teamId: string
+      /** Work Item ID. */
+      workItemId: string
+      /** Short key such as `ABC-123`, when the Work Item has one. */
+      key?: string
+      /** Work Item title. */
+      title: string
+      /** Standard status category of the Work Item. */
+      statusCategory: WorkflowStatusCategory
+      /** Whether the Work Item is completed. */
+      completed: boolean
+    }
+  | {
+      /** The requester cannot read the Work Item; only its completion is shown. */
+      visibility: 'restricted'
+      /** Whether the Work Item is completed. */
+      completed: boolean
+    }
+
+/** One request that the signed-in member sent, without internal triage data. */
+export type MyRequest = {
+  /** Submission ID. */
+  id: string
+  /** Receipt ID shown to the requester when the request was sent. */
+  receiptId: string
+  /** Form title in the locale the request was sent in. */
+  formTitle: string
+  /** Current intake status. */
+  status: RequestSubmissionStatus
+  /** Whether the team is waiting for the requester to reply. */
+  awaitingReply: boolean
+  /** Work Item made from the request, when the request was accepted. */
+  workItem?: MyRequestWorkItem
+  /** When the request was sent. */
+  submittedAt: string
+  /** When the request last changed. */
+  updatedAt: string
+}
+
+/** One request with its conversation, for the requester. */
+export type MyRequestDetail = MyRequest & {
+  /** Questions from the team and the requester's replies. */
+  thread: RequestRequesterThread
+}
+
+/** A page of the signed-in member's own requests, newest first. */
+export type MyRequestPage = {
+  /** Requests on this page. */
+  requests: MyRequest[]
+  /** Opaque cursor for the next page, when there is one. */
+  nextCursor?: string
 }

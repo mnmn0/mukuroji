@@ -118,6 +118,9 @@ function createRequestIntakeClient(
     completeConversion: createUnexpectedRequestIntakeCall('completeConversion'),
     getRequesterThread: createUnexpectedRequestIntakeCall('getRequesterThread'),
     replyToThread: createUnexpectedRequestIntakeCall('replyToThread'),
+    listRequesterSubmissions: createUnexpectedRequestIntakeCall('listRequesterSubmissions'),
+    getRequesterSubmission: createUnexpectedRequestIntakeCall('getRequesterSubmission'),
+    replyAsRequester: createUnexpectedRequestIntakeCall('replyAsRequester'),
     ingestEmail: createUnexpectedRequestIntakeCall('ingestEmail'),
     createAttachmentAccess: createUnexpectedRequestIntakeCall(
       'createAttachmentAccess',

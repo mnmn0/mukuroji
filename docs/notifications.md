@@ -178,13 +178,13 @@ Work Item を対象にした通知は、projection が通知を書くときに�
 
 送信直前の最終確認を通過した通知は、その直後にSlackを無効化・再有効化しても届く場合があります。Slackへの外部送信と設定保存は同一transactionにできないため、すでに送信処理に入った通知の取り消しは保証しません。
 
-管理者は受信者ごとに [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) を作成し、そのURLを次のSecrets Manager IDに**プレーンな文字列**で登録します。
+送信先の [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) は、メンバー本人が **設定** → **個人** → **通知設定** の「自分の Slack 通知」で登録・テスト送信・削除します（`GET` / `PUT` / `DELETE /api/notification-preferences/slack-destination`、`POST …/slack-destination/test`）。URLは次のSecrets Manager IDに**プレーンな文字列**で保存され、以前に管理者が同じIDへ登録したsecretもそのまま使えます。
 
 ```text
 mukuroji/automation-webhooks/<sha256(workspaceId.trim())>/slack/<sha256(memberKey.trim().toLowerCase())>
 ```
 
-既存のAutomation secret namespace内の専用サブディレクトリを使用するため、既存のsecret aliasとは衝突せず、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。アプリのユーザーが別の受信者の送信先を指定するAPIはありません。URLはソース、環境変数、通知row、API response、ログには保存しません。通常SlackとGovSlackの公式Incoming Webhook URLだけを許可します。
+既存のAutomation secret namespace内の専用サブディレクトリを使用するため、既存のsecret aliasとは衝突せず、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。別の受信者の送信先を指定するAPIはありません。APIは登録の有無だけを返し、URLはソース、環境変数、通知row、API response、audit、ログには保存しません（auditは保存・削除の事実だけを `notification-slack-destination.saved` / `.deleted` で残します）。通常SlackとGovSlackの公式Incoming Webhook URL（`https://hooks.slack.com/services/…`）だけを保存・送信します。テスト送信はSlackが受け付けたかどうかだけを返し、Slackの応答本文は読みません。
 
 CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する `ScheduledJobsFunction` のデプロイ後に有効化します。既存テーブルの置換や通知データのbackfillは不要です。ローカルでは `floci:up` がindexを追加し、`workers:dev` が同じworkerを毎分実行します。Secrets Managerの接続には既存の `SECRETS_MANAGER_ENDPOINT` 設定を使用します。
 
@@ -192,7 +192,7 @@ CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する
 
 通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
 
-60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
+60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。通知の理由は内部のkeyではなく受信者の言語の文言（例: 「担当、ウォッチ中」）で書き、文言のないkeyは出しません。メールの「通知の理由」も同じ文言です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。`NOTIFICATION_SLACK_APP_ORIGIN`（CDKはWebのoriginを設定）があるときは、本文の下にWork Item keyのページ（`/browse/<key>`）と通知の遷移先へのリンクを1行付けます。リンクのURLとラベルはサーバーが作った値と正規形のkeyだけです。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
 
@@ -215,6 +215,57 @@ Workspace直下のPlanning通知もWorkspaceリソースで認可します。担
 Workspace全体のAutomation notifyで明示的に選ばれたactiveなguest受信者にも、Inboxと同じ通知を配信します。現在のWorkspace閲覧権限とguest・外部アクセス制限を適用し、TeamやProject、Planningを参照する通知の認可は引き続き各sourceの権限で評価します。
 
 Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
+
+## Project・Team の Slack channel
+
+Project と Team には、メンバー全員が見る chat channel の Incoming Webhook を 1 つずつ登録できます（ADR 0086）。
+Team の送信先は Team の **メンバー** 画面、Project の送信先は Project の **概要** 画面の「Slack channel」で、
+登録・テスト送信・削除します（`GET` / `PUT` / `DELETE /api/teams/:teamId/notification-channel`、
+`/api/teams/:teamId/projects/:projectId/notification-channel`、それぞれ `POST …/test`）。
+
+- 閲覧は Team（Project）の閲覧者、変更とテスト送信は Workspace の書き込み権限を持つ Team マネージャー（Project は
+  Project マネージャーも）だけです。保存と削除は revision 条件付きで、呼び出し元の membership・Enterprise の revision・
+  Team と Project が有効であることを同じ transaction で確かめ、`notification-channel.saved` / `.deleted` の audit を
+  書きます。audit と request digest に URL は入りません。
+- URL は `mukuroji/automation-webhooks/<sha256(workspaceId)>/slack-channel/<sha256("team#<teamId>" または
+  "project#<teamId>#<projectId>")>/<version>` に置き、channel 名（表示用）・投稿の言語（ja / en）・revision・使う URL の
+  version は Notifications table の `<workspaceId>#!channel-destinations` partition に置きます。新しい URL は新しい
+  version に書き、設定の保存が commit されたときだけそちらに切り替えるので、権限や revision の確認で拒否された保存は
+  投稿先を変えません（拒否された候補と置き換えた古い version は消します。応答が失われて結果が分からないときは候補を
+残します）。削除しても row は revision を残した削除済みの印として残るので、削除前に読んだ画面からの操作が、後で
+登録し直した送信先を変えることはありません。最初の保存には URL が必要で、以降は URL を
+  空にすると名前と言語だけを変えます。
+- Enterprise の role では、Team の送信先は `teams.read`（閲覧）と `teams.manage`（変更）、Project の送信先は
+  `projects.read` と `projects.manage` を使います。本人の送信先は `workspace.read` で登録できます。
+
+投稿するのは次の event です。collaboration projection が通常の通知と同じ再認可（対象の存在、現在の Team・Project の
+再解決、Milestone と health update の現在の範囲）を通した後、Project に送信先があればそこへ、なければ Team の送信先へ
+1 件だけ投稿します。送信の直前にも、Workspace が有効なことと、対象（Work Item、health update の対象、Milestone）が
+今も投稿 row を作ったときの Team・Project にあることを読み直し、外れていれば投稿しません。読み直しの後に lease を
+更新し、別の実行に引き継がれていれば送りません。
+
+| event | 見出し（ja / en） |
+| --- | --- |
+| `planning-update.published` | ヘルス更新の公開 / Health update published |
+| `planning-update.health-degraded` | ヘルスの悪化 / Health got worse |
+| `planning-entity.milestone-completed` | Milestone の完了 / Milestone completed |
+| `planning-entity.milestone-rescheduled` | Milestone の日程変更 / Milestone rescheduled |
+| `work-item.due` | 今日が期限 / Due today |
+| `work-item.overdue` | 期限超過 / Overdue |
+
+本文は `[見出し] <Work Item key> <タイトル>` と、送信先の言語の概要、`NOTIFICATION_SLACK_APP_ORIGIN` があるときは対象画面と
+Work Item key のページへのリンクです。個人あてと同じくプレーンテキストで、メンション展開とリンクプレビューは無効です。
+channel の参加者全員が投稿を読めるため、送信先はその Project（Team）の内容を見てよい人だけの channel にしてください。
+
+投稿は `<workspaceId>#!channel-posts` partition に event ID ごとの row（TTL 30 日）として条件付きで書くので、projection の
+再試行でも 1 件です。row は既存の `SlackDeliveryIndex` の `slack-channel#0`〜`slack-channel#3` partition に載り、個人あての
+`slack#<n>` とは混ざりません。毎分の Slack job が個人あてと channel を独立に処理し、channel は 1 partition あたり毎分 8 件、
+60 秒の lease と version 条件、最大 5 試行の指数 backoff（`Retry-After` を尊重）で送ります。送信時に送信先が削除されて
+いれば `suppressed` で終えます。5 試行後の失敗と URL の欠落は `slack-channel-failed#<n>` partition へ移し、
+`slackFailureReference` を記録して `SlackChannelPostFailed` ログを出し、job を失敗にして `ScheduledJobsDlq` の
+アラーム対象にします。ログに本文・URL は含みません。
+
+hourly / daily の頻度でまとめる投稿、Microsoft Teams の Webhook、Agent Run の判断待ちの投稿はまだありません。
 
 ## Email 配信
 

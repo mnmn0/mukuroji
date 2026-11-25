@@ -62,6 +62,9 @@ describe('buildLoginRedirectPath', () => {
     expect(buildLoginRedirectPath('/my-tasks')).toBe('/?returnTo=%2Fmy-tasks')
     expect(buildLoginRedirectPath('/browse/PT-12')).toBe('/?returnTo=%2Fbrowse%2FPT-12')
     expect(buildLoginRedirectPath('/updates?feed=saved-1')).toBe('/?returnTo=%2Fupdates%3Ffeed%3Dsaved-1')
+    expect(buildLoginRedirectPath('/documents/product-principles?context=comments')).toBe(
+      '/?returnTo=%2Fdocuments%2Fproduct-principles%3Fcontext%3Dcomments',
+    )
     expect(buildLoginRedirectPath('/teams/core-team/issues?issueId=issue-34#activity')).toBe(
       '/?returnTo=%2Fteams%2Fcore-team%2Fissues%3FissueId%3Dissue-34%23activity',
     )

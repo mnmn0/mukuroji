@@ -54,6 +54,8 @@ test('production Slack authorization reloads Directory and Enterprise after revo
     expect(await dependencies.isAuthorized(delivery)).toBe(false)
     return 0
   })
+  // Channel posts (#399) have their own tests; this one checks only personal authorization.
+  const channelWorker = spyOn(notifications, 'deliverDueChannelPosts').mockImplementation(async () => 0)
   try {
     for (source of ['directory', 'enterprise']) {
       revoked = false
@@ -62,6 +64,7 @@ test('production Slack authorization reloads Directory and Enterprise after revo
     expect(directoryReads).toBe(4)
     expect(enterpriseReads).toBe(4)
   } finally {
+    channelWorker.mockRestore()
     worker.mockRestore()
     identity.mockRestore()
     send.mockRestore()

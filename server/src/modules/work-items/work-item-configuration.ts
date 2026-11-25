@@ -41,6 +41,13 @@ import {
   type WorkItemCompletionGateErrorResponse,
   type WorkItemCompletionGatePolicy,
   type WorkItemCompletionGateUnmetCondition,
+  evaluateWorkflowStatusRequirements,
+  evaluateWorkflowTransitionActor,
+  findWorkflowEntryActorRoles,
+  type WorkflowRuleActor,
+  type WorkflowRuleErrorResponse,
+  type WorkflowRuleUnmetCondition,
+  type WorkflowRuleWorkItemState,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type WorkItemParentMutationResponse,
@@ -141,6 +148,103 @@ export class WorkItemCompletionGateError extends WorkItemConfigurationError {
       unmetConditions: this.unmetConditions.map((condition) => ({ ...condition })),
     }
   }
+}
+
+/**
+ * Rejects a status change that the workflow's transition actor roles or status required fields do
+ * not allow; the API returns the unmet rules so a person or an agent can see what is missing.
+ */
+export class WorkflowRuleError extends WorkItemConfigurationError {
+  /** Every rule the change does not meet, actor rules first. */
+  readonly unmetConditions: readonly WorkflowRuleUnmetCondition[]
+
+  /**
+   * Creates the error for the unmet rules.
+   *
+   * @param unmetConditions - Rules the change does not meet; at least one.
+   */
+  constructor(unmetConditions: readonly WorkflowRuleUnmetCondition[]) {
+    const actorDenied = unmetConditions.some((condition) => condition.rule === 'transition-actor')
+    super(
+      actorDenied ? 403 : 409,
+      actorDenied ? 'WorkflowTransitionActorDenied' : 'WorkflowStatusRequirementsNotMet',
+      actorDenied
+        ? 'The workflow does not let this actor make the status change.'
+        : `Fields required in the target status are empty: ${unmetConditions.map((condition) =>
+          condition.rule === 'required-custom-field' ? condition.customFieldId : condition.rule === 'required-field' ? condition.field : condition.rule,
+        ).join(', ')}.`,
+    )
+    this.unmetConditions = unmetConditions
+  }
+
+  /**
+   * Builds the API response body.
+   *
+   * @returns The stable error body with the unmet rules.
+   */
+  toResponseBody(): WorkflowRuleErrorResponse {
+    return {
+      code: this.code === 'WorkflowTransitionActorDenied'
+        ? 'WorkflowTransitionActorDenied'
+        : 'WorkflowStatusRequirementsNotMet',
+      message: this.message,
+      unmetConditions: this.unmetConditions.map((condition) =>
+        condition.rule === 'transition-actor'
+          ? { ...condition, allowedActorRoles: [...condition.allowedActorRoles] }
+          : { ...condition }),
+    }
+  }
+}
+
+/**
+ * Applies a workflow's transition actor roles and status required fields to a status change.
+ *
+ * Nothing is checked when the status does not change. A change without a known transition (a create
+ * into a status, or a Type change to another workflow) uses the least restricted transition into the
+ * target status.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param change - The status change, its actor, and the Work Item state after it.
+ * @param change.workItemTypeId - Work Item Type after the change.
+ * @param change.projectId - Project after the change, which decides the custom fields that apply.
+ * @param change.fromStatusId - Status before the change, or `undefined` without a known transition.
+ * @param change.toStatusId - Status after the change.
+ * @param change.actor - Actor making the change.
+ * @param change.state - Reads the Work Item state after the change, only when a status requires a field.
+ * @returns Whether the change was judged against the actor's roles, so the write must fence them.
+ * @throws WorkflowRuleError when a rule is not met.
+ */
+export function assertWorkflowRules(
+  configuration: WorkItemConfiguration,
+  change: {
+    workItemTypeId: string | undefined
+    projectId: string | undefined
+    fromStatusId: string | undefined
+    toStatusId: string
+    actor: WorkflowRuleActor
+    state: () => WorkflowRuleWorkItemState
+  },
+): boolean {
+  if (change.fromStatusId === change.toStatusId) return false
+  const workflow = resolveWorkItemTypeWorkflow(configuration, change.workItemTypeId, { allowArchived: true })
+  const status = workflow.statuses.find((candidate) => candidate.id === change.toStatusId)
+  const unmet: WorkflowRuleUnmetCondition[] = []
+  const allowedActorRoles = findWorkflowEntryActorRoles(workflow, change.fromStatusId, change.toStatusId)
+  const actorRule = evaluateWorkflowTransitionActor(allowedActorRoles, change.actor)
+  if (actorRule) unmet.push(actorRule)
+  // A status shared by several Types or Projects asks only for the custom fields this Work Item can
+  // hold; a field its Type or Project does not use could never be filled.
+  const applicableFieldIds = (status?.requiredCustomFieldIds?.length ?? 0) > 0
+    ? new Set(getWorkItemTypeCustomFieldDefinitions(configuration, change.workItemTypeId, { allowArchived: true })
+      .filter((definition) => isFieldApplicable(definition, change.projectId))
+      .map((definition) => definition.id))
+    : new Set<string>()
+  const requiredCustomFieldIds = status?.requiredCustomFieldIds?.filter((fieldId) => applicableFieldIds.has(fieldId)) ?? []
+  if (status && ((status.requiredFields?.length ?? 0) > 0 || requiredCustomFieldIds.length > 0)) {
+    unmet.push(...evaluateWorkflowStatusRequirements({ ...status, requiredCustomFieldIds }, change.state()))
+  }
+  if (unmet.length > 0) throw new WorkflowRuleError(unmet)
+  return allowedActorRoles.length > 0
 }
 
 /** Work Item transaction が definition の同時変更を検出する guard です。 */
@@ -1078,6 +1182,7 @@ export function validateWorkItemConfiguration(
   )
   const customFields = readCustomFieldDefinitions(value.customFields)
   validateFormulaDefinitions(customFields)
+  assertWorkflowStatusRequiredCustomFields([workflow, ...(workflows ?? [])], customFields)
   const workItemTypes = value.workItemTypes === undefined
     ? undefined
     : readWorkItemTypeDefinitions(value.workItemTypes, customFields, [
@@ -1118,6 +1223,35 @@ export function validateWorkItemConfiguration(
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
+  }
+}
+
+/**
+ * Rejects a status that requires an unknown or formula custom field.
+ *
+ * A formula is computed, so a person could not fill it to meet the requirement.
+ *
+ * @param workflows - Every workflow of the configuration.
+ * @param customFields - Custom fields of the configuration.
+ * @throws WorkItemConfigurationError when a status requires an unusable custom field.
+ */
+function assertWorkflowStatusRequiredCustomFields(
+  workflows: readonly WorkItemConfiguration['workflow'][],
+  customFields: readonly CustomFieldDefinition[],
+) {
+  const fieldsById = new Map(customFields.map((field) => [field.id, field]))
+  for (const workflow of workflows) {
+    for (const status of workflow.statuses) {
+      for (const fieldId of status.requiredCustomFieldIds ?? []) {
+        const field = fieldsById.get(fieldId)
+        if (!field) {
+          throw invalidConfiguration(`Workflow status "${status.id}" requires unknown custom field "${fieldId}".`)
+        }
+        if (field.type === 'formula') {
+          throw invalidConfiguration(`Workflow status "${status.id}" cannot require formula field "${fieldId}".`)
+        }
+      }
+    }
   }
 }
 

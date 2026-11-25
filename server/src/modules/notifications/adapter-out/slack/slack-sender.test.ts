@@ -161,7 +161,7 @@ describe('Slack transport', () => {
     expect(payload?.blocks[1]?.type).toBe('context')
     const links = payload?.blocks[1]?.elements?.[0]?.text ?? ''
     expect(links).toContain('<https://app.example.test/browse/CORE-12|CORE-12>')
-    expect(links).toContain('<https://app.example.test/teams/core/issues/i-1?x=a%7Cb&amp;y=%3Cz%3E|Open in mukuroji>')
+    expect(links).toContain('<https://app.example.test/teams/core/issues/i-1?x=a%7Cb&amp;y=%3Cz%3E|mukuroji で開く>')
   })
   test('omits link blocks without an application origin', async () => {
     secretSpy.mockResolvedValue(url)

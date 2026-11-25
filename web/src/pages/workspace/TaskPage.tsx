@@ -28,6 +28,7 @@ import {
   type FileArtifactScope,
   useFileArtifacts,
 } from '../../files/mutations/useFileArtifacts'
+import { useProjectDeliverables } from '../../files/queries/useProjectDeliverables'
 import {
   createTranslator,
   getInitialLocale,
@@ -234,7 +235,7 @@ function useWorkItemFileScope(issueId?: string, teamId?: string) {
  * @returns A stable Project file scope, or undefined when no Team is selected.
  */
 function useProjectFileScope(projectId: string, teamId?: string) {
-  return useMemo<FileArtifactScope | undefined>(() =>
+  return useMemo<Extract<FileArtifactScope, { kind: 'project' }> | undefined>(() =>
     teamId ? { kind: 'project', projectId, teamId } : undefined,
   [projectId, teamId])
 }
@@ -863,11 +864,25 @@ export function TaskPage() {
   const artifactProjectTeamId = selectedWorkItemTeamId
   const issueFileScope = useWorkItemFileScope(artifactIssueId, selectedIssueDetailTeamId)
   const projectFileScope = useProjectFileScope(projectId, artifactProjectTeamId)
+  // The deliverables list reads one Team's Project (ADR 0093). Its Team is the selected Team or
+  // the Project's only owner Team, never the Team of whichever Work Item is listed first, so the
+  // list and the CSV stay the same for the same Project and still load with no Work Items.
+  const projectDeliverablesScope = useProjectFileScope(projectId, listConfigurationTeamId)
+  const projectDeliverables = useProjectDeliverables(accessToken, projectDeliverablesScope)
+  /** Re-reads the deliverables list in the background; its failure never affects the caller. */
+  const refreshProjectDeliverables = () => {
+    void projectDeliverables.refresh().catch(() => undefined)
+  }
   const issueArtifacts = useFileArtifacts({
     accessToken,
+    onRefreshed: projectDeliverables.refresh,
     scope: hasUnavailableCommentOwner ? undefined : issueFileScope,
   })
-  const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
+  const projectFiles = useFileArtifacts({
+    accessToken,
+    onRefreshed: projectDeliverables.refresh,
+    scope: projectFileScope,
+  })
   const collaborationOwnerMatchesLive = !liveCommentOwner || (
     liveCommentOwnerInProjectList &&
     selectedIssueDetailIsInScope &&
@@ -1658,6 +1673,10 @@ export function TaskPage() {
       )
       // Revalidate after the optimistic replacement so a Project reassignment
       // removes the item from this Project's list instead of leaving stale data.
+      if (input.assignedProjectId !== undefined) {
+        // The moved Work Item's attachments leave or join this Project's deliverables.
+        refreshProjectDeliverables()
+      }
       await mutateProjectTasks()
       await mutateSelectedIssueDetail()
       return updatedTask
@@ -1720,6 +1739,9 @@ export function TaskPage() {
   }
 
   const revalidateAfterBulkOperation = async () => {
+    // A bulk move, archive, or restore changes which Work Items' attachments the deliverables
+    // list shows. It reloads in the background so its failure delays or fails nothing here.
+    refreshProjectDeliverables()
     await Promise.all([
       mutateProjectTasks(),
       mutateSelectedIssueDetail(),
@@ -2268,6 +2290,7 @@ export function TaskPage() {
       onBulkRetry={canMutateProjectTasks && workspaceId ? handleBulkRetry : undefined}
       onBulkUndo={canMutateProjectTasks && workspaceId ? handleBulkUndo : undefined}
       projectId={projectId}
+      projectDeliverables={projectDeliverables}
       projectFiles={projectFiles}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}

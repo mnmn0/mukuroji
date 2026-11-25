@@ -229,6 +229,11 @@ export type TimeBudget = {
   periodFrom?: string
   /** Inclusive local period end. */
   periodTo?: string
+  /**
+   * `true` for one of the scope's budgets per period (ADR 0077), which always has both period
+   * dates; absent for the scope's default budget.
+   */
+  periodBudget?: true
   /** Optimistic concurrency revision. */
   revision: number
   /** Last update timestamp. */
@@ -283,8 +288,13 @@ export type TimeTrackingSummary = {
   totalActualCostMinor?: number
   /** Confidential total actual cost totals keyed by ISO currency code. */
   totalActualCostByCurrency?: Readonly<Record<string, number>>
-  /** Budget for the requested scope, when configured and authorized. */
+  /**
+   * Budget for the requested scope, when configured and authorized: the scope's budget for exactly
+   * the report period when one exists, otherwise its default budget.
+   */
   budget?: TimeBudget
+  /** The scope's budgets per period in period order, when authorized like `budget`. */
+  budgetPeriods?: TimeBudget[]
   /** Whether money fields were withheld from this response. */
   costsRedacted: boolean
   /**

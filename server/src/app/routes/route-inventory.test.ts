@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(614)
-  expect(new Set(inventory).size).toBe(610)
+  expect(inventory).toHaveLength(641)
+  expect(new Set(inventory).size).toBe(637)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -29,6 +29,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
+  expect(inventory).toContain('GET /api/my-requests')
+  expect(inventory).toContain('GET /api/my-requests/:submissionId')
+  expect(inventory).toContain('POST /api/my-requests/:submissionId/replies')
   expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
@@ -191,7 +194,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
+  // Slack destinations (#399): the caller's own, a Team channel, and a Project channel.
+  expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
+  expect(inventory).toContain('POST /api/teams/:teamId/notification-channel/test')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/notification-channel')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'a8120b3212bba137630cf9d33c0e0ba6a09c05d2dc9a54bbcac613f616df69d7',
+    'b1ee91485d115865e5d2a7aade027a1f710f4ee50e59daf14d60f6238848ff3e',
   )
 })

@@ -36,6 +36,7 @@ import {
 } from './work-item-access'
 import {
   assertWorkItemConfigurationUsage,
+  AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { readNewWorkItemAcceptanceCriteria } from './work-item-acceptance-criteria'
@@ -416,6 +417,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         team,
       ),
       { configuration },
+      AUTOMATION_WORKFLOW_RULE_PRINCIPAL,
     )
     readNewWorkItemAcceptanceCriteria(configuredBody.acceptanceCriteria)
     await requireActiveWorkspaceAssignee(
