@@ -130,6 +130,30 @@ export async function updateWorkspaceMemberName(
 export async function getWorkspaceMembersSignInSecurity(
   accessToken: string,
 ): Promise<WorkspaceMemberSignInSecurity[]> {
+  return (await getWorkspaceMembersSignInSecurityReport(accessToken)).members
+}
+
+/** Sign-in security of the active members, with who is a system administrator. */
+export type WorkspaceMembersSignInSecurityReport = {
+  /** Sign-in security of each active member. */
+  members: WorkspaceMemberSignInSecurity[]
+  /** Member keys of the system administrators, absent when the API could not read them. */
+  systemAdministratorMemberKeys?: string[]
+  /** Whether the API reported that it could not read the system administrators. */
+  systemAdministratorsLoadFailed: boolean
+}
+
+/**
+ * Reads each active member's sign-in security and which members are system administrators.
+ *
+ * Only owners and admins can call it.
+ *
+ * @param accessToken - Access token of the session.
+ * @returns The members' sign-in security and the system administrators.
+ */
+export async function getWorkspaceMembersSignInSecurityReport(
+  accessToken: string,
+): Promise<WorkspaceMembersSignInSecurityReport> {
   const data = await sendWorkspaceAccessRequest<unknown>(
     '/workspace/members/sign-in-security',
     accessToken,
@@ -140,10 +164,53 @@ export async function getWorkspaceMembersSignInSecurity(
   if (!Array.isArray(members)) {
     throw new WorkspaceAccessApiError(502, 'workspace.access.error.operation')
   }
-  return members.flatMap((member: unknown) => {
-    const parsed = parseMemberSignInSecurity(member)
-    return parsed ? [parsed] : []
-  })
+  const systemAdministrators = typeof data === 'object' && data !== null &&
+    'systemAdministratorMemberKeys' in data
+    ? data.systemAdministratorMemberKeys
+    : undefined
+  const systemAdministratorsLoadFailed = typeof data === 'object' && data !== null &&
+    'systemAdministratorsUnavailable' in data && data.systemAdministratorsUnavailable === true
+  return {
+    systemAdministratorsLoadFailed,
+    members: members.flatMap((member: unknown) => {
+      const parsed = parseMemberSignInSecurity(member)
+      return parsed ? [parsed] : []
+    }),
+    ...(Array.isArray(systemAdministrators)
+      ? {
+          systemAdministratorMemberKeys: systemAdministrators.filter(
+            (memberKey: unknown): memberKey is string => typeof memberKey === 'string',
+          ),
+        }
+      : {}),
+  }
+}
+
+/**
+ * Grants or revokes system administrator access for a member. Owners only.
+ *
+ * The API records the change in the audit log before it changes the Cognito group.
+ *
+ * @param accessToken - Access token of the session.
+ * @param memberKey - Member to change.
+ * @param systemAdministrator - Whether the member should be a system administrator.
+ * @param mutationContext - Idempotency and correlation headers.
+ */
+export async function setWorkspaceMemberSystemAdministrator(
+  accessToken: string,
+  memberKey: string,
+  systemAdministrator: boolean,
+  mutationContext: MutationRequestContext,
+): Promise<void> {
+  await sendWorkspaceAccessRequest<unknown>(
+    `/workspace/members/${encodeURIComponent(memberKey)}/system-administrator`,
+    accessToken,
+    {
+      body: JSON.stringify({ systemAdministrator }),
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  )
 }
 
 /**

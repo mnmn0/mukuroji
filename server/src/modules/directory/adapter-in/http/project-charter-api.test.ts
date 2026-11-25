@@ -1,10 +1,16 @@
 import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
+import { syncProjectUpdateOwnerWithCharter } from '../../../../api/routes/planning-routes'
+import { authenticateWorkspacePrincipal } from '../../../../api/shared/request-authorization'
+import { workItemDependencies } from '../../../../api/shared/app-dependencies'
+import { readPlanningWorkItemState } from '../../../../api/shared/planning-access'
 const {
   app,
   configureFakeProjectClients,
+  planningApiRequest,
   resetTestApp,
+  runWithTestAppDependencies,
 } = createApiTestHarness()
 import { afterEach, describe, expect, test } from 'bun:test'
 
@@ -34,7 +40,158 @@ async function send(path: string, method: string, body?: unknown) {
   })
 }
 
+/** Project update target of the Project the charter tests edit. */
+const updateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+
+/**
+ * Configures a weekly update cadence owned by the given member.
+ *
+ * @param ownerMemberKey - Member who publishes the Project updates.
+ */
+async function configureUpdateCadence(ownerMemberKey: string) {
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: updateTarget,
+    cadence: {
+      updateOwnerMemberKey: ownerMemberKey,
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  expect(response.status).toBe(200)
+}
+
+/**
+ * Reads the update owner of the Project's cadence from the Planning snapshot.
+ *
+ * @returns The member key, or undefined without a cadence.
+ */
+async function readUpdateOwner(): Promise<string | undefined> {
+  const response = await planningApiRequest('/api/planning')
+  const body: { updateTargets: Array<{ target: { projectId?: string }; cadence?: { updateOwnerMemberKey: string } }> } =
+    await response.json()
+  return body.updateTargets.find((candidate) => candidate.target.projectId === 'refero')?.cadence?.updateOwnerMemberKey
+}
+
 describe('Project charter API', () => {
+  test('moves the health update owner to a new charter owner and leaves it when the owner stays', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    await configureUpdateCadence('demo@example.com')
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ updateOwnerSync: 'synced' })
+    expect(await readUpdateOwner()).toBe('sato@example.com')
+
+    // Saving other fields with the same owner does not touch the cadence.
+    await configureUpdateCadenceOwnerDirectly('demo@example.com')
+    const unchanged = await send(charterPath, 'PUT', {
+      expectedRevision: 1,
+      charter: { ownerUserId: 'sato@example.com', purpose: '更新' },
+    })
+    expect(unchanged.status).toBe(200)
+    expect(await unchanged.json()).not.toHaveProperty('updateOwnerSync')
+    expect(await readUpdateOwner()).toBe('demo@example.com')
+  })
+
+  test('keeps the update owner when the new charter owner cannot publish updates in the Project', async () => {
+    // A Workspace owner without Project roles; owner@example.com has no access to the Project.
+    configureFakeProjectClients(false, {
+      workspaceRole: 'owner',
+      systemAdminMemberKeys: ['demo@example.com'],
+    })
+    await configureUpdateCadence('demo@example.com')
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'owner@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      charter: { owner: { userId: 'owner@example.com' } },
+      updateOwnerSync: 'owner-not-eligible',
+    })
+    expect(await readUpdateOwner()).toBe('demo@example.com')
+  })
+
+  test('does not apply an owner that a later charter save already replaced', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+    await configureUpdateCadence('demo@example.com')
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(await saved.json()).toMatchObject({ updateOwnerSync: 'synced' })
+
+    // An earlier save that named demo@example.com finishes its synchronization only now.
+    const late = await runWithTestAppDependencies(async () => await syncProjectUpdateOwnerWithCharter(
+      await authenticateWorkspacePrincipal('test-token'),
+      'core-team',
+      'refero',
+      'demo@example.com',
+    ))
+
+    expect(late).toBe('superseded')
+    expect(await readUpdateOwner()).toBe('sato@example.com')
+  })
+
+  test('keeps the update owner when the configured reviewer can no longer acknowledge updates', async () => {
+    // A Workspace owner without Project roles; owner@example.com has no access to the Project.
+    configureFakeProjectClients(false, {
+      workspaceRole: 'owner',
+      systemAdminMemberKeys: ['demo@example.com'],
+    })
+    await configureUpdateCadence('demo@example.com')
+    // The owner and reviewer lost access after the cadence was saved, so it is written without the endpoint check.
+    await runWithTestAppDependencies(async () => {
+      const principal = await authenticateWorkspacePrincipal('test-token')
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      const current = snapshot.updateTargets.find((candidate) => candidate.target.type === 'project' &&
+        candidate.target.projectId === 'refero')?.cadence
+      if (!current) throw new Error('The cadence was not configured.')
+      await workItemDependencies.planning.configureUpdateCadence(
+        principal.directoryId,
+        {
+          target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+          cadence: { ...current, updateOwnerMemberKey: 'sato@example.com', reviewerMemberKey: 'owner@example.com' },
+          expectedRevision: snapshot.revision,
+        },
+        workItemState,
+      )
+    })
+
+    const late = await runWithTestAppDependencies(async () => await syncProjectUpdateOwnerWithCharter(
+      await authenticateWorkspacePrincipal('test-token'),
+      'core-team',
+      'refero',
+      'demo@example.com',
+    ))
+
+    expect(late).toBe('failed')
+    expect(await readUpdateOwner()).toBe('sato@example.com')
+  })
+
+  test('reports a Project without an update cadence and keeps the charter saved', async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+
+    const saved = await send(charterPath, 'PUT', {
+      expectedRevision: 0,
+      charter: { ownerUserId: 'sato@example.com' },
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      charter: { owner: { userId: 'sato@example.com' } },
+      updateOwnerSync: 'not-configured',
+    })
+  })
+
+
   test('reads the default charter of a legacy Project', async () => {
     configureFakeProjectClients(true)
 
@@ -220,3 +377,24 @@ describe('Project charter API', () => {
     expect(reopened.status).toBe(200)
   })
 })
+
+/**
+ * Moves the cadence owner back through the cadence endpoint, as a person would in Planning.
+ *
+ * @param ownerMemberKey - Member who publishes the Project updates.
+ */
+async function configureUpdateCadenceOwnerDirectly(ownerMemberKey: string) {
+  const snapshot: { revision: number } = await (await planningApiRequest('/api/planning')).json()
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: updateTarget,
+    cadence: {
+      updateOwnerMemberKey: ownerMemberKey,
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: snapshot.revision,
+  })
+  expect(response.status).toBe(200)
+}

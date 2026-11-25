@@ -9,9 +9,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(599)
-  expect(new Set(inventory).size).toBe(595)
+  expect(inventory).toHaveLength(611)
+  expect(new Set(inventory).size).toBe(607)
   expect(inventory).toContain('POST /api/client-errors')
+  expect(inventory).toContain('GET /api/customers/project-links')
+  expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
@@ -25,6 +27,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
+  expect(inventory).toContain('GET /api/planning/updates/template')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId')
   expect(inventory).toContain('GET /api/workspace/time-entry-categories')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
@@ -58,6 +61,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/budget-report/export')
   expect(inventory).toContain('GET /api/planning/cycles/:cycleId/schedule-baselines')
   expect(inventory).toContain('POST /api/planning/cycles/:cycleId/schedule-baselines')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -81,6 +86,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/workspace/members/:memberKey/offboarding')
   expect(inventory).toContain('PUT /api/workspace/members/:memberKey/access-expiry')
   expect(inventory).toContain('POST /api/workspace/members/:memberKey/credentials/revoke')
+  expect(inventory).toContain('PUT /api/workspace/members/:memberKey/system-administrator')
   expect(inventory).toContain('GET /api/planning/update-feed')
   expect(inventory).toContain('GET /api/planning/archived-entities')
   expect(inventory).toContain('POST /api/planning/entities/:entityId/restore')
@@ -174,11 +180,15 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
   // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
+  expect(inventory).toContain('GET /api/me/calendar-feeds')
+  expect(inventory).toContain('POST /api/me/calendar-feeds')
+  expect(inventory).toContain('DELETE /api/me/calendar-feeds/:feedId')
+  expect(inventory).toContain('GET /api/public/calendar-feeds/:token')
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'c886db93fd47b473e56170e09ed67acb4c58c443f69adbc56ceeced307fed5d5',
+    'f599bcdae668d2ffe2699a3f96640b780cc03dc1c175a11ab71dc058b0d6d684',
   )
 })

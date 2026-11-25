@@ -686,6 +686,11 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/budget-report*',
+    permission: 'projects.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',
@@ -805,6 +810,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/me/preferences',
+    permission: 'workspace.read',
+  },
+  // A member's own calendar feeds; each feed read re-checks `work-items.read` for its owner.
+  {
+    method: '*',
+    pathPattern: '/api/me/calendar-feeds*',
     permission: 'workspace.read',
   },
   // Members read and rename themselves; the service refuses directory-managed names.
@@ -2026,6 +2037,13 @@ async function resolvePlanningUpdateAuthorizationResource(
       targetId: target.projectId.trim(),
       parentTeamId: target.teamId.trim(),
     }
+  }
+  if (
+    target.type === 'team' &&
+    typeof target.teamId === 'string' &&
+    target.teamId.trim()
+  ) {
+    return { workspaceId, kind: 'team', targetId: target.teamId.trim() }
   }
   if (
     target.type !== 'initiative' ||

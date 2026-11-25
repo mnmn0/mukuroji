@@ -492,6 +492,14 @@
       {
         "AttributeName": "emailNextAttemptAt",
         "AttributeType": "S"
+      },
+      {
+        "AttributeName": "pushQueueShard",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "pushNextAttemptAt",
+        "AttributeType": "S"
       }
     ],
     "keySchema": [
@@ -546,6 +554,22 @@
           },
           {
             "AttributeName": "emailNextAttemptAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      },
+      {
+        "IndexName": "PushDeliveryIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "pushQueueShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "pushNextAttemptAt",
             "KeyType": "RANGE"
           }
         ],

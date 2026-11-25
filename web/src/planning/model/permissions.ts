@@ -338,6 +338,7 @@ function planningUpdateTargetsMatch(
   if (left.type === 'project' && right.type === 'project') {
     return left.teamId === right.teamId && left.projectId === right.projectId
   }
+  if (left.type === 'team' && right.type === 'team') return left.teamId === right.teamId
   return false
 }
 
@@ -355,6 +356,7 @@ function resolvePlanningUpdateTargetScope(
   if (target.type === 'project') {
     return { projectId: target.projectId, teamId: target.teamId }
   }
+  if (target.type === 'team') return { teamId: target.teamId }
   return entities.find((entity) =>
     entity.type === 'initiative' && entity.id === target.entityId
   )

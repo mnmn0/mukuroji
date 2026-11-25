@@ -7,11 +7,13 @@ import { handler as agentRunTriageHandler } from './agent-run-triage-handler'
 import { handler as analyticsScheduleHandler } from './analytics-schedule-handler'
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
 import { handler as cycleScheduleHandler } from './cycle-schedule-handler'
+import { handler as emailFeedbackHandler } from './email-feedback-handler'
 import { handler as emailNotificationHandler } from './email-notifications-handler'
 import { handler as inboxDigestWorkerHandler } from './inbox-digest-worker-handler'
 import { handler as japanesePublicHolidaySyncHandler } from './japanese-public-holiday-sync-handler'
 import { handler as memberAccessExpiryHandler } from './member-access-expiry-handler'
 import { handler as notificationScheduleHandler } from './notification-schedule-handler'
+import { handler as pushNotificationHandler } from './push-notifications-handler'
 import { handler as slackNotificationHandler } from './slack-notifications-handler'
 import { handler as triageScheduleHandler } from './triage-schedule-handler'
 
@@ -19,7 +21,7 @@ import { handler as triageScheduleHandler } from './triage-schedule-handler'
  * Periodic jobs that share one Lambda and one every-minute EventBridge rule.
  *
  * Each entry keeps its own runtime-control guard and the retry count its former Lambda
- * had. Slack and Email delivery are tried once so a failure never sends a message twice.
+ * had. Slack, Email, and Web Push delivery are tried once so a failure never sends a message twice.
  */
 export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'automation-schedule', everyMinutes: 1, attempts: 3, run: automationScheduleHandler },
@@ -27,6 +29,8 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'agent-run-triage', everyMinutes: 1, attempts: 3, run: () => agentRunTriageHandler() },
   { name: 'slack-notifications', everyMinutes: 1, attempts: 1, run: () => slackNotificationHandler() },
   { name: 'email-notifications', everyMinutes: 1, attempts: 1, run: () => emailNotificationHandler() },
+  { name: 'push-notifications', everyMinutes: 1, attempts: 1, run: () => pushNotificationHandler() },
+  { name: 'email-feedback', everyMinutes: 1, attempts: 1, run: () => emailFeedbackHandler() },
   { name: 'analytics-schedule', everyMinutes: 5, attempts: 3, run: analyticsScheduleHandler },
   { name: 'notification-schedule', everyMinutes: 60, attempts: 3, run: notificationScheduleHandler },
   { name: 'cycle-schedule', everyMinutes: 60, attempts: 3, run: cycleScheduleHandler },

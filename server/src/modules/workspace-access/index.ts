@@ -48,6 +48,7 @@ export {
   type WorkspaceMemberCredentialAction,
   type WorkspaceMemberCredentialProgress,
   type WorkspaceMemberCredentialRecord,
+  type WorkspaceMemberSystemAdministratorAction,
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,
   type WorkspaceMemberVersionConditionInput,
@@ -60,6 +61,12 @@ export {
   type MemberCredentialResetPorts,
   type MemberSignInAccount,
 } from './application/member-credential-reset'
+export {
+  changeMemberSystemAdministrator,
+  type MemberSystemAdministratorInput,
+  type MemberSystemAdministratorPorts,
+  type MemberSystemAdministratorResult,
+} from './application/member-system-administrator'
 export {
   listMembersSignInSecurity,
   summarizeMfaEnrollment,

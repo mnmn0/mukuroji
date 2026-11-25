@@ -3,6 +3,7 @@ export {
   DEFAULT_FOCUS_POLICY_SETTINGS,
   createFocusCauseFingerprint,
   createFocusQueue,
+  createFocusUpdateReviewKey,
   createFocusWorkItemStateKey,
   focusQueueUsesApprovalSummary,
   focusQueueUsesScheduleBaseline,
