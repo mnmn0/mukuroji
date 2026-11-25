@@ -50,6 +50,7 @@
     "deploy:smoke:test": "bun test scripts/post-deploy-smoke.test.ts",
     "demo-data:remove": "bun cdk/scripts/remove-demo-data.ts",
     "demo-data:seed": "bun scripts/seed-demo-data.ts",
+    "web-push:vapid-keys": "bun scripts/generate-web-push-vapid-keys.ts",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:lint:ci": "bun --filter web lint:ci",

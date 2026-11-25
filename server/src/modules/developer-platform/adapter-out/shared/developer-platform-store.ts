@@ -30,9 +30,11 @@ import {
   type WebhookSubscription,
 } from '@mukuroji/contracts'
 import {
+  createAuditFieldChanges,
   createMutationAuditContext,
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
+  type AuditFieldChange,
   type AuditTransactWriteItem,
 } from '../../../audit'
 import {
@@ -813,6 +815,39 @@ type PlatformAuditEventInput = {
   metadata?: Readonly<Record<string, unknown>>
   /** Mutation actor ID です。 */
   actorId?: string
+  /** Allowlist した field の変更前後です。 */
+  changes?: AuditFieldChange[]
+}
+
+/** Lifecycle fields shared by the OAuth app and Webhook subscription audit builders. */
+type PlatformLifecycleAuditEvent = {
+  /** Audit event type. */
+  eventType: string
+  /** Retry-stable transition identity. */
+  transitionId: string
+  /** Transition timestamp. */
+  occurredAt: string
+  /** Audit action code. */
+  action: string
+  /** Activity summary. */
+  summary: string
+  /** Mutation actor ID; absent for a service change. */
+  actorId?: string
+}
+
+/**
+ * Returns the Webhook subscription fields compared by its update audit event.
+ *
+ * @param subscription - Stored Webhook subscription.
+ * @returns Name, status, event types, and scopes; the URL and delivery health are left out.
+ */
+function auditedWebhookSubscriptionFields(subscription: WebhookSubscription): Record<string, unknown> {
+  return {
+    name: subscription.name,
+    status: subscription.status,
+    eventTypes: [...subscription.eventTypes],
+    scopes: [...subscription.scopes],
+  }
 }
 
 /** External link と claim を同時保存する結果です。 */
@@ -975,6 +1010,7 @@ abstract class DeveloperPlatformStorageKernel {
   protected abstract createWebhookSubscriptionRecord(
     record: DeveloperPlatformRecord,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<'created' | 'quota-exceeded' | 'conflict'>
 
   /** Webhook subscription と active locator、optional receipt を原子的に保存します。 */
@@ -982,6 +1018,7 @@ abstract class DeveloperPlatformStorageKernel {
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<boolean>
 
   /** Webhook subscription の無効化と Workspace quota 解放を原子的に保存します。 */
@@ -989,6 +1026,7 @@ abstract class DeveloperPlatformStorageKernel {
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<boolean>
 
   /** Webhook delivery attempt と subscription health を原子的に保存します。 */
@@ -1129,6 +1167,7 @@ abstract class DeveloperPlatformStorageKernel {
       action: input.action,
       occurredAt: input.occurredAt,
       summary: input.summary,
+      ...(input.changes ? { changes: input.changes } : {}),
       metadata: {
         adapter: 'developer-platform',
         ...(input.teamId ? { teamId: input.teamId } : {}),
@@ -1242,6 +1281,7 @@ abstract class DeveloperPlatformStorageKernel {
   protected async persistInactiveOAuthApp(
     record: DeveloperPlatformRecord,
     oauthApp: OAuthAppSummary,
+    auditPut?: AuditTransactWriteItem,
   ) {
     const authRecord = await this.getCredentialAuthRecord(
       createOAuthClientAuthWorkspaceId(oauthApp.clientId),
@@ -1253,7 +1293,9 @@ abstract class DeveloperPlatformStorageKernel {
       value: oauthApp,
       version: record.version + 1,
     }, false), { expectedVersion: record.version }, undefined,
-    authRecord ? createCredentialAuthDelete(authRecord) : undefined)
+    authRecord ? createCredentialAuthDelete(authRecord) : undefined,
+    undefined,
+    auditPut)
     if (!saved) throw persistenceConflict()
     const tokens = await this.listRecords(record.workspaceId, 'OAUTHTOKEN#')
     await Promise.all(tokens.map(async (tokenRecord) => {
@@ -2027,6 +2069,14 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       undefined,
       request.idempotency,
       { status: 201, body: result },
+      this.createOAuthAppAuditPut(workspaceId, oauthApp, {
+        eventType: 'oauth-app.created',
+        transitionId: 'created',
+        occurredAt: oauthApp.createdAt,
+        action: 'created',
+        summary: 'OAuth app was registered.',
+        actorId: createdByUserId,
+      }),
     )) throw persistenceConflict()
     return result
   }
@@ -2118,6 +2168,14 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       undefined,
       request.idempotency,
       { status: 200, body: result },
+      this.createOAuthAppAuditPut(workspaceId, oauthApp, {
+        eventType: 'oauth-app.rotated',
+        transitionId: `rotated:${updatedRecord.version}`,
+        occurredAt: oauthApp.updatedAt,
+        action: 'rotated',
+        summary: 'OAuth client secret was rotated.',
+        actorId: request.actorUserId,
+      }),
     )
     if (!saved) throw persistenceConflict()
     return result
@@ -2148,8 +2206,48 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       revokedAt: now,
       updatedAt: now,
     }
-    await this.persistInactiveOAuthApp(record, oauthApp)
+    await this.persistInactiveOAuthApp(
+      record,
+      oauthApp,
+      this.createOAuthAppAuditPut(workspaceId, oauthApp, {
+        eventType: 'oauth-app.revoked',
+        transitionId: 'revoked',
+        occurredAt: now,
+        action: 'revoked',
+        summary: 'OAuth app was revoked.',
+        actorId: request.actorUserId,
+      }),
+    )
     return clone(oauthApp)
+  }
+
+  /**
+   * Builds the audit outbox event of an OAuth app lifecycle change without its client secret.
+   *
+   * @param workspaceId - Workspace that owns the OAuth app.
+   * @param oauthApp - OAuth app value committed by the change.
+   * @param event - Event type, retry-stable transition, time, action, summary, and actor.
+   * @returns The audit Put, or `undefined` when audit is not configured.
+   */
+  protected createOAuthAppAuditPut(
+    workspaceId: string,
+    oauthApp: OAuthAppSummary,
+    event: PlatformLifecycleAuditEvent,
+  ) {
+    return this.createPlatformAuditPut({
+      workspaceId,
+      entityType: 'oauth-app',
+      entityId: oauthApp.id,
+      ...event,
+      metadata: {
+        ownerUserId: oauthApp.createdByUserId,
+        name: oauthApp.name,
+        clientId: oauthApp.clientId,
+        grantTypes: [...oauthApp.grantTypes],
+        scopes: [...oauthApp.scopes],
+        ...(oauthApp.expiresAt ? { expiresAt: oauthApp.expiresAt } : {}),
+      },
+    })
   }
 
   /** client_credentials を検証し、digest だけ保存する token を発行します。 */
@@ -2387,7 +2485,18 @@ extends OAuthCredentialCapabilityStorage {
           { status: 201, body: result },
         )
       : undefined
-    const saved = await this.createWebhookSubscriptionRecord(record, completion)
+    const saved = await this.createWebhookSubscriptionRecord(
+      record,
+      completion,
+      this.createWebhookSubscriptionAuditPut(workspaceId, subscription, {
+        eventType: 'webhook-subscription.created',
+        transitionId: 'created',
+        occurredAt: now,
+        action: 'created',
+        summary: 'Webhook subscription was created.',
+        actorId: createdByUserId,
+      }),
+    )
     if (saved === 'quota-exceeded') {
       throw conflict(
         'WebhookSubscriptionLimitExceeded',
@@ -2523,6 +2632,14 @@ extends OAuthCredentialCapabilityStorage {
       updatedRecord,
       record.version,
       completion,
+      this.createWebhookSubscriptionAuditPut(workspaceId, subscription, {
+        eventType: 'webhook-subscription.rotated',
+        transitionId: `rotated:${updatedRecord.version}`,
+        occurredAt: subscription.updatedAt,
+        action: 'rotated',
+        summary: 'Webhook signing secret was rotated.',
+        actorId: request.actorUserId,
+      }),
     )
     if (!saved) throw persistenceConflict()
     return result
@@ -2581,7 +2698,30 @@ extends OAuthCredentialCapabilityStorage {
           WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS
     }
     const response = request.idempotencyResponse ?? { status: 200, body: subscription }
-    const saved = current.status !== 'disabled' && status === 'disabled'
+    const disabling = current.status !== 'disabled' && status === 'disabled'
+    const auditPut = this.createWebhookSubscriptionAuditPut(
+      workspaceId,
+      subscription,
+      disabling
+        ? {
+            eventType: 'webhook-subscription.deleted',
+            transitionId: `deleted:${updatedRecord.version}`,
+            occurredAt: subscription.updatedAt,
+            action: 'deleted',
+            summary: 'Webhook subscription was deleted.',
+            actorId: request.actorUserId,
+          }
+        : {
+            eventType: 'webhook-subscription.updated',
+            transitionId: `updated:${updatedRecord.version}`,
+            occurredAt: subscription.updatedAt,
+            action: 'updated',
+            summary: 'Webhook subscription was updated.',
+            actorId: request.actorUserId,
+          },
+      current,
+    )
+    const saved = disabling
       ? await this.disableWebhookSubscriptionRecord(
           updatedRecord,
           record.version,
@@ -2592,6 +2732,7 @@ extends OAuthCredentialCapabilityStorage {
                 response,
               )
             : undefined,
+          auditPut,
         )
       : await this.putWebhookSubscriptionRecord(
           updatedRecord,
@@ -2603,6 +2744,7 @@ extends OAuthCredentialCapabilityStorage {
                 response,
               )
             : undefined,
+          auditPut,
         )
     if (!saved) throw persistenceConflict()
     return clone(subscription)
@@ -2613,11 +2755,55 @@ extends OAuthCredentialCapabilityStorage {
     return this.updateWebhookSubscription({
       workspaceId: request.workspaceId,
       subscriptionId: request.subscriptionId,
+      ...(request.actorUserId ? { actorUserId: request.actorUserId } : {}),
       input: { status: request.status },
       ...(request.idempotency ? { idempotency: request.idempotency } : {}),
       ...(request.idempotencyResponse
         ? { idempotencyResponse: request.idempotencyResponse }
         : {}),
+    })
+  }
+
+  /**
+   * Builds the audit outbox event of a Webhook subscription lifecycle change.
+   *
+   * The event never carries the signing secret or the endpoint URL, whose query string may hold a
+   * receiver token; an update records only whether the URL changed.
+   *
+   * @param workspaceId - Workspace that owns the subscription.
+   * @param subscription - Subscription value committed by the change.
+   * @param event - Event type, retry-stable transition, time, action, summary, and actor.
+   * @param previous - Subscription value before an update, when the change edits one.
+   * @returns The audit Put, or `undefined` when audit is not configured.
+   */
+  protected createWebhookSubscriptionAuditPut(
+    workspaceId: string,
+    subscription: WebhookSubscription,
+    event: PlatformLifecycleAuditEvent,
+    previous?: WebhookSubscription,
+  ) {
+    return this.createPlatformAuditPut({
+      workspaceId,
+      entityType: 'webhook-subscription',
+      entityId: subscription.id,
+      ...event,
+      ...(previous === undefined
+        ? {}
+        : {
+            changes: createAuditFieldChanges(
+              auditedWebhookSubscriptionFields(previous),
+              auditedWebhookSubscriptionFields(subscription),
+            ),
+          }),
+      metadata: {
+        ownerUserId: subscription.createdByUserId,
+        name: subscription.name,
+        status: subscription.status,
+        teamIds: [...subscription.teamIds],
+        eventTypes: [...subscription.eventTypes],
+        scopes: [...subscription.scopes],
+        ...(previous !== undefined && previous.url !== subscription.url ? { urlChanged: true } : {}),
+      },
     })
   }
 
@@ -5400,6 +5586,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
   protected async createWebhookSubscriptionRecord(
     record: DeveloperPlatformRecord,
     completion?: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
   ): Promise<'created' | 'quota-exceeded' | 'conflict'> {
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     if (this.records.has(recordKey)) return 'conflict'
@@ -5467,6 +5654,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
   ) {
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     const current = this.records.get(recordKey)
@@ -5510,6 +5698,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    _auditPut?: AuditTransactWriteItem,
   ) {
     const recordKey = createMemoryKey(record.workspaceId, record.recordKey)
     const currentRecord = this.records.get(recordKey)
@@ -6696,6 +6885,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
   protected async createWebhookSubscriptionRecord(
     record: DeveloperPlatformRecord,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<'created' | 'quota-exceeded' | 'conflict'> {
     const quotaRecordKey = createWebhookSubscriptionQuotaRecordKey()
     try {
@@ -6755,6 +6945,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
           ...(completion
             ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
             : []),
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
       return 'created'
@@ -6774,6 +6965,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ) {
     const subscription = readRecordValue<WebhookSubscription>(
       record,
@@ -6822,6 +7014,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
           ...(completion
             ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
             : []),
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
       return true
@@ -6836,6 +7029,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     record: DeveloperPlatformRecord,
     expectedVersion: number,
     completion?: PreparedIdempotencyCompletionRecord,
+    auditPut?: AuditTransactWriteItem,
   ) {
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -6900,6 +7094,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
           ...(completion
             ? [createIdempotencyCompletionTransactWriteItem(this.tableName, completion)]
             : []),
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
       return true

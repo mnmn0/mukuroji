@@ -787,8 +787,13 @@ export interface TimeTrackingRepository {
     idempotencyPut?: AuditTransactWriteItem,
     periodGuard?: TimePeriodGuard,
   ): Promise<void>
-  /** Reads a Team or Project budget. */
-  getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
+  /**
+   * Reads a Team or Project budget.
+   *
+   * Project IDs are unique only within their Team, so a Project budget is read by the Team and
+   * Project pair.
+   */
+  getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
   saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team's rate card. */
@@ -1514,6 +1519,31 @@ export class TimeTrackingService {
     )
   }
 
+  /**
+   * Reads the budget of a Team or of one Project of the Team.
+   *
+   * The caller has already decided that the reader may see the amount.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team that owns the scope.
+   * @param scopeType - Budget scope.
+   * @param scopeId - Team or Project identifier.
+   * @returns The budget, or undefined when none is stored.
+   */
+  async getBudget(
+    workspaceId: string,
+    teamId: string,
+    scopeType: 'team' | 'project',
+    scopeId: string,
+  ): Promise<TimeBudget | undefined> {
+    return await this.repository.getBudget(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+      scopeType,
+      readIdentifier(scopeId, 'Budget scope ID'),
+    )
+  }
+
   /** Saves a budget without the public idempotency wrapper. */
   private async saveBudgetInternal(
     input: SaveTimeBudgetInput,
@@ -1538,7 +1568,7 @@ export class TimeTrackingService {
     if (input.periodFrom && input.periodTo && input.periodFrom > input.periodTo) {
       throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
     }
-    const current = await this.repository.getBudget(workspaceId, input.scopeType, scopeId)
+    const current = await this.repository.getBudget(workspaceId, resolvedTeamId, input.scopeType, scopeId)
     if (current && current.revision !== expectedRevision) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
@@ -1548,6 +1578,7 @@ export class TimeTrackingService {
     const budget: TimeBudget = {
       schemaVersion: 1,
       workspaceId,
+      teamId: resolvedTeamId,
       scopeType: input.scopeType,
       scopeId,
       amountMinor,
@@ -2140,8 +2171,8 @@ export class TimeTrackingService {
     const budget = !includeBudget
       ? undefined
       : input.budgetScope === 'project' && input.budgetScopeId
-        ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
-        : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
+        ? await this.repository.getBudget(input.workspaceId, input.teamId, 'project', input.budgetScopeId)
+        : await this.repository.getBudget(input.workspaceId, input.teamId, 'team', input.teamId)
     const totalEstimateMinutes = [...new Set(entries.flatMap((entry) => entry.workItemId === undefined ? [] : [entry.workItemId]))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
@@ -2182,7 +2213,7 @@ export class TimeTrackingService {
     validateTimeZone(input.timeZone)
     const budgets = new Map<string, TimeBudget>()
     for (const projectId of input.projectIds) {
-      const budget = await this.repository.getBudget(input.workspaceId, 'project', projectId)
+      const budget = await this.repository.getBudget(input.workspaceId, input.teamId, 'project', projectId)
       if (budget) budgets.set(projectId, budget)
     }
     const result = new Map<string, ProjectBudgetConsumption>()
@@ -2706,8 +2737,8 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Reads a budget. */
-  async getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string) {
-    const budget = this.budgets.get(budgetKey(workspaceId, scopeType, scopeId))
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
+    const budget = this.budgets.get(budgetKey(workspaceId, teamId, scopeType, scopeId))
     return budget ? clone(budget) : undefined
   }
 
@@ -2718,7 +2749,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
   ) {
-    const key = budgetKey(budget.workspaceId, budget.scopeType, budget.scopeId)
+    const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId)
     const current = this.budgets.get(key)
     if ((current?.revision ?? 0) !== expectedRevision) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     this.budgets.set(key, clone(budget))
@@ -3076,10 +3107,10 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Reads a Team or Project budget. */
-  async getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string) {
+  async getBudget(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string) {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
-      Key: { workspaceId, recordKey: `${BUDGET_PREFIX}${scopeType}#${scopeId}` },
+      Key: { workspaceId, recordKey: budgetRecordKey(teamId, scopeType, scopeId) },
       ConsistentRead: true,
     }))
     return response.Item ? readStoredBudget(response.Item) : undefined
@@ -3096,7 +3127,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       const put = {
         Put: {
           TableName: this.tableName,
-          Item: { ...budget, recordKey: `${BUDGET_PREFIX}${budget.scopeType}#${budget.scopeId}` },
+          Item: { ...budget, recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId) },
           ...(expectedRevision === 0
             ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
             : {
@@ -3696,6 +3727,18 @@ function aggregateCalendarEntries(
   return [...grouped.values()]
     .sort((left, right) => left.key.localeCompare(right.key))
     .map((group) => toSummaryGroup(group, includeCosts))
+}
+
+/**
+ * Splits a time entry at local midnight the way time reports do, so another report can count
+ * an entry that crosses midnight on each day it covers.
+ *
+ * @param entry - Entry to split.
+ * @param timeZone - IANA timezone that defines the days.
+ * @returns One segment per local date with its whole minutes and its share of the entry.
+ */
+export function splitTimeEntryByLocalDate(entry: TimeEntry, timeZone: string): Array<{ date: string; minutes: number; ratio: number }> {
+  return splitEntryByLocalDate(entry, timeZone, entry.startAt, entry.endAt)
 }
 
 /** Splits one interval at timezone-aware local midnight boundaries. */
@@ -4504,6 +4547,7 @@ function readStoredBudget(value: unknown): TimeBudget {
   return {
     schemaVersion: 1,
     workspaceId: readString(record.workspaceId, 'Stored budget Workspace ID'),
+    teamId: readString(record.teamId, 'Stored budget Team ID'),
     scopeType: readScopeType(record.scopeType),
     scopeId: readString(record.scopeId, 'Stored budget scope ID'),
     amountMinor: readNumber(record.amountMinor, 'Stored budget amount'),
@@ -4727,9 +4771,26 @@ function timerKey(workspaceId: string, userId: string): string {
   return `${workspaceId}\0${userId}`
 }
 
-/** Builds a budget key. */
-function budgetKey(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): string {
-  return `${workspaceId}\0${scopeType}\0${scopeId}`
+/** Builds the in-memory key of a budget from its Team-qualified scope. */
+function budgetKey(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
+  return `${workspaceId}\0${budgetRecordKey(teamId, scopeType, scopeId)}`
+}
+
+/**
+ * Builds the DynamoDB sort key of a budget.
+ *
+ * A Team budget is keyed by its Team. A Project budget is keyed by the Team and the Project,
+ * because Project IDs are unique only within their Team.
+ *
+ * @param teamId - Team that owns the scope.
+ * @param scopeType - Budget scope.
+ * @param scopeId - Team or Project identifier.
+ * @returns The sort key.
+ */
+function budgetRecordKey(teamId: string, scopeType: 'team' | 'project', scopeId: string): string {
+  return scopeType === 'team'
+    ? `${BUDGET_PREFIX}team#${scopeId}`
+    : `${BUDGET_PREFIX}project#${teamId}#${scopeId}`
 }
 
 /** Builds the DynamoDB sort key of a month close. */

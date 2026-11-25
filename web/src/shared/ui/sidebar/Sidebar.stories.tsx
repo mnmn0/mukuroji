@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { createSidebarLabels } from '../../i18n/i18n'
 import { Sidebar } from './Sidebar'
 import type {
@@ -234,5 +234,30 @@ export const TeamSearch: Story = {
       'aria-expanded',
       'false',
     )
+  },
+}
+
+/** A new Project can start as proposed, and the chosen lifecycle reaches the create handler. */
+export const CreateProposedProject: Story = {
+  args: {
+    onCreateProject: fn(async () => undefined),
+  },
+  play: async ({ args, canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body)
+    await userEvent.click(page.getByRole('button', { name: 'その他' }))
+    await userEvent.click(page.getByRole('button', { name: '新規登録' }))
+    await userEvent.click(page.getByRole('button', { name: 'プロジェクト' }))
+    const lifecycle = page.getByLabelText('開始時のライフサイクル')
+    await expect(lifecycle).toHaveValue('active')
+    await expect(Array.from(lifecycle.querySelectorAll('option'), (option) => option.textContent))
+      .toEqual(['提案中', '承認済み', '実行中'])
+    await userEvent.type(page.getByLabelText('プロジェクト名'), '新しい提案')
+    await userEvent.selectOptions(lifecycle, 'proposed')
+    await userEvent.click(page.getByRole('button', { name: 'プロジェクトを登録' }))
+    await expect(args.onCreateProject).toHaveBeenCalledWith('johns-first-team', {
+      name: '新しい提案',
+      tone: 'blue',
+      lifecycleState: 'proposed',
+    })
   },
 }

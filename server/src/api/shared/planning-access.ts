@@ -337,6 +337,10 @@ export async function requirePlanningUpdateTargetPermission(
     )
     return undefined
   }
+  if (target.type === 'team') {
+    await requirePlanningUpdateTeamPermission(principal, target.teamId, minimumRole, readContext)
+    return undefined
+  }
 
   const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
   if (!entity || entity.type !== 'initiative') {
@@ -609,6 +613,7 @@ function resolvePlanningPublishTargetScope(
   if (target.type === 'project') {
     return { teamId: target.teamId, projectId: target.projectId }
   }
+  if (target.type === 'team') return { teamId: target.teamId }
 
   const entity = snapshot.entities.find((candidate) =>
     candidate.id === target.entityId && candidate.type === 'initiative'
@@ -665,6 +670,8 @@ export async function readPlanningPublishState(
   let targetScope: PlanningWorkItemReadScope | undefined
   if (target.type === 'project') {
     targetScope = { teamId: target.teamId, projectId: target.projectId }
+  } else if (target.type === 'team') {
+    targetScope = { teamId: target.teamId }
   } else {
     const preliminarySnapshot = await workItemDependencies.planning.get(
       principal.directoryId,
@@ -904,6 +911,8 @@ export function filterPlanningSnapshotForPrincipal(
     .filter((updateTarget) =>
       updateTarget.target.type === 'initiative'
         ? entityIds.has(updateTarget.target.entityId)
+        : updateTarget.target.type === 'team'
+        ? teamIds.has(updateTarget.target.teamId)
         : projectScopeKeys.has(createPlanningProjectScopeKey(
             updateTarget.target.teamId,
             updateTarget.target.projectId,

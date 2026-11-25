@@ -20,6 +20,7 @@ import {
   type PersonalNotificationReminderDays,
 } from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
+import { EMAIL_SUPPRESSION_ITEM_TYPE, EMAIL_SUPPRESSION_KEY } from './domain/email-suppression'
 import {
   categoryChannelsEqual,
   hasNotificationMutes,
@@ -97,6 +98,8 @@ export type NotificationPreferences = {
   slackEnabledAt?: string
   /** Server-owned start of the current Email opt-in period; omitted from HTTP preferences. */
   emailEnabledAt?: string
+  /** Server-owned start of the current push opt-in period; omitted from HTTP preferences. */
+  pushEnabledAt?: string
 }
 
 /** Notification preference を置き換える入力です。 */
@@ -159,8 +162,8 @@ export type NotificationItem = {
   commentId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
-  /** Scheduled health update の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled health update の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled health update の canonical target ID です。 */
   planningTargetId?: string
   /** Current Planning target を再検証する record key です。 */
@@ -629,9 +632,9 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const preferences = normalizeNotificationPreferencesInput(input.preferences)
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
-    // Slack keeps its strict read; an Email-only save over a corrupt row starts a new Email period.
+    // Slack keeps its strict read; an Email- or push-only save over a corrupt row starts a new period.
     const current = preferences.version > 0 &&
-      (preferences.channels.slack || preferences.channels.email || preferences.reminderDays === undefined ||
+      (preferences.channels.slack || preferences.channels.email || preferences.channels.push || preferences.reminderDays === undefined ||
         preferences.categoryChannels === undefined || preferences.mutes === undefined)
       ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
           TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
@@ -639,6 +642,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
       : undefined
     let slackEnabledAt: string | undefined
     let emailEnabledAt: string | undefined
+    let pushEnabledAt: string | undefined
     if (preferences.channels.slack) {
       slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
     }
@@ -646,6 +650,12 @@ export class DynamoDbNotificationsClient implements NotificationClient {
       // Rows saved before Email transport existed keep their last save time as the opt-in boundary.
       emailEnabledAt = current?.channels.email
         ? current.emailEnabledAt ?? current.updatedAt ?? now.toISOString()
+        : now.toISOString()
+    }
+    if (preferences.channels.push) {
+      // Rows saved before push transport existed keep their last save time as the opt-in boundary.
+      pushEnabledAt = current?.channels.push
+        ? current.pushEnabledAt ?? current.updatedAt ?? now.toISOString()
         : now.toISOString()
     }
     // A client that does not send the field keeps the saved overrides of the version it read.
@@ -668,6 +678,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
       ...(hasNotificationMutes(mutes) ? { mutes } : {}),
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
       ...(emailEnabledAt ? { emailEnabledAt } : {}),
+      ...(pushEnabledAt ? { pushEnabledAt } : {}),
     }
 
     try {
@@ -829,6 +840,8 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           { AttributeName: 'slackNextAttemptAt', AttributeType: 'S' },
           { AttributeName: 'emailQueueShard', AttributeType: 'S' },
           { AttributeName: 'emailNextAttemptAt', AttributeType: 'S' },
+          { AttributeName: 'pushQueueShard', AttributeType: 'S' },
+          { AttributeName: 'pushNextAttemptAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'recipientKey', KeyType: 'HASH' },
@@ -853,6 +866,13 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           KeySchema: [
             { AttributeName: 'emailQueueShard', KeyType: 'HASH' },
             { AttributeName: 'emailNextAttemptAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }, {
+          IndexName: 'PushDeliveryIndex',
+          KeySchema: [
+            { AttributeName: 'pushQueueShard', KeyType: 'HASH' },
+            { AttributeName: 'pushNextAttemptAt', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'KEYS_ONLY' },
         }],
@@ -966,10 +986,14 @@ export function parseStoredNotificationPreferences(
     if (value.emailEnabledAt !== undefined && !readTimestamp(value.emailEnabledAt)) throw new Error('Invalid Email activation time.')
     // Email existed as a preference before its transport, so older rows may lack an activation time.
     const emailEnabledAt = normalized.channels.email ? readTimestamp(value.emailEnabledAt) : undefined
+    if (value.pushEnabledAt !== undefined && !readTimestamp(value.pushEnabledAt)) throw new Error('Invalid push activation time.')
+    // Push also existed as a preference before its transport.
+    const pushEnabledAt = normalized.channels.push ? readTimestamp(value.pushEnabledAt) : undefined
     return {
       ...normalized,
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
       ...(emailEnabledAt ? { emailEnabledAt } : {}),
+      ...(pushEnabledAt ? { pushEnabledAt } : {}),
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
@@ -1003,6 +1027,18 @@ export function isSlackNotificationEligible(preferences: NotificationPreferences
 export function isEmailNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
   const enabledAt = Date.parse(preferences.emailEnabledAt ?? preferences.updatedAt ?? '')
   return preferences.channels.email && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
+}
+
+/**
+ * Binds push delivery to the server-recorded opt-in period, with the same rule as Email: rows
+ * saved before push transport existed use their last save time as the boundary.
+ * @param preferences - Current stored preferences and activation boundary.
+ * @param occurredAt - Original notification event time, not its projection or retry time.
+ * @returns Whether the event occurred during the current push opt-in period.
+ */
+export function isPushNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
+  const enabledAt = Date.parse(preferences.pushEnabledAt ?? preferences.updatedAt ?? '')
+  return preferences.channels.push && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
 }
 
 /**
@@ -1130,6 +1166,11 @@ export function toNotificationItem(
     if (value.notificationKey === NOTIFICATION_PREFERENCES_KEY) {
       return undefined
     }
+    throw invalidNotificationData()
+  }
+  // The recipient's Email suppression row shares the partition but is never a notification.
+  if (value.itemType === EMAIL_SUPPRESSION_ITEM_TYPE) {
+    if (value.notificationKey === EMAIL_SUPPRESSION_KEY) return undefined
     throw invalidNotificationData()
   }
   const recipientStatusKey = readText(value.recipientStatusKey)
@@ -1562,8 +1603,8 @@ function readStringArray(value: unknown) {
 }
 
 /** Reads a validated Planning health update target type. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning health update notification kind. */

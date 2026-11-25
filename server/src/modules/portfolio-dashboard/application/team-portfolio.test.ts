@@ -162,7 +162,7 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     const repository = new InMemoryTimeTrackingRepository()
     const service = new TimeTrackingService(repository)
     await repository.saveBudget({
-      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      schemaVersion: 1, workspaceId: 'w', teamId: 't', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
       periodFrom: '2026-11-01', periodTo: '2026-11-30', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
     }, 0)
     await repository.saveEntry(timeEntry('before', 'alpha', '2026-10-31T10:00:00.000Z', '2026-10-31T11:00:00.000Z'))
@@ -178,15 +178,30 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     await expect(service.summarizeProjectBudgets({ ...input, entryLimit: 1 })).rejects.toMatchObject({ status: 413, code: 'PortfolioTooLarge' })
   })
 
+  test('reads only the budget of the same Project ID in the requested Team', async () => {
+    const repository = new InMemoryTimeTrackingRepository()
+    const service = new TimeTrackingService(repository)
+    await repository.saveBudget({
+      schemaVersion: 1, workspaceId: 'w', teamId: 'other-team', scopeType: 'project', scopeId: 'alpha', amountMinor: 1, currency: 'USD',
+      revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
+    }, 0)
+
+    const budgets = await service.summarizeProjectBudgets({
+      workspaceId: 'w', teamId: 't', projectIds: ['alpha'], timeZone: 'UTC', now: new Date('2026-11-23T00:00:00.000Z'), entryLimit: 10,
+    })
+
+    expect(budgets.size).toBe(0)
+  })
+
   test('counts only entries inside each Project budget period toward the limit', async () => {
     const repository = new InMemoryTimeTrackingRepository()
     const service = new TimeTrackingService(repository)
     await repository.saveBudget({
-      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      schemaVersion: 1, workspaceId: 'w', teamId: 't', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
       periodFrom: '2026-01-01', periodTo: '2026-01-31', revision: 1, updatedAt: '2026-01-01T00:00:00.000Z',
     }, 0)
     await repository.saveBudget({
-      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'beta', amountMinor: 100_000, currency: 'JPY',
+      schemaVersion: 1, workspaceId: 'w', teamId: 't', scopeType: 'project', scopeId: 'beta', amountMinor: 100_000, currency: 'JPY',
       periodFrom: '2026-11-01', periodTo: '2026-11-30', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
     }, 0)
     await repository.saveEntry(timeEntry('alpha-jan', 'alpha', '2026-01-10T10:00:00.000Z', '2026-01-10T11:00:00.000Z'))
@@ -206,7 +221,7 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     const repository = new InMemoryTimeTrackingRepository()
     const service = new TimeTrackingService(repository)
     await repository.saveBudget({
-      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      schemaVersion: 1, workspaceId: 'w', teamId: 't', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
       periodFrom: '2026-11-01', periodTo: '9999-12-31', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
     }, 0)
     await repository.saveEntry(timeEntry('inside', 'alpha', '2026-11-10T10:00:00.000Z', '2026-11-10T11:00:00.000Z'))
@@ -220,7 +235,7 @@ describe('TimeTrackingService.summarizeProjectBudgets', () => {
     const repository = new InMemoryTimeTrackingRepository()
     const service = new TimeTrackingService(repository)
     await repository.saveBudget({
-      schemaVersion: 1, workspaceId: 'w', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
+      schemaVersion: 1, workspaceId: 'w', teamId: 't', scopeType: 'project', scopeId: 'alpha', amountMinor: 100_000, currency: 'JPY',
       periodFrom: '2026-11-01', periodTo: '2026-11-30', revision: 1, updatedAt: '2026-11-01T00:00:00.000Z',
     }, 0)
     for (const id of ['a', 'b']) {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  DeleteCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -11,6 +12,7 @@ import {
 } from '../../domain/push-subscription'
 import { NotificationError } from '../../domain/notification-error'
 import type { PushSubscriptionStore } from '../../application/push-subscriptions'
+import type { PushDevice, PushDeviceDirectory } from '../../application/ports/push-device-directory'
 
 /** Days a subscription is kept without being registered again by its browser. */
 const subscriptionRetentionDays = 180
@@ -31,9 +33,14 @@ const memberVersionSortKey = 'devices'
 /** Minimal DynamoDB command boundary used by the push subscription store. */
 type PushSubscriptionDocumentClient = {
   /** Sends one read, query, or transaction. */
-  send(command: GetCommand | QueryCommand | TransactWriteCommand): Promise<{
+  send(command: GetCommand | QueryCommand | TransactWriteCommand | DeleteCommand, options?: {
+    /** Cancels the request when the delivery deadline passes. */
+    abortSignal?: AbortSignal
+  }): Promise<{
     /** Strongly read item. */
     Item?: Record<string, unknown>
+    /** Items read by a query. */
+    Items?: Record<string, unknown>[]
     /** Number of items matched by a count query. */
     Count?: number
     /** Key of the last item read when the query stopped early. */
@@ -78,7 +85,7 @@ function endpointPartition(subscriptionId: string): string {
 }
 
 /** DynamoDB-backed push subscriptions with exclusive endpoint ownership. */
-export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
+export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore, PushDeviceDirectory {
   /** Document client configured by the composition root. */
   readonly #client: PushSubscriptionDocumentClient
   /** Push subscriptions table. */
@@ -277,6 +284,98 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
   }
 
   /**
+   * Lists the member's unexpired devices whose endpoint owner record still names that member, so
+   * a device another member took over, or one removed after this read began, receives nothing.
+   *
+   * @param workspaceId - Workspace of the recipient.
+   * @param memberKey - Recipient member.
+   * @param now - Delivery time.
+   * @param signal - Delivery deadline.
+   * @returns Devices to send to, at most the per-member limit.
+   */
+  async listDevices(workspaceId: string, memberKey: string, now: Date, signal: AbortSignal): Promise<PushDevice[]> {
+    const partition = memberPartition(workspaceId, memberKey)
+    const nowSeconds = Math.floor(now.getTime() / 1_000)
+    const devices: PushDevice[] = []
+    let startKey: Record<string, unknown> | undefined
+    // The registration limit bounds live rows; the page bound keeps one delivery's reads finite.
+    for (let page = 0; page < 5; page += 1) {
+      const result = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName,
+        KeyConditionExpression: 'pk = :pk AND begins_with(sk, :prefix)',
+        ExpressionAttributeValues: { ':pk': partition, ':prefix': 'subscription#' },
+        ConsistentRead: true,
+        ...(startKey ? { ExclusiveStartKey: startKey } : {}),
+      }), { abortSignal: signal })
+      for (const item of result.Items ?? []) {
+        const { subscriptionId, endpoint, p256dh, auth, updatedAt, expiresAt } = item
+        // A row whose retention cannot be established fails closed instead of being sent to.
+        if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) {
+          throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
+        }
+        if (expiresAt <= nowSeconds) continue
+        if (
+          typeof subscriptionId !== 'string' || typeof endpoint !== 'string' || typeof p256dh !== 'string' ||
+          typeof auth !== 'string' || typeof updatedAt !== 'string' || createPushSubscriptionId(endpoint) !== subscriptionId
+        ) {
+          throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription record is invalid.')
+        }
+        devices.push({ subscriptionId, endpoint, keys: { p256dh, auth }, updatedAt })
+      }
+      startKey = result.LastEvaluatedKey
+      if (!startKey) break
+    }
+    // Expired rows awaiting TTL deletion are not bounded by the limit, so a partial list is not a result.
+    if (startKey) {
+      throw new NotificationError(503, 'PushSubscriptionUnavailable', 'The push subscription list could not be read completely.')
+    }
+    const owned: PushDevice[] = []
+    for (const device of devices.slice(0, MAX_PUSH_SUBSCRIPTIONS_PER_MEMBER)) {
+      const owner = await this.#readOwner(device.subscriptionId, signal)
+      if (owner && !owner.removed && owner.workspaceId === workspaceId && owner.memberKey === memberKey) owned.push(device)
+    }
+    return owned
+  }
+
+  /**
+   * Strongly rechecks that the recipient still owns a device's endpoint right before a send.
+   *
+   * @param workspaceId - Workspace of the recipient.
+   * @param memberKey - Recipient member key.
+   * @param device - Device about to be sent to.
+   * @param signal - Delivery deadline.
+   * @returns `true` while the live owner record names the recipient.
+   */
+  async isDeviceOwned(workspaceId: string, memberKey: string, device: PushDevice, signal: AbortSignal): Promise<boolean> {
+    const owner = await this.#readOwner(device.subscriptionId, signal)
+    return Boolean(owner && !owner.removed && owner.workspaceId === workspaceId && owner.memberKey === memberKey)
+  }
+
+  /**
+   * Deletes a device the push service reported as gone (`404` / `410`). Only the exact
+   * registration that was sent to is deleted, so a browser that registered the endpoint again
+   * meanwhile keeps its newer row.
+   *
+   * @param workspaceId - Workspace of the recipient.
+   * @param memberKey - Recipient member.
+   * @param device - Device read by {@link listDevices}.
+   * @param signal - Delivery deadline.
+   */
+  async removeGoneDevice(workspaceId: string, memberKey: string, device: PushDevice, signal: AbortSignal): Promise<void> {
+    try {
+      await this.#client.send(new DeleteCommand({
+        TableName: this.#tableName,
+        Key: { pk: memberPartition(workspaceId, memberKey), sk: `subscription#${device.subscriptionId}` },
+        ConditionExpression: 'updatedAt = :updatedAt',
+        ExpressionAttributeValues: { ':updatedAt': device.updatedAt },
+      }), { abortSignal: signal })
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return
+      throw error
+    }
+  }
+
+  /**
    * Strongly checks whether a member still stores an unexpired subscription.
    *
    * @param partition - Member partition.
@@ -298,14 +397,15 @@ export class DynamoDbPushSubscriptionStore implements PushSubscriptionStore {
    * Strongly reads the owner record of an endpoint.
    *
    * @param subscriptionId - Endpoint-derived subscription ID.
+   * @param signal - Optional deadline of a delivery read.
    * @returns The owner record, which may be a tombstone, or `undefined` when none exists.
    */
-  async #readOwner(subscriptionId: string): Promise<EndpointOwner | undefined> {
+  async #readOwner(subscriptionId: string, signal?: AbortSignal): Promise<EndpointOwner | undefined> {
     const { Item } = await this.#client.send(new GetCommand({
       TableName: this.#tableName,
       Key: { pk: endpointPartition(subscriptionId), sk: 'owner' },
       ConsistentRead: true,
-    }))
+    }), signal ? { abortSignal: signal } : undefined)
     if (!Item) return undefined
     const { workspaceId, memberKey, changedAt, revision, removed } = Item
     // Only the supported shapes are trusted; anything else fails closed instead of reading as a live owner.

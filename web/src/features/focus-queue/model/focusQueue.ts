@@ -10,6 +10,7 @@ import {
   type FocusQueueSection,
   type FocusSignalResolutionCondition,
   type FocusSignalType,
+  type FocusUpdateDeadlineTarget,
   type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
@@ -392,4 +393,17 @@ export function formatFocusTimestamp(value: string, locale: Locale): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(date)
+}
+
+/**
+ * Resolves the fallback label of a health update target without a server title.
+ *
+ * @param target - Project, Team, or Initiative target.
+ * @returns Localized message key.
+ */
+export function focusUpdateTargetLabelKey(target: FocusUpdateDeadlineTarget): MessageKey {
+  if (target.type === 'project') return 'workspace.focus.updateDeadlines.project'
+  return target.type === 'team'
+    ? 'workspace.focus.updateDeadlines.team'
+    : 'workspace.focus.updateDeadlines.initiative'
 }

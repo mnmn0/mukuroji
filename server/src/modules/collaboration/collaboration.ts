@@ -2558,6 +2558,12 @@ export type PlanningUpdateTargetKeyInput =
       /** Workspace-local Initiative identifier. */
       entityId: string
     }
+  | {
+      /** Target discriminator for a Team-level update. */
+      type: 'team'
+      /** Team that submits the update. */
+      teamId: string
+    }
 
 /**
  * Creates the shared public key used to store and query Planning update watchers.
@@ -2568,6 +2574,9 @@ export type PlanningUpdateTargetKeyInput =
 export function createPlanningUpdatePublicTargetKey(
   target: PlanningUpdateTargetKeyInput,
 ): string {
+  if (target.type === 'team') {
+    return `team/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}`
+  }
   return target.type === 'project'
     ? `project/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}/${encodeURIComponent(requireText(target.projectId, 'Project ID'))}`
     : `initiative/${encodeURIComponent(requireText(target.entityId, 'Initiative ID'))}`

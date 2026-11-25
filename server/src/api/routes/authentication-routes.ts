@@ -28,6 +28,7 @@ import { canManageWorkspaceTeams } from '../shared/team-administration-access'
 import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
+import { recordSignInFailed } from '../shared/sign-in-audit'
 import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
 import {
   readCognitoAccessTokenUser,
@@ -454,6 +455,9 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
           message: 'An administrator reset the password. Set a new one with the emailed code.',
         }, 409)
       }
+      if (isRejectedSignIn(error, ['NotAuthorizedException', 'UserNotFoundException'])) {
+        await recordSignInFailed(c, email, 'invalid-credentials')
+      }
 
       return toAuthErrorResponse(c, error)
     }
@@ -648,6 +652,9 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
       if (error instanceof WorkspaceAccessError) {
         return toWorkspaceAccessErrorResponse(c, error)
       }
+      if (isRejectedSignIn(error, ['CodeMismatchException', 'ExpiredCodeException', 'NotAuthorizedException'])) {
+        await recordSignInFailed(c, email, 'invalid-mfa-code')
+      }
       return toAuthErrorResponse(c, error)
     }
   })
@@ -726,7 +733,7 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         {},
         undefined,
         [],
-        previousAccessToken ? { previousAccessToken } : undefined,
+        previousAccessToken ? { previousAccessToken } : {},
       ))
     } catch (error) {
       return toRefreshErrorResponse(c, error)
@@ -836,4 +843,15 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
       return toAuthErrorResponse(c, error)
     }
   })
+}
+
+/**
+ * Checks whether Cognito rejected the presented credentials or one-time code.
+ *
+ * @param error - Thrown value.
+ * @param codes - Cognito error codes that mean the attempt itself was rejected.
+ * @returns Whether the failure is a rejected sign-in attempt rather than an outage.
+ */
+function isRejectedSignIn(error: unknown, codes: readonly string[]): boolean {
+  return error instanceof CognitoServiceError && codes.includes(error.code)
 }

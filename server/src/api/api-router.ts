@@ -21,6 +21,7 @@ import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
 import { registerPortfolioRoutes } from './routes/portfolio-routes'
 import { registerProjectStatusReportRoutes } from './routes/project-status-report-routes'
 import { registerWeeklyReportRoutes } from './routes/weekly-report-routes'
+import { registerProjectBudgetRoutes } from './routes/project-budget-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
 import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
@@ -38,6 +39,7 @@ import { registerTaskViewsRoutes } from './routes/task-views-routes'
 import { registerRealtimeRoutes } from './routes/realtime-routes'
 import { registerFilesRoutes } from './routes/files-routes'
 import { registerPublicApiRoutes } from './routes/public-api-routes'
+import { registerCalendarFeedRoutes } from './routes/calendar-feed-routes'
 
 export type {
   AppDependencies,
@@ -185,6 +187,7 @@ registerPortfolioRoutes(routeApp)
 registerProjectStatusReportRoutes(routeApp)
 registerWeeklyReportRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
+registerProjectBudgetRoutes(routeApp)
 registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
 registerOrgStructureRoutes(routeApp)
@@ -201,3 +204,4 @@ registerTaskViewsRoutes(routeApp)
 registerRealtimeRoutes(routeApp)
 registerFilesRoutes(routeApp)
 registerPublicApiRoutes(routeApp)
+registerCalendarFeedRoutes(routeApp)

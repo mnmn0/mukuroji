@@ -64,7 +64,25 @@ const PLANNING_ENTITY_AUDIT_EVENT_TYPE_PREFIX = 'planning-entity.'
 export async function readReadableAnalyticsMilestones(
   principal: WorkspacePrincipal,
 ): Promise<PlanningEntity[]> {
-  // Only the entities are read; the Work Item state feeds progress, which the trend does not use.
+  return readReadableLivePlanningEntities(principal, ['milestone'])
+}
+
+/**
+ * Reads the live Planning entities of the given types that the caller can read now.
+ *
+ * The rule is the one {@link readReadableAnalyticsMilestones} describes: a legacy caller's graph
+ * is filtered with the current Planning ACL, and an Enterprise caller is checked for
+ * `planning.read` at each entity's own scope.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param types - Entity types to keep.
+ * @returns The readable entities that are not archived.
+ */
+export async function readReadableLivePlanningEntities(
+  principal: WorkspacePrincipal,
+  types: readonly PlanningEntity['type'][],
+): Promise<PlanningEntity[]> {
+  // Only the entities are read; the Work Item state feeds progress, which the callers do not use.
   const planning = await workItemDependencies.planning.get(principal.directoryId, { workItems: [] })
   // The Enterprise scopes on the principal belong to `work-items.read`, so filtering with them
   // would intersect Planning access with unrelated Work Item grants; `planning.read` alone decides.
@@ -73,7 +91,7 @@ export async function readReadableAnalyticsMilestones(
     : filterPlanningSnapshotForPrincipal(await withPlanningLegacyReadScope(principal), planning)
       .entities
   return entities.filter((entity) =>
-    entity.type === 'milestone' &&
+    types.includes(entity.type) &&
     entity.archivedAt === undefined &&
     canReadPlanningScope(principal, entity)
   )

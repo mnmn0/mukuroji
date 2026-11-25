@@ -139,6 +139,27 @@ export const WithCharters: Story = {
   },
 }
 
+/** Customers linked to a Project by Customer Requests are listed in its row. */
+export const WithLinkedCustomers: Story = {
+  args: {
+    projectCustomerLinks: [{
+      projectId: defaultRows[0]?.projectId ?? 'refero',
+      customers: [
+        { customerId: 'acme', name: 'Acme Corporation', requestCount: 2 },
+        { customerId: 'globex', name: 'Globex', requestCount: 1 },
+        { customerId: 'initech', name: 'Initech', requestCount: 1 },
+      ],
+    }],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const row = defaultRows[0]
+    if (!row) throw new Error('The story needs a Project row.')
+    await expect(canvas.getByTestId(`project-customers-${row.teamId}-${row.projectId}`))
+      .toHaveTextContent('顧客: Acme Corporation, Globex ほか1社')
+  },
+}
+
 /** English Project directory with the attention facet selected. */
 export const EnglishAttention: Story = {
   args: {

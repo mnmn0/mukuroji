@@ -5,10 +5,12 @@ import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries
 import { useProjectActionItems } from '../../documents/queries/useProjectActionItems'
 import { useProjectDocuments } from '../../documents/queries/useProjectDocuments'
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { ProjectBudgetReportSection } from '../../features/time-tracking/ui/ProjectBudgetReportSection'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
 import { PlanningApiError } from '../../planning/api/errors'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useProjectCustomerLinks } from '../../customers/queries/useCustomers'
 import { isActiveProjectAssignmentCandidate, ProjectDirectoryApiError } from '../../projects/api'
 import {
   findProjectOverviewUpdateTarget,
@@ -71,6 +73,7 @@ export function ProjectOverviewPage() {
     'project',
     projectId,
   )
+  const customerLinks = useProjectCustomerLinks(canRead ? workspace.accessToken : undefined, Boolean(projectId))
   const projectDocuments = useProjectDocuments(canRead ? workspace.accessToken : undefined, projectId)
   // Action items are read once the first page of Project Documents is in, so
   // a slow later page never holds the list back.
@@ -263,6 +266,11 @@ export function ProjectOverviewPage() {
     >
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <ProjectOverviewView
+          linkedCustomers={customerLinks.data
+            ? customerLinks.data.items.find((links) => links.projectId === projectId)?.customers ?? []
+            : undefined}
+          linkedCustomersError={Boolean(customerLinks.error)}
+          onRetryLinkedCustomers={() => void customerLinks.mutate()}
           actionItems={actionItems}
           actionItemsError={resolveDocumentsError(actionItemsQuery.error, projectDocuments.error)}
           agentRuns={agentRuns}
@@ -314,6 +322,18 @@ export function ProjectOverviewPage() {
           workItemSummary={workItemSummary}
           workItemsError={workItemsError}
         />
+        {team && project ? (
+          <div className="mt-5">
+            <ProjectBudgetReportSection
+              key={`${team.id}/${project.id}`}
+              accessToken={workspace.accessToken}
+              enabled={canRead}
+              locale={workspace.locale}
+              projectId={project.id}
+              teamId={team.id}
+            />
+          </div>
+        ) : null}
         {isReportOpen && team && projectId ? (
           <ProjectStatusReportDialog
             accessToken={workspace.accessToken}

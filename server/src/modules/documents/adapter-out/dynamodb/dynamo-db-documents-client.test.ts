@@ -4323,6 +4323,197 @@ test('stores document mention notification source events atomically with comment
   })
 })
 
+test('records Document lifecycle, permission, public link, and export audit events with the change', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(
+    memory,
+    () => new Date('2026-07-18T00:00:00.000Z'),
+    'audit-events-table',
+  )
+  let sequence = 0
+  /** Creates a distinct request audit context, as one API request does. */
+  const auditContext = () => createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: ownerShareAccess.memberKey, kind: 'user', displayName: 'Owner' },
+    idempotencyKey: `document-audit-${++sequence}`,
+    request: { method: 'POST', path: '/api/documents', body: {} },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Audited page',
+    blocks: [{ id: 'block-a', type: 'paragraph', text: 'secret body' }],
+    auditContext: auditContext(),
+  })
+  const renamed = await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: document.revision,
+    title: 'Renamed page',
+    auditContext: auditContext(),
+  })
+  const shared = await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: renamed.revision,
+    permission: {
+      ...renamed.permission,
+      memberGrants: [{ memberKey: 'mina@example.com', role: 'viewer' }],
+    },
+    auditContext: auditContext(),
+  })
+  const publicShare = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-25T00:00:00.000Z',
+    auditContext: auditContext(),
+  })
+  await client.revokePublicShare({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    shareId: publicShare.share.id,
+    access: ownerShareAccess,
+    auditContext: auditContext(),
+  })
+  await client.exportDocument({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    format: 'markdown',
+    auditContext: auditContext(),
+  })
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: shared.revision,
+    auditContext: auditContext(),
+  })
+  const restored = await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: archived.revision,
+    auditContext: auditContext(),
+  })
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: restored.revision,
+    position: 'zz',
+    auditContext: auditContext(),
+  })
+
+  const events = memory.items().filter(({ eventType }) => typeof eventType === 'string' && eventType.startsWith('document.'))
+  expect(events.map(({ eventType }) => eventType).sort()).toEqual([
+    'document.archived',
+    'document.created',
+    'document.exported',
+    'document.permission.updated',
+    'document.public-link.created',
+    'document.public-link.revoked',
+    'document.restored',
+    'document.updated',
+    'document.updated',
+  ])
+  /** Finds the stored event of one type. */
+  const eventOf = (eventType: string) => events.find((event) => event.eventType === eventType)
+  expect(eventOf('document.updated')).toMatchObject({
+    entity: { type: 'document', id: document.id },
+    action: 'updated',
+    changes: [{ field: 'title', before: 'Audited page', after: 'Renamed page' }],
+    metadata: { actorMemberKey: ownerShareAccess.memberKey, documentKind: 'page', documentScopeType: 'workspace' },
+  })
+  // A reorder alone still says what changed.
+  expect(events.filter((event) => event.eventType === 'document.updated').at(-1)).toMatchObject({
+    changes: [{ field: 'position', after: 'zz' }],
+  })
+  expect(eventOf('document.permission.updated')).toMatchObject({
+    changes: [{
+      field: 'permission.memberGrants',
+      before: [],
+      after: [{ memberKey: 'mina@example.com', role: 'viewer' }],
+    }],
+  })
+  expect(eventOf('document.public-link.created')).toMatchObject({
+    target: { type: 'document-public-link', id: publicShare.share.id },
+    metadata: { shareId: publicShare.share.id, allowExport: false },
+  })
+  expect(eventOf('document.exported')).toMatchObject({ metadata: { format: 'markdown' } })
+  const serialized = JSON.stringify(events)
+  expect(serialized).not.toContain(publicShare.token)
+  expect(serialized).not.toContain('secret body')
+  expect(serialized).not.toContain('notificationCandidates')
+})
+
+test('records a retried export after the Document changed as another export', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(
+    memory,
+    () => new Date('2026-07-18T00:00:00.000Z'),
+    'audit-events-table',
+  )
+  /** Creates the audit context of one request key, as each retry of that request does. */
+  const auditContext = (idempotencyKey: string) => createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: ownerShareAccess.memberKey, kind: 'user', displayName: 'Owner' },
+    idempotencyKey,
+    request: { method: 'GET', path: '/api/documents/export', body: {} },
+    source: { kind: 'api' },
+    occurredAt: '2026-07-18T00:00:00.000Z',
+  })
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Exported page',
+    blocks: [],
+    auditContext: auditContext('create'),
+  })
+  /** Exports the Document under one fixed request key. */
+  const exportUnderSameKey = () => client.exportDocument({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    format: 'markdown',
+    auditContext: auditContext('export'),
+  })
+  /** Lists the stored export events. */
+  const exportEvents = () => memory.items().filter(({ eventType }) => eventType === 'document.exported')
+
+  await exportUnderSameKey()
+  await exportUnderSameKey()
+  expect(exportEvents()).toHaveLength(1)
+
+  await client.update({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expectedRevision: document.revision,
+    title: 'Edited page',
+    auditContext: auditContext('update'),
+  })
+  const rendered = await exportUnderSameKey()
+
+  expect(rendered.content).toContain('Edited page')
+  expect(exportEvents()).toHaveLength(2)
+  expect(exportEvents().map(({ summary }) => summary).sort()).toEqual([
+    'Exported page: Edited page',
+    'Exported page: Exported page',
+  ])
+})
+
 test('advances the Document comment-window revision with each insertion', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -6914,7 +7105,7 @@ function createMemoryDocumentClient() {
       }
       const item = input.Item as Record<string, unknown> | undefined
       if (item !== undefined) {
-        const mapKey = memoryKey(item.workspaceId, item.recordKey)
+        const mapKey = memoryKey(item.workspaceId ?? item.directoryId, item.recordKey ?? item.eventId)
         if (!matchesCondition(stored.get(mapKey), input)) throw conditionalError()
         stored.set(mapKey, structuredClone(item))
         return {}
