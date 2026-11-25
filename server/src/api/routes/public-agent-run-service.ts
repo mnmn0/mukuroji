@@ -481,8 +481,10 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
               const run = { ...created, startedAt: resumeStartedAt(previous, now) }
               started = run
               startedAt = now
+              // The Work Item update in this transaction fences the Project that was read.
               const auditPut = createAgentRunAuditPut(
-                auditContext, run, 'started', 'Agent Run started.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+                auditContext, run, 'started', 'Agent Run started.', { projectId: current.assignedProjectId },
+                AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
               )
               return {
                 transactItems: [
@@ -598,7 +600,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       // The response and receipt are built from the run as read, so a report or heartbeat that
       // commits first sends the close back to read the run again.
       return retryProgressFencedClose(async () => {
-        const { run, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
+        const { run, workItemProjectId, workItemRevision } = await requireOwnRun(principal, teamId, runId, instanceIdHash)
         const now = new Date()
         if (run.state !== 'active') {
           if (run.outcome === outcome && run.finishedBy === 'agent') return toAgentRun(run, now)
@@ -624,7 +626,10 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           },
         })
         const response = toAgentRun(finished, now)
-        const auditPut = createAgentRunAuditPut(auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`)
+        // The Work Item revision check below fences the Project that was read.
+        const auditPut = createAgentRunAuditPut(
+          auditContext, finished, 'finished', `Agent Run finished as ${outcome}.`, { projectId: workItemProjectId },
+        )
         const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
           ?.prepare({ status: 200, body: response })
         const store = workItemDependencies.agentRuns
@@ -725,8 +730,10 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         comment: { id: commentId, actorUserId: principal.userKey, body, createdAt },
         run: toAgentRun(reported, now),
       }
+      // The comment write conditions on the Work Item's current Project.
       const auditPut = createAgentRunAuditPut(
-        auditContext, reported, 'reported', `Agent Run saved a ${report.kind} report.`, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+        auditContext, reported, 'reported', `Agent Run saved a ${report.kind} report.`,
+        { projectId: detail.issue.assignedProjectId }, AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
       )
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 201, body: response })
@@ -829,9 +836,14 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         source: { kind: 'api', requestId: context.requestId, method: 'POST', route: path },
       })
       const response = { run: toAgentRun(successor, now), supersededRun: toAgentRun(superseded, now) }
-      const supersededAudit = createAgentRunAuditPut(auditContext, superseded, 'taken-over', 'Agent Run was taken over by another instance.')
+      // The Work Item revision check below fences the Project that was read.
+      const projectScope = { projectId: detail.issue.assignedProjectId }
+      const supersededAudit = createAgentRunAuditPut(
+        auditContext, superseded, 'taken-over', 'Agent Run was taken over by another instance.', projectScope,
+      )
       const startedAudit = createAgentRunAuditPut(
-        auditContext, successor, 'started', 'Agent Run took over a stalled run.', AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
+        auditContext, successor, 'started', 'Agent Run took over a stalled run.', projectScope,
+        AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
       )
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 201, body: response })
@@ -957,6 +969,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         previous === undefined
           ? 'Agent Run resumed a started Work Item that had no earlier run.'
           : `Agent Run resumed after run ${previous.runId} finished as ${previous.outcome ?? 'unknown'}.`,
+        // The Work Item revision check below fences the Project that was read.
+        { projectId: detail.issue.assignedProjectId },
       )
       const receipt = await createWorkItemIdempotencyTransaction(principal.directoryId, idempotency)
         ?.prepare({ status: 201, body: response })

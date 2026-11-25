@@ -1130,6 +1130,44 @@ export function createWorkItemRevisionConditionCheck(
 }
 
 /**
+ * Builds a condition check that fails when a Work Item left the Project it was read with.
+ *
+ * @param tableName - Work Item table name.
+ * @param directoryId - Workspace ID.
+ * @param teamId - Team ID.
+ * @param workItemId - Work Item ID.
+ * @param projectId - Project the Work Item was read with, or undefined for a Team-only Work Item.
+ * @returns Condition check for the same transaction.
+ */
+export function createWorkItemProjectConditionCheck(
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+  projectId: string | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const normalizedTableName = readRequiredString(tableName, 'Work Item table name is required.')
+  const normalizedDirectoryId = readRequiredString(directoryId, 'Workspace ID is required.')
+  const normalizedTeamId = readRequiredString(teamId, 'Team ID is required.')
+  const normalizedWorkItemId = readRequiredString(workItemId, 'Work Item ID is required.')
+  return {
+    ConditionCheck: {
+      TableName: normalizedTableName,
+      Key: {
+        directoryTeamId: createDirectoryTeamId(normalizedDirectoryId, normalizedTeamId),
+        issueId: normalizedWorkItemId,
+      },
+      ...(projectId === undefined
+        ? { ConditionExpression: 'attribute_exists(issueId) AND attribute_not_exists(assignedProjectId)' }
+        : {
+            ConditionExpression: 'attribute_exists(issueId) AND assignedProjectId = :assignedProjectId',
+            ExpressionAttributeValues: { ':assignedProjectId': readRequiredString(projectId, 'Project ID is required.') },
+          }),
+    },
+  }
+}
+
+/**
  * Creates a fence proving at commit time that a Work Item still exists and is still assigned to a
  * Project, for writes that reference the Work Item from that Project.
  *

@@ -8659,7 +8659,11 @@ function assertWebhookEventScopes(
 ) {
   const requiredScopes = new Set<ApiScope>()
   for (const eventType of eventTypes) {
-    if (eventType.startsWith('work-item.')) {
+    if (
+      eventType.startsWith('work-item.') ||
+      eventType.startsWith('comment.') ||
+      eventType.startsWith('agent-run.')
+    ) {
       requiredScopes.add('work-items:read')
     } else if (
       eventType.startsWith('external-link.') ||

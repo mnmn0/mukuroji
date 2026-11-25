@@ -533,6 +533,11 @@ export const WEBHOOK_EVENT_TYPES = [
   'sync-conflict.resolved',
   'import.completed',
   'import.failed',
+  'comment.created',
+  'agent-run.started',
+  'agent-run.reported',
+  'agent-run.finished',
+  'agent-run.released',
 ] as const
 
 /**

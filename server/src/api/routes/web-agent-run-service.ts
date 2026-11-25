@@ -39,7 +39,10 @@ import {
 import { createWorkItemCollaborationEntityKey } from '../../modules/collaboration'
 import { ProjectDataError } from '../../modules/directory'
 import { isTeamIssueNotFoundError, type TeamIssueResponseItem } from '../../modules/work-items'
-import { createWorkItemRevisionConditionCheck } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
+import {
+  createWorkItemProjectConditionCheck,
+  createWorkItemRevisionConditionCheck,
+} from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import {
   commitProgressFencedClose,
   createAgentRunAuditPut,
@@ -625,20 +628,31 @@ export async function releaseWebAgentRun(
       throw createAgentRunNotActiveError()
     }
     const released = finishAgentRun(run, 'released', principal.userKey, now)
-    const auditPut = createAgentRunAuditPut(auditContext, released, 'released', 'Agent Run was released by a member.')
+    const projectId = detail.issue.assignedProjectId
+    const auditPut = createAgentRunAuditPut(
+      auditContext, released, 'released', 'Agent Run was released by a member.', { projectId },
+    )
     const closeItems = store.createCloseItems(released, undefined, true)
     const assignmentOnly = !manager && run.assigneeUserId !== principal.userKey
     const committed = await commitProgressFencedClose([
       ...closeItems,
-      ...(assignmentOnly
-        ? [createWorkItemRevisionConditionCheck(
+      // The audit event carries the Work Item's Project for webhook delivery, so the release commits
+      // only while the Work Item is still in it; the revision check also fences the assignment.
+      assignmentOnly
+        ? createWorkItemRevisionConditionCheck(
             getTeamIssuesTableName(),
             principal.directoryId,
             teamId,
             run.workItemId,
             detail.issue.revision,
-          )]
-        : []),
+          )
+        : createWorkItemProjectConditionCheck(
+            getTeamIssuesTableName(),
+            principal.directoryId,
+            teamId,
+            run.workItemId,
+            projectId,
+          ),
       ...(auditPut ? [auditPut] : []),
     ], closeItems.length, run)
     return committed ? toAgentRunView(released, true, now) : undefined

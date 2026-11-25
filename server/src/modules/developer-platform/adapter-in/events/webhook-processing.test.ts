@@ -364,6 +364,128 @@ test('skips a relation event written before its Project scope was recorded', asy
   expect((await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })).deliveries).toEqual([])
 })
 
+/**
+ * Builds an Agent Run audit event for the projection tests.
+ *
+ * @param now - Event time.
+ * @param metadata - Extra metadata merged over the Agent Run fields.
+ * @returns Pending Agent Run finish event.
+ */
+function createAgentRunFinishedEvent(now: Date, metadata: Record<string, string | boolean>) {
+  const base = createWorkItemAuditEvent(now)
+  return createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Sato' },
+      idempotencyKey: `agent-run-finish-${String(metadata.projectScopeRecorded ?? 'legacy')}`,
+      request: { method: 'POST', path: '/api/v1/agent-runs/run-1/finish', body: { outcome: 'failed' } },
+      source: { kind: 'api', requestId: 'agent-run-finish-1' },
+      occurredAt: now.toISOString(),
+    }),
+    eventType: 'agent-run.finished',
+    entity: { type: 'agent-run', id: 'team/team-1/agent-run/run-1' },
+    action: 'finished',
+    summary: 'Agent Run finished as failed.',
+    metadata: {
+      adapter: 'agent-run',
+      teamId: 'team-1',
+      issueId: 'build',
+      runId: 'run-1',
+      runtime: 'claude-code',
+      agentName: 'nightly-bot',
+      state: 'finished',
+      outcome: 'failed',
+      ...metadata,
+    },
+    outboxStatus: 'pending',
+    expiresAt: base.expiresAt,
+  })
+}
+
+test('delivers an Agent Run failure to its Project with the run outcome', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const platform = createPlatform(() => now)
+  const subscription = await createSubscription(platform, { eventTypes: ['agent-run.finished'] })
+  const event = createAgentRunFinishedEvent(now, { projectId: 'project-1', projectScopeRecorded: true })
+  const authorizations: Array<[string, string, string | undefined]> = []
+
+  const response = await processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId)],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    auditEvents: { getEvent: async () => event },
+    developerPlatform: platform,
+    authorizer: {
+      async canDeliver(_workspaceId, candidate, teamId, projectId) {
+        authorizations.push([candidate.id, teamId, projectId])
+        return true
+      },
+    },
+    projections: createMemoryProjectionStore(),
+    queue: createRecordingQueue([]),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  })
+
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect(authorizations).toEqual([[subscription.subscription.id, 'team-1', 'project-1']])
+  const deliveries = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
+  expect(deliveries.deliveries.map((delivery) => delivery.eventType)).toEqual(['agent-run.finished'])
+  const data = toPublicWebhookEventData(event)
+  expect(data.metadata).toMatchObject({
+    teamId: 'team-1',
+    issueId: 'build',
+    projectId: 'project-1',
+    runId: 'run-1',
+    runtime: 'claude-code',
+    state: 'finished',
+    outcome: 'failed',
+  })
+  // The scope marker and the agent's free-text name stay private.
+  expect(data.metadata).not.toHaveProperty('projectScopeRecorded')
+  expect(data.metadata).not.toHaveProperty('agentName')
+})
+
+test('skips comment and Agent Run events whose Project scope was not recorded', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const base = createWorkItemAuditEvent(now)
+  const legacyComment = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Sato' },
+      idempotencyKey: 'comment-legacy-1',
+      request: { method: 'POST', path: '/api/teams/team-1/issues/build/comments', body: {} },
+      source: { kind: 'api', requestId: 'comment-legacy-1' },
+      occurredAt: now.toISOString(),
+    }),
+    eventType: 'comment.created',
+    entity: { type: 'work-item', id: 'team/team-1/issue/build' },
+    action: 'created',
+    summary: 'A comment was added.',
+    metadata: { teamId: 'team-1', issueId: 'build', commentId: 'comment-1' },
+    outboxStatus: 'pending',
+    expiresAt: base.expiresAt,
+  })
+  // A release caused by a Work Item removal records no Project scope either.
+  const unscopedRun = createAgentRunFinishedEvent(now, {})
+  const queued: WebhookQueueMessage[] = []
+
+  await processWebhookProjectionBatch({
+    Records: [legacyComment, unscopedRun].map((event, index) => ({
+      eventName: 'INSERT',
+      dynamodb: { SequenceNumber: String(401 + index), NewImage: marshallRecord(event) },
+    })),
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    queue: createRecordingQueue(queued),
+  })
+  expect(queued).toEqual([])
+})
+
 test('does not expand a projection page chain after duplicate messages and send response loss', async () => {
   let now = new Date('2026-07-18T00:00:00.000Z')
   const platform = createPlatform(() => now)

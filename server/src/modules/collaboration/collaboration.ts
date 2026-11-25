@@ -5886,6 +5886,8 @@ function createAuditMetadata(
     teamId: input.teamId,
     issueId: input.issueId,
     projectId: input.projectId,
+    // The comment write conditions on the Work Item's Project, so webhook delivery may trust it.
+    projectScopeRecorded: true,
     notificationTitle: input.workItemTitle,
     deepLink: appendCommentDeepLink(input.deepLink, commentId, rootCommentId),
     notificationCandidates,
