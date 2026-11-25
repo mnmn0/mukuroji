@@ -50,6 +50,8 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath, createTeamTriagePath } from '../../shared/routing/paths'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
+import type { AiPlanningStructureAdoptionContext } from '../../features/ai-assistance/ui/AiPlanningStructureAdoption'
 import {
   resolveRecordedRemainingEffortMinutes,
   resolveWorkItemDraftRevision,
@@ -141,6 +143,8 @@ export type TaskDetailAiAssistanceRenderContext = {
   resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
   /** Whether Planning adoption must confirm replacing local edits. */
   requirePlanningAdoptionConfirmation?: boolean
+  /** Parent and allowed child types for creating proposed children and dependencies; omit when read-only. */
+  planningStructureAdoption?: AiPlanningStructureAdoptionContext
   /** Reports Summary operation state to the local Work Item save guard. */
   onSummaryOperationPendingChange?: (pending: boolean) => void
   /** Revision-fenced Work Item source shared by both workflows. */
@@ -671,6 +675,21 @@ export function TaskDetailPane({
     onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,
     onPlanningOperationPendingChange: handleAiPlanningOperationPendingChange,
     onSummaryOperationPendingChange: handleAiSummaryOperationPendingChange,
+    planningStructureAdoption: isReadOnly || !issue
+      ? undefined
+      : {
+          childTypes: resolveAllowedChildWorkItemTypes(
+            workItemTypes,
+            issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          ).map((type) => ({ id: type.id, name: type.name })),
+          parent: {
+            ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+            assigneeUserId: issue.assigneeUserId,
+            teamId: issue.teamId,
+            workItemId: issue.id,
+            workItemTypeId: issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          },
+        },
     requirePlanningAdoptionConfirmation: isEditorDirty,
     resolveStatusLabel: (statusId) =>
       workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId,

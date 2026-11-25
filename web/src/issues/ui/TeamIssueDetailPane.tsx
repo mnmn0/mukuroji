@@ -23,6 +23,8 @@ import {
 } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
+import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
+import { resolveAllowedChildWorkItemTypes } from '../../features/ai-assistance/mutations/useAiPlanningStructureAdoption'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import { type FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -111,6 +113,7 @@ import { usePromoteProjectRisk } from '../../projects/mutations/usePromoteProjec
  */
 export function IssueDetailPane({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -150,6 +153,8 @@ export function IssueDetailPane({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   accessToken?: string
@@ -211,6 +216,7 @@ export function IssueDetailPane({
   return (
     <IssueDetailContent
       aiAssistanceEnabled={aiAssistanceEnabled}
+      aiPlanningAssistanceEnabled={aiPlanningAssistanceEnabled}
       softwareFactoryEnabled={softwareFactoryEnabled}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
@@ -254,6 +260,7 @@ export function IssueDetailPane({
 
 function IssueDetailContent({
   aiAssistanceEnabled = true,
+  aiPlanningAssistanceEnabled = false,
   softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
@@ -293,6 +300,8 @@ function IssueDetailContent({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the saved Workspace AI policy permits the Planning workflow. */
+  aiPlanningAssistanceEnabled?: boolean
   /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
   softwareFactoryEnabled?: boolean
   /** Related Documents を取得する access token です。 */
@@ -1291,6 +1300,33 @@ function IssueDetailContent({
             onMoveToStatus={onUpdateIssue && !isIssueUpdatePending && !isAiSummaryOperationPending ? moveToWorkflowStatus : undefined}
             t={t}
             task={issue}
+          />
+        ) : null}
+        {aiPlanningAssistanceEnabled && accessToken ? (
+          <AiWorkItemPlanningAssistant
+            accessToken={accessToken}
+            isMutationPending={isIssueUpdatePending || isAiSummaryOperationPending}
+            key={createAiAssistantSessionKey(aiSummarySource)}
+            locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
+              (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+            )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}
+            source={aiSummarySource}
+            structureAdoption={isIssueReadOnly
+              ? undefined
+              : {
+                  childTypes: resolveAllowedChildWorkItemTypes(workItemTypes, currentWorkItemTypeId)
+                    .map((type) => ({ id: type.id, name: type.name })),
+                  parent: {
+                    ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+                    assigneeUserId: issue.assigneeUserId,
+                    teamId: issue.teamId,
+                    workItemId: issue.id,
+                    workItemTypeId: currentWorkItemTypeId,
+                  },
+                }}
+            t={t}
           />
         ) : null}
         <div className="grid min-w-0 gap-4">
