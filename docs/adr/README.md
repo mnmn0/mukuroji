@@ -105,3 +105,4 @@
 | [0083](0083-signed-calendar-feeds.md) | カレンダーフィードを token の hash で引き、読むたびに持ち主の現在の権限で組み立てる | 提案 |
 | [0084](0084-charter-owner-moves-project-update-owner.md) | Project charter の責任者変更を、charter 保存後の書き込みで Project の進捗報告の担当者へ移す | 提案 |
 | [0085](0085-workflow-transition-actor-roles-and-status-requirements.md) | Workflow の遷移を実行できる役割と status ごとの必須項目を configuration に持ち、人の操作だけに許す | 提案 |
+| [0090](0090-automation-due-soon-and-business-day-schedules.md) | 期限前の rule は通知用の期限 index から Work Item を選び、営業日の繰り返しは実行時に Team の稼働カレンダーで数える | 提案 |
