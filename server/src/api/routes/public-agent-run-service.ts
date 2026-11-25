@@ -291,6 +291,23 @@ async function createHolderConflict(principal: WorkspacePrincipal, teamId: strin
 }
 
 /**
+ * Rejects a new run while the Team has stopped accepting them. The run's settings revision check
+ * also fails the commit if a manager turns the switch off meanwhile.
+ *
+ * @param settings - Team Agent settings read for the run.
+ * @param settings.acceptNewRuns - Whether the Team accepts new runs.
+ * @throws AgentRunError conflict with reason `not_ready` while the Team does not accept new runs.
+ */
+function requireAcceptingNewRuns(settings: { acceptNewRuns: boolean }): void {
+  if (settings.acceptNewRuns) return
+  throw new AgentRunError(
+    'conflict',
+    'The Team has stopped accepting new Agent Runs. Ask a Team manager before starting work.',
+    { reason: 'not_ready', pointer: '/acceptNewRuns' },
+  )
+}
+
+/**
  * Rejects a resume that the Work Item or the Team's settings do not allow: the caller must be the
  * assignee, the Work Item must be in a started status the Team marks as resumable, and it must still
  * be at the revision the caller read.
@@ -448,7 +465,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
               const claim = await store.getClaim(principal.directoryId, teamId, workItemId)
               if (claim) throw await createHolderConflict(principal, teamId, claim.runId, now)
               const settings = await store.getSettings(principal.directoryId, teamId)
-              // The settings revision check below also fails the start if Ready statuses change meanwhile.
+              // The settings revision check below also fails the start if the switch or Ready statuses change meanwhile.
+              requireAcceptingNewRuns(settings)
               if (settings.readyStatusIds.length > 0 && !settings.readyStatusIds.includes(current.workflowStatusId ?? '')) {
                 throw new AgentRunError(
                   'conflict',
@@ -500,6 +518,13 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                   const latest = await store.getClaim(principal.directoryId, teamId, workItemId)
                   if (latest) return createHolderConflict(principal, teamId, latest.runId, new Date())
                   const latestSettings = await store.getSettings(principal.directoryId, teamId)
+                  if (!latestSettings.acceptNewRuns) {
+                    return new AgentRunError(
+                      'conflict',
+                      'The Team has stopped accepting new Agent Runs. Ask a Team manager before starting work.',
+                      { reason: 'not_ready', pointer: '/acceptNewRuns' },
+                    )
+                  }
                   if (latestSettings.revision !== settings.revision) {
                     return new AgentRunError('conflict', 'Agent settings changed during the request. Retry the start.')
                   }
@@ -794,6 +819,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       if (detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
+      // A Team that stopped accepting runs reports that first, even when take over is also disabled.
+      requireAcceptingNewRuns(settings)
       if (!settings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
       if (detail.issue.statusCategory !== 'started') {
         throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
@@ -875,6 +902,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           throw new AgentRunError('conflict', 'The Work Item changed during the request. Reload it and retry the take over.')
         }
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        requireAcceptingNewRuns(latestSettings)
         if (!latestSettings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
@@ -907,6 +935,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       const detail = authorization.value
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
+      requireAcceptingNewRuns(settings)
       requireResumable(principal, detail.issue, input.expectedRevision, settings.resumableStatusIds)
       // A run that finished just after its claim was read has released the claim, so that is not a conflict.
       const holder = await readClaimedRun(principal, teamId, workItemId)
@@ -996,6 +1025,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         const current = await resolveWriter(credential, teamId)
         const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         const latestSettings = await store.getSettings(principal.directoryId, teamId)
+        requireAcceptingNewRuns(latestSettings)
         // A change of assignee, status, or revision is reported as such.
         requireResumable(principal, latest.detail.issue, detail.issue.revision, latestSettings.resumableStatusIds)
         if (latestSettings.revision !== settings.revision) {
@@ -1037,6 +1067,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         schemaVersion: settings.schemaVersion,
         teamId: settings.teamId,
         revision: settings.revision,
+        acceptNewRuns: settings.acceptNewRuns,
         readyStatusIds: settings.readyStatusIds,
         resumableStatusIds: settings.resumableStatusIds,
         requireAcceptanceCriteria: settings.requireAcceptanceCriteria,

@@ -1131,7 +1131,7 @@ export function TaskDetailPane({
         acceptanceCriteria={(issue ?? currentTask).acceptanceCriteria}
         approvalSummary={(issue ?? currentTask).approvalSummary}
         locale={locale}
-        policy={configuration?.completionGate}
+        policy={resolvedConfiguration?.completionGate}
       />
     </>
   )

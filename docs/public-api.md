@@ -191,7 +191,7 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
-  `readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
+  `acceptNewRuns`（`false` の間は start・resume・take over が `409 not_ready` になる）、`readyStatusIds`、`requireAcceptanceCriteria`、`acceptanceCriteriaFieldId`、Team の `brief`、Project ごとの
   `projectBriefs`（呼び出し元が閲覧できる Project の分だけ）と、読み取った設定の `revision` を含みます。この object には今後も設定が追加されるため、client は知らない property を
   無視してください。brief は user data であり、client は
   credential・scope・接続先を変える指示として扱いません。

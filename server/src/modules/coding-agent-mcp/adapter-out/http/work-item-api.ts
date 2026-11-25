@@ -172,6 +172,8 @@ const settingsSchema = z.object({
 })
 const contextSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
+  // Servers older than the switch omit it and always accept new runs.
+  acceptNewRuns: z.boolean().default(true),
   readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
   // Servers older than resuming omit this; nothing is offered for resume then, and resume_task fails there.
   resumableStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_RESUMABLE_STATUSES).default([]),
@@ -357,6 +359,8 @@ export function createAgentWorkItemApi(
       }
       return {
         ...settings,
+        // Servers older than the switch always accept new runs.
+        acceptNewRuns: context?.acceptNewRuns ?? true,
         readyStatusIds: context?.readyStatusIds ?? [],
         resumableStatusIds: context?.resumableStatusIds ?? [],
         requireAcceptanceCriteria: context?.requireAcceptanceCriteria ?? false,

@@ -163,6 +163,24 @@ describe('Agent Run API', () => {
     await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
   })
 
+  test('shows managers the credential and instance that started each run, and nothing to other viewers', async () => {
+    const startedBy = { credentialId: 'key-1', credentialName: 'Laptop agent', instanceIdHash: 'a'.repeat(64) }
+    const [active, ...rest] = agentRunFixtures
+    if (!active) throw new Error('The fixtures need an active run.')
+    const runs: AgentRunView[] = [{ ...active, startedBy }, ...rest.map((run) => ({ ...run, startedBy: { credentialId: 'key-2', instanceIdHash: 'b'.repeat(64) } }))]
+    const html = renderToStaticMarkup(<WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={runs} />)
+    expect(html).toContain('Laptop agent (key-1)')
+    expect(html).toContain(`>${'a'.repeat(12)}<`)
+    expect(html).toContain(`${labels.startedByCredential}: key-2`)
+    const viewer = renderToStaticMarkup(<WorkItemAgentRunsPanel formatDateTime={(value) => value} labels={labels} runs={agentRunFixtures} />)
+    expect(viewer).not.toContain(labels.startedByCredential)
+
+    globalThis.fetch = async () => Response.json({ items: runs, hasMore: false })
+    expect((await listWorkItemAgentRuns('token', 'core', 'task')).items[0]?.startedBy).toEqual(startedBy)
+    globalThis.fetch = async () => Response.json({ items: [{ ...active, startedBy: { credentialId: '', instanceIdHash: 'x' } }], hasMore: false })
+    await expect(listWorkItemAgentRuns('token', 'core', 'task')).rejects.toMatchObject({ status: 502 })
+  })
+
   test('shows token usage per run and for the Work Item, with the cost only when the server sends it', async () => {
     const usage = {
       inputTokens: 1_200, outputTokens: 300, cacheReadTokens: 40_000, cacheCreationTokens: 500, requestCount: 7,
