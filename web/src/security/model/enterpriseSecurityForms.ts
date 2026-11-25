@@ -11,7 +11,7 @@ import type {
  */
 export type EnterpriseSecurityScopeOption = {
   /** Scope の種類です。 */
-  type: 'workspace' | 'team' | 'project'
+  type: 'workspace' | 'org-unit' | 'team' | 'project'
   /** Scope の一意な ID です。 */
   id: string
   /** Selector に表示する scope 名です。 */

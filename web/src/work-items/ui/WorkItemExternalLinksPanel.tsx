@@ -55,10 +55,10 @@ export type WorkItemExternalLinksPanelProps = {
     installationId: string
     /** 外部 resource の種別です。 */
     resourceType: ExternalResourceType
-    /** Provider 内の resource ID です。 */
-    externalId: string
-    /** Provider UI の HTTPS URL です。 */
-    externalUrl: string
+    /** Provider 内の resource ID です。カレンダーの予定では省略し、接続先に作成します。 */
+    externalId?: string
+    /** Provider UI の HTTPS URL です。カレンダーの予定では省略します。 */
+    externalUrl?: string
     /** Provider UI の表示 key です。 */
     displayKey?: string
     /** Link の同期方向です。 */
@@ -244,7 +244,8 @@ export function WorkItemExternalLinksPanel({
   const connectedInstallations = installations.filter(
     (installation) =>
       installation.status === 'connected' &&
-      installation.category === 'source-control',
+      (installation.category === 'source-control' ||
+        installation.category === 'calendar'),
   )
   const [isAdding, setIsAdding] = useState(false)
   const [installationId, setInstallationId] = useState(
@@ -266,6 +267,17 @@ export function WorkItemExternalLinksPanel({
   )
     ? installationId
     : connectedInstallations[0]?.id ?? ''
+  const selectedInstallation = connectedInstallations.find(
+    (installation) => installation.id === selectedInstallationId,
+  )
+  const availableResourceTypes: readonly ExternalResourceType[] =
+    selectedInstallation?.category === 'calendar'
+      ? calendarResourceTypes
+      : sourceControlResourceTypes
+  const selectedResourceType = availableResourceTypes.includes(resourceType)
+    ? resourceType
+    : availableResourceTypes[0] ?? 'issue'
+  const createsEvent = selectedResourceType === 'calendar-event'
 
   const runAction = async (key: string, action: () => Promise<void>) => {
     setBusyOperations((current) => new Set(current).add(key))
@@ -290,16 +302,17 @@ export function WorkItemExternalLinksPanel({
   const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!onCreate || !isHttpsUrl(externalUrl)) {
+    if (!onCreate || (!createsEvent && !isHttpsUrl(externalUrl))) {
       setOperationError(labels.operationError)
       return
     }
 
     const succeeded = await runAction('external-link:create', () => onCreate({
       installationId: selectedInstallationId,
-      resourceType,
-      externalId: externalId.trim(),
-      externalUrl: externalUrl.trim(),
+      resourceType: selectedResourceType,
+      ...(createsEvent
+        ? {}
+        : { externalId: externalId.trim(), externalUrl: externalUrl.trim() }),
       ...(displayKey.trim() ? { displayKey: displayKey.trim() } : {}),
       syncDirection,
     }))
@@ -374,29 +387,40 @@ export function WorkItemExternalLinksPanel({
             </ExternalLinkSelect>
             <ExternalLinkSelect
               label={labels.resourceType}
-              value={resourceType}
-              onChange={(value) => setResourceType(value as ExternalResourceType)}
+              value={selectedResourceType}
+              onChange={(value) => {
+                const type = availableResourceTypes.find((candidate) => candidate === value)
+                if (type) setResourceType(type)
+              }}
             >
-              {externalResourceTypes.map((type) => (
+              {availableResourceTypes.map((type) => (
                 <option key={type} value={type}>
                   {labels.resourceTypeLabels[type]}
                 </option>
               ))}
             </ExternalLinkSelect>
           </div>
-          <ExternalLinkInput
-            label={labels.externalId}
-            placeholder={labels.externalIdPlaceholder}
-            value={externalId}
-            onChange={setExternalId}
-          />
-          <ExternalLinkInput
-            label={labels.externalUrl}
-            placeholder={labels.externalUrlPlaceholder}
-            type="url"
-            value={externalUrl}
-            onChange={setExternalUrl}
-          />
+          {createsEvent ? (
+            <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+              {labels.calendarEventHint}
+            </p>
+          ) : (
+            <>
+              <ExternalLinkInput
+                label={labels.externalId}
+                placeholder={labels.externalIdPlaceholder}
+                value={externalId}
+                onChange={setExternalId}
+              />
+              <ExternalLinkInput
+                label={labels.externalUrl}
+                placeholder={labels.externalUrlPlaceholder}
+                type="url"
+                value={externalUrl}
+                onChange={setExternalUrl}
+              />
+            </>
+          )}
           <div className="grid grid-cols-2 gap-3 max-[520px]:grid-cols-1">
             <ExternalLinkInput
               label={labels.displayKey}
@@ -599,11 +623,17 @@ export function WorkItemExternalLinksPanel({
   )
 }
 
-const externalResourceTypes = [
+/** Resource types a source-control account can link. */
+const sourceControlResourceTypes = [
   'issue',
   'merge-request',
   'commit',
   'deploy',
+] as const satisfies readonly ExternalResourceType[]
+
+/** Resource types a calendar account can link. */
+const calendarResourceTypes = [
+  'calendar-event',
 ] as const satisfies readonly ExternalResourceType[]
 
 const externalSyncDirections = [

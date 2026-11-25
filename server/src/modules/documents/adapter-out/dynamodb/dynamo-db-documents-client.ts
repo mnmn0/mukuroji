@@ -7305,10 +7305,12 @@ function authorizationSnapshotGuards(
       isInvalidAuthorizationGeneration(
         snapshot.enterpriseControlRevision,
       ) ||
+      isInvalidAuthorizationGeneration(snapshot.orgStructureRevision) ||
       (
         !memberKeyPresent &&
         snapshot.planningRevision === undefined &&
-        snapshot.enterpriseControlRevision === undefined
+        snapshot.enterpriseControlRevision === undefined &&
+        snapshot.orgStructureRevision === undefined
       )
     ) {
       throw new DocumentError(
@@ -7379,6 +7381,26 @@ function authorizationSnapshotGuards(
           entryType: 'enterprise-identity-control',
         },
         ...(snapshot.enterpriseControlRevision === 0
+          ? { allowMissingWhenExpectedZero: true }
+          : {}),
+      })
+    }
+    if (snapshot.orgStructureRevision !== undefined) {
+      // OrgUnit roles reach Teams through the structure, so its revision fences them (ADR 0097).
+      // The key mirrors the directory module's OrgUnit structure row; the directory barrel is not
+      // imported here because it depends back on this module through workspace access.
+      guards.push({
+        tableName:
+          environment.PROJECT_DIRECTORY_TABLE_NAME ??
+          'mukuroji-project-directory-local',
+        key: {
+          directoryId: `ORG_STRUCTURE#${encodeURIComponent(workspaceId)}`,
+          entryKey: 'STRUCTURE',
+        },
+        generationAttribute: 'revision',
+        expectedGeneration: snapshot.orgStructureRevision,
+        requiredAttributes: { entryType: 'org-structure' },
+        ...(snapshot.orgStructureRevision === 0
           ? { allowMissingWhenExpectedZero: true }
           : {}),
       })

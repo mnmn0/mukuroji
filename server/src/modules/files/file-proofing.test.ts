@@ -156,6 +156,26 @@ class MemoryDocumentClient {
         .flatMap((entry) => entry.Update ? [entry.Update] : [])
       const conditionChecks = (command.input.TransactItems ?? [])
         .flatMap((entry) => entry.ConditionCheck ? [entry.ConditionCheck] : [])
+      const deletes = (command.input.TransactItems ?? [])
+        .flatMap((entry) => entry.Delete ? [entry.Delete] : [])
+      for (const deletion of deletes) {
+        if (!this.items.has(createMemoryKey(deletion.Key as Record<string, unknown>))) {
+          throw createTransactionCancelledError()
+        }
+      }
+      for (const put of puts) {
+        if (
+          put.ConditionExpression?.includes('attribute_exists(#resolvedAt)') &&
+          !put.ConditionExpression.includes('attribute_not_exists(#resolvedAt)')
+        ) {
+          const existing = this.items.get(createMemoryKey(put.Item as Record<string, unknown>))
+          if (existing?.resolvedAt === undefined) throw createTransactionCancelledError()
+        }
+        if (put.ConditionExpression?.includes('attribute_not_exists(#resolvedAt)')) {
+          const existing = this.items.get(createMemoryKey(put.Item as Record<string, unknown>))
+          if (!existing || existing.resolvedAt !== undefined) throw createTransactionCancelledError()
+        }
+      }
       for (const put of puts) {
         this.assertCondition(
           put.Item as Record<string, unknown>,
@@ -233,6 +253,9 @@ class MemoryDocumentClient {
       for (const put of puts) {
         const item = put.Item as Record<string, unknown>
         this.items.set(createMemoryKey(item), structuredClone(item))
+      }
+      for (const deletion of deletes) {
+        this.items.delete(createMemoryKey(deletion.Key as Record<string, unknown>))
       }
       for (const update of updates) {
         const key = createMemoryKey(update.Key as Record<string, unknown>)
@@ -517,10 +540,12 @@ function createAuditContext(
  */
 async function createAvailableFile(
   upload: { contentType: string; fileName: string } = { contentType: 'image/png', fileName: 'review.png' },
+  fileScope: FileProofingScope = scope,
+  auditTableName?: string,
 ) {
-  const state = createClient()
+  const state = createClient(undefined, auditTableName)
   const session = await state.client.createUpload(
-    scope,
+    fileScope,
     manager,
     { ...upload, sizeBytes: 1024 },
     createAuditContext('create-file'),
@@ -533,13 +558,27 @@ async function createAvailableFile(
     scanStatus: 'available',
   })
   await state.client.completeUpload(
-    scope,
+    fileScope,
     manager,
     session.file.id,
     session.version.id,
     createAuditContext('complete-file'),
   )
   return { ...state, session }
+}
+
+const projectScope: FileProofingScope = {
+  workspaceId: 'workspace-1',
+  teamId: 'core',
+  kind: 'project',
+  projectId: 'refero',
+}
+
+const writer: FileProofingActor = {
+  memberKey: 'writer@example.com',
+  guest: false,
+  canWrite: true,
+  canManage: false,
 }
 
 describe('file proofing domain', () => {
@@ -1039,6 +1078,7 @@ describe('file proofing domain', () => {
 
     expect((await client.list(scope, manager)).files).toHaveLength(2)
     expect([...documentClient.queryPrefixes].sort()).toEqual([
+      'ANNOTATION#',
       'APPROVAL#',
       'FILE#',
       'FILE#',
@@ -1124,6 +1164,116 @@ describe('file proofing domain', () => {
         sizeBytes: FILE_UPLOAD_MAX_SIZE_BYTES + 1,
       },
     )).rejects.toMatchObject({ code: 'FileTooLarge', status: 413 })
+  })
+
+  test('resolves WBS deliverables by extension and stores the canonical media type', async () => {
+    const { client } = createClient()
+    for (const [fileName, contentType, stored] of [
+      ['wbs.md', 'application/octet-stream', 'text/markdown'],
+      ['legacy.xls', 'application/vnd.ms-excel', 'application/vnd.ms-excel'],
+      ['macro.xlsm', 'application/octet-stream', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+      ['flow.drawio', 'application/octet-stream', 'application/vnd.jgraph.mxfile'],
+    ]) {
+      const session = await client.createUpload(scope, manager, { contentType, fileName, sizeBytes: 100 })
+      expect(session.version.contentType).toBe(stored)
+      expect(session.version.scanStatus).toBe('pending')
+      // Object storage is signed for the canonical type, not the one the browser reported.
+      expect(session.upload.headers['content-type']).toBe(stored)
+    }
+  })
+
+  test('decides the File type by extension when the browser reports no media type', async () => {
+    const { client, session } = await createAvailableFile()
+    for (const [fileName, stored] of [
+      ['wbs.md', 'text/markdown'],
+      ['macro.xlsm', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+      ['flow.drawio', 'application/vnd.jgraph.mxfile'],
+    ]) {
+      const created = await client.createUpload(scope, manager, { contentType: '', fileName, sizeBytes: 100 })
+      expect(created.version.contentType).toBe(stored)
+      expect(created.upload.headers['content-type']).toBe(stored)
+
+      const replacement = await client.createVersionUpload(
+        scope,
+        manager,
+        session.file.id,
+        { contentType: '', fileName, sizeBytes: 100 },
+        createAuditContext(`replace-${fileName}`),
+      )
+      expect(replacement.version.contentType).toBe(stored)
+      expect(replacement.upload.headers['content-type']).toBe(stored)
+    }
+
+    for (const fileName of ['setup.exe', 'deploy.sh', 'page.html']) {
+      await expect(client.createUpload(scope, manager, { contentType: '', fileName, sizeBytes: 100 }))
+        .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+      await expect(client.createVersionUpload(
+        scope,
+        manager,
+        session.file.id,
+        { contentType: '', fileName, sizeBytes: 100 },
+        createAuditContext(`replace-${fileName}`),
+      )).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+    }
+    await expect(client.createUpload(scope, manager, { contentType: '', fileName: 'README', sizeBytes: 100 }))
+      .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'unrecognized' } })
+  })
+
+  test('applies the Workspace File types but never accepts a dangerous type', async () => {
+    const reads: string[] = []
+    const client = new DynamoDbFileProofingClient(
+      new MemoryDocumentClient() as unknown as DynamoDBDocumentClient,
+      'file-proofing',
+      new FakeFileObjectClient(),
+      {
+        fileTypeSettings: {
+          async readFileTypeSettings(workspaceId) {
+            reads.push(workspaceId)
+            // Every type off by default is enabled and xlsm is blocked.
+            return { allowed: ['tiff', 'heic', 'docm', 'pptm', 'rar', 'eml', 'msg'], blocked: ['xlsm'] }
+          },
+        },
+      },
+    )
+
+    const rar = await client.createUpload(scope, manager, {
+      contentType: 'application/x-rar-compressed',
+      fileName: 'archive.rar',
+      sizeBytes: 100,
+    })
+    expect(rar.version.contentType).toBe('application/vnd.rar')
+
+    const blocked = await client.createUpload(scope, manager, {
+      contentType: 'application/vnd.ms-excel.sheet.macroenabled.12',
+      fileName: 'macro.xlsm',
+      sizeBytes: 100,
+    }).catch((error: unknown) => error)
+    expect(blocked).toMatchObject({
+      code: 'FileTypeNotAllowed',
+      status: 415,
+      fileTypeRejection: { reason: 'not-allowed' },
+    })
+    if (!(blocked instanceof FileProofingError)) throw new Error('expected a FileProofingError')
+    expect(blocked.fileTypeRejection?.allowedFileTypes).toContain('rar')
+    expect(blocked.fileTypeRejection?.allowedFileTypes).not.toContain('xlsm')
+
+    for (const [fileName, contentType] of [
+      ['setup.exe', 'application/x-msdownload'],
+      ['setup.exe', 'application/zip'],
+      ['invoice.pdf.exe', 'application/pdf'],
+      ['deploy.sh', 'text/plain'],
+      ['page.html', 'text/html'],
+      ['logo.svg', 'image/svg+xml'],
+    ]) {
+      await expect(client.createUpload(scope, manager, { contentType, fileName, sizeBytes: 100 }))
+        .rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'dangerous' } })
+    }
+    await expect(client.createUpload(scope, manager, {
+      contentType: 'application/octet-stream',
+      fileName: 'model.blend',
+      sizeBytes: 100,
+    })).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415, fileTypeRejection: { reason: 'unrecognized' } })
+    expect(new Set(reads)).toEqual(new Set([scope.workspaceId]))
   })
 
   test('allows access only after a clean scan and records version replacement', async () => {
@@ -2170,10 +2320,20 @@ describe('file proofing domain', () => {
             ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
           },
         }],
+        completionSideEffectItems: [{
+          Put: {
+            TableName: 'audit',
+            Item: { scopeKey: 'requester-notice', recordKey: 'EVENT', eventType: 'request.requester.completed' },
+          },
+        }],
       }),
     )
 
     expect(completed.status).toBe('approved')
+    // The requester notice commits with the completion and comes last in its transaction.
+    expect(state.documentClient.transactionInputs.at(-1)?.TransactItems?.at(-1)?.Put?.Item).toMatchObject({
+      eventType: 'request.requester.completed',
+    })
     expect(state.documentClient.items.get(createMemoryKey(workItemKey))).toMatchObject({
       revision: 5,
       workflowStatusId: 'qa-approved',
@@ -2582,6 +2742,277 @@ describe('file proofing domain', () => {
       pendingDueAt: ['2026-02-01T00:00:00.000Z'],
       updatedAt: '2026-01-03T00:00:00.000Z',
     })
+  })
+})
+
+describe('annotation resolution and project file approval', () => {
+  test('resolves, reopens, and lets only the author delete an annotation while counting unresolved ones', async () => {
+    const { client, session } = await createAvailableFile()
+    const annotate = (actor: FileProofingActor, key: string) => client.createAnnotation(
+      scope,
+      actor,
+      session.file.id,
+      session.version.id,
+      { anchor: { kind: 'image', x: 0.5, y: 0.5 }, bodyMarkdown: key },
+      createAuditContext(key, { key }),
+    )
+    const first = await annotate(manager, 'first-annotation')
+    const second = await annotate(writer, 'second-annotation')
+    expect(first.capabilities).toEqual({ canResolve: true, canDelete: true })
+    const approval = await client.createApproval(
+      scope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: ['first@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('annotation-approval'),
+    )
+
+    const before = await client.list(scope, manager)
+    expect(before.files[0]?.unresolvedAnnotationCount).toBe(2)
+    expect(before.approvals.find((candidate) => candidate.id === approval.id)?.unresolvedAnnotationCount).toBe(2)
+
+    const resolved = await client.setAnnotationResolution(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      first.id,
+      true,
+      createAuditContext('resolve-first', { resolve: first.id }),
+    )
+    expect(resolved).toMatchObject({ resolvedByMemberKey: writer.memberKey })
+    expect(resolved.resolvedAt).toBeString()
+    await expect(client.setAnnotationResolution(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      first.id,
+      true,
+    )).resolves.toMatchObject({ id: first.id, resolvedAt: resolved.resolvedAt })
+    expect((await client.list(scope, manager)).files[0]?.unresolvedAnnotationCount).toBe(1)
+
+    const reopened = await client.setAnnotationResolution(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      first.id,
+      false,
+    )
+    expect(reopened.resolvedAt).toBeUndefined()
+    expect(reopened.resolvedByMemberKey).toBeUndefined()
+    await expect(client.setAnnotationResolution(
+      scope,
+      { ...writer, canWrite: false },
+      session.file.id,
+      session.version.id,
+      first.id,
+      true,
+    )).rejects.toMatchObject({ code: 'FileWriteDenied', status: 403 })
+
+    await expect(client.deleteAnnotation(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      second.id,
+    )).rejects.toMatchObject({ code: 'AnnotationDeleteDenied', status: 403 })
+    const third = await annotate(writer, 'third-annotation')
+    const thirdDeleteContext = createAuditContext('delete-third', { delete: third.id })
+    await client.deleteAnnotation(scope, writer, session.file.id, session.version.id, third.id, thirdDeleteContext)
+    // Reusing that key to delete another annotation is a reused key, and nothing is deleted.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      createAuditContext('delete-third', { delete: second.id }),
+    )).rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+    const deleteContext = createAuditContext('delete-second', { delete: second.id })
+    await client.deleteAnnotation(scope, writer, session.file.id, session.version.id, second.id, deleteContext)
+    const remaining = await client.listAnnotations(scope, manager, session.file.id, session.version.id)
+    expect(remaining.map((annotation) => annotation.id)).toEqual([first.id])
+    // A retry of the committed delete (same actor, target, and Idempotency-Key) succeeds.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      deleteContext,
+    )).resolves.toBeUndefined()
+    // The same key with another request body is a reused key, not a retry.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      createAuditContext('delete-second', { delete: 'other' }),
+    )).rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+    // Another actor's retry under the same receipt is not the same request.
+    await expect(client.deleteAnnotation(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      second.id,
+      deleteContext,
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    // A new delete request of the deleted annotation, or one without a key, stays not found.
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+      createAuditContext('delete-second-again', { delete: second.id }),
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      second.id,
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    await expect(client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      'never-existed',
+      createAuditContext('delete-missing', { delete: 'never-existed' }),
+    )).rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+    expect((await client.list(scope, manager)).files[0]?.unresolvedAnnotationCount).toBe(1)
+  })
+
+  test('settles an annotation delete that loses a race by its own receipt only', async () => {
+    const { client, documentClient, session } = await createAvailableFile()
+    const annotate = (key: string) => client.createAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      { anchor: { kind: 'image', x: 0.5, y: 0.5 }, bodyMarkdown: key },
+      createAuditContext(key, { key }),
+    )
+    const deleteWith = (annotationId: string, key: string) => client.deleteAnnotation(
+      scope,
+      writer,
+      session.file.id,
+      session.version.id,
+      annotationId,
+      createAuditContext(key, { delete: annotationId }),
+    )
+    /** Commits the given delete just before the next delete transaction is sent. */
+    const commitFirst = (concurrentDelete: () => Promise<void>) => {
+      const originalSend = documentClient.send.bind(documentClient)
+      documentClient.send = async (command: unknown) => {
+        if (command instanceof TransactWriteCommand) {
+          documentClient.send = originalSend
+          await concurrentDelete()
+        }
+        return await originalSend(command)
+      }
+    }
+    const first = await annotate('race-first')
+    const second = await annotate('race-second')
+    const third = await annotate('race-third')
+    await deleteWith(first.id, 'race-key')
+
+    // The key already deleted another annotation, and a different key deletes this one first.
+    commitFirst(() => deleteWith(second.id, 'race-other-key'))
+    await expect(deleteWith(second.id, 'race-key'))
+      .rejects.toMatchObject({ code: 'IdempotencyKeyReused', status: 409 })
+
+    // Without any receipt of this request, an annotation another request deleted is not found.
+    commitFirst(() => deleteWith(third.id, 'race-third-other'))
+    await expect(deleteWith(third.id, 'race-third-key'))
+      .rejects.toMatchObject({ code: 'AnnotationNotFound', status: 404 })
+
+    // A duplicate of the same request that commits first is this request's success.
+    const fourth = await annotate('race-fourth')
+    commitFirst(() => deleteWith(fourth.id, 'race-fourth-key'))
+    await expect(deleteWith(fourth.id, 'race-fourth-key')).resolves.toBeUndefined()
+  })
+
+  test('requests, decides, and lists approval of a Project file without a Work Item', async () => {
+    const { client, documentClient, session } = await createAvailableFile(undefined, projectScope, 'audit')
+    const listed = await client.list(projectScope, manager)
+    expect(listed.capabilities.canRequestApproval).toBeTrue()
+    expect(listed.files[0]?.capabilities.canRequestApproval).toBeTrue()
+    await expect(client.createApproval(
+      projectScope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: ['first@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+        completionTransition: 'done',
+      },
+    )).rejects.toMatchObject({ code: 'ApprovalCompletionTransitionUnsupported', status: 400 })
+
+    expect(await client.listDeliverables(projectScope, manager)).toEqual([
+      expect.objectContaining({ approvalState: 'none', unresolvedAnnotationCount: 0 }),
+    ])
+    const approval = await client.createApproval(
+      projectScope,
+      manager,
+      {
+        fileId: session.file.id,
+        versionId: session.version.id,
+        reviewerMemberKeys: ['first@example.com'],
+        dueAt: '2099-07-20T00:00:00.000Z',
+      },
+      createAuditContext('project-approval'),
+    )
+    expect(approval.issueId).toBeUndefined()
+    expect(approval).toMatchObject({ teamId: 'core', projectId: 'refero', subjectType: 'file-version' })
+    expect(await client.listDeliverables(projectScope, manager)).toEqual([
+      expect.objectContaining({ approvalState: 'pending', approvalId: approval.id }),
+    ])
+    const inbox = await client.listReviewerApprovals(
+      projectScope.workspaceId,
+      { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
+    )
+    expect(inbox.approvals.map((candidate) => candidate.id)).toEqual([approval.id])
+
+    const decided = await client.decideApproval(
+      projectScope,
+      { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
+      approval.id,
+      { decision: 'approve', expectedRevision: approval.revision },
+      createAuditContext('project-approval-decision'),
+    )
+    expect(decided.status).toBe('approved')
+    expect(await client.listDeliverables(projectScope, manager)).toEqual([
+      expect.objectContaining({ approvalState: 'approved', approvalId: approval.id }),
+    ])
+    const storedApproval = [...documentClient.items.values()].find((item) =>
+      item.entryType === 'approval' && item.id === approval.id
+    )
+    expect(storedApproval?.scopeKey).toBe(createFileProofingScopeKey(projectScope))
+    expect(storedApproval?.issueId).toBeUndefined()
+    const requestedEvent = [...documentClient.items.values()].find((item) =>
+      item.eventType === 'approval.requested'
+    )
+    expect(requestedEvent).toMatchObject({
+      entityType: 'project',
+      metadata: { deepLink: '/projects/refero/issues' },
+    })
+  })
+
+  test('reads no approval or annotation rows for a scope without visible files', async () => {
+    const { client, documentClient } = createClient()
+    expect(await client.listDeliverables(projectScope, manager)).toEqual([])
+    expect(documentClient.queryPrefixes).toEqual(['FILE#'])
   })
 })
 

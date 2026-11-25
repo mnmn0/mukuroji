@@ -638,6 +638,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType === analyticsReportDeliveredEventType) {
     return 'workspace.inbox.event.reportDelivered'
   }
+  if (normalizedEventType.startsWith('request.requester.')) {
+    return 'workspace.inbox.event.request'
+  }
   if (normalizedEventType.startsWith('timesheet.')) {
     return 'workspace.inbox.event.timesheet'
   }
@@ -758,6 +761,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   }
   if (normalizedReason === 'timesheet') {
     return t('workspace.inbox.reason.timesheet')
+  }
+  if (normalizedReason === 'requester') {
+    return t('workspace.inbox.reason.requester')
   }
 
   return t('workspace.inbox.reason.watch')

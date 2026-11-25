@@ -1,3 +1,4 @@
+import { describeWorkflowRuleRejection } from '../model/workflowRuleErrors'
 import type {
   TeamTaskViewScope,
   WorkItemActionContext,
@@ -146,6 +147,8 @@ import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarc
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
 import { useWorkItemCreateTemplates } from '../../automation/queries/useWorkItemCreateTemplates'
 import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
+import { createWorkItemCreateSessionDraftKey } from '../../work-items/model/workItemCreateSessionDraft'
+import { hasPendingSessionDraft } from '../../auth/useSessionDraft'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -263,7 +266,10 @@ export function TeamIssueScreen({
     category: 'all',
     customFieldId: '',
   })
-  const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
+  const createSessionDraftKey = createWorkItemCreateSessionDraftKey(['team', teamId])
+  // A create form whose text was kept when the session ended opens again so the text comes back.
+  const [isCreateOpen, setIsCreateOpen] = useState(() =>
+    defaultCreateIssueOpen || hasPendingSessionDraft(createSessionDraftKey))
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
@@ -943,6 +949,7 @@ export function TeamIssueScreen({
         failed: t('taskViews.action.failed'),
         unavailable: teamActionDisabledReasons.unavailable,
         openChildren: t('issues.error.openChildren'),
+          describeWorkflowRule: (error) => describeWorkflowRuleRejection(error, t),
       },
     ) ?? createFailedTaskActionResult(
       context.actionId,
@@ -1294,7 +1301,9 @@ export function TeamIssueScreen({
           target,
           isConflict ? 'WorkItemRevisionConflict' : 'TeamTaskActionMutationFailed',
           isConflict ? 'conflict' : 'unknown',
-          isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
+          isConflict
+            ? t('tasks.action.conflict')
+            : describeWorkflowRuleRejection(error, t) ?? t('taskViews.action.failed'),
           isConflict,
         ))
         if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
@@ -1604,7 +1613,8 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
+                    // A Team switch starts a new form, so text typed for one Team is never kept for another.
+                    key={`create-issue-${teamId}-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     calendarPolicy={workingCalendar}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
@@ -1674,17 +1684,19 @@ export function TeamIssueScreen({
                             undefined,
                             'TeamTaskCreateFailed',
                             'unknown',
-                            t('issues.error.create'),
+                            describeWorkflowRuleRejection(error, t) ?? t('issues.error.create'),
                           ))
                           if (canDismissOwner) dismissCreateIssueEditor()
                         }
                         if (!claimedContext) {
                           setCreateErrorMessage(
-                            error instanceof Error ? error.message : t('issues.error.create'),
+                            describeWorkflowRuleRejection(error, t)
+                              ?? (error instanceof Error ? error.message : t('issues.error.create')),
                           )
                         }
                       }
                     }}
+                    sessionDraftKey={createSessionDraftKey}
                     projects={createIssueProjects ?? activeTeam?.projects ?? []}
                     t={t}
                     workspaceMembers={workspaceMembers}

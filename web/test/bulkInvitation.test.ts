@@ -10,6 +10,7 @@ import {
   createWorkspaceMemberCsv,
   emptyWorkspaceMemberFilter,
   filterWorkspaceMembers,
+  type WorkspaceMemberFilter,
 } from '../src/workspace/model/memberDirectory'
 import { sendBulkWorkspaceInvitations } from '../src/workspace/mutations/bulkWorkspaceInvitations'
 
@@ -222,15 +223,33 @@ describe('filterWorkspaceMembers', () => {
       .map((entry) => entry.email)).toEqual(['suzuki@example.com'])
     expect(filterWorkspaceMembers(members, emptyWorkspaceMemberFilter)).toHaveLength(3)
   })
+
+  test('orders by name, oldest last sign-in with unrecorded members first, or newest joined', () => {
+    const sortable = [
+      member({ email: 'b@example.com', lastSignedInAt: '2026-11-20T00:00:00.000Z', createdAt: '2026-10-01T00:00:00.000Z' }),
+      member({ email: 'c@example.com', name: 'Aoki', createdAt: '2026-11-10T00:00:00.000Z' }),
+      member({ email: 'a@example.com', lastSignedInAt: '2026-11-01T00:00:00.000Z', createdAt: '2026-09-01T00:00:00.000Z' }),
+    ]
+    const emails = (sort: WorkspaceMemberFilter['sort']) =>
+      filterWorkspaceMembers(sortable, { ...emptyWorkspaceMemberFilter, sort }).map((entry) => entry.email)
+
+    expect(emails('default')).toEqual(['b@example.com', 'c@example.com', 'a@example.com'])
+    expect(emails('name')).toEqual(['a@example.com', 'c@example.com', 'b@example.com'])
+    expect(emails('last-sign-in')).toEqual(['c@example.com', 'a@example.com', 'b@example.com'])
+    expect(emails('joined')).toEqual(['c@example.com', 'b@example.com', 'a@example.com'])
+    // Sorting returns a new list and leaves the input as it was.
+    expect(sortable.map((entry) => entry.email)).toEqual(['b@example.com', 'c@example.com', 'a@example.com'])
+  })
 })
 
 describe('createWorkspaceMemberCsv', () => {
   test('quotes cells and keeps spreadsheet formulas from running', () => {
     const csv = createWorkspaceMemberCsv(
-      [member({ email: 'sato@example.com', name: '=HYPERLINK("x")' })],
+      [member({ email: 'sato@example.com', name: '=HYPERLINK("x")', lastSignedInAt: '2026-11-20T08:00:00.000Z' })],
       {
         createdAt: 'joined at',
         deactivatedAt: 'deactivated at',
+        lastSignedInAt: 'last signed in at',
         email: 'email',
         name: 'name',
         role: 'role',
@@ -239,8 +258,8 @@ describe('createWorkspaceMemberCsv', () => {
     )
 
     expect(csv).toBe(
-      '"email","name","role","status","joined at","deactivated at"\r\n' +
-      '"sato@example.com","\'=HYPERLINK(""x"")","member","active","2026-11-01T00:00:00.000Z",""\r\n',
+      '"email","name","role","status","joined at","deactivated at","last signed in at"\r\n' +
+      '"sato@example.com","\'=HYPERLINK(""x"")","member","active","2026-11-01T00:00:00.000Z","","2026-11-20T08:00:00.000Z"\r\n',
     )
   })
 
@@ -251,6 +270,7 @@ describe('createWorkspaceMemberCsv', () => {
     ], {
       createdAt: 'joined at',
       deactivatedAt: 'deactivated at',
+      lastSignedInAt: 'last signed in at',
       email: 'email',
       name: 'name',
       role: 'role',
@@ -268,6 +288,7 @@ describe('createWorkspaceMemberCsv', () => {
     const csv = createWorkspaceMemberCsv([member({ email: 'sato@example.com', name: '佐藤 花子', role: 'guest' })], {
       createdAt: '参加日時',
       deactivatedAt: '利用停止日時',
+      lastSignedInAt: '最終ログイン日時',
       email: 'メールアドレス',
       name: '表示名',
       role: 'ロール',

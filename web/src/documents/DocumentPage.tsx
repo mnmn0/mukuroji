@@ -21,6 +21,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   useBlocker,
+  useLocation,
   useNavigate,
   useParams,
   useSearchParams,
@@ -33,7 +34,9 @@ import {
   canMutateWorkspaceContent,
 } from '../auth/api'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
+import { buildLoginRedirectPath } from '../auth/model/loginReturnPath'
 import { clearAuthSession, getAuthSession } from '../auth/session'
+import { useSessionDraft } from '../auth/useSessionDraft'
 import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
   MobileSidebarButton,
@@ -176,9 +179,16 @@ import {
   shouldAdoptIncomingDocument,
   shouldScheduleDocumentAutosave,
   type DocumentDraftSaveGuard,
+  type DocumentOperationChunkSavedListener,
   type PendingPublicShareCreateRequest,
   type DocumentSaveStatus,
 } from './model/document'
+import {
+  createDocumentSessionDraftKey,
+  parseDocumentSessionDraft,
+  recoverDocumentSessionDraftOperations,
+  type DocumentSessionDraft,
+} from './model/documentSessionDraft'
 import { useDocumentRealtime } from './queries/useDocumentRealtime'
 import { WhiteboardCanvas } from './ui/WhiteboardCanvas'
 
@@ -362,6 +372,7 @@ export type DocumentScreenActions = {
     documentId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => Promise<DocumentOperationSaveResult>
   /**
    * Tree node を別 folder/scope へ移動する action です。
@@ -532,6 +543,9 @@ export type DocumentScreenProps = {
 export function DocumentPage() {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
+  const location = useLocation()
+  /** Set once the page leaves for sign-in, so unsaved edits kept for later do not block it. */
+  const isLeavingForSignInRef = useRef(false)
   const { closeMobileSidebar } = useWorkspaceSidebarController()
   const params = useParams()
   const [searchParams] = useSearchParams()
@@ -554,7 +568,8 @@ export function DocumentPage() {
   const blocker = useBlocker(
     useCallback(
       () =>
-        navigationGuardRef.current?.hasUnsavedChanges() ?? false,
+        !isLeavingForSignInRef.current &&
+        (navigationGuardRef.current?.hasUnsavedChanges() ?? false),
       [],
     ),
   )
@@ -898,18 +913,25 @@ export function DocumentPage() {
     globalThis.document.title = `${selectedDocument?.title ?? t('documents.title')} | ${t('app.title')}`
   }, [locale, selectedDocument?.title, t])
 
+  const signInPath = buildLoginRedirectPath(
+    `${location.pathname}${location.search}${location.hash}`,
+  )
+
   useEffect(() => {
     if (!session) {
-      navigate('/', { replace: true })
+      navigate(signInPath, { replace: true })
     }
-  }, [navigate, session])
+  }, [navigate, session, signInPath])
 
   useEffect(() => {
     if (currentUserError) {
+      // Clearing the session keeps the unsaved edits for this account; signing in again brings
+      // the member back to this Document, where they are restored.
+      isLeavingForSignInRef.current = true
       clearAuthSession()
-      navigate('/', { replace: true })
+      navigate(signInPath, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [currentUserError, navigate, signInPath])
 
   useEffect(() => {
     if (!accessToken || !documentId) {
@@ -1092,6 +1114,7 @@ export function DocumentPage() {
     selectedId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => {
     if (!accessToken) {
       throw new Error('Missing access token.')
@@ -1102,7 +1125,7 @@ export function DocumentPage() {
         saved = await saveDocumentOperationChunks(
           operations,
           expectedRevision,
-          (revision, chunk) => {
+          (revision, chunk, onCommitted) => {
             const input = {
               baseRevision: revision,
               clientId: presenceClientId,
@@ -1122,10 +1145,12 @@ export function DocumentPage() {
                       selectedId,
                       candidateInput,
                       context,
+                      onCommitted,
                     ),
                 ),
             )
           },
+          onChunkSaved,
         )
       } catch (error) {
         if (error instanceof DocumentOperationChunkSaveError) {
@@ -2606,6 +2631,7 @@ type DocumentWorkspaceProps = {
     documentId: string,
     expectedRevision: number,
     operations: DocumentOperation[],
+    onChunkSaved?: DocumentOperationChunkSavedListener,
   ) => Promise<DocumentOperationSaveResult>
   /**
    * Context drawer open callback です。
@@ -2696,6 +2722,10 @@ function DocumentWorkspace({
   const titleValueRef = useRef(selectedDocument.title)
   const committedTitleRef = useRef(selectedDocument.title)
   const pendingOperationsRef = useRef<DocumentOperation[]>([])
+  /** Operations sent in the save request now running, kept when the session ends mid-save. */
+  const inFlightOperationsRef = useRef<DocumentOperation[]>([])
+  // Revision the unsaved part of the running save is based on, advanced as each chunk is saved.
+  const flushBaseRevisionRef = useRef<number | undefined>(undefined)
   const saveTimerRef = useRef<number | undefined>(undefined)
   const revisionRef = useRef(selectedDocument.revision)
   const generationRef = useRef(0)
@@ -2744,7 +2774,9 @@ function DocumentWorkspace({
       hasDirtyTitle: titleDirty,
       incomingRevision: selectedDocument.revision,
       localRevision: revisionRef.current,
-      pendingOperationCount: pendingOperationsRef.current.length,
+      // Operations still being sent are unsaved too, so the incoming Document must not hide them.
+      pendingOperationCount:
+        pendingOperationsRef.current.length + inFlightOperationsRef.current.length,
       saveStatus,
     })) {
       setLocalDocument(selectedDocument)
@@ -2783,15 +2815,25 @@ function DocumentWorkspace({
       while (pendingOperationsRef.current.length > 0) {
         const operations = pendingOperationsRef.current
         pendingOperationsRef.current = []
+        inFlightOperationsRef.current = operations
         const savedGeneration = generationRef.current
         const expectedRevision = revisionRef.current
+        flushBaseRevisionRef.current = expectedRevision
 
         try {
           const saved = await onApplyOperations(
             localDocument.id,
             expectedRevision,
             operations,
+            (chunk, committedRevision) => {
+              // Chunks already saved must not be sent again after the session ends: the next
+              // session uses another client identity, so the API would refuse their IDs.
+              inFlightOperationsRef.current = inFlightOperationsRef.current.slice(chunk.length)
+              flushBaseRevisionRef.current = committedRevision
+            },
           )
+          inFlightOperationsRef.current = []
+          flushBaseRevisionRef.current = undefined
           const updated = saved.document
           const canAdoptSavedDocument =
             generationRef.current === savedGeneration &&
@@ -2810,6 +2852,8 @@ function DocumentWorkspace({
                 },
           )
         } catch (error) {
+          inFlightOperationsRef.current = []
+          flushBaseRevisionRef.current = undefined
           const chunkError =
             error instanceof DocumentOperationChunkSaveError
               ? error
@@ -2819,18 +2863,19 @@ function DocumentWorkspace({
             ...chunkError.remainingOperations,
             ...pendingOperationsRef.current,
           ])
-          if (
-            chunkError.lastSavedDocument &&
-            chunkError.lastCommittedRevision !== undefined
-          ) {
-            revisionRef.current =
-              chunkError.lastCommittedRevision
+          const { lastCommittedRevision, lastSavedDocument } = chunkError
+          // A chunk committed before its detail could be read still advances the revision.
+          if (lastCommittedRevision !== undefined) {
+            revisionRef.current = lastCommittedRevision
             setLocalDocument((current) => ({
               ...current,
-              capabilities:
-                chunkError.lastSavedDocument!.capabilities,
-              revision: chunkError.lastCommittedRevision!,
-              updatedAt: chunkError.lastSavedDocument!.updatedAt,
+              ...(lastSavedDocument
+                ? {
+                    capabilities: lastSavedDocument.capabilities,
+                    updatedAt: lastSavedDocument.updatedAt,
+                  }
+                : {}),
+              revision: lastCommittedRevision,
             }))
           }
           if (
@@ -3068,6 +3113,64 @@ function DocumentWorkspace({
     return () => onDraftGuardChange(undefined)
   }, [onDraftGuardChange, savePendingChanges])
 
+  const [sessionDraftNotice, setSessionDraftNotice] = useState<'restored' | 'readded'>()
+  useSessionDraft<DocumentSessionDraft>({
+    key: createDocumentSessionDraftKey(selectedDocument.id),
+    read: () => {
+      const operations = coalesceDocumentOperations([
+        ...inFlightOperationsRef.current,
+        ...pendingOperationsRef.current,
+      ])
+      if (operations.length === 0 && !titleDirtyRef.current) return undefined
+      return {
+        baseRevision: flushBaseRevisionRef.current ?? revisionRef.current,
+        conflicted: saveStatusRef.current === 'conflict',
+        operations,
+        ...(titleDirtyRef.current ? { title: titleValueRef.current } : {}),
+      }
+    },
+    parse: parseDocumentSessionDraft,
+    onRestore: (draft) => {
+      // Edits made since the page came back, or a Document that can no longer be edited, win.
+      if (
+        !editable ||
+        titleDirtyRef.current ||
+        pendingOperationsRef.current.length > 0 ||
+        activeFlushRef.current !== undefined
+      ) {
+        return
+      }
+      // Edits to blocks or objects someone else deleted meanwhile come back as new ones.
+      const recovered = recoverDocumentSessionDraftOperations(localDocument, draft.operations)
+      generationRef.current += 1
+      pendingOperationsRef.current = recovered.operations
+      // Saving against the revision the edits were made on reports a Document changed since.
+      revisionRef.current = draft.baseRevision
+      if (draft.title !== undefined) {
+        titleGenerationRef.current += 1
+        titleValueRef.current = draft.title
+        titleDirtyRef.current = isDocumentTitleDirty(draft.title, committedTitleRef.current, false)
+        setTitleDirty(titleDirtyRef.current)
+      }
+      const title = draft.title
+      setLocalDocument((current) => ({
+        ...applyDocumentOperationsLocally(current, recovered.operations),
+        ...(title === undefined ? {} : { title }),
+      }))
+      onUnsavedStateChange?.(true)
+      setSessionDraftNotice(recovered.readdedDeletedElements ? 'readded' : 'restored')
+      if (draft.conflicted) {
+        // The conflict shown before the session ended still needs an explicit overwrite.
+        saveStatusRef.current = 'conflict'
+        setSaveStatus('conflict')
+        return
+      }
+      // Saved at once rather than on the autosave timer, which an unmount would cancel for good:
+      // the draft is restored only once.
+      void (titleDirtyRef.current ? commitTitle() : flushRef.current())
+    },
+  })
+
   const upsertWhiteboardObject = (object: WhiteboardObject) => {
     const existing =
       localDocument.kind === 'whiteboard' &&
@@ -3137,6 +3240,13 @@ function DocumentWorkspace({
             }}
             value={localDocument.title}
           />
+          {sessionDraftNotice ? (
+            <p className="m-0 mt-1 text-xs font-semibold text-fg-amber-900" role="status">
+              {sessionDraftNotice === 'readded'
+                ? t('documents.editor.sessionDraftReaddedDeleted')
+                : t('documents.editor.sessionDraftRestored')}
+            </p>
+          ) : null}
         </div>
         {saveStatus === 'conflict' || saveStatus === 'error' ? (
           <button

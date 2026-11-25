@@ -1,14 +1,16 @@
-import type { RequestSubmissionPage } from '@mukuroji/contracts'
+import type { MyRequestPage, RequestSubmissionPage } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import {
   getRequestForm,
+  getRequestFormManagementScopes,
   getRequestForms,
 } from '../api/forms'
 import {
   getRequestQueue,
   getRequestSubmission,
 } from '../api/submissions'
+import { getMyRequest, getMyRequests } from '../api/myRequests'
 
 const requestIntakeQueryConfig = {
   dedupingInterval: 10_000,
@@ -105,6 +107,59 @@ export function useRequestForm(
   return useSWR(
     key,
     ([, token, currentFormId]) => getRequestForm(currentFormId, token),
+    requestIntakeQueryConfig,
+  )
+}
+
+/**
+ * Reads which request form scopes the caller can change (ADR 0087).
+ *
+ * @param accessToken - Request API access token.
+ * @param enabled - Whether the caller may hold Team scopes; Workspace administrators skip it.
+ * @returns The SWR state of the form management scopes.
+ */
+export function useRequestFormManagementScopes(accessToken?: string, enabled = true) {
+  const key = accessToken && enabled
+    ? ['request-form-management-scopes', accessToken] as const
+    : null
+
+  return useSWR(
+    key,
+    ([, token]) => getRequestFormManagementScopes(token),
+    requestIntakeQueryConfig,
+  )
+}
+
+/**
+ * Loads the requests the signed-in member sent, newest first, page by page.
+ *
+ * @param accessToken - Workspace access token.
+ * @param enabled - Whether the "My requests" page is shown.
+ * @returns SWR Infinite state of the member's request pages.
+ */
+export function useMyRequests(accessToken?: string, enabled = true) {
+  return useSWRInfinite(
+    (pageIndex, previousPage: MyRequestPage | null) => {
+      if (!accessToken || !enabled) return null
+      if (pageIndex > 0 && !previousPage?.nextCursor) return null
+      return ['my-requests', accessToken, pageIndex === 0 ? '' : previousPage?.nextCursor ?? ''] as const
+    },
+    ([, token, cursor]) => getMyRequests(token, { cursor: cursor || undefined, limit: 20 }),
+    requestIntakeQueryConfig,
+  )
+}
+
+/**
+ * Loads one of the signed-in member's requests with its conversation.
+ *
+ * @param accessToken - Workspace access token.
+ * @param requestId - Selected request ID.
+ * @returns SWR state of the request detail.
+ */
+export function useMyRequest(accessToken: string | undefined, requestId: string | undefined) {
+  return useSWR(
+    accessToken && requestId ? ['my-request', accessToken, requestId] as const : null,
+    ([, token, id]) => getMyRequest(token, id),
     requestIntakeQueryConfig,
   )
 }

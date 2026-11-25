@@ -17,13 +17,14 @@ import {
 import { type FileProofingActor, type FileProofingScope } from '../../modules/files/file-proofing'
 import {
   WorkItemCompletionGateError,
+  WorkflowRuleError,
   WorkItemConfigurationError,
 } from '../../modules/work-items/work-item-configuration'
 import { ambientAutomationActionExecutorDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readRequiredRouteId } from './input-parsing'
 import {
-  createEnterpriseControlAuthorizationConditionCheck,
+  createEnterpriseAuthorizationConditionChecks,
   requireAssignedProjectPermission,
   requireTeamPermission,
   toProjectDataErrorResponse,
@@ -73,6 +74,9 @@ export function toWorkItemConfigurationErrorResponse(c: Context, error: unknown)
   }
   if (error instanceof WorkItemCompletionGateError) {
     return c.json(error.toResponseBody(), 409)
+  }
+  if (error instanceof WorkflowRuleError) {
+    return c.json(error.toResponseBody(), error.status === 403 ? 403 : 409)
   }
   if (error.status >= 500) {
     console.error(error)
@@ -145,6 +149,31 @@ export async function loadFileProofingRequestContext(
   }
 
   const projectId = readRequiredRouteId(c.req.param('projectId'), 'Project ID')
+  const { scope, actor } = await loadProjectFileProofingContext(principal, teamId, projectId)
+  return { scope, actor }
+}
+
+/**
+ * Authorizes a principal for one Team-owned Project's files and resolves its file actor.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose files are read or written.
+ * @returns The Project file scope, the actor's file capabilities, and the Team permission context.
+ * @throws ProjectDataError when the Project is missing or the principal cannot view it.
+ */
+export async function loadProjectFileProofingContext(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): Promise<{
+  /** Project file scope. */
+  scope: FileProofingScope
+  /** Actor capabilities on the Project files. */
+  actor: FileProofingActor
+  /** Team permission context the Project access was resolved from. */
+  context: TeamPermissionContext
+}> {
   const context = await requireTeamPermission(principal, teamId, 'viewer')
   if (!context.team.projects.some((project) => project.id === projectId)) {
     throw new ProjectDataError(
@@ -168,7 +197,7 @@ export async function loadFileProofingRequestContext(
     scope: {
       workspaceId: principal.directoryId,
       teamId,
-      kind,
+      kind: 'project',
       projectId,
     },
     actor: {
@@ -177,6 +206,7 @@ export async function loadFileProofingRequestContext(
       canWrite,
       canManage,
     },
+    context,
   }
 }
 
@@ -331,9 +361,7 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
   }
   checks.push(...readCollaborationAuthorizationConditionChecks([actorMembershipCheck]))
 
-  if (!projectId) return checks
-
-  const enterpriseProjectAccess = principal.enterpriseProjectAccesses?.some((access) =>
+  const enterpriseProjectAccess = projectId !== undefined && principal.enterpriseProjectAccesses?.some((access) =>
     access.projectId === projectId && projectAccessAllows(access, 'member')
   ) === true
   const enterpriseTeamAccess = principal.enterpriseTeamAccesses?.some((access) =>
@@ -346,13 +374,17 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
         principal.enterpriseAuthorizationResource.targetId === teamId
     ) && principal.enterprisePermissions?.includes('teams.write') === true
 
+  // A Team or route grant can come from an OrgUnit role, so its CONTROL and structure fences apply
+  // whether or not the Work Item has a Project.
   if (enterpriseProjectAccess || enterpriseTeamAccess || enterpriseRouteAccess) {
-    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
-    if (enterpriseControlCheck) {
-      checks.push(...readCollaborationAuthorizationConditionChecks([enterpriseControlCheck]))
+    const enterpriseChecks = createEnterpriseAuthorizationConditionChecks(principal)
+    if (enterpriseChecks.length > 0) {
+      checks.push(...readCollaborationAuthorizationConditionChecks(enterpriseChecks))
     }
     return checks
   }
+
+  if (!projectId) return checks
 
   const projectAccess = context.projectAccesses?.find((access) => access.projectId === projectId)
   if (!projectAccess || !projectAccessAllows(projectAccess, 'member')) {

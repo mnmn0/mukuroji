@@ -12,6 +12,7 @@ import type {
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceCalendarSettingsResponse,
+  WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
@@ -21,6 +22,7 @@ import {
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
+  readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
@@ -380,6 +382,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     ...(body.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readTenantTimeEntryCategoryInput(body.timeEntryCategories) }),
+    ...(body.fileTypes === undefined
+      ? {}
+      : { fileTypes: readTenantFileTypeInput(body.fileTypes) }),
     ...(body.defaultCurrency === undefined ? {} : { defaultCurrency: readTenantDefaultCurrencyInput(body.defaultCurrency) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
@@ -439,6 +444,26 @@ function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportRemind
       400,
       'InvalidWeeklyReportReminderSettings',
       'Weekly report reminder flags, weekdays, or hours are invalid, or both notices use the same hour.',
+    )
+  }
+  return settings
+}
+
+/**
+ * Validates the File type settings of a profile update.
+ *
+ * @param value - Untrusted `fileTypes` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a type is unknown (executables and other dangerous types
+ *   are not in the catalog, so they can never be enabled), repeats, or already has the requested state.
+ */
+function readTenantFileTypeInput(value: unknown): WorkspaceFileTypeSettings {
+  const settings = readWorkspaceFileTypeSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidFileTypeSettings',
+      'File types must be known catalog types; dangerous types cannot be enabled.',
     )
   }
   return settings

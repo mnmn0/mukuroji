@@ -10,6 +10,8 @@ import type {
   AutomationActionExecutor,
   AutomationExecutionClaimToken,
   AutomationExecutionDefinitionGuard,
+  AutomationExecutionFailureKind,
+  AutomationExecutionFailureNotifier,
   AutomationExecutionServicePort,
 } from './ports'
 import { AutomationError } from '../domain/automation-error'
@@ -22,6 +24,7 @@ import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../domain/execution-policy'
 import { createPendingAutomationExecution } from './pending-execution'
 import {
   evaluateAutomationCondition as evaluateDomainAutomationCondition,
+  matchesAutomationRuleOwnerTeam,
   matchesAutomationTrigger as matchesDomainAutomationTrigger,
   type AutomationEvent,
 } from '../domain/rule-evaluation'
@@ -34,11 +37,48 @@ export class AutomationEngine {
   private readonly client: AutomationExecutionServicePort
   /** Side-effect executor for domain actions. */
   private readonly actionExecutor: AutomationActionExecutor
+  /** Optional reporter of dead-lettered and rate-limited executions. */
+  private readonly failureNotifier: AutomationExecutionFailureNotifier | undefined
 
-  /** Creates an Automation execution service. */
-  constructor(client: AutomationExecutionServicePort, actionExecutor: AutomationActionExecutor) {
+  /**
+   * Creates an Automation execution service.
+   *
+   * @param client - Execution persistence.
+   * @param actionExecutor - Side-effect executor for actions.
+   * @param failureNotifier - Reports dead-lettered and rate-limited executions to people.
+   */
+  constructor(
+    client: AutomationExecutionServicePort,
+    actionExecutor: AutomationActionExecutor,
+    failureNotifier?: AutomationExecutionFailureNotifier,
+  ) {
     this.client = client
     this.actionExecutor = actionExecutor
+    this.failureNotifier = failureNotifier
+  }
+
+  /**
+   * Reports a failure without failing the execution that is already saved.
+   *
+   * The execution row is the source of truth and stays retryable from the history, so a
+   * notification that cannot be written is logged instead of making the caller redeliver.
+   *
+   * @param rule - Rule version the execution ran.
+   * @param execution - Saved failed execution.
+   * @param kind - Which failure happened.
+   * @returns A promise that resolves after the attempt.
+   */
+  private async reportFailure(
+    rule: AutomationRule,
+    execution: AutomationExecution,
+    kind: AutomationExecutionFailureKind,
+  ) {
+    if (!this.failureNotifier) return
+    try {
+      await this.failureNotifier.notify(rule, execution, kind)
+    } catch (error) {
+      console.error('Automation failure notification failed:', error)
+    }
   }
 
   /** Applies one durable event to one pinned rule version. */
@@ -61,6 +101,7 @@ export class AutomationEngine {
       return undefined
     }
     if (!rule.enabled || !matchesDomainAutomationTrigger(rule.trigger, event)) return undefined
+    if (!matchesAutomationRuleOwnerTeam(rule, event)) return undefined
     if (!rule.conditions.every((condition) => evaluateDomainAutomationCondition(condition, {
       event,
       workItem: event.workItem,
@@ -86,7 +127,11 @@ export class AutomationEngine {
       execution.errorCode = 'AutomationRateLimitExceeded'
       execution.errorMessage = 'Automation rule rate limit was exceeded.'
       execution.retryable = false
-      return await this.createOrReadExecution(execution, event, rule)
+      const saved = await this.createOrReadExecution(execution, event, rule)
+      if (saved?.status === 'skipped' && saved.errorCode === 'AutomationRateLimitExceeded') {
+        await this.reportFailure(rule, saved, 'rate-limited')
+      }
+      return saved
     }
     if (reservation === 'duplicate') {
       const duplicate = await this.client.getExecution(rule.workspaceId, execution.id)
@@ -294,6 +339,7 @@ export class AutomationEngine {
         if (!await this.client.saveExecution(execution, claimToken, savedAt)) {
           return await readAutomationExecutionAfterLeaseLoss(this.client, execution)
         }
+        if (execution.status === 'dead-letter') await this.reportFailure(rule, execution, 'dead-letter')
         return execution
       }
     }

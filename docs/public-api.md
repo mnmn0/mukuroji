@@ -221,6 +221,12 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `agent_run_forbidden`、`invalid_transition`、`agent_run_takeover_disabled`、`invalid_artifact_url`、
   `not_ready`）で
   返し、`code` は既存の `conflict` / `forbidden` / `validation_failed` です。
+- Work Item の作成・`PATCH`・import・Agent Run の start で status を変えるとき、Team のワークフローの
+  遷移を実行できる役割と状態ごとの必須項目も判定します。developer credential は役割を限った遷移を
+  実行できず、`403 forbidden` と `errors[].code` の `transition_actor_denied`（`pointer: "/workflowStatusId"`）
+  を返します。必須項目が空なら `409 conflict` と `status_field_required`（`pointer` は `/schedule`、
+  `/acceptanceCriteria`、`/customFieldValues/<ID>`）です。どちらも `retryable: false` で、詳細は
+  [Work Item configuration](work-item-configuration.md#遷移を実行できる役割と状態ごとの必須項目)にあります。
 [Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
 
 ### Pagination contract
@@ -307,6 +313,12 @@ Public API の external link は
 `/api/v1/work-items/{workItemId}/external-links?teamId={teamId}` で一覧・作成し、
 個別削除は末尾に `{externalLinkId}` を追加する。Work Item と integration の両方の
 scope、および対象 Team の current RBAC を必要とする。
+
+`resourceType: "calendar-event"` は category が `calendar` の installation（Google Calendar、Outlook Calendar）
+だけで使える。`externalId` と `externalUrl` は送らない（送ると `400`）。接続先の既定カレンダーに Work Item の日付で
+終日の予定を作ってからリンクする。既存の予定はリンクできない。同じ `Idempotency-Key` で再送しても予定は 1 つだけになる。
+日付のない Work Item には作れない。同期するのは日付だけで、題名は同期しない（ADR 0089）。
+`resourceType` は今後も増えることがある。consumer は知らない `resourceType` のリンクを無視する。
 
 管理 API では `PATCH /api/developer/external-links/{externalLinkId}` に
 `syncDirection` を送って同期方向を変更する。`none` は link を `paused`、それ以外は

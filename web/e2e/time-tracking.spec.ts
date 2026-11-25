@@ -61,18 +61,47 @@ type TimeTrackingMockState = {
 }
 
 /**
+ * Creates an unsigned JWT-shaped access token, so the Web app can tell accounts apart.
+ *
+ * @param subject - Account subject.
+ * @param id - Distinguishes tokens of the same account.
+ * @returns The token.
+ */
+function createJwtShapedAccessToken(subject: string, id: string) {
+  const payload = Buffer.from(JSON.stringify({ sub: subject, jti: id })).toString('base64url')
+  return `header.${payload}.signature`
+}
+
+/** Options of {@link mockTimeTracking}. */
+type TimeTrackingMockOptions = {
+  /**
+   * Account token installed once with a refresh token, so the test can end the session and sign
+   * in again; without it every page load signs in with a fixture token.
+   */
+  accessToken?: string
+}
+
+/**
  * Installs the session, directory, Work Items, and an in-memory time tracking API.
  *
  * @param page - Browser page whose API requests are intercepted.
+ * @param options - Session the page starts with.
  * @returns Mutable mock state.
  */
-async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
+async function mockTimeTracking(page: Page, options: TimeTrackingMockOptions = {}): Promise<TimeTrackingMockState> {
   const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'], weekStartDay: 1, weeklyReports: {} }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
-  await page.addInitScript(() => {
-    localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
+  await page.addInitScript((accessToken) => {
     localStorage.setItem('mukuroji.locale', 'en')
-  })
+    if (accessToken === null) {
+      localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
+      return
+    }
+    // A reload must not sign the tab back in once the test ended the session.
+    if (sessionStorage.getItem('e2e.sessionInstalled')) return
+    sessionStorage.setItem('e2e.sessionInstalled', 'true')
+    localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken, expiresAt: Date.now() + 3600000, refreshToken: 'refresh-first', remember: true, tokenType: 'Bearer' }))
+  }, options.accessToken ?? null)
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { attributes: { 'custom:workspace_id': 'workspace-demo', email: 'demo@example.com', name: 'Demo' }, groups: [], isSystemAdmin: false, username: 'demo@example.com', workspaceMemberStatus: 'active', workspaceRole: 'member' } }))
   await page.route('**/api/teams/projects**', (route) => route.fulfill({ json: { teams: projectDirectoryFixtures } }))
   await page.route('**/api/projects/quick-access', (route) => route.fulfill({ json: { items: [], revision: 0 } }))
@@ -277,6 +306,67 @@ test.describe('Time tracking', () => {
     await expect(page.getByRole('button', { name: /^Return / })).toBeVisible()
     expect(state.entries[0]?.status).toBe('locked')
     expect(new Set(state.idempotencyKeys).size).toBe(state.idempotencyKeys.length)
+  })
+
+  test('keeps a time entry being added across an ended session for the same account only', async ({ page }) => {
+    await mockTimeTracking(page, { accessToken: createJwtShapedAccessToken('member-a', 'first') })
+    await page.route('**/api/auth/sso/discovery?*', (route) => route.fulfill({ json: { loginMode: 'password-or-sso', ssoRequired: false } }))
+    let signInSubject = 'member-a'
+    await page.route('**/api/auth/login', (route) => route.fulfill({
+      json: { accessToken: createJwtShapedAccessToken(signInSubject, 'second'), expiresAt: Date.now() + 3600000, refreshToken: 'refresh-second', tokenType: 'Bearer' },
+    }))
+    // The refresh token is no longer accepted, so the session ends while the member is adding time.
+    await page.route('**/api/auth/refresh', (route) => route.fulfill({ status: 401, json: { code: 'InvalidRefreshToken', message: 'Sign in again.' } }))
+    /** Lets the next time entry save fail as a request from an ended session. */
+    const rejectNextSave = () => page.route((url) => url.pathname === '/api/teams/core-team/time-entries', (route) =>
+      route.request().method() === 'POST'
+        ? route.fulfill({ status: 401, json: { code: 'Unauthorized', message: 'Unauthorized' } })
+        : route.fallback(), { times: 1 })
+    /** Signs in again from the login page the reload led to. */
+    const signInAgain = async () => {
+      await expect(page).toHaveURL(/returnTo=/u)
+      await page.getByLabel('Email address').fill(`${signInSubject}@example.com`)
+      await page.getByRole('button', { name: 'Continue', exact: true }).click()
+      await page.getByLabel('Password', { exact: true }).fill('Member123!')
+      await page.getByRole('button', { name: 'Log in', exact: true }).click()
+      await expect(page).toHaveURL('/teams/core-team/timesheet')
+    }
+
+    await page.goto('/teams/core-team/timesheet')
+    await page.getByRole('button', { name: 'Add manually' }).click()
+    const form = page.getByRole('form', { name: 'Add time' })
+    await form.getByLabel('Task').selectOption({ label: 'Reduce onboarding friction' })
+    await form.getByLabel('Start').fill('13:15')
+    await form.getByLabel('End', { exact: true }).fill('14:45')
+    await form.getByLabel('Note').fill('Usability interviews')
+    // Moving the start date last also moves the end date, which must be kept as shown.
+    await form.getByLabel('Date', { exact: true }).fill('2026-11-11')
+    await expect(form.getByLabel('End date')).toHaveValue('2026-11-11')
+    await rejectNextSave()
+    await form.getByRole('button', { name: 'Add' }).click()
+    await expect(form.getByRole('alert')).toBeVisible()
+
+    await page.reload()
+    await signInAgain()
+    await expect(form.getByText('Restored what you entered before your session ended. Check it and save.')).toBeVisible()
+    await expect(form.getByLabel('Task')).toHaveValue('onboarding')
+    await expect(form.getByLabel('Date', { exact: true })).toHaveValue('2026-11-11')
+    await expect(form.getByLabel('End date')).toHaveValue('2026-11-11')
+    await expect(form.getByLabel('Start')).toHaveValue('13:15')
+    await expect(form.getByLabel('End', { exact: true })).toHaveValue('14:45')
+    await expect(form.getByLabel('Note')).toHaveValue('Usability interviews')
+
+    // The same input, kept again, must not reach another account that signs in to this tab.
+    await rejectNextSave()
+    await form.getByRole('button', { name: 'Add' }).click()
+    await expect(form.getByRole('alert')).toBeVisible()
+    await page.evaluate(() => window.localStorage.removeItem('mukuroji.auth'))
+    await page.evaluate(() => window.sessionStorage.removeItem('mukuroji.auth'))
+    signInSubject = 'member-b'
+    await page.reload()
+    await signInAgain()
+    await expect(page.getByRole('button', { name: 'Add manually' })).toBeVisible()
+    await expect(form).toHaveCount(0)
   })
 
   test('tells a member that only managers approve time', async ({ page }) => {

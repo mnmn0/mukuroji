@@ -68,6 +68,7 @@ export type SettingsPanelId =
   | 'work-item-configuration'
   | 'work-calendar'
   | 'work-item-key-prefix'
+  | 'team-automation'
   | 'agent-settings'
 
 /**

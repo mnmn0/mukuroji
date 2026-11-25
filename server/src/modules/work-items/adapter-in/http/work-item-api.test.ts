@@ -17,6 +17,7 @@ const {
 import {
   createCanonicalPublicWorkItemService,
 } from '../../../../api/api-router'
+import { createCanonicalConnectorWorkItemGateway } from '../../../../api/routes/public-api-routes'
 import type {
   CollaborationClient,
 } from '../../../collaboration/collaboration'
@@ -903,6 +904,94 @@ test('rejects Public Work Item deletion while an incident schedule dependency ex
     status: 409,
   })
   expect(calls.issueDeletes).toEqual([])
+})
+
+test('refuses calendar dates longer than the planning horizon without writing them', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailSchedule: createDefaultUnscheduledWorkItemSchedule(),
+  })
+  setTestAppDependencies(createInMemoryDeveloperPlatformAdapters())
+  const gateway = createCanonicalConnectorWorkItemGateway()
+  const workspaceId = 'user#demo@example.com'
+  const refused = await runWithTestAppDependencies(async () => {
+    const current = await gateway.get(workspaceId, 'core-team', 'onboarding-friction')
+    return gateway.applyExternal({
+      workspaceId,
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      actorUserId: 'demo@example.com',
+      expectedRevision: current.revision,
+      // An event over the planning horizon is dates the Work Item cannot take, not a failure.
+      patch: { schedule: { startDate: '2026-06-18', endDate: '2200-06-18' } },
+      operationId: 'calendar-move-over-horizon',
+    })
+  })
+
+  expect(refused).toMatchObject({ kind: 'rejected', reason: 'calendar-dates-invalid' })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('refuses calendar dates for a Work Item with schedule dependencies without writing them', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Predecessor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  setTestAppDependencies({ ...createInMemoryDeveloperPlatformAdapters(), planning })
+  const gateway = createCanonicalConnectorWorkItemGateway()
+  const workspaceId = 'user#demo@example.com'
+  const move = async (operationId: string) => {
+    const current = await gateway.get(workspaceId, 'core-team', 'onboarding-friction')
+    return gateway.applyExternal({
+      workspaceId,
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      actorUserId: 'demo@example.com',
+      expectedRevision: current.revision,
+      patch: { schedule: { startDate: '2026-06-25', endDate: '2026-06-25' } },
+      operationId,
+    })
+  }
+  const applied = await runWithTestAppDependencies(() => move('calendar-move-without-dependency'))
+
+  expect(applied).toMatchObject({ kind: 'applied' })
+  expect(calls.issueUpdates).toHaveLength(1)
+
+  await planning.createWorkItemDependency('user#demo@example.com', {
+    id: 'calendar-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  const refused = await runWithTestAppDependencies(() => move('calendar-move-with-dependency'))
+
+  expect(refused).toMatchObject({ kind: 'rejected', reason: 'schedule-dependency' })
+  expect(calls.issueUpdates).toHaveLength(1)
 })
 
 /** API key that can delete Work Items in the deletion test Workspace. */

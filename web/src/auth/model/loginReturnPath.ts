@@ -44,6 +44,8 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
       [
         '/dashboard',
         '/browse',
+        // Unsaved Document edits kept across an ended session come back on the Document itself.
+        '/documents',
         '/home',
         '/focus',
         '/my-tasks',
@@ -51,6 +53,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
         '/workload',
         '/inbox',
         '/requests',
+        '/my-requests',
         '/search',
         '/planning',
         '/reports',

@@ -1,3 +1,4 @@
+import { listDelegatedManagementScopes } from './team-delegated-management'
 import {
   type EnterprisePermissionId,
   type EnterpriseRoutePermissionRule,
@@ -50,11 +51,12 @@ import {
   type EnterpriseRequestAccessInput,
   type EnterpriseTeamAccess,
   getVerifiedEnterpriseAuthenticationMethods,
-  hasUnqualifiedEnterpriseProjectScope,
+  hasDirectoryDependentEnterpriseScope,
   isEnterpriseSsoConfigured,
   isEnterpriseExternalMember,
   normalizeEnterpriseEmailDomain,
-  qualifyEnterpriseProjectScopes,
+  readEnterpriseScopeDirectory,
+  resolveEnterpriseDirectoryScopes,
   readCognitoAuthenticationMethods,
   readStableEnterpriseServiceAccountSnapshot,
   requireEnterpriseCognitoSsoAppClientConfiguration,
@@ -403,6 +405,34 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/notification-reminders',
     permission: 'teams.manage',
   },
+  // Slack destinations (#399): Team channels belong to Team managers, Project channels to Project
+  // managers; the routes then check the caller's role on that Team or Project.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/notification-channel',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/notification-channel*',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel*',
+    permission: 'projects.manage',
+  },
+  // The caller's own Slack destination changes no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/notification-preferences/slack-destination*',
+    permission: 'workspace.read',
+  },
   {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
@@ -475,6 +505,16 @@ const enterpriseRoutePermissionRules = [
     method: '*',
     pathPattern: '/api/teams/:teamId/projects/:projectId/files*',
     permission: 'files.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/deliverables',
+    permission: 'files.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/approvals*',
+    permission: 'files.approve',
   },
   {
     method: '*',
@@ -758,6 +798,10 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/projects/quick-access',
     permission: 'projects.read',
   },
+  // Replacing the OrgUnit structure decides which Teams an OrgUnit role reaches, so it is
+  // Workspace administration and never reachable through an OrgUnit or Team scoped role.
+  { method: 'PUT', pathPattern: '/api/org-structure', permission: 'workspace.manage' },
+  { method: 'GET', pathPattern: '/api/org-structure', permission: 'workspace.read' },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
   // Workload and personal time across Teams: each Team is then checked like its Team route, so a
@@ -844,6 +888,13 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'GET',
     pathPattern: '/api/ai-assistance*',
+    permission: 'workspace.read',
+  },
+  // Answering a question about one's own request is self-service; the route still proves the
+  // member sent the request.
+  {
+    method: 'POST',
+    pathPattern: '/api/my-requests/:submissionId/replies',
     permission: 'workspace.read',
   },
   { method: 'GET', pathPattern: '/api/*', permission: 'workspace.read' },
@@ -1044,20 +1095,20 @@ export async function authenticateWorkspacePrincipal(
     directoryGroupMemberships,
   } = directoryPrincipal
   const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+    hasDirectoryDependentEnterpriseScope(compatibleRoleAssignments) ||
+    hasDirectoryDependentEnterpriseScope(compatibleGroupMappings)
   const enterpriseDirectory = needsProjectScopeQualification
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? await readEnterpriseScopeDirectory(
+        workspaceDependencies.projectDirectory,
         principal.directoryId,
-        'ja',
-        true,
+        [...compatibleRoleAssignments, ...compatibleGroupMappings],
       )
     : undefined
   const qualifiedRoleAssignments = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleRoleAssignments, enterpriseDirectory)
     : compatibleRoleAssignments
   const qualifiedGroupMappings = enterpriseDirectory
-    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    ? resolveEnterpriseDirectoryScopes(compatibleGroupMappings, enterpriseDirectory)
     : compatibleGroupMappings
   const requiredPermissions = context
     ? resolveRoutePermissions(
@@ -1237,6 +1288,9 @@ export async function authenticateWorkspacePrincipal(
       : { enterprisePermissions: requestAccess.permissions }),
     enterpriseIdentityControlRevision:
       snapshot.controlRevision,
+    ...(enterpriseDirectory?.orgStructure?.revision === undefined
+      ? {}
+      : { enterpriseOrgStructureRevision: enterpriseDirectory.orgStructure.revision }),
     enterpriseAuthorizationResource: requestAccess.resource,
     enterpriseGrantedRoutePermission: requestAccess.grantedRoutePermission,
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
@@ -1335,20 +1389,20 @@ async function authenticateEnterpriseServiceAccount(
         },
       ]
       const needsProjectScopeQualification =
-        hasUnqualifiedEnterpriseProjectScope(serviceAccountAssignments) ||
-        hasUnqualifiedEnterpriseProjectScope(snapshot.groupMappings)
+        hasDirectoryDependentEnterpriseScope(serviceAccountAssignments) ||
+        hasDirectoryDependentEnterpriseScope(snapshot.groupMappings)
       const enterpriseDirectory = needsProjectScopeQualification
-        ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        ? await readEnterpriseScopeDirectory(
+            workspaceDependencies.projectDirectory,
             workspaceId,
-            'ja',
-            true,
+            [...serviceAccountAssignments, ...snapshot.groupMappings],
           )
         : undefined
       const qualifiedServiceAccountAssignments = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(serviceAccountAssignments, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(serviceAccountAssignments, enterpriseDirectory)
         : serviceAccountAssignments
       const qualifiedGroupMappings = enterpriseDirectory
-        ? qualifyEnterpriseProjectScopes(snapshot.groupMappings, enterpriseDirectory)
+        ? resolveEnterpriseDirectoryScopes(snapshot.groupMappings, enterpriseDirectory)
         : snapshot.groupMappings
       const enterpriseAuthorizationEvaluation = {
         principal: serviceAccountPrincipal,
@@ -2080,6 +2134,53 @@ export async function requireRequestAdministration(c: Context) {
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
   requireWorkspaceAdministration(principal)
   return principal
+}
+
+/**
+ * Reports which Request form scopes the caller can change. Enterprise role holders are judged
+ * by the Workspace `requests.manage` grant, because the read route admits `requests.read`.
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The Workspace flag and the Teams whose forms the caller can change.
+ * @throws RequestIntakeError when the bearer token is missing.
+ */
+export async function readRequestFormManagementScopes(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  return listDelegatedManagementScopes(principal, 'requests.manage')
+}
+
+/**
+ * Authenticates a Request form manager: a Workspace administrator, or a Team manager who
+ * manages the forms scoped to their own Teams (ADR 0087).
+ *
+ * @param c - Current route context carrying the bearer token.
+ * @returns The principal and the form scopes it manages.
+ * @throws RequestIntakeError when the caller manages no form scope.
+ */
+export async function requireRequestFormManagement(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  const scopes = await listDelegatedManagementScopes(principal)
+  if (!scopes.workspace && scopes.teamIds.length === 0) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Workspace owner or admin access, or Team manager access, is required.',
+    )
+  }
+  return {
+    directoryId: principal.directoryId,
+    userKey: principal.userKey,
+    workspace: scopes.workspace,
+    teamIds: scopes.teamIds,
+  }
 }
 
 /**

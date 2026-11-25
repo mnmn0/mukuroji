@@ -16,6 +16,7 @@ export {
   undoBulkOperation,
 } from './application/bulk-operation-service'
 export { orderBulkArchiveItems } from './application/bulk-archive-order'
+export { deleteUnusedAutomationTemplate } from './application/template-deletion'
 export {
   type AutomationActionExecutionContext,
   type AutomationActionExecutor,
@@ -23,6 +24,8 @@ export {
   type AutomationExecutionClaimToken,
   type AutomationExecutionDefinitionGuard,
   type AutomationExecutionDefinitionReader,
+  type AutomationExecutionFailureKind,
+  type AutomationExecutionFailureNotifier,
   type AutomationExecutionPage,
   type AutomationExecutionPort,
   type AutomationExecutionQuery,
@@ -37,13 +40,21 @@ export {
   type AutomationInboundWebhookSecretCleanup,
   type AutomationInboundWebhookSecretReference,
   type AutomationInboundWebhookSecretStore,
+  type AutomationPinnedActionsGuard,
+  type AutomationDueWorkItem,
+  type AutomationDueWorkItemSource,
   type AutomationRecurringSchedulePort,
   type AutomationRepository,
+  type AutomationWorkCalendarSource,
   type AutomationRuleTemplatePort,
   type BulkItemApplyResult,
   type BulkItemPreviewResult,
   type BulkOperationAdapter,
 } from './application/ports'
+export {
+  createDynamoDbAutomationDueWorkItemSource,
+  type DynamoDbAutomationDueWorkItemSourceOptions,
+} from './adapter-out/dynamodb/due-work-item-source'
 export {
   SecretsManagerAutomationInboundWebhookSecretStore,
 } from './adapter-out/secrets-manager/inbound-webhook-secret-store'
@@ -62,14 +73,17 @@ export {
   type BulkReassignMemberWorkItem,
 } from './domain/bulk-reassign-member'
 export {
+  assertTemplateTargetWithinOwnerTeam,
   validateApplyAutomationTemplateInput,
   listProjectTemplateWbsNumbers,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
+  validateDeleteAutomationDefinitionInput,
   validateUpdateAutomationInboundWebhookEndpointInput,
 } from './domain/management-validation'
+export { dryRunAutomationRule } from './domain/rule-dry-run'
 export {
   createAutomationActionId,
   createAutomationCommentId,
@@ -81,15 +95,21 @@ export {
   getRecurringOccurrences,
   selectCatchUpOccurrences,
   validateRecurringSchedule,
+  type RecurringWorkCalendar,
 } from './domain/recurring-schedule'
 export {
   evaluateAutomationCondition,
+  matchesAutomationRuleOwnerTeam,
   matchesAutomationTrigger,
   type AutomationConditionContext,
   type AutomationEvent,
   type AutomationEventChange,
 } from './domain/rule-evaluation'
-export { validateCreateAutomationRuleInput } from './domain/rule-validation'
+export {
+  assertAutomationRuleTeamScope,
+  teamScopeViolation,
+  validateCreateAutomationRuleInput,
+} from './domain/rule-validation'
 export { createPendingAutomationExecution } from './application/pending-execution'
 export { createAutomationScheduleShard } from './application/schedule-shard'
 export {

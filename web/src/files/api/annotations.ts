@@ -1,6 +1,8 @@
 import type { AnnotationAnchor, FileAnnotation } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { FileResourceScope } from '../model/fileScope'
 import { FilesApiError } from './errors'
+import { createFileOwnerPath } from './fileScopePath'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
 /**
@@ -111,6 +113,84 @@ export function createProjectFileAnnotation(
       method: 'POST',
     },
   )
+}
+
+/**
+ * Resolves an annotation, or reopens a resolved one.
+ *
+ * @param scope - Work Item or Project that owns the file.
+ * @param fileId - Annotated file.
+ * @param versionId - Annotated version.
+ * @param annotationId - Annotation to change.
+ * @param resolved - `true` to resolve, `false` to reopen.
+ * @param accessToken - Files API access token.
+ * @param context - Mutation idempotency context.
+ * @returns The changed annotation.
+ */
+export function setFileAnnotationResolution(
+  scope: FileResourceScope,
+  fileId: string,
+  versionId: string,
+  annotationId: string,
+  resolved: boolean,
+  accessToken: string,
+  context: MutationRequestContext,
+) {
+  return requestJson<{ annotation: FileAnnotation }>(
+    `${createAnnotationPath(scope, fileId, versionId, annotationId)}/${resolved ? 'resolve' : 'reopen'}`,
+    accessToken,
+    {
+      headers: createMutationHeaders(context),
+      method: 'POST',
+    },
+  )
+}
+
+/**
+ * Deletes an annotation the current user wrote.
+ *
+ * @param scope - Work Item or Project that owns the file.
+ * @param fileId - Annotated file.
+ * @param versionId - Annotated version.
+ * @param annotationId - Annotation to delete.
+ * @param accessToken - Files API access token.
+ * @param context - Mutation idempotency context.
+ * @returns A promise that settles when the annotation is deleted.
+ */
+export async function deleteFileAnnotation(
+  scope: FileResourceScope,
+  fileId: string,
+  versionId: string,
+  annotationId: string,
+  accessToken: string,
+  context: MutationRequestContext,
+) {
+  await requestJson<unknown>(
+    createAnnotationPath(scope, fileId, versionId, annotationId),
+    accessToken,
+    {
+      headers: createMutationHeaders(context),
+      method: 'DELETE',
+    },
+  )
+}
+
+/**
+ * Builds the API path of one annotation.
+ *
+ * @param scope - Work Item or Project that owns the file.
+ * @param fileId - Annotated file.
+ * @param versionId - Annotated version.
+ * @param annotationId - Annotation ID.
+ * @returns The encoded annotation path.
+ */
+function createAnnotationPath(
+  scope: FileResourceScope,
+  fileId: string,
+  versionId: string,
+  annotationId: string,
+) {
+  return `${createFileOwnerPath(scope)}/files/${encodeURIComponent(fileId)}/versions/${encodeURIComponent(versionId)}/annotations/${encodeURIComponent(annotationId)}`
 }
 
 function createWorkItemPath(teamId: string, issueId: string) {

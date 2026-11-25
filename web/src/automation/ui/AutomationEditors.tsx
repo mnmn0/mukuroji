@@ -1,6 +1,9 @@
 import {
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  AUTOMATION_APPROVAL_DECISIONS,
+  RECURRING_MAX_BUSINESS_DAY,
+  RECURRING_MONTHLY_DAYS,
   WORK_ITEM_RELATION_EVENT_TYPES,
   type AutomationInboundWebhookEndpoint,
   type AutomationProjectTemplatePayload,
@@ -17,6 +20,8 @@ import {
   type UpdateAutomationTemplateInput,
   type WorkflowDefinition,
   type WorkItemConfiguration,
+  type AutomationApprovalDecision,
+  type RecurringMonthlyDay,
   type WorkItemRelationEventType,
 } from '@mukuroji/contracts'
 import { useId, useMemo, useState, type FormEvent } from 'react'
@@ -27,6 +32,7 @@ import {
   automationTriggerUsesConfiguration,
   createDefaultAutomationWorkflowTemplatePayload,
   createAutomationScheduleTrigger,
+  readAutomationDueDaysBefore,
   createAutomationTrigger,
   createAutomationTemplateEditorInput,
   createAutomationConditions,
@@ -64,6 +70,12 @@ import {
   isRecurringCadenceConfigurationValid,
   weekdayFromLocalDate,
 } from '../model/recurringSchedule'
+import {
+  applyWorkItemTemplateFormValue,
+  createInitialWorkItemTemplateJson,
+  readWorkItemTemplateFormValues,
+  type WorkItemTemplateFormValues,
+} from '../model/workItemTemplateForm'
 
 const automationTriggerTypes = [
   'status',
@@ -73,6 +85,7 @@ const automationTriggerTypes = [
   'custom-field',
   'work-item-type',
   'comment',
+  'approval',
   'relation',
   'form',
   'webhook',
@@ -89,6 +102,9 @@ const automationActionTypes = [
   'approval',
   'webhook',
 ] as const
+
+/** Triggers that use Workspace endpoints and secrets, which Team rules cannot use (ADR 0087). */
+const teamExcludedTriggerTypes: ReadonlySet<AutomationTriggerType> = new Set(['form', 'webhook'])
 
 const conditionOperators = [
   'equals',
@@ -107,6 +123,18 @@ const projectTemplateTones = ['blue', 'purple', 'green', 'yellow'] as const
 const recurringCadences = ['daily', 'weekly', 'monthly'] as const
 const catchUpPolicies = ['skip', 'latest', 'all'] as const
 const recurringWeekdays = [0, 1, 2, 3, 4, 5, 6] as const
+
+/** Monthly day rules a schedule rule can use; business days are only for Recurring Work. */
+const ruleMonthlyDays = ['day-of-month', 'last-day'] as const satisfies readonly RecurringMonthlyDay[]
+
+/** Monthly day rule a schedule rule can use. */
+type RuleMonthlyDay = (typeof ruleMonthlyDays)[number]
+
+const monthlyDayLabelKeys: Record<RecurringMonthlyDay, MessageKey> = {
+  'day-of-month': 'automation.recurring.monthlyDay.dayOfMonth',
+  'last-day': 'automation.recurring.monthlyDay.lastDay',
+  'business-day': 'automation.recurring.monthlyDay.businessDay',
+}
 
 /** Automation rule editor で選択できる trigger type です。 */
 type AutomationTriggerType = (typeof automationTriggerTypes)[number]
@@ -131,10 +159,17 @@ const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
+  approval: 'automation.trigger.approval',
   relation: 'automation.trigger.relationChange',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
   schedule: 'automation.trigger.schedule',
+}
+
+const approvalDecisionLabelKeys: Record<AutomationApprovalDecision, MessageKey> = {
+  approved: 'automation.approvalDecision.approved',
+  rejected: 'automation.approvalDecision.rejected',
+  'changes-requested': 'automation.approvalDecision.changesRequested',
 }
 
 const relationEventLabelKeys: Record<WorkItemRelationEventType, MessageKey> = {
@@ -256,6 +291,11 @@ export type AutomationRuleEditorProps = {
   teams?: RecurringTeamOption[]
   /** Rule 作成 callback です。 */
   onCreate: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
+  /**
+   * Whether the rule is owned by a Team, which hides the form and webhook triggers and the
+   * outbound webhook action that the server rejects for Team rules (ADR 0087).
+   */
+  teamScoped?: boolean
 }
 
 /** Props of the baseline-slip day field. */
@@ -318,10 +358,17 @@ export function AutomationRuleEditor({
   isSaving = false,
   locale,
   onCreate,
+  teamScoped = false,
   teams = [],
   webhookEndpoints = [],
 }: AutomationRuleEditorProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const triggerTypes = teamScoped
+    ? automationTriggerTypes.filter((type) => !teamExcludedTriggerTypes.has(type))
+    : automationTriggerTypes
+  const actionTypes = teamScoped
+    ? automationActionTypes.filter((type) => type !== 'webhook')
+    : automationActionTypes
   const activeWebhookEndpoints = useMemo(
     () => webhookEndpoints.filter((endpoint) => endpoint.status === 'active'),
     [webhookEndpoints],
@@ -359,8 +406,13 @@ export function AutomationRuleEditor({
   const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState(
     initialSchedule?.dayOfMonth ?? dayOfMonthFromLocalDate(initialScheduleStartDate),
   )
+  const [scheduleMonthlyDay, setScheduleMonthlyDay] = useState<RuleMonthlyDay>(
+    initialSchedule?.monthlyDay === 'last-day' ? 'last-day' : 'day-of-month',
+  )
+  const [scheduleDueDaysBefore, setScheduleDueDaysBefore] = useState('')
   const [actionType, setActionType] = useState<AutomationActionType>('move')
   const [actionConfiguration, setActionConfiguration] = useState('')
+  const [notifyAssignee, setNotifyAssignee] = useState(false)
   const [conditionField, setConditionField] = useState('')
   const [conditionOperator, setConditionOperator] = useState<ConditionOperator>('equals')
   const [conditionValue, setConditionValue] = useState('')
@@ -393,7 +445,11 @@ export function AutomationRuleEditor({
     : triggerType === 'work-item-type'
       ? Boolean(resolvedTriggerTeamId.trim()) && isWorkItemTypeTriggerValid
       : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration)
-  const isActionValid = isAutomationActionConfigurationValid(actionType, actionConfiguration)
+  const notifiesAssigneeOnly = actionType === 'notify' && notifyAssignee &&
+    !actionConfiguration.trim()
+  const isActionValid = notifiesAssigneeOnly ||
+    isAutomationActionConfigurationValid(actionType, actionConfiguration)
+  const dueDaysBefore = readAutomationDueDaysBefore(scheduleDueDaysBefore)
   const isScheduleTimeValid = isAutomationScheduleConfigurationValid(
     scheduleTimeZone,
     scheduleLocalTime,
@@ -402,9 +458,10 @@ export function AutomationRuleEditor({
     scheduleFrequency,
     scheduleWeekday,
     scheduleDayOfMonth,
+    scheduleMonthlyDay,
   )
   const isScheduleValid = triggerType !== 'schedule' || (
-    isScheduleTimeValid && isScheduleCadenceValid
+    isScheduleTimeValid && isScheduleCadenceValid && dueDaysBefore !== undefined
   )
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -416,7 +473,7 @@ export function AutomationRuleEditor({
 
     try {
       await onCreate({
-        actions: [createAutomationAction(actionType, actionConfiguration, trimmedName)],
+        actions: [createAutomationAction(actionType, actionConfiguration, trimmedName, notifyAssignee)],
         conditions: createAutomationConditions(
           trimmedConditionField,
           conditionOperator,
@@ -441,9 +498,10 @@ export function AutomationRuleEditor({
               dayOfWeek: scheduleWeekday,
               frequency: scheduleFrequency,
               localTime: scheduleLocalTime,
+              monthlyDay: scheduleMonthlyDay,
               startDate: currentDateInTimeZone(scheduleTimeZone),
               timeZone: scheduleTimeZone,
-            })
+            }, dueDaysBefore ?? undefined)
           : createAutomationTrigger(
               triggerType,
               resolvedTriggerConfiguration,
@@ -483,7 +541,7 @@ export function AutomationRuleEditor({
       <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
         <SelectField
           label={t('automation.rule.trigger')}
-          options={automationTriggerTypes.map((value) => ({ label: t(triggerLabelKeys[value]), value }))}
+          options={triggerTypes.map((value) => ({ label: t(triggerLabelKeys[value]), value }))}
           testId="automation-rule-trigger"
           value={triggerType}
           onChange={(value) => {
@@ -499,12 +557,13 @@ export function AutomationRuleEditor({
         />
         <SelectField
           label={t('automation.rule.action')}
-          options={automationActionTypes.map((value) => ({ label: t(actionLabelKeys[value]), value }))}
+          options={actionTypes.map((value) => ({ label: t(actionLabelKeys[value]), value }))}
           testId="automation-rule-action"
           value={actionType}
           onChange={(value) => {
             setActionType(readActionType(value))
             setActionConfiguration('')
+            setNotifyAssignee(false)
           }}
         />
       </div>
@@ -599,6 +658,26 @@ export function AutomationRuleEditor({
               {t('automation.rule.relationEventHint')}
             </span>
           </label>
+        ) : triggerType === 'approval' ? (
+          <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('automation.rule.approvalDecision')}
+            <select
+              className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+              data-testid="automation-rule-approval-decision"
+              value={triggerConfiguration}
+              onChange={(event) => setTriggerConfiguration(event.target.value)}
+            >
+              <option value="">{t('automation.rule.approvalDecisionAny')}</option>
+              {AUTOMATION_APPROVAL_DECISIONS.map((decision) => (
+                <option key={decision} value={decision}>
+                  {t(approvalDecisionLabelKeys[decision])}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+              {t('automation.rule.approvalDecisionHint')}
+            </span>
+          </label>
         ) : triggerType === 'webhook' ? (
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.webhookEndpoint')}
@@ -648,12 +727,23 @@ export function AutomationRuleEditor({
           <input
             className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
             data-testid="automation-rule-action-configuration"
-            required
+            required={!(actionType === 'notify' && notifyAssignee)}
             type={actionType === 'webhook' ? 'url' : 'text'}
             value={actionConfiguration}
             onChange={(event) => setActionConfiguration(event.target.value)}
           />
         </label>
+        {actionType === 'notify' ? (
+          <label className="flex items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            <input
+              checked={notifyAssignee}
+              data-testid="automation-rule-notify-assignee"
+              type="checkbox"
+              onChange={(event) => setNotifyAssignee(event.target.checked)}
+            />
+            {t('automation.rule.notifyAssignee')}
+          </label>
+        ) : null}
       </div>
       {triggerType === 'schedule' ? (
         <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-3">
@@ -704,6 +794,15 @@ export function AutomationRuleEditor({
               />
             ) : null}
             {scheduleFrequency === 'monthly' ? (
+              <SelectField
+                label={t('automation.recurring.monthlyDay')}
+                options={ruleMonthlyDays.map((value) => ({ label: t(monthlyDayLabelKeys[value]), value }))}
+                testId="automation-rule-schedule-monthly-day"
+                value={scheduleMonthlyDay}
+                onChange={(value) => setScheduleMonthlyDay(readRuleMonthlyDay(value))}
+              />
+            ) : null}
+            {scheduleFrequency === 'monthly' && scheduleMonthlyDay !== 'last-day' ? (
               <NumberField
                 isInvalid={!isScheduleCadenceValid}
                 label={t('automation.recurring.dayOfMonth')}
@@ -721,6 +820,21 @@ export function AutomationRuleEditor({
               value={scheduleCatchUpPolicy}
               onChange={(value) => setScheduleCatchUpPolicy(readCatchUpPolicy(value))}
             />
+            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('automation.rule.dueDaysBefore')}
+              <input
+                aria-invalid={dueDaysBefore === undefined}
+                className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                data-testid="automation-rule-schedule-due-days-before"
+                inputMode="numeric"
+                placeholder={t('automation.rule.dueDaysBeforePlaceholder')}
+                value={scheduleDueDaysBefore}
+                onChange={(event) => setScheduleDueDaysBefore(event.target.value)}
+              />
+              <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+                {t('automation.rule.dueDaysBeforeHint')}
+              </span>
+            </label>
           </div>
           {!isScheduleTimeValid ? (
             <p className="text-xs font-semibold text-fg-red-700" data-testid="automation-rule-schedule-error" role="alert">
@@ -819,7 +933,7 @@ export function AutomationTemplateEditor({
   const payloadMessageId = useId()
   const [name, setName] = useState('')
   const [kind, setKind] = useState<TemplateKind>(initialKind)
-  const [payloadJson, setPayloadJson] = useState('{}')
+  const [payloadJson, setPayloadJson] = useState(createInitialWorkItemTemplateJson)
   const [projectPayload, setProjectPayload] = useState<AutomationProjectTemplatePayload>({
     tone: 'blue',
   })
@@ -861,7 +975,7 @@ export function AutomationTemplateEditor({
       () => {
         setKind(initialKind)
         setName('')
-        setPayloadJson('{}')
+        setPayloadJson(createInitialWorkItemTemplateJson())
         setProjectPayload({ tone: 'blue' })
         outlines.reset()
         setWorkflowPayload(createDefaultAutomationWorkflowTemplatePayload(locale))
@@ -1088,21 +1202,86 @@ function WorkItemTemplatePayloadField({
   value: string
 }) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const formValues = readWorkItemTemplateFormValues(value)
+  const textField = (
+    field: Exclude<keyof WorkItemTemplateFormValues, 'priority' | 'description'>,
+    labelKey: MessageKey,
+  ) => (
+    <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+      {t(labelKey)}
+      <input
+        className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+        data-testid={`automation-template-field-${field}`}
+        disabled={!formValues}
+        required={field === 'title'}
+        value={formValues?.[field] ?? ''}
+        onChange={(event) => onChange(applyWorkItemTemplateFormValue(value, field, event.target.value))}
+      />
+    </label>
+  )
   return (
     <>
-      <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-        {t('automation.template.payload')}
-        <textarea
-          aria-describedby={messageId}
-          aria-invalid={error ? true : undefined}
-          className="workbench-input min-h-40 resize-y px-3 py-2 font-mono text-sm text-[var(--workbench-text)]"
-          data-testid="automation-template-payload"
-          rows={8}
-          spellCheck={false}
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      </label>
+      <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-3">
+        <legend className="px-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('automation.template.workItemFields')}
+        </legend>
+        {textField('title', 'automation.template.field.title')}
+        <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('automation.template.field.description')}
+          <textarea
+            className="workbench-input min-h-20 resize-y px-3 py-2 text-sm text-[var(--workbench-text)]"
+            data-testid="automation-template-field-description"
+            disabled={!formValues}
+            rows={3}
+            value={formValues?.description ?? ''}
+            onChange={(event) => onChange(applyWorkItemTemplateFormValue(value, 'description', event.target.value))}
+          />
+        </label>
+        <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
+          <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('automation.template.field.priority')}
+            <select
+              className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+              data-testid="automation-template-field-priority"
+              disabled={!formValues}
+              value={formValues?.priority ?? ''}
+              onChange={(event) => onChange(applyWorkItemTemplateFormValue(value, 'priority', event.target.value))}
+            >
+              <option value="">{t('automation.template.field.priorityNone')}</option>
+              <option value="high">{t('automation.template.field.priorityHigh')}</option>
+              <option value="medium">{t('automation.template.field.priorityMedium')}</option>
+              <option value="low">{t('automation.template.field.priorityLow')}</option>
+            </select>
+          </label>
+          {textField('assigneeUserId', 'automation.template.field.assignee')}
+          {textField('workItemTypeId', 'automation.template.field.workItemType')}
+          {textField('workflowStatusId', 'automation.template.field.workflowStatus')}
+          {textField('assignedProjectId', 'automation.template.field.project')}
+        </div>
+        {!formValues ? (
+          <p className="text-xs font-semibold text-fg-red-700" role="alert">
+            {t('automation.template.formUnavailable')}
+          </p>
+        ) : null}
+      </fieldset>
+      <details>
+        <summary className="cursor-pointer text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('automation.template.payloadAdvanced')}
+        </summary>
+        <label className="mt-2 grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('automation.template.payload')}
+          <textarea
+            aria-describedby={messageId}
+            aria-invalid={error ? true : undefined}
+            className="workbench-input min-h-40 resize-y px-3 py-2 font-mono text-sm text-[var(--workbench-text)]"
+            data-testid="automation-template-payload"
+            rows={8}
+            spellCheck={false}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        </label>
+      </details>
       <p
         className={`text-xs font-medium leading-5 ${error ? 'text-fg-red-700' : 'text-[var(--workbench-muted)]'}`}
         id={messageId}
@@ -1478,11 +1657,13 @@ export function RecurringWorkEditor({
     readRecurringWeekday(weekdayFromLocalDate(initialStartDate)),
   )
   const [dayOfMonth, setDayOfMonth] = useState(dayOfMonthFromLocalDate(initialStartDate))
+  const [monthlyDay, setMonthlyDay] = useState<RecurringMonthlyDay>('day-of-month')
   const isScheduleTimeValid = isAutomationScheduleConfigurationValid(timeZone, localTime)
   const isScheduleCadenceValid = isRecurringCadenceConfigurationValid(
     cadence,
     weekday,
     dayOfMonth,
+    monthlyDay,
   )
   const isScheduleValid = isScheduleTimeValid && isScheduleCadenceValid
 
@@ -1510,6 +1691,7 @@ export function RecurringWorkEditor({
           dayOfWeek: weekday,
           frequency: cadence,
           localTime,
+          monthlyDay,
           startDate,
           timeZone: timeZone.trim(),
         }),
@@ -1600,15 +1782,31 @@ export function RecurringWorkEditor({
           />
         ) : null}
         {cadence === 'monthly' ? (
+          <SelectField
+            label={t('automation.recurring.monthlyDay')}
+            options={RECURRING_MONTHLY_DAYS.map((value) => ({ label: t(monthlyDayLabelKeys[value]), value }))}
+            testId="automation-recurring-monthly-day"
+            value={monthlyDay}
+            onChange={(value) => setMonthlyDay(readRecurringMonthlyDay(value))}
+          />
+        ) : null}
+        {cadence === 'monthly' && monthlyDay !== 'last-day' ? (
           <NumberField
             isInvalid={!isScheduleCadenceValid}
-            label={t('automation.recurring.dayOfMonth')}
-            max={31}
+            label={t(monthlyDay === 'business-day'
+              ? 'automation.recurring.businessDay'
+              : 'automation.recurring.dayOfMonth')}
+            max={monthlyDay === 'business-day' ? RECURRING_MAX_BUSINESS_DAY : 31}
             min={1}
             testId="automation-recurring-day-of-month"
             value={dayOfMonth}
             onChange={setDayOfMonth}
           />
+        ) : null}
+        {cadence === 'monthly' && monthlyDay === 'business-day' ? (
+          <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+            {t('automation.recurring.businessDayHint')}
+          </p>
         ) : null}
         <SelectField
           label={t('automation.recurring.catchUp')}
@@ -1753,6 +1951,26 @@ function readCatchUpPolicy(value: string): CatchUpPolicy {
   return catchUpPolicies.find((candidate) => candidate === value) ?? 'latest'
 }
 
+/**
+ * Reads a monthly day rule chosen in the schedule rule editor.
+ *
+ * @param value - Select value.
+ * @returns The rule, `day-of-month` when unknown.
+ */
+function readRuleMonthlyDay(value: string): RuleMonthlyDay {
+  return ruleMonthlyDays.find((candidate) => candidate === value) ?? 'day-of-month'
+}
+
+/**
+ * Reads a monthly day rule chosen in the Recurring Work editor.
+ *
+ * @param value - Select value.
+ * @returns The rule, `day-of-month` when unknown.
+ */
+function readRecurringMonthlyDay(value: string): RecurringMonthlyDay {
+  return RECURRING_MONTHLY_DAYS.find((candidate) => candidate === value) ?? 'day-of-month'
+}
+
 function readRecurringWeekday(value: number): RecurringWeekday {
   return recurringWeekdays.find((candidate) => candidate === value) ?? 1
 }
@@ -1772,6 +1990,7 @@ function createAutomationAction(
   type: AutomationActionType,
   configuration: string,
   ruleName: string,
+  notifyAssignee = false,
 ): AutomationAction {
   const value = configuration.trim()
 
@@ -1793,6 +2012,7 @@ function createAutomationAction(
     case 'notify':
       return {
         recipientMemberKeys: splitCommaSeparated(value),
+        ...(notifyAssignee ? { notifyAssignee } : {}),
         title: ruleName,
         type,
       }

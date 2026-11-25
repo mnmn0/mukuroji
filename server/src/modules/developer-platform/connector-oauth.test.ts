@@ -38,7 +38,7 @@ function createFetchMock(
   return Object.assign(implementation, { preconnect() {} })
 }
 
-function createProviderOptions(fetcher: typeof fetch): ConfiguredOAuthConnectorOptions {
+function createProviderOptions(fetcher: typeof fetch): ConfiguredOAuthConnectorOptions & Required<Pick<ConfiguredOAuthConnectorOptions, 'resources'>> {
   const resourceBinding = {
     collectionPath: 'issues',
     itemPath: 'issues/{externalId}',

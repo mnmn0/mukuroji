@@ -1,8 +1,13 @@
-import { type EnterpriseRoleAssignment, type EnterpriseRoleId } from '@mukuroji/contracts'
+import {
+  type EnterprisePermissionId,
+  type EnterpriseRoleAssignment,
+  type EnterpriseRoleId,
+} from '@mukuroji/contracts'
 import { expect, test } from 'bun:test'
 import { CognitoServiceError } from '../../modules/authentication'
 import { type ProjectAccessEntry, type ProjectDirectoryResponse } from '../../modules/directory'
 import { InMemoryEnterpriseIdentityClient } from '../../modules/enterprise-identity/enterprise-identity'
+import { createDefaultEnterpriseSecurityPolicy } from '../../modules/enterprise-identity/enterprise-security-view'
 import { type WorkspaceRole } from '../../modules/workspace-access/workspace-access'
 import {
   canMemberViewWorkItemScope,
@@ -43,6 +48,8 @@ type FakeOptions = {
   roleAssignments?: EnterpriseRoleAssignment[]
   /** Whether the member is a system administrator. */
   systemAdmin?: boolean
+  /** Permission ceiling of a configured external access policy; no policy without it. */
+  externalPermissionCeiling?: EnterprisePermissionId[]
 }
 
 /**
@@ -62,6 +69,17 @@ function createDependencies(options: FakeOptions = {}): MemberWorkItemVisibility
       getSnapshot: async (workspaceId) => ({
         ...await identity.getSnapshot(workspaceId),
         roleAssignments: options.roleAssignments ?? [],
+        ...(options.externalPermissionCeiling
+          ? {
+              policy: {
+                ...createDefaultEnterpriseSecurityPolicy(workspaceId),
+                externalAccess: {
+                  ...createDefaultEnterpriseSecurityPolicy(workspaceId).externalAccess,
+                  permissionCeiling: options.externalPermissionCeiling,
+                },
+              },
+            }
+          : {}),
       }),
     },
     projectDirectory: {
@@ -193,6 +211,26 @@ test('rejects a Project that is not active in the owner Team', async () => {
 test('keeps Workspace-wide read roles away from a guest', async () => {
   const options = { roleAssignments: [assignment('workspace:portfolio-viewer')] }
   expect(await check({ teamId: 'core-team', assignedProjectId: 'refero' }, options, 'guest')).toBe(false)
+})
+
+test('applies the external ceiling to an approval permission only where the request boundary does', async () => {
+  const reviewer: Omit<MemberWorkItemVisibilityScope, 'workspaceId'> = {
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    permissions: ['files.read', 'files.approve'],
+  }
+  const legacyViewer = { legacyAccesses: [{ projectId: 'refero', role: 'viewer' as const, teamId: 'core-team' }] }
+  // Without a configured policy a guest's legacy access decides, as at the decision endpoint.
+  expect(await check(reviewer, legacyViewer, 'guest')).toBe(true)
+  // A configured ceiling binds every route, so a guest it does not let approve is not picked.
+  expect(await check(reviewer, { ...legacyViewer, externalPermissionCeiling: ['files.read'] }, 'guest')).toBe(false)
+  expect(await check(
+    reviewer,
+    { ...legacyViewer, externalPermissionCeiling: ['files.read', 'files.approve'] },
+    'guest',
+  )).toBe(true)
+  // Reads stay within the default ceiling either way.
+  expect(await check({ teamId: 'core-team', assignedProjectId: 'refero' }, legacyViewer, 'guest')).toBe(true)
 })
 
 test('lets a system administrator view without any membership', async () => {

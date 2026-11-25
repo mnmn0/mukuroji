@@ -10,6 +10,9 @@ import {
   updateIndirectTimeEntry,
   updateTimeEntry,
 } from '../src/features/time-tracking/api/timeEntries'
+import { clearAuthSession, resetAuthSessionTabAccount, saveAuthSession } from '../src/auth/session'
+import { discardSessionDrafts, registerSessionDraft } from '../src/auth/sessionDrafts'
+import { createTimeEntryFormSessionDraftKey } from '../src/features/time-tracking/model/timeEntryFormSessionDraft'
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
 import { readTimeEntryHistory } from '../src/features/time-tracking/api/timeTrackingValidation'
 import { getActiveTimer, stopTimer } from '../src/features/time-tracking/api/timers'
@@ -123,6 +126,41 @@ function respondWith(body: unknown, status = 200): RecordedRequest[] {
     return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
   }, { preconnect: originalFetch.preconnect })
   return requests
+}
+
+/** In-memory Web Storage used for both localStorage and sessionStorage. */
+class MemoryStorage {
+  /** Stored values by key. */
+  private readonly values = new Map<string, string>()
+
+  /**
+   * Reads one value.
+   *
+   * @param key - Storage key.
+   * @returns The value, or null.
+   */
+  getItem(key: string) {
+    return this.values.get(key) ?? null
+  }
+
+  /**
+   * Writes one value.
+   *
+   * @param key - Storage key.
+   * @param value - Value.
+   */
+  setItem(key: string, value: string) {
+    this.values.set(key, value)
+  }
+
+  /**
+   * Removes one value.
+   *
+   * @param key - Storage key.
+   */
+  removeItem(key: string) {
+    this.values.delete(key)
+  }
 }
 
 describe('time tracking periods', () => {
@@ -265,6 +303,8 @@ describe('time tracking model', () => {
   test('keeps the idempotency key only for failures that may have been applied', () => {
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(0, 'offline', 'NetworkUnavailable'))).toBe('offline')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'conflict', 'TimeEntryRevisionConflict'))).toBe('conflict')
+    expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'overlap', 'TimeBudgetPeriodOverlap'))).toBe('budgetPeriodOverlap')
+    expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'limit', 'TimeBudgetPeriodLimit'))).toBe('budgetPeriodLimit')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'closed', 'TimePeriodClosed'))).toBe('closed')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(403, 'denied'))).toBe('forbidden')
     expect(shouldRetainTimeTrackingMutation(new TimeTrackingApiError(0, 'offline'))).toBe(true)
@@ -530,6 +570,7 @@ describe('time tracking views', () => {
   test('the timesheet lists the week, rejection reasons, and the week-wide submit', () => {
     const html = renderToStaticMarkup(
       <PersonalTimesheet
+        teamId="core-team"
         entries={timeTrackingFixtureEntries}
         formatters={formatters}
         onCreateEntry={noop}
@@ -553,6 +594,94 @@ describe('time tracking views', () => {
     expect(html).toContain('Week total 5:15')
     // Approved entries are no longer editable.
     expect(html.match(/>Edit</gu)).toHaveLength(2)
+  })
+
+  test('the timesheet reopens a form kept when the session ended only in the same Team', () => {
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() })
+    resetAuthSessionTabAccount()
+    const payload = Buffer.from(JSON.stringify({ sub: 'member-a' })).toString('base64url')
+    const session = { accessToken: `header.${payload}.signature`, expiresAt: Date.now() + 60_000, refreshToken: 'refresh', remember: false, tokenType: 'Bearer' }
+    const draftKey = createTimeEntryFormSessionDraftKey('work-item', ['timesheet', 'core-team'])
+    try {
+      saveAuthSession(session)
+      const unregister = registerSessionDraft(draftKey, 'member-a', () => ({ billable: false, fields: { workItemId: 'onboarding' } }))
+      clearAuthSession()
+      unregister()
+      saveAuthSession(session)
+      /**
+       * Renders the timesheet of one Team.
+       *
+       * @param teamId - Team the timesheet records into.
+       * @returns Markup.
+       */
+      const render = (teamId: string) => renderToStaticMarkup(
+        <PersonalTimesheet
+          teamId={teamId}
+          entries={[]}
+          formatters={formatters}
+          onCreateEntry={noop}
+          onMoveWeek={() => undefined}
+          onRetry={() => undefined}
+          onSubmitEntry={noop}
+          onSubmitWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+          onUpdateEntry={noop}
+          t={t}
+          today="2026-11-10"
+          week={week}
+          workItemOptions={timeTrackingFixtureWorkItems}
+          workItemTitles={workItemTitles}
+        />,
+      )
+      // Work Item IDs are unique only in their Team, so another Team never gets the input.
+      expect(render('design-team')).not.toContain('aria-label="Add time"')
+      expect(render('core-team')).toContain('aria-label="Add time"')
+    } finally {
+      discardSessionDrafts()
+      resetAuthSessionTabAccount()
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
+  })
+
+  test('the timesheet lets a member leave indirect work kept from an ended session while its targets load', () => {
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() })
+    resetAuthSessionTabAccount()
+    const payload = Buffer.from(JSON.stringify({ sub: 'member-a' })).toString('base64url')
+    const session = { accessToken: `header.${payload}.signature`, expiresAt: Date.now() + 60_000, refreshToken: 'refresh', remember: false, tokenType: 'Bearer' }
+    const draftKey = createTimeEntryFormSessionDraftKey('indirect', ['timesheet', 'core-team'])
+    try {
+      saveAuthSession(session)
+      const unregister = registerSessionDraft(draftKey, 'member-a', () => ({ billable: false, fields: { hours: '2' } }))
+      clearAuthSession()
+      unregister()
+      saveAuthSession(session)
+      const html = renderToStaticMarkup(
+        <PersonalTimesheet
+          teamId="core-team"
+          entries={[]}
+          formatters={formatters}
+          onCreateEntry={noop}
+          onMoveWeek={() => undefined}
+          onRetry={() => undefined}
+          onSubmitEntry={noop}
+          onSubmitWeek={async () => ({ count: 0, failedEntryIds: [], partialFailure: false, entries: [] })}
+          onUpdateEntry={noop}
+          t={t}
+          today="2026-11-10"
+          week={week}
+          workItemOptions={timeTrackingFixtureWorkItems}
+          workItemTitles={workItemTitles}
+        />,
+      )
+      // The form waits for the targets, and a Cancel button leaves it without waiting.
+      expect(html).not.toContain('data-testid="indirect-time-entry-form"')
+      expect(html).toMatch(/data-testid="indirect-time-entry-pending"[^]*>Cancel</u)
+    } finally {
+      discardSessionDrafts()
+      resetAuthSessionTabAccount()
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
   })
 
   test('the approval queue hides everything but a notice from non-managers', () => {
@@ -626,6 +755,7 @@ describe('time tracking views', () => {
     expect(queue).toMatch(/<button[^>]*disabled=""[^>]*>Approve all submitted this week</)
     const timesheet = renderToStaticMarkup(
       <PersonalTimesheet
+        teamId="core-team"
         entries={timeTrackingFixtureEntries}
         formatters={formatters}
         isPartial
@@ -682,6 +812,7 @@ describe('time tracking views', () => {
     const week = createWeekPeriod(timeTrackingFixtureWeekStart)
     const render = (isLoadingWorkItemOptions: boolean) => renderToStaticMarkup(
       <PersonalTimesheet
+        teamId="core-team"
         entries={[]}
         formatters={formatters}
         isLoadingWorkItemOptions={isLoadingWorkItemOptions}

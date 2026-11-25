@@ -1,7 +1,11 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
+  type AutomationManagementScopes,
   type AutomationRule,
+  type AutomationRuleDryRunInput,
+  type AutomationRuleDryRunResult,
   type CreateAutomationRuleInput,
+  type DeleteAutomationDefinitionInput,
   type UpdateAutomationRuleInput,
 } from '@mukuroji/contracts'
 import {
@@ -30,6 +34,35 @@ export function getAutomationRules(accessToken: string) {
     'rules',
     isAutomationRule,
   )
+}
+
+/**
+ * Reads which Automation scopes the signed-in member manages.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @returns Whether Workspace definitions are manageable and which Teams' definitions are.
+ * @throws AutomationApiError when the response is not a scope list.
+ */
+export async function getAutomationManagementScopes(
+  accessToken: string,
+): Promise<AutomationManagementScopes> {
+  const response = await requestJson<unknown>(
+    `${automationApiBaseUrl}/automation/management-scopes`,
+    accessToken,
+  )
+  if (
+    !isRecord(response) ||
+    typeof response.workspace !== 'boolean' ||
+    !Array.isArray(response.teamIds) ||
+    !response.teamIds.every((teamId): teamId is string => typeof teamId === 'string')
+  ) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
+  return { workspace: response.workspace, teamIds: [...response.teamIds] }
 }
 
 /**
@@ -79,6 +112,86 @@ export function updateAutomationRule(
 }
 
 /**
+ * Deletes an automation rule. Executions already started keep running on their saved version.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param ruleId - Rule to delete.
+ * @param input - Revision the client read.
+ * @param mutationContext - Mutation request context shared between retries.
+ * @returns A promise that resolves after the delete.
+ */
+export async function deleteAutomationRule(
+  accessToken: string,
+  ruleId: string,
+  input: DeleteAutomationDefinitionInput,
+  mutationContext: MutationRequestContext,
+) {
+  await requestMutation<unknown>(
+    `${automationApiBaseUrl}/automation/rules/${encodeURIComponent(ruleId)}`,
+    accessToken,
+    'DELETE',
+    input,
+    mutationContext,
+  )
+}
+
+/**
+ * Evaluates an unsaved rule against one Work Item without running its actions.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param input - Rule definition and the Work Item to try it on.
+ * @returns Whether the rule matches and what each action would do.
+ */
+export async function dryRunAutomationRule(
+  accessToken: string,
+  input: AutomationRuleDryRunInput,
+): Promise<AutomationRuleDryRunResult> {
+  const response = await requestJson<unknown>(
+    `${automationApiBaseUrl}/automation/rule-dry-runs`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
+  )
+  if (!isAutomationRuleDryRunResult(response)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
+  return response
+}
+
+/**
+ * Returns whether a value has every dry run field the Web client reads.
+ *
+ * @param value - Unknown dry run response.
+ * @returns Whether the value is a dry run result.
+ */
+function isAutomationRuleDryRunResult(value: unknown): value is AutomationRuleDryRunResult {
+  return isRecord(value) &&
+    typeof value.matched === 'boolean' &&
+    typeof value.triggerType === 'string' &&
+    Array.isArray(value.conditions) &&
+    value.conditions.every((condition) => isRecord(condition) &&
+      isNonnegativeSafeInteger(condition.index) &&
+      typeof condition.matched === 'boolean' &&
+      typeof condition.readsEventFields === 'boolean') &&
+    Array.isArray(value.actions) &&
+    value.actions.every((action) => isRecord(action) &&
+      isNonnegativeSafeInteger(action.index) &&
+      typeof action.type === 'string' &&
+      (action.changes === undefined || (Array.isArray(action.changes) &&
+        action.changes.every((change) => isRecord(change) && typeof change.field === 'string' && 'after' in change))) &&
+      (action.recipientMemberKeys === undefined || (Array.isArray(action.recipientMemberKeys) &&
+        action.recipientMemberKeys.every((key) => typeof key === 'string'))) &&
+      isOptionalString(action.webhookHost))
+}
+
+/**
  * Loads the canonical collection property returned by an automation list endpoint.
  *
  * @param url - Collection endpoint URL.
@@ -120,6 +233,7 @@ function isAutomationRule(value: unknown): value is AutomationRule {
     typeof value.id === 'string' &&
     typeof value.workspaceId === 'string' &&
     typeof value.name === 'string' &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&
     isNonnegativeSafeInteger(value.revision) &&

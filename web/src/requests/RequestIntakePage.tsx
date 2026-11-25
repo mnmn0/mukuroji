@@ -3,7 +3,7 @@ import type {
   RequestSubmissionActionInput,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
@@ -42,6 +42,7 @@ import {
 } from './api'
 import {
   useRequestForm,
+  useRequestFormManagementScopes,
   useRequestForms,
   useRequestQueue,
   useRequestSubmission,
@@ -49,7 +50,7 @@ import {
 import { getRequestFormEditorInstanceKey } from './model/editorState'
 import { RequestFormBuilder } from './ui/RequestFormBuilder'
 import {
-  createEmptyRequestFormDraft,
+  createEmptyRequestFormDraftForScope,
   createRequestFormInput,
   normalizeRequestForm,
   normalizeRequestSubmission,
@@ -113,7 +114,24 @@ export function RequestIntakePage() {
     ])),
     [teams],
   )
-  const canManageForms = canManageWorkspaceStructure(user)
+  const isWorkspaceStructureManager = canManageWorkspaceStructure(user)
+  // A Team manager manages the forms scoped to their own Teams (ADR 0087).
+  const {
+    data: managementScopes,
+    error: managementScopesError,
+    mutate: mutateManagementScopes,
+  } = useRequestFormManagementScopes(
+    accessToken,
+    Boolean(user) && !currentUserError && !isWorkspaceStructureManager,
+  )
+  const canManageWorkspaceForms = isWorkspaceStructureManager || managementScopes?.workspace === true
+  const formTeams = useMemo(
+    () => canManageWorkspaceForms
+      ? teams
+      : teams.filter((team) => managementScopes?.teamIds.includes(team.id) === true),
+    [canManageWorkspaceForms, managementScopes, teams],
+  )
+  const canManageForms = canManageWorkspaceForms || formTeams.length > 0
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -211,6 +229,7 @@ export function RequestIntakePage() {
       projectDirectoryError,
       queueError,
       formsError,
+      managementScopesError,
       workspaceAccessError,
       requestWorkItemConfigurationError,
       detailError,
@@ -318,6 +337,9 @@ export function RequestIntakePage() {
               </div>
             </div>
             <div className="flex flex-none items-center gap-3">
+              <Link className="workbench-button-secondary inline-flex min-h-10 items-center px-4" to="/my-requests">
+                {t('requests.mine.title')}
+              </Link>
               <div className="hidden text-right min-[721px]:block">
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('workspace.user.label')}</p>
                 <p className="mt-1 max-w-[220px] truncate text-sm font-semibold text-[var(--workbench-text)]">{userLabel}</p>
@@ -349,6 +371,17 @@ export function RequestIntakePage() {
               <TabButton active={activeView === 'queue'} label={t('requests.tab.queue')} onClick={() => selectView('queue')} />
               {canManageForms ? <TabButton active={activeView === 'forms'} label={t('requests.tab.forms')} onClick={() => selectView('forms')} /> : null}
             </div>
+            {managementScopesError ? (
+              <div
+                className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
+                role="alert"
+              >
+                <span>{t('requests.forms.scopeLoadError')}</span>
+                <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => void mutateManagementScopes()}>
+                  {t('requests.forms.scopeRetry')}
+                </button>
+              </div>
+            ) : null}
 
             {activeView === 'queue' ? (
               <RequestQueue
@@ -407,7 +440,8 @@ export function RequestIntakePage() {
                     )}
                     locale={locale}
                     onAuthenticatedApiError={handleAuthenticatedApiError}
-                    teams={teams}
+                    allowWorkspaceScope={canManageWorkspaceForms}
+                    teams={formTeams}
                     onCreated={(form) => {
                       void mutateForms()
                       selectForm(form.id)
@@ -432,6 +466,7 @@ export function RequestIntakePage() {
 
 function RequestFormEditorContainer({
   accessToken,
+  allowWorkspaceScope,
   initialForm,
   locale,
   onAuthenticatedApiError,
@@ -440,6 +475,8 @@ function RequestFormEditorContainer({
   teams,
 }: {
   accessToken: string
+  /** Whether the editor offers the Workspace scope; a Team manager only sees their Teams. */
+  allowWorkspaceScope: boolean
   initialForm?: RequestForm
   locale: Locale
   onAuthenticatedApiError: (error: unknown) => void
@@ -450,7 +487,9 @@ function RequestFormEditorContainer({
   const t = useMemo(() => createTranslator(locale), [locale])
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [model, setModel] = useState<RequestFormDraftModel>(() =>
-    initialForm ? normalizeRequestForm(initialForm) : createEmptyRequestFormDraft(),
+    initialForm
+      ? normalizeRequestForm(initialForm)
+      : createEmptyRequestFormDraftForScope(allowWorkspaceScope ? undefined : teams[0]?.id),
   )
   const [isSaving, setIsSaving] = useState(false)
   const [isPublishing, setIsPublishing] = useState(false)
@@ -565,6 +604,7 @@ function RequestFormEditorContainer({
       isPublishing={isPublishing}
       isSaving={isSaving}
       locale={locale}
+      allowWorkspaceScope={allowWorkspaceScope}
       model={model}
       teams={teams}
       workItemConfigurationsByTeam={workItemConfigurationsByTeam}

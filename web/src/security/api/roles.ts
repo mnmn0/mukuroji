@@ -11,6 +11,8 @@ export type EnterpriseAssignableRoleIds = {
   groupMappings: {
     /** Workspace scope へ割り当て可能な role ID です。 */
     workspace: string[]
+    /** OrgUnit scope へ割り当て可能な role ID です。 */
+    'org-unit': string[]
     /** Team scope へ割り当て可能な role ID です。 */
     team: string[]
     /** Project scope へ割り当て可能な role ID です。 */
@@ -22,6 +24,8 @@ export type EnterpriseAssignableRoleIds = {
   members: {
     /** Workspace scope へ割り当て可能な role ID です。 */
     workspace: string[]
+    /** OrgUnit scope へ割り当て可能な role ID です。 */
+    'org-unit': string[]
     /** Team scope へ割り当て可能な role ID です。 */
     team: string[]
     /** Project scope へ割り当て可能な role ID です。 */

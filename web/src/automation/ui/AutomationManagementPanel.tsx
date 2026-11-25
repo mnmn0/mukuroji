@@ -5,6 +5,8 @@ import type {
   AutomationInboundWebhookEndpoint,
   AutomationInboundWebhookSecretResponse,
   AutomationRule,
+  AutomationRuleDryRunInput,
+  AutomationRuleDryRunResult,
   AutomationTemplate,
   AutomationTemplateApplication,
   CreateAutomationRuleInput,
@@ -12,6 +14,7 @@ import type {
   CreateAutomationTemplateInput,
   CreateRecurringWorkInput,
   RecurringWork,
+  UpdateAutomationRuleInput,
   UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -24,6 +27,10 @@ import {
   type RecurringTeamOption,
 } from './AutomationEditors'
 import { AutomationInboundWebhooksPanel } from './AutomationInboundWebhooksPanel'
+import {
+  AutomationRuleDefinitionEditor,
+  type AutomationRuleEditorOptions,
+} from './AutomationRuleDefinitionEditor'
 import {
   automationManagementTabs,
   resolveAutomationManagementTabTarget,
@@ -58,6 +65,7 @@ const triggerTypeLabelKeys: Record<string, MessageKey> = {
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
+  approval: 'automation.trigger.approval',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
   schedule: 'automation.trigger.schedule',
@@ -110,10 +118,16 @@ export type AutomationManagementPanelProps = {
   webhooks?: AutomationInboundWebhookEndpoint[]
   /** Template 一覧です。 */
   templates: AutomationTemplate[]
+  /** Recurring Work の編集で選べる template。省略時は `templates` を使います。 */
+  templateOptions?: AutomationTemplate[]
+  /** Team の設定で、所有 Team の定義を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
   /** Recurring Work 一覧です。 */
   recurringWork: RecurringWork[]
   /** Execution history です。 */
   executions: AutomationExecution[]
+  /** Searches older runs when the shown history is not complete; omitted when nothing remains. */
+  onLoadMoreExecutions?: () => Promise<unknown> | unknown
   /** Recurring Work の Team selector に表示する Team です。 */
   teams: RecurringTeamOption[]
   /** Workflow template の保存先と expected revision です。 */
@@ -134,6 +148,16 @@ export type AutomationManagementPanelProps = {
   onCreateRule?: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
   /** Rule active/paused 切替 callback です。 */
   onToggleRule?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Saves edited conditions and actions as the rule's next version. */
+  onUpdateRule?: (rule: AutomationRule, input: UpdateAutomationRuleInput) => Promise<unknown> | unknown
+  /** Deletes a rule after the user confirms. */
+  onDeleteRule?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Tries an unsaved rule definition on one Work Item. */
+  onDryRunRule?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
+  /** Picker choices of the rule definition editor. */
+  ruleEditorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule, which depend on its owner Team; overrides `ruleEditorOptions`. */
+  ruleEditorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
   /** Inbound Webhook endpoint 作成 callback です。 */
   onCreateWebhook?: (
     input: CreateAutomationInboundWebhookEndpointInput,
@@ -152,6 +176,8 @@ export type AutomationManagementPanelProps = {
   onCreateTemplate?: (input: CreateAutomationTemplateInput) => Promise<unknown> | unknown
   /** Template active/archived 切替 callback です。 */
   onToggleTemplate?: (template: AutomationTemplate) => Promise<unknown> | unknown
+  /** Deletes a template after the user confirms. */
+  onDeleteTemplate?: (template: AutomationTemplate) => Promise<unknown> | unknown
   /** Template duplicate callback です。 */
   onDuplicateTemplate?: (template: AutomationTemplate) => Promise<unknown> | unknown
   /** Kind を変更しない Template 更新 callback です。 */
@@ -179,6 +205,8 @@ export type AutomationManagementPanelProps = {
   onCreateRecurringWork?: (input: CreateRecurringWorkInput) => Promise<unknown> | unknown
   /** Recurring Work active/paused 切替 callback です。 */
   onToggleRecurringWork?: (recurringWork: RecurringWork) => Promise<unknown> | unknown
+  /** Deletes a Recurring Work definition after the user confirms. */
+  onDeleteRecurringWork?: (recurringWork: RecurringWork) => Promise<unknown> | unknown
   /** Failed execution retry callback です。 */
   onRetryExecution?: (execution: AutomationExecution) => Promise<unknown> | unknown
   /** 全 resource の再読み込み callback です。 */
@@ -191,6 +219,7 @@ export function AutomationManagementPanel({
   canViewWebhooks = true,
   errorMessage,
   executions,
+  onLoadMoreExecutions,
   initialTab = 'rules',
   isLoading = false,
   locale,
@@ -199,6 +228,10 @@ export function AutomationManagementPanel({
   onCreateTemplate,
   onCreateWebhook,
   onApplyTemplate,
+  onDeleteRecurringWork,
+  onDeleteRule,
+  onDeleteTemplate,
+  onDryRunRule,
   onDuplicateTemplate,
   onRefresh,
   onPauseWebhook,
@@ -209,15 +242,20 @@ export function AutomationManagementPanel({
   onToggleRecurringWork,
   onToggleRule,
   onToggleTemplate,
+  onUpdateRule,
   onUpdateTemplate,
   onRefreshTemplateApplication,
   onPreviewTemplateApplication,
   planningParents,
   readOnly = false,
   recurringWork,
+  ruleEditorOptions,
+  ruleEditorOptionsFor,
   rules,
   teams,
   templates,
+  templateOptions,
+  teamScoped = false,
   webhooks = [],
   workflowTargets = [],
 }: AutomationManagementPanelProps) {
@@ -317,10 +355,16 @@ export function AutomationManagementPanel({
             locale={locale}
             readOnly={readOnly}
             rules={rules}
+            teamScoped={teamScoped}
             teams={teams}
             webhookEndpoints={webhooks.filter((endpoint) => endpoint.purpose !== 'triage')}
+            editorOptions={ruleEditorOptions}
+            editorOptionsFor={ruleEditorOptionsFor}
             onCreate={onCreateRule}
+            onDelete={onDeleteRule}
+            onDryRun={onDryRunRule}
             onToggle={onToggleRule}
+            onUpdate={onUpdateRule}
           />
         ) : null}
         {activeTab === 'webhooks' ? (
@@ -347,6 +391,7 @@ export function AutomationManagementPanel({
             workflowTargets={workflowTargets}
             onApply={onApplyTemplate}
             onCreate={onCreateTemplate}
+            onDelete={onDeleteTemplate}
             onDuplicate={onDuplicateTemplate}
             onRefreshApplication={onRefreshTemplateApplication}
             onPreviewApplication={onPreviewTemplateApplication}
@@ -362,8 +407,9 @@ export function AutomationManagementPanel({
             readOnly={readOnly}
             recurringWork={recurringWork}
             teams={teams}
-            templates={templates}
+            templates={templateOptions ?? templates}
             onCreate={onCreateRecurringWork}
+            onDelete={onDeleteRecurringWork}
             onToggle={onToggleRecurringWork}
           />
         ) : null}
@@ -373,6 +419,7 @@ export function AutomationManagementPanel({
             executions={executions}
             locale={locale}
             readOnly={readOnly}
+            onLoadMore={onLoadMoreExecutions}
             onRetry={onRetryExecution}
           />
         ) : null}
@@ -399,19 +446,66 @@ type RulesTabProps = {
   onCreate?: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
   /** Rule 状態切替 callback です。 */
   onToggle?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Team が所有する rule を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
+  /** Saves an edited rule as its next version. */
+  onUpdate?: (rule: AutomationRule, input: UpdateAutomationRuleInput) => Promise<unknown> | unknown
+  /** Deletes a rule. */
+  onDelete?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Tries an unsaved rule definition on one Work Item. */
+  onDryRun?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
+  /** Picker choices of the rule definition editor. */
+  editorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule; overrides `editorOptions`. */
+  editorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
 }
 
+/** Picker choices used when the container gives none. */
+const emptyRuleEditorOptions: AutomationRuleEditorOptions = {
+  members: [],
+  teams: [],
+  projects: [],
+  statuses: [],
+  customFields: [],
+  workItemTemplates: [],
+}
+
+/**
+ * Lists rules with their create, edit, toggle, and delete controls.
+ *
+ * @param props - Tab props.
+ * @returns The rules tab.
+ */
 function RulesTab({
   busyOperation,
+  editorOptions = emptyRuleEditorOptions,
+  editorOptionsFor,
   locale,
   onCreate,
+  onDelete,
+  onDryRun,
   onToggle,
+  onUpdate,
   readOnly,
   rules,
+  teamScoped,
   teams,
   webhookEndpoints,
 }: RulesTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const [editingRuleId, setEditingRuleId] = useState<string>()
+  // Counts editor opens and closes so a finished save closes only the editing session that started it.
+  const editSession = useRef(0)
+
+  /**
+   * Opens a rule editor, or closes it with `undefined`, and starts a new editing session.
+   *
+   * @param ruleId - The rule to edit, or `undefined` to close the editor.
+   */
+  const changeEditingRule = (ruleId: string | undefined) => {
+    editSession.current += 1
+    setEditingRuleId(ruleId)
+  }
 
   return (
     <>
@@ -419,6 +513,7 @@ function RulesTab({
         <AutomationRuleEditor
           isSaving={busyOperation === 'rule:create'}
           locale={locale}
+          teamScoped={teamScoped}
           teams={teams}
           webhookEndpoints={webhookEndpoints}
           onCreate={onCreate}
@@ -433,10 +528,14 @@ function RulesTab({
           const trigger = rule.trigger.type
           const actions = rule.actions.map((action) => action.type)
 
+          const isEditing = editingRuleId === id
+          const name = readResourceName(rule, t('automation.common.unnamed'))
+
           return (
+            <div className="grid gap-3" key={id}>
             <ResourceCard
-              key={id}
               description={[
+                formatOwnerTeam(rule.ownerTeamId, teams, t),
                 trigger
                   ? `${t('automation.rule.trigger')}: ${formatType(trigger, t, 'trigger')}`
                   : '',
@@ -447,26 +546,103 @@ function RulesTab({
                   : '',
               ].filter(Boolean).join(' · ')}
               locale={locale}
-              name={readResourceName(rule, t('automation.common.unnamed'))}
+              name={name}
               status={status}
               version={rule.version}
             >
+              {!readOnly && onUpdate ? (
+                <button
+                  className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
+                  data-testid={`automation-rule-edit-${id}`}
+                  disabled={busyOperation === `rule:update:${id}`}
+                  type="button"
+                  onClick={() => changeEditingRule(isEditing ? undefined : id)}
+                >
+                  {t(isEditing ? 'automation.ruleEdit.cancel' : 'automation.edit')}
+                </button>
+              ) : null}
               {!readOnly && onToggle ? (
                 <button
                   className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                   data-testid={`automation-rule-toggle-${id}`}
-                  disabled={busyOperation === `rule:toggle:${id}`}
+                  disabled={busyOperation === `rule:toggle:${id}` || isEditing}
                   type="button"
                   onClick={() => void onToggle(rule)}
                 >
                   {t(status === 'active' ? 'automation.pause' : 'automation.activate')}
                 </button>
               ) : null}
+              {!readOnly && onDelete ? (
+                <DeleteResourceButton
+                  disabled={busyOperation === `rule:delete:${id}`}
+                  locale={locale}
+                  name={name}
+                  testId={`automation-rule-delete-${id}`}
+                  onDelete={() => onDelete(rule)}
+                />
+              ) : null}
             </ResourceCard>
+            {isEditing && onUpdate ? (
+              <AutomationRuleDefinitionEditor
+                isSaving={busyOperation === `rule:update:${id}`}
+                key={id}
+                locale={locale}
+                options={editorOptionsFor ? editorOptionsFor(rule) : editorOptions}
+                rule={rule}
+                onCancel={() => changeEditingRule(undefined)}
+                onDryRun={onDryRun}
+                onSave={async (input) => {
+                  const session = editSession.current
+                  await onUpdate(rule, input)
+                  // Close only the session that saved: the editor may have been switched or reopened meanwhile.
+                  if (editSession.current === session) changeEditingRule(undefined)
+                }}
+              />
+            ) : null}
+            </div>
           )
         }}
       />
     </>
+  )
+}
+
+/** Props of the delete button that asks for confirmation. */
+type DeleteResourceButtonProps = {
+  /** Display locale. */
+  locale: Locale
+  /** Name shown in the confirmation. */
+  name: string
+  /** Test ID of the button. */
+  testId: string
+  /** Whether the delete is in progress. */
+  disabled: boolean
+  /** Deletes the resource. */
+  onDelete: () => Promise<unknown> | unknown
+}
+
+/**
+ * Deletes a resource after the browser confirmation.
+ *
+ * @param props - Button props.
+ * @returns The delete button.
+ */
+function DeleteResourceButton({ disabled, locale, name, onDelete, testId }: DeleteResourceButtonProps) {
+  const t = useMemo(() => createTranslator(locale), [locale])
+
+  return (
+    <button
+      className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+      data-testid={testId}
+      disabled={disabled}
+      type="button"
+      onClick={() => {
+        if (!window.confirm(t('automation.deleteConfirm').replace('{name}', name))) return
+        void onDelete()
+      }}
+    >
+      {t('automation.delete')}
+    </button>
   )
 }
 
@@ -490,6 +666,8 @@ type TemplatesTabProps = {
   onToggle?: (template: AutomationTemplate) => Promise<unknown> | unknown
   /** Template 複製 callback です。 */
   onDuplicate?: (template: AutomationTemplate) => Promise<unknown> | unknown
+  /** Deletes a template. */
+  onDelete?: (template: AutomationTemplate) => Promise<unknown> | unknown
   /** Template payload 更新 callback です。 */
   onUpdate?: (
     template: AutomationTemplate,
@@ -518,6 +696,7 @@ function TemplatesTab({
   locale,
   onApply,
   onCreate,
+  onDelete,
   onDuplicate,
   onRefreshApplication,
   onPreviewApplication,
@@ -555,7 +734,10 @@ function TemplatesTab({
           return (
             <div className="grid gap-3" key={id}>
               <ResourceCard
-                description={`${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`}
+                description={[
+                  formatOwnerTeam(template.ownerTeamId, teams, t),
+                  `${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`,
+                ].filter(Boolean).join(' · ')}
                 locale={locale}
                 name={readResourceName(template, t('automation.common.unnamed'))}
                 status={status}
@@ -606,6 +788,15 @@ function TemplatesTab({
                   >
                     {t(status === 'archived' ? 'automation.activate' : 'automation.archive')}
                   </button>
+                ) : null}
+                {!readOnly && onDelete ? (
+                  <DeleteResourceButton
+                    disabled={busyOperation === `template:delete:${id}`}
+                    locale={locale}
+                    name={readResourceName(template, t('automation.common.unnamed'))}
+                    testId={`automation-template-delete-${id}`}
+                    onDelete={() => onDelete(template)}
+                  />
                 ) : null}
               </ResourceCard>
               {isEditing && onUpdate ? (
@@ -1245,12 +1436,15 @@ type RecurringTabProps = {
   onCreate?: (input: CreateRecurringWorkInput) => Promise<unknown> | unknown
   /** Recurring Work 状態切替 callback です。 */
   onToggle?: (recurringWork: RecurringWork) => Promise<unknown> | unknown
+  /** Deletes a Recurring Work definition. */
+  onDelete?: (recurringWork: RecurringWork) => Promise<unknown> | unknown
 }
 
 function RecurringTab({
   busyOperation,
   locale,
   onCreate,
+  onDelete,
   onToggle,
   readOnly,
   recurringWork,
@@ -1283,6 +1477,7 @@ function RecurringTab({
             <ResourceCard
               key={id}
               description={[
+                formatOwnerTeam(definition.ownerTeamId, teams, t),
                 timeZone,
                 nextRunAt
                   ? `${t('automation.recurring.nextRun')}: ${formatDateTime(nextRunAt, locale, timeZone)}`
@@ -1302,6 +1497,15 @@ function RecurringTab({
                 >
                   {t(status === 'active' ? 'automation.pause' : 'automation.activate')}
                 </button>
+              ) : null}
+              {!readOnly && onDelete ? (
+                <DeleteResourceButton
+                  disabled={busyOperation === `recurring:delete:${id}`}
+                  locale={locale}
+                  name={readResourceName(definition, t('automation.common.unnamed'))}
+                  testId={`automation-recurring-delete-${id}`}
+                  onDelete={() => onDelete(definition)}
+                />
               ) : null}
             </ResourceCard>
           )
@@ -1323,13 +1527,37 @@ type RunsTabProps = {
   readOnly: boolean
   /** Execution retry callback です。 */
   onRetry?: (execution: AutomationExecution) => Promise<unknown> | unknown
+  /** Searches older runs; shown as a button while older history remains unsearched. */
+  onLoadMore?: () => Promise<unknown> | unknown
 }
 
-function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsTabProps) {
+/**
+ * Lists automation runs with their action results and retry controls.
+ *
+ * @param props - Runs, locale, and callbacks.
+ * @returns The run history, with a control to search older runs when some remain.
+ */
+function RunsTab({ busyOperation, executions, locale, onLoadMore, onRetry, readOnly }: RunsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const loadMore = onLoadMore ? (
+    <button
+      className="workbench-button-secondary min-h-9 justify-self-start px-3 disabled:cursor-not-allowed disabled:opacity-55"
+      data-testid="automation-runs-load-more"
+      disabled={busyOperation === 'execution:load-more'}
+      type="button"
+      onClick={() => void onLoadMore()}
+    >
+      {t('automation.runs.loadMore')}
+    </button>
+  ) : null
 
   if (executions.length === 0) {
-    return <EmptyState message={t('automation.runs.empty')} />
+    return (
+      <div className="grid gap-3">
+        <EmptyState message={t(onLoadMore ? 'automation.runs.emptySearched' : 'automation.runs.empty')} />
+        {loadMore}
+      </div>
+    )
   }
 
   return (
@@ -1409,6 +1637,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
           </article>
         )
       })}
+      {loadMore}
     </div>
   )
 }
@@ -1577,4 +1806,22 @@ function formatDateTime(value: string, locale: Locale, timeZone?: string) {
   } catch {
     return format()
   }
+}
+
+/**
+ * Formats the owner Team of a Team definition for its card.
+ *
+ * @param ownerTeamId - Owner Team, or undefined for a Workspace definition.
+ * @param teams - Teams the panel knows by name.
+ * @param t - Translator.
+ * @returns The label, or an empty string for a Workspace definition.
+ */
+function formatOwnerTeam(
+  ownerTeamId: string | undefined,
+  teams: readonly RecurringTeamOption[],
+  t: ReturnType<typeof createTranslator>,
+): string {
+  if (ownerTeamId === undefined) return ''
+  const name = teams.find((team) => team.id === ownerTeamId)?.name ?? ownerTeamId
+  return t('automation.ownerTeam').replace('{team}', name)
 }

@@ -1,6 +1,7 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
   type CreateRecurringWorkInput,
+  type DeleteAutomationDefinitionInput,
   type RecurringWork,
   type UpdateRecurringWorkInput,
 } from '@mukuroji/contracts'
@@ -79,6 +80,30 @@ export function updateRecurringWork(
 }
 
 /**
+ * Deletes a recurring Work definition; Work Items it already created stay.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param recurringWorkId - Definition to delete.
+ * @param input - Revision the client read.
+ * @param mutationContext - Mutation request context shared between retries.
+ * @returns A promise that resolves after the delete.
+ */
+export async function deleteRecurringWork(
+  accessToken: string,
+  recurringWorkId: string,
+  input: DeleteAutomationDefinitionInput,
+  mutationContext: MutationRequestContext,
+) {
+  await requestMutation<unknown>(
+    `${automationApiBaseUrl}/recurring-work/${encodeURIComponent(recurringWorkId)}`,
+    accessToken,
+    'DELETE',
+    input,
+    mutationContext,
+  )
+}
+
+/**
  * Loads the canonical collection property returned by an automation list endpoint.
  *
  * @param url - Collection endpoint URL.
@@ -121,6 +146,7 @@ function isRecurringWork(value: unknown): value is RecurringWork {
     typeof value.workspaceId === 'string' &&
     typeof value.teamId === 'string' &&
     typeof value.name === 'string' &&
+    isOptionalString(value.ownerTeamId) &&
     typeof value.enabled === 'boolean' &&
     isNonnegativeSafeInteger(value.version) &&
     isNonnegativeSafeInteger(value.revision) &&

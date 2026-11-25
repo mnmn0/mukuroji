@@ -48,6 +48,24 @@ describe('approval notification source visibility', () => {
     expect(await f.read(source)).toBe(true)
     expect(await f.read({ ...source, guest: true })).toBe(false)
   })
+  test('reads a Project file approval from the Project partition', async () => {
+    const source = { workspaceId: 'workspace-1', teamId: 'core', projectId: 'refero', approvalId: 'approval-1', fileId: 'file-1', guest: false }
+    const scopeKey = createFileProofingScopeKey({ ...source, kind: 'project' })
+    const approval: Record<string, unknown> = { ...source, scopeKey, recordKey: 'APPROVAL#approval-1',
+      entryType: 'approval', id: source.approvalId, subjectType: 'file-version', versionId: 'version-1' }
+    const file: Record<string, unknown> = { ...source, scopeKey, recordKey: 'FILE#file-1', entryType: 'file', guestAccess: false }
+    const rows = new Map([['APPROVAL#approval-1', approval], ['FILE#file-1', file]])
+    const read = createApprovalNotificationReader({ async send(command) {
+      expect(command.input.Key?.scopeKey).toBe(scopeKey)
+      return { Item: rows.get(String(command.input.Key?.recordKey)) }
+    } }, 'files')
+    expect(await read(source)).toBe(true)
+    expect(await read({ ...source, guest: true })).toBe(false)
+    approval.issueId = 'item-1'
+    await expect(read(source)).rejects.toThrow('Invalid approval notification source')
+    const { projectId: _projectId, ...withoutParent } = source
+    await expect(read(withoutParent)).rejects.toThrow('Invalid approval notification source')
+  })
   test('surfaces corrupt identities and transient reads rather than silently discarding work', async () => {
     for (const subject of ['approval', 'file'] as const) {
       const f = fixture()

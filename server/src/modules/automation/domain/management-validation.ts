@@ -14,10 +14,13 @@ import {
   type AutomationProjectTemplatePhase,
   type AutomationProjectTemplatePreviewExpectation,
   type AutomationProjectTemplateWorkItem,
+  type AutomationTemplate,
+  type AutomationTemplateApplicationTarget,
   type AutomationValue,
   type CreateAutomationInboundWebhookEndpointInput,
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
+  type DeleteAutomationDefinitionInput,
   type ScheduleDependencyType,
   type UpdateAutomationInboundWebhookEndpointInput,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
@@ -41,6 +44,27 @@ import { normalizeAutomationWorkItemSchedule } from './work-item-schedule-valida
 const TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH = 200
 
 /**
+ * Validates the body of a rule, template, or recurring definition delete request.
+ *
+ * @param value - Untrusted request body.
+ * @returns The revision the client read.
+ */
+export function validateDeleteAutomationDefinitionInput(
+  value: unknown,
+): DeleteAutomationDefinitionInput {
+  const input = requireRecord(value, 'Automation delete request')
+  assertOnlyKeys(input, ['expectedRevision'], 'Automation delete request')
+  return {
+    expectedRevision: requireInteger(
+      input.expectedRevision,
+      'Automation delete expected revision',
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  }
+}
+
+/**
  * Validates and normalizes an untrusted Automation template definition.
  *
  * @param value - Untrusted template input.
@@ -50,7 +74,32 @@ export function validateCreateAutomationTemplateInput(
   value: unknown,
 ): CreateAutomationTemplateInput {
   const input = requireRecord(value, 'Automation template')
-  assertOnlyKeys(input, ['enabled', 'kind', 'name', 'payload'], 'Automation template')
+  assertOnlyKeys(input, ['enabled', 'kind', 'name', 'ownerTeamId', 'payload'], 'Automation template')
+  const definition = validateAutomationTemplateDefinition(input)
+  if (input.ownerTeamId === undefined) return definition
+  const ownerTeamId = requireBoundedText(input.ownerTeamId, 'Automation template owner Team ID', 256)
+  if (definition.kind === 'work-item') {
+    const teamId = definition.payload.teamId
+    if (teamId !== undefined && teamId !== '' && teamId !== ownerTeamId) {
+      throw new AutomationError(
+        'forbidden',
+        'AutomationTeamScopeViolation',
+        'A Team template can only create Work Items in its own Team.',
+      )
+    }
+  }
+  return { ownerTeamId, ...definition }
+}
+
+/**
+ * Validates the kind, name, enabled flag, and payload of an untrusted template input.
+ *
+ * @param input - Untrusted template record whose top-level keys were already checked.
+ * @returns Normalized template creation input without an owner Team.
+ */
+function validateAutomationTemplateDefinition(
+  input: Record<string, unknown>,
+): CreateAutomationTemplateInput {
   if (input.kind !== 'work-item' && input.kind !== 'project' && input.kind !== 'workflow') {
     throw invalidInput('Automation template kind is invalid.')
   }
@@ -759,12 +808,49 @@ export function validateAutomationInboundWebhookLifecycleInput(
  */
 export function validateCreateRecurringWorkInput(value: unknown): CreateRecurringWorkInput {
   const input = requireRecord(value, 'Recurring Work')
+  const name = requireBoundedText(input.name, 'Recurring Work name', 160)
+  const teamId = requireBoundedText(input.teamId, 'Recurring Work Team ID', 256)
+  const ownerTeamId = input.ownerTeamId === undefined
+    ? undefined
+    : requireBoundedText(input.ownerTeamId, 'Recurring Work owner Team ID', 256)
+  if (ownerTeamId !== undefined && ownerTeamId !== teamId) {
+    throw new AutomationError(
+      'forbidden',
+      'AutomationTeamScopeViolation',
+      'A Team recurring Work definition can only create Work Items in its own Team.',
+    )
+  }
   return {
-    name: requireBoundedText(input.name, 'Recurring Work name', 160),
-    teamId: requireBoundedText(input.teamId, 'Recurring Work Team ID', 256),
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+    name,
+    teamId,
     enabled: requireBoolean(input.enabled, 'Recurring Work enabled'),
     templateId: requireBoundedText(input.templateId, 'Recurring Work template ID', 256),
     schedule: validateRecurringSchedule(input.schedule),
+  }
+}
+
+/**
+ * Rejects applying a Team template outside its owner Team.
+ *
+ * @param template - Template being applied or previewed.
+ * @param target - Requested application target.
+ * @throws AutomationError when the target is another Team or the whole Workspace.
+ */
+export function assertTemplateTargetWithinOwnerTeam(
+  template: AutomationTemplate,
+  target: AutomationTemplateApplicationTarget,
+) {
+  if (template.ownerTeamId === undefined) return
+  const targetTeamId = target.kind === 'project'
+    ? target.teamId
+    : target.scopeType === 'team' ? target.scopeId : undefined
+  if (targetTeamId !== template.ownerTeamId) {
+    throw new AutomationError(
+      'forbidden',
+      'AutomationTeamScopeViolation',
+      'A Team template can only be applied to its own Team.',
+    )
   }
 }
 
