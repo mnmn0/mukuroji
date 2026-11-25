@@ -5353,14 +5353,23 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       }
 
       if (overrideRequest.reason !== undefined) {
-        // Only a manager of the Work Item may complete it past the Team's completion Gate.
-        await requireWorkItemManagerPermission(
-          principal,
-          teamId,
-          context,
+        // Only a manager of the Work Item may complete it past the Team's completion Gate. An update
+        // that also moves it to another Project needs the manager role on both sides of the move.
+        const projectIds = new Set([
           detail.issue.assignedProjectId,
-          'Only a manager of the assigned Project or the Team can override the completion Gate.',
-        )
+          'assignedProjectId' in body
+            ? readAssignedProjectId(body.assignedProjectId) ?? undefined
+            : detail.issue.assignedProjectId,
+        ])
+        for (const projectId of projectIds) {
+          await requireWorkItemManagerPermission(
+            principal,
+            teamId,
+            context,
+            projectId,
+            'Only a manager of the assigned Project or the Team can override the completion Gate.',
+          )
+        }
       }
 
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(

@@ -11,7 +11,7 @@
 ## 決定
 
 - Team API の Work Item 更新（`PATCH /api/teams/{teamId}/issues/{issueId}`）に任意の `completionGateOverride: { reason }` を足す。`reason` は前後の空白を除いて 1〜1,000 文字で、他の key は受け付けない。不正な値は `400 InvalidWorkItemCompletionGateOverride`。
-- override を送れるのは Work Item の manager だけとする。Project に割り当てた Work Item はその Project の manager、Team の manager の直接の付与、または system administrator。Project のない Work Item は Team の manager。判定は実績日の訂正と同じ関数（`requireWorkItemManagerPermission`）で行い、満たさなければ `403 ProjectAccessDenied`。
+- override を送れるのは Work Item の manager だけとする。Project に割り当てた Work Item はその Project の manager、Team の manager の直接の付与、または system administrator。Project のない Work Item は Team の manager。同じ更新で Project を移すときは、移す前と後の両方の manager を要る（ADR 0085 の `project-manager` と同じ）。判定は実績日の訂正と同じ関数（`requireWorkItemManagerPermission`）で行い、満たさなければ `403 ProjectAccessDenied`。
 - override は、その更新が Gate に拒否されるときだけ効く。`required` の条件を満たさない遷移を通し、通した条件の ID と理由を `completionGateOverridden` として更新に渡す。Gate が拒否しない更新（条件を満たしている、completed への遷移でない）では何も記録しない。承認の件数を transaction の条件に入れる fence は、override した遷移では付けない。
 - 記録は更新と同じ transaction に入れる。監査 event `work-item.updated` の `metadata.completionGateOverride`（`reason`、`conditions`）と、Work Item の活動履歴の要約（`Completed by overriding the completion Gate (...): <reason>`）に残す。実行者は監査 event と活動履歴の actor。Work Item の row には保存しない。`completionGateOverride` は監査 view の公開 metadata に加える。
 - Public API・MCP・自動化・一括操作・承認の決定は override を受け付けない。`prepareConfiguredUpdateWorkItem` は入力の `completionGateOverride` / `completionGateOverridden` を常に捨て、認可済みの呼び出し元が option で渡した理由だけを使う。`completionGateOverridden` は公開の更新 body では `400` で拒否する。

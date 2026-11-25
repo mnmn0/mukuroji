@@ -486,3 +486,32 @@ test('never takes a recorded override from the request body', async () => {
 
   expect(response.status).toBe(400)
 })
+
+test('requires the manager role on both Projects when the override update also moves the Work Item', async () => {
+  const projectRoles = {
+    detailAssignedProjectId: 'project-a',
+    detailAcceptanceCriteria: [openCriterion],
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'project-a', role: 'manager' as const },
+      { teamId: 'core-team', projectId: 'project-b', role: 'member' as const },
+    ],
+    teamProjects: [
+      { id: 'project-a', name: 'Project A', tone: 'blue' as const },
+      { id: 'project-b', name: 'Project B', tone: 'green' as const },
+    ],
+  }
+  configureFakeProjectClients(true, projectRoles)
+  configureGate({ acceptanceCriteria: 'required' })
+  const moved = await patchWorkItem({
+    workflowStatusId: 'done',
+    assignedProjectId: 'project-b',
+    completionGateOverride: { reason: 'Accepted in review' },
+  })
+  expect(moved.status).toBe(403)
+
+  resetTestApp()
+  configureFakeProjectClients(true, projectRoles)
+  configureGate({ acceptanceCriteria: 'required' })
+  const stayed = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Accepted in review' } })
+  expect(stayed.status).toBe(200)
+})
