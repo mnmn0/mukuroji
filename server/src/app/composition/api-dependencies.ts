@@ -144,6 +144,7 @@ import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapt
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { DynamoDbChannelPostStore } from '../../modules/notifications/adapter-out/dynamodb/channel-post-store'
 import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notifications/adapter-out/secrets-manager/slack-destination-secret-store'
+import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
   DynamoDbAgentRunStore,
@@ -669,6 +670,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     notificationDestinationSecrets: new SecretsManagerSlackDestinationSecretStore(createSecretsManagerClient()),
+    notificationDestinationTestSender: createSlackTestMessageSender(),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -2123,6 +2125,9 @@ export function overrideAppDependencies(
       ...(overrides.channelDestinations ? { channelDestinations: overrides.channelDestinations } : {}),
       ...(overrides.notificationDestinationSecrets
         ? { notificationDestinationSecrets: overrides.notificationDestinationSecrets }
+        : {}),
+      ...(overrides.notificationDestinationTestSender
+        ? { notificationDestinationTestSender: overrides.notificationDestinationTestSender }
         : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),

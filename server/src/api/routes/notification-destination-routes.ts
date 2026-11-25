@@ -5,7 +5,6 @@ import { createMutationAuditEventPut, getConfiguredAuditTableName, type AuditTra
 import { ProjectDataError } from '../../modules/directory'
 import {
   NotificationError,
-  createSlackTestMessageSender,
   deleteChannelDestination,
   deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
@@ -42,9 +41,6 @@ const PERSONAL_PATH = '/api/notification-preferences/slack-destination'
 const TEAM_PATH = '/api/teams/:teamId/notification-channel'
 /** Path of a Project's channel destination. */
 const PROJECT_PATH = '/api/teams/:teamId/projects/:projectId/notification-channel'
-
-/** Sends the fixed test message. */
-const sendTestMessage = createSlackTestMessageSender()
 
 /**
  * Registers the routes that register, test, and delete Slack destinations: the caller's own, a
@@ -88,7 +84,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
     const body = await readJson<unknown>(c.req)
     const locale = typeof body === 'object' && body !== null && Reflect.get(body, 'locale') === 'en' ? 'en' : 'ja'
     return c.json(await testNotificationDestination(
-      workItemDependencies.notificationDestinationSecrets, personalSecretId(principal), locale, sendTestMessage,
+      workItemDependencies.notificationDestinationSecrets, personalSecretId(principal), locale, workItemDependencies.notificationDestinationTestSender,
     ))
   }))
 
@@ -148,7 +144,7 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
         workItemDependencies.notificationDestinationSecrets,
         slackChannelDestinationSecretId(principal.directoryId, target, record.secretVersion),
         record.locale,
-        sendTestMessage,
+        workItemDependencies.notificationDestinationTestSender,
       ))
     }))
   }

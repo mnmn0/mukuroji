@@ -149,3 +149,25 @@ test('a member registers, reads, and removes their own Slack destination', async
   expect(await removed.json()).toEqual({ configured: false })
   expect(state.secrets.size).toBe(0)
 })
+
+test('a manager test-sends to the stored Team webhook through the injected sender', async () => {
+  configureFakeProjectClients(true, { role: 'manager' })
+  installStores()
+  const sent: { webhookUrl: string | undefined, locale: string }[] = []
+  setTestAppDependencies({
+    notificationDestinationTestSender: async (sentUrl, locale) => {
+      sent.push({ webhookUrl: sentUrl, locale })
+      return { succeeded: true, retryable: false }
+    },
+  })
+
+  await request('/api/teams/core-team/notification-channel', {
+    method: 'PUT', body: { webhookUrl, locale: 'en', expectedRevision: 0 },
+  })
+  const tested = await request('/api/teams/core-team/notification-channel/test', { method: 'POST', body: {} })
+  expect(tested.status).toBe(200)
+  const body = await tested.text()
+  expect(body).not.toContain('ROUTESECRET')
+  expect(JSON.parse(body)).toEqual({ delivered: true })
+  expect(sent).toEqual([{ webhookUrl, locale: 'en' }])
+})

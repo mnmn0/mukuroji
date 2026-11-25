@@ -102,6 +102,10 @@ export const workItemDependencies: WorkItemDependencies = {
   get notificationDestinationSecrets() {
     return requireAppDependencies().workItems.notificationDestinationSecrets
   },
+  /** Slack test-message sender, resolved from the current dependencies on each access; do not cache it. */
+  get notificationDestinationTestSender() {
+    return requireAppDependencies().workItems.notificationDestinationTestSender
+  },
   get agentRuns() {
     return requireAppDependencies().workItems.agentRuns
   },
