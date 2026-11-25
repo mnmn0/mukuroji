@@ -26,6 +26,7 @@ import type {
   PlanningUpdateTemplateSettings,
   WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
+  WorkspaceFileTypeSettings,
   WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import {
@@ -35,6 +36,7 @@ import {
   readPlanningUpdateTemplateSettings,
   readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
+  readWorkspaceFileTypeSettings,
   readWorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
@@ -297,6 +299,7 @@ export class DynamoDbTenantAdministrationClient implements
         ? { planningUpdateTemplate: readStoredPlanningUpdateTemplate(input.planningUpdateTemplate) }
         : {}),
       ...(timeEntryCategories ? { timeEntryCategories } : {}),
+      ...(input.fileTypes ? { fileTypes: readStoredFileTypes(input.fileTypes) } : {}),
       ...(input.defaultCurrency ? { defaultCurrency: readStoredDefaultCurrency(input.defaultCurrency) } : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
@@ -2017,6 +2020,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     ...(value.timeEntryCategories === undefined
       ? {}
       : { timeEntryCategories: readStoredTimeEntryCategories(value.timeEntryCategories) }),
+    ...(value.fileTypes === undefined
+      ? {}
+      : { fileTypes: readStoredFileTypes(value.fileTypes) }),
     ...(value.defaultCurrency === undefined ? {} : { defaultCurrency: readStoredDefaultCurrency(value.defaultCurrency) }),
     status,
     ...(closedAt ? { closedAt } : {}),
@@ -2075,6 +2081,20 @@ function readStoredWeeklyReportReminders(value: unknown): WeeklyReportReminderSe
 function readStoredTimeEntryCategories(value: unknown): WorkspaceTimeEntryCategorySettings {
   const settings = readWorkspaceTimeEntryCategorySettings(value)
   if (!settings) throw new Error('invalid time entry category settings')
+  return settings
+}
+
+/**
+ * Reads stored or already-validated Workspace File type settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid, so a corrupt row fails closed instead of falling
+ *   back to the defaults.
+ */
+function readStoredFileTypes(value: unknown): WorkspaceFileTypeSettings {
+  const settings = readWorkspaceFileTypeSettings(value)
+  if (!settings) throw new Error('invalid file type settings')
   return settings
 }
 

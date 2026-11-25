@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { FileAttachment } from '@mukuroji/contracts'
+import type { FileAttachment, FileTypeRejection } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   blockedVideoFileFixture,
@@ -12,8 +12,13 @@ import {
   findInlineImageVersion,
   findMarkdownAttachmentRejection,
   markdownAttachmentMaxSizeBytes,
+  readMarkdownAttachmentBatchMessages,
   readMarkdownAttachmentFileId,
+  readScopedMarkdownAttachmentMessages,
 } from '../src/files/model/markdownAttachments'
+import { describeFileTypeRejection } from '../src/files/model/fileTypeRejection'
+import type { MarkdownAttachmentUpload } from '../src/files/mutations/useMarkdownAttachmentUpload'
+import { MarkdownAttachmentControls } from '../src/files/ui/MarkdownAttachmentControls'
 import { MarkdownAttachmentReactContext } from '../src/files/ui/markdownAttachmentContext'
 import { MarkdownDescriptionField } from '../src/issues/ui/MarkdownDescriptionField'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
@@ -22,14 +27,57 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 const t = createTranslator('en')
 
 describe('markdown attachment model', () => {
-  test('accepts raster images and allowed files up to the body limit only', () => {
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'image/png' })).toBeUndefined()
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'application/pdf' })).toBeUndefined()
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'image/svg+xml' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: 'text/html' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: 1_000, type: '' })).toBe('unsupportedType')
-    expect(findMarkdownAttachmentRejection({ size: markdownAttachmentMaxSizeBytes + 1, type: 'image/png' })).toBe('tooLarge')
-    expect(findMarkdownAttachmentRejection({ size: 0, type: 'image/png' })).toBe('tooLarge')
+  test('accepts files up to the body limit and leaves the type to the server', () => {
+    expect(findMarkdownAttachmentRejection({ size: 1_000 })).toBeUndefined()
+    expect(findMarkdownAttachmentRejection({ size: markdownAttachmentMaxSizeBytes + 1 })).toBe('tooLarge')
+    expect(findMarkdownAttachmentRejection({ size: 0 })).toBe('tooLarge')
+  })
+
+  test('explains a refused type with the types the Workspace accepts', () => {
+    expect(describeFileTypeRejection({ reason: 'not-allowed', allowedFileTypes: ['markdown', 'xlsm'] }, t))
+      .toBe('This Workspace does not accept this file type. You can attach: .md, .markdown, .xlsm')
+    expect(describeFileTypeRejection({ reason: 'dangerous', allowedFileTypes: [] }, t))
+      .toBe('Programs, scripts, and other dangerous types cannot be attached. This Workspace accepts no file types.')
+  })
+
+  test('shows upload messages only in the Work Item scope that produced them', () => {
+    const rejection: FileTypeRejection = { reason: 'not-allowed', allowedFileTypes: ['pdf'] }
+    const scopeA = JSON.stringify({ kind: 'work-item', workItemId: 'A' })
+    const scopeB = JSON.stringify({ kind: 'work-item', workItemId: 'B' })
+    const fromA = { scopeKey: scopeA, messages: { fileTypeRejection: rejection, errorKey: 'files.error.upload' } }
+
+    expect(readScopedMarkdownAttachmentMessages(fromA, scopeA)).toEqual(fromA.messages)
+    // First render after the editor moved to B: A's rejection is not shown, without waiting for an effect.
+    expect(readScopedMarkdownAttachmentMessages(fromA, scopeB)).toBeUndefined()
+    // An upload started in A that finishes after the move stores A's messages, which B never shows.
+    expect(readScopedMarkdownAttachmentMessages({ scopeKey: scopeA, messages: { errorKey: 'files.error.upload' } }, scopeB))
+      .toBeUndefined()
+  })
+
+  test('reports an upload failure that follows a type rejection in the same batch', () => {
+    const rejection: FileTypeRejection = { reason: 'dangerous', allowedFileTypes: ['pdf'] }
+    // script.js is refused for its type, then report.pdf fails to upload.
+    expect(readMarkdownAttachmentBatchMessages(false, rejection))
+      .toEqual({ fileTypeRejection: rejection, errorKey: 'files.error.upload' })
+    expect(readMarkdownAttachmentBatchMessages(true, rejection)).toEqual({ fileTypeRejection: rejection })
+    expect(readMarkdownAttachmentBatchMessages(false)).toEqual({ errorKey: 'files.error.upload' })
+    expect(readMarkdownAttachmentBatchMessages(true)).toEqual({})
+
+    const upload: MarkdownAttachmentUpload = {
+      attachFiles: async () => undefined,
+      canAttach: true,
+      errorKey: 'files.error.upload',
+      fileTypeRejection: rejection,
+      handleDragOver: () => undefined,
+      handleDrop: () => undefined,
+      handlePaste: () => undefined,
+      isUploading: false,
+    }
+    const markup = renderToStaticMarkup(<MarkdownAttachmentControls t={t} upload={upload} />)
+    expect(markup).toContain('The file could not be uploaded.')
+    expect(markup).toContain(describeFileTypeRejection(rejection, t))
+    expect(markup.indexOf('The file could not be uploaded.'))
+      .toBeLessThan(markup.indexOf(describeFileTypeRejection(rejection, t)))
   })
 
   test('writes images as image references and other files as links, escaping the label', () => {

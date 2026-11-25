@@ -5,6 +5,7 @@ import {
 import {
   DEFAULT_PLANNING_UPDATE_TEMPLATE_SETTINGS,
   DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+  DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   DEFAULT_WORKSPACE_CURRENCY,
@@ -22,6 +23,7 @@ import { PlanningUpdateTemplateFields } from './PlanningUpdateTemplateFields'
 import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
 import { hasTimeEntryCategoryProblem } from '../model/timeEntryCategories'
+import { FileTypeFields } from './FileTypeFields'
 import { TimeEntryCategoryFields } from './TimeEntryCategoryFields'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
@@ -454,6 +456,12 @@ export function TenantAdministrationPanel({
             disabled={tenantLifecycleLocked}
             onChange={(next) => onChangeProfile({ ...profile, timeEntryCategories: next })}
             settings={timeEntryCategories}
+            t={t}
+          />
+          <FileTypeFields
+            disabled={isSaving || tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, fileTypes: next })}
+            settings={profile.fileTypes ?? DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS}
             t={t}
           />
           <button

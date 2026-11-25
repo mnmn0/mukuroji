@@ -3,9 +3,11 @@ import type {
   ApprovalRequest,
   FileAnnotation,
   FileAttachment,
+  FileTypeRejection,
   FileVersion,
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { uploadFilesInOrder } from './fileUploadBatch'
 import {
   cancelApprovalRequest,
   completeFileVersionUpload,
@@ -110,6 +112,12 @@ export type FileUploadOptions = {
    * Called once per file after its upload is completed, with the stored file and version.
    */
   onUploaded?: (file: FileAttachment, version: FileVersion) => void
+  /**
+   * Called when the server refuses a file because of its type, with the reason and the types the
+   * Workspace accepts. When given, the refused file is skipped and the remaining files still
+   * upload; without it, the first refusal stops the batch.
+   */
+  onFileTypeRejected?: (rejection: FileTypeRejection) => void
 }
 
 /**
@@ -157,6 +165,10 @@ export type FileArtifactsController = {
    * 直近 mutation の安定 error code です。
    */
   mutationErrorCode?: string
+  /**
+   * 直近の upload が形式で拒否されたときの理由と、Workspace が受け付ける形式です。
+   */
+  mutationFileTypeRejection?: FileTypeRejection
   /**
    * Shell が認証 policy error を一元処理するための raw load/mutation errors です。
    */
@@ -231,6 +243,7 @@ export function useFileArtifacts({
   const [mutationError, setMutationError] = useState<{
     code?: string
     status?: number
+    fileTypeRejection?: FileTypeRejection
     token: symbol
   }>()
   const [mutatingToken, setMutatingToken] = useState<symbol>()
@@ -265,7 +278,12 @@ export function useFileArtifacts({
     } catch (caughtError) {
       if (currentOperationTokenRef.current === requestToken) {
         setMutationError(caughtError instanceof FilesApiError
-          ? { code: caughtError.code, status: caughtError.status, token: requestToken }
+          ? {
+              code: caughtError.code,
+              status: caughtError.status,
+              fileTypeRejection: caughtError.fileTypeRejection,
+              token: requestToken,
+            }
           : { status: 500, token: requestToken })
       }
       throw caughtError
@@ -285,7 +303,7 @@ export function useFileArtifacts({
     let hasCreatedUploadSession = false
 
     try {
-      for (const selectedFile of selectedFiles) {
+      await uploadFilesInOrder(selectedFiles, async (selectedFile) => {
         const input = {
           contentType: selectedFile.type || 'application/octet-stream',
           fileName: selectedFile.name,
@@ -360,14 +378,19 @@ export function useFileArtifacts({
               ),
         )
         options.onUploaded?.(completed.file, completed.version)
-      }
+      }, options.onFileTypeRejected)
 
       return true
     } catch (uploadError) {
       console.error('File upload failed:', uploadError)
       if (currentOperationTokenRef.current === operationToken) {
         setMutationError(uploadError instanceof FilesApiError
-          ? { code: uploadError.code, status: uploadError.status, token: operationToken }
+          ? {
+              code: uploadError.code,
+              status: uploadError.status,
+              fileTypeRejection: uploadError.fileTypeRejection,
+              token: operationToken,
+            }
           : { status: 500, token: operationToken })
       }
       return false
@@ -616,6 +639,7 @@ export function useFileArtifacts({
     isLoading: Boolean(isConfigured && isLoading),
     isMutating,
     mutationErrorCode: currentMutationError?.code,
+    mutationFileTypeRejection: currentMutationError?.fileTypeRejection,
     mutationErrorStatus: currentMutationError?.status,
     refresh,
     requestApproval,

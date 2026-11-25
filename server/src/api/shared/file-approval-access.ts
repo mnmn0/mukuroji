@@ -279,7 +279,11 @@ export function toFileProofingErrorResponse(c: Context, error: unknown) {
     ? error.status
     : 502
 
-  return c.json({ code: error.code, message: error.message }, status)
+  return c.json({
+    code: error.code,
+    message: error.message,
+    ...error.fileTypeRejection,
+  }, status)
 }
 
 /** File approval mutation が canonical Work Item だけを対象にすることを保証します。 */
