@@ -1679,7 +1679,14 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail && softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={resolvedConfiguration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isReadOnly ? (workflowStatusId) => onUpdateIssue(issue.teamId, issue.id, { workflowStatusId }) : undefined}
+            t={t}
+            task={issue}
+          />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}

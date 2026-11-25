@@ -1267,7 +1267,14 @@ function IssueDetailContent({
           </div>
         </div>
         {softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={configuration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isIssueUpdatePending ? (workflowStatusId) => onUpdateIssue(issue.id, { workflowStatusId }) : undefined}
+            t={t}
+            task={issue}
+          />
         ) : null}
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
