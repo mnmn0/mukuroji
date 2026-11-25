@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { SWRConfig, unstable_serialize } from 'swr'
-import type { ApprovalRequest, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
+import type { ApprovalRequest, DocumentBlock, DocumentDetail, DocumentVersion } from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
 import { DocumentVersionReviewDialog, type ApprovalsReadStatus } from '../src/documents/ui/DocumentVersionReview'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
+import type { MentionableMember } from '../src/shared/lib/memberMentions'
 
 const t = createTranslator('en')
 
@@ -27,15 +28,41 @@ const pinnedVersion: DocumentVersion = {
 /**
  * Builds the snapshot of the pinned version from the fixture page.
  *
- * @returns A page snapshot with one paragraph.
+ * @param blocks - Snapshot blocks; one paragraph when omitted.
+ * @returns A page snapshot.
  */
-function createSnapshot(): DocumentDetail {
+function createSnapshot(blocks?: DocumentBlock[]): DocumentDetail {
   if (documentRecordFixture.kind !== 'page') throw new Error('Expected a page fixture.')
   return {
     ...documentRecordFixture,
     revision: 1,
     title: 'Spec v1',
-    blocks: [{ id: 'paragraph-v1', type: 'paragraph', text: 'Approved scope text' }],
+    blocks: blocks ?? [{ id: 'paragraph-v1', type: 'paragraph', text: 'Approved scope text' }],
+  }
+}
+
+/**
+ * Builds the current fixture page with other blocks.
+ *
+ * @param blocks - Current blocks.
+ * @returns The current page.
+ */
+function createCurrentPage(blocks: DocumentBlock[]) {
+  if (documentRecordFixture.kind !== 'page') throw new Error('Expected a page fixture.')
+  return { ...documentRecordFixture, blocks }
+}
+
+/**
+ * Builds a checklist block with one item.
+ *
+ * @param ownership - Owner and deadline saved on the item.
+ * @returns The checklist block.
+ */
+function createChecklist(ownership: { assigneeMemberKey?: string; dueDate?: string }): DocumentBlock {
+  return {
+    id: 'checklist-1',
+    type: 'checklist',
+    items: [{ id: 'item-1', text: 'Sign the contract', checked: false, ...ownership }],
   }
 }
 
@@ -52,13 +79,16 @@ function renderDialog(props: {
   canEdit?: boolean
   approvalsStatus?: ApprovalsReadStatus
   detailFailed?: boolean
+  snapshotBlocks?: DocumentBlock[]
+  currentBlocks?: DocumentBlock[]
+  members?: MentionableMember[]
 }) {
   const version = props.version ?? pinnedVersion
   const detailKey = unstable_serialize(['document-version-detail', 'token', documentRecordFixture.id, version.id])
   const fallback = props.detailFailed ? {} : {
     [detailKey]: {
       version,
-      document: createSnapshot(),
+      document: createSnapshot(props.snapshotBlocks),
     },
   }
   // A failed read is seeded as the cached SWR state of the version detail.
@@ -72,10 +102,10 @@ function renderDialog(props: {
           accessToken="token"
           approvals={props.approvals ?? []}
           approvalsStatus={props.approvalsStatus}
-          document={documentRecordFixture}
+          document={props.currentBlocks ? createCurrentPage(props.currentBlocks) : documentRecordFixture}
           initialTab={props.initialTab}
           locale="en"
-          members={[{ memberKey: 'reviewer@example.com', name: 'Rina Reviewer', status: 'active' }]}
+          members={props.members ?? [{ memberKey: 'reviewer@example.com', name: 'Rina Reviewer', status: 'active' }]}
           onClose={() => undefined}
           onPin={props.canEdit === false ? undefined : async () => undefined}
           onRequestApproval={props.canEdit === false ? undefined : async () => undefined}
@@ -103,6 +133,33 @@ describe('DocumentVersionReviewDialog', () => {
     expect(html).toContain('data-diff-kind="removed"')
     expect(html).toContain('data-diff-kind="added"')
     expect(html).toContain('Context before execution')
+  })
+
+  test('shows a checklist owner or deadline change on both sides of the comparison', () => {
+    const before = createChecklist({ assigneeMemberKey: 'ann@example.com', dueDate: '2099-01-10' })
+    const after = createChecklist({ assigneeMemberKey: 'bob@example.com', dueDate: '2099-02-20' })
+    const named = renderDialog({
+      initialTab: 'compare',
+      snapshotBlocks: [before],
+      currentBlocks: [after],
+      members: [{ memberKey: 'ann@example.com', name: 'Ann Smith', status: 'active' }],
+    })
+    expect(named).toContain('data-diff-kind="changed"')
+    expect(named).toContain('Owner: Ann Smith')
+    expect(named).toContain('Due 2099-01-10')
+    // A member missing from the list, such as one who left, is shown by the saved key.
+    expect(named).toContain('Owner: bob@example.com')
+    expect(named).toContain('Due 2099-02-20')
+
+    const unnamed = renderDialog({
+      initialTab: 'compare',
+      snapshotBlocks: [createChecklist({})],
+      currentBlocks: [createChecklist({ assigneeMemberKey: 'ann@example.com' })],
+      members: [],
+    })
+    expect(unnamed).toContain('data-diff-kind="changed"')
+    expect(unnamed).toContain('Owner: ann@example.com')
+    expect(unnamed.match(/Owner: /g)).toHaveLength(1)
   })
 
   test('offers pinning for an unnamed version and approval requests for a pinned one', () => {

@@ -11,6 +11,7 @@ import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { MentionableMember } from '../../shared/lib/memberMentions'
 import { createWorkItemSearchPath } from '../../shared/routing/paths'
 import type { DocumentRecord } from '../api'
+import type { ChecklistAssigneeOption } from '../model/checklistItems'
 import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import { createCanonicalWorkItemId, parseCanonicalWorkItemId } from '../model/relations'
 import { resolveApprovalStatusClassName } from '../model/versionApprovals'
@@ -226,6 +227,7 @@ export function DocumentVersionReviewDialog({
               accessToken={accessToken}
               document={document}
               locale={locale}
+              members={members}
               t={t}
               version={version}
               versions={versions}
@@ -316,6 +318,7 @@ function VersionCompare({
   accessToken,
   document,
   locale,
+  members,
   t,
   version,
   versions,
@@ -326,6 +329,8 @@ function VersionCompare({
   document: DocumentRecord
   /** Locale used for dates. */
   locale: Locale
+  /** Workspace members that name checklist owners; a missing list shows the saved member key. */
+  members?: readonly MentionableMember[]
   /** Translator. */
   t: (key: MessageKey) => string
   /** Version under review. */
@@ -334,6 +339,7 @@ function VersionCompare({
   versions: readonly DocumentVersion[]
 }) {
   const selectId = useId()
+  const assignees = useMemo(() => toChecklistOwnerNames(members), [members])
   const candidates = versions.filter((candidate) => candidate.id !== version.id)
   const [targetId, setTargetId] = useState(CURRENT_CONTENT)
   const reviewed = useDocumentVersionDetail(accessToken, document.id, version.id)
@@ -419,7 +425,12 @@ function VersionCompare({
             </ul>
           ) : null}
           {diff.blocks.map((entry, index) => (
-            <BlockDiffEntry entry={entry} key={`${entry.kind}:${entry.block.id}:${index}`} t={t} />
+            <BlockDiffEntry
+              assignees={assignees}
+              entry={entry}
+              key={`${entry.kind}:${entry.block.id}:${index}`}
+              t={t}
+            />
           ))}
         </div>
       )}
@@ -444,15 +455,36 @@ const blockDiffClassNames = {
 } as const satisfies Record<DocumentBlockDiffEntry['kind'], string>
 
 /**
+ * Names the members a checklist item can be assigned to.
+ *
+ * Every member is kept, including a former one, because a saved version can name an owner who has
+ * since left the Workspace.
+ *
+ * @param members - Workspace members, when loaded.
+ * @returns One owner name per member key.
+ */
+function toChecklistOwnerNames(
+  members: readonly MentionableMember[] | undefined,
+): ChecklistAssigneeOption[] {
+  return (members ?? []).map((member) => ({
+    id: member.memberKey,
+    label: member.name || member.email || member.memberKey,
+  }))
+}
+
+/**
  * One block of the comparison.
  *
- * @param props - Diff entry and translator.
+ * @param props - Owner names, diff entry, and translator.
  * @returns The block with its change label.
  */
 function BlockDiffEntry({
+  assignees,
   entry,
   t,
 }: {
+  /** Names of the members a checklist item can be assigned to. */
+  assignees: readonly ChecklistAssigneeOption[]
   /** Diff entry to render. */
   entry: DocumentBlockDiffEntry
   /** Translator. */
@@ -467,15 +499,15 @@ function BlockDiffEntry({
       {entry.kind === 'changed' || (entry.kind === 'moved' && entry.contentChanged) ? (
         <div className="grid gap-2">
           <div className="rounded-md bg-red-50 px-3 py-2 line-through decoration-red-400/70" aria-label={t('documents.versionReview.diff.before')}>
-            <DocumentReadOnlyBlock block={entry.before} t={t} />
+            <DocumentReadOnlyBlock assignees={assignees} block={entry.before} t={t} />
           </div>
           <div className="rounded-md bg-emerald-50 px-3 py-2" aria-label={t('documents.versionReview.diff.after')}>
-            <DocumentReadOnlyBlock block={entry.block} t={t} />
+            <DocumentReadOnlyBlock assignees={assignees} block={entry.block} t={t} />
           </div>
         </div>
       ) : (
         <div className={entry.kind === 'removed' ? 'line-through decoration-red-400/70' : undefined}>
-          <DocumentReadOnlyBlock block={entry.block} t={t} />
+          <DocumentReadOnlyBlock assignees={assignees} block={entry.block} t={t} />
         </div>
       )}
     </section>
