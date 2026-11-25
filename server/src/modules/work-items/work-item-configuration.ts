@@ -211,6 +211,7 @@ export class WorkflowRuleError extends WorkItemConfigurationError {
  * @param change.toStatusId - Status after the change.
  * @param change.actor - Actor making the change.
  * @param change.state - Reads the Work Item state after the change, only when a status requires a field.
+ * @returns Whether the change was judged against the actor's roles, so the write must fence them.
  * @throws WorkflowRuleError when a rule is not met.
  */
 export function assertWorkflowRules(
@@ -223,15 +224,13 @@ export function assertWorkflowRules(
     actor: WorkflowRuleActor
     state: () => WorkflowRuleWorkItemState
   },
-): void {
-  if (change.fromStatusId === change.toStatusId) return
+): boolean {
+  if (change.fromStatusId === change.toStatusId) return false
   const workflow = resolveWorkItemTypeWorkflow(configuration, change.workItemTypeId, { allowArchived: true })
   const status = workflow.statuses.find((candidate) => candidate.id === change.toStatusId)
   const unmet: WorkflowRuleUnmetCondition[] = []
-  const actorRule = evaluateWorkflowTransitionActor(
-    findWorkflowEntryActorRoles(workflow, change.fromStatusId, change.toStatusId),
-    change.actor,
-  )
+  const allowedActorRoles = findWorkflowEntryActorRoles(workflow, change.fromStatusId, change.toStatusId)
+  const actorRule = evaluateWorkflowTransitionActor(allowedActorRoles, change.actor)
   if (actorRule) unmet.push(actorRule)
   // A status shared by several Types or Projects asks only for the custom fields this Work Item can
   // hold; a field its Type or Project does not use could never be filled.
@@ -245,6 +244,7 @@ export function assertWorkflowRules(
     unmet.push(...evaluateWorkflowStatusRequirements({ ...status, requiredCustomFieldIds }, change.state()))
   }
   if (unmet.length > 0) throw new WorkflowRuleError(unmet)
+  return allowedActorRoles.length > 0
 }
 
 /** Work Item transaction が definition の同時変更を検出する guard です。 */

@@ -73,6 +73,7 @@ import {
   readWorkItemTypeChangeResolution,
   requireActiveCustomFieldPeople,
   resolveWorkflowRuleActor,
+  withWorkflowRoleConditionChecks,
   type WorkflowRulePrincipal,
 } from './work-item-configuration'
 import { toWorkspaceAccessErrorResponse } from './workspace-access'
@@ -627,7 +628,7 @@ export async function prepareConfiguredUpdateWorkItem(
     targetWorkItemType.id,
   )
   const sameWorkflow = !typeChanged || currentWorkflow.id === targetWorkflow.id
-  assertWorkflowRules(resolved.configuration, {
+  const judgedActorRoles = assertWorkflowRules(resolved.configuration, {
     workItemTypeId: targetWorkItemType.id,
     projectId,
     // Another workflow has no transition from the current status, so its target is entered directly.
@@ -695,6 +696,8 @@ export async function prepareConfiguredUpdateWorkItem(
   )
   return {
     ...inputWithoutTypeChangeResolution,
+    // The status was entered by the caller's roles, so the write fails when they change first.
+    ...withWorkflowRoleConditionChecks(inputWithoutTypeChangeResolution, rulePrincipal, judgedActorRoles),
     workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,

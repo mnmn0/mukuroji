@@ -160,18 +160,31 @@ test('does not check required fields when the status does not change', async () 
   expect((await patchWorkItem({ title: 'Renamed' })).status).toBe(200)
 })
 
-test('fences the caller\'s roles at commit when the status changes, and not otherwise', async () => {
-  const calls = configureFakeProjectClients(true, { role: 'manager', detailAssigneeUserId: 'sato@example.com' })
+test('fences the caller\'s roles at commit only when a restricted transition judged them', async () => {
+  const updateChecks: unknown[][] = []
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    detailAssigneeUserId: 'sato@example.com',
+    issueUpdateHook: (input) => {
+      updateChecks.push([...(input.authorizationConditionChecks ?? [])])
+    },
+  })
   configureRules({ allowedActorRoles: ['project-manager'] })
+  const memberCheck = {
+    ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' },
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedVersion': 1 }),
+    }),
+  }
 
   expect((await patchWorkItem({ workflowStatusId: 'review' })).status).toBe(200)
-  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({
-    memberKey: 'demo@example.com',
-    workspaceMemberVersion: 1,
-  })
+  expect(updateChecks[0]).toContainEqual(memberCheck)
 
+  // A transition no role restricts, and a change that keeps the status, judge no role.
+  expect((await patchWorkItem({ workflowStatusId: 'todo' })).status).toBe(200)
+  expect(updateChecks[1]).not.toContainEqual(memberCheck)
   expect((await patchWorkItem({ title: 'Renamed' })).status).toBe(200)
-  expect(calls.issueUpdates[1]?.authorizationSnapshot).toBeUndefined()
+  expect(updateChecks[2]).not.toContainEqual(memberCheck)
 })
 
 const credential: AuthenticatedDeveloperCredential = {

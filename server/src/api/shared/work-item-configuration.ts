@@ -102,6 +102,33 @@ export function createPersonWorkflowRulePrincipal(
 }
 
 /**
+ * Adds a person's role checks to a write that was judged against their transition actor roles.
+ *
+ * Only a person can satisfy a restricted transition, so a write by anyone else, or one no role
+ * restricted, gets no extra check. A service account never becomes a person, so its synthetic
+ * member row is never checked.
+ *
+ * @param body - Write body whose caller checks the role checks join.
+ * @param body.authorizationConditionChecks - Caller checks the body already carries.
+ * @param rulePrincipal - Who made the change.
+ * @param judgedActorRoles - Whether the workflow rules judged the change against actor roles.
+ * @returns The caller checks to spread into the body, or nothing to add.
+ */
+export function withWorkflowRoleConditionChecks(
+  body: { authorizationConditionChecks?: CreateTeamIssueRequestBody['authorizationConditionChecks'] },
+  rulePrincipal: WorkflowRulePrincipal,
+  judgedActorRoles: boolean,
+): Pick<CreateTeamIssueRequestBody, 'authorizationConditionChecks'> {
+  if (!judgedActorRoles || rulePrincipal.kind !== 'person') return {}
+  return {
+    authorizationConditionChecks: [
+      ...rulePrincipal.roleConditionChecks,
+      ...(body.authorizationConditionChecks ?? []),
+    ],
+  }
+}
+
+/**
  * Judges a rule principal against one Work Item.
  *
  * A person counts as a manager only when they manage every Project the change touches, so moving a
@@ -357,7 +384,7 @@ export async function prepareConfiguredCreateWorkItem(
     workItemType.id,
   )
   // Creating in the initial status is not a status change; any other status is entered like one.
-  if (workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId) {
+  const judgedActorRoles = workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId &&
     assertWorkflowRules(resolved.configuration, {
       workItemTypeId: workItemType.id,
       projectId,
@@ -373,23 +400,10 @@ export async function prepareConfiguredCreateWorkItem(
         customFieldValues,
       ),
     })
-  }
-  // A person may enter a restricted status only by their roles, so the create fails when those
-  // roles change before it commits.
-  const roleConditionChecks =
-    workflowStatus.workflowStatusId !== typeWorkflow.initialStatusId && rulePrincipal.kind === 'person'
-      ? rulePrincipal.roleConditionChecks
-      : []
   return {
     ...inputWithoutQuickCapture,
-    ...(roleConditionChecks.length > 0
-      ? {
-          authorizationConditionChecks: [
-            ...roleConditionChecks,
-            ...(inputWithoutQuickCapture.authorizationConditionChecks ?? []),
-          ],
-        }
-      : {}),
+    // The status was entered by the creator's roles, so the create fails when they change first.
+    ...withWorkflowRoleConditionChecks(inputWithoutQuickCapture, rulePrincipal, judgedActorRoles),
     workItemTypeId: workItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,

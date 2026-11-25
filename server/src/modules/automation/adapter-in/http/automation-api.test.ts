@@ -5562,7 +5562,7 @@ async function requestBulkUndo(operation: BulkOperation) {
 }
 
 test('keeps the actual dates in the undo snapshot of a Bulk status edit', async () => {
-  const calls = configureFakeProjectClients(true, {
+  configureFakeProjectClients(true, {
     detailWorkflowStatusId: 'done',
     detailActualStartDate: '2026-06-01',
     detailActualEndDate: '2026-06-05',
@@ -5597,8 +5597,6 @@ test('keeps the actual dates in the undo snapshot of a Bulk status edit', async 
     actualStartDate: '2026-06-01',
     actualEndDate: '2026-06-05',
   })
-  // The status change was judged against the caller's roles, so the write fences them.
-  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ workspaceMemberVersion: 1 })
 })
 
 test('restores the earlier completion date when a manager undoes a Bulk reopen', async () => {
@@ -5672,8 +5670,6 @@ test('lets a member undo a Bulk first start without correcting the actual dates'
   expect(await response.json()).toMatchObject({ items: [{ status: 'undone' }] })
   expect(calls.issueUpdates).toHaveLength(1)
   expect(corrections).toEqual([undefined])
-  // Moving the status back was judged against the caller's roles, so the write fences them.
-  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ workspaceMemberVersion: 1 })
 })
 
 test('predicts a Bulk undo completion date in the calendar of the restored schedule', async () => {

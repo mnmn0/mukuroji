@@ -1118,13 +1118,6 @@ function createApiBulkOperationAdapter(
       'assignedProjectId' in configuredBody &&
       readAssignedProjectId(configuredBody.assignedProjectId) !==
         loaded.detail.issue.assignedProjectId
-    // A status change was judged against the caller's roles, so a role change before the commit
-    // fails the write instead of letting a manager-only transition through.
-    const changesWorkflowStatus =
-      action.type !== 'archive' &&
-      'workflowStatusId' in configuredBody &&
-      configuredBody.workflowStatusId !== undefined &&
-      configuredBody.workflowStatusId !== loaded.detail.issue.workflowStatusId
     if (
       action.type !== 'archive' &&
       'schedule' in configuredBody &&
@@ -1150,7 +1143,7 @@ function createApiBulkOperationAdapter(
         throw error
       }
     }
-    if (changesAssignedProject || changesWorkflowStatus) {
+    if (changesAssignedProject) {
       try {
         const authorizationSnapshot =
           await createPlanningFencedWorkItemAuthorizationSnapshot(principal)
@@ -1426,10 +1419,6 @@ function createApiBulkOperationAdapter(
       const changesAssignedProject = 'assignedProjectId' in configuredBody &&
         readAssignedProjectId(configuredBody.assignedProjectId) !==
           loaded.detail.issue.assignedProjectId
-      // An undo that moves the status back was judged against the caller's roles too.
-      const changesWorkflowStatus = 'workflowStatusId' in configuredBody &&
-        configuredBody.workflowStatusId !== undefined &&
-        configuredBody.workflowStatusId !== loaded.detail.issue.workflowStatusId
       const restoresArchive = typeof configuredBody.archivedAt === 'string'
       // One instant dates both the prediction and the write, so a day boundary between them
       // cannot change the restored completion date.
@@ -1462,7 +1451,7 @@ function createApiBulkOperationAdapter(
         ...(actualDateRequest.correction ? { actualDateTransitionAt } : {}),
         ...(actualDateCorrection ? { actualDateCorrection } : {}),
       }
-      if (changesSchedule || restoresArchive || changesAssignedProject || changesWorkflowStatus) {
+      if (changesSchedule || restoresArchive || changesAssignedProject) {
         try {
           mutationBody = {
             ...mutationBody,

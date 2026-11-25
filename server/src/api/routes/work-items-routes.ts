@@ -5299,10 +5299,6 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       const changesAssignedProject =
         'assignedProjectId' in configuredBody &&
         readAssignedProjectId(configuredBody.assignedProjectId) !== detail.issue.assignedProjectId
-      const changesWorkflowStatus =
-        'workflowStatusId' in configuredBody &&
-        configuredBody.workflowStatusId !== undefined &&
-        configuredBody.workflowStatusId !== detail.issue.workflowStatusId
       if (changesSchedule) {
         try {
           authorizationSnapshot = await createDependencyFencedWorkItemAuthorizationSnapshot(
@@ -5326,9 +5322,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           }
           throw error
         }
-      } else if (changesAssignedProject || changesWorkflowStatus) {
-        // A status change was judged against the caller's roles, so a role change before the commit
-        // fails the write instead of letting a manager-only transition through.
+      } else if (changesAssignedProject) {
         authorizationSnapshot = await createPlanningFencedWorkItemAuthorizationSnapshot(principal)
       }
 
