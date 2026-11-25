@@ -6,7 +6,7 @@ import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 /**
  * Directory group mapping の適用 scope です。
  */
-export type EnterpriseMappingScope = 'workspace' | 'team' | 'project'
+export type EnterpriseMappingScope = 'workspace' | 'org-unit' | 'team' | 'project'
 
 /**
  * Directory group と mukuroji role の mapping です。

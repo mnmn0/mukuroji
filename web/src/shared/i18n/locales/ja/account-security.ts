@@ -161,6 +161,7 @@ export const accountSecurityMessages = {
   'memberSecurity.roleAssignments.scope.workspace': 'ワークスペース',
   'memberSecurity.roleAssignments.scope.team': 'Team',
   'memberSecurity.roleAssignments.scope.project': 'Project',
+  'memberSecurity.roleAssignments.scope.org-unit': '部門',
   'security.sessions.mfaImpact.count':
     'MFA を登録していないアクティブメンバーが {count} 人います。保存すると、その人は次回ログイン時に認証アプリの登録を求められます。',
   'security.sessions.mfaImpact.unknown': '{count} 人は登録状況を確認できませんでした。',

@@ -115,3 +115,4 @@
 | [0094](0094-workspace-file-type-policy.md) | 添付できるファイル形式を contracts の catalog で持ち、Workspace は既定との差分だけを tenant profile に保存する | 提案 |
 | [0095](0095-member-offboarding-and-access-expiry.md) | メンバーの利用期限を読み取り時に効かせ、毎時の job で無効化する。無効化で本人の API キーを失効する | 提案 |
 | [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |
+| [0097](0097-org-units.md) | OrgUnit（部門）で Team を束ね、部門のロールは配下の Team scope に展開して評価する | 提案 |

@@ -27,6 +27,7 @@ import { registerProjectBudgetRoutes } from './routes/project-budget-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
 import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
+import { registerOrgStructureRoutes } from './routes/org-structure-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -195,6 +196,7 @@ registerScheduleBaselineRoutes(routeApp)
 registerProjectBudgetRoutes(routeApp)
 registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
+registerOrgStructureRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)

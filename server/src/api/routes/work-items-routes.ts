@@ -5770,6 +5770,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         kind: request.kind,
         title: request.title,
@@ -5894,6 +5897,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           ...(principal.enterpriseIdentityControlRevision === undefined
             ? {}
             : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+          ...(principal.enterpriseOrgStructureRevision === undefined
+            ? {}
+            : { orgStructureRevision: principal.enterpriseOrgStructureRevision }),
         },
         expectedRevision: request.expectedRevision,
         ...(request.kind ? { kind: request.kind } : {}),

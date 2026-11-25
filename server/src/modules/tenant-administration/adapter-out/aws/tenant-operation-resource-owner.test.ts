@@ -1480,8 +1480,8 @@ describe('AwsTenantOperationResourceOwner', () => {
         operationId: 'operation-1',
         step: 'export',
         cursor: {
-          // 22 tables, 4 file namespaces, and 7 trailing tables precede the completion index.
-          targetIndex: 33,
+          // 22 tables, 4 file namespaces, and 8 trailing tables precede the completion index.
+          targetIndex: 34,
           phase: 'snapshot',
           processedCount: 12,
           snapshotRunId: runId,
@@ -1725,7 +1725,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 26, processedCount: 25 },
+      cursor: { targetIndex: 27, processedCount: 25 },
     }
 
     try {
@@ -1939,7 +1939,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 26, processedCount: 25 },
+      cursor: { targetIndex: 27, processedCount: 25 },
     }
 
     try {
