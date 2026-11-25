@@ -516,6 +516,34 @@ describe('ConnectorSyncEngine', () => {
     )).toBe('synced')
   })
 
+  test('matches a GitHub issue to its link whatever the case of the owner and repository', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async pull() {
+        return { items: [{ ...externalRecord('10'), externalId: 'Acme/App#12', externalUrl: 'https://github.com/Acme/App/issues/12' }] }
+      },
+    }))
+    expect(fixture.installation.provider).toBe('github')
+    const link = await fixture.platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: fixture.installation.id,
+        resourceType: 'issue',
+        externalId: 'acme/app#12',
+        externalUrl: 'https://github.com/acme/app/issues/12',
+        displayKey: 'acme/app#12',
+        syncDirection: 'bidirectional',
+      },
+    })
+    const result = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'issue',
+    })
+    expect(result.results).toEqual([expect.objectContaining({ kind: 'synced', linkId: link.id })])
+  })
+
   test('does not acknowledge a pending generation from an older provider replica', async () => {
     const fixture = await createRuntimeFixture(createAdapter({
       async pull() {

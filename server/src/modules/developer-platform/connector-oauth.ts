@@ -131,8 +131,9 @@ export type ConfiguredOAuthConnectorOptions = {
   /** RFC 7009 compatible revocation endpoint です。 */
   revocationEndpoint?: string
   /**
-   * Provider-specific grant revocation used when no RFC 7009 endpoint is configured.
-   * `github-oauth-app` deletes the GitHub OAuth App grant through `DELETE /applications/{client_id}/grant`.
+   * Provider-specific token revocation used when no RFC 7009 endpoint is configured.
+   * `github-oauth-app` revokes the one access token through `DELETE /applications/{client_id}/token`,
+   * leaving other tokens of the same GitHub account and OAuth App working.
    */
   grantRevocation?: 'github-oauth-app'
   /** Provider account profile endpoint です。 */
@@ -213,8 +214,8 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   private readonly tokenEndpoint: URL
   /** Provider revocation endpoint です。 */
   private readonly revocationEndpoint?: URL
-  /** GitHub OAuth App grant endpoint used when no RFC 7009 endpoint is configured. */
-  private readonly gitHubGrantEndpoint?: URL
+  /** GitHub OAuth App token endpoint used when no RFC 7009 endpoint is configured. */
+  private readonly gitHubTokenEndpoint?: URL
   /** Provider account endpoint です。 */
   private readonly accountEndpoint?: URL
   /** Provider resource API base URL です。 */
@@ -271,11 +272,11 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
           'OAuth revocation endpoint',
         )
       : undefined
-    this.gitHubGrantEndpoint = !options.revocationEndpoint && options.grantRevocation === 'github-oauth-app'
+    this.gitHubTokenEndpoint = !options.revocationEndpoint && options.grantRevocation === 'github-oauth-app'
       ? validateHttpsEndpoint(
-          new URL(`applications/${encodeURIComponent(this.clientId)}/grant`, options.apiBaseUrl).toString(),
+          new URL(`applications/${encodeURIComponent(this.clientId)}/token`, options.apiBaseUrl).toString(),
           options.allowedHosts,
-          'GitHub grant revocation endpoint',
+          'GitHub token revocation endpoint',
         )
       : undefined
     this.accountEndpoint = options.accountEndpoint
@@ -423,7 +424,7 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
     credential: ConnectorCredential,
     request?: ConnectorRevocationRequest,
   ) {
-    if (!this.revocationEndpoint && !this.gitHubGrantEndpoint) {
+    if (!this.revocationEndpoint && !this.gitHubTokenEndpoint) {
       throw new ConnectorRuntimeError(
         'ConnectorRevocationUnsupported',
         'Connector provider does not have a configured revocation endpoint.',
@@ -443,9 +444,10 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
       this.revocationTimeoutMilliseconds,
       requestTimeoutMilliseconds,
     ))
-    if (this.gitHubGrantEndpoint) {
-      // Deleting the OAuth App grant revokes every token GitHub issued for it.
-      await this.revokeGitHubGrant(this.gitHubGrantEndpoint, accessToken, signal)
+    if (this.gitHubTokenEndpoint) {
+      // Only this token is revoked: deleting the whole grant would also revoke the tokens of other
+      // installations of the same GitHub account, as when a failed callback cleans up its credential.
+      await this.revokeGitHubToken(this.gitHubTokenEndpoint, accessToken, signal)
       return
     }
     const revocations: Promise<void>[] = []
@@ -461,14 +463,14 @@ export class ConfiguredOAuthConnectorAdapter implements ConnectorOAuthAdapter {
   }
 
   /**
-   * Deletes the GitHub OAuth App grant of an access token, authenticating with the client ID and
-   * secret. A grant GitHub no longer knows (404) is already revoked.
+   * Revokes one GitHub OAuth App access token, authenticating with the client ID and secret.
+   * A token GitHub no longer knows (404) is already revoked.
    *
-   * @param endpoint - `applications/{client_id}/grant` endpoint.
-   * @param accessToken - Access token whose grant is deleted.
+   * @param endpoint - `applications/{client_id}/token` endpoint.
+   * @param accessToken - Access token to revoke.
    * @param signal - Shared revocation deadline.
    */
-  private async revokeGitHubGrant(endpoint: URL, accessToken: string, signal: AbortSignal) {
+  private async revokeGitHubToken(endpoint: URL, accessToken: string, signal: AbortSignal) {
     const response = await this.fetchWithTimeout(endpoint, {
       method: 'DELETE',
       redirect: 'error',

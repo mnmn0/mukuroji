@@ -1013,7 +1013,7 @@ export class ConnectorSyncEngine {
             link.syncDirection === 'bidirectional'
           )
         )
-        .map((link) => [link.externalId, link]),
+        .map((link) => [externalIdMatchKey(installation.provider, link.externalId), link]),
     )
     const maximumPages = input.maximumPages ?? 10
     if (!Number.isSafeInteger(maximumPages) || maximumPages < 1 || maximumPages > 100) {
@@ -1042,12 +1042,13 @@ export class ConnectorSyncEngine {
           adapter.pull(credential, input.resourceType, cursor),
       )
       for (const record of page.items) {
-        const link = linkByExternalId.get(record.externalId)
+        const link = linkByExternalId.get(externalIdMatchKey(installation.provider, record.externalId))
         if (!link) continue
         results.push(await this.processInbound({
           workspaceId: input.workspaceId,
           link,
-          record,
+          // The match key proved the IDs name the same resource; the record takes the link's spelling.
+          record: record.externalId === link.externalId ? record : { ...record, externalId: link.externalId },
           ...(link.syncStatus === 'pending'
             ? { pollGeneration: link.updatedAt }
             : {}),
@@ -2446,6 +2447,20 @@ function requireStableValue(value: string, label: string) {
     )
   }
   return value
+}
+
+/**
+ * Returns the key that matches a provider record to its link. GitHub treats owner and repository
+ * names case-insensitively, so `Acme/App#12` from GitHub matches a link entered as `acme/app#12`.
+ *
+ * @param provider - Connector provider.
+ * @param externalId - Provider resource ID.
+ * @returns Matching key.
+ */
+function externalIdMatchKey(provider: string, externalId: string) {
+  if (provider !== 'github') return externalId
+  const separator = externalId.lastIndexOf('#')
+  return separator < 0 ? externalId : `${externalId.slice(0, separator).toLowerCase()}${externalId.slice(separator)}`
 }
 
 function syncStateKey(workspaceId: string, linkId: string) {

@@ -98,6 +98,9 @@ describe('GitHub issue protocol', () => {
   test('closes the issue for a completed or canceled Work Item and reopens it otherwise', async () => {
     const protocol = new GitHubIssueProtocol()
     const { request, requests } = createRequester([
+      { status: 200, payload: issue() },
+      { status: 200, payload: issue({ state: 'closed' }) },
+      { status: 200, payload: issue({ state: 'closed' }) },
       { status: 200, payload: issue({ state: 'closed' }) },
       { status: 200, payload: issue({ state: 'closed' }) },
       { status: 200, payload: issue() },
@@ -114,12 +117,55 @@ describe('GitHub issue protocol', () => {
     await protocol.push(request, { ...mutation, statusCategory: 'completed' })
     await protocol.push(request, { ...mutation, statusCategory: 'canceled' })
     await protocol.push(request, { ...mutation, statusCategory: 'started' })
-    expect(requests.map((entry) => entry.body)).toEqual([
+    // Every write reads the issue first, so only the PATCH requests carry a body.
+    expect(requests.filter((entry) => entry.method === 'PATCH').map((entry) => entry.body)).toEqual([
       { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'completed' },
       { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'not_planned' },
       { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'open' },
     ])
-    expect(requests[0]).toMatchObject({ method: 'PATCH', path: 'repos/acme/app/issues/12' })
+    expect(requests[0]).toMatchObject({ method: 'GET', path: 'repos/acme/app/issues/12' })
+    expect(requests[1]).toMatchObject({ method: 'PATCH', path: 'repos/acme/app/issues/12' })
+  })
+
+  test('refuses to write a pull request through an issue link', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const { request, requests } = createRequester([
+      { status: 200, payload: issue({ pull_request: { url: 'https://api.github.com/repos/acme/app/pulls/12' } }) },
+      { status: 200, payload: issue({ pull_request: { url: 'https://api.github.com/repos/acme/app/pulls/12' } }) },
+    ])
+    const mutation = {
+      externalId: 'acme/app#12',
+      resourceType: 'issue' as const,
+      workItemRevision: 4,
+      title: 'Fix login',
+      originMarker: 'v1.payload.signature',
+      operationId: 'operation-1',
+      statusCategory: 'started',
+    }
+    await expect(protocol.push(request, mutation)).rejects.toMatchObject({ code: 'ConnectorResourceUnsupported' })
+    expect(requests.map((entry) => entry.method)).toEqual(['GET'])
+    await expect(protocol.read(request, 'issue', 'acme/app#12')).rejects.toMatchObject({ code: 'ConnectorResourceUnsupported' })
+  })
+
+  test('keeps a title of 256 characters, counting emoji as one, and refuses a longer one', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const { request, requests } = createRequester([
+      { status: 200, payload: issue() },
+      { status: 200, payload: issue() },
+    ])
+    const mutation = {
+      externalId: 'acme/app#12',
+      resourceType: 'issue' as const,
+      workItemRevision: 4,
+      originMarker: 'v1.payload.signature',
+      operationId: 'operation-1',
+      statusCategory: 'started',
+    }
+    const title = '🚀'.repeat(256)
+    await protocol.push(request, { ...mutation, title })
+    expect(requests[1]?.body).toMatchObject({ title })
+    await expect(protocol.push(request, { ...mutation, title: `${title}x` })).rejects.toMatchObject({ code: 'ConnectorRecordTooLarge' })
+    expect(requests).toHaveLength(2)
   })
 
   test('refuses a description longer than an issue can take instead of shortening it', async () => {
@@ -186,7 +232,7 @@ describe('bundled GitHub connector settings', () => {
     expect(url.searchParams.get('client_id')).toBe('github-client')
   })
 
-  test('disconnects by deleting the GitHub OAuth App grant with client credentials', async () => {
+  test('disconnects by revoking only the stored GitHub token with client credentials', async () => {
     const calls: { url: string, init?: RequestInit }[] = []
     let status = 204
     const registry = createOAuthConnectorRegistryFromEnvironment({
@@ -209,11 +255,11 @@ describe('bundled GitHub connector settings', () => {
     const credential = { accessToken: 'gho_token', externalAccountId: '1', scopes: ['repo'] }
     await adapter.disconnect(credential)
     expect(calls).toHaveLength(1)
-    expect(calls[0]?.url).toBe('https://api.github.com/applications/github-client/grant')
+    expect(calls[0]?.url).toBe('https://api.github.com/applications/github-client/token')
     expect(calls[0]?.init?.method).toBe('DELETE')
     expect(new Headers(calls[0]?.init?.headers).get('Authorization')).toBe(`Basic ${Buffer.from('github-client:secret').toString('base64')}`)
     expect(calls[0]?.init?.body).toBe(JSON.stringify({ access_token: 'gho_token' }))
-    // A grant GitHub no longer has is already revoked; other failures are reported.
+    // A token GitHub no longer has is already revoked; other failures are reported.
     status = 404
     await adapter.disconnect(credential)
     status = 500

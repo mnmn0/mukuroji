@@ -119,8 +119,9 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
    * Writes the Work Item title, description, and open / closed state to its issue. A completed or
    * canceled Work Item closes the issue; any other status category reopens it.
    *
-   * GitHub has no conditional issue update, so a write with an expected version first reads the
-   * issue and refuses when someone edited it since Mukuroji last read it. The next poll then reads
+   * Every write first reads the target and refuses a pull request, which the issues endpoint would
+   * also write. GitHub has no conditional issue update, so a write with an expected version also
+   * refuses when someone edited the issue since Mukuroji last read it. The next poll then reads
    * the edit and records a conflict instead of the write overwriting it.
    *
    * @param request - Authenticated provider requester.
@@ -131,23 +132,26 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
     requireIssueResource(mutation.resourceType)
     const issue = readIssueId(mutation.externalId)
     const state = toIssueState(mutation.statusCategory)
-    if (mutation.expectedExternalVersion !== undefined) {
-      const current = await request({ method: 'GET', path: issuePath(issue), allowedStatuses: [404, 410] })
-      if (current.status === 404 || current.status === 410) throw missingIssue()
-      if (readIssue(current.payload, `${issue.owner}/${issue.repository}`).externalVersion !== mutation.expectedExternalVersion) {
-        throw issueChanged()
-      }
+    // The target is read first even without an expected version: the issues endpoint also writes
+    // pull requests, which reading the payload refuses.
+    // The contents are checked before anything is read, so a write GitHub cannot take sends nothing.
+    const body = {
+      ...(mutation.title === undefined ? {} : { title: readTitle(mutation.title) }),
+      body: writeBody(mutation.description, mutation.originMarker),
+      ...(state === undefined
+        ? {}
+        : { state, ...(state === 'closed' ? { state_reason: mutation.statusCategory === 'canceled' ? 'not_planned' : 'completed' } : {}) }),
+    }
+    const current = await request({ method: 'GET', path: issuePath(issue), allowedStatuses: [404, 410] })
+    if (current.status === 404 || current.status === 410) throw missingIssue()
+    const currentIssue = readIssue(current.payload, `${issue.owner}/${issue.repository}`)
+    if (mutation.expectedExternalVersion !== undefined && currentIssue.externalVersion !== mutation.expectedExternalVersion) {
+      throw issueChanged()
     }
     const response = await request({
       method: 'PATCH',
       path: issuePath(issue),
-      body: {
-        ...(mutation.title === undefined ? {} : { title: readTitle(mutation.title) }),
-        body: writeBody(mutation.description, mutation.originMarker),
-        ...(state === undefined
-          ? {}
-          : { state, ...(state === 'closed' ? { state_reason: mutation.statusCategory === 'canceled' ? 'not_planned' : 'completed' } : {}) }),
-      },
+      body,
       allowedStatuses: [404, 410],
     })
     if (response.status === 404 || response.status === 410) throw missingIssue()
@@ -238,6 +242,10 @@ function readRepositoryName(value: unknown) {
  */
 function readIssue(value: unknown, repositoryName: string): ConnectorExternalRecord {
   const issue = requireObject(value, 'GitHub issue')
+  // The issues API also serves pull requests; only issues are synchronized.
+  if (issue.pull_request !== undefined && issue.pull_request !== null) {
+    throw new ConnectorRuntimeError('ConnectorResourceUnsupported', 'The GitHub link points to a pull request, not an issue.')
+  }
   const number = issue.number
   if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 1) throw malformed('GitHub issue number is invalid.')
   const externalId = `${repositoryName}#${number}`
@@ -298,13 +306,21 @@ function writeBody(description: string | undefined, originMarker: string) {
 }
 
 /**
- * Bounds the issue title.
+ * Checks the issue title. A title longer than {@link TITLE_MAX_LENGTH} characters (Unicode code
+ * points, as Work Item titles count them) is refused rather than shortened, since a shortened copy
+ * would read back as the Work Item's title.
  *
  * @param value - Work Item title.
  * @returns Title GitHub accepts.
  */
 function readTitle(value: string) {
-  const title = value.trim().slice(0, TITLE_MAX_LENGTH)
+  const title = value.trim()
+  if (Array.from(title).length > TITLE_MAX_LENGTH) {
+    throw new ConnectorRuntimeError(
+      'ConnectorRecordTooLarge',
+      `The Work Item title is longer than the ${TITLE_MAX_LENGTH} characters a GitHub issue title can take.`,
+    )
+  }
   return title === '' ? 'Untitled' : title
 }
 

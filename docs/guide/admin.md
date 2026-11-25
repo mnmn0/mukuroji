@@ -429,7 +429,7 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   逆に Work Item が完了・中止になると issue を close し、それ以外に戻ると reopen します。pull request・commit・deploy の
   link は手入力のまま同期しません。issue の本文の末尾には、Mukuroji が書き込んだことを示す見えないコメントが付きます。
   説明が 60,000 文字を超える Work Item は、短くして書き込まずに同期の失敗として残します。接続を解除すると、GitHub の
-  OAuth App への許可（grant）も取り消します。
+  保存していたアクセストークンを取り消します（同じ GitHub アカウントの別の接続には影響しません）。
   Google Calendar と Outlook Calendar を接続すると、Work Item の **外部リンク** で「カレンダーの予定」を追加できます。
   接続した account の既定カレンダーに、Work Item の日付で終日の予定を作り、日付を双方向に同期します。
   カレンダーで予定を動かすと Work Item の期限や期間が動き、Work Item の日付を変えると予定が動きます。
