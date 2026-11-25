@@ -725,8 +725,9 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
     （[ADR 0098](adr/0098-team-started-work-item-index-and-board-continuation.md)）。
 - 上限で止まった source があれば、応答に opaque な `continuation` を付ける。
   `GET /api/teams/{teamId}/agent-runs?continuation=...` は token にある source だけを続きから読み、
-  次の token を返す。24 時間の範囲は最初の page と同じ起点を使う。token の形式と各 store の cursor の
-  Team は server が検証し、合わなければ `400` を返す。Web は「続きの Run とタスクを読み込む」で page を
+  次の token を返す。24 時間の範囲は最初の page と同じ起点を使う。token は暗号化・認証され、
+  閲覧者と Team に結び付く。作り替えた token、別の閲覧者や Team の token、各 store の cursor の Team が
+  合わない token は `400` を返す。Web は「続きの Run とタスクを読み込む」で page を
   足し、同じ Work Item が複数の page に出た場合は先の page を使う。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
   （`canAccessAssignedProject`）。`active` Run がなければ Work Item の Run 履歴から最新の 1 件を読む。

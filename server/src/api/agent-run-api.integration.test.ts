@@ -2504,6 +2504,14 @@ describe('Factory board route', () => {
     const first = await readBoard()
     expect(first.body).toMatchObject({ finishedRunsHasMore: true, startedWorkItemsHasMore: true, activeRunsHasMore: false })
     expect(first.body.continuation).toBeString()
+    // The token is sealed: none of its parts reveals a DynamoDB key, and a changed token is refused.
+    const token = first.body.continuation ?? ''
+    for (const part of token.split('.')) expect(Buffer.from(part, 'base64url').toString('utf8')).not.toContain('Partition')
+    const tampered = `${token.slice(0, -2)}${token.endsWith('AA') ? 'BB' : 'AA'}`
+    expect((await app.request(
+      `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(tampered)}`,
+      { headers },
+    )).status).toBe(400)
     const seen = new Set(first.body.items.map((item) => item.workItem.id))
     let continuation = first.body.continuation
     let pages = 1
@@ -2524,20 +2532,17 @@ describe('Factory board route', () => {
     for (const item of [...failedItems, ...startedItems]) expect(seen.has(item.id)).toBe(true)
   })
 
-  test('rejects a malformed board continuation and a cursor of another Team', async () => {
+  test('rejects a malformed, forged, or foreign board continuation', async () => {
     configureBoard([])
     const read = async (continuation: string) => (await app.request(
       `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(continuation)}`,
       { headers },
     )).status
     expect(await read('not-a-token')).toBe(400)
+    // A readable token, as an earlier version issued, is refused: tokens are sealed by the server.
     const encode = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
-    expect(await read(encode({ version: 1, since: new Date().toISOString() }))).toBe(400)
-    expect(await read(encode({ version: 2, since: new Date().toISOString(), failed: 'x' }))).toBe(400)
-    expect(await read(encode({ version: 1, since: 'yesterday', failed: 'x' }))).toBe(400)
-    // A store cursor is bound to its Team partition, so another Team's position is rejected.
-    const otherTeamCursor = encode({ finishedRunPartition: 'other-workspace#team#other-team', finishedAt: '2026-01-01T00:00:00.000Z' })
-    expect(await read(encode({ version: 1, since: new Date().toISOString(), failed: otherTeamCursor }))).toBe(400)
+    expect(await read(encode({ version: 1, since: new Date().toISOString(), failed: 'x' }))).toBe(400)
+    expect(await read(`b1.${'A'.repeat(16)}.${'A'.repeat(20)}.${'A'.repeat(22)}`)).toBe(400)
   })
 
   test('requires a session and a Team the caller can view', async () => {

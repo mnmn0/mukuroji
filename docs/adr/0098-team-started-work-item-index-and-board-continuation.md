@@ -40,8 +40,11 @@ board の応答に opaque な `continuation` を追加する。上限で止ま�
 続けて読み、次の token を返す。Web は「続きの Run とタスクを読み込む」で次の page を足し、Work Item が
 複数の page に出た場合は先に読んだ方を使う。
 
-token は client から届くため、形式、version、文字数、時刻を検証する。store の cursor は各 store が
-自分の Team の partition に束縛されていることを確かめ、別の Team の cursor は `400` で断る。
+store の cursor は DynamoDB の key を含み、page は閲覧できない Work Item の行で止まることもあるため、
+token は server の cursor secret から導いた鍵で AES-256-GCM により暗号化・認証し、Workspace・Team・
+閲覧者を認証データに含める。client は中身を読めず、作り替えた token や別の閲覧者・Team の token は
+`400` で断る。復号後も version、文字数、時刻を検証し、store の cursor は各 store が自分の Team の
+partition に束縛されていることを確かめる。
 
 ## 検討した選択肢
 

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
 import {
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
@@ -30,6 +30,7 @@ import {
   type AgentRunFinishedGroup,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { CognitoServiceError, isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
 import {
   createMutationAuditEventPut,
@@ -283,31 +284,111 @@ const boardContinuationCursorMaxLength = 2_048
 /** Source fields of {@link FactoryBoardContinuation}. */
 const boardContinuationSources = ['active', 'recent', 'failed', 'started'] as const
 
+/** Envelope version of a sealed board continuation; also bound into its authentication. */
+const boardContinuationEnvelope = 'b1'
+
+/** Label that derives the board continuation key from the server cursor secret. */
+const boardContinuationKeyLabel = 'mukuroji:factory-board-continuation:v1'
+
+/** Byte lengths of the AES-GCM nonce and tag of a sealed continuation. */
+const boardContinuationIvBytes = 12
+const boardContinuationTagBytes = 16
+
+/** Base64url text, the only alphabet of a sealed continuation part. */
+const base64UrlPattern = /^[A-Za-z0-9_-]+$/u
+
+/** Viewer and Team a board continuation is bound to. */
+type FactoryBoardContinuationScope = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Viewer the continuation was issued to. */
+  userKey: string
+}
+
+/** Key derived from the server cursor secret, resolved on first use. */
+let boardContinuationKey: Buffer | undefined
+
 /**
- * Encodes the sources left unread so the board can load the rest on request. Each store cursor is
- * bound to the Team partition by its store, which rejects a cursor of another Team.
+ * Returns the AES-256-GCM key of board continuations.
  *
- * @param continuation - Sources to continue and the completed-lane window.
- * @returns Opaque token, or undefined when every source was read to its end.
+ * @returns 32-byte key used only for board continuations.
  */
-function encodeBoardContinuation(continuation: FactoryBoardContinuation): string | undefined {
-  if (boardContinuationSources.every((source) => continuation[source] === undefined)) return undefined
-  return Buffer.from(JSON.stringify({ version: 1, ...continuation }), 'utf8').toString('base64url')
+function getBoardContinuationKey(): Buffer {
+  boardContinuationKey ??= createHmac('sha256', loadServerConfig().publicApiCursorSecret)
+    .update(boardContinuationKeyLabel)
+    .digest()
+  return boardContinuationKey
 }
 
 /**
- * Validates a client-supplied board continuation token.
+ * Builds the additional authenticated data that binds a continuation to its viewer and Team.
+ *
+ * @param scope - Viewer and Team.
+ * @returns Authenticated data.
+ */
+function boardContinuationAad(scope: FactoryBoardContinuationScope): Buffer {
+  return Buffer.from(JSON.stringify([boardContinuationEnvelope, scope.directoryId, scope.teamId, scope.userKey]), 'utf8')
+}
+
+/**
+ * Seals the sources left unread so the board can load the rest on request. The store cursors carry
+ * DynamoDB keys, and a page can stop on a Work Item the viewer cannot see, so the token is encrypted
+ * and authenticated for the viewer and Team: the client can neither read nor forge it.
+ *
+ * @param continuation - Sources to continue and the completed-lane window.
+ * @param scope - Viewer and Team the token is issued to.
+ * @returns Opaque token, or undefined when every source was read to its end.
+ */
+function encodeBoardContinuation(continuation: FactoryBoardContinuation, scope: FactoryBoardContinuationScope): string | undefined {
+  if (boardContinuationSources.every((source) => continuation[source] === undefined)) return undefined
+  const iv = randomBytes(boardContinuationIvBytes)
+  const cipher = createCipheriv('aes-256-gcm', getBoardContinuationKey(), iv, { authTagLength: boardContinuationTagBytes })
+  cipher.setAAD(boardContinuationAad(scope))
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify({ version: 1, ...continuation }), 'utf8'), cipher.final()])
+  return [boardContinuationEnvelope, iv.toString('base64url'), ciphertext.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.')
+}
+
+/**
+ * Opens a sealed board continuation token.
  *
  * @param value - Token from the query string.
- * @returns Decoded continuation.
- * @throws AgentRunError when the token is malformed.
+ * @param scope - Viewer and Team of the request.
+ * @returns The token's plaintext.
+ * @throws Error when the token is malformed, tampered with, or issued to another viewer or Team.
  */
-export function readFactoryBoardContinuation(value: string): FactoryBoardContinuation {
+function openBoardContinuation(value: string, scope: FactoryBoardContinuationScope): unknown {
+  const parts = value.split('.')
+  if (parts.length !== 4 || parts[0] !== boardContinuationEnvelope || !parts.slice(1).every((part) => base64UrlPattern.test(part))) {
+    throw new TypeError('Unsupported continuation envelope.')
+  }
+  const [, ivText = '', ciphertextText = '', tagText = ''] = parts
+  const iv = Buffer.from(ivText, 'base64url')
+  const tag = Buffer.from(tagText, 'base64url')
+  if (iv.length !== boardContinuationIvBytes || tag.length !== boardContinuationTagBytes) throw new TypeError('Malformed continuation.')
+  const decipher = createDecipheriv('aes-256-gcm', getBoardContinuationKey(), iv, { authTagLength: boardContinuationTagBytes })
+  decipher.setAAD(boardContinuationAad(scope))
+  decipher.setAuthTag(tag)
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertextText, 'base64url')), decipher.final()])
+  return JSON.parse(plaintext.toString('utf8'))
+}
+
+/**
+ * Validates a client-supplied board continuation token for the requesting viewer and Team.
+ *
+ * @param value - Token from the query string.
+ * @param principal - Viewer.
+ * @param teamId - Team of the request.
+ * @returns Decoded continuation.
+ * @throws AgentRunError when the token is malformed, tampered with, or issued for another viewer or Team.
+ */
+export function readFactoryBoardContinuation(value: string, principal: WorkspacePrincipal, teamId: string): FactoryBoardContinuation {
   const invalid = () => new AgentRunError('validation_failed', 'The board continuation is invalid.', { pointer: '/continuation' })
   if (value.length > boardContinuationCursorMaxLength * boardContinuationSources.length * 2) throw invalid()
   let parsed: unknown
   try {
-    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    parsed = openBoardContinuation(value, { directoryId: principal.directoryId, teamId, userKey: principal.userKey })
   } catch {
     throw invalid()
   }
@@ -595,7 +676,7 @@ export async function listWebTeamAgentRunBoard(
     ...(recent.nextCursor !== undefined ? { recent: recent.nextCursor } : {}),
     ...(failed.nextCursor !== undefined ? { failed: failed.nextCursor } : {}),
     ...(started.nextCursor !== undefined ? { started: started.nextCursor } : {}),
-  })
+  }, { directoryId: principal.directoryId, teamId, userKey: principal.userKey })
   const workItemIds = [...new Set([...active.runs.keys(), ...finished.workItemIds, ...started.workItemIds])]
   const store = workItemDependencies.agentRuns
   const items = await mapInOrderWithConcurrency(workItemIds, boardReadConcurrency, async (workItemId) => {

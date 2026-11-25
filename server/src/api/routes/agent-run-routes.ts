@@ -113,7 +113,7 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
         principal,
         c.req.param('teamId'),
         c.req.header('X-Correlation-Id')?.trim() || undefined,
-        continuation === undefined ? undefined : readFactoryBoardContinuation(continuation),
+        continuation === undefined ? undefined : readFactoryBoardContinuation(continuation, principal, c.req.param('teamId')),
       ))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
