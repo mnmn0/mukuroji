@@ -437,6 +437,19 @@ Team 全体の近況も同じように出せます。**ポートフォリオ** �
 「注意・遅延」「未提出」「提出期限超過」のフィードで遅れている Project を探せます。
 AI assistance が有効な Workspace では、「Planning draft を生成」で下書きを作れます。
 
+### Project・Team の Slack channel に流す
+
+Project の **概要**（`/projects/<Project ID>/overview`）の **Project の Slack channel** に、Project の channel の
+Slack Incoming Webhook URL を登録すると、近況の公開（健全性の悪化を含む）、Milestone の完了と日程変更、
+Work Item の期限当日と期限超過がその channel に投稿されます。投稿には対象画面へのリンクが付きます。
+Team の **メンバー**（`/teams/<Team ID>/members`）の **Team の Slack channel** に登録すると、専用の channel を
+持たない Project と Team 直下の Work Item の投稿がそちらに流れます。
+
+- 登録・変更・削除・**テスト送信** ができるのは Project マネージャーと Team マネージャーです。ほかのメンバーには登録の有無だけが見えます。
+- **channel 名** は画面の表示用です。**投稿の言語** で日本語か英語を選べます。
+- 登録した URL は画面に表示されません。URL を変えるときは新しい URL を入れて保存し、名前や言語だけを変えるときは URL を空のまま保存します。
+- channel の参加者全員が投稿を読めます。Project の内容を見てよい人だけの channel を選んでください。
+
 ### メンバーの週報を読む
 
 Team の **工数** の **週報の提出状況**（`/teams/<Team ID>/timesheet?view=team-weekly-reports`）で、週を選ぶと

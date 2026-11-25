@@ -94,6 +94,18 @@ export const workItemDependencies: WorkItemDependencies = {
   get teamReminderSettings() {
     return requireAppDependencies().workItems.teamReminderSettings
   },
+  /** Destination settings store, resolved from the current dependencies on each access; do not cache it. */
+  get channelDestinations() {
+    return requireAppDependencies().workItems.channelDestinations
+  },
+  /** Webhook secret store, resolved from the current dependencies on each access; do not cache it. */
+  get notificationDestinationSecrets() {
+    return requireAppDependencies().workItems.notificationDestinationSecrets
+  },
+  /** Slack test-message sender, resolved from the current dependencies on each access; do not cache it. */
+  get notificationDestinationTestSender() {
+    return requireAppDependencies().workItems.notificationDestinationTestSender
+  },
   get agentRuns() {
     return requireAppDependencies().workItems.agentRuns
   },

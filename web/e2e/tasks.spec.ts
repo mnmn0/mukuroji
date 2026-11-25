@@ -1486,6 +1486,38 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: notificationPreferences })
   })
 
+  // Slack destinations (#399): nothing is registered unless a test registers one.
+  let personalSlackConfigured = false
+  await page.route(/\/api\/notification-preferences\/slack-destination(?:\/test)?$/, async (route) => {
+    const request = route.request()
+    if (request.url().endsWith('/test')) {
+      await route.fulfill({ json: { delivered: personalSlackConfigured, ...(personalSlackConfigured ? {} : { code: 'DestinationNotConfigured' }) } })
+      return
+    }
+    if (request.method() === 'PUT') personalSlackConfigured = true
+    if (request.method() === 'DELETE') personalSlackConfigured = false
+    await route.fulfill({ json: { configured: personalSlackConfigured } })
+  })
+  await page.route(/\/api\/teams\/([^/]+)(?:\/projects\/([^/]+))?\/notification-channel(?:\/test)?(?:\?.*)?$/, async (route) => {
+    const url = new URL(route.request().url())
+    const match = /\/teams\/([^/]+)(?:\/projects\/([^/]+))?\/notification-channel/.exec(url.pathname)
+    if (url.pathname.endsWith('/test')) {
+      await route.fulfill({ json: { delivered: false, code: 'DestinationNotConfigured' } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        scope: match?.[2] ? 'project' : 'team',
+        teamId: decodeURIComponent(match?.[1] ?? ''),
+        ...(match?.[2] ? { projectId: decodeURIComponent(match[2]) } : {}),
+        configured: false,
+        locale: 'ja',
+        revision: 0,
+        canManage: true,
+      },
+    })
+  })
+
   // Detail panes list a Work Item's external links; no Work Item in these fixtures has one.
   await page.route(/.*\/api\/developer\/work-items\/[^/]+\/external-links(?:\?.*)?$/, async (route) => {
     if (route.request().method() !== 'GET') {
@@ -13494,6 +13526,26 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('notification-mute-project-core-team-product-roadmap')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepMentions')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepApprovals')).not.toBeChecked()
+  })
+
+  test('設定画面で自分の Slack 送信先を登録・テスト送信・削除でき、URL は表示されない', async ({ page }) => {
+    await page.goto('/settings/personal')
+    const panel = page.getByTestId('slack-destination-personal')
+    await expect(panel.getByTestId('slack-destination-status')).toHaveText('Webhook は登録されていません')
+    const urlInput = panel.getByLabel('Slack Incoming Webhook URL')
+    await urlInput.fill('https://example.test/hook')
+    await expect(panel.getByText('https://hooks.slack.com/services/ で始まる')).toBeVisible()
+    await urlInput.fill('https://hooks.slack.com/services/T000/B000/SECRET')
+    await panel.getByRole('button', { name: 'Webhook を保存', exact: true }).click()
+    await expect(panel.getByTestId('slack-destination-outcome')).toHaveText('保存しました。')
+    await expect(panel.getByTestId('slack-destination-status')).toHaveText('Webhook を登録済みです')
+    await expect(panel.getByText('SECRET')).toHaveCount(0)
+    // The field is relabelled for replacing the stored URL once one is registered.
+    await expect(panel.getByLabel('新しい Webhook URL（変えないときは空のまま）')).toHaveValue('')
+    await panel.getByRole('button', { name: 'テスト送信', exact: true }).click()
+    await expect(panel.getByTestId('slack-destination-outcome')).toHaveText('テスト通知を送りました。Slack を確認してください。')
+    await panel.getByRole('button', { name: '登録を削除', exact: true }).click()
+    await expect(panel.getByTestId('slack-destination-status')).toHaveText('Webhook は登録されていません')
   })
 
   test('Issue #431: 管理者がメンバーの表示名を修正できる', async ({ page }) => {
