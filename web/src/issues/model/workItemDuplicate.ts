@@ -96,7 +96,7 @@ export function createWorkItemDuplicateDraft(issue: TeamIssue): WorkItemDuplicat
  *
  * @param templates - Workspace templates of every kind.
  * @param teamId - Team the new Work Item belongs to.
- * @returns Enabled Work Item templates that are not bound to another Team, by name.
+ * @returns Enabled Work Item templates that are neither owned by nor bound to another Team, by name.
  */
 export function listWorkItemTemplatesForTeam(
   templates: readonly AutomationTemplate[],
@@ -107,6 +107,8 @@ export function listWorkItemTemplatesForTeam(
       template.kind === 'work-item' &&
       template.enabled &&
       typeof template.payload.title === 'string' &&
+      // A Team-owned template serves only its own Team (ADR 0087).
+      (template.ownerTeamId === undefined || template.ownerTeamId === teamId) &&
       (template.payload.teamId === undefined || template.payload.teamId === teamId))
     .sort((first, second) => first.name.localeCompare(second.name) || first.id.localeCompare(second.id))
 }

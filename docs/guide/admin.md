@@ -10,7 +10,7 @@ coding agent の受け入れ、Enterprise のセキュリティ設定をまと�
 | --- | --- | --- |
 | 個人 | `/settings/personal`（`/settings` も同じ） | 表示設定、通知設定、サインインとセキュリティ、AI の利用、agent の接続 |
 | Workspace 管理 | `/settings/workspace` | アクセス台帳、ID・セキュリティ管理への入口、テナント管理、チームとプロジェクトの管理、API と外部連携、オートメーション |
-| Team | `/settings/team` | ワークフローとフィールド、Work Item key の prefix、エージェント設定 |
+| Team | `/settings/team` | ワークフローとフィールド、Work Item key の prefix、Team のオートメーション、エージェント設定 |
 
 区分は画面の分け方だけで、操作できる範囲はこれまでどおりロールで決まります。
 
@@ -279,6 +279,18 @@ Team の作成・アーカイブもできます。初期 owner は deploy 時に
 ## オートメーション
 
 **設定** → **Workspace 管理** → **オートメーション**（変更は owner / admin のみ）。詳細は [`docs/automation.md`](../automation.md)。
+一覧には Team が持つルール・テンプレート・繰り返し作業も並び、カードに「Team: 名前」と出ます。owner / admin はそれも停止できます。
+
+### Team のオートメーション
+
+**設定** → **Team** → **Team のオートメーション** で Team を選ぶと、その Team が持つルール・テンプレート・繰り返し作業・実行履歴だけが出ます。
+Team の全 Project の manager（と owner / admin）は、ここで作成・編集・停止・削除・再試行と、ルールの試行ができ、作ったものはその Team の持ち物になります。
+
+- Team のルールはその Team の Work Item でだけ動き、その Team の Work Item だけを変更・作成します。別の Team の Project への移動や、別の Team に作るアクションは保存できません。
+- Team のルールでは「フォーム送信」「Webhook 受信」のトリガーと「Webhook を送信」のアクションは使えません。必要なら owner / admin に Workspace のルールとして作ってもらいます。
+- Team の繰り返し作業は、その Team の Work Item を作ります。使えるテンプレートは同じ Team のものです。
+- Team の実行履歴は直近の履歴から探します。見つからない古い実行は **さらに古い実行を探す** で続きを探せます。
+- 依頼フォームも、Team を対象にしたフォームは その Team の全 Project の manager が作成・変更・公開できます。回答の一覧と添付は owner / admin が見ます。
 
 | タブ | 内容 |
 | --- | --- |

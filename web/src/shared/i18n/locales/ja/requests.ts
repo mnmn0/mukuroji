@@ -68,6 +68,8 @@ export const requestsMessages = {
   'requests.action.error': '操作を完了できませんでした。最新状態を確認してください。',
   'requests.routing.teamBacklog': 'Team バックログ',
   'requests.routing.initialStatus': '初期状態',
+  'requests.forms.scopeLoadError': 'Team の依頼フォームを管理できるかどうかを読み込めませんでした。',
+  'requests.forms.scopeRetry': '再読み込み',
   'requests.forms.title': 'フォーム',
   'requests.forms.description': '表示、access link、routing をコード変更なしで管理します。',
   'requests.forms.new': '新しいフォーム',

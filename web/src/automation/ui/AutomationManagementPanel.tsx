@@ -118,10 +118,16 @@ export type AutomationManagementPanelProps = {
   webhooks?: AutomationInboundWebhookEndpoint[]
   /** Template 一覧です。 */
   templates: AutomationTemplate[]
+  /** Recurring Work の編集で選べる template。省略時は `templates` を使います。 */
+  templateOptions?: AutomationTemplate[]
+  /** Team の設定で、所有 Team の定義を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
   /** Recurring Work 一覧です。 */
   recurringWork: RecurringWork[]
   /** Execution history です。 */
   executions: AutomationExecution[]
+  /** Searches older runs when the shown history is not complete; omitted when nothing remains. */
+  onLoadMoreExecutions?: () => Promise<unknown> | unknown
   /** Recurring Work の Team selector に表示する Team です。 */
   teams: RecurringTeamOption[]
   /** Workflow template の保存先と expected revision です。 */
@@ -150,6 +156,8 @@ export type AutomationManagementPanelProps = {
   onDryRunRule?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
   /** Picker choices of the rule definition editor. */
   ruleEditorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule, which depend on its owner Team; overrides `ruleEditorOptions`. */
+  ruleEditorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
   /** Inbound Webhook endpoint 作成 callback です。 */
   onCreateWebhook?: (
     input: CreateAutomationInboundWebhookEndpointInput,
@@ -211,6 +219,7 @@ export function AutomationManagementPanel({
   canViewWebhooks = true,
   errorMessage,
   executions,
+  onLoadMoreExecutions,
   initialTab = 'rules',
   isLoading = false,
   locale,
@@ -241,9 +250,12 @@ export function AutomationManagementPanel({
   readOnly = false,
   recurringWork,
   ruleEditorOptions,
+  ruleEditorOptionsFor,
   rules,
   teams,
   templates,
+  templateOptions,
+  teamScoped = false,
   webhooks = [],
   workflowTargets = [],
 }: AutomationManagementPanelProps) {
@@ -343,9 +355,11 @@ export function AutomationManagementPanel({
             locale={locale}
             readOnly={readOnly}
             rules={rules}
+            teamScoped={teamScoped}
             teams={teams}
             webhookEndpoints={webhooks.filter((endpoint) => endpoint.purpose !== 'triage')}
             editorOptions={ruleEditorOptions}
+            editorOptionsFor={ruleEditorOptionsFor}
             onCreate={onCreateRule}
             onDelete={onDeleteRule}
             onDryRun={onDryRunRule}
@@ -393,7 +407,7 @@ export function AutomationManagementPanel({
             readOnly={readOnly}
             recurringWork={recurringWork}
             teams={teams}
-            templates={templates}
+            templates={templateOptions ?? templates}
             onCreate={onCreateRecurringWork}
             onDelete={onDeleteRecurringWork}
             onToggle={onToggleRecurringWork}
@@ -405,6 +419,7 @@ export function AutomationManagementPanel({
             executions={executions}
             locale={locale}
             readOnly={readOnly}
+            onLoadMore={onLoadMoreExecutions}
             onRetry={onRetryExecution}
           />
         ) : null}
@@ -431,6 +446,8 @@ type RulesTabProps = {
   onCreate?: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
   /** Rule 状態切替 callback です。 */
   onToggle?: (rule: AutomationRule) => Promise<unknown> | unknown
+  /** Team が所有する rule を作るかどうかです（ADR 0087）。 */
+  teamScoped?: boolean
   /** Saves an edited rule as its next version. */
   onUpdate?: (rule: AutomationRule, input: UpdateAutomationRuleInput) => Promise<unknown> | unknown
   /** Deletes a rule. */
@@ -439,6 +456,8 @@ type RulesTabProps = {
   onDryRun?: (input: AutomationRuleDryRunInput) => Promise<AutomationRuleDryRunResult>
   /** Picker choices of the rule definition editor. */
   editorOptions?: AutomationRuleEditorOptions
+  /** Picker choices for one edited rule; overrides `editorOptions`. */
+  editorOptionsFor?: (rule: AutomationRule) => AutomationRuleEditorOptions
 }
 
 /** Picker choices used when the container gives none. */
@@ -460,6 +479,7 @@ const emptyRuleEditorOptions: AutomationRuleEditorOptions = {
 function RulesTab({
   busyOperation,
   editorOptions = emptyRuleEditorOptions,
+  editorOptionsFor,
   locale,
   onCreate,
   onDelete,
@@ -468,6 +488,7 @@ function RulesTab({
   onUpdate,
   readOnly,
   rules,
+  teamScoped,
   teams,
   webhookEndpoints,
 }: RulesTabProps) {
@@ -492,6 +513,7 @@ function RulesTab({
         <AutomationRuleEditor
           isSaving={busyOperation === 'rule:create'}
           locale={locale}
+          teamScoped={teamScoped}
           teams={teams}
           webhookEndpoints={webhookEndpoints}
           onCreate={onCreate}
@@ -513,6 +535,7 @@ function RulesTab({
             <div className="grid gap-3" key={id}>
             <ResourceCard
               description={[
+                formatOwnerTeam(rule.ownerTeamId, teams, t),
                 trigger
                   ? `${t('automation.rule.trigger')}: ${formatType(trigger, t, 'trigger')}`
                   : '',
@@ -564,7 +587,7 @@ function RulesTab({
                 isSaving={busyOperation === `rule:update:${id}`}
                 key={id}
                 locale={locale}
-                options={editorOptions}
+                options={editorOptionsFor ? editorOptionsFor(rule) : editorOptions}
                 rule={rule}
                 onCancel={() => changeEditingRule(undefined)}
                 onDryRun={onDryRun}
@@ -711,7 +734,10 @@ function TemplatesTab({
           return (
             <div className="grid gap-3" key={id}>
               <ResourceCard
-                description={`${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`}
+                description={[
+                  formatOwnerTeam(template.ownerTeamId, teams, t),
+                  `${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`,
+                ].filter(Boolean).join(' · ')}
                 locale={locale}
                 name={readResourceName(template, t('automation.common.unnamed'))}
                 status={status}
@@ -1451,6 +1477,7 @@ function RecurringTab({
             <ResourceCard
               key={id}
               description={[
+                formatOwnerTeam(definition.ownerTeamId, teams, t),
                 timeZone,
                 nextRunAt
                   ? `${t('automation.recurring.nextRun')}: ${formatDateTime(nextRunAt, locale, timeZone)}`
@@ -1500,13 +1527,37 @@ type RunsTabProps = {
   readOnly: boolean
   /** Execution retry callback です。 */
   onRetry?: (execution: AutomationExecution) => Promise<unknown> | unknown
+  /** Searches older runs; shown as a button while older history remains unsearched. */
+  onLoadMore?: () => Promise<unknown> | unknown
 }
 
-function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsTabProps) {
+/**
+ * Lists automation runs with their action results and retry controls.
+ *
+ * @param props - Runs, locale, and callbacks.
+ * @returns The run history, with a control to search older runs when some remain.
+ */
+function RunsTab({ busyOperation, executions, locale, onLoadMore, onRetry, readOnly }: RunsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const loadMore = onLoadMore ? (
+    <button
+      className="workbench-button-secondary min-h-9 justify-self-start px-3 disabled:cursor-not-allowed disabled:opacity-55"
+      data-testid="automation-runs-load-more"
+      disabled={busyOperation === 'execution:load-more'}
+      type="button"
+      onClick={() => void onLoadMore()}
+    >
+      {t('automation.runs.loadMore')}
+    </button>
+  ) : null
 
   if (executions.length === 0) {
-    return <EmptyState message={t('automation.runs.empty')} />
+    return (
+      <div className="grid gap-3">
+        <EmptyState message={t(onLoadMore ? 'automation.runs.emptySearched' : 'automation.runs.empty')} />
+        {loadMore}
+      </div>
+    )
   }
 
   return (
@@ -1586,6 +1637,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
           </article>
         )
       })}
+      {loadMore}
     </div>
   )
 }
@@ -1754,4 +1806,22 @@ function formatDateTime(value: string, locale: Locale, timeZone?: string) {
   } catch {
     return format()
   }
+}
+
+/**
+ * Formats the owner Team of a Team definition for its card.
+ *
+ * @param ownerTeamId - Owner Team, or undefined for a Workspace definition.
+ * @param teams - Teams the panel knows by name.
+ * @param t - Translator.
+ * @returns The label, or an empty string for a Workspace definition.
+ */
+function formatOwnerTeam(
+  ownerTeamId: string | undefined,
+  teams: readonly RecurringTeamOption[],
+  t: ReturnType<typeof createTranslator>,
+): string {
+  if (ownerTeamId === undefined) return ''
+  const name = teams.find((team) => team.id === ownerTeamId)?.name ?? ownerTeamId
+  return t('automation.ownerTeam').replace('{team}', name)
 }

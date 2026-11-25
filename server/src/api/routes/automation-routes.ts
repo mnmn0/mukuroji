@@ -95,6 +95,8 @@ import {
   validateApplyAutomationTemplateInput,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
+  assertTemplateTargetWithinOwnerTeam,
+  teamScopeViolation,
   validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
@@ -190,6 +192,12 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
+import {
+  assertAutomationActionsUseOwnerTeamProjects,
+  listDelegatedManagementScopes,
+  requireDelegatedManagement,
+  requireSomeDelegatedManagement,
+} from '../shared/team-delegated-management'
 import { getEnv } from '../shared/runtime-config'
 import {
   projectWorkItemMutationSearchDocumentBestEffort,
@@ -1812,6 +1820,7 @@ export function createAutomationActionExecutor(
 ): AutomationActionExecutor {
   return {
     async execute(action, context) {
+      assertAutomationActionWithinOwnerTeam(action, context)
       switch (action.type) {
         case 'assign':
           await executeAutomationWorkItemUpdate(
@@ -1853,6 +1862,43 @@ export function createAutomationActionExecutor(
           await deliverAutomationWebhook(action, context)
       }
     },
+  }
+}
+
+/**
+ * Rejects an action of a Team-owned execution that reaches outside its Team.
+ *
+ * The rule was checked when it was saved; this check holds for executions that resume a pinned
+ * version and for events whose Work Item belongs to another Team. Create actions check their
+ * resolved Team when the template and values are merged.
+ *
+ * @param action - Action about to run.
+ * @param context - Durable Automation execution context carrying the pinned owner Team.
+ * @throws AutomationError when the action would change another Team or call out of the Workspace.
+ */
+function assertAutomationActionWithinOwnerTeam(
+  action: AutomationAction,
+  context: AutomationActionExecutionContext,
+) {
+  const ownerTeamId = context.execution.ownerTeamId
+  if (ownerTeamId === undefined) return
+  switch (action.type) {
+    case 'webhook':
+      throw teamScopeViolation('A Team rule cannot call an outbound webhook.')
+    case 'assign':
+    case 'move':
+    case 'update':
+    case 'comment':
+    case 'approval': {
+      const target = readOptionalAutomationWorkItemTarget(context.event)
+      if (target && target.teamId !== ownerTeamId) {
+        throw teamScopeViolation('A Team rule can only change Work Items of its own Team.')
+      }
+      return
+    }
+    case 'create':
+    case 'notify':
+      return
   }
 }
 
@@ -2124,9 +2170,15 @@ async function executeAutomationWorkItemCreate(
     ...(template?.kind === 'work-item' ? template.payload : {}),
     ...action.values,
   }
-  const teamId = readAutomationText(values.teamId) ?? readAutomationMetadataText(context.event, 'teamId')
+  const ownerTeamId = context.execution.ownerTeamId
+  const teamId = readAutomationText(values.teamId) ??
+    readAutomationMetadataText(context.event, 'teamId') ??
+    ownerTeamId
   if (!teamId) {
     throw new AutomationError('invalid-input', 'AutomationTargetMissing', 'Create action requires a Team ID.')
+  }
+  if (ownerTeamId !== undefined && teamId !== ownerTeamId) {
+    throw teamScopeViolation('A Team definition can only create Work Items in its own Team.')
   }
   const body = createAutomationWorkItemCreateBody(
     values,
@@ -3017,6 +3069,16 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
  * @param routeApp - Hono application that receives the routes.
  */
 export function registerAutomationRoutes(routeApp: Hono): void {
+  /** 呼び出し元が管理できる Automation 定義の範囲（Workspace と Team）を返します。 */
+  routeApp.get('/api/automation/management-scopes', async (c) => {
+    try {
+      const principal = await authenticateAutomationPrincipal(c)
+      return c.json(await listDelegatedManagementScopes(principal, 'automation.manage'))
+    } catch (error) {
+      return toAutomationErrorResponse(c, error)
+    }
+  })
+
   /** Workspace の versioned automation rules を返します。 */
   routeApp.get('/api/automation/rules', async (c) => {
     try {
@@ -3030,13 +3092,18 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が automation rule を作成します。 */
   routeApp.post('/api/automation/rules', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = validateCreateAutomationRuleInput(await readAutomationJson(c))
+      await requireDelegatedManagement(principal, input.ownerTeamId)
+      const ownerTeamId = input.ownerTeamId
       return c.json(await automationDependencies.ruleTemplates.createRule(
         principal.directoryId,
         input,
         c.req.header('Idempotency-Key')?.trim() || undefined,
         principal.workspaceMember.memberKey,
+        ownerTeamId === undefined
+          ? undefined
+          : (actions) => assertAutomationActionsUseOwnerTeamProjects(principal.directoryId, ownerTeamId, actions),
       ), 201)
     } catch (error) {
       return toAutomationErrorResponse(c, error)
@@ -3044,16 +3111,21 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   })
 
   /**
-   * Workspace 管理者が保存前の rule を一つの Work Item に当てはめ、一致するかと各 action の予定を
+   * Workspace 管理者（Team rule は所有 Team の Team manager も）が保存前の rule を一つの Work Item に当てはめ、一致するかと各 action の予定を
    * 返します。Action は実行しません。
    */
   routeApp.post('/api/automation/rule-dry-runs', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
+      await requireSomeDelegatedManagement(principal, 'automation.manage')
       const body = await readAutomationJson(c)
       const rule = validateCreateAutomationRuleInput(body.rule)
+      await requireDelegatedManagement(principal, rule.ownerTeamId)
       const teamId = requireAutomationDryRunText(body.teamId, 'Team ID')
       const workItemId = requireAutomationDryRunText(body.workItemId, 'Work Item ID')
+      if (rule.ownerTeamId !== undefined && teamId !== rule.ownerTeamId) {
+        throw teamScopeViolation('A Team rule can only be tried on Work Items of its own Team.')
+      }
       await requireAutomationTeam(principal.directoryId, teamId)
       // Workspace administration does not grant every Project, so the dry run reads the Work Item
       // only when the administrator could view it; otherwise its values would leak through the plan.
@@ -3074,17 +3146,20 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   })
 
   /**
-   * Workspace 管理者が automation rule を削除します。実行中や再試行待ちの execution は、保存済み
+   * Workspace 管理者（Team rule は所有 Team の Team manager も）が automation rule を削除します。実行中や再試行待ちの execution は、保存済み
    * の rule version を使って最後まで動きます。
    */
   routeApp.delete('/api/automation/rules/:ruleId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
+      await requireSomeDelegatedManagement(principal, 'automation.manage')
       const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
       const ruleId = c.req.param('ruleId')
-      if (!await automationDependencies.ruleTemplates.getRule(principal.directoryId, ruleId)) {
+      const current = await automationDependencies.ruleTemplates.getRule(principal.directoryId, ruleId)
+      if (!current) {
         throw new AutomationError('not-found', 'AutomationRuleNotFound', 'Automation rule was not found.')
       }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       await automationDependencies.ruleTemplates.deleteRule(
         principal.directoryId,
         ruleId,
@@ -3099,12 +3174,24 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が automation rule の新 version を保存します。 */
   routeApp.patch('/api/automation/rules/:ruleId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = await readAutomationJson(c) as UpdateAutomationRuleInput
+      const current = await automationDependencies.ruleTemplates.getRule(
+        principal.directoryId,
+        c.req.param('ruleId'),
+      )
+      if (!current) {
+        throw new AutomationError('not-found', 'AutomationRuleNotFound', 'Automation rule was not found.')
+      }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
+      const ownerTeamId = current.ownerTeamId
       return c.json(await automationDependencies.ruleTemplates.updateRule(
         principal.directoryId,
         c.req.param('ruleId'),
         input,
+        ownerTeamId === undefined
+          ? undefined
+          : (actions) => assertAutomationActionsUseOwnerTeamProjects(principal.directoryId, ownerTeamId, actions),
       ))
     } catch (error) {
       return toAutomationErrorResponse(c, error)
@@ -3378,8 +3465,9 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が automation template を作成します。 */
   routeApp.post('/api/automation/templates', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = validateCreateAutomationTemplateInput(await readAutomationJson(c))
+      await requireDelegatedManagement(principal, input.ownerTeamId)
       return c.json(await automationDependencies.ruleTemplates.createTemplate(
         principal.directoryId,
         input,
@@ -3393,8 +3481,16 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が automation template の新 version を保存します。 */
   routeApp.patch('/api/automation/templates/:templateId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = await readAutomationJson(c) as UpdateAutomationTemplateInput
+      const current = await automationDependencies.ruleTemplates.getTemplate(
+        principal.directoryId,
+        c.req.param('templateId'),
+      )
+      if (!current) {
+        throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
+      }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       return c.json(await automationDependencies.ruleTemplates.updateTemplate(
         principal.directoryId,
         c.req.param('templateId'),
@@ -3408,7 +3504,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が template の current version を複製します。 */
   routeApp.post('/api/automation/templates/:templateId/duplicate', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const source = await automationDependencies.ruleTemplates.getTemplate(
         principal.directoryId,
         c.req.param('templateId'),
@@ -3416,9 +3512,12 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!source) {
         throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
       }
+      // The copy keeps the source's owner, so only someone who manages that scope can copy it.
+      await requireDelegatedManagement(principal, source.ownerTeamId)
       return c.json(await automationDependencies.ruleTemplates.createTemplate(
         principal.directoryId,
         validateCreateAutomationTemplateInput({
+          ...(source.ownerTeamId === undefined ? {} : { ownerTeamId: source.ownerTeamId }),
           kind: source.kind,
           name: `${source.name} copy`,
           enabled: source.enabled,
@@ -3523,6 +3622,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
           'The selected Project or Workflow template is unavailable.',
         )
       }
+      assertTemplateTargetWithinOwnerTeam(template, input.target)
       const names = readLocalizedNames(template.payload)
       return c.json(await previewProjectTemplateApplication(
         principal,
@@ -3559,14 +3659,20 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   })
 
   /**
-   * Workspace 管理者が template を削除します。Rule の create action や recurring 定義が使っている
+   * Workspace 管理者（Team template は所有 Team の Team manager も）が template を削除します。Rule の create action や recurring 定義が使っている
    * template は削除できません。
    */
   routeApp.delete('/api/automation/templates/:templateId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
+      await requireSomeDelegatedManagement(principal, 'automation.manage')
       const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
       const templateId = c.req.param('templateId')
+      const current = await automationDependencies.ruleTemplates.getTemplate(principal.directoryId, templateId)
+      if (!current) {
+        throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
+      }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       await deleteUnusedAutomationTemplate(
         automationDependencies,
         principal.directoryId,
@@ -3592,8 +3698,9 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が recurring Work 定義を作成します。 */
   routeApp.post('/api/recurring-work', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = validateCreateRecurringWorkInput(await readAutomationJson(c))
+      await requireDelegatedManagement(principal, input.ownerTeamId)
       await requireAutomationTeam(principal.directoryId, input.teamId)
       return c.json(await automationDependencies.recurringSchedules.createRecurringWork(
         principal.directoryId,
@@ -3608,7 +3715,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が recurring Work 定義の新 version を保存します。 */
   routeApp.patch('/api/recurring-work/:recurringWorkId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const input = await readAutomationJson(c) as UpdateRecurringWorkInput
       const current = await automationDependencies.recurringSchedules.getRecurringWork(
         principal.directoryId,
@@ -3617,6 +3724,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (!current) {
         throw new AutomationError('not-found', 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
       }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       await requireAutomationTeam(principal.directoryId, input.teamId ?? current.teamId)
       return c.json(await automationDependencies.recurringSchedules.updateRecurringWork(
         principal.directoryId,
@@ -3628,15 +3736,24 @@ export function registerAutomationRoutes(routeApp: Hono): void {
     }
   })
 
-  /** Workspace 管理者が recurring Work 定義を削除します。作成済みの Work Item は残ります。 */
+  /**
+   * Workspace 管理者（Team の定義は所有 Team の Team manager も）が recurring Work 定義を削除します。
+   * 作成済みの Work Item は残ります。
+   */
   routeApp.delete('/api/recurring-work/:recurringWorkId', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
+      await requireSomeDelegatedManagement(principal, 'automation.manage')
       const input = validateDeleteAutomationDefinitionInput(await readAutomationJson(c))
       const recurringWorkId = c.req.param('recurringWorkId')
-      if (!await automationDependencies.recurringSchedules.getRecurringWork(principal.directoryId, recurringWorkId)) {
+      const current = await automationDependencies.recurringSchedules.getRecurringWork(
+        principal.directoryId,
+        recurringWorkId,
+      )
+      if (!current) {
         throw new AutomationError('not-found', 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
       }
+      await requireDelegatedManagement(principal, current.ownerTeamId, { existingDefinition: true })
       await automationDependencies.recurringSchedules.deleteRecurringWork(
         principal.directoryId,
         recurringWorkId,
@@ -3667,8 +3784,13 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** Workspace 管理者が retryable execution を同じ trigger event で再開します。 */
   routeApp.post('/api/automation/executions/:executionId/retry', async (c) => {
     try {
-      const principal = await authenticateAutomationPrincipal(c, true)
+      const principal = await authenticateAutomationPrincipal(c)
       const executionId = c.req.param('executionId')
+      const execution = await automationDependencies.executions.getExecution(principal.directoryId, executionId)
+      if (!execution) {
+        throw new AutomationError('not-found', 'AutomationExecutionNotFound', 'Automation execution was not found.')
+      }
+      await requireDelegatedManagement(principal, execution.ownerTeamId, { existingDefinition: true })
       const event = await automationDependencies.executions.getExecutionEvent(principal.directoryId, executionId)
       if (!event) {
         throw new AutomationError('not-found', 'AutomationExecutionNotFound', 'Automation execution was not found.')

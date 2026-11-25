@@ -60,6 +60,7 @@ const settingsPanelLabelKeys: Record<SettingsPanelId, MessageKey> = {
   'work-item-configuration': 'workspace.settings.panel.work-item-configuration',
   'work-calendar': 'workspace.settings.panel.work-calendar',
   'work-item-key-prefix': 'workspace.settings.panel.work-item-key-prefix',
+  'team-automation': 'workspace.settings.panel.team-automation',
   'agent-settings': 'workspace.settings.panel.agent-settings',
 }
 

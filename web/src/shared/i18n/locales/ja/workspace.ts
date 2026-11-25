@@ -590,6 +590,7 @@ export const workspaceMessages = {
   'workspace.settings.panel.work-item-configuration': 'ワークフローとフィールド',
   'workspace.settings.panel.work-calendar': '稼働カレンダー',
   'workspace.settings.panel.work-item-key-prefix': 'Work Item key の prefix',
+  'workspace.settings.panel.team-automation': 'チームの自動化',
   'workspace.settings.panel.agent-settings': 'エージェント設定',
   'workspace.settings.profile.nameLabel': '表示名',
   'workspace.settings.profile.nameHelp': '担当者の一覧・コメント・週報などで、ほかのメンバーに表示される名前です。空にするとメールアドレスで表示されます。',

@@ -1,4 +1,5 @@
 import {
+  type AutomationRule,
   crossesWorkItemBaselineSlipThreshold,
   parseWorkItemBaselineSlipChange,
   isWorkItemRelationEventType,
@@ -134,6 +135,27 @@ export function matchesAutomationTrigger(
     case 'schedule':
       return event.eventType === 'automation.schedule'
   }
+}
+
+/**
+ * Tests whether a rule's owner Team accepts the event.
+ *
+ * A Workspace rule accepts every event. A Team rule accepts only events of its own Team's Work
+ * Items. A plain schedule event names no Work Item, and the rule's actions are limited to the Team
+ * instead; a due Work Item schedule event names its Work Item's Team and must match.
+ *
+ * @param rule - Rule whose owner Team is checked.
+ * @param event - Durable trigger event.
+ * @returns Whether the rule may run for the event.
+ */
+export function matchesAutomationRuleOwnerTeam(
+  rule: Pick<AutomationRule, 'ownerTeamId' | 'trigger'>,
+  event: AutomationEvent,
+): boolean {
+  if (rule.ownerTeamId === undefined) return true
+  const teamId = event.metadata?.teamId
+  if (rule.trigger.type === 'schedule' && teamId === undefined) return true
+  return teamId === rule.ownerTeamId
 }
 
 /**
