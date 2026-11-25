@@ -73,7 +73,8 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   - 競合の解決で予定に書くときは、link の向き（inbound だけの link を含む）にかかわらず、競合で表示した ETag を
     条件にする。
   - 解決の claim を取った後で競合を読み直し、読んだ時点から競合が新しくなっていれば何もせずに失敗させる。
-    同じ解決の再送は先の試行の claim を解放しない。
+    同じ解決の再送は先の試行の claim を解放しない。claim の解放は取得した時刻も条件にし、lease が切れた後に
+    同じ解決の別の試行が取り直した claim を、先の試行が解放しないようにする。
 - 日付の競合は「マージ」で開始日と終了日を選び直せる。カレンダーの競合のマージは `schedule` だけ、他の
   connector の競合のマージは title・description・status だけを受け付ける。
 - Google の PATCH は `start`・`end` を項目ごとにマージするので、`dateTime` と `timeZone` を `null` で消してから

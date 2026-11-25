@@ -894,6 +894,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictIdValue: string,
     operationIdValue: string,
     refresh?: ConnectorConflictSnapshotRefresh,
+    claimStartedAt?: string,
   ) {
     const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
@@ -906,7 +907,9 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     const row = readConflictRow(value)
     if (
       row.value.conflict.status !== 'open' ||
-      row.value.resolutionOperationId !== operationId
+      row.value.resolutionOperationId !== operationId ||
+      // A claim the same operation took again after this attempt's lease expired is not this one.
+      (claimStartedAt !== undefined && row.value.resolutionStartedAt !== claimStartedAt)
     ) return false
     const nextValue = refresh
       ? applyConflictSnapshotRefresh(row.value, refresh)

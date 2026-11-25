@@ -278,12 +278,15 @@ export interface ConnectorSyncPersistence {
   /**
    * Side effect 前に失敗した current resolution claim を解放します。`refresh` を渡すと、
    * conflict の snapshot と revision も同じ書き込みで新しい値に置き換えます。
+   * `claimStartedAt` を渡すと、その時刻に取得した claim だけを解放します。lease が切れた後に
+   * 同じ operation の別の試行が取り直した claim は解放しません。
    */
   releaseConflictResolution(
     workspaceId: string,
     conflictId: string,
     operationId: string,
     refresh?: ConnectorConflictSnapshotRefresh,
+    claimStartedAt?: string,
   ): Promise<boolean>
   /** Open conflict を一度だけ resolved/ignored へ遷移させます。 */
   completeConflict(
@@ -1087,7 +1090,8 @@ export class ConnectorSyncEngine {
       throw conflictResolutionRace()
     }
     // A retry of the same operation goes on while the first attempt may still hold the claim, so
-    // only the attempt that took the claim releases it.
+    // only the attempt that took the claim releases it, and only the claim it took: after the lease
+    // expires, another attempt of the same operation can take a newer one.
     const ownsClaim = claim === 'claimed'
     const release = async (refresh?: ConnectorConflictSnapshotRefresh) => {
       if (ownsClaim) {
@@ -1096,6 +1100,7 @@ export class ConnectorSyncEngine {
           conflictId,
           operationId,
           refresh,
+          resolvedAt,
         )
       }
     }
@@ -1767,13 +1772,15 @@ export class InMemoryConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictId: string,
     operationId: string,
     refresh?: ConnectorConflictSnapshotRefresh,
+    claimStartedAt?: string,
   ) {
     const key = conflictKey(workspaceId, conflictId)
     const current = this.conflicts.get(key)
     if (
       !current ||
       current.conflict.status !== 'open' ||
-      current.resolutionOperationId !== operationId
+      current.resolutionOperationId !== operationId ||
+      (claimStartedAt !== undefined && current.resolutionStartedAt !== claimStartedAt)
     ) return false
     const next = refresh ? applyConflictSnapshotRefresh(current, refresh) : { ...current }
     delete next.resolutionOperationId
