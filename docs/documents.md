@@ -131,7 +131,9 @@ transaction で参加者 row と marker を書き足します。どちらも pag
 既存の thread は data migration `0002-document-comment-participant-index` で参加者 row と marker を
 一括で作れます。migration の間は comment の作成を止めます（[data-migration.md](data-migration.md)）。Comment の作成者は自分の
 comment の本文と mention を編集（`editedAt` を記録し、新しく mention された member にだけ通知）
-し、削除できます。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
+し、削除できます。編集の画面は保存済みの mention を候補から選んだ扱いにせず、編集で変わらなかった
+部分にある mention はその位置の member のまま保ちます。そのため保存後に member の名前が入れ替わっても、
+関係のない編集で古い `@名前` が別の member の mention に変わりません。削除は row を消さず、本文と mention を空にして `deletedAt` を記録するので、
 thread の返信はそのまま残り、画面は「このコメントは削除されました」と表示します。編集と削除の
 `Idempotency-Key` は Workspace・member・key の hash を sort key にした
 `COMMENT_MUTATION#<documentId>#<hash>` の receipt（operation・comment・入力の fingerprint と

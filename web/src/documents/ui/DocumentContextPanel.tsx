@@ -1077,10 +1077,9 @@ function CommentCard({
               className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
               onClick={() => {
                 setError(false)
-                setEditDraft({
-                  body: comment.body,
-                  mentionMemberKeys: comment.mentions.map((mention) => mention.userId),
-                })
+                // Only members picked during the edit are listed; the stored mentions are kept from
+                // the comment itself, so a renamed member's old token is not read as a new pick.
+                setEditDraft({ body: comment.body, mentionMemberKeys: [] })
               }}
               type="button"
             >

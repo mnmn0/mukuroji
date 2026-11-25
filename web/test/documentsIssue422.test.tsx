@@ -206,6 +206,34 @@ describe('Document editing and comments (#422)', () => {
     }
   })
 
+  test('keeps stored mentions on their members when members swap names before an edit', () => {
+    // Ann and Bob were mentioned; Ann has since become Anne, and Bob has taken the name Ann.
+    const people = [
+      { memberKey: 'ann@example.com', name: 'Anne', email: 'ann@example.com', status: 'active' },
+      { memberKey: 'bob@example.com', name: 'Ann', email: 'bob@example.com', status: 'active' },
+    ]
+    const original = {
+      body: 'Ask @Ann and @Bob',
+      mentions: [
+        { userId: 'ann@example.com', offset: 4, length: 4 },
+        { userId: 'bob@example.com', offset: 13, length: 4 },
+      ],
+    }
+    const stored = [
+      { userId: 'ann@example.com', offset: 4, length: 4 },
+      { userId: 'bob@example.com', offset: 13, length: 4 },
+    ]
+
+    // An unrelated edit, as the edit form sends it with no member picked.
+    expect(resolveEditedDocumentMentions(original, 'Ask @Ann and @Bob today', [], people)).toEqual(stored)
+    // Even with the second member listed as picked, the unchanged `@Ann` stays the first member's.
+    expect(resolveEditedDocumentMentions(original, 'Ask @Ann and @Bob today', ['bob@example.com'], people))
+      .toEqual(stored)
+    // Picking the second member by its new name adds a mention where it was picked.
+    expect(resolveEditedDocumentMentions(original, 'Ask @Ann and @Bob, cc @Ann', ['bob@example.com'], people))
+      .toEqual([...stored, { userId: 'bob@example.com', offset: 22, length: 4 }])
+  })
+
   test('puts an edited comment into the cached thread opened by a deep link', async () => {
     const root = createComment({ id: 'root' })
     const reply = createComment({ id: 'reply', parentCommentId: 'root', body: 'Before' })
