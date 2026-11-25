@@ -125,11 +125,13 @@ export function TimeBudgetPanel({
   const [periodFrom, setPeriodFrom] = useState('')
   const [periodTo, setPeriodTo] = useState('')
   // The key names the budget being edited, so switching to another period's budget, or between a
-  // budget per period and the default budget, resets the form even at the same revision.
+  // budget per period and the default budget, resets the form even at the same revision. Its update
+  // time is part of it too: a period deleted and saved again restarts at the same revision, and the
+  // form must not keep the old values while the save expects the new budget.
   const editedBudgetKey = editTarget === 'newPeriod'
     ? `new:${reportRange.from}/${reportRange.to}`
     : budget?.periodBudget ? `period:${budget.periodFrom ?? ''}/${budget.periodTo ?? ''}` : 'default'
-  const formKey = `${projectId ?? 'team'}:${editTarget ?? 'closed'}:${editedBudgetKey}:${budget?.revision ?? 0}`
+  const formKey = `${projectId ?? 'team'}:${editTarget ?? 'closed'}:${editedBudgetKey}:${budget?.revision ?? 0}:${budget?.updatedAt ?? ''}`
   const [periodFormKey, setPeriodFormKey] = useState(formKey)
   if (periodFormKey !== formKey) {
     // The keyed form resets amount and currency when the saved budget changes; reset the period with them.
