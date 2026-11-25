@@ -164,9 +164,10 @@ test('rejects a disabled, other-Team, or non-Work-Item template before writing',
   const creates = configureTemplates([
     workItemTemplate({ id: 'disabled', enabled: false }),
     workItemTemplate({ id: 'other-team' }, { teamId: 'other-team' }),
+    workItemTemplate({ id: 'owned-by-other', ownerTeamId: 'other-team' }),
   ])
 
-  for (const templateId of ['disabled', 'other-team', 'missing']) {
+  for (const templateId of ['disabled', 'other-team', 'owned-by-other', 'missing']) {
     await expect(createWorkItem({ templateId }, `template-${templateId}`)).rejects.toMatchObject({
       status: 404,
       code: 'not_found',
@@ -181,6 +182,7 @@ test('lists the enabled Work Item templates of a Team', async () => {
     workItemTemplate({ id: 'a-check', name: 'A check' }, { acceptanceCriteria: undefined }),
     workItemTemplate({ id: 'disabled', enabled: false }),
     workItemTemplate({ id: 'other-team' }, { teamId: 'other-team' }),
+    workItemTemplate({ id: 'owned-by-other', ownerTeamId: 'other-team' }),
   ])
 
   const catalog = await runWithTestAppDependencies(() =>

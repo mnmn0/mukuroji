@@ -7,6 +7,7 @@ import {
 } from '../src/requests/fixtures'
 import {
   createEmptyRequestFormDraft,
+  createEmptyRequestFormDraftForScope,
   createEmptyRequestField,
   createRequestFormInput,
   isRequestFormDraftModelValid,
@@ -354,4 +355,11 @@ describe('request form model round-trip', () => {
     expect(publishedRevisions).toEqual([model.revision + 1, model.revision + 2])
     expect(published.revision).toBe(model.revision + 3)
   })
+})
+
+test('starts a Team manager form in their Team with the routing Team to match', () => {
+  expect(createEmptyRequestFormDraftForScope(undefined).scope).toEqual({ type: 'workspace' })
+  const draft = createEmptyRequestFormDraftForScope('core-team')
+  expect(draft.scope).toEqual({ type: 'team', teamId: 'core-team' })
+  expect(draft.routing.teamId).toBe('core-team')
 })

@@ -52,6 +52,7 @@ import type {
   AutomationInboundWebhookProvisioning,
   AutomationInboundWebhookProvisioningOperation,
   AutomationInboundWebhookSecretCleanup,
+  AutomationPinnedActionsGuard,
   AutomationRepository,
 } from '../../application/ports'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
@@ -71,8 +72,9 @@ import {
   getFirstRecurringWakeUp,
   getNextRecurringOccurrence,
 } from '../../domain/recurring-schedule'
-import { validateCreateAutomationRuleInput } from '../../domain/rule-validation'
+import { teamScopeViolation, validateCreateAutomationRuleInput } from '../../domain/rule-validation'
 import {
+  assertTemplateTargetWithinOwnerTeam,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
@@ -311,6 +313,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
    * @param input - Rule definition.
    * @param idempotencyKey - Client idempotency key.
    * @param createdByMemberKey - Member who creates the rule; not part of the replay fingerprint.
+   * @param assertPinnedActions - Check run on the actions after template versions are pinned.
    * @returns The created or replayed rule.
    */
   async createRule(
@@ -318,11 +321,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     input: CreateAutomationRuleInput,
     idempotencyKey?: string,
     createdByMemberKey?: string,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
     const normalized = validateCreateAutomationRuleInput(input)
     const requestedDefinition = {
+      ...(normalized.ownerTeamId === undefined ? {} : { ownerTeamId: normalized.ownerTeamId }),
       name: normalized.name,
       enabled: normalized.enabled,
       trigger: normalized.trigger,
@@ -369,11 +374,13 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const pinned = await this.pinWorkItemTemplateVersions(
       normalizedWorkspaceId,
       requestedDefinition.actions,
+      requestedDefinition.ownerTeamId,
     )
     const definition = {
       ...requestedDefinition,
       actions: pinned.actions,
     }
+    await assertPinnedActions?.(definition.actions)
     const now = new Date().toISOString()
     const nextRunAt = definition.trigger.type === 'schedule'
       ? getNextRecurringOccurrence(definition.trigger.schedule, new Date(now))
@@ -435,10 +442,17 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Rule を revision CAS 付きで更新します。 */
-  async updateRule(workspaceId: string, ruleId: string, input: UpdateAutomationRuleInput) {
+  async updateRule(
+    workspaceId: string,
+    ruleId: string,
+    input: UpdateAutomationRuleInput,
+    assertPinnedActions?: AutomationPinnedActionsGuard,
+  ) {
     const current = await this.requireRule(workspaceId, ruleId)
     assertExpectedRevision(current.revision, input.expectedRevision)
+    assertOwnerTeamUnchanged(input, current.ownerTeamId)
     const normalized = validateCreateAutomationRuleInput({
+      ...(current.ownerTeamId === undefined ? {} : { ownerTeamId: current.ownerTeamId }),
       name: input.name ?? current.name,
       enabled: input.enabled ?? current.enabled,
       trigger: input.trigger ?? current.trigger,
@@ -460,8 +474,9 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       : undefined
     const pinned = input.actions === undefined
       ? { actions: current.actions, templateChecks: [] }
-      : await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions)
+      : await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions, current.ownerTeamId)
     const pinnedActions = pinned.actions
+    if (input.actions !== undefined) await assertPinnedActions?.(pinnedActions)
     const scheduleChanged = normalized.trigger.type === 'schedule' && (
       current.trigger.type !== 'schedule' ||
       canonicalString(current.trigger.schedule) !== canonicalString(normalized.trigger.schedule)
@@ -646,6 +661,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const current = await this.requireTemplate(workspaceId, templateId)
     assertExpectedRevision(current.revision, input.expectedRevision)
     const normalized = validateCreateAutomationTemplateInput({
+      ...(current.ownerTeamId === undefined ? {} : { ownerTeamId: current.ownerTeamId }),
       kind: current.kind,
       name: input.name ?? current.name,
       enabled: input.enabled ?? current.enabled,
@@ -753,6 +769,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (target.kind !== template.kind) {
       throw invalidInput('Template application target does not match the template kind.')
     }
+    assertTemplateTargetWithinOwnerTeam(template, target)
     const calendarPolicy = template.kind === 'project' ? await readCalendarPolicy?.(template.version) : undefined
     const now = new Date().toISOString()
     const application: AutomationTemplateApplication = {
@@ -1848,6 +1865,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const template = await this.requireEnabledWorkItemTemplate(
       normalizedWorkspaceId,
       normalized.templateId,
+      normalized.ownerTeamId,
     )
     const now = new Date().toISOString()
     const nextRunAt = getFirstRecurringWakeUp(normalized.schedule, new Date(now))
@@ -1879,7 +1897,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     } catch (error) {
       if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
       if (!createIdentity) {
-        await this.requireEnabledWorkItemTemplate(normalizedWorkspaceId, normalized.templateId)
+        await this.requireEnabledWorkItemTemplate(normalizedWorkspaceId, normalized.templateId, normalized.ownerTeamId)
         throw persistenceError(error)
       }
       return await this.getIdempotentCreateReplay<RecurringWork>(
@@ -1896,7 +1914,9 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   async updateRecurringWork(workspaceId: string, recurringWorkId: string, input: UpdateRecurringWorkInput) {
     const current = await this.requireRecurringWork(workspaceId, recurringWorkId)
     assertExpectedRevision(current.revision, input.expectedRevision)
+    assertOwnerTeamUnchanged(input, current.ownerTeamId)
     const normalized = validateCreateRecurringWorkInput({
+      ...(current.ownerTeamId === undefined ? {} : { ownerTeamId: current.ownerTeamId }),
       name: input.name ?? current.name,
       teamId: input.teamId ?? current.teamId,
       enabled: input.enabled ?? current.enabled,
@@ -1921,7 +1941,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
     const template = input.templateId === undefined
       ? undefined
-      : await this.requireEnabledWorkItemTemplate(workspaceId, normalized.templateId)
+      : await this.requireEnabledWorkItemTemplate(workspaceId, normalized.templateId, current.ownerTeamId)
     const templateVersion = template?.version ?? current.templateVersion
     const recurring: RecurringWork = {
       ...current,
@@ -2987,7 +3007,22 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Enabled Work Item template を取得し、保存時に固定できることを確認します。 */
-  private async requireEnabledWorkItemTemplate(workspaceId: string, templateId: string) {
+  /**
+   * Reads an enabled Work Item template that a definition of the given owner may use.
+   *
+   * A Workspace definition may use only Workspace templates. A Team definition may use Workspace
+   * templates and its own Team's templates, and never a template that creates in another Team.
+   *
+   * @param workspaceId - Workspace that owns the template.
+   * @param templateId - Template to read.
+   * @param ownerTeamId - Team that owns the referencing definition, or undefined for Workspace.
+   * @returns The enabled Work Item template.
+   */
+  private async requireEnabledWorkItemTemplate(
+    workspaceId: string,
+    templateId: string,
+    ownerTeamId?: string,
+  ) {
     const template = await this.requireTemplate(workspaceId, templateId)
     if (!template.enabled || template.kind !== 'work-item') {
       throw new AutomationError(
@@ -2995,6 +3030,18 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         'AutomationTemplateUnavailable',
         'The selected Work Item template is unavailable.',
       )
+    }
+    if (template.ownerTeamId !== undefined && template.ownerTeamId !== ownerTeamId) {
+      throw teamScopeViolation('The selected Work Item template belongs to another Team.')
+    }
+    const payloadTeamId = template.payload.teamId
+    if (
+      ownerTeamId !== undefined &&
+      payloadTeamId !== undefined &&
+      payloadTeamId !== '' &&
+      payloadTeamId !== ownerTeamId
+    ) {
+      throw teamScopeViolation('The selected Work Item template creates Work Items in another Team.')
     }
     return template
   }
@@ -3008,16 +3055,22 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
    *
    * @param workspaceId - Workspace that owns the templates.
    * @param actions - Actions to pin.
+   * @param ownerTeamId - Team that owns the rule, or undefined for a Workspace rule.
    * @returns Pinned actions and one condition check per referenced template.
    */
   private async pinWorkItemTemplateVersions(
     workspaceId: string,
     actions: readonly AutomationAction[],
+    ownerTeamId?: string,
   ) {
     const templates = new Map<string, AutomationTemplate>()
     const pinnedActions = await Promise.all(actions.map(async (action): Promise<AutomationAction> => {
       if (action.type !== 'create' || !action.templateId) return action
-      const template = await this.requireEnabledWorkItemTemplate(workspaceId, action.templateId)
+      const template = await this.requireEnabledWorkItemTemplate(
+        workspaceId,
+        action.templateId,
+        ownerTeamId,
+      )
       templates.set(template.id, template)
       return { ...action, templateVersion: template.version }
     }))
@@ -3892,6 +3945,20 @@ function readAutomationDefinitionRevision(item: Record<string, unknown>): number
     throw storedInvalid('Automation definition revision')
   }
   return item.revision
+}
+
+/**
+ * Rejects an update that tries to move a definition to another owner.
+ *
+ * @param input - Untrusted update body.
+ * @param ownerTeamId - Owner Team stored on the current definition.
+ * @throws AutomationError when the body names a different owner.
+ */
+function assertOwnerTeamUnchanged(input: object, ownerTeamId: string | undefined) {
+  if (!Object.hasOwn(input, 'ownerTeamId')) return
+  if (Reflect.get(input, 'ownerTeamId') !== ownerTeamId) {
+    throw invalidInput('The owner Team of an Automation definition cannot be changed.')
+  }
 }
 
 function readRecurringWork(item: Record<string, unknown>) {

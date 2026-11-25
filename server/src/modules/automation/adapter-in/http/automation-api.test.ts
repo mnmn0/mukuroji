@@ -1,3 +1,5 @@
+import { listDelegatedManagementScopes } from '../../../../api/shared/team-delegated-management'
+import type { WorkspacePrincipal } from '../../../../api/shared/project-access'
 import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
@@ -65,6 +67,7 @@ import type {
   AutomationInboundWebhookSecretStore,
 } from '../../automation-inbound-webhook'
 import type {
+  AutomationAction,
   AutomationRule,
   AutomationTemplate,
   AutomationTemplateApplication,
@@ -5712,6 +5715,314 @@ test('predicts a Bulk undo completion date in the calendar of the restored sched
   expect(corrections).toEqual([undefined])
 })
 
+/** A Team rule body that reacts to status changes and assigns the Work Item. */
+const teamRuleBody = {
+  ownerTeamId: 'core-team',
+  name: 'Assign on review',
+  enabled: true,
+  trigger: { type: 'status', toStatusId: 'review' },
+  actions: [{ type: 'assign', assigneeMemberKey: 'user#reviewer@example.com' }],
+}
+
+/**
+ * Creates the stored form of a Team rule.
+ *
+ * @param ownerTeamId - Owner Team of the stored rule, or undefined for a Workspace rule.
+ * @returns A stored Automation rule.
+ */
+function createStoredTeamRule(ownerTeamId: string | undefined) {
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'rule-team',
+    workspaceId: 'user#demo@example.com',
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+    name: 'Assign on review',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    trigger: { type: 'status', toStatusId: 'review' },
+    conditions: [],
+    actions: [{ type: 'assign', assigneeMemberKey: 'user#reviewer@example.com' }],
+    retryPolicy: { maxAttempts: 3, initialDelayMs: 1000, backoffMultiplier: 2, maxDelayMs: 60000 },
+    rateLimit: { maxExecutions: 100, windowSeconds: 60 },
+    allowReentry: false,
+    maxChainDepth: 8,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  } satisfies Awaited<ReturnType<TestAutomationRuleTemplatePort['createRule']>>
+}
+
+test('lets a Team manager create and change rules of their own Team only', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'manager' })
+  const created: unknown[] = []
+  const updated: unknown[] = []
+  /** Pins template create actions to version 2, as the repository does before writing. */
+  const pinTemplates = (actions: readonly AutomationAction[]) => actions.map((action) =>
+    action.type === 'create' && action.templateId ? { ...action, templateVersion: 2 } : action
+  )
+  /** Builds a Work Item template whose payload assigns the given Project. */
+  const projectTemplate = (templateId: string, version: number, assignedProjectId: string) => ({
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: templateId,
+    workspaceId: 'user#demo@example.com',
+    kind: 'work-item' as const,
+    name: 'Follow-up',
+    enabled: true,
+    version,
+    revision: version,
+    payload: {
+      title: 'Follow up',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+      assignedProjectId,
+    },
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  })
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async createRule(_workspaceId, input, _idempotencyKey, _createdByMemberKey, assertPinnedActions) {
+        await assertPinnedActions?.(pinTemplates(input.actions))
+        created.push(input)
+        return createStoredTeamRule(input.ownerTeamId)
+      },
+      async getRule(_workspaceId, ruleId) {
+        return createStoredTeamRule(ruleId === 'rule-workspace' ? undefined : 'core-team')
+      },
+      async updateRule(_workspaceId, _ruleId, input, assertPinnedActions) {
+        if (input.actions) await assertPinnedActions?.(pinTemplates(input.actions))
+        updated.push(input)
+        return createStoredTeamRule('core-team')
+      },
+      // Version 1 was current when the request arrived; version 2, pinned on save, moved the
+      // template to another Team's Project.
+      async getTemplate(_workspaceId, templateId) {
+        return projectTemplate(templateId, 1, 'core-project')
+      },
+      async getTemplateVersion(_workspaceId, templateId, version) {
+        return projectTemplate(templateId, version, version === 2 ? 'other-team-project' : 'core-project')
+      },
+    }),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const post = (body: unknown) => app.request('/api/automation/rules', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  })
+
+  const ownTeam = await post(teamRuleBody)
+  const workspaceRule = await post({ ...teamRuleBody, ownerTeamId: undefined })
+  const webhookAction = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'webhook', url: 'https://hooks.example.com/review' }],
+  })
+  const otherTeamCreate = await post({
+    ...teamRuleBody,
+    actions: [{
+      type: 'create',
+      values: { teamId: 'ops-team', title: 'Follow up', schedule: createDefaultDueDateWorkItemSchedule('2026-07-20') },
+    }],
+  })
+  const otherTeamProject = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'move', targetProjectId: 'other-team-project' }],
+  })
+  const otherTeamUpdate = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'update', patch: { assignedProjectId: 'other-team-project' } }],
+  })
+  const otherTeamTemplateProject = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'create', templateId: 'template-moved' }],
+  })
+  const otherTeamTemplateProjectOnUpdate = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, actions: [{ type: 'create', templateId: 'template-moved' }] }),
+  })
+  const formTrigger = await post({ ...teamRuleBody, trigger: { type: 'form', formId: 'form-1' } })
+  const stopOwn = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const stopWorkspace = await app.request('/api/automation/rules/rule-workspace', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(ownTeam.status).toBe(201)
+  expect(workspaceRule.status).toBe(403)
+  expect(await workspaceRule.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
+  for (const response of [
+    webhookAction,
+    otherTeamCreate,
+    otherTeamProject,
+    otherTeamUpdate,
+    otherTeamTemplateProject,
+    otherTeamTemplateProjectOnUpdate,
+    formTrigger,
+  ]) {
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  }
+  expect(stopOwn.status).toBe(200)
+  expect(stopWorkspace.status).toBe(403)
+  expect(created).toEqual([expect.objectContaining({ ownerTeamId: 'core-team' })])
+  expect(updated).toEqual([{ expectedRevision: 1, enabled: false }])
+  expect(await scopes.json()).toEqual({ workspace: false, teamIds: ['core-team'] })
+})
+
+test('keeps Team rules with Workspace administrators for members who do not manage the Team', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'member' })
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({}),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  const response = await app.request('/api/automation/rules', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(teamRuleBody),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(response.status).toBe(403)
+  expect(await scopes.json()).toEqual({ workspace: false, teamIds: [] })
+})
+
+test('lets a Workspace administrator stop a Team rule and see every Team as manageable', async () => {
+  configureFakeProjectClients(true)
+  const updated: unknown[] = []
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getRule() {
+        return createStoredTeamRule('core-team')
+      },
+      async updateRule(_workspaceId, _ruleId, input) {
+        updated.push(input)
+        return { ...createStoredTeamRule('core-team'), enabled: false }
+      },
+    }),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+
+  const stop = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+  const scopes = await app.request('/api/automation/management-scopes', { headers })
+
+  expect(stop.status).toBe(200)
+  expect(updated).toHaveLength(1)
+  expect(await scopes.json()).toEqual({ workspace: true, teamIds: ['core-team'] })
+})
+
+test('lets a Workspace administrator stop a rule whose Team is no longer active', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getRule() {
+        return createStoredTeamRule('archived-team')
+      },
+      async updateRule() {
+        return { ...createStoredTeamRule('archived-team'), enabled: false }
+      },
+    }),
+  })
+
+  const stop = await app.request('/api/automation/rules/rule-team', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: 1, enabled: false }),
+  })
+
+  expect(stop.status).toBe(200)
+})
+
+test('reports Enterprise management scopes from the manage grant, not the read grant', async () => {
+  configureFakeProjectClients(true)
+  const principal = (permissions: WorkspacePrincipal['enterprisePermissions']): WorkspacePrincipal => ({
+    directoryId: 'default',
+    userKey: 'enterprise-user',
+    actorId: 'enterprise-user',
+    isSystemAdmin: false,
+    groups: [],
+    enterprisePermissions: permissions,
+    enterpriseRouteAuthorizedAtResource: true,
+    enterpriseAuthorizationResource: { kind: 'workspace', targetId: 'default', workspaceId: 'default' },
+    workspaceMember: {
+      id: 'enterprise-user',
+      memberKey: 'enterprise-user',
+      email: 'enterprise@example.com',
+      role: 'member',
+      status: 'active',
+      version: 1,
+      createdAt: '2026-11-24T00:00:00.000Z',
+      updatedAt: '2026-11-24T00:00:00.000Z',
+    },
+    workspaceRole: 'member',
+    workspaceMemberStatus: 'active',
+  })
+
+  const reader = await runWithTestAppDependencies(() =>
+    listDelegatedManagementScopes(principal(['automation.read']), 'automation.manage'))
+  const manager = await runWithTestAppDependencies(() =>
+    listDelegatedManagementScopes(principal(['automation.read', 'automation.manage']), 'automation.manage'))
+
+  expect(reader).toEqual({ workspace: false, teamIds: [] })
+  expect(manager).toEqual({ workspace: true, teamIds: ['core-team'] })
+})
+
+test('rejects Team execution actions that reach another Team at run time', async () => {
+  const calls = configureFakeProjectClients(true)
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-team-guard',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-team',
+      ruleVersion: 1,
+      ownerTeamId: 'ops-team',
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'issue-1' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-team-guard:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const executor = createAutomationActionExecutor()
+
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({ type: 'assign', assigneeMemberKey: 'user#demo@example.com' }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({
+      type: 'create',
+      values: { teamId: 'core-team', title: 'Elsewhere', schedule: createDefaultDueDateWorkItemSchedule('2026-07-20') },
+    }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  await expect(runWithTestAppDependencies(() =>
+    executor.execute({ type: 'webhook', url: 'https://hooks.example.com/x' }, context)
+  )).rejects.toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  expect(calls.issueUpdates).toHaveLength(0)
+  expect(calls.issueCreates).toHaveLength(0)
+})
+
 /**
  * Builds a saved rule for definition route tests.
  *
@@ -5987,8 +6298,127 @@ test('dry-runs an unsaved rule against a Work Item without running actions', asy
   expect(JSON.stringify(await hidden.json())).not.toContain('high')
 })
 
-test('keeps rule definition changes and dry runs to Workspace administrators', async () => {
-  configureFakeProjectClients(true, { workspaceRole: 'member' })
+test('lets a Team manager delete and dry-run definitions of their own Team only', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'manager' })
+  const deletes: string[] = []
+  const issue = createBulkRecoveryIssue()
+  const recurring = (id: string, ownerTeamId?: string) => ({
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id,
+    workspaceId: 'user#demo@example.com',
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+    teamId: 'core-team',
+    name: 'Daily triage',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    templateId: 'template-1',
+    templateVersion: 1,
+    schedule: {
+      frequency: 'daily' as const,
+      interval: 1,
+      timeZone: 'UTC',
+      localTime: '09:00',
+      startDate: '2026-07-16',
+      catchUpPolicy: 'latest' as const,
+    },
+    nextRunAt: '2026-07-17T09:00:00.000Z',
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  })
+  const template = (id: string, ownerTeamId?: string): AutomationTemplate => ({
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id,
+    workspaceId: 'user#demo@example.com',
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
+    kind: 'work-item',
+    name: 'Follow-up',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: { title: 'Follow-up', schedule: createDefaultDueDateWorkItemSchedule('2026-07-31') },
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  })
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getRule(_workspaceId, ruleId) {
+        return createStoredTeamRule(ruleId === 'rule-workspace' ? undefined : 'core-team')
+      },
+      async deleteRule(_workspaceId, ruleId) {
+        deletes.push(`rule:${ruleId}`)
+      },
+      async getTemplate(_workspaceId, templateId) {
+        return template(templateId, templateId === 'template-workspace' ? undefined : 'core-team')
+      },
+      async getAutomationDefinitionRevision() {
+        return 1
+      },
+      async listRules() {
+        return []
+      },
+      async deleteTemplate(_workspaceId, templateId) {
+        deletes.push(`template:${templateId}`)
+      },
+    }),
+    recurringSchedules: createAutomationRecurringSchedulePort({
+      async getRecurringWork(_workspaceId, recurringWorkId) {
+        return recurring(recurringWorkId, recurringWorkId === 'recurring-workspace' ? undefined : 'core-team')
+      },
+      async listRecurringWorks() {
+        return []
+      },
+      async deleteRecurringWork(_workspaceId, recurringWorkId) {
+        deletes.push(`recurring:${recurringWorkId}`)
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail() {
+        return { issue: structuredClone(issue), comments: [], activity: [] }
+      },
+    }),
+  })
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const remove = (path: string) => app.request(path, {
+    method: 'DELETE',
+    headers,
+    body: JSON.stringify({ expectedRevision: 1 }),
+  })
+  const dryRun = (ownerTeamId: string | undefined, teamId: string) => app.request('/api/automation/rule-dry-runs', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      rule: { ...teamRuleBody, ownerTeamId },
+      teamId,
+      workItemId: 'onboarding-friction',
+    }),
+  })
+
+  const ownDeletes = [
+    await remove('/api/automation/rules/rule-team'),
+    await remove('/api/automation/templates/template-team'),
+    await remove('/api/recurring-work/recurring-team'),
+  ]
+  const workspaceDeletes = [
+    await remove('/api/automation/rules/rule-workspace'),
+    await remove('/api/automation/templates/template-workspace'),
+    await remove('/api/recurring-work/recurring-workspace'),
+  ]
+  const ownDryRun = await dryRun('core-team', 'core-team')
+  const otherTeamDryRun = await dryRun('core-team', 'ops-team')
+  const workspaceDryRun = await dryRun(undefined, 'core-team')
+
+  expect(ownDeletes.map((response) => response.status)).toEqual([204, 204, 204])
+  expect(workspaceDeletes.map((response) => response.status)).toEqual([403, 403, 403])
+  expect(deletes).toEqual(['rule:rule-team', 'template:template-team', 'recurring:recurring-team'])
+  expect(ownDryRun.status).toBe(200)
+  expect(otherTeamDryRun.status).toBe(403)
+  expect(await otherTeamDryRun.json()).toMatchObject({ code: 'AutomationTeamScopeViolation' })
+  expect(workspaceDryRun.status).toBe(403)
+})
+
+test('keeps rule definition changes and dry runs from members who manage no Team', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', role: 'member' })
   const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
   for (const [path, body] of [
     ['/api/automation/rules/rule-1', { expectedRevision: 1 }],

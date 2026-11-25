@@ -24,6 +24,7 @@ import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../domain/execution-policy'
 import { createPendingAutomationExecution } from './pending-execution'
 import {
   evaluateAutomationCondition as evaluateDomainAutomationCondition,
+  matchesAutomationRuleOwnerTeam,
   matchesAutomationTrigger as matchesDomainAutomationTrigger,
   type AutomationEvent,
 } from '../domain/rule-evaluation'
@@ -100,6 +101,7 @@ export class AutomationEngine {
       return undefined
     }
     if (!rule.enabled || !matchesDomainAutomationTrigger(rule.trigger, event)) return undefined
+    if (!matchesAutomationRuleOwnerTeam(rule, event)) return undefined
     if (!rule.conditions.every((condition) => evaluateDomainAutomationCondition(condition, {
       event,
       workItem: event.workItem,
