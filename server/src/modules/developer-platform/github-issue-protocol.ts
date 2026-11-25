@@ -19,9 +19,6 @@ const GITHUB_RESOURCE_TYPES: readonly ExternalResourceType[] = ['issue', 'merge-
  */
 const PAGE_SIZE = 8
 
-/** Highest page number Mukuroji asks for, which bounds one inventory walk to 10,000 issues. */
-const MAX_PAGE = 1_250
-
 /** Longest issue title GitHub accepts. */
 const TITLE_MAX_LENGTH = 256
 
@@ -91,7 +88,7 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
       .map((item) => readIssue(item, readRepositoryName(item)))
     return {
       items,
-      ...(response.payload.length === PAGE_SIZE && page < MAX_PAGE ? { nextCursor: String(page + 1) } : {}),
+      ...(response.payload.length === PAGE_SIZE ? { nextCursor: String(page + 1) } : {}),
     }
   }
 
@@ -331,7 +328,9 @@ function readTitle(value: string) {
  * @returns Page number.
  */
 function readPageCursor(value: string) {
-  if (!/^[1-9][0-9]{0,3}$/u.test(value) || Number(value) > MAX_PAGE) throw malformed('GitHub issue page cursor is invalid.')
+  // Any positive page number of up to nine digits: a walk goes on while GitHub returns full pages,
+  // and each poll already reads a bounded number of pages.
+  if (!/^[1-9][0-9]{0,8}$/u.test(value)) throw malformed('GitHub issue page cursor is invalid.')
   return Number(value)
 }
 

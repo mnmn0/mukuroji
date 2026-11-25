@@ -66,6 +66,16 @@ describe('GitHub issue protocol', () => {
     expect(requests[1]?.query?.page).toBe('2')
   })
 
+  test('keeps paging past ten thousand issues while GitHub returns full pages', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const fullPage = Array.from({ length: 8 }, (_, index) => issue({ number: 20_000 + index }))
+    const { request, requests } = createRequester([{ status: 200, payload: fullPage }])
+    const page = await protocol.pull(request, 'issue', '1250')
+    expect(requests[0]?.query?.page).toBe('1250')
+    expect(page.nextCursor).toBe('1251')
+    await expect(protocol.pull(request, 'issue', '0')).rejects.toMatchObject({ code: 'ConnectorProviderResponseMalformed' })
+  })
+
   test('has no records for pull requests, commits, or deploys and refuses to write them', async () => {
     const protocol = new GitHubIssueProtocol()
     const { request, requests } = createRequester([])
