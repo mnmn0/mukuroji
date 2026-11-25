@@ -146,6 +146,9 @@ import {
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { DynamoDbChannelPostStore } from '../../modules/notifications/adapter-out/dynamodb/channel-post-store'
+import { SecretsManagerSlackDestinationSecretStore } from '../../modules/notifications/adapter-out/secrets-manager/slack-destination-secret-store'
+import { createSlackTestMessageSender } from '../../modules/notifications/adapter-out/slack/slack-channel-post-sender'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import {
   DynamoDbAgentRunStore,
@@ -685,6 +688,13 @@ export function createProductionWorkItemDependencies(
       createDynamoDbDocumentClient(),
       getConfiguredNotificationsTableName(),
     ),
+    channelDestinations: new DynamoDbChannelPostStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
+    ),
+    notificationDestinationSecrets: new SecretsManagerSlackDestinationSecretStore(createSecretsManagerClient()),
+    notificationDestinationTestSender: createSlackTestMessageSender(),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -2140,6 +2150,13 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.channelDestinations ? { channelDestinations: overrides.channelDestinations } : {}),
+      ...(overrides.notificationDestinationSecrets
+        ? { notificationDestinationSecrets: overrides.notificationDestinationSecrets }
+        : {}),
+      ...(overrides.notificationDestinationTestSender
+        ? { notificationDestinationTestSender: overrides.notificationDestinationTestSender }
+        : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
       ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),

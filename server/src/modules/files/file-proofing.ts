@@ -366,6 +366,11 @@ export type FileApprovalCompletionTransition = {
    * commits only while the stored counts still match. Absent when no Gate read approvals.
    */
   expectedApprovalSummary?: ApprovalSummaryCounts
+  /**
+   * Unconditional items, such as the source requester's completion notification, written last
+   * in the same transaction so they commit only with the completion. Absent when there are none.
+   */
+  completionSideEffectItems?: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /** Approval counts of one Work Item that a completion Gate judges and fences. */
@@ -2070,6 +2075,11 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           : [],
       },
     })
+
+    // Last, so these unconditional items never shift the cancellation indexes above.
+    if (completionTransition?.completionSideEffectItems) {
+      transactionItems.push(...completionTransition.completionSideEffectItems)
+    }
 
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))

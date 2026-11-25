@@ -39,6 +39,8 @@ import {
 import {
   WorkItemCompletionGateError,
   WorkItemConfigurationError,
+  WorkflowRuleError,
+  assertWorkflowRules,
   assertWorkItemTypeChangeResolution,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
@@ -66,9 +68,13 @@ import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from './work-item-access'
 import {
   createWorkItemTypeRelationConfigurationTransactionItems,
+  createWorkflowRuleWorkItemState,
   getWorkItemConfigurationTableName,
   readWorkItemTypeChangeResolution,
   requireActiveCustomFieldPeople,
+  resolveWorkflowRuleActor,
+  withWorkflowRoleConditionChecks,
+  type WorkflowRulePrincipal,
 } from './work-item-configuration'
 import { toWorkspaceAccessErrorResponse } from './workspace-access'
 
@@ -249,6 +255,10 @@ export function toFileProofingErrorResponse(c: Context, error: unknown) {
     // An approval decision that would complete the Work Item reports the Gate like a Work Item update.
     return c.json(error.toResponseBody(), 409)
   }
+  if (error instanceof WorkflowRuleError) {
+    // An approval decision that changes the status reports workflow rules like a Work Item update.
+    return c.json(error.toResponseBody(), error.status === 403 ? 403 : 409)
+  }
   if (!(error instanceof FileProofingError)) {
     console.error(error)
     return c.json({ message: 'File proofing data is unavailable.' }, 502)
@@ -300,6 +310,7 @@ export function requireCanonicalFileProofingWorkItem(
  * @param teamId - Owning Team identifier.
  * @param workItem - Canonical Work Item being approved.
  * @param completionTransition - Requested target workflow status.
+ * @param rulePrincipal - Who decides the approval, for the workflow's transition actor roles.
  * @param dependencies - Ports used to read workflow configuration.
  * @returns A transaction-ready completion transition snapshot.
  */
@@ -308,10 +319,11 @@ export function resolveFileApprovalCompletionTransition(
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
+  rulePrincipal: WorkflowRulePrincipal,
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, true)
+  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, rulePrincipal)
 }
 
 /**
@@ -335,7 +347,8 @@ export async function validateFileApprovalCompletionTransition(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ): Promise<void> {
-  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, false)
+  // Requesting an approval changes no status, so the workflow rules are judged at the decision.
+  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, undefined)
 }
 
 /**
@@ -346,7 +359,8 @@ export async function validateFileApprovalCompletionTransition(
  * @param workItem - Canonical Work Item being approved.
  * @param completionTransition - Requested target workflow status.
  * @param dependencies - Ports used to read workflow configuration.
- * @param applyParentCompletionPolicy - Whether to check and fence the Work Item's open children.
+ * @param decider - Who decides the approval when the decision applies the transition; `undefined`
+ *   when an approval request only names it.
  * @returns A transaction-ready completion transition snapshot.
  */
 async function resolveCompletionTransition(
@@ -355,8 +369,10 @@ async function resolveCompletionTransition(
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
   dependencies: AutomationActionExecutorDependencies,
-  applyParentCompletionPolicy: boolean,
+  decider: WorkflowRulePrincipal | undefined,
 ) {
+  // The decision is when the status changes, so open children and workflow rules apply only then.
+  const applyParentCompletionPolicy = decider !== undefined
   try {
     const resolved = await dependencies.workItemConfigurations.getTeamConfiguration(
       directoryId,
@@ -378,6 +394,20 @@ async function resolveCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    if (decider) {
+      assertWorkflowRules(resolved.configuration, {
+        workItemTypeId: workItem.workItemTypeId,
+        projectId: workItem.assignedProjectId,
+        fromStatusId: currentStatus.workflowStatusId,
+        toStatusId: nextStatus.workflowStatusId,
+        actor: resolveWorkflowRuleActor(decider, workItem, workItem.assignedProjectId),
+        state: () => createWorkflowRuleWorkItemState(
+          workItem.schedule,
+          workItem.acceptanceCriteria?.length ?? 0,
+          workItem.customFieldValues,
+        ),
+      })
+    }
     // The approval being decided is still stored as pending, so it is counted as approved here.
     // Its decision updates the approval counts, so the counts the Gate judged are required by that
     // update rather than by a separate condition check on the same row.
@@ -441,8 +471,8 @@ async function resolveCompletionTransition(
       ...(gateFence.observedApprovals ? { expectedApprovalSummary: gateFence.observedApprovals } : {}),
     }
   } catch (error) {
-    // The Gate's unmet conditions are part of its response, so the error keeps its own type.
-    if (error instanceof WorkItemCompletionGateError) throw error
+    // The Gate's and workflow rules' unmet conditions are part of their responses, so they keep their types.
+    if (error instanceof WorkItemCompletionGateError || error instanceof WorkflowRuleError) throw error
     if (error instanceof WorkItemConfigurationError) {
       throw new FileProofingError(error.status, error.code, error.message, { cause: error })
     }
@@ -469,11 +499,14 @@ export function hasApprovalSummaryContent(summary: ApprovalSummary) {
  * @param current - Current Work Item.
  * @param input - Request input.
  * @param resolved - Resolved Work Item configuration.
+ * @param rulePrincipal - Who makes the change, for the workflow's transition actor roles.
  * @param options - Optional dependency overrides for relation validation and the approval read,
  *   and acceptance criterion marks a caller sends outside `input`.
  * @returns The validated update and its configuration transaction items.
  * @throws WorkItemCompletionGateError when the change completes the Work Item while a required
  *   completion Gate condition is unmet.
+ * @throws WorkflowRuleError when the actor may not make the status change, or a field the target
+ *   status requires is empty.
  */
 export async function prepareConfiguredUpdateWorkItem(
   directoryId: string,
@@ -481,6 +514,7 @@ export async function prepareConfiguredUpdateWorkItem(
   current: TeamIssueResponseItem,
   input: UpdateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
+  rulePrincipal: WorkflowRulePrincipal,
   options: {
     relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> &
       Partial<Pick<WorkItemDependencies, 'fileProofing'>>
@@ -597,6 +631,20 @@ export async function prepareConfiguredUpdateWorkItem(
     projectId,
     targetWorkItemType.id,
   )
+  const sameWorkflow = !typeChanged || currentWorkflow.id === targetWorkflow.id
+  const judgedActorRoles = assertWorkflowRules(resolved.configuration, {
+    workItemTypeId: targetWorkItemType.id,
+    projectId,
+    // Another workflow has no transition from the current status, so its target is entered directly.
+    fromStatusId: sameWorkflow ? currentWorkflowStatus.workflowStatusId : undefined,
+    toStatusId: nextWorkflowStatus.workflowStatusId,
+    actor: resolveWorkflowRuleActor(rulePrincipal, current, projectId),
+    state: () => createWorkflowRuleWorkItemState(
+      'schedule' in input && input.schedule !== undefined ? input.schedule : current.schedule,
+      readCompletionGateAcceptanceCriteria(current, input, options.acceptanceCriteriaMarks).length,
+      customFieldValues,
+    ),
+  })
   const relationTransactionItems = typeChanged
     ? await createWorkItemTypeRelationConfigurationTransactionItems(
         directoryId,
@@ -652,6 +700,8 @@ export async function prepareConfiguredUpdateWorkItem(
   )
   return {
     ...inputWithoutTypeChangeResolution,
+    // The status was entered by the caller's roles, so the write fails when they change first.
+    ...withWorkflowRoleConditionChecks(inputWithoutTypeChangeResolution, rulePrincipal, judgedActorRoles),
     workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,

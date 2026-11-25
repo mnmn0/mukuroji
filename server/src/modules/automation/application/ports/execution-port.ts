@@ -27,6 +27,31 @@ export interface AutomationActionExecutor {
   ): Promise<void>
 }
 
+/** Kind of rule failure that is reported to people. */
+export type AutomationExecutionFailureKind = 'dead-letter' | 'rate-limited'
+
+/**
+ * Tells a rule's creator and the Workspace administrators that the rule failed.
+ *
+ * Implementations must be idempotent per execution attempt (dead-letter) and per rule and time
+ * bucket (rate-limited), because the engine calls them again when it re-reads the same outcome.
+ */
+export interface AutomationExecutionFailureNotifier {
+  /**
+   * Records the failure notification.
+   *
+   * @param rule - Rule version the execution ran.
+   * @param execution - Execution in its saved failed state.
+   * @param kind - Which failure happened.
+   * @returns A promise that resolves after the notification is durable.
+   */
+  notify(
+    rule: AutomationRule,
+    execution: AutomationExecution,
+    kind: AutomationExecutionFailureKind,
+  ): Promise<void>
+}
+
 /** Query for an Automation execution timeline. */
 export type AutomationExecutionQuery = {
   /** Workspace to query. */

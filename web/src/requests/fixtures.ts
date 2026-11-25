@@ -1,6 +1,8 @@
 import {
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
+  type MyRequest,
+  type MyRequestDetail,
   type PublicRequestForm,
   type RequestForm,
   type RequestFormDraft,
@@ -250,3 +252,76 @@ export const requestSubmissionReceiptFixture: RequestSubmissionReceipt = {
   submittedAt: '2026-07-16T02:00:00.000Z',
   threadToken: 'requester-thread-token',
 }
+
+/** A request waiting for the requester's answer, for the "My requests" stories. */
+export const myRequestAwaitingReplyFixture: MyRequestDetail = {
+  id: 'req-01',
+  receiptId: 'REQ-7J3K',
+  formTitle: 'IT 機器の依頼',
+  status: 'needs-more-info',
+  awaitingReply: true,
+  submittedAt: '2026-07-16T02:00:00.000Z',
+  updatedAt: '2026-07-16T04:30:00.000Z',
+  thread: {
+    status: 'open',
+    messages: [
+      {
+        id: 'message-01',
+        direction: 'staff',
+        body: '必要なノート PC の機種と、利用開始日を教えてください。',
+        createdAt: '2026-07-16T04:30:00.000Z',
+      },
+    ],
+    updatedAt: '2026-07-16T04:30:00.000Z',
+  },
+}
+
+/** A converted request whose Work Item the requester can open. */
+export const myRequestVisibleWorkItemFixture: MyRequestDetail = {
+  id: 'req-02',
+  receiptId: 'REQ-8M2P',
+  formTitle: 'アカウント発行の依頼',
+  status: 'converted',
+  awaitingReply: false,
+  workItem: {
+    visibility: 'visible',
+    teamId: 'core-team',
+    workItemId: 'issue-1',
+    key: 'CORE-12',
+    title: '新入社員のアカウントを発行する',
+    statusCategory: 'started',
+    completed: false,
+  },
+  submittedAt: '2026-07-14T01:00:00.000Z',
+  updatedAt: '2026-07-15T03:00:00.000Z',
+  thread: { status: 'closed', messages: [], updatedAt: '2026-07-15T03:00:00.000Z' },
+}
+
+/** A converted request whose completed Work Item the requester cannot open. */
+export const myRequestRestrictedWorkItemFixture: MyRequestDetail = {
+  id: 'req-03',
+  receiptId: 'REQ-2Q9X',
+  formTitle: '経費精算の相談',
+  status: 'converted',
+  awaitingReply: false,
+  workItem: { visibility: 'restricted', completed: true },
+  submittedAt: '2026-07-10T01:00:00.000Z',
+  updatedAt: '2026-07-12T03:00:00.000Z',
+  thread: { status: 'closed', messages: [], updatedAt: '2026-07-12T03:00:00.000Z' },
+}
+
+/** The member's requests, newest first, as the list shows them. */
+export const myRequestListFixture: readonly MyRequest[] = [
+  myRequestAwaitingReplyFixture,
+  myRequestVisibleWorkItemFixture,
+  myRequestRestrictedWorkItemFixture,
+].map((request): MyRequest => ({
+  id: request.id,
+  receiptId: request.receiptId,
+  formTitle: request.formTitle,
+  status: request.status,
+  awaitingReply: request.awaitingReply,
+  ...(request.workItem ? { workItem: request.workItem } : {}),
+  submittedAt: request.submittedAt,
+  updatedAt: request.updatedAt,
+}))

@@ -1,6 +1,8 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   fitWorkItemTitle,
+  type MyRequestWorkItem,
+  type RequestWorkItemReference,
   type CreateManualTriageEntryInput,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
@@ -16,12 +18,13 @@ import {
   getConfiguredAuditTableName,
   getConfiguredAuditRetentionDays,
 } from '../../modules/audit/audit'
-import { createWorkItemRevisionConditionCheck } from '../../modules/work-items'
+import { createWorkItemRevisionConditionCheck, isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   RequestIntakeError,
   createRequestWorkItemInput,
   type RequestExternalContext,
+  type RequestIntakeActor,
   type RequestLinkResolution,
 } from '../../modules/request-intake/request-intake'
 import {
@@ -30,6 +33,10 @@ import {
 import {
   createPublicRequestIntakeRouter,
 } from '../../modules/request-intake/adapter-in/http/public-request-intake-router'
+import {
+  createMyRequestsRouter,
+} from '../../modules/request-intake/adapter-in/http/my-requests-router'
+import { resolveRequestFormTitle } from '../../modules/request-intake/my-requests'
 import {
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
@@ -42,7 +49,12 @@ import {
   type TriageRouterBulkActionRequest,
   type TriageRouterActionRequest,
 } from '../../modules/triage'
-import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import {
+  ambientAutomationActionExecutorDependencies,
+  workItemDependencies,
+  workspaceDependencies,
+} from '../shared/app-dependencies'
+import { canMemberViewWorkItemScope } from '../shared/member-work-item-visibility'
 import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from '../shared/constants'
 import { requireTriageTeamAccess } from '../shared/customer-access'
 import { projectWorkItemSearchDocumentBestEffort } from '../shared/document-access'
@@ -79,6 +91,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import {
+  createPersonWorkflowRulePrincipal,
   filterRequestConversionCustomFieldValues,
   prepareConfiguredCreateWorkItem,
 } from '../shared/work-item-configuration'
@@ -89,8 +102,19 @@ import {
 } from '../shared/workspace-access'
 import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 
-async function authorizeRequestLink(c: Context, resolution: RequestLinkResolution) {
-  if (resolution.accessMode === 'public') return
+/**
+ * Checks the access mode of a request link and returns the signed-in member for an
+ * authenticated link.
+ *
+ * @param c - Hono request context.
+ * @param resolution - Resolved request link.
+ * @returns The member sending the request, or undefined for a public link.
+ */
+async function authorizeRequestLink(
+  c: Context,
+  resolution: RequestLinkResolution,
+): Promise<RequestIntakeActor | undefined> {
+  if (resolution.accessMode === 'public') return undefined
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) {
     throw new RequestIntakeError(
@@ -103,6 +127,95 @@ async function authorizeRequestLink(c: Context, resolution: RequestLinkResolutio
   if (principal.directoryId !== resolution.workspaceId) {
     throw new RequestIntakeError(404, 'RequestFormUnavailable', 'Request form is unavailable.')
   }
+  return { id: principal.userKey }
+}
+
+/**
+ * Authenticates the Workspace member who reads their own requests.
+ *
+ * @param c - Hono request context.
+ * @returns The member's Workspace, member key, and principal.
+ */
+async function authenticateMyRequestsMember(c: Context) {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    throw new RequestIntakeError(401, 'RequestAuthenticationRequired', 'Authentication is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+  return { workspaceId: principal.directoryId, userKey: principal.userKey, principal }
+}
+
+/**
+ * Reads the Work Item made from a request as its requester may see it. The key, title, and
+ * status category are returned only when the requester can read the Work Item; otherwise only
+ * whether it is completed.
+ *
+ * @param principal - Authenticated requester.
+ * @param reference - Work Item recorded on the request.
+ * @returns The requester's view, or undefined when the Work Item no longer exists.
+ */
+async function readMyRequestWorkItem(
+  principal: WorkspacePrincipal,
+  reference: RequestWorkItemReference,
+): Promise<MyRequestWorkItem | undefined> {
+  let issue: Awaited<ReturnType<typeof workItemDependencies.teamIssues.getTeamIssueDetail>>['issue']
+  try {
+    // A consistent read, so a Work Item just moved to another Project is judged by its
+    // committed scope rather than shown through its previous one.
+    issue = (await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      reference.teamId,
+      reference.workItemId,
+      { consistentIssueRead: true, includeEvents: false },
+    )).issue
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) return undefined
+    throw error
+  }
+  const completed = issue.statusCategory === 'completed'
+  // "My requests" is authorized as a Workspace read, so Work Item read is evaluated here for the
+  // member at the Work Item's current Team and Project, including Team- or Project-scoped
+  // Enterprise grants, as the Work Item routes require it.
+  if (!await canRequesterReadWorkItem(principal, issue.teamId, issue.assignedProjectId)) {
+    return { visibility: 'restricted', completed }
+  }
+  return {
+    visibility: 'visible',
+    teamId: issue.teamId,
+    workItemId: issue.id,
+    ...(issue.key ? { key: issue.key } : {}),
+    title: issue.title,
+    statusCategory: issue.statusCategory,
+    completed,
+  }
+}
+
+/**
+ * Reports whether the requester holds Work Item read at a Work Item's Team and Project.
+ *
+ * @param principal - Authenticated requester.
+ * @param teamId - Team that owns the Work Item.
+ * @param assignedProjectId - Project the Work Item is assigned to, if any.
+ * @returns Whether the requester may read the Work Item's content.
+ */
+async function canRequesterReadWorkItem(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  assignedProjectId: string | undefined,
+): Promise<boolean> {
+  const dependencies = ambientAutomationActionExecutorDependencies
+  const member = await dependencies.workspaceAccess.getActiveMember(principal.directoryId, principal.userKey)
+  if (!member) return false
+  return await canMemberViewWorkItemScope(
+    member,
+    {
+      workspaceId: principal.directoryId,
+      teamId,
+      ...(assignedProjectId ? { assignedProjectId } : {}),
+      permissions: ['work-items.read'],
+    },
+    dependencies,
+  )
 }
 
 function createRequestExternalContext(c: Context): RequestExternalContext {
@@ -717,6 +830,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
               ? { projectId: detail.issue.assignedProjectId }
               : {}),
           },
+          requesterOutcome: action.action === 'duplicate' ? 'duplicate' : 'accepted',
         },
         [
           ...authorizationConditionChecks,
@@ -1084,6 +1198,7 @@ async function acceptTriageEntryAsNewWorkItem(
     request.teamId,
     conversionInput,
     resolvedConfiguration,
+    createPersonWorkflowRulePrincipal(principal, teamContext),
     { fallbackToTypeInitialStatus: formConversion !== undefined },
   )
   const acceptanceReferenceConditionChecks =
@@ -1139,6 +1254,14 @@ async function acceptTriageEntryAsNewWorkItem(
           actorId: principal.userKey,
           submissionId: submission.id,
           events: submission.events,
+          ...(submission.requesterUserId
+            ? {
+                requester: {
+                  memberKey: submission.requesterUserId,
+                  formTitle: resolveRequestFormTitle(submission),
+                },
+              }
+            : {}),
         }
       : undefined,
     {
@@ -1237,6 +1360,16 @@ export function registerRequestIntakeRoutes(routeApp: Hono): void {
     createExternalContext: createRequestExternalContext,
     mapError: (context, error) => toRequestIntakeErrorResponse(context, error, true),
     readJson,
+  }))
+
+  routeApp.route('/', createMyRequestsRouter({
+    getRequestIntake: () => workItemDependencies.requestIntake,
+    authenticate: authenticateMyRequestsMember,
+    readWorkItem: readMyRequestWorkItem,
+    createExternalContext: createRequestExternalContext,
+    mapError: (context, error) => toRequestIntakeErrorResponse(context, error),
+    readJson,
+    readLimit: (value) => readOptionalPositiveQueryInteger(value, 'Request list limit'),
   }))
 
   routeApp.route('/', createAdminRequestIntakeRouter({
