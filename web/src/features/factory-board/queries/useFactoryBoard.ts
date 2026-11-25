@@ -206,7 +206,10 @@ export function useAgentRunHistory(
   teamNames: Readonly<Record<string, string>>,
 ) {
   return useSWR(
-    accessToken && teamIds.length > 0 ? ['agent-run-history', accessToken, teamIds.join(','), days, JSON.stringify(filters)] as const : null,
+    // The names are part of the key because the merged rows carry them; a renamed Team reads again.
+    accessToken && teamIds.length > 0
+      ? ['agent-run-history', accessToken, teamIds.join(','), days, JSON.stringify(filters), JSON.stringify(teamIds.map((teamId) => teamNames[teamId] ?? null))] as const
+      : null,
     async ([, token]) => readAgentRunHistories(token, teamIds, days, filters, teamNames),
     {
       dedupingInterval: 30_000,

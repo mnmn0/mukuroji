@@ -2904,6 +2904,9 @@ describe('Factory board route', () => {
     expect((await app.request(`${path}?${period}`, { headers })).status).toBe(200)
     expect((await app.request(`${path}?to=2026-10-31T00:00:00Z`, { headers })).status).toBe(400)
     expect((await app.request(`${path}?from=2026-01-01T00:00:00Z&to=2026-10-31T00:00:00Z`, { headers })).status).toBe(400)
+    // A day that does not exist is refused instead of rolling into the next month; a leap day is accepted.
+    expect((await app.request(`${path}?from=2026-02-30T00:00:00Z&to=2026-03-10T00:00:00Z`, { headers })).status).toBe(400)
+    expect((await app.request(`${path}?from=2028-02-29T00:00:00Z&to=2028-03-10T00:00:00Z`, { headers })).status).toBe(200)
     expect((await app.request(`${path}?${period}&outcome=exploded`, { headers })).status).toBe(400)
     expect((await app.request(`${path}?${period}&runtime=cursor`, { headers })).status).toBe(400)
     expect((await app.request(`${path}?${period}&assigneeUserId=${'x'.repeat(300)}`, { headers })).status).toBe(400)

@@ -80,7 +80,8 @@ export type AgentRunHistoryQuery = {
  */
 function readPeriodBound(value: string | undefined, name: 'from' | 'to'): number {
   const instant = value === undefined || !isoInstantPattern.test(value) ? Number.NaN : Date.parse(value)
-  if (!Number.isFinite(instant)) {
+  // Date.parse rolls a day that does not exist (2026-02-30) into the next month, so the date must read back unchanged.
+  if (!Number.isFinite(instant) || new Date(instant).toISOString().slice(0, 10) !== value?.slice(0, 10)) {
     throw new AgentRunError('validation_failed', `${name} must be a UTC ISO 8601 instant such as 2026-01-01T00:00:00Z.`, { pointer: `/${name}` })
   }
   return instant
