@@ -99,8 +99,8 @@ import {
   type WorkItemDependencyScheduleState,
   type WorkItemRelationNotificationEndpoint,
 } from '../../modules/work-items'
-import { isWorkspaceMemberRowActive } from '../../modules/workspace-access'
-import { WorkspaceAccessError, type WorkspaceMemberStatus } from '../../modules/workspace-access/workspace-access'
+import { isWorkspaceMemberRowActive, type WorkspaceMemberStatus } from '../../modules/workspace-access'
+import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   CollaborationError,
   COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
