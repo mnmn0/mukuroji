@@ -234,8 +234,10 @@ agent の hooks から `node /absolute/path/to/mcp.mjs --heartbeat` を実行す
 
 - MCP server と同じ `MUKUROJI_MCP_*`（URL、token、Team、担当者、`MUKUROJI_MCP_RUNTIME`、指定している場合は `MUKUROJI_MCP_INSTANCE_ID`）を読みます。
   instance ID も MCP server と同じ方法で求めるので、延長するのは同じマシン・アカウント・runtime・担当者で始めた `active` Run だけです。
+  `MUKUROJI_MCP_PROJECT_ID` を指定している場合は、その Project のタスクの Run だけを延長します。
 - 同じ instance の heartbeat は 1 分に 1 回までです。それより早く呼ばれたときは API を呼ばずに終わります。最後に成功した時刻は `~/.cache/mukuroji-mcp`（`XDG_CACHE_HOME` を設定していればその下）に空の file として残します。
   server 側の rate limit（Run ごとに 10 秒に 1 回）と lease の契約は変わりません。
+- 直前の heartbeat から 10 秒以内で server に断られた Run は、Run の最後の heartbeat が 30 秒以内なら `recent` と数えます。それ以外の rate limit、読み切れないほど多い Run、読み取りの失敗は `failed` と数え、時刻を残さないので次の hook で再試行します。
 - 結果は stderr に 1 行出し、失敗しても常に終了コード 0 で終わるので、hook が agent を止めることはありません。
 - hooks は MCP の `env` を引き継ぎません。値はクライアントを起動するシェルで export するか、
   次のような小さな script に書きます（token は書かず、シェルの `MUKUROJI_MCP_TOKEN` を使います）。

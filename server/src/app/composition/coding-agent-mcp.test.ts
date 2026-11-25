@@ -368,6 +368,10 @@ test('the hook heartbeat renews only the runs of the same instance and always ex
       .toBe('mukuroji heartbeat: skipped, renewed within the last minute\n')
     expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'codex', MUKUROJI_MCP_INSTANCE_ID: 'instance-b' })).stderr)
       .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
+    // A Project restriction keeps the hook to the runs the MCP server itself would act on.
+    expect((await heartbeat({ MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a',
+      MUKUROJI_MCP_PROJECT_ID: 'other-project', XDG_CACHE_HOME: join(stampDirectory, 'scoped') })).stderr)
+      .toBe('mukuroji heartbeat: 0 renewed, 0 recent, 0 failed\n')
     // Missing configuration is reported, and the hook still exits 0.
     expect(await heartbeat({ MUKUROJI_MCP_ASSIGNEE_ID: '' })).toMatchObject({ exitCode: 0, stderr: expect.stringContaining('MUKUROJI_MCP_') })
   } finally {

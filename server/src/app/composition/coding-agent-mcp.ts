@@ -13,7 +13,7 @@ import { createWorkspaceMcpServer } from '../../modules/coding-agent-mcp/adapter
 import { assessServerCompatibility, type ServerCompatibility } from '../../modules/coding-agent-mcp/application/compatibility'
 import { maximumAgentTeams } from '../../modules/coding-agent-mcp/application/multi-team-agent-tasks'
 import { heartbeatOwnRuns, type HookHeartbeatResult } from '../../modules/coding-agent-mcp/application/hook-heartbeat'
-import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+import { AgentTaskError, type AgentRunRecord, type AgentWorkItemApi } from '../../modules/coding-agent-mcp/application/work-item-api'
 
 const profileSchema = z.enum(['tasks', 'workspace']).default('tasks')
 
@@ -140,10 +140,15 @@ export function composeCodingAgentHeartbeat(
     throw new AgentTaskError('configuration', 'Set the same MUKUROJI_MCP_* values as the MCP server for the heartbeat.')
   }
   const config = parsed.data
-  const teams = readTeamIds(config.MUKUROJI_MCP_TEAM_ID, config.MUKUROJI_MCP_TEAM_IDS).map((teamId) => ({
+  const teamIds = readTeamIds(config.MUKUROJI_MCP_TEAM_ID, config.MUKUROJI_MCP_TEAM_IDS)
+  if (teamIds.length > 1 && config.MUKUROJI_MCP_PROJECT_ID !== undefined) {
+    throw new AgentTaskError('configuration', 'MUKUROJI_MCP_PROJECT_ID needs exactly one Team. Remove it or configure a single Team.')
+  }
+  const teams = teamIds.map((teamId) => ({
     teamId,
     api: createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId }),
   }))
+  const runInScope = createHeartbeatProjectScope(teams[0].api, config.MUKUROJI_MCP_PROJECT_ID)
   const owner = {
     assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
     instanceId: config.MUKUROJI_MCP_INSTANCE_ID ??
@@ -157,13 +162,36 @@ export function composeCodingAgentHeartbeat(
     .update([config.MUKUROJI_MCP_URL, owner.assigneeUserId, owner.instanceId].join('\u0000')).digest('hex').slice(0, 32)}`)
   return async () => {
     if (await readStampAgeMs(stampPath) < HOOK_HEARTBEAT_INTERVAL_MS) return { renewed: 0, recent: 0, failed: 0, throttled: true }
-    const result = await heartbeatOwnRuns(teams, owner)
+    const result = await heartbeatOwnRuns(teams, owner, runInScope ? { runInScope } : {})
     if (result.failed === 0) {
       await mkdir(stampDirectory, { recursive: true, mode: 0o700 })
         .then(() => writeFile(stampPath, '', { mode: 0o600 }))
         .catch(() => undefined)
     }
     return { ...result, throttled: false }
+  }
+}
+
+/**
+ * Creates the Project check of a hook heartbeat, so the hook renews only runs the MCP server
+ * itself would act on when `MUKUROJI_MCP_PROJECT_ID` restricts it.
+ *
+ * @param api - API of the single configured Team.
+ * @param projectId - Configured Project, if any.
+ * @returns A check of a run's task, or undefined when no Project is configured.
+ */
+function createHeartbeatProjectScope(
+  api: Pick<AgentWorkItemApi, 'get'>,
+  projectId: string | undefined,
+): ((run: AgentRunRecord) => Promise<boolean>) | undefined {
+  if (projectId === undefined) return undefined
+  return async (run) => {
+    try {
+      return (await api.get(run.workItemId)).assignedProjectId === projectId
+    } catch (error) {
+      if (error instanceof AgentTaskError && ['not_found', 'forbidden'].includes(error.code)) return false
+      throw error
+    }
   }
 }
 
