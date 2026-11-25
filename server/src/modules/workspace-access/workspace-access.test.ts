@@ -2675,6 +2675,63 @@ test('provisions a new directory member with an immutable external identity', as
   })
 })
 
+test('clears an expired access expiry when the directory reactivates a member, and keeps it otherwise (ADR 0095)', async () => {
+  /**
+   * Reconciles one directory member and returns the result with the member update it wrote.
+   *
+   * @param status - Membership status before the reconciliation.
+   * @returns The reconciled member and the member Update item.
+   */
+  const reconcile = async (status: WorkspaceMember['status']) => {
+    const target = {
+      ...createWorkspaceMember('sato@example.com', 'member', status, 4),
+      provisioningSource: 'directory' as const,
+      externalIdentityId: 'scim-user-123',
+      accessExpiresAt: '2026-07-01T00:00:00.000Z',
+      ...(status === 'deactivated' ? { deactivatedAt: '2026-07-01T01:00:00.000Z' } : {}),
+    }
+    const inputs: Array<Record<string, unknown>> = []
+    const client = new DynamoDbWorkspaceAccessClient(
+      'WorkspaceAccessTable',
+      createDocumentClient((command) => {
+        inputs.push(command.input)
+        return command.constructor.name === 'GetCommand' ? { Item: toMemberItem(target) } : {}
+      }),
+      undefined,
+      false,
+      () => now,
+      'PlanningTable',
+      'AuditTable',
+    )
+    const member = await client.reconcileDirectoryMember(workspaceId, {
+      memberKey: 'sato@example.com',
+      email: 'sato@example.com',
+      name: '佐藤 花子',
+      role: 'member',
+      externalIdentityId: 'scim-user-123',
+      expectedPlanningRevision: 0,
+    }, createAuditContext(`directory-reconcile-${status}`))
+    const transaction = inputs.at(-1)
+    const items = transaction && Array.isArray(transaction.TransactItems) ? transaction.TransactItems : []
+    const first: unknown = items[0]
+    const update = typeof first === 'object' && first !== null && 'Update' in first ? first.Update : undefined
+    const expression = typeof update === 'object' && update !== null && 'UpdateExpression' in update
+      ? update.UpdateExpression
+      : undefined
+    // A newly provisioned member has no expiry field at all, so it is read through `in`.
+    return { member, accessExpiresAt: 'accessExpiresAt' in member ? member.accessExpiresAt : undefined, expression }
+  }
+
+  const reactivated = await reconcile('deactivated')
+  expect(reactivated.member).toMatchObject({ status: 'active' })
+  expect(reactivated.accessExpiresAt).toBeUndefined()
+  expect(reactivated.expression).toContain('REMOVE deactivatedAt, accessExpiresAt')
+
+  const reconciled = await reconcile('active')
+  expect(reconciled.accessExpiresAt).toBe('2026-07-01T00:00:00.000Z')
+  expect(reconciled.expression).not.toContain('accessExpiresAt')
+})
+
 test('deprovisions a directory member atomically with the Planning revision and audit event', async () => {
   const target = {
     ...createWorkspaceMember('sato@example.com', 'member', 'active', 4),

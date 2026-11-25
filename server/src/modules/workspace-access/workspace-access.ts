@@ -3374,6 +3374,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
+    // As in updateMember, a reactivation starts without an expiry, so a member whose access
+    // expired is not refused and deactivated again at once. Ordinary reconciliation of an active
+    // member keeps the expiry an administrator set.
+    const becameReactivated = existing.status === 'deactivated'
     const nextMember = {
       ...existing,
       email,
@@ -3383,6 +3387,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       provisioningSource: 'directory',
       externalIdentityId,
       deactivatedAt: undefined,
+      accessExpiresAt: becameReactivated ? undefined : existing.accessExpiresAt,
       version: existing.version + 1,
       updatedAt: nowIso,
     } satisfies WorkspaceMember
@@ -3462,6 +3467,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       'version = version + :one',
     ]
     const removeExpressions = ['deactivatedAt']
+    if (becameReactivated) removeExpressions.push('accessExpiresAt')
     const name = normalizeOptional(input.name)
     if (name) {
       updateExpressions.push('#name = :name')
