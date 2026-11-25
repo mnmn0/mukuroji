@@ -1389,6 +1389,17 @@ function VersionsPanel({
     (lastReviewingVersion?.id === reviewingVersionId ? lastReviewingVersion : undefined)
   const canEdit = document.capabilities.canEdit
 
+  /**
+   * Opens the review dialog of one version and reads the approvals again, since a decision made
+   * on the Work Item since the last read changes their status.
+   *
+   * @param versionId - Version to review.
+   */
+  const openReview = (versionId: string) => {
+    setReviewingVersionId(versionId)
+    void approvalsQuery.mutate()
+  }
+
   return (
     <div className="grid gap-3 p-4">
       <p className="m-0 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
@@ -1517,7 +1528,7 @@ function VersionsPanel({
               {reviewAccessToken ? (
                 <button
                   className="mr-3 mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
-                  onClick={() => setReviewingVersionId(version.id)}
+                  onClick={() => openReview(version.id)}
                   type="button"
                 >
                   {t('documents.versions.review')}

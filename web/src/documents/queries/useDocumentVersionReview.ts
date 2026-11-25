@@ -1,10 +1,20 @@
 import useSWR from 'swr'
 import { getDocumentApprovals, getDocumentVersion } from '../api/versions'
 
-/** SWR options for immutable version snapshots and their approvals. */
+/** SWR options for immutable version snapshots, which never change once read. */
 const versionReviewQueryConfig = {
   dedupingInterval: 30_000,
   revalidateOnFocus: false,
+  shouldRetryOnError: false,
+} as const
+
+/**
+ * SWR options for the approval list. An approval is decided or cancelled on the Work Item, often
+ * in another tab, so the list is read again when the window regains focus.
+ */
+export const documentApprovalsQueryConfig = {
+  dedupingInterval: 5_000,
+  revalidateOnFocus: true,
   shouldRetryOnError: false,
 } as const
 
@@ -47,6 +57,6 @@ export function useDocumentApprovals(
       ? ['document-approvals', accessToken, documentId] as const
       : null,
     ([, token, selectedDocumentId]) => getDocumentApprovals(token, selectedDocumentId),
-    { ...versionReviewQueryConfig, dedupingInterval: 5_000 },
+    documentApprovalsQueryConfig,
   )
 }

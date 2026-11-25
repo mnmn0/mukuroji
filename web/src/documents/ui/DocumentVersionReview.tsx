@@ -14,7 +14,11 @@ import type { DocumentRecord } from '../api'
 import type { ChecklistAssigneeOption } from '../model/checklistItems'
 import { createDocumentRelationTargetKey } from '../model/linkTargets'
 import { createCanonicalWorkItemId, parseCanonicalWorkItemId } from '../model/relations'
-import { resolveApprovalStatusClassName } from '../model/versionApprovals'
+import {
+  listEnteredReviewerKeys,
+  readEnteredReviewerKey,
+  resolveApprovalStatusClassName,
+} from '../model/versionApprovals'
 import { diffDocumentVersions, type DocumentBlockDiffEntry, type WhiteboardDiffSummary } from '../model/versionDiff'
 import { useDocumentVersionDetail } from '../queries/useDocumentVersionReview'
 import { DocumentReadOnlyBlock, DocumentReadOnlyContent } from './DocumentEditor'
@@ -721,6 +725,7 @@ function RequestApprovalForm({
   t: (key: MessageKey) => string
 }) {
   const dueId = useId()
+  const reviewerHintId = useId()
   const linkedWorkItemIds = document.relations
     .map((relation) => relation.target)
     .filter((target) => target.kind === 'work-item')
@@ -736,6 +741,11 @@ function RequestApprovalForm({
   const [isDone, setIsDone] = useState(false)
   const activeMembers = (members ?? []).filter((member) => member.status === 'active')
   const normalizedQuery = reviewerQuery.trim().toLowerCase()
+  const enteredReviewerKeys = listEnteredReviewerKeys(
+    reviewerKeys,
+    activeMembers.map((member) => member.memberKey),
+  )
+  const enteredReviewerKey = readEnteredReviewerKey(reviewerQuery, reviewerKeys)
   const visibleMembers = activeMembers.filter((member) =>
     reviewerKeys.includes(member.memberKey) ||
     !normalizedQuery ||
@@ -767,6 +777,18 @@ function RequestApprovalForm({
         ? current.filter((candidate) => candidate !== memberKey)
         : [...current, memberKey]
     )
+  }
+
+  /**
+   * Adds the entered member key as a reviewer. The server checks that the member is active and
+   * can view the Work Item.
+   */
+  const addEnteredReviewer = () => {
+    if (enteredReviewerKey === undefined) return
+    setReviewerKeys((current) =>
+      current.includes(enteredReviewerKey) ? current : [...current, enteredReviewerKey]
+    )
+    setReviewerQuery('')
   }
 
   /**
@@ -848,14 +870,44 @@ function RequestApprovalForm({
         <legend className="mb-1 text-xs font-semibold text-[var(--workbench-text)]">
           {t('documents.versionReview.reviewers')}
         </legend>
-        <input
-          aria-label={t('documents.versionReview.reviewerSearch')}
-          className="workbench-input h-9 px-3 text-sm"
-          onChange={(event) => setReviewerQuery(event.target.value)}
-          placeholder={t('documents.versionReview.reviewerSearch')}
-          value={reviewerQuery}
-        />
+        <p className="m-0 text-xs font-medium leading-5 text-[var(--workbench-muted)]" id={reviewerHintId}>
+          {t('documents.versionReview.reviewerEntryHint')}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input
+            aria-describedby={reviewerHintId}
+            aria-label={t('documents.versionReview.reviewerSearch')}
+            className="workbench-input h-9 min-w-0 flex-1 px-3 text-sm"
+            onChange={(event) => setReviewerQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return
+              // Enter adds the entered reviewer instead of sending the form.
+              event.preventDefault()
+              addEnteredReviewer()
+            }}
+            placeholder={t('documents.versionReview.reviewerSearch')}
+            value={reviewerQuery}
+          />
+          <button
+            className="workbench-button-secondary h-9 px-3 text-xs disabled:opacity-50"
+            disabled={enteredReviewerKey === undefined}
+            onClick={addEnteredReviewer}
+            type="button"
+          >
+            {t('documents.versionReview.reviewerAdd')}
+          </button>
+        </div>
         <div className="grid max-h-48 gap-1 overflow-y-auto">
+          {enteredReviewerKeys.map((memberKey) => (
+            <label className="flex items-center gap-2 text-sm" key={`entered:${memberKey}`}>
+              <input
+                checked
+                onChange={() => toggleReviewer(memberKey)}
+                type="checkbox"
+              />
+              <span className="font-medium text-[var(--workbench-text)]">{memberKey}</span>
+            </label>
+          ))}
           {visibleMembers.map((member) => (
             <label className="flex items-center gap-2 text-sm" key={member.memberKey}>
               <input
