@@ -2549,6 +2549,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       status: 'converted',
       revision: current.revision + 1,
       workItem: validateWorkItemReference(input.workItem),
+      ...(input.requesterOutcome === 'duplicate' ? { requesterOutcome: 'duplicate' } : {}),
       events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
       capabilities: terminalSubmissionCapabilities,
@@ -3782,7 +3783,8 @@ function readStoredSubmission(value: unknown): StoredRequestSubmission {
     typeof record.updatedAt !== 'string' ||
     typeof record.threadDigest !== 'string' ||
     typeof record.duplicateFingerprint !== 'string' ||
-    (record.requesterUserId !== undefined && typeof record.requesterUserId !== 'string')
+    (record.requesterUserId !== undefined && typeof record.requesterUserId !== 'string') ||
+    (record.requesterOutcome !== undefined && record.requesterOutcome !== 'duplicate')
   ) throw new RequestIntakeError(503, 'InvalidRequestSubmission', 'Stored request submission is invalid.')
   return {
     ...(record as unknown as StoredRequestSubmission),

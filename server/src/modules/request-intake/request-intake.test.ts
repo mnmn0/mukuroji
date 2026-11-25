@@ -13,6 +13,7 @@ import type {
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY, WORK_ITEM_TITLE_MAX_LENGTH } from '@mukuroji/contracts'
 import type { FileObjectClient } from '../files/file-proofing'
+import { createMyRequestView } from './my-requests'
 import {
   DynamoDbRequestIntakeClient,
   RequestIntakeError,
@@ -3053,12 +3054,15 @@ test('notifies the requester about questions, rejection, and conversion without 
 
   // A duplicate merge through Triage also completes the conversion, but tells the requester so.
   stored = createStoredSubmission({ requesterUserId: 'member@example.com' })
-  await client.completeConversion('workspace-1', 'req-1', { id: 'manager@example.com' }, {
+  const duplicate = await client.completeConversion('workspace-1', 'req-1', { id: 'manager@example.com' }, {
     expectedRevision: 1,
     workItem: { teamId: 'team-core', workItemId: 'wi-1' },
     requesterOutcome: 'duplicate',
   })
   expect(auditEvents()).toEqual([expect.objectContaining({ eventType: 'request.requester.duplicate' })])
+  // The requester keeps seeing the duplicate resolution, while the Work Item link stays.
+  expect(duplicate).toMatchObject({ status: 'converted', requesterOutcome: 'duplicate' })
+  expect(createMyRequestView(duplicate).status).toBe('duplicate')
 
   stored = createStoredSubmission()
   await client.applyAction('workspace-1', 'req-1', { id: 'manager@example.com' }, {

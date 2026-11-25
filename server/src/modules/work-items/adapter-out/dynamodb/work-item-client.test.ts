@@ -5262,3 +5262,58 @@ test('DynamoDB Work Item completion notifies the member who sent its source requ
   }, 'demo@example.com', auditContext)
   expect(requesterEvents()).toHaveLength(0)
 })
+
+test('DynamoDB Work Item builds the requester completion notice for an approval completion', async () => {
+  const reads: Array<Record<string, unknown>> = []
+  const storedIssue: Record<string, unknown> = {
+    ...createScheduleCascadeIssue('core-team', 'request-wi'),
+    revision: 4,
+    sourceRequestId: 'req_1',
+    sourceRequester: { memberKey: 'member@example.com', formTitle: 'IT request' },
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        reads.push(command.input)
+        return { Item: storedIssue }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  const items = await client.createSourceRequesterCompletionTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'request-wi',
+    nextRevision: 5,
+    actorUserId: 'reviewer@example.com',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+  })
+
+  expect(reads[0]).toMatchObject({ ConsistentRead: true })
+  expect(items).toHaveLength(1)
+  expect(items[0]?.Put?.Item).toMatchObject({
+    eventType: 'request.requester.completed',
+    entity: { type: 'request-submission', id: 'req_1' },
+    metadata: { notificationCandidates: [{ memberKey: 'member@example.com', reason: 'requester' }] },
+  })
+  expect(JSON.stringify(items)).not.toContain(String(storedIssue.title))
+
+  delete storedIssue.sourceRequester
+  expect(await client.createSourceRequesterCompletionTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'request-wi',
+    nextRevision: 5,
+    actorUserId: 'reviewer@example.com',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+  })).toEqual([])
+})

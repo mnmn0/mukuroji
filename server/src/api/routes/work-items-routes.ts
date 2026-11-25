@@ -1267,6 +1267,42 @@ async function requirePlanningProjectScopeIsUnused(
   }
 }
 
+/**
+ * Adds the source requester's completion notification to an approval that completes a Work Item
+ * made from a request, so the notice does not depend on how the Work Item was completed.
+ *
+ * @param principal - Member deciding the approval.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItem - Work Item before the decision.
+ * @param transition - Resolved completion transition.
+ * @returns The transition, with the notification items when the Work Item becomes completed.
+ */
+async function addSourceRequesterCompletionNotice(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  transition: FileApprovalCompletionTransition,
+): Promise<FileApprovalCompletionTransition> {
+  const createItems = workItemDependencies.teamIssues.createSourceRequesterCompletionTransactionItems
+  if (
+    !createItems ||
+    !workItem.sourceRequestId ||
+    workItem.statusCategory === 'completed' ||
+    transition.statusCategory !== 'completed'
+  ) {
+    return transition
+  }
+  const items = await createItems.call(workItemDependencies.teamIssues, {
+    directoryId: principal.directoryId,
+    teamId,
+    issueId: workItem.id,
+    nextRevision: transition.expectedRevision + 1,
+    actorUserId: principal.userKey,
+    occurredAt: new Date().toISOString(),
+  })
+  return items.length > 0 ? { ...transition, completionSideEffectItems: items } : transition
+}
+
 /** Approval 作成後に削除・無効化された遷移先を decision conflict として扱います。 */
 async function resolveFileApprovalCompletionTransitionForDecision(
   directoryId: string,
@@ -6040,8 +6076,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           canonicalWorkItem,
           completionTransition,
         )
-        resolvedCompletionTransition = resolved
-        return resolved
+        const withRequesterNotice = resolved
+          ? await addSourceRequesterCompletionNotice(
+              principal,
+              scope.teamId,
+              canonicalWorkItem,
+              resolved,
+            )
+          : undefined
+        resolvedCompletionTransition = withRequesterNotice
+        return withRequesterNotice
       }
       const approval = await workItemDependencies.fileProofing.decideApproval(
         scope,

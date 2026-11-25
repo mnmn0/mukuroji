@@ -2039,10 +2039,20 @@ describe('file proofing domain', () => {
             ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
           },
         }],
+        completionSideEffectItems: [{
+          Put: {
+            TableName: 'audit',
+            Item: { scopeKey: 'requester-notice', recordKey: 'EVENT', eventType: 'request.requester.completed' },
+          },
+        }],
       }),
     )
 
     expect(completed.status).toBe('approved')
+    // The requester notice commits with the completion and comes last in its transaction.
+    expect(state.documentClient.transactionInputs.at(-1)?.TransactItems?.at(-1)?.Put?.Item).toMatchObject({
+      eventType: 'request.requester.completed',
+    })
     expect(state.documentClient.items.get(createMemoryKey(workItemKey))).toMatchObject({
       revision: 5,
       workflowStatusId: 'qa-approved',

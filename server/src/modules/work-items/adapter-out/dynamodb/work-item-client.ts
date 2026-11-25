@@ -1416,6 +1416,22 @@ export type NamedWorkItemDeletionFence = {
 /**
  * API handler から利用する team issue client の最小 interface です。
  */
+/** Input for the source requester's completion notification written by another module. */
+export type CreateSourceRequesterCompletionTransactionItemsInput = {
+  /** Workspace that owns the Work Item. */
+  directoryId: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item being completed. */
+  issueId: string
+  /** Work Item revision the completion writes. */
+  nextRevision: number
+  /** Member who completed the Work Item. */
+  actorUserId: string
+  /** When the completion happens. */
+  occurredAt: string
+}
+
 export type TeamIssuesClient = {
   /** Prepares de-identified duplicate-source context for an atomic Triage merge.
    *
@@ -1425,6 +1441,16 @@ export type TeamIssuesClient = {
   createTriageDuplicateContextTransactionItems?(
     input: CreateTriageDuplicateContextTransactionItemsInput,
   ): TriageDuplicateContextTransactionContribution
+  /**
+   * Builds the source requester's completion notification for a completion that another module
+   * writes in its own transaction, such as an approval decision.
+   *
+   * @param input - Work Item, actor, and the revision the completion writes.
+   * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
+   */
+  createSourceRequesterCompletionTransactionItems?(
+    input: CreateSourceRequesterCompletionTransactionItemsInput,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
@@ -1808,6 +1834,29 @@ export class DynamoDbTeamIssuesClient {
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
     this.planningTableName = planningTableName?.trim() || undefined
+  }
+
+  /**
+   * Builds the source requester's completion notification for a completion that another module
+   * writes, reading the stored requester copy that the API never returns.
+   *
+   * @param input - Work Item, actor, and the revision the completion writes.
+   * @returns Audit outbox items, or none when the Work Item has no signed-in requester.
+   */
+  async createSourceRequesterCompletionTransactionItems(
+    input: CreateSourceRequesterCompletionTransactionItemsInput,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    if (!this.auditTableName) return []
+    await this.ensureLocalTables()
+    const item = await this.getRequiredTeamIssueItem(input.directoryId, input.teamId, input.issueId, true)
+    return this.createSourceRequesterNotificationItems(
+      input.directoryId,
+      item,
+      'completed',
+      input.actorUserId,
+      input.occurredAt,
+      `${input.teamId}:${input.issueId}:${input.nextRevision}`,
+    )
   }
 
   /**

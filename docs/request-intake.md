@@ -104,6 +104,8 @@ thread link と同じ rate limit と冪等 receipt を共有し、Enterprise の
 
 Work Item は requester が現在その Team / Project で `work-items.read` を持つ場合（Team / Project 単位の Enterprise 付与と従来の Project 参加を含み、Work Item の route と同じ判定）だけ key・title・status category を返し、
 読めない場合は `restricted` として完了したかどうかだけを返す。
+Triage の重複操作で既存 Work Item に統合した依頼は、submission の `requesterOutcome: duplicate`
+を保存し、Work Item への link を残したまま依頼者には「重複」と表示する。
 
 追加情報の依頼、見送り、重複、受付（Work Item 作成または既存 Work Item への link）、作成した
 Work Item の完了は、同じ transaction の audit outbox に `request.requester.<kind>` event を書く。
@@ -112,7 +114,8 @@ Event は Team / Project / Work Item scope を持たず、form title と定型�
 projection は scope のない requester event を reason `requester` の候補だけに配り、Inbox は
 読み取り時に submission がまだその member のものかを確かめる。完了通知のため、Form から作った
 Work Item は API に返さない `sourceRequester`（member key と form title）を持ち、完了遷移の
-transaction の最後に notification を追加する。通知は受信箱だけに届け、member の channel 設定にかかわらず Email・Slack・Push には送らない。判断は ADR 0088 を参照する。
+transaction の最後に notification を追加する。Work Item の更新だけでなく、完了遷移付きの承認で
+完了した場合も、承認 decision の transaction の最後に同じ notification を追加する。通知は受信箱だけに届け、member の channel 設定にかかわらず Email・Slack・Push には送らない。判断は ADR 0088 を参照する。
 
 ## API
 

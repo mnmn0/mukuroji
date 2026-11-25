@@ -40,12 +40,27 @@ export function createMyRequestView(
     id: submission.id,
     receiptId: submission.receiptId,
     formTitle: resolveRequestFormTitle(submission),
-    status: submission.status,
+    status: resolveRequesterStatus(submission),
     awaitingReply: submission.status === 'needs-more-info',
     ...(workItem ? { workItem } : {}),
     submittedAt: submission.createdAt,
     updatedAt: submission.updatedAt,
   }
+}
+
+/**
+ * Returns the status the requester sees. A request Triage closed as a duplicate of an existing
+ * Work Item is stored as converted, so it is shown as a duplicate instead.
+ *
+ * @param submission - Request submission read by the server.
+ * @returns The requester-facing status.
+ */
+function resolveRequesterStatus(
+  submission: Pick<RequestSubmission, 'status' | 'requesterOutcome'>,
+): RequestSubmissionStatus {
+  return submission.status === 'converted' && submission.requesterOutcome === 'duplicate'
+    ? 'duplicate'
+    : submission.status
 }
 
 /**

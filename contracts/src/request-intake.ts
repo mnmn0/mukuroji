@@ -589,6 +589,11 @@ export type RequestSubmission = {
   duplicateOfSubmissionId?: string
   /** 変換済み canonical Work Item 参照です。 */
   workItem?: RequestWorkItemReference
+  /**
+   * How a converted request was resolved for its requester. `duplicate` means Triage closed it
+   * as a duplicate of the linked Work Item; absent means it was accepted as that Work Item.
+   */
+  requesterOutcome?: 'duplicate'
   /** Member key of the Workspace member who sent the request through an authenticated link. */
   requesterUserId?: string
   /** Thread に保存された bounded plain text message です。 */
