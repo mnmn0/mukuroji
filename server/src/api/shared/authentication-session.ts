@@ -95,7 +95,11 @@ export async function createAuthenticationResponse(
       name: readUserAttribute(user, 'name'),
     }, auditContext)
     if (!continuation) {
-      await recordMemberSignIn(principal.directoryId, principal.userKey)
+      await recordMemberSignIn(
+        principal.directoryId,
+        principal.userKey,
+        c.req.header('X-Correlation-Id')?.trim(),
+      )
     }
     const claims = decodeJwtPayload<CognitoAccessTokenClaims>(tokens.AccessToken)
     const authenticatedAt = readNumericClaim(claims?.auth_time) ??
@@ -148,14 +152,25 @@ export async function createAuthenticationResponse(
  *
  * @param workspaceId - Workspace of the member.
  * @param memberKey - Member that signed in.
+ * @param correlationId - Canonical correlation ID of the sign-in request, logged with a failed
+ *   record so it can be traced to the request's access log.
  */
-async function recordMemberSignIn(workspaceId: string, memberKey: string) {
+async function recordMemberSignIn(
+  workspaceId: string,
+  memberKey: string,
+  correlationId: string | undefined,
+) {
   const { workspaceAccess } = workspaceDependencies
   if (!workspaceAccess.recordMemberSignIn) return
   try {
     await workspaceAccess.recordMemberSignIn(workspaceId, memberKey)
   } catch (error) {
-    console.error(error)
+    // The error message and the member key can carry the member's address, so only the error's
+    // name is logged with the request's correlation ID.
+    console.error('Failed to record the member sign-in:', {
+      correlationId,
+      errorName: error instanceof Error ? error.name : 'Unknown',
+    })
   }
 }
 

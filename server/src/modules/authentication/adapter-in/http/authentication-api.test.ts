@@ -28,6 +28,7 @@ import type { AuditEventV1 } from '../../../audit'
 import {
   afterEach,
   expect,
+  spyOn,
   test,
 } from 'bun:test'
 
@@ -692,6 +693,47 @@ test('rate limits new password attempts before touching the invitation', async (
   expect(limited.headers.get('Retry-After')).toBeTruthy()
   expect(await limited.json()).toMatchObject({ code: 'AuthenticationChallengeRateLimited' })
   expect(sequence).toEqual([])
+})
+
+test('keeps the login when the last sign-in cannot be recorded and logs only safe fields', async () => {
+  const failure = Object.assign(new Error('Record failed for demo@example.com'), {
+    name: 'ProvisionedThroughputExceededException',
+  })
+  const calls = configureFakeProjectClients(true, {
+    passwordAuthTokens: true,
+    workspaceSignInError: failure,
+  })
+  const consoleError = spyOn(console, 'error').mockImplementation(() => undefined)
+
+  try {
+    const response = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Correlation-Id': 'sign-in-record-failure-correlation',
+      },
+      body: JSON.stringify({ email: 'demo@example.com', password: 'Permanent123!' }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ accessToken: 'test-token' })
+    expect(calls.workspaceSignIns).toEqual(['demo@example.com'])
+    // The log carries the server-issued correlation ID of the request, not the client's header.
+    const correlationId = response.headers.get('X-Correlation-Id')
+    expect(correlationId).toBeTruthy()
+    expect(correlationId).not.toBe('sign-in-record-failure-correlation')
+    expect(consoleError).toHaveBeenCalledWith('Failed to record the member sign-in:', {
+      correlationId,
+      errorName: 'ProvisionedThroughputExceededException',
+    })
+    // Neither the raw error, its message, the member's address nor the password reaches the log.
+    const logged = JSON.stringify(consoleError.mock.calls)
+    expect(logged).not.toContain('demo@example.com')
+    expect(logged).not.toContain('Permanent123!')
+    expect(consoleError.mock.calls.flat()).not.toContain(failure)
+  } finally {
+    consoleError.mockRestore()
+  }
 })
 
 test('retries membership reconcile on normal login after password completion succeeded alone', async () => {

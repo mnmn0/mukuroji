@@ -3807,13 +3807,18 @@ test('shows the last sign-in in the access snapshot to owners and admins only', 
   const signedInAt = '2026-07-10T09:30:00.000Z'
   const createClient = (actorRole: WorkspaceMember['role']) => new DynamoDbWorkspaceAccessClient(
     'WorkspaceAccessTable',
-    createDocumentClient(() => ({
-      Items: [
-        toMemberItem(createWorkspaceMember('demo@example.com', actorRole)),
-        { ...toMemberItem(createWorkspaceMember('sato@example.com', 'member')), lastSignedInAt: signedInAt },
-        { ...toMemberItem(createWorkspaceMember('suzuki@example.com', 'member')), lastSignedInAt: 'yesterday' },
-      ],
-    })),
+    createDocumentClient((command) => command.constructor.name === 'GetCommand'
+      ? {
+        // A stored member row that carries the time, as getMember reads it.
+        Item: { ...toMemberItem(createWorkspaceMember('sato@example.com', 'member')), lastSignedInAt: signedInAt },
+      }
+      : {
+        Items: [
+          toMemberItem(createWorkspaceMember('demo@example.com', actorRole)),
+          { ...toMemberItem(createWorkspaceMember('sato@example.com', 'member')), lastSignedInAt: signedInAt },
+          { ...toMemberItem(createWorkspaceMember('suzuki@example.com', 'member')), lastSignedInAt: 'yesterday' },
+        ],
+      }),
     undefined,
     false,
     () => now,
@@ -3836,6 +3841,8 @@ test('shows the last sign-in in the access snapshot to owners and admins only', 
     expect((await lastSignIns(role)).every(([, value]) => value === undefined)).toBe(true)
   }
   // Other readers of member rows never carry the time.
-  expect(await createClient('owner').getActiveMember(workspaceId, 'sato@example.com'))
-    .not.toHaveProperty('lastSignedInAt')
+  const activeMember = await createClient('owner').getActiveMember(workspaceId, 'sato@example.com')
+  expect(activeMember).toBeDefined()
+  expect(activeMember?.memberKey).toBe('sato@example.com')
+  expect(activeMember).not.toHaveProperty('lastSignedInAt')
 })
