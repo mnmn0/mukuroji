@@ -33,10 +33,12 @@ import {
   normalizeWorkItemConfigurationForSave,
   sortCustomFieldOptions,
 } from '../model/workItemConfigurationEditor'
+import { pruneWorkflowStatusRequiredCustomFields } from '../model/workflowRules'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
 import { ParentCompletionPolicyConfigurationSection } from './ParentCompletionPolicyConfigurationSection'
 import { ProgressModeConfigurationSection } from './ProgressModeConfigurationSection'
+import { WorkflowRulesConfigurationSection } from './WorkflowRulesConfigurationSection'
 
 /**
  * Configuration panel の scope selector に表示する選択肢です。
@@ -701,6 +703,12 @@ export function WorkflowConfigurationSection({
           </div>
         </div>
       </div>
+      <WorkflowRulesConfigurationSection
+        customFields={configuration.customFields}
+        locale={locale}
+        onChange={updateWorkflow}
+        workflow={{ ...selectedWorkflow, statuses }}
+      />
     </section>
   )
 }
@@ -1117,7 +1125,7 @@ function CustomFieldsConfigurationSection({
   /** Updates custom fields while removing type references to fields no longer available. */
   const updateFields = (customFields: CustomFieldDefinition[]) => {
     const availableFieldIds = new Set(customFields.map((field) => field.id))
-    onChange({
+    onChange(pruneWorkflowStatusRequiredCustomFields({
       ...configuration,
       customFields,
       workItemTypes: configuration.workItemTypes?.map((type) => ({
@@ -1125,7 +1133,7 @@ function CustomFieldsConfigurationSection({
         customFieldIds: type.customFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
         requiredCustomFieldIds: type.requiredCustomFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
       })),
-    })
+    }))
   }
   const updateField = (
     fieldId: string,
