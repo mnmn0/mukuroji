@@ -102,6 +102,14 @@ export const NOTIFICATION_MESSAGE_TEMPLATES = {
     en: 'Health update published ({health}): {excerpt}',
     ja: 'Health update が公開されました（{health}）: {excerpt}',
   },
+  'automation.execution-dead-lettered': {
+    en: 'Automation rule "{ruleName}" failed and stopped retrying.',
+    ja: 'Automation rule「{ruleName}」の実行が失敗し、再試行を止めました。',
+  },
+  'automation.rule-rate-limited': {
+    en: 'Automation rule "{ruleName}" was skipped because it reached its rate limit.',
+    ja: 'Automation rule「{ruleName}」が実行回数の上限に達したため、実行を飛ばしました。',
+  },
   'analytics.report-delivered': {
     en: 'A scheduled report snapshot is ready.',
     ja: '定期配信のスナップショットができました。',

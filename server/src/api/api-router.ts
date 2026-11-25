@@ -88,6 +88,8 @@ export type {
 
 export {
   createAutomationActionExecutor,
+  createAutomationExecutionFailureNotifier,
+  createAutomationWorkCalendarSource,
   createBulkItemMutationIdempotencyKey,
   requireBulkOperationOwner,
   toBulkOperationResponse,
