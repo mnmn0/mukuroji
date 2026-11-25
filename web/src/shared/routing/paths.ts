@@ -424,3 +424,13 @@ export function createTeamTimeTrackingPath(
   const encoded = query.toString()
   return `/teams/${encodeURIComponent(teamId)}/timesheet${encoded ? `?${encoded}` : ''}`
 }
+
+/**
+ * Creates the URL of the Run history opened from a Team's Factory board.
+ *
+ * @param teamId - Team whose board opens the history.
+ * @returns Run history URL.
+ */
+export function createTeamRunHistoryPath(teamId: string) {
+  return `/teams/${encodeURIComponent(teamId)}/factory/history`
+}

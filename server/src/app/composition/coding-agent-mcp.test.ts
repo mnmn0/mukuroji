@@ -1,11 +1,12 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { CODING_AGENT_MCP_VERSION } from '../../modules/coding-agent-mcp/application/compatibility'
-import { composeCodingAgentMcp, deriveAgentInstanceId } from './coding-agent-mcp'
+import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
+import { composeCodingAgentMcp, deriveAgentInstanceId, readTeamIds } from './coding-agent-mcp'
 
 /** Public run fields kept by the fake API, plus the raw instance ID only the fake sees. */
 type FakeRun = {
@@ -130,6 +131,12 @@ function startFakeApi() {
       runs.push({ run, instanceId: body.instanceId })
       return Response.json({ run, workItem: task }, { status: 201 })
     }
+    if (url.pathname === '/api/v1/work-items/task/attachments') {
+      return Response.json({ items: [{ id: 'file-1', name: 'spec.pdf', versionId: 'version-1', versionNumber: 1, contentType: 'application/pdf', sizeBytes: 10, updatedAt: '2026-09-01T00:00:00.000Z' }] })
+    }
+    if (url.pathname === '/api/v1/work-items/task/attachments/file-1/download') {
+      return Response.json({ fileId: 'file-1', versionId: 'version-1', url: 'https://files.example.test/file-1', expiresAt: '2026-09-01T00:05:00.000Z' })
+    }
     if (url.pathname === '/api/v1/work-items/task/documents') return Response.json({ items: [{ id: 'spec', title: 'Spec' }], hasMore: false })
     if (url.pathname === '/api/v1/work-items/task/documents/spec') {
       return Response.json({
@@ -234,7 +241,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     clients.push(readOnly)
     const readTools = (await readOnly.listTools()).tools.map((tool) => tool.name)
     expect(readTools).toContain('get_next_task')
-    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document']))
+    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document', 'list_task_attachments', 'get_attachment_download_url']))
     for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task', 'resume_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
     expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
@@ -246,10 +253,14 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
       .toMatchObject({ data: { items: [{ id: 'spec', title: 'Spec' }], hasMore: false } })
     expect((await call(readOnly, 'read_document', { taskId: 'task', documentId: 'spec' })).content)
       .toMatchObject({ data: { id: 'spec', format: 'markdown', content: '# Spec' } })
+    expect((await call(readOnly, 'list_task_attachments', { taskId: 'task' })).content)
+      .toMatchObject({ data: { items: [{ id: 'file-1', name: 'spec.pdf' }] } })
+    expect((await call(readOnly, 'get_attachment_download_url', { taskId: 'task', fileId: 'file-1' })).content)
+      .toMatchObject({ data: { fileId: 'file-1', url: 'https://files.example.test/file-1' } })
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(20)
+    expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
       mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 4, serverCompatibility: { status: 'compatible', server: { apiRevision: 4, minimumApiRevision: 1 } } },
@@ -400,7 +411,7 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     expect(await version.exited).toBe(0)
     expect((await new Response(version.stdout).text()).trim()).toBe(CODING_AGENT_MCP_VERSION)
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
-    expect((await client.listTools()).tools).toHaveLength(20)
+    expect((await client.listTools()).tools).toHaveLength(22)
     expect((await call(client, 'get_configuration')).content).toMatchObject({
       data: { runtime: 'codex', mcp: { version: CODING_AGENT_MCP_VERSION, serverCompatibility: { status: 'compatible' } } },
     })
@@ -429,6 +440,25 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     expect(healthRequests).toBe(2)
   } finally {
     await api.stop(true)
+  }
+})
+
+test('several configured Teams let create_task choose its Team, and one Team keeps the old schema', async () => {
+  const fake = startFakeApi()
+  const clients: Client[] = []
+  try {
+    const single = await connect(fake.api.port, 'auto', {})
+    clients.push(single)
+    const multi = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_TEAM_IDS: 'team-b' })
+    clients.push(multi)
+    /** Reads the argument names of create_task. */
+    const createArguments = async (client: Client) =>
+      Object.keys((await client.listTools()).tools.find((tool) => tool.name === 'create_task')?.inputSchema.properties ?? {})
+    expect(await createArguments(single)).not.toContain('teamId')
+    expect(await createArguments(multi)).toContain('teamId')
+  } finally {
+    await Promise.all(clients.map((client) => client.close()))
+    await fake.api.stop(true)
   }
 })
 
@@ -636,4 +666,32 @@ test('the workspace profile needs only the origin and token, and rejects an unkn
   expect(() => composeCodingAgentMcp({
     MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token',
   })).not.toThrow()
+})
+
+test('a Project restriction needs exactly one Team', () => {
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a,team-b',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).toThrow('MUKUROJI_MCP_PROJECT_ID needs exactly one Team')
+  expect(() => composeCodingAgentMcp({
+    MUKUROJI_MCP_URL: 'http://127.0.0.1:3000', MUKUROJI_MCP_TOKEN: 'token', MUKUROJI_MCP_TEAM_IDS: 'team-a',
+    MUKUROJI_MCP_ASSIGNEE_ID: 'agent', MUKUROJI_MCP_PROJECT_ID: 'project',
+  })).not.toThrow()
+})
+
+describe('readTeamIds', () => {
+  test('keeps the single Team of an older configuration', () => {
+    expect(readTeamIds('team-a', undefined)).toEqual(['team-a'])
+  })
+
+  test('adds listed Teams in order without duplicates', () => {
+    expect(readTeamIds('team-a', 'team-b, team-a ,team-c')).toEqual(['team-a', 'team-b', 'team-c'])
+    expect(readTeamIds(undefined, 'team-b')).toEqual(['team-b'])
+  })
+
+  test('rejects no Team, an empty entry, and too many Teams', () => {
+    expect(() => readTeamIds(undefined, undefined)).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, 'team-a,,team-b')).toThrow(AgentTaskError)
+    expect(() => readTeamIds(undefined, Array.from({ length: 11 }, (_, index) => `team-${index}`).join(','))).toThrow(AgentTaskError)
+  })
 })

@@ -47,6 +47,8 @@ export {
 } from './domain/agent-run-analytics'
 export {
   createAgentRunReportCommentBody,
+  isAgentRunQuestionReport,
+  readAnswerAgentRunReportRequest,
   readAgentRunArtifactUrl,
   readReportAgentRunRequest,
   toAgentRunReport,
@@ -61,6 +63,7 @@ export {
   createAgentRunPartition,
   type AgentRunDocumentClient,
   type AgentRunFenceInput,
+  type AgentRunFinishedEntry,
   type AgentRunFinishedGroup,
   type AgentRunPage,
   type AgentRunReportPage,

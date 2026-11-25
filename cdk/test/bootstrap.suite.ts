@@ -434,6 +434,13 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
   expect(seededIndexAttributes.wireframe).toEqual(['work-item-schedule-01', '0000-00-00']);
   expect(seededIndexAttributes['seo-research']).toEqual(['work-item-schedule-06', '2026-06-09']);
   expect(seededIndexAttributes['competitor-report']?.[1]).toBeUndefined();
+  // Started seeds join the Team started index the Factory board reads (ADR 0098).
+  const startedPartitions = Object.fromEntries(canonicalWorkItems.map(({ Put }) => [
+    Put.Item.issueId.S,
+    Put.Item.startedDirectoryTeamId?.S,
+  ]));
+  expect(startedPartitions.wireframe).toBe('directory-1#team#core-team');
+  expect(startedPartitions['seo-research']).toBeUndefined();
   // Owners find seeded Work Items in Focus through the member index (ADR 0038). The keys are pinned
   // to what the server's createWorkItemMemberIndexRecord returns for the same Work Item.
   const memberIndexItems = createCanonicalWorkItemMemberIndexTransactItems('WorkItemsTable', 'directory-1');

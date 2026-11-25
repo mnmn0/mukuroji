@@ -554,10 +554,15 @@ tool は次のとおり変更・追加する。
   `credentialId` は Team 管理権限を持つ member にだけ返す。
 - 解放、take over、resume の実行者は audit event の actor として記録する。
 - audit event は entity type `agent-run` を追加し、`agent-run.started`、`agent-run.reported`、
-  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed` を既存の
-  mutation transaction と outbox で記録する。heartbeat は audit event を作らず
+  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed`、
+  `agent-run.answered` を既存の mutation transaction と outbox で記録する。heartbeat は audit event を作らず
   `lastHeartbeatAt` だけを更新する。actor は credential owner の member とし、`metadata` に
   `runtime` と `agentName` を持つ。
+- `blocker`・`handoff` の report には、Work Item に comment できる member が回答を 1 つだけ保存できる。
+  回答は report の `answer`（本文・回答者・時刻・回答 comment の ID）として、回答者の comment と
+  `agent-run.answered` と同じ transaction で書く。report の条件（`commentId` 一致・`answer` 未保存）で
+  同時の別回答を拒み、同じ member の同じ本文の再送は保存済みの回答を返す。agent は Public API の
+  `agent-run-questions` と MCP の `get_task` の `questions` で読む。
 - Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
   OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
   （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。
@@ -720,8 +725,16 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
     `finishedRunsHasMore: true` を返す。失敗の partition は解決済みの失敗も残るため、失敗の総数が 500 件を
     超える Team では古い失敗が欠けうる（[ADR 0006](adr/0006-finished-run-index.md)）。index の key がない
     既存の終了済み Run への付与は #365 の migration で行う。
-  - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
-    index はない。
+  - `TeamStartedWorkItemIndex`（Team の `started` で archive されていない Work Item だけが載る sparse
+    index）から、更新の新しい順に最大 300 件読む。他の status category の Work Item は読まない
+    （[ADR 0098](adr/0098-team-started-work-item-index-and-board-continuation.md)）。
+- 上限で止まった source があれば、応答に opaque な `continuation` を付ける。
+  `GET /api/teams/{teamId}/agent-runs?continuation=...` は token にある source だけを続きから読み、
+  次の token を返す。続きの page は最初の page の読み取り時刻で評価するため、24 時間の範囲、lane、
+  lease の停滞判定、`generatedAt` は最初の page と同じになる。token は暗号化・認証され、
+  閲覧者と Team に結び付く。作り替えた token、別の閲覧者や Team の token、各 store の cursor の Team が
+  合わない token は `400` を返す。Web は「続きの Run とタスクを読み込む」で page を
+  足し、同じ Work Item が複数の page に出た場合は先の page を使う。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
   （`canAccessAssignedProject`）。`active` Run がなければ Work Item の Run 履歴から最新の 1 件を読む。
   「その後に新しい Run がない」はこの最新 1 件で判定する。読み取りは同時 10 件までとする。

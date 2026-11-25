@@ -1,6 +1,7 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import type { Locale } from '../../shared/i18n/i18n'
 import { indexAgentRunReportsByComment, selectAgentRunReportsForWorkItem } from '../model/agentRunReportDisplay'
+import { useAnswerAgentRunReport } from '../mutations/useAnswerAgentRunReport'
 import { useWorkItemAgentRunReports } from '../queries/useWorkItemAgentRunReports'
 import { AgentRunReportChips, AgentRunReportsLoadNotice } from './AgentRunReportChips'
 import { createAgentRunReportChipsLabels, createAgentRunReportsNoticeLabels } from './agentRunReportLabels'
@@ -17,6 +18,10 @@ export type AgentRunReportCommentDetailsInput = {
   commentCount: number
   /** Display locale. */
   locale: Locale
+  /** True when the viewer may comment, and so answer a blocker or hand-off. */
+  canAnswer?: boolean
+  /** Reads the conversation again after an answer, so the answer's comment appears. */
+  onAnswered?: () => Promise<unknown>
 }
 
 /** Report rendering for a Work Item's conversation. */
@@ -29,7 +34,7 @@ export type AgentRunReportCommentDetails = {
 
 /**
  * Reads a Work Item's reports and returns a renderer that shows the chips of the report saved with
- * a comment. Comments without a report render nothing, so the conversation never waits on reports;
+ * a comment, with an answer form under a waiting blocker or hand-off for members who may comment. Comments without a report render nothing, so the conversation never waits on reports;
  * a failed read is shown as a separate notice with a retry action instead of as missing reports.
  *
  * @param input - Work Item, session, and locale.
@@ -37,8 +42,10 @@ export type AgentRunReportCommentDetails = {
  */
 export function useAgentRunReportCommentDetails({
   accessToken,
+  canAnswer = false,
   commentCount,
   locale,
+  onAnswered,
   teamId,
   workItemId,
 }: AgentRunReportCommentDetailsInput): AgentRunReportCommentDetails {
@@ -52,10 +59,18 @@ export function useAgentRunReportCommentDetails({
     () => indexAgentRunReportsByComment(selectAgentRunReportsForWorkItem(reports, { accessToken, teamId, workItemId })),
     [accessToken, reports, teamId, workItemId],
   )
+  const answer = useAnswerAgentRunReport({ accessToken, teamId, refreshReports: mutate, onAnswered })
   const renderCommentDetails = useCallback((comment: { id: string }) => {
     const report = byComment.get(comment.id)
-    return report ? <AgentRunReportChips labels={labels} report={report} /> : null
-  }, [byComment, labels])
+    if (!report) return null
+    return (
+      <AgentRunReportChips
+        labels={labels}
+        onAnswer={canAnswer && accessToken && teamId ? (body) => answer(report, body) : undefined}
+        report={report}
+      />
+    )
+  }, [accessToken, answer, byComment, canAnswer, labels, teamId])
   return {
     renderCommentDetails,
     loadNotice: error && accessToken && teamId ? <AgentRunReportsLoadNotice labels={noticeLabels} onRetry={() => { void mutate() }} /> : null,

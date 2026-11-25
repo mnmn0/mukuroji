@@ -55,7 +55,8 @@ const workItemNotificationScheduleShardCount = 16;
  * @param issueId - Work Item identifier.
  * @param statusCategory - Workflow status category of the seed.
  * @param dueDate - Canonical `YYYY-MM-DD` deadline of the seed.
- * @returns DynamoDB attribute values for `notificationScheduleShard` and `notificationDueKey`.
+ * @returns DynamoDB attribute values for `notificationScheduleShard`, `notificationDueKey`, and
+ *   `startedDirectoryTeamId`.
  */
 export function createSeedWorkItemNotificationScheduleAttributes(
   workspaceId: string,
@@ -75,6 +76,8 @@ export function createSeedWorkItemNotificationScheduleAttributes(
   return {
     notificationScheduleShard: { S: `work-item-schedule-${String(shardIndex).padStart(2, '0')}` },
     ...(dueKey === undefined ? {} : { notificationDueKey: { S: dueKey } }),
+    // Mirrors the started index partition of the same server function (ADR 0098).
+    ...(statusCategory === 'started' ? { startedDirectoryTeamId: { S: `${workspaceId}#team#${teamId}` } } : {}),
   };
 }
 

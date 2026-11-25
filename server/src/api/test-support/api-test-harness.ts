@@ -898,6 +898,7 @@ function createTeamIssuesFake(
     getTeamIssuesByReferences: unsupported,
     getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
+    listStartedWorkItemIds: unsupported,
     getWorkItemKeyLocation: unsupported,
     listWorkItemKeyPrefixes: unsupported,
     getTeamWorkItemKeyPrefix: unsupported,
@@ -3232,6 +3233,16 @@ function configureFakeProjectClients(
         })
         return {
           issues: createFakeTeamIssues(teamId).slice(0, readOptions.limit),
+        }
+      },
+      async listStartedWorkItemIds(_directoryId, teamId, readOptions) {
+        // The cursor is an offset, so a board test also sees the index stop early and continue.
+        const started = createFakeTeamIssues(teamId).filter((issue) => issue.statusCategory === 'started')
+        const offset = Number.isSafeInteger(Number(readOptions.cursor)) ? Number(readOptions.cursor) : 0
+        const end = offset + readOptions.limit
+        return {
+          workItemIds: started.slice(offset, end).map((issue) => issue.id),
+          ...(end < started.length ? { nextCursor: String(end) } : {}),
         }
       },
       async getTeamIssuePage(directoryId, teamId, readOptions) {

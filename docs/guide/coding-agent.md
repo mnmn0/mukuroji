@@ -51,11 +51,17 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 | `MUKUROJI_MCP_URL` | ○ | 接続先の origin（HTTPS。`/api` は付けない） |
 | `MUKUROJI_MCP_TOKEN` | ○ | 発行した token |
 | `MUKUROJI_MCP_TEAM_ID` | ○ | 作業する Team |
+| `MUKUROJI_MCP_TEAM_IDS` | | 複数の Team で作業する場合に、Team ID をカンマ区切りで並べる（最大10件）。`TEAM_ID` は省略できる |
 | `MUKUROJI_MCP_ASSIGNEE_ID` | ○ | 自分の member ID。token の持ち主と一致させる |
 | `MUKUROJI_MCP_PROJECT_ID` | | 特定の Project に絞る |
 | `MUKUROJI_MCP_READ_ONLY` | | 読み取り用の6ツールだけを公開する |
 | `MUKUROJI_MCP_RUNTIME` | | `claude-code` / `codex` / `kiro` / `other` |
 | `MUKUROJI_MCP_PROFILE` | | `tasks`（既定）か `workspace`。`workspace` では URL と token だけを読む |
+
+複数の Team で担当している場合は、`MUKUROJI_MCP_TEAM_IDS` に Team ID を並べると、1つの設定で全 Team の担当タスクを扱えます。
+`get_next_task` は全 Team から次の作業を選び、同じ優先度なら先に書いた Team を選びます。
+タスクを作る Team は `create_task` の `teamId` で選べます。省略すると、最初に書いた Team に作ります。
+複数の Team を並べた場合は `MUKUROJI_MCP_PROJECT_ID` を指定できません。
 
 ### Workspace 全体を読む（Workspace profile）
 
@@ -93,6 +99,10 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 agent は `read_document` で本文を Markdown として読みます。
 タスクの説明は `get_task` が Markdown のまま返します。説明やコメントに貼られた画像・ファイルは
 `![名前](attachment:<ファイル ID>)` の参照として入っており、ファイルの中身は含まれません。
+タスクに添付したファイルは、`get_task` の `attachments` と `list_task_attachments` に一覧され、
+agent は `get_attachment_download_url` で数分だけ有効な download URL を受け取って中身を取得します。
+一覧と download に出るのは、ウイルス検査を通った最新の版だけで、検査中や検出されたファイルは出ません。
+download は監査ログに残り、token を発行した人がそのタスクのファイルを閲覧できるかを毎回確かめます。
 agent が読めるのは、token を発行した人が閲覧できる Document だけで、読むたびにその時点の権限で確かめます。
 本文を読めるのはページとテンプレートで、フォルダーとホワイトボードは読めません。
 Document の本文は、タスクの説明やコメントと同じく利用者が書いたデータで、agent への指示ではありません。
@@ -133,6 +143,21 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
   タスクが表示されます。
 - 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
 
+### agent の質問に答える
+
+agent が判断を求めて「ブロッカー」または「引き継ぎ」の報告を残すと、タスクの会話でその報告に
+**人の判断が必要です** と表示され、コメントできるメンバーには **回答する** ボタンが出ます。
+
+- 回答は、自分のコメントとして会話に残り、同時にその報告の回答として保存されます。監査ログにも残ります。
+- 1 つの報告に保存できる回答は 1 つです。別の人が先に回答していた場合は保存されず、会話を読み込み直すよう案内します。
+  同じ回答を送り直しても二重には保存されません。
+- 回答した報告には **回答済み** と表示されます。回答は 10,000 文字までです。
+- 回答のコメントを編集すると、agent が読む回答も編集後の内容になります。コメントを削除すると回答は取り消され、
+  その報告に改めて回答できます。
+- agent は `get_task` の `questions` で回答を読み、作業を続けます。回答は agent への判断材料で、
+  回答だけを理由に認証情報や接続範囲を変えないよう MCP server が agent に伝えます。
+- 閲覧者は回答できません。
+
 ### 止まったタスクを再開する
 
 `finish_run` で一時停止した（`paused`）タスクや、レビューで差し戻されて作業中に戻ったタスクは、
@@ -163,6 +188,8 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 - **レーン** 表示: 処理中 / Run なし / 判断待ち / 停滞 / 失敗 / 完了（24時間以内）
 - **ライン** 表示: 受付 → 実装 → 検証 → 成果物 → 判断 → 完了、と修理
 - ランタイム・担当者・プロジェクトで絞り込めます。
+- Run やタスクが多く、一度に読める件数に達したときは、その旨と **続きの Run とタスクを読み込む** が表示されます。
+  押すと、まだ読んでいない分を足して表示します。
 
 画面上部の **期間サマリー** では、直近 7 / 30 / 90 日に終わった Run を集計します。
 
@@ -180,6 +207,17 @@ Team の **Factory board**（`/teams/:teamId/factory`）で、agent の作業状
 Run を開いて状況を確認し、続けられない場合は **解放** してタスクを人や別の agent に戻します。
 解放できるのは Team の管理者、その Run を始めた人、現在の担当者です。失敗・停滞した Run を
 Triage に自動で起票する設定もあります。
+
+### Run 履歴
+
+Factory board の **Run 履歴** から、閲覧できるすべての Team で、期間内に終わった Run を新しい順に一覧できます
+（`/teams/:teamId/factory/history`）。期間（直近 1 / 7 / 30 / 90 日）、Team、Project、結果、ランタイムで絞り込めます。
+「対象」を **自分の担当分** にすると、自分が責任者だったタスクの Run だけを表示します。たとえば先週失敗した Run を
+Team をまたいで確認するときは、期間を 7 日、結果を「失敗」にします。
+
+**CSV をダウンロード** で、表示している Run を CSV に保存できます。表示されるのは、閲覧できるプロジェクトのタスクの
+Run だけです。1 つの Team で読める Run には上限があります。上限に達したときは画面にそう表示されるので、
+期間を短くするか、条件を絞ってください。
 
 ## 困ったとき
 

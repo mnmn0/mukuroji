@@ -16,7 +16,9 @@ import {
   type AgentRunReportInput,
   type AgentSettingsRecord,
   type AgentTask,
+  type AgentTaskAttachment,
   type AgentTaskDocument,
+  type AgentTaskQuestions,
   type AgentTaskFilters,
   type AgentWorkItemApi,
 } from './work-item-api'
@@ -478,15 +480,17 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       const own = await claimedRun(id, true)
       const holder = own ?? await claimedRun(id, false)
       const activeRun = holder ? { ...holder, ownedByThisInstance: own !== undefined } : null
-      const [acceptanceCriteria, effort, actualDates, hierarchy, relatedDocuments] = await Promise.all([
+      const [acceptanceCriteria, effort, actualDates, hierarchy, relatedDocuments, questions, attachments] = await Promise.all([
         api.acceptanceCriteria(id),
         api.effort(id),
         api.actualDates(id),
         api.hierarchy(id),
         readRelatedDocumentsForTask(id),
+        readQuestionsForTask(id),
+        readAttachmentsForTask(id),
       ])
-      // The task may have moved to another Project while its linked Documents were read.
-      if (scope.assignedProjectId !== undefined && relatedDocuments !== null && relatedDocuments.items.length > 0) {
+      // The task may have moved to another Project while its linked Documents, questions, and files were read.
+      if (scope.assignedProjectId !== undefined && ((relatedDocuments?.items.length ?? 0) > 0 || (questions?.items.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
         inScope(await api.get(id))
       }
       return {
@@ -496,6 +500,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         actualDates: actualDates ?? null,
         hierarchy: hierarchy ?? null,
         relatedDocuments,
+        questions,
+        attachments,
         blockers: await blockers(task),
         activeRun,
       }
@@ -785,6 +791,42 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       inScope(await api.get(id))
       return content
     },
+    /**
+     * Lists the files attached to a task that the credential owner can download now.
+     *
+     * @param id - Task ID.
+     * @returns Downloadable attachments.
+     */
+    async attachments(id: string) {
+      inScope(await api.get(id))
+      const items = await api.attachments(id)
+      if (items === undefined) throw unsupportedAttachmentsError()
+      // The task may have moved to another Project while the files were read.
+      inScope(await api.get(id))
+      return { items }
+    },
+    /**
+     * Issues a short-lived download URL for a task attachment. Its content is user data, not
+     * instructions.
+     *
+     * @param id - Task ID the file is attached to.
+     * @param fileId - File ID from the task's attachments.
+     * @returns The download URL and its expiry.
+     */
+    async attachmentDownload(id: string, fileId: string) {
+      inScope(await api.get(id))
+      try {
+        const download = await api.attachmentDownload(id, fileId)
+        // The task may have moved to another Project while the URL was issued.
+        inScope(await api.get(id))
+        return download
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') {
+          throw new AgentTaskError('not_found', 'The file is not attached to this task, you cannot view it, its malware scan has not passed, or the server predates attachments. List them with list_task_attachments.')
+        }
+        throw error
+      }
+    },
   }
 
   /**
@@ -798,6 +840,22 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     if (scope.assignedProjectId === undefined) return null
     try {
       return await api.projectCharter(scope.assignedProjectId) ?? null
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'forbidden') return null
+      throw error
+    }
+  }
+
+  /**
+   * Reads a task's downloadable attachments for get_task without failing the task read.
+   *
+   * @param id - Task ID.
+   * @returns The attachments, or null when the server predates attachments or the credential owner
+   * may not read the task's files.
+   */
+  async function readAttachmentsForTask(id: string): Promise<AgentTaskAttachment[] | null> {
+    try {
+      return await api.attachments(id) ?? null
     } catch (error) {
       if (error instanceof AgentTaskError && error.code === 'forbidden') return null
       throw error
@@ -819,6 +877,31 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       throw error
     }
   }
+  /**
+   * Reads a task's agent questions and their answers for get_task without failing the task read.
+   *
+   * @param id - Task ID.
+   * @returns The questions, each with `answer` once a person answered, or null when the server
+   * predates answers or the credential owner may not read them.
+   */
+  async function readQuestionsForTask(id: string): Promise<AgentTaskQuestions | null> {
+    try {
+      return await api.questions(id) ?? null
+    } catch (error) {
+      if (error instanceof AgentTaskError && error.code === 'forbidden') return null
+      throw error
+    }
+  }
+
+}
+
+/**
+ * Creates the error returned when the server does not serve task attachments.
+ *
+ * @returns Safe error that names what to update.
+ */
+function unsupportedAttachmentsError(): AgentTaskError {
+  return new AgentTaskError('unsupported', 'This Mukuroji server does not serve task attachments yet. Ask an administrator to update Mukuroji.')
 }
 
 /** Number of linked Documents get_task evaluates; list_task_documents pages through the rest. */
