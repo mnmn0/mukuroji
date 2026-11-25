@@ -358,6 +358,7 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   並び順の変更も選べます。これらは相手の Work Item を含まず、変更された側の Work Item だけを送ります。
   Work Item を削除して消えた関係は、残った相手の Work Item の解除・削除として送ります。
   コメントの作成（返信は含みません）と、coding agent の作業の開始・報告・終了・解放も選べます。
+  コメントの event には本文が入らないので、本文が要るときは届いた `commentId` で API からコメントを読みます。
   agent の失敗を bot に知らせるには「Agent Run 終了」を選び、届いた event の `outcome` が `failed` のものを拾います。
   API キーの webhooks / imports の scope は `/api/v1` では使いません（Webhook の作成と import は、この画面から行います）。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
