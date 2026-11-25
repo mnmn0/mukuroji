@@ -161,7 +161,7 @@ export const automationMessages = {
   'automation.template.formUnavailable': 'The advanced JSON is not an object, so the form cannot edit it. Fix the JSON first.',
   'automation.template.payloadAdvanced': 'Advanced (JSON): schedule, custom fields, and more',
   'automation.template.payloadHint':
-    'Enter a JSON object. Work Item templates should include required creation values such as title.',
+    'Enter a JSON object. Work Item templates should include required creation values such as title. An acceptanceCriteria array of texts gives created Work Items those acceptance criteria.',
   'automation.template.payloadInvalidJson': 'Enter valid JSON.',
   'automation.template.payloadObjectRequired': 'The top-level payload must be a JSON object.',
   'automation.template.payloadInvalidValue': 'The payload contains an unsupported JSON value or field name.',

@@ -2484,18 +2484,26 @@ describe('planning structured updates', () => {
     await publish(4, 'on-track')
 
     expect(contexts).toEqual([
-      { healthDegraded: false, updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com' },
+      {
+        healthDegraded: false,
+        updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        // The escalation member reviews updates when the cadence names no reviewer.
+        reviewerMemberKey: 'lead@example.com',
+      },
       {
         previousHealth: 'on-track', healthDegraded: true,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
       {
         previousHealth: 'at-risk', healthDegraded: false,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
       {
         previousHealth: 'at-risk', healthDegraded: false,
         updateOwnerMemberKey: 'owner@example.com', escalationMemberKey: 'lead@example.com',
+        reviewerMemberKey: 'lead@example.com',
       },
     ])
   })

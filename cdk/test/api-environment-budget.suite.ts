@@ -273,6 +273,7 @@ const expectedWorkflowConfiguration = {
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: nestedSecret(
     ref(WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID),
   ),
+  NOTIFICATION_EMAIL_SENDER: base64(ref('NotificationEmailSender')),
   NOTIFICATION_REMINDER_DEFAULT_DAYS: base64(ref('NotificationReminderDefaultDays')),
   NOTIFICATIONS_STATUS_INDEX_NAME: base64('RecipientStatusIndex'),
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),

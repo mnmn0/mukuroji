@@ -63,6 +63,15 @@ export {
 } from './domain/automation-error'
 export { isAutomationValue } from './domain/automation-value'
 export {
+  createBulkReassignMemberPatch,
+  createBulkReassignMemberUndoPayload,
+  isBulkReassignMemberApplied,
+  isBulkReassignMemberUndoApplied,
+  listBulkReassignMemberRemovedShares,
+  type BulkReassignMemberPatch,
+  type BulkReassignMemberWorkItem,
+} from './domain/bulk-reassign-member'
+export {
   validateApplyAutomationTemplateInput,
   listProjectTemplateWbsNumbers,
   validateAutomationInboundWebhookLifecycleInput,

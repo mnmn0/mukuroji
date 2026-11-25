@@ -161,7 +161,7 @@ export const automationMessages = {
   'automation.template.formUnavailable': '詳細（JSON）が object として読めないため、フォームで編集できません。JSON を直してください。',
   'automation.template.payloadAdvanced': '詳細（JSON）: 期間・custom field などを編集',
   'automation.template.payloadHint':
-    'JSON object を入力します。Work Item template には title など作成に必要な値を含めてください。',
+    'JSON object を入力します。Work Item template には title など作成に必要な値を含めてください。acceptanceCriteria に文字列の配列を入れると、作成した Work Item が受け入れ条件を持って始まります。',
   'automation.template.payloadInvalidJson': '有効な JSON を入力してください。',
   'automation.template.payloadObjectRequired': 'Payload の最上位は JSON object にしてください。',
   'automation.template.payloadInvalidValue': 'Payload に利用できない JSON 値またはフィールド名があります。',

@@ -128,7 +128,7 @@ function isPlanningCadence(value: unknown): boolean {
   )
 }
 
-/** Returns whether a value is a Project or Initiative update target. */
+/** Returns whether a value is a Project, Team, or Initiative update target. */
 function isPlanningUpdateTarget(value: unknown): boolean {
   if (!isRecord(value)) return false
   if (value.type === 'project') {
@@ -136,6 +136,9 @@ function isPlanningUpdateTarget(value: unknown): boolean {
       value.teamId.length > 0 &&
       typeof value.projectId === 'string' &&
       value.projectId.length > 0
+  }
+  if (value.type === 'team') {
+    return typeof value.teamId === 'string' && value.teamId.length > 0
   }
   return value.type === 'initiative' &&
     typeof value.entityId === 'string' &&
@@ -155,7 +158,8 @@ function isPlanningUpdateCadence(value: unknown): boolean {
       value.escalationHoursAfter === undefined ||
       isNonnegativeSafeInteger(value.escalationHoursAfter)
     ) &&
-    isOptionalString(value.escalationMemberKey)
+    isOptionalString(value.escalationMemberKey) &&
+    isOptionalString(value.reviewerMemberKey)
 }
 
 /** Returns whether a value is a server-captured progress snapshot. */
@@ -329,7 +333,16 @@ function isPlanningUpdate(value: unknown): value is PlanningUpdate {
     value.evidence.every(isPlanningUpdateEvidence) &&
     typeof value.authorMemberKey === 'string' &&
     isIsoTimestamp(value.coveredDueAt) &&
-    isIsoTimestamp(value.createdAt)
+    isIsoTimestamp(value.createdAt) &&
+    (value.acknowledgement === undefined || isPlanningUpdateAcknowledgement(value.acknowledgement))
+}
+
+/** Returns whether a value is the reviewer acknowledgement attached to a history entry. */
+function isPlanningUpdateAcknowledgement(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.memberKey === 'string' &&
+    typeof value.commentId === 'string' &&
+    isIsoTimestamp(value.acknowledgedAt)
 }
 
 /** Returns whether a value is one append-only immutable-update comment. */
@@ -340,7 +353,8 @@ function isPlanningUpdateComment(value: unknown): value is PlanningUpdateComment
     isPositiveSafeInteger(value.updateVersion) &&
     typeof value.body === 'string' &&
     typeof value.authorMemberKey === 'string' &&
-    isIsoTimestamp(value.createdAt)
+    isIsoTimestamp(value.createdAt) &&
+    (value.acknowledgement === undefined || value.acknowledgement === true)
 }
 
 /** Returns whether a value is one member reaction on an immutable update. */

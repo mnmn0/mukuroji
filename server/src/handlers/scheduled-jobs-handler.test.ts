@@ -9,9 +9,12 @@ test('keeps the cadence and retry policy each scheduled worker had as its own La
       { name: 'agent-run-triage', everyMinutes: 1, attempts: 3 },
       { name: 'slack-notifications', everyMinutes: 1, attempts: 1 },
       { name: 'email-notifications', everyMinutes: 1, attempts: 1 },
+      { name: 'push-notifications', everyMinutes: 1, attempts: 1 },
+      { name: 'email-feedback', everyMinutes: 1, attempts: 1 },
       { name: 'analytics-schedule', everyMinutes: 5, attempts: 3 },
       { name: 'notification-schedule', everyMinutes: 60, attempts: 3 },
       { name: 'cycle-schedule', everyMinutes: 60, attempts: 3 },
+      { name: 'inbox-digest', everyMinutes: 15, attempts: 1 },
       { name: 'japanese-public-holiday-sync', everyMinutes: 360, attempts: 2 },
     ])
 })
@@ -25,9 +28,12 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
     'analytics-schedule-handler',
     'automation-schedule-handler',
     'cycle-schedule-handler',
+    'email-feedback-handler',
     'email-notifications-handler',
+    'inbox-digest-worker-handler',
     'japanese-public-holiday-sync-handler',
     'notification-schedule-handler',
+    'push-notifications-handler',
     'slack-notifications-handler',
     'triage-schedule-handler',
   ]) {
@@ -42,9 +48,12 @@ test('leaves the Agent Run triage job out when Software factory is not deployed'
     'triage-schedule',
     'slack-notifications',
     'email-notifications',
+    'push-notifications',
+    'email-feedback',
     'analytics-schedule',
     'notification-schedule',
     'cycle-schedule',
+    'inbox-digest',
     'japanese-public-holiday-sync',
   ])
 })

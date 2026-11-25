@@ -3,6 +3,7 @@ import type {
   AccountSecurityStatus,
   SoftwareTokenSetupStart,
   WorkspaceMembersSignInSecurityResponse,
+  WorkspaceMemberSystemAdministratorResponse,
 } from '@mukuroji/contracts'
 import {
   AccountCredentialChangeError,
@@ -30,8 +31,10 @@ import {
 } from '../../app/composition/account-credential-changes'
 import { createMfaSetupChallengePorts } from '../../app/composition/mfa-setup-challenge'
 import { createMemberCredentialResetPorts } from '../../app/composition/member-credential-reset'
+import { createMemberSystemAdministratorPorts } from '../../app/composition/member-system-administrator'
 import { createSoftwareTokenEnrollmentPorts } from '../../app/composition/software-token-enrollment'
 import {
+  changeMemberSystemAdministrator,
   listMembersSignInSecurity,
   resetMemberCredential,
   WorkspaceAccessError,
@@ -577,11 +580,21 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
+      const members = await listMembersSignInSecurity(
+        createRequestMemberSignInSecurityPorts(),
+        principal.directoryId,
+      )
+      const systemAdministrators = await readSystemAdministratorMemberKeys(
+        principal.directoryId,
+        members.map((member) => member.memberKey),
+      )
       const response: WorkspaceMembersSignInSecurityResponse = {
-        members: await listMembersSignInSecurity(
-          createRequestMemberSignInSecurityPorts(),
-          principal.directoryId,
-        ),
+        members,
+        ...(systemAdministrators === 'unavailable'
+          ? { systemAdministratorsUnavailable: true }
+          : systemAdministrators
+            ? { systemAdministratorMemberKeys: systemAdministrators }
+            : {}),
       }
       return c.json(response)
     } catch (error) {
@@ -611,6 +624,92 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
   routeApp.post('/api/workspace/members/:memberKey/mfa-reset', async (c) => {
     return handleMemberCredentialAction(c, 'mfa-reset')
   })
+
+  /**
+   * Grants or revokes system administrator access for a member (ADR 0067).
+   *
+   * @remarks
+   * Owners only, and nobody changes their own access. The member joins or leaves the configured
+   * Cognito system administrator groups, and the change is written to the audit log before
+   * Cognito changes. Guests cannot be granted it.
+   */
+  routeApp.put('/api/workspace/members/:memberKey/system-administrator', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceAdministration(principal)
+      if (principal.workspaceRole !== 'owner') {
+        throw new WorkspaceAccessError(
+          403,
+          'WorkspaceRoleDenied',
+          'Only an owner can change who is a system administrator.',
+        )
+      }
+      const memberKey = readWorkspaceEmail(c.req.param('memberKey'))
+      const body = await readJson<Record<string, unknown>>(c.req)
+      const systemAdministrator = body?.systemAdministrator
+      if (typeof systemAdministrator !== 'boolean') {
+        return c.json({
+          code: 'InvalidSystemAdministratorRequest' as const,
+          message: 'systemAdministrator must be true or false.',
+        }, 400)
+      }
+      const ports = createMemberSystemAdministratorPorts({
+        cognito: authenticationDependencies.cognito,
+        workspaceAccess: workspaceDependencies.workspaceAccess,
+      })
+      if (!ports) return unavailableResponse(c)
+
+      const action = systemAdministrator ? 'system-administrator-granted' : 'system-administrator-revoked'
+      const response: WorkspaceMemberSystemAdministratorResponse = await changeMemberSystemAdministrator(
+        ports,
+        {
+          workspaceId: principal.directoryId,
+          actorMemberKey: principal.userKey,
+          memberKey,
+          systemAdministrator,
+          auditContext: createWorkspaceMutationContext(c, principal, { action, memberKey }),
+        },
+      )
+      return c.json(response)
+    } catch (error) {
+      if (error instanceof CognitoServiceError && error.code === 'UserNotFoundException') {
+        return c.json({
+          code: 'MemberSignInUnavailable' as const,
+          message: 'The member has no password sign-in account.',
+        }, 404)
+      }
+      return toAccountSecurityErrorResponse(c, error)
+    }
+  })
+}
+
+/**
+ * Reads which of the listed active members are system administrators.
+ *
+ * @param workspaceId - Workspace whose directory the users must belong to.
+ * @param memberKeys - Member keys of the active members.
+ * @returns The member keys in a system administrator group, `unavailable` when the groups could
+ *   not be read, so that the roster still loads and the screen offers a retry, or undefined when
+ *   this deployment cannot list the groups.
+ */
+async function readSystemAdministratorMemberKeys(
+  workspaceId: string,
+  memberKeys: readonly string[],
+): Promise<string[] | 'unavailable' | undefined> {
+  const { listSystemAdminEmails } = authenticationDependencies.cognito
+  if (!listSystemAdminEmails) return undefined
+  try {
+    const emails = new Set(await listSystemAdminEmails.call(authenticationDependencies.cognito, workspaceId))
+    return memberKeys.filter((memberKey) => emails.has(memberKey.toLowerCase()))
+  } catch (error) {
+    console.error('Failed to read the system administrator groups.', {
+      error: error instanceof Error ? error.name : 'UnknownError',
+    })
+    return 'unavailable'
+  }
 }
 
 /**

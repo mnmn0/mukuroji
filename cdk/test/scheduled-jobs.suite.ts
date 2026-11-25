@@ -13,9 +13,9 @@ const scheduledJobIds = [
   'AgentRunTriage',
   'SlackNotification',
   'EmailNotification',
+  'PushNotification',
   'AnalyticsSchedule',
   'NotificationSchedule',
-  'CycleSchedule',
 ];
 
 test('runs every periodic job from one Lambda on one every-minute rule', () => {
@@ -139,5 +139,56 @@ test('lets the national holiday sync write only its shared tenant administration
         Resource: { 'Fn::GetAtt': [Match.stringLikeRegexp('^TenantAdministrationTable'), 'Arn'] },
       })]),
     },
+  });
+});
+
+test('lets the Inbox digest job find due members through its sparse index only', () => {
+  const template = synthesizedTemplate;
+  const functionLogicalId = findScheduledJobsFunctionLogicalId(template);
+  const roleLogicalId: unknown =
+    template.toJSON().Resources[functionLogicalId].Properties.Role['Fn::GetAtt'][0];
+  // The role already holds ten managed policies, so the job's statements are inline.
+  const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+    .filter((policy) => JSON.stringify(policy.Properties.Roles) === JSON.stringify([{ Ref: roleLogicalId }]))
+    .flatMap((policy): unknown[] => policy.Properties.PolicyDocument.Statement);
+
+  expect(JSON.stringify(statements)).toContain('/index/InboxDigestDueIndex');
+  expect(statements).toContainEqual(expect.objectContaining({
+    Action: 'dynamodb:DeleteItem',
+    Condition: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['SYSTEM#INBOX_DIGEST'] } },
+    Resource: { 'Fn::GetAtt': [expect.stringMatching(/^PlanningTable/u), 'Arn'] },
+  }));
+  expect(Object.keys(template.findResources('AWS::IAM::ManagedPolicy'))
+    .some((logicalId) => logicalId.startsWith('InboxDigestJobPolicy'))).toBe(false);
+  // Every job on the shared role, through inline and managed policies, adds to what the role may
+  // do on the notifications table itself; the whole set is pinned so no other action slips in.
+  const roleStatements = [
+    ...statements,
+    ...Object.values(template.findResources('AWS::IAM::ManagedPolicy'))
+      .filter((policy) => JSON.stringify(policy.Properties.Roles ?? []).includes(JSON.stringify({ Ref: roleLogicalId })))
+      .flatMap((policy): unknown[] => policy.Properties.PolicyDocument.Statement),
+  ];
+  expect(roleStatements.length).toBeGreaterThan(statements.length);
+  const notificationsTableActions = roleStatements
+    .flatMap((statement): unknown[] => {
+      if (typeof statement !== 'object' || statement === null || !('Resource' in statement) || !('Action' in statement)) return [];
+      const resources: unknown[] = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+      const onTable = resources.some((resource) => /^\{"Fn::GetAtt":\["NotificationsTable[0-9A-F]+","Arn"\]\}$/u.test(JSON.stringify(resource)));
+      if (!onTable) return [];
+      return Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+    });
+  expect([...new Set(notificationsTableActions)].sort()).toEqual([
+    'dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
+  ]);
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Environment: {
+      Variables: Match.objectLike({
+        INBOX_DIGEST_WORKER_ENABLED: { Ref: 'InboxDigestDeliveryEnabled' },
+      }),
+    },
+  });
+  expect(template.toJSON().Parameters.InboxDigestDeliveryEnabled).toMatchObject({
+    Default: 'true',
+    AllowedValues: ['true', 'false'],
   });
 });

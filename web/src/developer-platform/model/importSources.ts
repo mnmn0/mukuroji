@@ -1,6 +1,12 @@
+import {
+  measureWorkItemImportContentBytes,
+  WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH,
+  WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES,
+  WORK_ITEM_IMPORT_MAX_BYTES,
+} from '@mukuroji/contracts'
 import type { DeveloperImportFieldMapping, DeveloperImportFormat } from './transfers'
 import { MS_PROJECT_IMPORT_COLUMNS, readMsProjectXml } from './msProjectXml'
-import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from './spreadsheet'
+import { findSpreadsheetTable, readSpreadsheetWorkbook, SPREADSHEET_IMPORT_MAX_BYTES } from '../../shared/lib/files/spreadsheet'
 
 /** File format chosen for an import; workbooks and MS Project files are sent as JSON rows. */
 export type DeveloperImportFileFormat = DeveloperImportFormat | 'xlsx' | 'msproject'
@@ -76,12 +82,35 @@ const suggestedTargets = new Map<string, string>([
  * a MS Project XML file are converted in the browser to JSON rows whose cells are text, the same
  * values a CSV file carries.
  *
+ * The source must fit the import limit, counted the same way the server counts it, so an
+ * oversized file is refused before it is sent.
+ *
+ * @param format - Format the person chose.
+ * @param file - Chosen file.
+ * @returns Source text and its column names.
+ * @throws Error with a message for the person when the file cannot be read in that format or is
+ * too large to import.
+ */
+export async function readDeveloperImportSource(
+  format: DeveloperImportFileFormat,
+  file: DeveloperImportFile,
+): Promise<DeveloperImportSource> {
+  const source = await readSourceInFormat(format, file)
+  if (measureWorkItemImportContentBytes(source.content) > WORK_ITEM_IMPORT_MAX_BYTES) {
+    throw new Error('The file is too large to import.')
+  }
+  return source
+}
+
+/**
+ * Reads a chosen file in the format the person chose, without the import size check.
+ *
  * @param format - Format the person chose.
  * @param file - Chosen file.
  * @returns Source text and its column names.
  * @throws Error with a message for the person when the file cannot be read in that format.
  */
-export async function readDeveloperImportSource(
+async function readSourceInFormat(
   format: DeveloperImportFileFormat,
   file: DeveloperImportFile,
 ): Promise<DeveloperImportSource> {
@@ -118,6 +147,9 @@ export function suggestDeveloperImportMapping(headers: readonly string[]): Devel
   const mapping: DeveloperImportFieldMapping[] = []
   const targets = new Set<string>()
   for (const header of headers) {
+    if (mapping.length >= WORK_ITEM_IMPORT_MAPPING_MAX_ENTRIES) break
+    // A column name longer than a mapping field accepts is left for the person to rename.
+    if (header.length > WORK_ITEM_IMPORT_MAPPING_FIELD_MAX_LENGTH) continue
     const target = header.startsWith('customFieldValues.')
       ? header
       : suggestedTargets.get(header.trim().toLowerCase())

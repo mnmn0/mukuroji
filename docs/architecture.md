@@ -89,6 +89,10 @@ key は必ず server が認証済みの主体から組み立て、client が送�
 | `planning` | Cycle・Milestone・Release・Phase・Goal・Initiative・Roadmap・Portfolio、依存、health update | PlanningTable |
 | `update-feed` | アップデートのフィード、既読状態、保存フィード | PlanningTable |
 | `collections` | Work Item のコレクション | PlanningTable |
+| `weekly-reports` | 個人週報の下書き・提出版、Team の週次・月次まとめ、週報の督促（[ADR 0030](adr/0030-weekly-report-storage-and-visibility.md)、[ADR 0035](adr/0035-weekly-report-submission-reminders.md)） | PlanningTable |
+| `project-raid-log` | Project のリスク・課題・変更要求（RAID）台帳（[ADR 0024](adr/0024-project-raid-log-storage.md)） | PlanningTable |
+| `project-status-shares` | 進捗レポートの社外共有 link（[ADR 0072](adr/0072-project-status-report-share-links.md)） | PlanningTable |
+| `portfolio-dashboard` | Team のポートフォリオ snapshot（[ADR 0069](adr/0069-team-portfolio-snapshot-row.md)） | PlanningTable |
 | `capacity-planning` | 稼働可能時間、要員の依頼と割り当て | CapacityPlanningTable |
 | `time-tracking` | 工数記録、タイムシート、予算 | AnalyticsTable（`TimeEntryTeamDateIndex`） |
 | `analytics` | ダッシュボード、保存レポート、スナップショット、定期配信、予測 | AnalyticsTable |
@@ -146,6 +150,9 @@ AuditEventsTable の stream が outbox を兼ねます。業務 table の更新�
 | ConnectorSyncQueue（任意） | ConnectorSyncFunction | audit の投影、Connector の定期 poll |
 | Tenant*ExecutionQueue ×6（任意） | テナント操作の各 capability Lambda | TenantOperationFunction |
 
+リクエストへのメール返信は queue を通さず、Provider / SES adapter が署名付き envelope で RequestEmailIngestionFunction
+（`request-intake-email-handler.ts`）を非同期 invoke し、失敗は RequestEmailIngestionDlq に送ります（[`request-intake.md`](request-intake.md)）。
+
 どの queue も専用の DLQ を持ち、最大受信回数は5回です。stream の処理失敗も DLQ に送り、黙って捨てません。
 ただし Analytics の history row の projection は例外です。row の更新に失敗したら row を消してエラーログを出し、その Work Item は audit timeline から読みます。DLQ には送りません。row を消すのにも失敗したときだけ、stream の再試行の対象になります（ADR 0042）。
 
@@ -159,8 +166,14 @@ EventBridge が毎分 ScheduledJobsFunction（`scheduled-jobs-handler.ts`）を�
 | triage-schedule | 1分 | スヌーズ・SLA の期限が来た Triage を戻す |
 | agent-run-triage | 1分 | 失敗・停滞した Agent Run を Triage に起票 |
 | slack-notifications | 1分 | Slack 通知の配信 |
+| email-notifications | 1分 | メール通知の配信（[ADR 0005](adr/0005-notification-email-ses-transport.md)） |
 | analytics-schedule | 5分 | レポートの定期配信 |
+| inbox-digest | 15分 | アップデートの日次・週次ダイジェストを受信箱へ配信（`INBOX_DIGEST_WORKER_ENABLED` が `true` のときだけ、[ADR 0066](adr/0066-inbox-digest-scheduled-job.md)） |
 | notification-schedule | 60分 | 近況の督促、期限通知、顧客データの保持 |
+| cycle-schedule | 60分 | 期日の来た次の Cycle の作成と未完了 Work Item の繰り越し（[ADR 0010](adr/0010-cycle-schedule-due-index.md)） |
+| japanese-public-holiday-sync | 360分 | 内閣府の祝日一覧の取得（月に1回だけ取得、[ADR 0032](adr/0032-japanese-public-holiday-monthly-sync.md)） |
+
+Software factory を deploy しない構成では agent-run-triage を実行しません。
 
 ほかに Connector の poll（5分、任意）と restore drill（日次で判定し90日ごとに実行、任意）があります。
 

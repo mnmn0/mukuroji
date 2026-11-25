@@ -69,6 +69,7 @@ function snapshotWithSavedProfile(
       memberId: 'hana',
       displayName: 'Hanako Sato',
       skills: [],
+      timeOff: [],
       ...member,
       schedule: {
         monday: { enabled: true, minutes: 360 },

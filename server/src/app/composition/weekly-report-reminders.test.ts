@@ -13,7 +13,11 @@ import {
   type ChannelDelivery,
 } from '../../modules/notifications'
 import { toDeliveryProjectionEvent } from './notification-delivery-authorization'
-import { createWeeklyReportReader, createWeeklyReportReminderRevalidator } from './weekly-report-reminders'
+import {
+  createWeeklyReportReader,
+  createWeeklyReportReminderRevalidator,
+  createWorkspaceMemberNameReader,
+} from './weekly-report-reminders'
 
 /**
  * Builds a stored week with a submission count.
@@ -266,4 +270,72 @@ describe('weekly report reminder adapters', () => {
     expect((await readWeeklyReportReminderFence(toDeliveryProjectionEvent(legacy), revalidator)).current).toBe(false)
     expect((await readWeeklyReportReminderFence(event, undefined)).current).toBe(false)
   })
+})
+
+test('replaces Project member names in the rosters with the current Workspace member names', async () => {
+  const reader = createWeeklyReportReader({
+    store: { getWeeks: async () => new Map() },
+    readProfile: async () => undefined,
+    readTeamRosters: async (workspaceId) => [{
+      workspaceId,
+      teamId: 'team-1',
+      projects: [{
+        projectId: 'platform',
+        writers: [
+          { memberKey: 'Renamed@example.com', displayName: 'Old name' },
+          { memberKey: 'cleared@example.com', displayName: 'Old name' },
+          { memberKey: 'former@example.com', displayName: 'Former' },
+        ],
+        managerMemberKeys: [],
+      }],
+    }],
+    readMemberNames: async () => new Map([
+      ['renamed@example.com', 'New name'],
+      ['cleared@example.com', undefined],
+    ]),
+  })
+
+  const [roster] = await reader.readTeamRosters('workspace-1')
+  expect(roster?.projects[0]?.writers).toEqual([
+    { memberKey: 'Renamed@example.com', displayName: 'New name' },
+    { memberKey: 'cleared@example.com' },
+    // A member missing from the Workspace list keeps the Project name.
+    { memberKey: 'former@example.com', displayName: 'Former' },
+  ])
+})
+
+test('names deactivated writers by their current Workspace member name', async () => {
+  const readMemberNames = createWorkspaceMemberNameReader({
+    listMembers: async () => [
+      { memberKey: 'Active@example.com', name: ' Active ' },
+      // A deactivated member whose Project row still holds the old name.
+      { memberKey: 'deactivated@example.com', name: 'Renamed before leaving' },
+      { memberKey: 'cleared@example.com', name: '' },
+    ],
+  })
+  const reader = createWeeklyReportReader({
+    store: { getWeeks: async () => new Map() },
+    readProfile: async () => undefined,
+    readTeamRosters: async (workspaceId) => [{
+      workspaceId,
+      teamId: 'team-1',
+      projects: [{
+        projectId: 'platform',
+        writers: [
+          { memberKey: 'active@example.com', displayName: 'Old' },
+          { memberKey: 'deactivated@example.com', displayName: 'Old' },
+          { memberKey: 'cleared@example.com', displayName: 'Old' },
+        ],
+        managerMemberKeys: [],
+      }],
+    }],
+    readMemberNames,
+  })
+
+  const [roster] = await reader.readTeamRosters('workspace-1')
+  expect(roster?.projects[0]?.writers).toEqual([
+    { memberKey: 'active@example.com', displayName: 'Active' },
+    { memberKey: 'deactivated@example.com', displayName: 'Renamed before leaving' },
+    { memberKey: 'cleared@example.com' },
+  ])
 })

@@ -224,6 +224,31 @@ describe('Automation editors', () => {
     }
   })
 
+  test('reads the contributors a Work Item template starts with', () => {
+    const schedule = {
+      calendarPolicy: {
+        holidays: [],
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      },
+      mode: 'unscheduled',
+    }
+    const parse = (contributorAssignments: unknown) => parseAutomationTemplatePayload(JSON.stringify({
+      contributorAssignments,
+      schedule,
+      title: 'Release',
+    }))
+
+    expect(parse([{ jobRoleId: 'qa', plannedEffortMinutes: 240 }, { memberUserId: 'dev@example.com' }])).toMatchObject({
+      payload: {
+        contributorAssignments: [{ jobRoleId: 'qa', plannedEffortMinutes: 240 }, { memberUserId: 'dev@example.com' }],
+      },
+    })
+    for (const invalid of [[{}], [{ jobRoleId: 'qa', plannedEffortMinutes: 1.5 }], [{ jobRoleId: 'qa', extra: true }], {}]) {
+      expect(parse(invalid)).toEqual({ error: 'invalid-value' })
+    }
+  })
+
   test('accepts nullable Project assignment and string Work Item template fields', () => {
     expect(parseAutomationTemplatePayload(JSON.stringify({
       assignedProjectId: null,
@@ -262,6 +287,28 @@ describe('Automation editors', () => {
         workflowStatusId: 'backlog',
       },
     })
+  })
+
+  test('keeps Work Item template acceptance criteria within the Work Item limits', () => {
+    const payload = (acceptanceCriteria: unknown) => JSON.stringify({
+      acceptanceCriteria,
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        mode: 'unscheduled',
+      },
+      title: 'Release',
+    })
+
+    expect(parseAutomationTemplatePayload(payload([' Tests pass ', 'Docs updated'])))
+      .toMatchObject({ payload: { acceptanceCriteria: ['Tests pass', 'Docs updated'] } })
+    expect(parseAutomationTemplatePayload(payload([]))).not.toHaveProperty('payload.acceptanceCriteria')
+    for (const invalid of ['Tests pass', ['  '], ['x'.repeat(1025)], [1], Array.from({ length: 21 }, (_, index) => `C${index}`)]) {
+      expect(parseAutomationTemplatePayload(payload(invalid))).toEqual({ error: 'invalid-value' })
+    }
   })
 
   test('rejects a date range beyond the server planning horizon', () => {

@@ -57,10 +57,14 @@ import {
   slackDeliveryShard,
   emailDeliveryShard,
   isEmailNotificationEligible,
+  pushDeliveryShard,
+  isPushNotificationEligible,
+  isPushTransportConfigured,
   isDocumentDeliveryVisible,
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
   requiresCurrentWorkItemAssignee,
+  requiresCurrentWorkItemContributor,
   isSlackNotificationEligible,
   isNotificationRoutedToChannel,
   type PlanningScheduledNotificationKind,
@@ -160,8 +164,8 @@ export type AuditProjectionEvent = {
   daysUntilDue?: number
   /** Work Item `reopenedAt` an escalation was scanned under; absent before any reopening. */
   workItemReopenedAt?: string
-  /** Scheduled Planning event の Project / Initiative target type です。 */
-  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled Planning event の Project / Team / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative' | 'team'
   /** Scheduled Planning event の canonical target ID です。 */
   planningTargetId?: string
   /** Scheduled Planning event が再検証する UPDATE_TARGET record key です。 */
@@ -420,6 +424,8 @@ export type NotificationProjectionDeliveryState = {
   deliveryFrequency: NotificationPreferences['frequency']
   /** Whether the Email transport queue receives this notification; set only when it does. */
   emailQueued?: true
+  /** Whether the Web Push transport queue receives this notification; set only when it does. */
+  pushQueued?: true
 }
 
 /** Projection 時点で強整合 read した Work Item scope です。 */
@@ -432,6 +438,8 @@ export type CurrentWorkItemNotificationScope = {
   projectId?: string
   /** 現在の担当 Workspace member key です。 */
   assigneeMemberKey?: string
+  /** Member keys currently holding a contributor share of the Work Item. */
+  contributorMemberKeys?: string[]
   /** 現在の date-only 期限です。 */
   dueDate?: string
   /** 現在の標準 workflow status category です。 */
@@ -458,8 +466,8 @@ export type CurrentPlanningUpdateNotificationScope = {
   exists: boolean
   /** Current target が archived / disabled かどうかです。 */
   archived: boolean
-  /** Current Project / Initiative target type です。 */
-  targetType?: 'project' | 'initiative'
+  /** Current Project / Team / Initiative target type です。 */
+  targetType?: 'project' | 'initiative' | 'team'
   /** Current canonical target ID です。 */
   targetId?: string
   /** Current target record key です。 */
@@ -584,6 +592,25 @@ function isPlanningContentNotification(
  * bundle the Analytics module; it must match the event type the Analytics notifier writes.
  */
 const analyticsReportDeliveredEventType = 'analytics.report.delivered'
+/**
+ * Team workload events (time off and resource assignments). Kept as a literal prefix so this
+ * Lambda does not bundle the capacity planning module.
+ */
+const workloadEventTypePrefix = 'workload.'
+
+/**
+ * Checks whether an event is readable through any one scope that it covers rather than the one
+ * scope it carries: a delivered Analytics report, or a Team workload event that the workload API
+ * shows through any visible Project of the Team.
+ *
+ * @param event - Projected event.
+ * @returns Whether any covered scope admits the recipient.
+ */
+function isReadableThroughAnyCoveredScope(event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'teamId'>): boolean {
+  if (event.projectId !== undefined) return false
+  return event.eventType === analyticsReportDeliveredEventType ||
+    event.eventType.startsWith(workloadEventTypePrefix) && event.teamId !== undefined
+}
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
   ['work-item.due', 'due'],
@@ -1282,6 +1309,11 @@ export function createSubscribedWatcherScopes(
             type: 'initiative',
             entityId: event.planningTargetId,
           })
+      : event.planningTargetType === 'team' && event.planningTargetId
+        ? createPlanningUpdatePublicTargetKey({
+            type: 'team',
+            teamId: event.planningTargetId,
+          })
           : event.teamId && event.projectId
             ? createPlanningUpdatePublicTargetKey({
                 type: 'project',
@@ -1290,6 +1322,7 @@ export function createSubscribedWatcherScopes(
               })
           : event.entityId && (
               event.entityId.startsWith('project/') ||
+              event.entityId.startsWith('team/') ||
               event.entityId.startsWith('initiative/')
             )
             ? event.entityId
@@ -1651,6 +1684,10 @@ export function createNotificationProjectionDeliveryState(
     ...(isEmailTransportEnabled() && routed('email') && isEmailNotificationEligible(preferences, occurredAt)
       ? { emailQueued: true }
       : {}),
+    ...(isPushTransportConfigured(loadServerConfig().environment.WEB_PUSH_VAPID_PUBLIC_KEY) && routed('push') &&
+      isPushNotificationEligible(preferences, occurredAt)
+      ? { pushQueued: true }
+      : {}),
   }
 }
 
@@ -1729,6 +1766,12 @@ export function createNotificationProjectionItem(
       emailNextAttemptAt: deliveryState.deliveryAfter,
       emailDeliveryStatus: 'pending',
       emailAttempts: 0,
+    } : {}),
+    ...(deliveryState.pushQueued && deliveryState.deliveryChannels.includes('push') ? {
+      pushQueueShard: pushDeliveryShard(recipientKey),
+      pushNextAttemptAt: deliveryState.deliveryAfter,
+      pushDeliveryStatus: 'pending',
+      pushAttempts: 0,
     } : {}),
     ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
     occurredAt: event.occurredAt,
@@ -2556,7 +2599,7 @@ async function isEligibleRecipient(
     return false
   }
 
-  const analyticsScopes = event.eventType === analyticsReportDeliveredEventType && event.projectId === undefined
+  const analyticsScopes = isReadableThroughAnyCoveredScope(event)
     ? listAnalyticsDeliveryAuthorizationScopes(event, directoryItems)
     : undefined
   let cognitoGroupIds: string[] = []
@@ -2609,6 +2652,8 @@ async function isEligibleRecipient(
       weeklyReportReminderReasons.has(event.eventType) ||
       // A Team report can be readable through an Enterprise Project grant without a project-member row.
       event.eventType === analyticsReportDeliveredEventType ||
+      // A Team workload event is readable through an Enterprise Project grant in the Team as well.
+      event.eventType.startsWith(workloadEventTypePrefix) ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
@@ -2659,8 +2704,9 @@ async function isEligibleRecipient(
     const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
       item.teamId === event.teamId && item.projectId && !item.archivedAt)
     if (analyticsScopes && event.teamId) {
-      // A Team report is readable through any readable Project of its Team, as in the Analytics
-      // schedule and Inbox checks, while the generic Team rule requires every Project of the Team.
+      // A Team report or workload event is readable through any readable Project of its Team, as
+      // in the Analytics, workload, and Inbox checks, while the generic Team rule requires every
+      // Project of the Team.
       if (teamProjects.some((project) => hasEligibleProjectAccess(project, memberKey, directoryItems))) return true
     } else if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
       teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
@@ -2820,11 +2866,15 @@ export async function authorizeNotificationDelivery(
   }
   const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
-  if (currentScope.checked && requiresCurrentWorkItemAssignee({
+  const recipientReasons = {
     reasons: sourceEvent.notificationCandidates
       .filter((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey)
       .map((candidate) => candidate.reason),
-  }) && currentScope.assigneeMemberKey !== memberKey) return false
+  }
+  if (currentScope.checked && requiresCurrentWorkItemAssignee(recipientReasons) &&
+    currentScope.assigneeMemberKey !== memberKey) return false
+  if (currentScope.checked && requiresCurrentWorkItemContributor(recipientReasons) &&
+    !currentScope.contributorMemberKeys?.includes(memberKey)) return false
   const scoped = refreshScheduledNotificationEvent(
     currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
     currentScope,
@@ -3014,6 +3064,10 @@ async function readCurrentWorkItemScope(
     exists: true,
     projectId: item.assignedProjectId,
     assigneeMemberKey: normalizeMemberKey(item.assigneeUserId),
+    contributorMemberKeys: (item.contributorAssignments ?? []).flatMap((assignment) => {
+      const memberKey = normalizeMemberKey(assignment.memberUserId)
+      return memberKey === undefined ? [] : [memberKey]
+    }),
     dueDate: normalizeStoredDateOnly(item.dueDate),
     statusCategory: item.statusCategory,
     updatedAt: item.updatedAt,
@@ -3088,8 +3142,10 @@ async function readCurrentPlanningUpdateScope(
     throw new Error('Planning notification target row is invalid.')
   }
   const targetType = record.target.type
-  const targetId = targetType === 'project'
+  const targetId = record.target.type === 'project'
     ? record.target.projectId
+    : record.target.type === 'team'
+    ? record.target.teamId
     : record.target.entityId
   const base = {
     checked: true,
@@ -3114,6 +3170,9 @@ async function readCurrentPlanningUpdateScope(
       teamId: record.target.teamId,
       projectId: record.target.projectId,
     }
+  }
+  if (record.target.type === 'team') {
+    return { ...base, teamId: record.target.teamId }
   }
 
   const initiativeRecordKey = `ENTITY#${encodeURIComponent(record.target.entityId)}`
@@ -3238,8 +3297,8 @@ function planningNotificationKindFromEventType(
 }
 
 /** Reads a validated Planning target type from audit metadata. */
-function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
-  return value === 'project' || value === 'initiative' ? value : undefined
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | 'team' | undefined {
+  return value === 'project' || value === 'initiative' || value === 'team' ? value : undefined
 }
 
 /** Reads a validated Planning notification kind from audit metadata. */
