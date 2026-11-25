@@ -160,6 +160,11 @@ test('lets an owner assign and remove a role on one member, and lists it with th
     expect(snapshotBody.assignableRoleIds.members.workspace).toEqual(
       expect.arrayContaining(['workspace:portfolio-viewer', 'workspace:auditor']),
     )
+    // Every scope the Web snapshot validator requires survives the caller-level filtering.
+    expect(snapshotBody.assignableRoleIds.members).toHaveProperty(
+      'org-unit',
+      expect.arrayContaining(['org-unit:manager', 'org-unit:viewer']),
+    )
 
     const removed = await sendAssignmentRequest(
       `/api/enterprise/security/role-assignments/${encodeURIComponent(createdBody.assignment.id)}`,

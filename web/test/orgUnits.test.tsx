@@ -124,6 +124,14 @@ describe('OrgUnit structure draft', () => {
     expect(removedTop.teamAssignments.some((assignment) => assignment.teamId === 'sales-hq')).toBe(false)
   })
 
+  test('adds a removed parent\'s child at the top level instead of under the removed parent', () => {
+    const withoutSales = removeOrgUnit(draft, 'sales')
+    const added = addOrgUnit(withoutSales, { id: 'west', name: 'West', parentId: 'sales' })
+    expect(added.orgUnits.at(-1)).toEqual({ id: 'west', name: 'West' })
+    expect(addOrgUnit(withoutSales, { id: 'west', name: 'West', parentId: 'east' }).orgUnits.at(-1))
+      .toEqual({ id: 'west', name: 'West', parentId: 'east' })
+  })
+
   test('adds, renames, and reassigns', () => {
     const added = addOrgUnit(draft, { id: 'west', name: 'West', parentId: 'sales' })
     expect(renameOrgUnit(added, 'west', 'West 2').orgUnits.at(-1)?.name).toBe('West 2')
@@ -166,24 +174,30 @@ describe('OrgUnit structure draft', () => {
 })
 
 describe('OrgUnit portfolio roll-up', () => {
-  test('sums descendants, counting a shared Project once but every Team share of its Work Items', () => {
+  test('sums descendants, counting each Team\'s Project on its own even when the IDs match', () => {
     const rollup = createPortfolioOrgUnitRollup(model.rows, teams.map((team) => team.id), structure)
     const sales = rollup.rows.find((row) => row.orgUnitId === 'sales')
-    // CRM appears in both Sales HQ and East Team; each Team reports only its own Work Items.
-    expect(sales).toMatchObject({ depth: 0, teamCount: 2, projectCount: 2, workItems: { total: 26, open: 14, completed: 12, overdueOpen: 4 } })
+    // Sales HQ and East Team each have their own Project with the ID `crm` (ADR 0028).
+    expect(sales).toMatchObject({ depth: 0, teamCount: 2, projectCount: 3, workItems: { total: 26, open: 14, completed: 12, overdueOpen: 4 } })
     expect(rollup.rows.find((row) => row.orgUnitId === 'east')).toMatchObject({ depth: 1, teamCount: 1, projectCount: 2, workItems: { total: 16 } })
     expect(rollup.rows.find((row) => row.orgUnitId === 'eng')).toMatchObject({ teamCount: 1, workItems: { total: 20 } })
     expect(rollup.unassigned).toMatchObject({ teamCount: 1, projectCount: 1, workItems: { total: 3 } })
   })
 
-  test('counts a shared Project as off track when any of its Teams reports it off track', () => {
+  test('counts off-track Projects by Team, matching the cards after the OrgUnit is chosen', () => {
     const rows = model.rows.map((row): PortfolioDashboardRow => {
       if (row.projectId !== 'crm') return row
       return { ...row, health: row.teamId === 'east-team' ? 'off-track' : 'on-track' }
     })
     const rollup = createPortfolioOrgUnitRollup(rows, teams.map((team) => team.id), structure)
-    expect(rollup.rows.find((row) => row.orgUnitId === 'sales')).toMatchObject({ projectCount: 2, offTrackCount: 1 })
-    // Sales HQ alone reports CRM on track, so the roll-up of only its Teams has nothing off track.
+    const sales = rollup.rows.find((row) => row.orgUnitId === 'sales')
+    expect(sales).toMatchObject({ projectCount: 3, offTrackCount: 1 })
+    // The cards count the chosen OrgUnit's rows, one per Team's Project, so both views agree.
+    const salesTeamIds = resolvePortfolioOrgUnitTeamIds(structure, 'sales')
+    const scopedRows = rows.filter((row) => salesTeamIds?.has(row.teamId))
+    expect(scopedRows).toHaveLength(sales?.projectCount ?? -1)
+    expect(scopedRows.filter((row) => row.health === 'off-track')).toHaveLength(sales?.offTrackCount ?? -1)
+    // Sales HQ alone reports its CRM on track, so the roll-up of only its Teams has nothing off track.
     const salesHqOnly = { ...structure, teamAssignments: structure.teamAssignments.filter((assignment) => assignment.teamId !== 'east-team') }
     expect(createPortfolioOrgUnitRollup(rows, teams.map((team) => team.id), salesHqOnly).rows.find((row) => row.orgUnitId === 'sales'))
       .toMatchObject({ projectCount: 1, offTrackCount: 0 })
@@ -278,7 +292,36 @@ describe('OrgUnit structure read failures', () => {
     await expect(readOrgStructureForDisplay('token')).rejects.toBeInstanceOf(TypeError)
   })
 
+  test('reports session failures to the shared session guard, but not a refusal of the structure', async () => {
+    const reported: unknown[] = []
+    /**
+     * Records the failure of a guarded request and rethrows it, like the Workspace session guard.
+     *
+     * @param request - Guarded request.
+     * @returns The request's result.
+     */
+    const guard = async <Result,>(request: Promise<Result>): Promise<Result> => {
+      try {
+        return await request
+      } catch (error) {
+        reported.push(error)
+        throw error
+      }
+    }
+
+    answerWith(401, { code: 'Unauthorized', message: 'Sign in again.' })
+    await expect(readOrgStructureForDisplay('token', guard)).rejects.toMatchObject({ status: 401 })
+    answerWith(403, { code: 'EnterpriseSessionIpDenied', message: 'Source IP is not allowed.' })
+    await expect(readOrgStructureForDisplay('token', guard)).rejects.toMatchObject({ code: 'EnterpriseSessionIpDenied' })
+    expect(reported).toHaveLength(2)
+
+    answerWith(403, { code: 'WorkspaceRoleDenied', message: 'Guests cannot read the OrgUnit structure.' })
+    expect(await readOrgStructureForDisplay('token', guard)).toEqual({ orgUnits: [], teamAssignments: [], revision: 0 })
+    expect(reported).toHaveLength(2)
+  })
+
   test('tells the reader the OrgUnit roll-up is missing and offers the retry', () => {
+    // A failed refetch keeps the last structure in SWR; the stale roll-up and filter stay hidden.
     const html = renderToStaticMarkup(
       <PortfolioDashboardView
         canSaveSnapshot={false}
@@ -288,6 +331,7 @@ describe('OrgUnit structure read failures', () => {
         isSavingSnapshot={false}
         locale="en"
         model={model}
+        orgStructure={structure}
         showAgentRuns={false}
         t={createTranslator('en')}
         teams={teams}
@@ -300,6 +344,7 @@ describe('OrgUnit structure read failures', () => {
     expect(html).toContain(createTranslator('en')('portfolioDashboard.error.orgStructure'))
     expect(html).toContain('data-testid="portfolio-retry"')
     expect(html).not.toContain('portfolio-org-units')
+    expect(html).not.toContain('portfolio-filter-org-unit')
   })
 
   test('tells an administrator that OrgUnits are missing from the scope choices', () => {

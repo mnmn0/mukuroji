@@ -202,6 +202,7 @@ export function SettingsPage() {
                     />
                     <OrgStructurePanelContainer
                       accessToken={workspace.accessToken}
+                      guardRequest={workspace.guardEnterpriseSession}
                       locale={workspace.locale}
                       teams={workspace.teams}
                     />

@@ -66,6 +66,7 @@ const orgStructureErrorStatuses: Partial<Record<string, 400 | 403 | 409 | 503>> 
   InvalidOrgStructure: 400,
   InvalidProjectWrite: 400,
   DirectoryAuthorizationChanged: 403,
+  IdempotencyKeyConflict: 409,
   OrgStructureConflict: 409,
   OrgStructureTeamNotFound: 409,
   OrgStructureUnavailable: 503,

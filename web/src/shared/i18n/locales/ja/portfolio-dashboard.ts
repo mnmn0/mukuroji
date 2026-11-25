@@ -49,7 +49,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.table.empty': '条件に合う Project はありません。',
   'portfolioDashboard.filter.orgUnit': '部門',
   'portfolioDashboard.orgUnit.title': '部門別',
-  'portfolioDashboard.orgUnit.meta': '配下の部門を含めた合計です。複数チームで共有する Project は 1 件として数えます。',
+  'portfolioDashboard.orgUnit.meta': '配下の部門を含めた合計です。Project は下の一覧と同じく、チームごとに 1 件と数えます。',
   'portfolioDashboard.orgUnit.column.name': '部門',
   'portfolioDashboard.orgUnit.column.teams': 'Team 数',
   'portfolioDashboard.orgUnit.column.projects': 'Project 数',

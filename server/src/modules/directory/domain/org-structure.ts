@@ -64,10 +64,23 @@ export function readReplaceOrgStructureCommand(value: unknown): ReplaceOrgStruct
  */
 export function readStoredOrgStructure(value: unknown): OrgStructure {
   const structure = parseOrgStructure(value)
-  if (!structure || structure.revision === 0) {
+  // Every save stores a canonical UTC time, so a missing or non-canonical one means a broken row.
+  if (!structure || structure.revision === 0 || !isCanonicalTimestamp(structure.updatedAt)) {
     throw new ProjectDataError(503, 'OrgStructureUnavailable', 'The stored OrgUnit structure is invalid.')
   }
   return structure
+}
+
+/**
+ * Tells whether a value is an ISO 8601 UTC time in the canonical form `Date#toISOString` writes.
+ *
+ * @param value - Stored value.
+ * @returns Whether the value is a canonical timestamp.
+ */
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString() === value
 }
 
 /**

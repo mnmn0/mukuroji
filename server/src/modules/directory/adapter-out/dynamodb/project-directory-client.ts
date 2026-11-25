@@ -98,6 +98,7 @@ import {
   listUnknownOrgStructureTeamIds,
   readReplaceOrgStructureCommand,
   readStoredOrgStructure,
+  type ReplaceOrgStructureCommand,
 } from '../../domain/org-structure'
 import {
   createOrgStructureItem,
@@ -1629,8 +1630,11 @@ export class DynamoDbProjectDirectoryClient {
    * Replaces the OrgUnit tree and Team memberships of a Workspace.
    *
    * Every Team named must exist in the Workspace, archived Teams included. The row is written
-   * only when its stored revision still equals the expected one, together with the audit event
-   * and the caller's authorization guards.
+   * only when its stored revision still equals the expected one, together with the audit event,
+   * the caller's authorization guards, and a receipt that binds the request's idempotency key to
+   * its input. A retry of a committed save under the same key and input, whose response was lost,
+   * is answered with the structure it saved instead of a conflict with itself; the same key with
+   * another input is refused.
    *
    * @param directoryId - Workspace directory identifier.
    * @param input - Untrusted request body.
@@ -1646,6 +1650,13 @@ export class DynamoDbProjectDirectoryClient {
   ): Promise<OrgStructure> {
     const command = readReplaceOrgStructureCommand(input)
     await this.ensureLocalAuditTable()
+    const requestKey: TeamGrantRequest | undefined = auditContext
+      ? { idempotencyKeyHash: auditContext.idempotencyKeyHash, requestFingerprint: auditContext.requestFingerprint }
+      : undefined
+    if (requestKey) {
+      const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+      if (replayed) return replayed
+    }
     const items = await this.readValidDirectoryItems(directoryId, true)
     const teamIds = new Set(items.flatMap((item) => item.entryType === 'team' ? [item.teamId] : []))
     if (listUnknownOrgStructureTeamIds(command.teamAssignments, teamIds).length > 0) {
@@ -1655,11 +1666,12 @@ export class DynamoDbProjectDirectoryClient {
     if (current.revision !== command.expectedRevision) {
       throw createOrgStructureConflictError()
     }
+    const updatedAt = new Date().toISOString()
     const next: OrgStructure = {
       orgUnits: command.orgUnits,
       teamAssignments: command.teamAssignments,
       revision: command.expectedRevision + 1,
-      updatedAt: new Date().toISOString(),
+      updatedAt,
     }
     const isFirstSave = command.expectedRevision === 0
     // The Put below already conditions the structure row, and a transaction may name a row once,
@@ -1691,6 +1703,17 @@ export class DynamoDbProjectDirectoryClient {
                 }),
           },
         },
+        // The receipt commits with the structure, so a retry finds it only after the save did.
+        ...(requestKey
+          ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createTeamGrantRequestItem(directoryId, requestKey, updatedAt),
+                ConditionExpression: 'attribute_not_exists(#entryKey)',
+                ExpressionAttributeNames: { '#entryKey': 'entryKey' },
+              },
+            }]
+          : []),
         ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
           directoryId,
           eventType: 'org-structure.updated',
@@ -1714,11 +1737,69 @@ export class DynamoDbProjectDirectoryClient {
       ])
     } catch (error) {
       if (error instanceof ProjectDataError && error.code === 'ConditionalCheckFailedException') {
+        // The same request sent twice at once: one commits, the other loses its conditions. Only a
+        // receipt of this key and input proves the save committed; anything else stays a conflict.
+        if (requestKey) {
+          const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+          if (replayed) return replayed
+        }
         throw createOrgStructureConflictError()
       }
       throw error
     }
     return next
+  }
+
+  /**
+   * Reads the receipt of an OrgUnit structure save under the request's idempotency key.
+   *
+   * The receipt is written in the transaction that saves the structure, so finding it with the
+   * same request fingerprint proves that this request already committed. The fingerprint covers
+   * the expected revision and the whole structure, so the saved structure is rebuilt from the
+   * command and the receipt time.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param command - Validated request.
+   * @param requestKey - Idempotency key hash and request fingerprint of the request.
+   * @returns The structure the earlier request saved, or undefined when the key was never used.
+   * @throws ProjectDataError 409 `IdempotencyKeyConflict` when the key was used with another request.
+   * @throws ProjectDataError 503 `OrgStructureUnavailable` when the stored receipt is malformed.
+   */
+  private async readOrgStructureReplay(
+    directoryId: string,
+    command: ReplaceOrgStructureCommand,
+    requestKey: TeamGrantRequest,
+  ): Promise<OrgStructure | undefined> {
+    let receipt: unknown
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: true,
+        Key: createTeamGrantRequestKey(directoryId, requestKey.idempotencyKeyHash),
+      }))
+      receipt = response.Item
+    } catch (error) {
+      throw toProjectDataError(error)
+    }
+    if (receipt === undefined) return undefined
+    if (
+      !isRecord(receipt) ||
+      receipt.entryType !== 'team-grant-request' ||
+      receipt.workspaceId !== directoryId ||
+      typeof receipt.requestFingerprint !== 'string' ||
+      typeof receipt.createdAt !== 'string'
+    ) {
+      throw new ProjectDataError(503, 'OrgStructureUnavailable', 'The stored OrgUnit structure receipt is invalid.')
+    }
+    if (receipt.requestFingerprint !== requestKey.requestFingerprint) {
+      throw new ProjectDataError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+    }
+    return {
+      orgUnits: command.orgUnits,
+      teamAssignments: command.teamAssignments,
+      revision: command.expectedRevision + 1,
+      updatedAt: receipt.createdAt,
+    }
   }
 
   /**
@@ -2421,14 +2502,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param grantRequest - Idempotency key hash and request fingerprint of the request.
    */
   private async bindTeamRequestKey(directoryId: string, grantRequest: TeamGrantRequest): Promise<void> {
-    const item: TeamGrantRequestItem = {
-      directoryId: createTeamGrantRequestDirectoryId(directoryId),
-      entryKey: `KEY#${grantRequest.idempotencyKeyHash}`,
-      entryType: 'team-grant-request',
-      workspaceId: directoryId,
-      requestFingerprint: grantRequest.requestFingerprint,
-      createdAt: new Date().toISOString(),
-    }
+    const item = createTeamGrantRequestItem(directoryId, grantRequest, new Date().toISOString())
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [{
@@ -5481,6 +5555,42 @@ function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string
  */
 function createTeamGrantRequestDirectoryId(workspaceId: string) {
   return `TEAM_GRANT_REQUEST#${encodeURIComponent(workspaceId)}`
+}
+
+/**
+ * Creates the primary key of the receipt that binds one idempotency key of a Workspace.
+ *
+ * @param workspaceId - Workspace that owns the receipt.
+ * @param idempotencyKeyHash - Hash of the caller's idempotency key.
+ * @returns The partition and sort key.
+ */
+function createTeamGrantRequestKey(workspaceId: string, idempotencyKeyHash: string) {
+  return {
+    directoryId: createTeamGrantRequestDirectoryId(workspaceId),
+    entryKey: `KEY#${idempotencyKeyHash}`,
+  }
+}
+
+/**
+ * Builds the receipt row that binds an administration request's idempotency key to its input.
+ *
+ * @param workspaceId - Workspace that owns the receipt.
+ * @param request - Idempotency key hash and request fingerprint.
+ * @param createdAt - ISO 8601 time the key was accepted.
+ * @returns The receipt row.
+ */
+function createTeamGrantRequestItem(
+  workspaceId: string,
+  request: TeamGrantRequest,
+  createdAt: string,
+): TeamGrantRequestItem {
+  return {
+    ...createTeamGrantRequestKey(workspaceId, request.idempotencyKeyHash),
+    entryType: 'team-grant-request',
+    workspaceId,
+    requestFingerprint: request.requestFingerprint,
+    createdAt,
+  }
 }
 
 /**

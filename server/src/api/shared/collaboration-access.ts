@@ -341,9 +341,7 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
   }
   checks.push(...readCollaborationAuthorizationConditionChecks([actorMembershipCheck]))
 
-  if (!projectId) return checks
-
-  const enterpriseProjectAccess = principal.enterpriseProjectAccesses?.some((access) =>
+  const enterpriseProjectAccess = projectId !== undefined && principal.enterpriseProjectAccesses?.some((access) =>
     access.projectId === projectId && projectAccessAllows(access, 'member')
   ) === true
   const enterpriseTeamAccess = principal.enterpriseTeamAccesses?.some((access) =>
@@ -356,6 +354,8 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
         principal.enterpriseAuthorizationResource.targetId === teamId
     ) && principal.enterprisePermissions?.includes('teams.write') === true
 
+  // A Team or route grant can come from an OrgUnit role, so its CONTROL and structure fences apply
+  // whether or not the Work Item has a Project.
   if (enterpriseProjectAccess || enterpriseTeamAccess || enterpriseRouteAccess) {
     const enterpriseChecks = createEnterpriseAuthorizationConditionChecks(principal)
     if (enterpriseChecks.length > 0) {
@@ -363,6 +363,8 @@ export async function createCollaborationCommentAuthorizationConditionChecks(
     }
     return checks
   }
+
+  if (!projectId) return checks
 
   const projectAccess = context.projectAccesses?.find((access) => access.projectId === projectId)
   if (!projectAccess || !projectAccessAllows(projectAccess, 'member')) {

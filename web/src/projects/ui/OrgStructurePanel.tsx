@@ -20,7 +20,7 @@ import {
   renameOrgUnit,
   type OrgStructureDraft,
 } from '../model/orgStructure'
-import { isOrgStructureKey, useOrgStructure } from '../queries/useOrgStructure'
+import { isOrgStructureKey, useOrgStructure, type OrgStructureRequestGuard } from '../queries/useOrgStructure'
 
 /** Team offered in the membership list. */
 export type OrgStructurePanelTeam = {
@@ -38,6 +38,8 @@ type OrgStructurePanelContainerProps = {
   locale: Locale
   /** Active Teams of the Workspace. */
   teams: readonly OrgStructurePanelTeam[]
+  /** Reports a session failure of the read or the save to the shared re-authentication flow. */
+  guardRequest?: OrgStructureRequestGuard
 }
 
 /**
@@ -46,9 +48,9 @@ type OrgStructurePanelContainerProps = {
  * @param props - Authenticated settings inputs.
  * @returns The OrgUnit structure panel.
  */
-export function OrgStructurePanelContainer({ accessToken, locale, teams }: OrgStructurePanelContainerProps) {
+export function OrgStructurePanelContainer({ accessToken, guardRequest, locale, teams }: OrgStructurePanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const query = useOrgStructure(accessToken)
+  const query = useOrgStructure(accessToken, guardRequest)
   const { mutate } = useSWRConfig()
   const [isSaving, setIsSaving] = useState(false)
   const [message, setMessage] = useState<{ tone: 'error' | 'success'; key: MessageKey }>()
@@ -72,11 +74,12 @@ export function OrgStructurePanelContainer({ accessToken, locale, teams }: OrgSt
     setIsSaving(true)
     setMessage(undefined)
     try {
-      const saved = await replaceOrgStructure(
+      const request = replaceOrgStructure(
         accessToken,
         { expectedRevision: query.data.revision, ...draft },
         createMutationRequestContext(),
       )
+      const saved = await (guardRequest ? guardRequest(request) : request)
       await query.mutate(saved, { revalidate: false })
       await mutate(isOrgStructureKey)
       setMessage({ tone: 'success', key: 'projects.orgUnits.saved' })
@@ -150,8 +153,10 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
     teamAssignments: structure.teamAssignments,
   })
   const [newName, setNewName] = useState('')
-  const [newParentId, setNewParentId] = useState('')
+  const [chosenParentId, setChosenParentId] = useState('')
   const rows = listOrgUnitTreeRows(draft.orgUnits)
+  // A chosen parent removed from the draft afterwards falls back to the top level.
+  const newParentId = rows.some((row) => row.orgUnit.id === chosenParentId) ? chosenParentId : ''
   const pathLabel = (orgUnitId: string) => {
     const row = rows.find((candidate) => candidate.orgUnit.id === orgUnitId)
     return row ? `${'　'.repeat(row.depth)}${row.orgUnit.name}` : orgUnitId
@@ -205,7 +210,7 @@ export function OrgStructurePanel({ structure, teams, isSaving, message, t, onSa
             <select
               className="workbench-input min-h-10 px-3 text-sm font-normal"
               disabled={isSaving}
-              onChange={(event) => setNewParentId(event.target.value)}
+              onChange={(event) => setChosenParentId(event.target.value)}
               value={newParentId}
             >
               <option value="">{t('projects.orgUnits.topLevel')}</option>

@@ -2732,6 +2732,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           ...view.assignableRoleIds,
           members: {
             workspace: memberAssignableRoleIds(view.assignableRoleIds.members.workspace),
+            'org-unit': memberAssignableRoleIds(view.assignableRoleIds.members['org-unit']),
             team: memberAssignableRoleIds(view.assignableRoleIds.members.team),
             project: memberAssignableRoleIds(view.assignableRoleIds.members.project),
           },

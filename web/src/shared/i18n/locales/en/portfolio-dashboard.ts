@@ -49,7 +49,7 @@ export const portfolioDashboardMessages = {
   'portfolioDashboard.table.empty': 'No Project matches the filters.',
   'portfolioDashboard.filter.orgUnit': 'OrgUnit',
   'portfolioDashboard.orgUnit.title': 'By OrgUnit',
-  'portfolioDashboard.orgUnit.meta': 'Totals include the OrgUnits below. A Project shared by several teams counts once.',
+  'portfolioDashboard.orgUnit.meta': 'Totals include the OrgUnits below. Each Team’s Project counts once, as in the list below.',
   'portfolioDashboard.orgUnit.column.name': 'OrgUnit',
   'portfolioDashboard.orgUnit.column.teams': 'Teams',
   'portfolioDashboard.orgUnit.column.projects': 'Projects',

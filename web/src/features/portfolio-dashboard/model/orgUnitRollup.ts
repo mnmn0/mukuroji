@@ -5,7 +5,7 @@ import {
   type PortfolioProjectWorkItems,
 } from '@mukuroji/contracts'
 import { listOrgUnitTreeRows } from '../../../projects/model/orgStructure'
-import { healthRank, type PortfolioDashboardRow } from './portfolioDashboard'
+import type { PortfolioDashboardRow } from './portfolioDashboard'
 
 /** Totals of the Teams and Projects under one OrgUnit, its descendants included. */
 export type PortfolioOrgUnitRollupRow = {
@@ -19,7 +19,7 @@ export type PortfolioOrgUnitRollupRow = {
   teamCount: number
   /** Distinct Projects of those Teams that the reader may read. */
   projectCount: number
-  /** Distinct Projects whose worst reported health across the Teams is off track. */
+  /** Those Projects whose latest update reports them off track. */
   offTrackCount: number
   /** Work Item counts summed over those Projects. */
   workItems: PortfolioProjectWorkItems
@@ -34,8 +34,8 @@ export type PortfolioOrgUnitRollup = {
 }
 
 /**
- * Sums the portfolio rows of each OrgUnit. A Project shared by several Teams under the OrgUnit is
- * counted once, while the Work Items of every Team's share of it are added up.
+ * Sums the portfolio rows of each OrgUnit. Each Team's Project counts once under its Team-qualified
+ * key, as in the dashboard's own rows and cards.
  *
  * @param rows - Portfolio rows of every Team the reader could read.
  * @param teamIds - Directory Teams, so Teams without readable Projects still count.
@@ -81,9 +81,8 @@ export function resolvePortfolioOrgUnitTeamIds(
 /**
  * Sums the rows of a set of Teams.
  *
- * Each Team's portfolio covers only its own Work Items, so the rows of a Project shared by several
- * of the Teams are all added up. The Project itself is counted once, with the worst health any of
- * its Teams reported.
+ * Project IDs are unique only within a Team (ADR 0028), and a Project row carries no identity
+ * shared across Teams, so each Team's Project is counted on its own under its Team-qualified key.
  *
  * @param rows - Portfolio rows.
  * @param teamIds - Teams to include.
@@ -93,15 +92,12 @@ function summarizeTeams(rows: readonly PortfolioDashboardRow[], teamIds: Readonl
   const projectHealth = new Map<string, PlanningHealth>()
   const workItems: PortfolioProjectWorkItems = { total: 0, open: 0, completed: 0, overdueOpen: 0 }
   for (const row of rows) {
-    if (!teamIds.has(row.teamId)) continue
+    if (!teamIds.has(row.teamId) || projectHealth.has(row.key)) continue
     workItems.total += row.metrics.workItems.total
     workItems.open += row.metrics.workItems.open
     workItems.completed += row.metrics.workItems.completed
     workItems.overdueOpen += row.metrics.workItems.overdueOpen
-    const current = projectHealth.get(row.projectId)
-    if (current === undefined || healthRank[row.health] < healthRank[current]) {
-      projectHealth.set(row.projectId, row.health)
-    }
+    projectHealth.set(row.key, row.health)
   }
   const offTrackCount = [...projectHealth.values()].filter((health) => health === 'off-track').length
   return { teamCount: teamIds.size, projectCount: projectHealth.size, offTrackCount, workItems }

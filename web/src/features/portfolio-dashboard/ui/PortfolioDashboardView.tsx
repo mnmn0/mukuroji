@@ -204,13 +204,16 @@ export function PortfolioDashboardView({
   onOpenProject,
   onRetry,
   onSaveSnapshot,
-  orgStructure = emptyOrgStructure,
+  orgStructure: loadedOrgStructure = emptyOrgStructure,
   showAgentRuns,
   snapshotMessage,
   t,
   teams,
 }: PortfolioDashboardViewProps) {
   const [orgUnitId, setOrgUnitId] = useState('all')
+  // A failed refetch can leave the last structure in place; it is not used until a read succeeds,
+  // so the roll-up, the OrgUnit filter, and a chosen OrgUnit never rest on a stale structure.
+  const orgStructure = isOrgStructureUnavailable ? emptyOrgStructure : loadedOrgStructure
   const orgUnitTeamIds = useMemo(() => resolvePortfolioOrgUnitTeamIds(orgStructure, orgUnitId), [orgStructure, orgUnitId])
   // Narrowing to an OrgUnit keeps only its Teams' rows, for the cards and the table alike.
   const scopedRows = useMemo(

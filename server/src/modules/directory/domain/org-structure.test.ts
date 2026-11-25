@@ -116,6 +116,12 @@ test('fails closed on a malformed stored structure', () => {
   expect(() => readStoredOrgStructure({ ...stored, revision: 0 })).toThrow(ProjectDataError)
   expect(() => readStoredOrgStructure({ ...stored, orgUnits: [{ id: 'a', name: 'A', parentId: 'a' }] }))
     .toThrow(ProjectDataError)
+  // Every save writes a canonical UTC time, so a row without one or with another form is broken.
+  const { updatedAt: _updatedAt, ...withoutUpdatedAt } = stored
+  expect(() => readStoredOrgStructure(withoutUpdatedAt)).toThrow(ProjectDataError)
+  expect(() => readStoredOrgStructure({ ...stored, updatedAt: '2026-11-20' })).toThrow(ProjectDataError)
+  expect(() => readStoredOrgStructure({ ...stored, updatedAt: '2026-11-20T09:00:00+09:00' }))
+    .toThrow(ProjectDataError)
 })
 
 test('names Team memberships whose Team does not exist', () => {

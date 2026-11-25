@@ -49,14 +49,19 @@ export function listOrgUnitTreeRows(orgUnits: readonly OrgUnit[]): OrgUnitTreeRo
 }
 
 /**
- * Adds an OrgUnit at the end of its siblings.
+ * Adds an OrgUnit at the end of its siblings. A parent that is no longer in the draft, such as one
+ * removed after it was chosen, is dropped so the OrgUnit is added at the top level.
  *
  * @param draft - Current draft.
  * @param orgUnit - OrgUnit to add.
  * @returns The new draft.
  */
 export function addOrgUnit(draft: OrgStructureDraft, orgUnit: OrgUnit): OrgStructureDraft {
-  return { ...draft, orgUnits: [...draft.orgUnits, orgUnit] }
+  const { parentId, ...rest } = orgUnit
+  const added = parentId !== undefined && draft.orgUnits.some((candidate) => candidate.id === parentId)
+    ? { ...rest, parentId }
+    : rest
+  return { ...draft, orgUnits: [...draft.orgUnits, added] }
 }
 
 /**
