@@ -13540,6 +13540,8 @@ test.describe('authenticated task page', () => {
     await expect(panel.getByTestId('slack-destination-outcome')).toHaveText('保存しました。')
     await expect(panel.getByTestId('slack-destination-status')).toHaveText('Webhook を登録済みです')
     await expect(panel.getByText('SECRET')).toHaveCount(0)
+    // The field is relabelled for replacing the stored URL once one is registered.
+    await expect(panel.getByLabel('新しい Webhook URL（変えないときは空のまま）')).toHaveValue('')
     await panel.getByRole('button', { name: 'テスト送信', exact: true }).click()
     await expect(panel.getByTestId('slack-destination-outcome')).toHaveText('テスト通知を送りました。Slack を確認してください。')
     await panel.getByRole('button', { name: '登録を削除', exact: true }).click()

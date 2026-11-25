@@ -56,8 +56,11 @@ export type SlackDestinationController = {
   outcome?: SlackDestinationOutcome
   /** Reads the state again. */
   retry(): void
-  /** Saves the destination. */
-  save(input: SlackDestinationSaveInput): void
+  /**
+   * Saves the destination.
+   * @returns True when the server accepted the change, so the card may clear the typed URL.
+   */
+  save(input: SlackDestinationSaveInput): Promise<boolean>
   /** Removes the destination. */
   remove(): void
   /** Sends a test message. */
@@ -86,24 +89,28 @@ export function useSlackDestination(
   const { mutate } = query
   const revision = query.data?.revision ?? 0
 
-  const run = useCallback((action: () => Promise<SlackDestinationOutcome>) => {
-    if (pending || !accessToken || !owner) return
+  const run = useCallback(async (action: () => Promise<SlackDestinationOutcome>): Promise<boolean> => {
+    if (pending || !accessToken || !owner) return false
     setPending(true)
     setResult(undefined)
     const actionOwnerKey = ownerKey
-    void action()
-      .then((reached) => setResult({ ownerKey: actionOwnerKey, outcome: reached }))
-      .catch((error: unknown) => setResult({
+    try {
+      const reached = await action()
+      setResult({ ownerKey: actionOwnerKey, outcome: reached })
+      return true
+    } catch (error: unknown) {
+      setResult({
         ownerKey: actionOwnerKey,
         outcome: {
           kind: 'error',
           ...(error instanceof NotificationsApiError && error.code ? { code: error.code } : {}),
         },
-      }))
-      .finally(() => {
-        setPending(false)
-        void mutate()
       })
+      return false
+    } finally {
+      setPending(false)
+      void mutate()
+    }
   }, [accessToken, mutate, owner, ownerKey, pending])
 
   return {
@@ -127,18 +134,18 @@ export function useSlackDestination(
       }
       return { kind: 'saved' }
     }),
-    remove: () => run(async () => {
+    remove: () => { void run(async () => {
       if (!accessToken || !owner) throw new Error('Slack destination is not ready.')
       if (owner === 'personal') await deletePersonalSlackDestination(accessToken)
       else await deleteChannelDestination(accessToken, owner, revision)
       return { kind: 'deleted' }
-    }),
-    test: () => run(async () => {
+    }) },
+    test: () => { void run(async () => {
       if (!accessToken || !owner) throw new Error('Slack destination is not ready.')
       const result = owner === 'personal'
         ? await testPersonalSlackDestination(accessToken, locale)
         : await testChannelDestination(accessToken, owner)
       return result.delivered ? { kind: 'tested' } : { kind: 'test-failed', ...(result.code ? { code: result.code } : {}) }
-    }),
+    }) },
   }
 }

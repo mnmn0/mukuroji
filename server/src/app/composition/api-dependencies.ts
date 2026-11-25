@@ -666,6 +666,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     channelDestinations: new DynamoDbChannelPostStore(
       createDynamoDbDocumentClient(),
       getConfiguredNotificationsTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     notificationDestinationSecrets: new SecretsManagerSlackDestinationSecretStore(createSecretsManagerClient()),
     agentRuns: new DynamoDbAgentRunStore(

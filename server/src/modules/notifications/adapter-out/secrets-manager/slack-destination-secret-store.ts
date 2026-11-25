@@ -70,25 +70,55 @@ export function slackChannelDestinationSecretId(
   return `mukuroji/automation-webhooks/${workspaceHash(workspaceId)}/slack-channel/${targetHash}/${secretVersion}`
 }
 
+/** Waits before each retry while a just-deleted secret's name is released (about 3.5 s in all). */
+const nameReleaseRetryDelaysMs: readonly number[] = [500, 1_000, 2_000]
+
 /** Secrets Manager adapter for Slack webhook URLs. */
 export class SecretsManagerSlackDestinationSecretStore implements SlackDestinationSecretStore {
   /** Configured Secrets Manager client. */
   readonly #client: Pick<SecretsManagerClient, 'send'>
+  /** Waits between attempts while a deleted secret's name is released. */
+  readonly #sleep: (milliseconds: number) => Promise<void>
 
   /**
    * Creates the adapter.
    * @param client - Secrets Manager client configured by the composition root.
+   * @param sleep - Wait used between name-release retries; tests pass an immediate one.
    */
-  constructor(client: Pick<SecretsManagerClient, 'send'>) {
+  constructor(
+    client: Pick<SecretsManagerClient, 'send'>,
+    sleep: (milliseconds: number) => Promise<void> = async (milliseconds) => {
+      await new Promise((resolve) => setTimeout(resolve, milliseconds))
+    },
+  ) {
     this.#client = client
+    this.#sleep = sleep
   }
 
   /** @inheritdoc */
   async put(secretId: string, webhookUrl: string): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      const outcome = await this.#putOnce(secretId, webhookUrl)
+      if (outcome === 'stored') return
+      // A secret deleted moments ago keeps its name until Secrets Manager releases it.
+      if (attempt >= nameReleaseRetryDelaysMs.length) throw destinationUnavailable()
+      await this.#sleep(nameReleaseRetryDelaysMs[attempt] ?? 0)
+    }
+  }
+
+  /**
+   * Updates the secret, or creates it when it does not exist.
+   * @param secretId - Server-derived secret name.
+   * @param webhookUrl - Validated webhook URL.
+   * @returns `stored`, or `name-pending` while a just-deleted secret still holds the name.
+   * @throws Error when Secrets Manager refuses for any other reason.
+   */
+  async #putOnce(secretId: string, webhookUrl: string): Promise<'stored' | 'name-pending'> {
     try {
       await this.#client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: webhookUrl }))
-      return
+      return 'stored'
     } catch (error) {
+      if (isNamedError(error, 'InvalidRequestException')) return 'name-pending'
       if (!isNamedError(error, 'ResourceNotFoundException')) throw destinationUnavailable()
     }
     try {
@@ -97,8 +127,9 @@ export class SecretsManagerSlackDestinationSecretStore implements SlackDestinati
         Description: 'mukuroji Slack notification destination',
         SecretString: webhookUrl,
       }))
-    } catch {
-      // A secret deleted moments ago keeps its name for a short while; the caller may retry.
+      return 'stored'
+    } catch (error) {
+      if (isNamedError(error, 'InvalidRequestException') || isNamedError(error, 'ResourceExistsException')) return 'name-pending'
       throw destinationUnavailable()
     }
   }

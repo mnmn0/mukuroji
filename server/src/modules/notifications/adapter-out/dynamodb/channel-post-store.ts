@@ -13,8 +13,9 @@ import {
   parseNotificationMessage,
   type NotificationMessageLocale,
 } from '@mukuroji/contracts'
-import type { AuditTransactWriteItem } from '../../../audit'
+import { createWorkspaceMemberAuditEntityId, type AuditTransactWriteItem } from '../../../audit'
 import type {
+  ChannelDestinationState,
   ChannelDestinationStore,
   ChannelPost,
   ChannelPostContent,
@@ -56,6 +57,9 @@ export const CHANNEL_POST_SHARDS = 4
 /** Days a queued or sent post row is kept before DynamoDB TTL removes it. */
 const postRetentionSeconds = 30 * 24 * 60 * 60
 
+/** Index pages read per partition per run before the rest waits for the next run. */
+const maximumDuePages = 4
+
 /**
  * Lists the queue partitions of channel posts.
  * @returns `slack-channel#0` to `slack-channel#<n-1>`.
@@ -81,17 +85,21 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
   readonly #client: Pick<DynamoDBDocumentClient, 'send'>
   /** NotificationsTable name. */
   readonly #tableName: string
+  /** Workspace Audit pseudonym key, needed only when audit events name a member. */
+  readonly #auditPseudonymKey: string | undefined
 
   /**
    * Creates the store.
    * @param client - DocumentClient bound to the NotificationsTable region.
    * @param tableName - NotificationsTable name.
+   * @param auditPseudonymKey - Workspace Audit pseudonym key, used for member audit entity IDs.
    */
-  constructor(client: Pick<DynamoDBDocumentClient, 'send'>, tableName: string) {
+  constructor(client: Pick<DynamoDBDocumentClient, 'send'>, tableName: string, auditPseudonymKey?: string) {
     const name = tableName.trim()
     if (!name) throw new Error('Notifications table name is required.')
     this.#client = client
     this.#tableName = name
+    this.#auditPseudonymKey = auditPseudonymKey
   }
 
   /** @inheritdoc */
@@ -104,14 +112,25 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
 
   /** @inheritdoc */
   async getRevision(workspaceId: string, target: ChannelDestinationTarget): Promise<number> {
+    return (await this.getState(workspaceId, target)).revision
+  }
+
+  /** @inheritdoc */
+  async getState(workspaceId: string, target: ChannelDestinationTarget): Promise<ChannelDestinationState> {
     const response = await this.#client.send(new GetCommand({
       TableName: this.#tableName, Key: destinationKey(workspaceId, target), ConsistentRead: true,
     }))
-    if (!response.Item) return 0
-    parseDestinationRow(response.Item, workspaceId, target)
+    if (!response.Item) return { revision: 0 }
+    const record = parseDestinationRow(response.Item, workspaceId, target)
     const revision: unknown = response.Item.revision
-    if (typeof revision !== 'number') throw new Error('Invalid notification channel destination row.')
-    return revision
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision)) throw new Error('Invalid notification channel destination row.')
+    return record ? { record, revision } : { revision }
+  }
+
+  /** @inheritdoc */
+  personalAuditEntityId(workspaceId: string, memberKey: string): string {
+    if (!this.#auditPseudonymKey) throw new NotificationError(503, 'NotificationAuditUnavailable', 'Notification audit is not configured.')
+    return `${createWorkspaceMemberAuditEntityId(workspaceId, memberKey, this.#auditPseudonymKey)}/slack-destination`
   }
 
   /** @inheritdoc */
@@ -231,27 +250,34 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
   async listDue(shard: string, now: Date, limit: number) {
     const posts: ChannelPost[] = []
     let invalidCount = 0
-    const page = await this.#client.send(new QueryCommand({
-      TableName: this.#tableName, IndexName: 'SlackDeliveryIndex',
-      KeyConditionExpression: 'slackQueueShard = :shard AND slackNextAttemptAt <= :now',
-      ExpressionAttributeValues: { ':shard': shard, ':now': now.toISOString() },
-      Limit: limit,
-    }))
-    for (const candidate of page.Items ?? []) {
-      if (typeof candidate.recipientKey !== 'string' || typeof candidate.notificationKey !== 'string') {
-        invalidCount += 1
-        continue
-      }
-      const response = await this.#client.send(new GetCommand({
-        TableName: this.#tableName, ConsistentRead: true,
-        Key: { recipientKey: candidate.recipientKey, notificationKey: candidate.notificationKey },
+    let startKey: Record<string, unknown> | undefined
+    // Unreadable rows stay queued and fail the run; later pages keep valid posts moving past them.
+    for (let pageCount = 0; pageCount < maximumDuePages && posts.length < limit; pageCount += 1) {
+      const page = await this.#client.send(new QueryCommand({
+        TableName: this.#tableName, IndexName: 'SlackDeliveryIndex',
+        KeyConditionExpression: 'slackQueueShard = :shard AND slackNextAttemptAt <= :now',
+        ExpressionAttributeValues: { ':shard': shard, ':now': now.toISOString() },
+        Limit: limit - posts.length,
+        ...(startKey ? { ExclusiveStartKey: startKey } : {}),
       }))
-      try {
-        const post = parsePostRow(response.Item, shard, now)
-        if (post) posts.push(post)
-      } catch {
-        invalidCount += 1
+      for (const candidate of page.Items ?? []) {
+        if (typeof candidate.recipientKey !== 'string' || typeof candidate.notificationKey !== 'string') {
+          invalidCount += 1
+          continue
+        }
+        const response = await this.#client.send(new GetCommand({
+          TableName: this.#tableName, ConsistentRead: true,
+          Key: { recipientKey: candidate.recipientKey, notificationKey: candidate.notificationKey },
+        }))
+        try {
+          const post = parsePostRow(response.Item, shard, now)
+          if (post) posts.push(post)
+        } catch {
+          invalidCount += 1
+        }
       }
+      startKey = page.LastEvaluatedKey
+      if (!startKey) break
     }
     return { posts, invalidCount }
   }
@@ -470,7 +496,10 @@ function parsePostRow(row: Record<string, unknown> | undefined, shard: string, n
     ? { scope: 'project', teamId: row.teamId, projectId: row.projectId }
     : { scope: 'team', teamId: row.teamId }
   const source = parsePostSource(row.source)
-  if (!source) throw invalid()
+  // The worker rechecks the source but sends to the target, so the two must name the same scope.
+  if (!source || source.teamId !== target.teamId || (target.scope === 'project' && source.projectId !== target.projectId)) {
+    throw invalid()
+  }
   const message = parseNotificationMessage(row.message)
   return {
     workspaceId: row.workspaceId,

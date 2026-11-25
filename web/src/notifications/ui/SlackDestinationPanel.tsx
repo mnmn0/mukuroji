@@ -59,11 +59,14 @@ export function SlackDestinationPanel({ controller, kind, t }: SlackDestinationP
           onSubmit={(event) => {
             event.preventDefault()
             if (!canSave) return
-            controller.save({
-              webhookUrl,
+            const submitted = webhookUrl
+            void controller.save({
+              webhookUrl: submitted,
               ...(isChannel ? { label: label ?? view.label ?? '', locale: postLocale ?? view.locale ?? 'ja' } : {}),
+            }).then((saved) => {
+              // Keep the URL after a failed save, and keep anything typed while the save ran.
+              if (saved) setWebhookUrl((current) => (current === submitted ? '' : current))
             })
-            setWebhookUrl('')
           }}
         >
           <p className="text-sm font-semibold text-[var(--workbench-text)]" data-testid="slack-destination-status">

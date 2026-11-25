@@ -40,6 +40,14 @@ export type DeleteChannelDestinationInput = {
   auditPut?: AuditTransactWriteItem
 }
 
+/** Destination settings and their revision, read together. */
+export type ChannelDestinationState = {
+  /** Current settings, or undefined when none are registered or they were removed. */
+  record?: ChannelDestinationRecord
+  /** Revision the next change must name; it survives a removal. */
+  revision: number
+}
+
 /** Persistence of the non-secret settings of channel destinations. */
 export type ChannelDestinationStore = {
   /**
@@ -56,6 +64,21 @@ export type ChannelDestinationStore = {
    * @returns The stored revision, or 0 when the destination was never saved.
    */
   getRevision(workspaceId: string, target: ChannelDestinationTarget): Promise<number>
+  /**
+   * Reads the settings and their revision in one strongly consistent read.
+   * @param workspaceId - Workspace ID.
+   * @param target - Team or Project.
+   * @returns Settings, if any, and the revision.
+   */
+  getState(workspaceId: string, target: ChannelDestinationTarget): Promise<ChannelDestinationState>
+  /**
+   * Names a member in audit events without the member key, which may be an email.
+   * @param workspaceId - Workspace ID.
+   * @param memberKey - Member key.
+   * @returns Workspace-scoped member pseudonym entity ID.
+   * @throws NotificationError (503) when the pseudonym key is not configured.
+   */
+  personalAuditEntityId(workspaceId: string, memberKey: string): string
   /**
    * Saves the settings when the stored revision still matches.
    * @param input - Settings, expected revision, and transactional checks.

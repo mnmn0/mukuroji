@@ -36,7 +36,12 @@ function installStores() {
       return record
     },
     async delete(input: DeleteChannelDestinationInput) { records.delete(JSON.stringify(input.target)) },
+    async getState(_workspaceId, target) {
+      const record = records.get(JSON.stringify(target))
+      return record ? { record, revision: record.revision } : { revision: 0 }
+    },
     async recordAudit() {},
+    personalAuditEntityId() { return 'workspace/wsp_test/member/mbr_test/slack-destination' },
   }
   setTestAppDependencies({
     channelDestinations,

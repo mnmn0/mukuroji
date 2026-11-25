@@ -94,10 +94,8 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
 
   for (const path of [TEAM_PATH, PROJECT_PATH]) {
     routeApp.get(path, async (c) => await withTarget(c, 'read', async (principal, target, canManage) => {
-      const store = workItemDependencies.channelDestinations
-      const record = await store.get(principal.directoryId, target)
-      const removedRevision = record ? 0 : await store.getRevision(principal.directoryId, target)
-      return c.json(toPublicChannelDestination(target, record, canManage, removedRevision) satisfies NotificationChannelDestination)
+      const { record, revision } = await workItemDependencies.channelDestinations.getState(principal.directoryId, target)
+      return c.json(toPublicChannelDestination(target, record, canManage, revision) satisfies NotificationChannelDestination)
     }))
 
     routeApp.put(path, async (c) => await withTarget(c, 'manage', async (principal, target) => {
@@ -351,14 +349,16 @@ function createPersonalAuditPut(
   principal: WorkspacePrincipal,
   action: 'saved' | 'deleted',
 ): AuditTransactWriteItem | undefined {
+  const auditTableName = getConfiguredAuditTableName()
+  if (!auditTableName) return undefined
   return createMutationAuditEventPut(
-    getConfiguredAuditTableName(),
+    auditTableName,
     createApiMutationContext(c, principal, { action }),
     {
       directoryId: principal.directoryId,
       eventType: `notification-slack-destination.${action}`,
       entityType: 'notification-slack-destination',
-      entityId: `member/${principal.userKey}/slack-destination`,
+      entityId: workItemDependencies.channelDestinations.personalAuditEntityId(principal.directoryId, principal.userKey),
       action,
       summary: action === 'saved' ? 'Personal Slack destination was saved.' : 'Personal Slack destination was deleted.',
       changes: [],

@@ -66,6 +66,9 @@ Slack 配信は個人あての通知だけで、送信先の Incoming Webhook �
 - Team の送信先は、その Team の Project のうち自分の送信先を持たないものの投稿も受ける。
 - URL を差し替えた直後は、古い version を読みかけた投稿が secret を見つけられないことがある。その投稿は再試行で
   新しい version を読む。
+- 設定の削除や URL の差し替えが commit された後に古い version の secret の削除が失敗すると、その secret は
+  どの設定からも参照されないまま残る。version は推測できない UUID で、Workspace 閉鎖時の prefix 削除で消える。
+  削除の再試行キューは作らない。
 - Notifications table に送信先 row と投稿 row（TTL 30 日）が増える。GSI・Lambda は増えない。
 - Agent Run の判断待ちは監査 event がまだないため channel には投稿しない。
 - 更新した文書: `docs/notifications.md`、`docs/guide/member.md`、`docs/guide/pm.md`。

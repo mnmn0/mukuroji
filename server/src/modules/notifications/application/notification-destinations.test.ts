@@ -39,10 +39,9 @@ function saved(revision: number, secretVersion = v1): ChannelDestinationRecord {
  * @param rejectSave - Error a save throws, as a lost fence would.
  * @returns The store and the operations it saw.
  */
-function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
+function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error, calls: string[] = []) {
   let record = initial
   let removedRevision = 0
-  const calls: string[] = []
   const store: ChannelDestinationStore = {
     async get() { return record },
     async getRevision() { return record?.revision ?? removedRevision },
@@ -58,7 +57,9 @@ function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
       return next
     },
     async delete(input) { calls.push('delete'); record = undefined; removedRevision = input.expectedRevision + 1 },
+    async getState() { return record ? { record, revision: record.revision } : { revision: removedRevision } },
     async recordAudit() { calls.push('audit') },
+    personalAuditEntityId() { return 'member-pseudonym/slack-destination' },
   }
   return { store, calls, current: () => record }
 }
@@ -67,9 +68,8 @@ function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
  * Builds an in-memory webhook store.
  * @returns The store and the secrets it holds.
  */
-function memorySecrets() {
+function memorySecrets(calls: string[] = []) {
   const values = new Map<string, string>()
-  const calls: string[] = []
   return {
     values,
     calls,
@@ -119,14 +119,14 @@ describe('destination request validation', () => {
 
 describe('channel destination save and delete', () => {
   test('writes the webhook under a new version before the settings and never returns it', async () => {
-    const { store, calls } = memoryStore()
-    const secrets = memorySecrets()
+    const history: string[] = []
+    const { store } = memoryStore(undefined, undefined, history)
+    const secrets = memorySecrets(history)
     const record = await saveChannelDestination(store, secrets.secrets, {
       workspaceId: 'workspace-1', target, secretIdOf, newSecretVersion: v1, memberKey: 'manager@example.test', now,
       body: { webhookUrl: url, label: '#alpha', locale: 'ja', expectedRevision: 0 }, authorizationConditionChecks: [],
     })
-    expect(secrets.calls).toEqual([`put secret/${v1}`])
-    expect(calls).toEqual(['save'])
+    expect(history).toEqual([`put secret/${v1}`, 'save'])
     expect(record.secretVersion).toBe(v1)
     expect(secrets.values.get(`secret/${v1}`)).toBe(url)
     const view = toPublicChannelDestination(target, record, true)
@@ -155,8 +155,9 @@ describe('channel destination save and delete', () => {
   })
 
   test('switches to a replacement webhook only after the save commits, then removes the old one', async () => {
-    const existing = memoryStore(saved(1))
-    const secrets = memorySecrets()
+    const history: string[] = []
+    const existing = memoryStore(saved(1), undefined, history)
+    const secrets = memorySecrets(history)
     secrets.values.set(`secret/${v1}`, url)
     const replacement = url.replace('TESTTOKEN', 'NEWTOKEN')
     const record = await saveChannelDestination(existing.store, secrets.secrets, {
@@ -164,7 +165,7 @@ describe('channel destination save and delete', () => {
       body: { webhookUrl: replacement, locale: 'ja', expectedRevision: 1 }, authorizationConditionChecks: [],
     })
     expect(record.secretVersion).toBe(v2)
-    expect(secrets.calls).toEqual([`put secret/${v2}`, `delete secret/${v1}`])
+    expect(history).toEqual([`put secret/${v2}`, 'save', `delete secret/${v1}`])
     expect([...secrets.values.entries()]).toEqual([[`secret/${v2}`, replacement]])
   })
 

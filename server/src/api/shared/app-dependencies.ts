@@ -94,9 +94,11 @@ export const workItemDependencies: WorkItemDependencies = {
   get teamReminderSettings() {
     return requireAppDependencies().workItems.teamReminderSettings
   },
+  /** Destination settings store, resolved from the current dependencies on each access; do not cache it. */
   get channelDestinations() {
     return requireAppDependencies().workItems.channelDestinations
   },
+  /** Webhook secret store, resolved from the current dependencies on each access; do not cache it. */
   get notificationDestinationSecrets() {
     return requireAppDependencies().workItems.notificationDestinationSecrets
   },

@@ -8,7 +8,7 @@ const loadingController: SlackDestinationController = {
   loadFailed: false,
   pending: false,
   retry: () => undefined,
-  save: () => undefined,
+  save: async () => true,
   remove: () => undefined,
   test: () => undefined,
 }
