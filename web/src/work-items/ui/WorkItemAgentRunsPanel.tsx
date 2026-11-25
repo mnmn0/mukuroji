@@ -3,7 +3,13 @@ import { useMemo, useState } from 'react'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { Locale } from '../../shared/i18n/i18n'
 import { releaseAgentRun } from '../api/agentRuns'
-import { readAgentRunDisplayState, splitAgentRuns, type AgentRunDisplayState } from '../model/agentRunDisplay'
+import {
+  formatAgentRunCredential,
+  readAgentRunDisplayState,
+  shortenAgentInstanceHash,
+  splitAgentRuns,
+  type AgentRunDisplayState,
+} from '../model/agentRunDisplay'
 import { applyAgentRunToHistory, useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from './agentRunLabels'
 
@@ -194,6 +200,12 @@ export function WorkItemAgentRunsPanel({
             <AgentRunTime label={labels.startedAt} value={formatDateTime(active.startedAt)} />
             <AgentRunTime label={labels.lastActivity} value={formatDateTime(active.lastHeartbeatAt)} />
             <AgentRunTime label={labels.leaseExpiresAt} value={formatDateTime(active.leaseExpiresAt)} />
+            {active.startedBy ? (
+              <>
+                <AgentRunTime label={labels.startedByCredential} value={formatAgentRunCredential(active.startedBy)} wrap />
+                <AgentRunTime label={labels.startedByInstance} value={shortenAgentInstanceHash(active.startedBy.instanceIdHash)} />
+              </>
+            ) : null}
           </dl>
           {active.usage ? (
             <p className="text-xs font-medium text-[var(--workbench-muted)]" data-testid="agent-run-usage">{labels.formatUsageCompact(active.usage)}</p>
@@ -219,6 +231,11 @@ export function WorkItemAgentRunsPanel({
                   {run.finishedAt ? ` – ${formatDateTime(run.finishedAt)}` : ''}
                 </span>
                 {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
+                {run.startedBy ? (
+                  <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
+                    {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)} · ${labels.startedByInstance}: ${shortenAgentInstanceHash(run.startedBy.instanceIdHash)}`}
+                  </span>
+                ) : null}
               </li>
             ))}
           </ol>
@@ -297,16 +314,18 @@ function AgentRunResumedBadge({ labels, run }: {
  * @param props - Label and formatted value.
  * @returns Definition list entry.
  */
-function AgentRunTime({ label, value }: {
+function AgentRunTime({ label, value, wrap = false }: {
   /** Field label. */
   label: string
-  /** Formatted time. */
+  /** Formatted value. */
   value: string
+  /** Wraps a long value instead of cutting it off, so its end stays readable. */
+  wrap?: boolean
 }) {
   return (
     <div className="grid min-w-0 gap-0.5">
       <dt className="font-semibold text-[var(--workbench-muted)]">{label}</dt>
-      <dd className="truncate font-medium text-[var(--workbench-text)]">{value}</dd>
+      <dd className={`${wrap ? '[overflow-wrap:anywhere]' : 'truncate'} font-medium text-[var(--workbench-text)]`}>{value}</dd>
     </div>
   )
 }

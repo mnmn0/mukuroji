@@ -147,7 +147,7 @@ test('reads Ready statuses and briefs from agent-context alongside the run setti
     return Response.json({ status: 500, code: 'internal_error', retryable: false }, { status: 500 })
   })
   expect(await api.agentSettings()).toEqual({
-    schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true,
+    schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, acceptNewRuns: true,
     readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
     brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
   })
