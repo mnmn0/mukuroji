@@ -272,7 +272,7 @@ describe('Task action menu extra actions', () => {
  * @returns The template.
  */
 function workItemTemplate(
-  overrides: Partial<Pick<WorkItemTemplate, 'id' | 'name' | 'enabled'>> = {},
+  overrides: Partial<Pick<WorkItemTemplate, 'id' | 'name' | 'enabled' | 'ownerTeamId'>> = {},
   payload: Partial<WorkItemTemplate['payload']> = {},
 ): WorkItemTemplate {
   return {
@@ -312,10 +312,12 @@ describe('Work Item template draft', () => {
       workItemTemplate({ id: 'disabled', enabled: false }),
       workItemTemplate({ id: 'other-team' }, { teamId: 'other-team' }),
       workItemTemplate({ id: 'own-team' }, { teamId: 'core-team' }),
+      workItemTemplate({ id: 'owned-by-other', ownerTeamId: 'other-team' }),
+      workItemTemplate({ id: 'owned-by-own', ownerTeamId: 'core-team' }),
       projectTemplate,
     ], 'core-team')
 
-    expect(templates.map((template) => template.id)).toEqual(['a', 'z', 'own-team'])
+    expect(templates.map((template) => template.id)).toEqual(['a', 'z', 'own-team', 'owned-by-own'])
   })
 
   test('fills the draft from the template but keeps the form date and leaves odd values out', () => {

@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono'
 import type { RequestIntakeTransactionItems } from '../../request-intake'
 import type {
+  AutomationManagementScopes,
   CreateRequestFormInput,
   PublishRequestFormInput,
   RequestForm,
@@ -24,6 +25,14 @@ export type RequestIntakeAdministrator = {
   userKey: string
 }
 
+/** A principal who manages Request forms of the whole Workspace or of some Teams. */
+export type RequestFormManager = RequestIntakeAdministrator & {
+  /** Whether the principal manages Workspace forms and every Team's forms. */
+  workspace: boolean
+  /** Teams whose Team-scoped forms the principal manages. */
+  teamIds: readonly string[]
+}
+
 /** The subset of the Request Intake client used by the admin HTTP adapter. */
 export type AdminRequestIntakeClient = {
   /** Lists forms in a Workspace.
@@ -31,7 +40,7 @@ export type AdminRequestIntakeClient = {
    * @param workspaceId The Workspace directory ID.
    * @returns The form list response.
    */
-  listForms(workspaceId: string): Promise<unknown>
+  listForms(workspaceId: string): Promise<{ forms: RequestForm[] }>
   /** Reads a form in a Workspace.
    *
    * @param workspaceId The Workspace directory ID.
@@ -118,6 +127,19 @@ export type AdminRequestIntakeRouterDependencies = {
    * @returns The authenticated administrator principal.
    */
   requireAdministration(context: Context): Promise<RequestIntakeAdministrator>
+  /** Verifies the bearer token and resolves which form scopes the caller manages.
+   *
+   * @param context The Hono request context.
+   * @returns The form manager, who manages the Workspace or at least one Team.
+   */
+  requireFormManagement(context: Context): Promise<RequestFormManager>
+  /** Verifies the bearer token and reports which form scopes the caller can change, judged by
+   * the `requests.manage` grant for Enterprise role holders.
+   *
+   * @param context The Hono request context.
+   * @returns The Workspace flag and Team identifiers whose forms the caller can change.
+   */
+  readFormManagementScopes(context: Context): Promise<AutomationManagementScopes>
   /** Safely parses request JSON, returning undefined when parsing fails.
    *
    * @param request The request object to parse.
@@ -155,6 +177,47 @@ export type AdminRequestIntakeRouterDependencies = {
   mapError(context: Context, error: unknown): Response
 }
 
+/** Tests whether a form manager manages a form scope.
+ *
+ * @param manager The resolved form manager.
+ * @param scope The form's scope.
+ * @returns Whether the manager may read and change forms of the scope.
+ */
+export function canManageRequestFormScope(manager: RequestFormManager, scope: RequestFormScope) {
+  if (manager.workspace) return true
+  return scope.type === 'team' && scope.teamId !== undefined && manager.teamIds.includes(scope.teamId)
+}
+
+/** Requires a form manager to manage a form scope.
+ *
+ * @param manager The resolved form manager.
+ * @param scope The form's current or requested scope.
+ * @throws RequestIntakeError when the scope is the Workspace or another Team.
+ */
+function requireRequestFormScopeManagement(manager: RequestFormManager, scope: RequestFormScope) {
+  if (canManageRequestFormScope(manager, scope)) return
+  throw new RequestIntakeError(
+    403,
+    'RequestFormScopeDenied',
+    'Only Workspace administrators manage this form scope; a Team manager manages forms of their own Team.',
+  )
+}
+
+/**
+ * Binds a form mutation to the revision whose scope was authorized. The repository checks
+ * `expectedRevision` against its own read, so without this a concurrent scope change between
+ * the two reads could let a manager of the former Team change the moved form.
+ *
+ * @param expectedRevision - Revision the caller submitted.
+ * @param authorizedRevision - Revision of the form read for the scope check.
+ * @throws RequestIntakeError when the form changed after the scope check.
+ */
+function requireAuthorizedFormRevision(expectedRevision: number, authorizedRevision: number) {
+  if (expectedRevision !== authorizedRevision) {
+    throw new RequestIntakeError(409, 'RequestRevisionConflict', 'Request form revision changed.')
+  }
+}
+
 /** Creates admin Request Form, queue, and submission-access HTTP routes.
  *
  * @param dependencies The application and transport boundaries used by the routes.
@@ -165,10 +228,21 @@ export function createAdminRequestIntakeRouter(
 ) {
   const router = new Hono()
 
+  router.get('/api/request-forms/management-scopes', async (context) => {
+    try {
+      return context.json(await dependencies.readFormManagementScopes(context))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
   router.get('/api/request-forms', async (context) => {
     try {
-      const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.getRequestIntake().listForms(principal.directoryId))
+      const manager = await dependencies.requireFormManagement(context)
+      const { forms } = await dependencies.getRequestIntake().listForms(manager.directoryId)
+      return context.json({
+        forms: forms.filter((form) => canManageRequestFormScope(manager, form.scope)),
+      })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -176,11 +250,13 @@ export function createAdminRequestIntakeRouter(
 
   router.post('/api/request-forms', async (context) => {
     try {
-      const principal = await dependencies.requireAdministration(context)
+      const manager = await dependencies.requireFormManagement(context)
+      const input = readCreateRequestFormInput(await dependencies.readJson(context.req))
+      requireRequestFormScopeManagement(manager, input.scope)
       return context.json(await dependencies.getRequestIntake().createForm(
-        principal.directoryId,
-        { id: principal.userKey },
-        readCreateRequestFormInput(await dependencies.readJson(context.req)),
+        manager.directoryId,
+        { id: manager.userKey },
+        input,
       ), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -189,11 +265,13 @@ export function createAdminRequestIntakeRouter(
 
   router.get('/api/request-forms/:formId', async (context) => {
     try {
-      const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.getRequestIntake().getForm(
-        principal.directoryId,
+      const manager = await dependencies.requireFormManagement(context)
+      const form = await dependencies.getRequestIntake().getForm(
+        manager.directoryId,
         context.req.param('formId') ?? '',
-      ))
+      )
+      requireRequestFormScopeManagement(manager, form.scope)
+      return context.json(form)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -201,12 +279,19 @@ export function createAdminRequestIntakeRouter(
 
   router.put('/api/request-forms/:formId', async (context) => {
     try {
-      const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.getRequestIntake().updateForm(
-        principal.directoryId,
-        context.req.param('formId') ?? '',
-        { id: principal.userKey },
-        readUpdateRequestFormInput(await dependencies.readJson(context.req)),
+      const manager = await dependencies.requireFormManagement(context)
+      const formId = context.req.param('formId') ?? ''
+      const input = readUpdateRequestFormInput(await dependencies.readJson(context.req))
+      const requestIntake = dependencies.getRequestIntake()
+      const current = await requestIntake.getForm(manager.directoryId, formId)
+      requireRequestFormScopeManagement(manager, current.scope)
+      if (input.scope !== undefined) requireRequestFormScopeManagement(manager, input.scope)
+      requireAuthorizedFormRevision(input.expectedRevision, current.revision)
+      return context.json(await requestIntake.updateForm(
+        manager.directoryId,
+        formId,
+        { id: manager.userKey },
+        input,
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -215,11 +300,13 @@ export function createAdminRequestIntakeRouter(
 
   router.post('/api/request-forms/:formId/publish', async (context) => {
     try {
-      const principal = await dependencies.requireAdministration(context)
+      const principal = await dependencies.requireFormManagement(context)
       const formId = context.req.param('formId') ?? ''
       const publishInput = readPublishRequestFormInput(await dependencies.readJson(context.req))
       const requestIntake = dependencies.getRequestIntake()
       const current = await requestIntake.getForm(principal.directoryId, formId)
+      requireRequestFormScopeManagement(principal, current.scope)
+      requireAuthorizedFormRevision(publishInput.expectedRevision, current.revision)
       const configurationGuardConditionChecks = await dependencies.validateFormRoutingReferences(
         principal.directoryId,
         current.draft,

@@ -397,9 +397,12 @@ async function runDueWorkItemOccurrence(
   }
   const dueDate = getDueDateForOccurrence(occurrence, timeZone, daysBefore)
   const items = await dependencies.dueWorkItems.listOpenWorkItemsDueOn(rule.workspaceId, dueDate)
-  const ordered = [...items].sort((first, second) =>
-    first.teamId.localeCompare(second.teamId) || first.workItemId.localeCompare(second.workItemId)
-  )
+  const ordered = items
+    // A Team rule reminds only about its own Team's Work Items (ADR 0087).
+    .filter((item) => rule.ownerTeamId === undefined || item.teamId === rule.ownerTeamId)
+    .sort((first, second) =>
+      first.teamId.localeCompare(second.teamId) || first.workItemId.localeCompare(second.workItemId)
+    )
   for (const item of ordered) {
     const event = await hydrateAutomationWorkItem({
       eventId: createDueWorkItemEventId(rule, occurrence, item.teamId, item.workItemId),
@@ -711,6 +714,7 @@ async function executeRecurringOccurrence(
     workspaceId: definition.workspaceId,
     ruleId: `recurring:${definition.id}`,
     ruleVersion: definition.version,
+    ...(definition.ownerTeamId === undefined ? {} : { ownerTeamId: definition.ownerTeamId }),
     triggerEventId: event.eventId,
     status: 'pending',
     attempts: 0,

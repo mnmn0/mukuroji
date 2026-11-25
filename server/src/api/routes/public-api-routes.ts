@@ -1129,6 +1129,8 @@ function isPublicWorkItemTemplateFor(
 ): template is Extract<AutomationTemplate, { kind: 'work-item' }> {
   return template.kind === 'work-item' &&
     template.enabled &&
+    // A Team-owned template serves only its own Team (ADR 0087).
+    (template.ownerTeamId === undefined || template.ownerTeamId === teamId) &&
     (template.payload.teamId === undefined || template.payload.teamId === teamId)
 }
 

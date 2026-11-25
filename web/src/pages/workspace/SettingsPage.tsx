@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
+import { TeamAutomationPanelContainer } from '../../automation/ui/TeamAutomationPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
 import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
@@ -281,6 +282,13 @@ export function SettingsPage() {
                 teams={workspace.teams}
               />
             </SettingsPanelAnchor>
+            <SettingsPanelAnchor panel="team-automation">
+              <TeamAutomationPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            </SettingsPanelAnchor>
             {workspace.softwareFactoryEnabled ? (
               <SettingsPanelAnchor panel="agent-settings">
                 <AgentSettingsPanelContainer
@@ -354,6 +362,7 @@ function listSettingsPanels(
           signedIn && 'work-item-configuration',
           signedIn && 'work-calendar',
           signedIn && 'work-item-key-prefix',
+          signedIn && 'team-automation',
           signedIn && available.softwareFactory && 'agent-settings',
         ]
   return panels.filter((panel) => panel !== false).map((panel) => ({ panel, section }))
