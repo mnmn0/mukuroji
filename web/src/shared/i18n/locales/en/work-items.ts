@@ -424,6 +424,7 @@ export const workItemsMessages = {
   'tasks.workspaceCalendar.staleError': "Couldn't reload the Workspace working calendar. New Work Items and the Gantt chart use the calendar loaded earlier.",
   'tasks.workspaceCalendar.retry': 'Load again',
   'tasks.create.titlePlaceholder': 'Ex: Pre-release checklist',
+  'tasks.create.sessionDraftRestored': 'Restored what you entered before your session ended. Check it and create the Work Item.',
   'tasks.create.assignee': 'Assignee',
   'tasks.create.assigneeRequired': 'Select an assignee before creating the task.',
   'tasks.create.assigneeContextInvalid': 'The inherited assignee is no longer available. Select an assignee.',

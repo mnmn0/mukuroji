@@ -309,6 +309,8 @@ async function mockCurrentUser(
  * 認証済みタスク画面 mock の追加設定です。
  */
 type MockAuthenticatedTaskPageOptions = {
+  /** Session written to storage instead of the fixture session. */
+  authSession?: typeof authSession
   /** Optional GET detail responses used to exercise selected Work Item reconciliation boundaries. */
   issueDetailOverrides?: Partial<Record<string, {
     /** HTTP status returned instead of the canonical detail response. */
@@ -736,7 +738,7 @@ async function mockAuthenticatedTaskPage(
   await page.addInitScript((session) => {
     window.localStorage.setItem('mukuroji.locale', 'ja')
     window.localStorage.setItem('mukuroji.auth', JSON.stringify(session))
-  }, authSession)
+  }, options.authSession ?? authSession)
 
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
@@ -15924,6 +15926,62 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
     await expect(page.getByTestId('tasks-count')).toContainText('0')
+  })
+})
+
+test.describe('authenticated task page with an account-identifying session', () => {
+  test.beforeEach(async ({ page }) => {
+    // The session is written by the shared mocks alone, so no other init script races with it.
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      authSession: { ...authSession, accessToken: createJwtShapedAccessToken('member-a', 'first') },
+    })
+  })
+
+  test('session が切れて再ログインしても書きかけの返信を戻す', async ({ page }) => {
+    // The shared mocks expect the fixture token; the account subjects matter only to the Web app.
+    await page.route('**/api/**', async (route) => {
+      await route.fallback({
+        headers: { ...route.request().headers(), authorization: `Bearer ${authSession.accessToken}` },
+      })
+    })
+    await page.route('**/api/auth/sso/discovery?*', async (route) => {
+      await route.fulfill({ json: { loginMode: 'password-or-sso', ssoRequired: false } })
+    })
+    await page.route('**/api/auth/login', async (route) => {
+      await route.fulfill({
+        json: {
+          accessToken: createJwtShapedAccessToken('member-a', 'second'),
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          tokenType: 'Bearer',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await page.getByRole('button', { name: '返信', exact: true }).first().click()
+    const replyBody = page.getByLabel('返信本文')
+    await replyBody.fill('session 切れでも残す返信')
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({ json: { code: 'Unauthorized', message: 'Unauthorized' }, status: 401 })
+    })
+    await page.getByRole('button', { name: '返信する', exact: true }).click()
+
+    await expect(page).toHaveURL(/\/login\?returnTo=/u)
+    await page.unroute(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u)
+    await page.getByLabel('メールアドレス').fill('member-a@example.com')
+    await page.getByRole('button', { name: '続行', exact: true }).click()
+    await page.getByLabel('パスワード', { exact: true }).fill('MemberA123!')
+    await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(replyBody).toHaveValue('session 切れでも残す返信')
+    // Once the comment it answers has loaded, the reply opens under it, ready to send again.
+    await expect(replyBody).toBeEditable()
+    await expect(page.getByText('セッションが切れる前に書いていたコメントを戻しました。')).toBeVisible()
   })
 })
 

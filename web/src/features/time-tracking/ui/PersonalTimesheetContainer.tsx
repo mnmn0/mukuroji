@@ -85,6 +85,7 @@ export function PersonalTimesheetContainer({
       onUpdateIndirectEntry={(entry, input) => mutations.updateIndirect(entry, input)}
       {...(rejectionReasons.data ? { rejectionReasons: rejectionReasons.data } : {})}
       t={t}
+      teamId={teamId}
       today={today}
       week={week}
       workItemOptions={workItemOptions}
