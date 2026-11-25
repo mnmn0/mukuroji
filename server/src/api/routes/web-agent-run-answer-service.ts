@@ -170,8 +170,8 @@ export async function answerWebAgentRunReport(
   const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId)
   const commentId = deriveAuditedCommentId(entityKey, auditContext)
   const current = withAnswer(report, await readCurrentAnswer(entityKey, report.answer))
-  // A retry of the request whose answer comment was since deleted reads the withdrawn answer.
-  if (report.answer?.commentId === commentId && current.answer === undefined) return { report: toAgentRunReport(current) }
+  // A retry of the request that saved the answer replays it as its comment now stands, edited or deleted.
+  if (report.answer?.commentId === commentId) return { report: toAgentRunReport(current) }
   const replay = recordedAnswer(current, principal, body)
   if (replay) return { report: toAgentRunReport(current) }
   const answer: AgentRunReportAnswer = {
