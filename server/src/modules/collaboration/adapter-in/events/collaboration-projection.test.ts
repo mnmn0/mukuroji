@@ -162,17 +162,36 @@ const unscopedRoutingSubject = { eventType: 'comment.created', reasons: ['mentio
 
 describe('collaboration projection pure helpers', () => {
   test('sends an access expiry notice only to a current manager of its Project', () => {
-    const event = { eventType: 'workspace-member.access-expiring', projectId: 'platform' }
+    const event = {
+      eventType: 'workspace-member.access-expiring', projectId: 'platform', accessExpiryMemberKey: 'guest@example.com',
+    }
+    const guest: ProjectDirectoryItem = {
+      entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'viewer',
+    }
     const directory: ProjectDirectoryItem[] = [
       { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: 'manager' },
       { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'former@example.com', role: 'member' },
       { entryType: 'project-member', teamId: 'core', projectId: 'other', memberKey: 'elsewhere@example.com', role: 'manager' },
+      guest,
     ]
 
     expect(isCurrentMemberAccessExpiryRecipient(event, 'Lead@example.com', directory)).toBe(true)
     expect(isCurrentMemberAccessExpiryRecipient(event, 'former@example.com', directory)).toBe(false)
     expect(isCurrentMemberAccessExpiryRecipient(event, 'elsewhere@example.com', directory)).toBe(false)
     expect(isCurrentMemberAccessExpiryRecipient({ eventType: 'comment.created' }, 'former@example.com', directory)).toBe(true)
+    // The expiring member left the Project, or their membership was archived, after the scan.
+    const withoutGuest = directory.filter((item) => item !== guest)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', withoutGuest)).toBe(false)
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', [
+      ...withoutGuest, { ...guest, archivedAt: '2026-11-24T00:00:00.000Z' },
+    ])).toBe(false)
+    // Membership in another Project does not authorize this Project's notice.
+    expect(isCurrentMemberAccessExpiryRecipient(event, 'lead@example.com', [
+      ...withoutGuest, { ...guest, projectId: 'other' },
+    ])).toBe(false)
+    // An event that does not name the expiring member is never sent.
+    expect(isCurrentMemberAccessExpiryRecipient({ ...event, accessExpiryMemberKey: undefined }, 'lead@example.com', directory))
+      .toBe(false)
   })
 
   test('fans Work Item and Planning update events out to current recipients but not the actor', async () => {
@@ -3140,6 +3159,9 @@ describe('collaboration projection pure helpers', () => {
     keys.forEach((key) => { process.env[key] = key })
     const scannedExpiry = new Date(Date.now() + 3 * 86_400_000).toISOString()
     let leadRole = 'manager'
+    let guestMembership: Record<string, unknown> | undefined = {
+      entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'member',
+    }
     let guestRow: Record<string, unknown> | undefined = {
       entryType: 'workspace-member', memberKey: 'guest@example.com', role: 'guest', status: 'active',
       accessExpiresAt: scannedExpiry,
@@ -3163,7 +3185,7 @@ describe('collaboration projection pure helpers', () => {
             { entryType: 'team', teamId: 'core' },
             { entryType: 'project', teamId: 'core', projectId: 'platform' },
             { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'lead@example.com', role: leadRole },
-            { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey: 'guest@example.com', role: 'member' },
+            ...(guestMembership ? [guestMembership] : []),
           ], $metadata: {} }
         }
       }
@@ -3234,6 +3256,16 @@ describe('collaboration projection pure helpers', () => {
       expect(await processCollaborationProjectionBatch({ Records: [record('demoted')] }, dependencies))
         .toEqual({ batchItemFailures: [] })
       leadRole = 'manager'
+      // The expiring member left the Project, or their membership was archived, after the scan, so
+      // the Project no longer authorizes telling its managers about them.
+      const scannedMembership = guestMembership
+      guestMembership = undefined
+      expect(await processCollaborationProjectionBatch({ Records: [record('left-project')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      guestMembership = { ...scannedMembership, archivedAt: '2026-11-24T00:00:00.000Z' }
+      expect(await processCollaborationProjectionBatch({ Records: [record('archived-membership')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      guestMembership = scannedMembership
       expect(projectedIds()).toEqual(['current'])
 
       // The same fence runs again before an external channel sends.
@@ -3248,6 +3280,14 @@ describe('collaboration projection pure helpers', () => {
       })
       if (!event) throw new Error('Expected a parsed event.')
       expect((await readMemberAccessExpiryNoticeFence(event)).current).toBe(true)
+      const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(true)
+      // The expiring member left the Project while the delivery was held, so the send is dropped.
+      guestMembership = undefined
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(false)
+      guestMembership = { ...scannedMembership, archivedAt: '2026-11-24T00:00:00.000Z' }
+      expect(await authorizeNotificationDelivery(event, 'lead@example.com', identity)).toBe(false)
+      guestMembership = scannedMembership
       guestRow = undefined
       expect((await readMemberAccessExpiryNoticeFence(event)).current).toBe(false)
     } finally {

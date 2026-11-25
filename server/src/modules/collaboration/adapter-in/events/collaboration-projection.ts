@@ -2199,28 +2199,35 @@ export function toPlanningUpdateProjectMemberCandidates(
 /**
  * Reports whether a recipient may still receive a member access expiry notice (ADR 0095).
  *
- * The notice is for the managers of the Project it was scanned for, so a recipient who stepped
- * down from managing that Project after the scan is not told.
+ * The notice is for the managers of the Project it was scanned for, and that Project is what
+ * authorizes telling them about the expiring member. So a recipient who stepped down from managing
+ * that Project after the scan is not told, and neither is anyone once the expiring member has left
+ * the Project (or had their membership archived) after the scan. The same check runs at projection
+ * and again before an external channel sends.
  *
- * @param event - Event whose Project the notice is authorized against.
+ * @param event - Event whose Project the notice is authorized against, naming the expiring member.
  * @param memberKey - Recipient member key.
  * @param directoryItems - Current Project directory rows.
- * @returns True for other events, or when the recipient still manages the event's Project.
+ * @returns True for other events, or when the recipient still manages the event's Project and the
+ *   expiring member still belongs to it.
  */
 export function isCurrentMemberAccessExpiryRecipient(
-  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId'>,
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'accessExpiryMemberKey'>,
   memberKey: string,
   directoryItems: ProjectDirectoryItem[],
 ) {
   if (event.eventType !== MEMBER_ACCESS_EXPIRING_EVENT_TYPE) return true
-  const normalized = normalizeMemberKey(memberKey)
-  return Boolean(event.projectId) && directoryItems.some((item) =>
+  const recipient = normalizeMemberKey(memberKey)
+  const target = normalizeMemberKey(event.accessExpiryMemberKey)
+  if (!event.projectId || !recipient || !target) return false
+  const isCurrentProjectMember = (key: string, managerOnly: boolean) => directoryItems.some((item) =>
     item.entryType === 'project-member' &&
     item.projectId === event.projectId &&
-    item.role === 'manager' &&
+    (!managerOnly || item.role === 'manager') &&
     item.archivedAt === undefined &&
-    normalizeMemberKey(item.memberKey) === normalized
+    normalizeMemberKey(item.memberKey) === key
   )
+  return isCurrentProjectMember(recipient, true) && isCurrentProjectMember(target, false)
 }
 
 /**
