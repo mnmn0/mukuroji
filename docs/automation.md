@@ -164,7 +164,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 Recurring definition は Work Item template、Team、IANA timezone、local wall-clock time、日次/週次/月次 cadence、catch-up policy を保持する。`nextRunAt` は UTC instant として保存し、`ScheduleDueIndex` で期限到来分だけを取得する。
 
-月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（schedule を変えた時刻より前の実行時刻は実行しない）。すでに始まった営業日の実行が再試行待ちの間にカレンダーが変わっても、再試行は同じ日の実行（同じ Work Item）を続ける（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
+月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（schedule を変えた時刻より前の実行時刻は実行しない）。すでに始まった営業日の実行が再試行待ちの間にカレンダーが変わっても、再試行は同じ日の実行（同じ Work Item）を続ける。営業日の実行が完了すると、次の `nextRunAt` は完了した月の翌月以降から探すので、再試行待ちの間に実行時刻を変えても同じ月に二度実行しない（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
 
 DST の扱いは次で固定する。
 

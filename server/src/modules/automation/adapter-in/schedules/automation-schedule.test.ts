@@ -1902,6 +1902,64 @@ describe('due-soon schedule rules and business-day Recurring Work', () => {
     expect(completed.nextRunAt).toBe('2026-09-01T01:00:00.000Z')
   })
 
+  test('advances past the month of a resumed business-day run whose local time was edited on calendar day n', async () => {
+    const definition: RecurringWork = {
+      ...createRecurringWork(),
+      schedule: {
+        frequency: 'monthly',
+        interval: 1,
+        timeZone: 'Asia/Tokyo',
+        localTime: '09:00',
+        startDate: '2026-07-16',
+        dayOfMonth: 1,
+        monthlyDay: 'business-day',
+        catchUpPolicy: 'skip',
+      },
+      nextRunAt: '2026-09-01T00:00:00.000Z',
+    }
+    const harness = createRecurringExecutionHarness(definition)
+    const holidays = new Set<string>()
+    let failNext = true
+    const occurrences: string[] = []
+    const dependencies = {
+      client: harness.client,
+      entitlement: enabledAutomationEntitlement,
+      actionExecutor: {
+        async execute(_action, context) {
+          if (failNext) {
+            failNext = false
+            throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          }
+          occurrences.push(String(context.event.occurredAt))
+        },
+      },
+      workCalendars: {
+        async readTeamWorkCalendar() {
+          return { workingWeekdays: new Set([1, 2, 3, 4, 5]), holidays }
+        },
+      },
+    } satisfies AutomationScheduleDependencies
+
+    // 2026-09-01 (Tuesday) is both calendar day 1 and the first business day; the first attempt fails.
+    const pending = await processRecurringWorkDefinition(definition, new Date('2026-09-01T00:00:10.000Z'), dependencies)
+    expect(pending.lastRunAt).toBeUndefined()
+    // The administrator then moves the schedule to 10:00 while the 09:00 run waits for a retry.
+    const edited: RecurringWork = {
+      ...pending,
+      revision: pending.revision + 1,
+      schedule: { ...pending.schedule, localTime: '10:00' },
+      scheduleChangedAt: '2026-09-01T00:10:00.000Z',
+      nextRunAt: '2026-09-01T01:00:00.000Z',
+    }
+    harness.setCurrentDefinition(edited)
+    const completed = await processRecurringWorkDefinition(edited, new Date('2026-09-01T06:00:00.000Z'), dependencies)
+
+    expect(occurrences).toEqual(['2026-09-01T00:00:00.000Z'])
+    expect(completed.lastRunAt).toBe('2026-09-01T00:00:00.000Z')
+    // September is done, so the edited 10:00 slot on the same day is not a next run.
+    expect(completed.nextRunAt).toBe('2026-10-01T01:00:00.000Z')
+  })
+
   test('defers a business-day Recurring Work to its working day and runs it there', async () => {
     const definition: RecurringWork = {
       ...createRecurringWork(),

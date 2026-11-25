@@ -24,6 +24,7 @@ import {
   getBusinessDayWakeUp,
   getDueDateForOccurrence,
   getLocalMonthStart,
+  getNextLocalMonthStart,
   getNextRecurringOccurrence,
   getRecurringOccurrences,
   selectCatchUpOccurrences,
@@ -512,8 +513,13 @@ export async function processRecurringWorkDefinition(
 
   const lastCompleted = selected.at(-1) ?? occurrences.at(-1)!
   // A business-day schedule wakes on calendar day n of the next month (the earliest its run can
-  // fall on) and counts business days there, so calendar changes made meanwhile take effect.
-  const nextRun = getNextRecurringOccurrence(definition.schedule, lastCompleted)
+  // fall on) and counts business days there, so calendar changes made meanwhile take effect. It
+  // runs once a month, so the search starts after the completed run's local month: a run resumed
+  // at a time since edited would otherwise find a later slot on the same day.
+  const nextRunAfter = definition.schedule.monthlyDay === 'business-day'
+    ? new Date(getNextLocalMonthStart(lastCompleted, definition.schedule.timeZone).getTime() - 1)
+    : lastCompleted
+  const nextRun = getNextRecurringOccurrence(definition.schedule, nextRunAfter)
   if (!nextRun) {
     throw new AutomationError('conflict', 'RecurringScheduleExhausted', 'Recurring schedule has no next occurrence.')
   }

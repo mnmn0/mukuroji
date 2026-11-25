@@ -294,6 +294,19 @@ export function getLocalMonthStart(instant: Date, timeZone: string): Date {
 }
 
 /**
+ * Returns the start of the local calendar month after the one that contains an instant.
+ *
+ * @param instant - Instant inside the current month.
+ * @param timeZone - IANA time zone the months are counted in.
+ * @returns The first instant of the next month's first local day.
+ */
+export function getNextLocalMonthStart(instant: Date, timeZone: string): Date {
+  // Day 1 plus 32 days always lands in the next month, whatever its length or offset changes.
+  const inNextMonth = new Date(getLocalMonthStart(instant, timeZone).getTime() + 32 * 86_400_000)
+  return getLocalMonthStart(inNextMonth, timeZone)
+}
+
+/**
  * Applies a catch-up policy to missed recurring occurrences.
  *
  * @param occurrences - Candidate occurrences.
