@@ -216,7 +216,9 @@ export async function answerWebAgentRunReport(
   } catch (error) {
     // A concurrent answer fails the report condition; it is reported as a conflict, or replayed when it
     // is this member's same answer.
-    const latest = await store.getRunReport(run, report.sequence).catch(() => undefined)
+    // The answer is read as its comment now stands, so a withdrawn answer with the same text is not replayed.
+    const stored = await store.getRunReport(run, report.sequence).catch(() => undefined)
+    const latest = stored && await withCurrentAnswer(principal.directoryId, stored).catch(() => undefined)
     if (latest?.answer !== undefined && recordedAnswer(latest, principal, body)) return { report: toAgentRunReport(latest) }
     throw error
   }

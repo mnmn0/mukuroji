@@ -1925,6 +1925,7 @@ describe('Web Agent Run routes', () => {
     }
     const comments: Parameters<CollaborationClient['createComment']>[0][] = []
     const storedComments = new Map<string, Awaited<ReturnType<CollaborationClient['createComment']>>>()
+    let refuseNextComment = false
     setTestAppDependencies({
       collaboration: createCollaborationStub({
         /**
@@ -1944,6 +1945,10 @@ describe('Web Agent Run routes', () => {
          */
         async createComment(input) {
           if (!input.auditContext) throw new Error('An answer comment must be audited.')
+          if (refuseNextComment) {
+            refuseNextComment = false
+            throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+          }
           try {
             store.applyTransactItems(input.coWrites ?? [])
           } catch (error) {
@@ -2018,6 +2023,10 @@ describe('Web Agent Run routes', () => {
     expect((await questions())[0]).toMatchObject({ sequence: 2, answer: { body: 'Use the backup bucket.' } })
     storedComments.set(answerComment.id, { ...answerComment, bodyMarkdown: '', deletedAt: '2026-10-22T02:00:00.000Z' })
     expect((await questions())[0]).toMatchObject({ sequence: 2 })
+    expect((await questions())[0]?.answer).toBeUndefined()
+    // A failed write of the withdrawn text is not taken for the withdrawn answer.
+    refuseNextComment = true
+    expect((await answer(2, { body: 'Use the staging bucket.' }, 'answer-10')).status).toBe(409)
     expect((await questions())[0]?.answer).toBeUndefined()
     const again = await answer(2, { body: 'Use production.' }, 'answer-9')
     expect(again.status).toBe(201)
