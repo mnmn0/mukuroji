@@ -1,7 +1,8 @@
-import { useMemo } from 'react'
+import { useId, useMemo, type AnchorHTMLAttributes } from 'react'
 import Markdown, { type Components, type Options } from 'react-markdown'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
+import { rehypePrefixFragmentLinks } from '../lib/markdownFragmentLinks'
 import { remarkHtmlAsText } from '../lib/markdownHtmlAsText'
 
 /**
@@ -42,14 +43,48 @@ export type SafeMarkdownProps = {
 }
 
 /**
+ * Props of a Markdown link after sanitizing, as react-markdown passes them to a renderer.
+ */
+export type SafeMarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  /** Syntax tree node of the link, which is not an element attribute. */
+  node?: unknown
+  /** Marks a footnote reference link. */
+  'data-footnote-ref'?: boolean | string
+  /** Marks a link from a footnote back to its reference. */
+  'data-footnote-backref'?: boolean | string
+}
+
+/**
+ * Draws a sanitized Markdown link. A link to another place on the page, such as a footnote, keeps
+ * its id and footnote attributes and stays in the page; any other link opens in a new tab without
+ * referrer.
+ *
+ * @param props - Sanitized link attributes and text.
+ * @returns The link element, or the text when the link has no target.
+ */
+export function SafeMarkdownLink(props: SafeMarkdownLinkProps) {
+  const { children, href } = props
+  if (!href) return <span>{children}</span>
+  const attributes = {
+    'aria-describedby': props['aria-describedby'],
+    'aria-label': props['aria-label'],
+    className: props.className,
+    'data-footnote-backref': props['data-footnote-backref'],
+    'data-footnote-ref': props['data-footnote-ref'],
+    id: props.id,
+  }
+  return href.startsWith('#') ? (
+    <a {...attributes} href={href}>{children}</a>
+  ) : (
+    <a {...attributes} href={href} rel="noreferrer noopener" target="_blank">{children}</a>
+  )
+}
+
+/**
  * Default renderers: links open in a new tab without referrer, and images are not loaded.
  */
 const defaultMarkdownComponents: Components = {
-  a: ({ children, href }) => href ? (
-    <a href={href} rel="noreferrer noopener" target="_blank">
-      {children}
-    </a>
-  ) : <span>{children}</span>,
+  a: SafeMarkdownLink,
   img: () => null,
 }
 
@@ -69,6 +104,10 @@ export function SafeMarkdown({
   rawHtml = 'skip',
   remarkPlugins = [],
 }: SafeMarkdownProps) {
+  // Footnote ids are named per instance, so two blocks or comments on one page that both use
+  // `[^1]` each link to their own footnote. The sanitizer adds its prefix to the ids, and the
+  // page links get the same prefix after it.
+  const footnotePrefix = `${useId().replace(/[^A-Za-z0-9]/gu, '')}-`
   const schemeKey = extraUrlSchemes?.join(' ') ?? ''
   const sanitizeSchema = useMemo(() => {
     const schemes = schemeKey ? schemeKey.split(' ') : []
@@ -102,7 +141,11 @@ export function SafeMarkdown({
     >
       <Markdown
         components={components ? { ...defaultMarkdownComponents, ...components } : defaultMarkdownComponents}
-        rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+        rehypePlugins={[
+          [rehypeSanitize, sanitizeSchema],
+          [rehypePrefixFragmentLinks, { localPrefix: footnotePrefix, prefix: defaultSchema.clobberPrefix ?? '' }],
+        ]}
+        remarkRehypeOptions={{ clobberPrefix: footnotePrefix }}
         remarkPlugins={rawHtml === 'escape'
           ? [remarkGfm, remarkHtmlAsText, ...remarkPlugins]
           : [remarkGfm, ...remarkPlugins]}

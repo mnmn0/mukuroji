@@ -279,6 +279,8 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
   中の行が新たに HTML になることがあるので、HTML が無くなるまで解析し直し、数回で収まらない場合は
   段落全体の HTML の開始を escape します。
   画面は block ごとに別々に Markdown を描画するので、参照の定義と脚注も block の中だけで効きます。
+  脚注の id と link は描画ごとに別の prefix を付けるので、同じ label を使う block や comment が
+  1 つの画面に並んでも、それぞれ自分の脚注へ移動します。
   書き出しでは 1 つのファイルにつなぐと最初の定義がすべての block に効いてしまうため、定義を使う
   link と画像は inline の link（`[text](<url> "title")`）に書き換えて定義を消し、脚注の label は
   `<書き出しの中の block の番号>-<番号>` に付け替えます（中身のない段落は書き出しません）。

@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react'
+import { useMemo } from 'react'
 import type { Components } from 'react-markdown'
 import { markdownAttachmentScheme, readMarkdownAttachmentFileId } from '../../files/model/markdownAttachments'
 import {
@@ -10,7 +10,7 @@ import {
   MarkdownAttachmentReactContext,
   useMarkdownAttachmentContext,
 } from '../../files/ui/markdownAttachmentContext'
-import { SafeMarkdown } from '../../shared/ui/SafeMarkdown'
+import { SafeMarkdown, SafeMarkdownLink, type SafeMarkdownLinkProps } from '../../shared/ui/SafeMarkdown'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
 import { useWorkItemKeyPrefixes } from '../queries/workItemKeyPrefixesContext'
 
@@ -47,22 +47,18 @@ const attachmentUrlSchemes = [markdownAttachmentScheme]
 
 /**
  * Draws a Markdown link: an `attachment:` link becomes a download button resolved from the
- * nearest attachment context, and any other link opens in a new tab.
+ * nearest attachment context, and any other link is drawn as {@link SafeMarkdownLink} draws it.
  *
  * @param props - Link target and text from the Markdown body.
  * @returns The link element.
  */
-function CommentMarkdownLink({ children, href }: { children?: ReactNode; href?: string }) {
+function CommentMarkdownLink(props: SafeMarkdownLinkProps) {
   const attachments = useMarkdownAttachmentContext()
-  const fileId = readMarkdownAttachmentFileId(href)
+  const fileId = readMarkdownAttachmentFileId(props.href)
   if (fileId) {
-    return <MarkdownAttachmentLink attachments={attachments} fileId={fileId}>{children}</MarkdownAttachmentLink>
+    return <MarkdownAttachmentLink attachments={attachments} fileId={fileId}>{props.children}</MarkdownAttachmentLink>
   }
-  return href ? (
-    <a href={href} rel="noreferrer noopener" target="_blank">
-      {children}
-    </a>
-  ) : <span>{children}</span>
+  return <SafeMarkdownLink {...props} />
 }
 
 /**
@@ -81,7 +77,7 @@ function CommentMarkdownImage({ alt, src }: { alt?: string; src?: unknown }) {
  * Renderers shared by every comment body. They stay the same element types across renders.
  */
 const commentMarkdownComponents: Components = {
-  a: ({ children, href }) => <CommentMarkdownLink href={href}>{children}</CommentMarkdownLink>,
+  a: (props) => <CommentMarkdownLink {...props} />,
   img: ({ alt, src }) => <CommentMarkdownImage alt={alt} src={src} />,
 }
 
