@@ -1066,6 +1066,11 @@ describe('public Agent Run service', () => {
     }
     await expect(takeOverDuring({ ...enabled, revision: 2, allowTakeoverAfterLeaseExpiry: false }, 'disabled'))
       .rejects.toMatchObject({ reason: 'agent_run_takeover_disabled' })
+    // Stopping new Runs is reported first, even when take over was also turned off.
+    await expect(takeOverDuring(
+      { ...enabled, revision: 2, acceptNewRuns: false, allowTakeoverAfterLeaseExpiry: false },
+      'stopped',
+    )).rejects.toMatchObject({ reason: 'not_ready', pointer: '/acceptNewRuns' })
     await expect(takeOverDuring({ ...enabled, revision: 2, leaseMinutes: 45 }, 'changed'))
       .rejects.toMatchObject({ category: 'conflict' })
     // A cancellation with nothing changed, such as an identical request's receipt, stays retryable.

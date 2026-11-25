@@ -202,7 +202,7 @@ export function WorkItemAgentRunsPanel({
             <AgentRunTime label={labels.leaseExpiresAt} value={formatDateTime(active.leaseExpiresAt)} />
             {active.startedBy ? (
               <>
-                <AgentRunTime label={labels.startedByCredential} value={formatAgentRunCredential(active.startedBy)} />
+                <AgentRunTime label={labels.startedByCredential} value={formatAgentRunCredential(active.startedBy)} wrap />
                 <AgentRunTime label={labels.startedByInstance} value={shortenAgentInstanceHash(active.startedBy.instanceIdHash)} />
               </>
             ) : null}
@@ -232,8 +232,8 @@ export function WorkItemAgentRunsPanel({
                 </span>
                 {run.usage ? <span className="whitespace-nowrap" data-testid="agent-run-usage">{labels.formatUsageCompact(run.usage)}</span> : null}
                 {run.startedBy ? (
-                  <span className="truncate" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
-                    {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)}`}
+                  <span className="min-w-0 [overflow-wrap:anywhere]" data-testid="agent-run-started-by" title={run.startedBy.instanceIdHash}>
+                    {`${labels.startedByCredential}: ${formatAgentRunCredential(run.startedBy)} · ${labels.startedByInstance}: ${shortenAgentInstanceHash(run.startedBy.instanceIdHash)}`}
                   </span>
                 ) : null}
               </li>
@@ -314,16 +314,18 @@ function AgentRunResumedBadge({ labels, run }: {
  * @param props - Label and formatted value.
  * @returns Definition list entry.
  */
-function AgentRunTime({ label, value }: {
+function AgentRunTime({ label, value, wrap = false }: {
   /** Field label. */
   label: string
-  /** Formatted time. */
+  /** Formatted value. */
   value: string
+  /** Wraps a long value instead of cutting it off, so its end stays readable. */
+  wrap?: boolean
 }) {
   return (
     <div className="grid min-w-0 gap-0.5">
       <dt className="font-semibold text-[var(--workbench-muted)]">{label}</dt>
-      <dd className="truncate font-medium text-[var(--workbench-text)]">{value}</dd>
+      <dd className={`${wrap ? '[overflow-wrap:anywhere]' : 'truncate'} font-medium text-[var(--workbench-text)]`}>{value}</dd>
     </div>
   )
 }

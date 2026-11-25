@@ -852,7 +852,7 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
               : run.finishedAt ? <DetailField label={labels.runs.finishedAt} value={formatDateTime(run.finishedAt)} /> : null}
             {run.startedBy ? (
               <>
-                <DetailField label={labels.runs.startedByCredential} value={formatAgentRunCredential(run.startedBy)} />
+                <DetailField label={labels.runs.startedByCredential} value={formatAgentRunCredential(run.startedBy)} wrap />
                 <DetailField label={labels.runs.startedByInstance} value={shortenAgentInstanceHash(run.startedBy.instanceIdHash)} />
               </>
             ) : null}
@@ -909,16 +909,18 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
  * @param props - Label and value.
  * @returns Definition list entry.
  */
-function DetailField({ label, value }: {
+function DetailField({ label, value, wrap = false }: {
   /** Field label. */
   label: string
   /** Display value. */
   value: string
+  /** Wraps a long value instead of cutting it off, so its end stays readable. */
+  wrap?: boolean
 }) {
   return (
     <div className="grid min-w-0 gap-0.5">
       <dt className="font-semibold text-[var(--workbench-muted)]">{label}</dt>
-      <dd className="truncate font-medium text-[var(--workbench-text)]">{value}</dd>
+      <dd className={`${wrap ? '[overflow-wrap:anywhere]' : 'truncate'} font-medium text-[var(--workbench-text)]`}>{value}</dd>
     </div>
   )
 }
