@@ -609,6 +609,8 @@ function createFileProofingStub(
     deleteFile: unsupported,
     createApproval: unsupported,
     createWorkItemApproval: unsupported,
+    createDocumentVersionApproval: unsupported,
+    listDocumentApprovals: async () => [],
     async listPendingWorkItemApprovalCompletionTransitions() {
       return []
     },
@@ -772,6 +774,11 @@ function createDocumentFake(
     applyOperations: unsupported,
     listVersions: unsupported,
     restoreVersion: unsupported,
+    getVersion: unsupported,
+    pinVersion: unsupported,
+    async prepareVersionApprovalTransactWrite() {
+      return { conditionChecks: [] }
+    },
     updatePreference: unsupported,
     listRecent: unsupported,
     getCommentCreateReplay: unsupported,
