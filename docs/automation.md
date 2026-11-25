@@ -22,10 +22,11 @@ Trigger は次を扱う。
 - baseline slip（Project の今の schedule baseline より予定終了日が遅れた変更。下の「baseline slip trigger」を参照）
 - custom field
 - comment
+- approval（承認依頼の決定。下の「承認の決定 trigger」を参照）
 - relation（Work Item の親子・blocker・関連 link の変更と兄弟の並べ替え）
 - form
 - webhook
-- schedule
+- schedule（`dueWorkItems` で期限の n 日前の Work Item ごとにも動かせる。下の「期限前の schedule rule」を参照）
 
 Relation trigger は `eventTypes`（1〜10 件、[relation の event](./event-audit.md#work-item-relation-の-event) の `work-item.parent-changed` などから選ぶ）で対象を絞り、省略するとすべての relation 変更で動く。relation の event は両端の Work Item に 1 件ずつ記録されるので、1 つの変更で両端の event type がそれぞれ一致すればルールは両端で 1 回ずつ動き、`workItem.` の condition と action は event を記録した側の Work Item を対象にする。相手の Work Item は `event.metadata.relatedWorkItemId`（親の変更では `parentWorkItemId` / `previousParentWorkItemId`）で condition に使える。Rule を編集できるのは Workspace 管理者だけなので、相手が管理者の見られない Project にあっても問題にならない。
 
@@ -34,6 +35,26 @@ Action は assign、move、update、create、comment、notify、approval、webho
 Approval action は event が指す canonical Work Item 自体を承認対象にし、通常の file approval と同じ main row、reviewer Inbox projection、summary、decision/cancel API、audit transaction を利用する。作成前に owner Team と assigned Project が active であること、全 reviewer が active Workspace member かつ対象 Work Item を閲覧できること、指定した完了 workflow status が現在の configuration で遷移可能であることを強整合 read で再検証する。Requester は `service` identity の `automation:<ruleId>` として保存し、人間 requester と誤認して cancel/notification の対象にはしない。
 
 Condition は event snapshot と現在の Work Item snapshot のどちらを読むかを field path で明示する。Field path の namespace、比較 operator、値の型と condition tree の深さは保存前に検証し、実行時に存在しない field は `not-exists` 以外では一致しない。
+
+### 編集・削除・dry-run（#393）
+
+管理画面の **編集** は、保存済み rule の名前・条件・action を変えて次の version を保存する（`PATCH /api/automation/rules/{ruleId}` に `expectedRevision` を付ける）。Trigger、retry、rate limit、loop guard は保存済みの値のまま変えない。条件は field 条件の行を「すべてに一致」（top level に並べる）か「いずれかに一致」（1 つの `any` group）でまとめる。`not` や入れ子の group、文字列でない値を持つ条件は行として表示できないため、そのまま保存するか作り直すかを選ぶ。Action は上から順に実行し、↑↓ で並べ替える。画面で表せない action（複数 field の update、値を指定した create、secret alias や body を持つ webhook）は保存済みのまま残す。
+
+Rule を作った member は `createdByMemberKey` に記録する（fingerprint には含めない。この変更より前の rule にはない）。
+
+`POST /api/automation/rule-dry-runs` は保存前の rule 定義（`CreateAutomationRuleInput` と同じ検証）を、Team と Work Item ID で指定した 1 件に当てて評価する。Trigger は起きたものとして、空の event と今の Work Item snapshot で top level の条件を 1 つずつ評価し、すべて一致したときだけ各 action の予定（assign・move・update は今の値と違う field の before/after、notify・approval は宛先、webhook は host）を返す。同じ field を書く action が続くときは、前の action の結果に対して次の action の変化を示す。Action は実行せず、何も書き込まない。`event.` を読む条件は実際の event で結果が変わるため `readsEventFields` で示す。Workspace 管理者だけが呼べ、Team が無効なら `409` を返し、Work Item が読めなければ通常の Work Item 参照と同じ error を返す。
+
+削除は `DELETE /api/automation/rules/{ruleId}`、`DELETE /api/automation/templates/{templateId}`、`DELETE /api/recurring-work/{recurringWorkId}` に `{ "expectedRevision": n }` を付けて行い、成功すると `204` を返す。Rule と recurring work は current row を消すので、event consumer と schedule worker は以後実行しない（予約済み execution は固定済み version で終わる）。Template は、create action を持つ rule か recurring work が参照している間は `409 AutomationTemplateInUse` で拒否する。参照の確認から削除までに rule や recurring が保存されないよう、削除は確認時に読んだ definition revision を condition にする。逆に、template を参照する rule・recurring work の保存は、読んだ template の revision と有効状態を同じ transaction で condition check するため、確認の後に消された template を参照する定義は保存されない。
+
+### 承認の決定 trigger
+
+`{ "type": "approval", "decision": "rejected" }` は Work Item（または file version）の承認依頼が決まったときに動く。`decision` は `approved`（全 reviewer が承認した `approval.completed`）、`rejected`（`approval.rejected`）、`changes-requested`（`approval.changes-requested`）のどれかで、省略するとすべての決定で動く。1 人の reviewer の承認だけの `approval.approved` では動かない。`workItem.` の条件と action は承認依頼の Work Item を対象にし、`event.metadata.approvalId`、`approvalStatus`、`reviewerStatus`、`subjectType` を条件で読める。
+
+### 期限前の schedule rule
+
+`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていたり、完了・archive されていたりすれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。`catchUpPolicy` が `skip` でも `latest` でも、途中で止まった実行時刻は、すでに 1 件でも動いていれば（動いた Work Item がその後完了して期限一覧から外れていても、rule の execution 履歴で判定する）遅れて再開したときに残りの Work Item を実行する。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
+
+Notify action の `notifyAssignee: true` は、rule が対象にしている Work Item の、rule が動いた時点の担当者にも通知する（同じ rule の前の assign action で変えた担当者ではない。dry-run も同じ）。`recipientMemberKeys` は空でもよいが、どちらか一方は必要。「期限 3 日前に担当者へ通知」は、毎日 9:00 の schedule に `dueWorkItems: { daysBefore: 3 }` と `{ "type": "notify", "recipientMemberKeys": [], "notifyAssignee": true, "title": "期限まで3日" }` で作る。
 
 ### baseline slip trigger
 
@@ -49,7 +70,7 @@ Condition は event snapshot と現在の Work Item snapshot のどちらを読�
 
 実行 ID は Workspace、論理 rule ID、元 event ID から決定的に作り、最初に予約した immutable rule version を execution に固定する。Rule 編集後に同じ event が再配信されても新 version の action は重複実行せず、途中の execution は固定済み version で再開する。実行開始は status と attempt の条件付き更新、および期限付き runner lease で一つの worker だけが取得する。同じ event が並行再配信された場合、後続 worker は保存済み execution を返して action を開始しない。
 
-各 action receipt は execution ID と action index を一意 key にし、成功した action だけを記録する。途中失敗後の retry は receipt がある action を skip し、未完了 action から再開する。Retryable failure と期限切れ runner lease は `ScheduleDueIndex` に sparse 登録し、minute worker が保存済み rule version と trigger event だけを使って回収する。
+各 action receipt は execution ID と action index を一意 key にし、成功した action だけを記録する。途中失敗後の retry は receipt がある action を skip し、未完了 action から再開する。Retryable failure と期限切れ runner lease、および予約から 5 分たっても claim されていない `pending` execution は `ScheduleDueIndex` に sparse 登録し、minute worker が保存済み rule version と trigger event だけを使って回収する。予約直後に worker が止まり、その間に rule が削除・停止されても、予約済み execution はこの経路で終わる。
 
 Approval ID と request fingerprint は action の deterministic idempotency key に固定する。期限はまだ永続化されていない action attempt 時刻ではなく、保存済み immutable `execution.startedAt + dueInHours` から計算する。Approval transaction の commit 後、receipt 保存前に応答が失われても retry は同じ ID・期限・payload を照合して既存 request を返し、reviewer projection、summary、audit event を重複させない。
 
@@ -60,6 +81,12 @@ Event consumer の current rule 一覧は strongly consistent に読み、停止
 内部 Work Item action は deterministic な resource/event ID を使い、状態更新と automation source の audit event を既存の DynamoDB transaction で確定する。Action receipt 保存前に応答が失われても、再実行は同じ resource/event を照合して成功済み mutation として扱う。Webhook には同じ deterministic idempotency key を送る。外部 endpoint が idempotency を実装していない場合、応答消失時の exactly-once は保証できない。
 
 Outbound webhook は HTTPS の既定 port のみを許可し、credential 付き URL、private/reserved address、redirect を拒否する。Hostname は実行時に一度だけ解決し、すべての A/AAAA answer が public であることを検証してから、その address へ socket を固定する。DNS 解決を含む request 全体を 10 秒で timeout する。Secret alias や secret 本文は外部へ送らず、Unix timestamp と raw JSON body を `timestamp.body` として HMAC-SHA256 署名し、`X-Mukuroji-Timestamp` / `X-Mukuroji-Signature` で送る。Signature 値は `sha256=<hex digest>` とし、同じ execution/action の retry では同じ `Idempotency-Key` を送る。
+
+### 失敗の通知（#393）
+
+Rule の execution が dead-letter になったとき、または rate limit で skip されたとき、rule の作成者（active な member のとき）と active な owner / admin（最大 `AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT` = 20 人）に Inbox 通知を送る。通知は audit event（`automation.execution.dead-lettered` / `automation.rule.rate-limited`、entity は `automation-rule`）を outbox にし、collaboration projection が `notificationCandidates`（理由 `automation`）から Inbox を作る。リンク先は実行履歴タブ（`/settings/workspace?automationTab=runs`）。
+
+重複を避けるため、event ID の元になる idempotency key は dead-letter では execution ID と attempt 数、rate limit では rule ID と UTC の 1 時間単位にする（同じ rule の連続 skip は 1 時間に 1 通）。通知は best effort で、失敗しても保存済みの execution は変えずにログだけ残す。Recurring work の dead-letter は rule を持たないため、今は通知しない。
 
 ## Signed inbound webhook
 
@@ -137,6 +164,8 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 Recurring definition は Work Item template、Team、IANA timezone、local wall-clock time、日次/週次/月次 cadence、catch-up policy を保持する。`nextRunAt` は UTC instant として保存し、`ScheduleDueIndex` で期限到来分だけを取得する。
 
+月次の日は `monthlyDay` で選ぶ。省略（`day-of-month`）は `dayOfMonth` の日、`last-day` は月末（`dayOfMonth` は持たない）、`business-day` は `dayOfMonth`（1〜23）番目の営業日で、recurring work だけが使える（rule の schedule は `last-day` まで）。営業日は owner Team の有効な稼働カレンダー（稼働曜日と休日、[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）で数える。保存時の `nextRunAt` は暦の n 日（第 n 営業日の下限）で、その時刻に worker がカレンダーを読み、営業日がまだ来ていなければ slot を完了せずに `nextRunAt` を後ろへずらす。実際の営業日が同じ月にある間は毎日の実行時刻に起きてカレンダーを読み直すので、営業日が前に動く休日の変更もその日のうちに反映される。暦の n 日を過ぎてから作成・変更した場合は、翌日の実行時刻から数え始める（schedule を変えた時刻より前の実行時刻は実行しない）。すでに始まった営業日の実行が再試行待ちの間にカレンダーが変わっても、再試行は同じ日の実行（同じ Work Item）を続ける。営業日の実行が完了すると、次の `nextRunAt` は完了した月の翌月以降から探すので、再試行待ちの間に実行時刻を変えても同じ月に二度実行しない（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。
+
 DST の扱いは次で固定する。
 
 - spring-forward で local time が存在しない場合は同日の最初の有効時刻へ進める。
@@ -167,18 +196,19 @@ Archive は hard delete ではなく reversible archive metadata を Work Item �
 
 ## API
 
-Rule/template/recurring の作成・更新と execution retry は Workspace administration 権限を要求する。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
+Rule/template/recurring の作成・更新・削除、rule の dry-run と execution retry は Workspace administration 権限を要求する。Inbound webhook の list/detail を含む管理 API はすべて Workspace administration 権限を要求し、endpoint URL と opaque ID を一般 member へ開示しない。それ以外の参照 API は authenticated member、bulk API と form ingress は Workspace business-write 権限を要求する。Public inbound webhook は Cognito authentication を使わず、上記の HMAC、timestamp、idempotency guard をすべて要求する。
 
 ```text
 GET|POST  /api/automation/rules
-PATCH     /api/automation/rules/{ruleId}
+PATCH|DELETE /api/automation/rules/{ruleId}
+POST      /api/automation/rule-dry-runs
 GET|POST  /api/automation/templates
-PATCH     /api/automation/templates/{templateId}
+PATCH|DELETE /api/automation/templates/{templateId}
 POST      /api/automation/templates/{templateId}/duplicate
 POST      /api/automation/templates/{templateId}/applications
 GET       /api/automation/template-applications/{applicationId}
 GET|POST  /api/recurring-work
-PATCH     /api/recurring-work/{recurringWorkId}
+PATCH|DELETE /api/recurring-work/{recurringWorkId}
 GET       /api/automation/executions
 POST      /api/automation/executions/{executionId}/retry
 POST      /api/automation/forms/{formId}/submissions

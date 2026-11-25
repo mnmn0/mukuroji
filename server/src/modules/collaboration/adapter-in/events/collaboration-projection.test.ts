@@ -743,6 +743,9 @@ describe('collaboration projection pure helpers', () => {
       expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(true)
       expect(await authorizeNotificationDelivery({ ...event, notificationCandidates: [] }, memberKey, identity)).toBe(false)
       expect(await authorizeNotificationDelivery({ ...event, eventType: 'comment.created' }, memberKey, identity)).toBe(false)
+      for (const eventType of ['automation.execution.dead-lettered', 'automation.rule.rate-limited']) {
+        expect(await authorizeNotificationDelivery({ ...event, eventType }, memberKey, identity)).toBe(true)
+      }
       active = false
       expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(false)
     } finally {

@@ -46,6 +46,8 @@ export type MyTaskDirectStatusMoveMessages = {
   unavailable: string
   /** Message shown when the Team refuses to complete a parent whose children are still open. */
   openChildren: string
+  /** Explains a rejection the Team's workflow rules made, or returns `undefined` for other failures. */
+  describeWorkflowRule?: (error: unknown) => string | undefined
 }
 
 /**
@@ -141,6 +143,16 @@ export function executeMyTaskDirectStatusMove(
 
   /** Converts a rejected direct mutation into the same canonical failure as selector Move. */
   const createMutationFailure = (error: unknown): WorkItemActionResult => {
+    const workflowRule = messages.describeWorkflowRule?.(error)
+    if (workflowRule) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'WorkflowRuleNotSatisfied',
+        'validation',
+        workflowRule,
+      )
+    }
     if (isMyTaskOpenChildrenRefusal(error)) {
       return createFailedTaskActionResult(
         context.actionId,

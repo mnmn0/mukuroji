@@ -9,14 +9,18 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(620)
-  expect(new Set(inventory).size).toBe(616)
+  expect(inventory).toHaveLength(624)
+  expect(new Set(inventory).size).toBe(620)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
   expect(inventory).toContain('POST /api/notifications/bulk')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/automation/templates/:templateId/application-previews')
+  expect(inventory).toContain('POST /api/automation/rule-dry-runs')
+  expect(inventory).toContain('DELETE /api/automation/rules/:ruleId')
+  expect(inventory).toContain('DELETE /api/automation/templates/:templateId')
+  expect(inventory).toContain('DELETE /api/recurring-work/:recurringWorkId')
   expect(inventory).toContain('GET /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('PUT /api/planning/entities/:entityId/watch')
   expect(inventory).toContain('DELETE /api/planning/entities/:entityId/watch')
@@ -190,6 +194,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/notification-channel/test')
   expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/notification-channel')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '8bfe64ac53fcec33b1320a26fae0f36921bf028ebc03692f3ae8f055217e9816',
+    'f1a6825c8251d4a22926ea0ad087980cf8ac4f56706b52d3a819abcb05feab91',
   )
 })
