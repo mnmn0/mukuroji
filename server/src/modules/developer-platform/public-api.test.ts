@@ -144,6 +144,9 @@ function createDefaultWorkItemService(
     async getHierarchy(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, parentWorkItemId: null, childWorkItemIds: [], wbsNumber: '1' }
     },
+    async getCompletionGate(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision, conditions: [], blocksCompletion: false }
+    },
     async listComments() { return { items: [], hasMore: false } },
     async authorizeComment() {},
     async addComment(_credential, _teamId, _workItemId, body) {
@@ -662,6 +665,51 @@ describe('public API router', () => {
       parentWorkItemId: 'phase-1',
       childWorkItemIds: ['task-1'],
       wbsNumber: '1.2',
+    })
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
+  test('returns the completion Gate status from its own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getCompletionGate(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return {
+            schemaVersion: 1,
+            teamId,
+            workItemId,
+            revision: 3,
+            conditions: [
+              { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: '1 of 1 acceptance criteria are not satisfied.' },
+            ],
+            blocksCompletion: true,
+          }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/completion-gate?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/completion-gate?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await response.json()).toEqual({
+      schemaVersion: 1,
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      revision: 3,
+      conditions: [
+        { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: '1 of 1 acceptance criteria are not satisfied.' },
+      ],
+      blocksCompletion: true,
     })
     expect(denied.status).toBe(403)
     expect(reads).toEqual(['team-1/work-item-1'])

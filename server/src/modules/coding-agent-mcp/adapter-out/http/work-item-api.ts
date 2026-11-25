@@ -4,7 +4,7 @@ import {
   type PublicProjectCharter,
   AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
   AGENT_SETTINGS_MAX_RESUMABLE_STATUSES, AGENT_RUN_QUESTIONS_MAX_ITEMS, AGENT_RUN_REPORT_ANSWER_READ_MAX_LENGTH,
-  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
+  WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH, WORK_ITEM_COMPLETION_GATE_CONDITIONS,
 } from '@mukuroji/contracts'
 import type {
   AgentAttachmentDownload, AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskAttachment, AgentTaskDocument, AgentTaskQuestions,
@@ -80,6 +80,16 @@ const hierarchySchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier,
   parentWorkItemId: identifier.nullable(), childWorkItemIds: z.array(identifier),
   wbsNumber: z.string().regex(/^[1-9][0-9]*(\.[1-9][0-9]*)*$/u).optional(),
+})
+const completionGateSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  conditions: z.array(z.object({
+    condition: z.string().min(1).max(100),
+    requirement: z.enum(['warn', 'required']),
+    state: z.enum(['met', 'unmet', 'unavailable']),
+    message: z.string().max(500).optional(),
+  })).max(50),
+  blocksCompletion: z.boolean(),
 })
 /** Validates the response of `GET /api/v1/work-items/{workItemId}/key`. */
 export const keySchema = z.object({
@@ -422,6 +432,30 @@ export function createAgentWorkItemApi(
         parentWorkItemId: found.parentWorkItemId,
         childWorkItemIds: found.childWorkItemIds,
         ...(found.wbsNumber === undefined ? {} : { wbsNumber: found.wbsNumber }),
+      }
+    },
+    /** Evaluates the Team's completion Gate against a task; a server older than the endpoint has none. */
+    async completionGate(id) {
+      let found: z.infer<typeof completionGateSchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/completion-gate`, completionGateSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the completion Gate of another task.')
+      }
+      return {
+        revision: found.revision,
+        // A newer server may evaluate conditions this client does not know; blocksCompletion still counts them.
+        conditions: found.conditions.flatMap(({ condition, requirement, state, message }) => {
+          const known = WORK_ITEM_COMPLETION_GATE_CONDITIONS.find((candidate) => candidate === condition)
+          return known === undefined
+            ? []
+            : [{ condition: known, requirement, state, ...(message === undefined ? {} : { message }) }]
+        }),
+        blocksCompletion: found.blocksCompletion,
       }
     },
     /** Reads a task's key and its Work Item's creation time; a server older than the endpoint has neither. */

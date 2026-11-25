@@ -277,6 +277,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async actualDates() { return undefined },
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
+    async completionGate() { return undefined },
     async relatedDocuments() { return undefined },
     async questions() { return undefined },
     async projectCharter() { return undefined },
@@ -537,7 +538,7 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'field' }, skipped: [{ taskId: 'bare', reason: 'not_ready' }] })
     // The custom field is checked first, so only the bare task needed a criteria read.
     expect(criteriaReads).toEqual(['bare'])
-    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null, actualDates: null, hierarchy: null })
+    expect(await service.get('canonical')).toMatchObject({ task: { id: 'canonical' }, acceptanceCriteria: criteria, effort: null, actualDates: null, hierarchy: null, completionGate: null })
     expect(await service.configuration()).toMatchObject({ agentSettings: { requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance' } })
     // Only the marks are sent; the server applies them to the stored list, so a retry has the same body.
     await service.update('canonical', { expectedRevision: 1, acceptanceCriteria: [{ id: criteria[1]?.id ?? '', satisfied: true }] }, 'mark')
@@ -964,6 +965,16 @@ describe('agent task lifecycle', () => {
       task: { id: 'one' },
       hierarchy: { parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '2.1' },
     })
+  })
+
+  test('shows the completion Gate read from its own endpoint', async () => {
+    const gate = {
+      revision: 1,
+      conditions: [{ condition: 'acceptance-criteria' as const, requirement: 'required' as const, state: 'unmet' as const, message: '1 of 1 acceptance criteria are not satisfied.' }],
+      blocksCompletion: true,
+    }
+    const { service } = fixture([task('one')], { async completionGate() { return gate } })
+    expect(await service.get('one')).toMatchObject({ task: { id: 'one' }, completionGate: gate })
   })
 
   test('shows the first page of linked Documents and keeps get_task working without them', async () => {

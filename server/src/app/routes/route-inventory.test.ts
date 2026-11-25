@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(656)
-  expect(new Set(inventory).size).toBe(652)
+  expect(inventory).toHaveLength(657)
+  expect(new Set(inventory).size).toBe(653)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -214,6 +214,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/attachments/:fileId/download')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '446f461042ea5caaf5a33ced43322cae5123aab9988b822d0bf390b5bb3c2ded',
+    'be3816d3553877d4ff5765ac9d1d64d9751ce5a19e570add85103998ed898564',
   )
 })

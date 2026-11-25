@@ -94,6 +94,10 @@ Team のワークフローで実行できる役割を限った遷移（例: 「�
 足りない項目（`/schedule`、`/acceptanceCriteria`、`/customFieldValues/<ID>`）がエラーに示されるので、
 `update_task` で埋めてから新しい `idempotencyKey` でやり直します。
 
+Team に完了 Gate を設定していると、`get_task` の `completionGate` に条件ごとの達成状況が出ます。
+`blocksCompletion` が `true` の間は `complete_task` が拒否されるので、agent は足りない条件
+（例: 承認がまだない）を人に伝えます。受け入れ条件は agent が満たしたと記録できますが、承認は人が行います。
+
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
 `get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
 agent は `read_document` で本文を Markdown として読みます。

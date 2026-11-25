@@ -17,6 +17,7 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type PublicWorkItemCompletionGate,
   type PublicDocumentContent,
   type PublicWorkItemAttachmentDownload,
   type PublicWorkItemAttachmentList,
@@ -336,6 +337,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<PublicWorkItemHierarchy>
+  /**
+   * Evaluates the Team's completion Gate against a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns Every condition the Team evaluates with whether the Work Item meets it.
+   */
+  getCompletionGate(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemCompletionGate>
   /**
    * Returns active Work Item Types and creation field schemas after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -1513,6 +1526,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId/hierarchy', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getHierarchy(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/completion-gate', async (c) => {
+    c.header('Cache-Control', 'private, no-store')
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getCompletionGate(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),

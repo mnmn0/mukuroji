@@ -24,6 +24,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- server API: `GET /api/v1/work-items/{workItemId}/completion-gate?teamId=` を追加しました。Team の完了 Gate の
+  条件ごとに満たしているか（`met` / `unmet` / `unavailable`）と、完了が拒否される状態か（`blocksCompletion`）を
+  `WorkItemCompletionGateStatus` で返します。scope は既存の `work-items:read` です（#354）。
+- MCP: `get_task` が `completionGate` で Team の完了 Gate の達成状況を返します。server が古いときは `null` です。
+  この client が知らない条件は `conditions` から省き、`blocksCompletion` はそれも含めて判定した値のままです（#354）。
 - server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
   `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
   `work-items:read` です。質問は新しい `AgentRunQuestion` で返し、既存の `AgentRunReport` は変えていません（#411）。

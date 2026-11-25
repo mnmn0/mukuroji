@@ -188,6 +188,7 @@ import {
 import {
   hasWorkItemApprovalCompletionTransitionConflict,
   prepareConfiguredUpdateWorkItem,
+  readWorkItemCompletionGateStatus,
 } from '../shared/file-approval-access'
 import {
   getEffectiveProjectScopeAccessList,
@@ -1797,6 +1798,40 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         parentWorkItemId: node?.parentWorkItemId ?? null,
         childWorkItemIds: node?.childWorkItemIds ?? [],
         ...(node ? { wbsNumber: node.wbsNumber } : {}),
+      }
+    },
+
+    /**
+     * Evaluates the Team's completion Gate against a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns Every condition the Team evaluates with its state at the Work Item's revision.
+     */
+    async getCompletionGate(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      const { configuration } = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        issue.teamId,
+      )
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        ...await readWorkItemCompletionGateStatus(
+          principal.directoryId,
+          issue.teamId,
+          issue,
+          configuration,
+          workItemDependencies,
+        ),
       }
     },
 

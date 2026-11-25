@@ -74,6 +74,8 @@ v1 の schema は `calendarSource` を持たないので、応答の `calendarPo
 
 `GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。archive 済みの Work Item は、どちらの場合も階層の外として親 `null`・子なしを返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
 
+`GET /api/v1/work-items/{workItemId}/completion-gate?teamId={teamId}` は Team の完了 Gate（[Work Item configuration](work-item-configuration.md#完了-gate)）をこの Work Item の現在の revision で判定し、`{ schemaVersion, teamId, workItemId, revision, conditions, blocksCompletion }` で返します（`WorkItemCompletionGateStatus`）。`conditions` は Team が `warn` か `required` にした条件を表示順に並べ、各要素は `condition`・`requirement`・`state`（`met` / `unmet` / `unavailable`）と、満たしていないときの `message` を持ちます。承認の件数を読めないとき、承認の条件は `unavailable` です。`blocksCompletion` は `required` の条件に `met` でないものがあると `true` で、その間 completed category への遷移は `409 conflict`（`errors[].code: "gate_not_satisfied"`）で拒否されます。Gate を設定していない Team では `conditions` が空で `blocksCompletion` は `false` です。判定は表示用で、完了の更新のときに server がもう一度判定します。条件は今後増えることがあるので、知らない `condition` は `message` で示してください。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
+
 ## Work Item Type catalog
 
 `GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。

@@ -229,7 +229,9 @@ Configuration の `completionGate` は、Work Item が completed category の st
 
 Web では、設定画面（ワークフローとフィールド）の「完了 Gate」で条件ごとに「使わない」「警告」「必須」を選ぶ。Work Item 詳細には、`warn` か `required` の条件がある Team でだけ、受け入れ条件の下に「完了 Gate」のチェックリストを出す。条件ごとに満たしているか、要求が警告か必須かを示し、保存済みの受け入れ条件と Work Item の承認の集計（`approvalSummary`。承認が無い Work Item では応答から省かれるので 0 件として数える）から contract の `describeWorkItemCompletionGate` で求める。表示は目安で、完了できるかは更新のときの server の判定で決まる。
 
-CI、bot / 人の review、merge、未解決 blocker の条件、manager の override、MCP `get_task` への Gate 状況の追加は後続で扱う（#354）。
+Public API の `GET /api/v1/work-items/{workItemId}/completion-gate` と MCP の `get_task`（`completionGate`）は、同じ判定を server で行った結果を返す。Web の表示と違い、承認の件数は Gate の判定と同じく強い読み取りで読み、読めなければ `unavailable` にする（[Public API](public-api.md)）。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、manager の override は後続で扱う（#354）。
 
 ### 遷移を実行できる役割と状態ごとの必須項目
 

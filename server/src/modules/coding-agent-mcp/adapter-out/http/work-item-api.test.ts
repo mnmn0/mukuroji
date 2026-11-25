@@ -546,3 +546,46 @@ test('reads a task hierarchy from the endpoint and treats an older server as hav
   await expect(api.hierarchy('other')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.hierarchy('bad-number')).rejects.toMatchObject({ code: 'invalid_response' })
 })
+
+test('reads a task completion Gate, drops conditions this client does not know, and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    /**
+     * Builds a completion Gate response with the given fields.
+     *
+     * @param body - Fields that override the empty Gate.
+     * @returns The JSON response.
+     */
+    const respond = (body: Record<string, unknown>) =>
+      Response.json({ schemaVersion: 1, teamId: 'team', revision: 2, conditions: [], blocksCompletion: false, ...body })
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/completion-gate':
+        return respond({
+          workItemId: 'task',
+          conditions: [
+            { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: 'Open criteria.' },
+            { condition: 'ci-passed', requirement: 'required', state: 'unavailable', message: 'CI could not be read.' },
+            { condition: 'human-approval', requirement: 'warn', state: 'met' },
+          ],
+          blocksCompletion: true,
+        })
+      case '/api/v1/work-items/other/completion-gate': return respond({ workItemId: 'task' })
+      case '/api/v1/work-items/bad-state/completion-gate':
+        return respond({ workItemId: 'bad-state', conditions: [{ condition: 'human-approval', requirement: 'warn', state: 'maybe' }] })
+      default: return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.completionGate('task')).toEqual({
+    revision: 2,
+    conditions: [
+      { condition: 'acceptance-criteria', requirement: 'required', state: 'unmet', message: 'Open criteria.' },
+      { condition: 'human-approval', requirement: 'warn', state: 'met' },
+    ],
+    blocksCompletion: true,
+  })
+  expect(paths[0]).toBe('/api/v1/work-items/task/completion-gate?teamId=team')
+  expect(await api.completionGate('legacy-server')).toBeUndefined()
+  await expect(api.completionGate('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.completionGate('bad-state')).rejects.toMatchObject({ code: 'invalid_response' })
+})
