@@ -1,6 +1,6 @@
 # 0005. 通知の Email を SES で送り、Slack と同じ配信 queue を channel ごとの sparse index で持つ
 
-- 状態: 提案
+- 状態: 一部を置き換え済み（[0082](0082-notification-email-digest-and-feedback.md)、digest と bounce・complaint の扱い）
 - 日付: 2026-11-20
 - 関連: Issue #351
 

@@ -28,6 +28,7 @@ import {
   type PlanningSnapshot,
   type PlanningUpdateCadence,
   type PlanningUpdateTargetSummary,
+  type ProjectCharterUpdateOwnerSync,
   type PlanningUpdate,
   type PlanningUpdateComment,
   type PlanningUpdateReaction,
@@ -156,6 +157,7 @@ import {
 import {
   createApiMutationContext,
   getEffectiveProjectScopeAccessList,
+  hasEnterprisePermissionAtResource,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -3155,6 +3157,186 @@ function createPlanningRevisionConditionCheck(
           }),
     },
   }
+}
+
+/** Attempts at moving the update owner when a concurrent Planning write moved the revision. */
+const CHARTER_UPDATE_OWNER_SYNC_ATTEMPTS = 3
+
+/**
+ * Moves a Project's health update owner to the new charter owner (ADR 0084).
+ *
+ * The charter is already saved, so nothing here undoes it. The cadence is rewritten with only its
+ * owner changed, under the same checks as the cadence endpoint: the caller must manage the
+ * Project's update target, and the new owner must be able to publish updates in it. The cadence
+ * write is fenced on the charter still naming this owner, so an older save that finishes after a
+ * newer one cannot apply its owner. A Planning revision that moved between the read and the write
+ * is read again and retried a few times.
+ *
+ * @param principal - Principal that saved the charter.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose charter owner changed.
+ * @param ownerMemberKey - Member key of the new charter owner.
+ * @returns What happened to the update owner.
+ */
+export async function syncProjectUpdateOwnerWithCharter(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  ownerMemberKey: string,
+): Promise<ProjectCharterUpdateOwnerSync> {
+  const target: PlanningUpdateTarget = { type: 'project', teamId, projectId }
+  try {
+    for (let attempt = 1; ; attempt += 1) {
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      const current = findPlanningUpdateTargetSummary(snapshot, target)
+      if (!current?.cadence || current.archivedAt) return 'not-configured'
+      if (current.cadence.updateOwnerMemberKey.toLowerCase() === ownerMemberKey.toLowerCase()) return 'unchanged'
+      // The charter route authorized projects.manage, so an Enterprise principal is evaluated again
+      // for the planning.write permission the cadence endpoint requires at this Project.
+      if (
+        principal.enterprisePermissions !== undefined &&
+        !hasEnterprisePermissionAtResource(principal, 'planning.write', {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: projectId,
+          parentTeamId: teamId,
+        })
+      ) {
+        return 'not-permitted'
+      }
+      const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+      try {
+        await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, target, 'manager')
+      } catch (error) {
+        if (isAccessRefusal(error)) return 'not-permitted'
+        throw error
+      }
+      let owner: WorkspaceMember
+      try {
+        owner = await requirePlanningCadenceRecipientTargetPermission(
+          principal,
+          visibleSnapshot,
+          target,
+          ownerMemberKey,
+          'member',
+        )
+      } catch (error) {
+        if (isAccessRefusal(error)) return 'owner-not-eligible'
+        throw error
+      }
+      const recipients: WorkspaceMember[] = [owner]
+      if (current.cadence.escalationMemberKey) {
+        try {
+          recipients.push(await requirePlanningCadenceRecipientTargetPermission(
+            principal,
+            visibleSnapshot,
+            target,
+            current.cadence.escalationMemberKey,
+            'viewer',
+          ))
+        } catch (error) {
+          // The escalation recipient lost access; the cadence must be fixed in Planning by hand.
+          if (isAccessRefusal(error)) return 'failed'
+          throw error
+        }
+      }
+      // The reviewer acknowledges with an update comment, so it is checked as the cadence
+      // endpoint checks it. Without an explicit reviewer the escalation recipient reviews.
+      const reviewerMemberKey = resolvePlanningUpdateReviewerMemberKey(current.cadence)
+      if (reviewerMemberKey) {
+        try {
+          recipients.push(await requirePlanningCadenceRecipientTargetPermission(
+            principal,
+            visibleSnapshot,
+            target,
+            reviewerMemberKey,
+            'member',
+            'planning.write',
+          ))
+        } catch (error) {
+          // The reviewer lost access; the cadence must be fixed in Planning by hand.
+          if (isAccessRefusal(error)) return 'failed'
+          throw error
+        }
+      }
+      // A later save that moved the charter owner again owns the update owner from here on.
+      if (await isCharterOwnerSuperseded(principal, teamId, projectId, ownerMemberKey)) return 'superseded'
+      const charterOwnerCheck = (await workspaceDependencies.projectDirectory.createProjectCharterOwnerConditionCheck?.(
+        principal.directoryId,
+        teamId,
+        projectId,
+        ownerMemberKey,
+      ))?.ConditionCheck
+      try {
+        await workItemDependencies.planning.configureUpdateCadence(
+          principal.directoryId,
+          {
+            target,
+            cadence: { ...current.cadence, updateOwnerMemberKey: owner.memberKey },
+            expectedRevision: snapshot.revision,
+          },
+          workItemState,
+          [
+            // A service account has no membership row to fence; recipients and CONTROL still are.
+            ...createPlanningCallerAuthorizationConditionChecks(
+              principal,
+              recipients,
+              principal.principalKind !== 'service-account',
+            ),
+            ...(charterOwnerCheck ? [{ ConditionCheck: charterOwnerCheck }] : []),
+          ],
+        )
+        return 'synced'
+      } catch (error) {
+        if (!(error instanceof PlanningError)) throw error
+        if (
+          error.code === 'PlanningAuthorizationChanged' &&
+          await isCharterOwnerSuperseded(principal, teamId, projectId, ownerMemberKey)
+        ) {
+          return 'superseded'
+        }
+        if (attempt < CHARTER_UPDATE_OWNER_SYNC_ATTEMPTS && error.code === 'PlanningRevisionConflict') continue
+        throw error
+      }
+    }
+  } catch (error) {
+    console.error('Moving the Project update owner to the charter owner failed.', error)
+    return 'failed'
+  }
+}
+
+/**
+ * Checks whether a later charter save has replaced the owner this synchronization applies.
+ *
+ * @param principal - Principal that saved the charter.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose charter owner changed.
+ * @param ownerMemberKey - Member key the synchronization moves the update owner to.
+ * @returns Whether the stored charter now names another owner or none.
+ */
+async function isCharterOwnerSuperseded(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  ownerMemberKey: string,
+): Promise<boolean> {
+  const { charter } = await workspaceDependencies.projectDirectory.getProjectCharter(
+    principal.directoryId,
+    teamId,
+    projectId,
+  )
+  return charter.owner?.userId !== ownerMemberKey
+}
+
+/**
+ * Checks whether an error refuses access rather than reporting a failure.
+ *
+ * @param error - Error thrown by an authorization check.
+ * @returns Whether the error is a 403, 404, or 409 refusal with an HTTP status.
+ */
+function isAccessRefusal(error: unknown): boolean {
+  return isRecord(error) && (error.status === 403 || error.status === 404 || error.status === 409)
 }
 
 /**

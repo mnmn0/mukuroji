@@ -19,6 +19,7 @@ import {
   type PublicWorkItemHierarchy,
   type PublicDocumentContent,
   type PublicCredentialOwner,
+  type PublicProjectCharter,
   type PublicProjectMemberList,
   type PublicProjectRaidLog,
   type PublicTeamList,
@@ -562,6 +563,18 @@ export interface PublicDirectoryService {
     teamId: string,
     projectId: string,
   ): Promise<PublicProjectRaidLog>
+  /**
+   * Reads the charter and lifecycle state of a Project, when the owner can view it.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project ID.
+   * @returns The charter the Web charter panel shows, with people referenced by member ID.
+   */
+  getProjectCharter(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    projectId: string,
+  ): Promise<PublicProjectCharter>
   /**
    * Resolves a Work Item key to the Work Item it names; answers 404 alike for every key that names
    * no Work Item the owner can read.
@@ -1271,6 +1284,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     c.header('Cache-Control', 'private, no-store')
     return c.json(await requireDirectoryService(dependencies).listProjectRaidLog(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('projectId'), 'Project ID'),
+    ))
+  })
+
+  router.get('/v1/projects/:projectId/charter', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireDirectoryService(dependencies).getProjectCharter(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('projectId'), 'Project ID'),

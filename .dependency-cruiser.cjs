@@ -17,6 +17,7 @@ const serverModules = [
   'focus',
   'notifications',
   'planning',
+  'project-budget',
   'realtime',
   'request-intake',
   'restore-drill',

@@ -8,7 +8,7 @@ import type { ChannelDeliveryTelemetry } from '../application/channel-delivery'
  * @returns Telemetry port for one scheduled delivery invocation.
  */
 export function createChannelDeliveryTelemetry(
-  label: 'Slack' | 'Email',
+  label: 'Slack' | 'Email' | 'Push',
   write: (event: string) => void = console.log,
   now: () => number = Date.now,
 ): ChannelDeliveryTelemetry {
