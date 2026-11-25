@@ -66,6 +66,9 @@ type AutomationFieldOperator = Extract<
  */
 export function validateCreateAutomationRuleInput(value: unknown): CreateAutomationRuleInput {
   const input = requireRecord(value, 'Automation rule')
+  const ownerTeamId = input.ownerTeamId === undefined
+    ? undefined
+    : requireBoundedText(input.ownerTeamId, 'Automation rule owner Team ID', 256)
   const name = requireBoundedText(input.name, 'Automation rule name', 160)
   if (typeof input.enabled !== 'boolean') {
     throw invalidInput('Automation rule enabled must be boolean.')
@@ -90,7 +93,11 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
   const maxChainDepth = input.maxChainDepth === undefined
     ? undefined
     : requireInteger(input.maxChainDepth, 'Automation maxChainDepth', 1, 64)
+  if (ownerTeamId !== undefined) {
+    assertAutomationRuleTeamScope(ownerTeamId, trigger, actions)
+  }
   return {
+    ...(ownerTeamId === undefined ? {} : { ownerTeamId }),
     name,
     enabled: input.enabled,
     trigger,
@@ -101,6 +108,52 @@ export function validateCreateAutomationRuleInput(value: unknown): CreateAutomat
     ...(allowReentry === undefined ? {} : { allowReentry }),
     ...(maxChainDepth === undefined ? {} : { maxChainDepth }),
   }
+}
+
+/**
+ * Rejects triggers and actions that a Team-owned rule cannot use.
+ *
+ * A Team-owned rule only reacts to its Team's Work Item events and only changes or creates
+ * Work Items in that Team. Form and inbound webhook triggers and outbound webhook actions use
+ * Workspace-level endpoints and secrets, so they stay with Workspace administrators.
+ *
+ * @param ownerTeamId - Team that owns the rule.
+ * @param trigger - Validated rule trigger.
+ * @param actions - Validated rule actions.
+ * @throws AutomationError when the rule reaches outside its Team.
+ */
+export function assertAutomationRuleTeamScope(
+  ownerTeamId: string,
+  trigger: AutomationTrigger,
+  actions: readonly AutomationAction[],
+): void {
+  if (trigger.type === 'form' || trigger.type === 'webhook') {
+    throw teamScopeViolation(`A Team rule cannot use the ${trigger.type} trigger.`)
+  }
+  if (trigger.type === 'work-item-type' && trigger.teamId !== ownerTeamId) {
+    throw teamScopeViolation('A Team rule can only watch Work Item types of its own Team.')
+  }
+  for (const action of actions) {
+    if (action.type === 'webhook') {
+      throw teamScopeViolation('A Team rule cannot call an outbound webhook.')
+    }
+    if (action.type === 'create') {
+      const teamId = action.values?.teamId
+      if (teamId !== undefined && teamId !== ownerTeamId) {
+        throw teamScopeViolation('A Team rule can only create Work Items in its own Team.')
+      }
+    }
+  }
+}
+
+/**
+ * Creates the stable error for a Team-owned definition that reaches another scope.
+ *
+ * @param message - Safe explanation of the rejected reference.
+ * @returns A 403 Automation error.
+ */
+export function teamScopeViolation(message: string): AutomationError {
+  return new AutomationError('forbidden', 'AutomationTeamScopeViolation', message)
 }
 
 /** Validates a trigger discriminator and its filters. */

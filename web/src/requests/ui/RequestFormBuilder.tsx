@@ -48,6 +48,8 @@ export type RequestFormBuilderProps = {
    * Routing と scope selector に表示する Team/Project directory です。
    */
   teams: ProjectDirectoryTeam[]
+  /** Whether the Workspace scope can be chosen; false for a Team manager. Defaults to true. */
+  allowWorkspaceScope?: boolean
   /**
    * 選択 Team で利用できる workflow status 一覧です。
    */
@@ -121,6 +123,7 @@ const conditionOperators = [
  * Admin が form 表示、条件、validation、consent、attachment、routing を編集する UI です。
  */
 export function RequestFormBuilder({
+  allowWorkspaceScope = true,
   canEdit = true,
   canPublish = true,
   errorMessage,
@@ -269,7 +272,9 @@ export function RequestFormBuilder({
                 })
               }}
             >
-              <option value="workspace">{t('requests.builder.scopeWorkspace')}</option>
+              {allowWorkspaceScope || model.scope.type === 'workspace'
+                ? <option value="workspace">{t('requests.builder.scopeWorkspace')}</option>
+                : null}
               <option value="team">{t('requests.builder.scopeTeam')}</option>
             </select>
           </BuilderLabel>

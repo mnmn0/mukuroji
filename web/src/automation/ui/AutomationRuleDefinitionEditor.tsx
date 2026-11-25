@@ -365,9 +365,12 @@ export function AutomationRuleDefinitionEditor({
               value={newActionType}
               onChange={(event) => setNewActionType(readActionType(event.target.value))}
             >
-              {AUTOMATION_RULE_DRAFT_ACTION_TYPES.map((type) => (
-                <option key={type} value={type}>{t(actionLabelKeys[type])}</option>
-              ))}
+              {AUTOMATION_RULE_DRAFT_ACTION_TYPES
+                // A Team rule cannot call an outbound webhook (ADR 0087).
+                .filter((type) => rule.ownerTeamId === undefined || type !== 'webhook')
+                .map((type) => (
+                  <option key={type} value={type}>{t(actionLabelKeys[type])}</option>
+                ))}
             </select>
           </label>
           <button
@@ -1013,6 +1016,8 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
     teamId,
     workItemId: workItemId.trim(),
     rule: {
+      // The owner Team decides who may try the rule and which Work Items it may be tried on.
+      ...(rule.ownerTeamId === undefined ? {} : { ownerTeamId: rule.ownerTeamId }),
       name: update.name ?? rule.name,
       enabled: rule.enabled,
       trigger: rule.trigger,

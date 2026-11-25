@@ -361,6 +361,11 @@ export type AutomationRule = {
   id: string
   /** Rule が属する Workspace ID です。 */
   workspaceId: string
+  /**
+   * Rule を所有する Team ID です。省略時は Workspace 全体の rule で、Workspace 管理者だけが
+   * 管理します。指定時は Team manager が管理でき、その Team の Work Item だけを扱います。
+   */
+  ownerTeamId?: string
   /** Rule の表示名です。 */
   name: string
   /** Rule を新しい event に適用するかどうかです。 */
@@ -400,6 +405,8 @@ export type AutomationRule = {
 
 /** Automation rule 作成 API の入力です。 */
 export type CreateAutomationRuleInput = {
+  /** Rule を所有する Team ID です。省略時は Workspace 全体の rule です。作成後は変えられません。 */
+  ownerTeamId?: string
   /** Rule の表示名です。 */
   name: string
   /** 作成直後から有効にするかどうかです。 */
@@ -421,7 +428,7 @@ export type CreateAutomationRuleInput = {
 }
 
 /** Automation rule 更新 API の入力です。 */
-export type UpdateAutomationRuleInput = Partial<CreateAutomationRuleInput> & {
+export type UpdateAutomationRuleInput = Partial<Omit<CreateAutomationRuleInput, 'ownerTeamId'>> & {
   /** 読み込み時点の optimistic revision です。 */
   expectedRevision: number
 }
@@ -675,6 +682,11 @@ export type AutomationTemplateForKind<TKind extends AutomationTemplateKind> = {
   id: string
   /** Template が属する Workspace ID です。 */
   workspaceId: string
+  /**
+   * Template を所有する Team ID です。省略時は Workspace 全体の template です。指定時は
+   * その Team の rule・recurring Work・適用だけが使えます。
+   */
+  ownerTeamId?: string
   /** Template discriminator です。 */
   kind: TKind
   /** Template の表示名です。 */
@@ -701,6 +713,8 @@ export type AutomationTemplate = {
 
 /** Kind ごとの Automation template 作成入力です。 */
 export type CreateAutomationTemplateInputForKind<TKind extends AutomationTemplateKind> = {
+  /** Template を所有する Team ID です。省略時は Workspace 全体の template です。作成後は変えられません。 */
+  ownerTeamId?: string
   /** Template discriminator です。 */
   kind: TKind
   /** Template の表示名です。 */
@@ -1095,6 +1109,11 @@ export type RecurringWork = {
   workspaceId: string
   /** 作成する Work Item の owner Team ID です。 */
   teamId: string
+  /**
+   * Definition を所有する Team ID です。省略時は Workspace 管理者だけが管理する定義です。
+   * 指定時は `teamId` と同じ Team で、その Team manager が管理できます。
+   */
+  ownerTeamId?: string
   /** 表示名です。 */
   name: string
   /** 新しい occurrence を生成するかどうかです。 */
@@ -1130,6 +1149,8 @@ export type CreateRecurringWorkInput = {
   name: string
   /** 作成する Work Item の owner Team ID です。 */
   teamId: string
+  /** Definition を所有する Team ID です。指定する場合は `teamId` と同じにします。作成後は変えられません。 */
+  ownerTeamId?: string
   /** 作成直後から有効にするかどうかです。 */
   enabled: boolean
   /** Work Item template ID です。 */
@@ -1139,7 +1160,7 @@ export type CreateRecurringWorkInput = {
 }
 
 /** Recurring Work 更新 API の入力です。 */
-export type UpdateRecurringWorkInput = Partial<CreateRecurringWorkInput> & {
+export type UpdateRecurringWorkInput = Partial<Omit<CreateRecurringWorkInput, 'ownerTeamId'>> & {
   /** 読み込み時点の optimistic revision です。 */
   expectedRevision: number
 }
@@ -1182,6 +1203,11 @@ export type AutomationExecution = {
   ruleId: string
   /** 実行した immutable rule version です。 */
   ruleVersion: number
+  /**
+   * 実行した rule または recurring Work を所有する Team ID です。実行開始時に固定し、
+   * action はこの Team の Work Item だけを変更・作成します。省略時は Workspace 全体の定義です。
+   */
+  ownerTeamId?: string
   /** Trigger にした durable event ID です。 */
   triggerEventId: string
   /** Execution state です。 */
@@ -1328,4 +1354,12 @@ export type BulkOperation = {
   createdAt: string
   /** 最終更新日時です。 */
   updatedAt: string
+}
+
+/** 呼び出し元が管理できる Automation 定義の範囲です。 */
+export type AutomationManagementScopes = {
+  /** Workspace 全体の定義（所有 Team なし）と全 Team の定義を管理できるかどうかです。 */
+  workspace: boolean
+  /** 所有 Team の定義を管理できる Team ID の一覧です。`workspace` が true の場合は全 Team です。 */
+  teamIds: string[]
 }

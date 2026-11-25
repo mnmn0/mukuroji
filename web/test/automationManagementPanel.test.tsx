@@ -35,6 +35,11 @@ import { runAutomationManagementMutation } from '../src/automation/mutations/run
 import { resolveAutomationManagementTabTarget } from '../src/automation/model/tabs'
 import { refreshAutomationTemplateApplication } from '../src/automation/model/templateApplicationRefresh'
 import {
+  selectOwnedAutomationData,
+  selectTeamTemplateOptions,
+  selectWorkspaceTemplateOptions,
+} from '../src/automation/model/ownedDefinitions'
+import {
   activeAutomationRuleFixture,
   activeInboundWebhookEndpointFixture,
   deadLetterAutomationExecutionFixture,
@@ -90,6 +95,31 @@ describe('AutomationManagementPanel', () => {
       'idempotency-1',
       'idempotency-1',
     ])
+  })
+
+  test('offers a search of older runs only while Team history remains unsearched', () => {
+    const render = (onLoadMoreExecutions?: () => void) => renderToStaticMarkup(
+      <AutomationManagementPanel
+        canViewWebhooks={false}
+        executions={[]}
+        initialTab="runs"
+        locale="en"
+        recurringWork={[]}
+        rules={[]}
+        teams={teams}
+        templates={[]}
+        onLoadMoreExecutions={onLoadMoreExecutions}
+      />,
+    )
+    const t = createTranslator('en')
+
+    const searchable = render(() => undefined)
+    const complete = render()
+
+    expect(searchable).toContain('data-testid="automation-runs-load-more"')
+    expect(searchable).toContain(t('automation.runs.emptySearched'))
+    expect(complete).not.toContain('automation-runs-load-more')
+    expect(complete).toContain(t('automation.runs.empty'))
   })
 
   test('uses roving tab stops and wraps keyboard navigation across visible tabs', () => {
@@ -1222,5 +1252,62 @@ describe('AutomationManagementPanel', () => {
 
     expect(html).toContain('Dead letter')
     expect(html).not.toContain('data-testid="automation-run-retry-')
+  })
+})
+
+describe('Team-owned Automation definitions', () => {
+  test('keeps only the Team definitions and runs, and labels the owner Team on Workspace cards', () => {
+    const teamRule = { ...activeAutomationRuleFixture, id: 'rule-team', ownerTeamId: 'core-team' }
+    const otherRule = { ...pausedAutomationRuleFixture, id: 'rule-other', ownerTeamId: 'ops-team' }
+    const owned = selectOwnedAutomationData({
+      executions: [
+        { ...deadLetterAutomationExecutionFixture, id: 'run-team', ownerTeamId: 'core-team' },
+        deadLetterAutomationExecutionFixture,
+      ],
+      recurringWork: [dstRecurringWorkFixture, { ...dstRecurringWorkFixture, id: 'recurring-team', ownerTeamId: 'core-team' }],
+      rules: [activeAutomationRuleFixture, teamRule, otherRule],
+      templates: [workItemAutomationTemplateFixture, { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' }],
+      webhooks: [activeInboundWebhookEndpointFixture],
+      workflowTargets: [
+        { expectedRevision: 1, name: 'workspace', scopeId: 'workspace', scopeType: 'workspace' },
+        { expectedRevision: 2, name: 'Core team', scopeId: 'core-team', scopeType: 'team' },
+      ],
+    }, 'core-team')
+
+    expect(owned.rules.map((rule) => rule.id)).toEqual(['rule-team'])
+    expect(owned.executions.map((execution) => execution.id)).toEqual(['run-team'])
+    expect(owned.recurringWork.map((definition) => definition.id)).toEqual(['recurring-team'])
+    expect(owned.templates.map((template) => template.id)).toEqual(['template-team'])
+    expect(owned.webhooks).toEqual([])
+    expect(owned.workflowTargets.map((target) => target.scopeId)).toEqual(['core-team'])
+    expect(selectTeamTemplateOptions([
+      workItemAutomationTemplateFixture,
+      { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' },
+      { ...workItemAutomationTemplateFixture, id: 'template-other', ownerTeamId: 'ops-team' },
+      {
+        ...workItemAutomationTemplateFixture,
+        id: 'template-ops-payload',
+        payload: { ...workItemAutomationTemplateFixture.payload, teamId: 'ops-team' },
+      },
+    ], 'core-team').map((template) => template.id)).toEqual([workItemAutomationTemplateFixture.id, 'template-team'])
+    expect(selectWorkspaceTemplateOptions([
+      workItemAutomationTemplateFixture,
+      { ...workItemAutomationTemplateFixture, id: 'template-team', ownerTeamId: 'core-team' },
+    ]).map((template) => template.id)).toEqual([workItemAutomationTemplateFixture.id])
+
+    const markup = renderToStaticMarkup(
+      <AutomationManagementPanel
+        executions={[]}
+        locale="ja"
+        recurringWork={[]}
+        rules={[activeAutomationRuleFixture, teamRule]}
+        teams={teams}
+        templates={[]}
+        webhooks={[]}
+        workflowTargets={[]}
+      />,
+    )
+    expect(markup).toContain('Team: Core team')
+    expect(markup.split('Team: ').length - 1).toBe(1)
   })
 })
