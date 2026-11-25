@@ -816,6 +816,7 @@ export class ConnectorSyncEngine {
     }
     let mutation = createOutboundMutation(
       link,
+      installation.provider,
       workItem,
       input.operationId,
       this.originSigningSecret,
@@ -853,6 +854,7 @@ export class ConnectorSyncEngine {
       validateLinkRecordBinding(link, latest)
       mutation = createOutboundMutation(
         link,
+        installation.provider,
         workItem,
         input.operationId,
         this.originSigningSecret,
@@ -1258,6 +1260,7 @@ export class ConnectorSyncEngine {
     if (!keepsUndatedLocal && (resolution.resolution === 'use-local' || resolution.resolution === 'merge')) {
       const mutation = createOutboundMutation(
         link,
+        installation.provider,
         synchronizedWorkItem,
         operationId,
         this.originSigningSecret,
@@ -1950,6 +1953,7 @@ function createPersistedConnectorExternalRecord(
  * Builds the write of a Work Item to its linked resource.
  *
  * @param link - Link of the resource.
+ * @param provider - Provider of the link's installation.
  * @param workItem - Work Item contents to write.
  * @param operationId - Stable operation ID of the write.
  * @param originSigningSecret - Secret that signs the origin marker.
@@ -1960,6 +1964,7 @@ function createPersistedConnectorExternalRecord(
  */
 function createOutboundMutation(
   link: ExternalWorkItemLink,
+  provider: ConnectorInstallation['provider'],
   workItem: ConnectorWorkItemSnapshot,
   operationId: string,
   originSigningSecret: string,
@@ -1967,6 +1972,9 @@ function createOutboundMutation(
   alwaysConditional = false,
 ): ConnectorOutboundMutation {
   const calendar = link.resourceType === 'calendar-event'
+  // GitHub checks the version itself before it writes, so like a calendar it conditions only the
+  // writes it reads back.
+  const conditionalWhenBidirectional = calendar || provider === 'github'
   return {
     externalId: link.externalId,
     resourceType: readWorkItemResourceType(link.resourceType),
@@ -1984,11 +1992,11 @@ function createOutboundMutation(
       originSigningSecret,
     ),
     operationId,
-    // A calendar write is conditional only when both sides sync: an outbound-only link is meant to
+    // A calendar or GitHub write is conditional only when both sides sync: an outbound-only link is meant to
     // overwrite the event, and a refused write would never be read back. A conflict resolution
     // always is, so it does not overwrite an event moved after the conflict was shown.
     ...(expectedExternalVersion &&
-        (!calendar || alwaysConditional || link.syncDirection === 'bidirectional')
+        (!conditionalWhenBidirectional || alwaysConditional || link.syncDirection === 'bidirectional')
       ? { expectedExternalVersion }
       : {}),
   }
@@ -2169,7 +2177,7 @@ function validateConflictResolution(
   }
   if (
     keys.length === 0 ||
-    keys.some((key) => !['title', 'description', 'status'].includes(key))
+    keys.some((key) => !['title', 'description', 'status', 'state'].includes(key))
   ) {
     throw new ConnectorRuntimeError(
       'ConnectorSyncResolutionInvalid',
@@ -2179,6 +2187,18 @@ function validateConflictResolution(
   const mergedValues: ConnectorWorkItemPatch = {}
   for (const key of keys) {
     const value = input.mergedValues[key]
+    if (key === 'state') {
+      // A two-state resource (a GitHub issue) merges its open / closed state, which the gateway
+      // maps to a status of the matching category.
+      if (value !== 'open' && value !== 'closed') {
+        throw new ConnectorRuntimeError(
+          'ConnectorSyncResolutionInvalid',
+          'Merged state must be open or closed.',
+        )
+      }
+      mergedValues.state = value
+      continue
+    }
     if (typeof value !== 'string' || value.length > 100_000 || value.includes('\0')) {
       throw new ConnectorRuntimeError(
         'ConnectorSyncResolutionInvalid',

@@ -356,6 +356,9 @@ Phase / Milestone を持つテンプレートを適用するときは、Phase �
   GitHub を接続すると、Work Item の **外部リンク** に issue を `owner/repository#番号` で登録でき、タイトル・説明・
   open / closed が同期されます。closed の issue は Work Item を workflow で今の状態から移れる完了 category の status
   （なければ最初の完了 status）へ、reopen された issue は未着手（なければ backlog、作業中）の status へ動かします。
+  workflow に完了の status がない（reopen では未着手・backlog・作業中の status がない）場合や、workflow の条件で移せない場合は、
+  Work Item を動かさず同期の失敗として残します。両方が双方向に同期していて、Mukuroji が最後に読んだあとに GitHub 側で
+  issue が編集されていたら、上書きせずに次の取り込みで同期競合として出します。
   逆に Work Item が完了・中止になると issue を close し、それ以外に戻ると reopen します。pull request・commit・deploy の
   link は手入力のまま同期しません。issue の本文の末尾には、Mukuroji が書き込んだことを示す見えないコメントが付きます。
   Google Calendar と Outlook Calendar を接続すると、Work Item の **外部リンク** で「カレンダーの予定」を追加できます。

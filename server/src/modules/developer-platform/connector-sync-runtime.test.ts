@@ -1152,6 +1152,33 @@ describe('ConnectorSyncEngine', () => {
     })
   })
 
+  test('accepts an open or closed state in a merge and rejects any other value', async () => {
+    const fixture = await createRuntimeFixture(createAdapter({
+      async push(_credential, mutation) {
+        return {
+          ...externalRecord('11'),
+          title: mutation.title,
+          description: mutation.description,
+          status: mutation.status,
+          originMarker: mutation.originMarker,
+        }
+      },
+    }))
+    const conflict = await createConflictFixture(fixture)
+    await expect(fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'resolver-1' },
+      conflict.id,
+      { resolution: 'merge', mergedValues: { title: 'Merged title', state: 'maybe' } },
+    )).rejects.toMatchObject({ code: 'ConnectorSyncResolutionInvalid' })
+    const merged = await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'resolver-1' },
+      conflict.id,
+      { resolution: 'merge', mergedValues: { title: 'Merged title', state: 'closed' } },
+    )
+    expect(merged.status).toBe('resolved')
+    expect(fixture.getWorkItem()).toMatchObject({ title: 'Merged title' })
+  })
+
   test('replays an idempotent merge after local apply succeeds and provider push fails', async () => {
     let failNextPush = false
     let externalVersion = 10

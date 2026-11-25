@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { WorkflowDefinition } from '@mukuroji/contracts'
+import { WorkItemConfigurationError } from '../../modules/work-items/work-item-configuration'
 import { resolveConnectorStateStatus } from './connector-state-status'
 
 const workflow: Pick<WorkflowDefinition, 'statuses' | 'transitions'> = {
@@ -37,5 +38,12 @@ describe('connector state status', () => {
 
   test('falls back to the first status of the category and leaves the rejection to the workflow rules', () => {
     expect(resolveConnectorStateStatus(workflow, 'todo', 'closed')).toBe('shipped')
+  })
+
+  test('fails instead of acknowledging a state the workflow has no status for', () => {
+    const openOnly = { statuses: workflow.statuses.filter((status) => status.category !== 'completed'), transitions: [] }
+    expect(() => resolveConnectorStateStatus(openOnly, 'doing', 'closed')).toThrow(WorkItemConfigurationError)
+    const closedOnly = { statuses: workflow.statuses.filter((status) => status.category === 'completed'), transitions: [] }
+    expect(() => resolveConnectorStateStatus(closedOnly, 'done', 'open')).toThrow(WorkItemConfigurationError)
   })
 })

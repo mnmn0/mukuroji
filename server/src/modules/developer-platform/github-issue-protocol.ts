@@ -114,6 +114,10 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
    * Writes the Work Item title, description, and open / closed state to its issue. A completed or
    * canceled Work Item closes the issue; any other status category reopens it.
    *
+   * GitHub has no conditional issue update, so a write with an expected version first reads the
+   * issue and refuses when someone edited it since Mukuroji last read it. The next poll then reads
+   * the edit and records a conflict instead of the write overwriting it.
+   *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents and the origin marker.
    * @returns The issue after the write.
@@ -122,6 +126,13 @@ export class GitHubIssueProtocol implements ConnectorResourceProtocol {
     requireIssueResource(mutation.resourceType)
     const issue = readIssueId(mutation.externalId)
     const state = toIssueState(mutation.statusCategory)
+    if (mutation.expectedExternalVersion !== undefined) {
+      const current = await request({ method: 'GET', path: issuePath(issue), allowedStatuses: [404, 410] })
+      if (current.status === 404 || current.status === 410) throw missingIssue()
+      if (readIssue(current.payload, `${issue.owner}/${issue.repository}`).externalVersion !== mutation.expectedExternalVersion) {
+        throw issueChanged()
+      }
+    }
     const response = await request({
       method: 'PATCH',
       path: issuePath(issue),
@@ -260,6 +271,8 @@ function readBody(value: unknown): { description: string; originMarker?: string 
 
 /**
  * Writes the description with the origin marker as a trailing HTML comment, which GitHub hides.
+ * The description is written as it is: the marker opens its own comment, and reading the issue
+ * back takes only a marker at the very end, so comments in the description keep working.
  *
  * @param description - Work Item description.
  * @param originMarker - Signed origin marker.
@@ -267,7 +280,7 @@ function readBody(value: unknown): { description: string; originMarker?: string 
  */
 function writeBody(description: string | undefined, originMarker: string) {
   if (!/^[A-Za-z0-9._~:-]{1,1024}$/u.test(originMarker)) throw malformed('Connector origin marker is invalid.')
-  const text = (description ?? '').slice(0, BODY_MAX_LENGTH).replace(/-->/gu, '-- >')
+  const text = (description ?? '').slice(0, BODY_MAX_LENGTH)
   return `${text}\n\n<!-- mukuroji-origin:${originMarker} -->`
 }
 
@@ -305,6 +318,16 @@ function requireIssueResource(resourceType: ExternalResourceType) {
       'The GitHub connector syncs issues only.',
     )
   }
+}
+
+/**
+ * Error for an issue edited since Mukuroji last read it. The next poll reads the edit and records a
+ * conflict when the Work Item changed too.
+ *
+ * @returns A non-retryable runtime error.
+ */
+function issueChanged() {
+  return new ConnectorRuntimeError('ConnectorExternalVersionChanged', 'The GitHub issue changed since it was last read.')
 }
 
 /**

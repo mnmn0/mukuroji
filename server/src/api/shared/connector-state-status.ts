@@ -1,4 +1,5 @@
 import type { WorkflowDefinition, WorkflowStatusCategory } from '@mukuroji/contracts'
+import { WorkItemConfigurationError } from '../../modules/work-items/work-item-configuration'
 
 /** Categories a closed resource maps to; a Work Item already in one of them stays where it is. */
 const CLOSED_CATEGORIES: ReadonlySet<WorkflowStatusCategory> = new Set(['completed', 'canceled'])
@@ -12,12 +13,15 @@ const REOPEN_CATEGORIES: readonly WorkflowStatusCategory[] = ['unstarted', 'back
  * first status of the matching category that the workflow allows from the current status is used:
  * `completed` for a closed resource, and `unstarted`, then `backlog`, then `started` for a reopened
  * one. When no transition leads there, the first such status of the workflow is returned and the
- * workflow rules reject the change, which the sync records as a failure instead of guessing.
+ * workflow rules reject the change, which the sync records as a failure instead of guessing. A
+ * workflow with no status of the matching category cannot follow the resource, so that is a failure
+ * too rather than a silent acknowledgement of the change.
  *
  * @param workflow - Workflow of the Work Item Type.
  * @param currentStatusId - Current workflow status ID.
  * @param state - Open or closed state of the resource.
  * @returns The status ID to set, or `undefined` when the current status already agrees.
+ * @throws {WorkItemConfigurationError} When the workflow has no status of the matching category.
  */
 export function resolveConnectorStateStatus(
   workflow: Pick<WorkflowDefinition, 'statuses' | 'transitions'>,
@@ -40,5 +44,9 @@ export function resolveConnectorStateStatus(
     const target = ordered.find((status) => status.category === category)
     if (target) return target.id
   }
-  return undefined
+  throw new WorkItemConfigurationError(
+    409,
+    'ConnectorStateStatusUnavailable',
+    `The workflow has no status for a ${state} resource.`,
+  )
 }

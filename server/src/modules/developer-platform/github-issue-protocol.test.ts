@@ -106,7 +106,7 @@ describe('GitHub issue protocol', () => {
       resourceType: 'issue' as const,
       workItemRevision: 4,
       title: 'Fix login',
-      description: 'Use --> safely',
+      description: 'Use <!-- note --> safely',
       originMarker: 'v1.payload.signature',
       operationId: 'operation-1',
     }
@@ -114,11 +114,36 @@ describe('GitHub issue protocol', () => {
     await protocol.push(request, { ...mutation, statusCategory: 'canceled' })
     await protocol.push(request, { ...mutation, statusCategory: 'started' })
     expect(requests.map((entry) => entry.body)).toEqual([
-      { title: 'Fix login', body: 'Use -- > safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'completed' },
-      { title: 'Fix login', body: 'Use -- > safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'not_planned' },
-      { title: 'Fix login', body: 'Use -- > safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'open' },
+      { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'completed' },
+      { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'closed', state_reason: 'not_planned' },
+      { title: 'Fix login', body: 'Use <!-- note --> safely\n\n<!-- mukuroji-origin:v1.payload.signature -->', state: 'open' },
     ])
     expect(requests[0]).toMatchObject({ method: 'PATCH', path: 'repos/acme/app/issues/12' })
+  })
+
+  test('refuses to overwrite an issue edited since its expected version', async () => {
+    const protocol = new GitHubIssueProtocol()
+    const current = issue()
+    const version = typeof current.updated_at === 'string' ? current.updated_at : ''
+    const { request, requests } = createRequester([
+      { status: 200, payload: current },
+      { status: 200, payload: current },
+      { status: 200, payload: current },
+    ])
+    const mutation = {
+      externalId: 'acme/app#12',
+      resourceType: 'issue' as const,
+      workItemRevision: 4,
+      title: 'Fix login',
+      originMarker: 'v1.payload.signature',
+      operationId: 'operation-1',
+      statusCategory: 'started',
+    }
+    await expect(protocol.push(request, { ...mutation, expectedExternalVersion: '2020-01-01T00:00:00Z' }))
+      .rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
+    expect(requests.map((entry) => entry.method)).toEqual(['GET'])
+    await protocol.push(request, { ...mutation, expectedExternalVersion: version })
+    expect(requests.map((entry) => entry.method)).toEqual(['GET', 'GET', 'PATCH'])
   })
 })
 
