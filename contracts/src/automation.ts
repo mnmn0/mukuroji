@@ -105,12 +105,29 @@ export type AutomationRelationTrigger = {
   eventTypes?: WorkItemRelationEventType[]
 }
 
+/** Most days before the due date a due-soon schedule trigger can look ahead. */
+export const AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE = 365
+
+/**
+ * Runs a schedule trigger once for each open Work Item whose due date is a fixed number of days
+ * after the occurrence's local date in the schedule's time zone.
+ */
+export type AutomationDueWorkItemsSelection = {
+  /** Days from the occurrence date to the due date, from 0 (due that day) to the maximum. */
+  daysBefore: number
+}
+
 /** Scheduled occurrence を検出する trigger です。 */
 export type AutomationScheduleTrigger = {
   /** Trigger discriminator です。 */
   type: 'schedule'
   /** IANA timezone と recurrence を含む schedule です。 */
   schedule: RecurringSchedule
+  /**
+   * When set, each occurrence runs the rule once per open Work Item due that many days later,
+   * and conditions and actions read that Work Item. Omitted runs the rule once per occurrence.
+   */
+  dueWorkItems?: AutomationDueWorkItemsSelection
 }
 
 /** Longest delay, in days, a baseline-slip trigger can wait for. */
@@ -131,7 +148,26 @@ export type AutomationBaselineSlipTrigger = {
   minDelayDays?: number
 }
 
-/** Automation rule が扱える11種類の trigger です。 */
+/** Approval decisions an approval trigger can filter on. */
+export const AUTOMATION_APPROVAL_DECISIONS = ['approved', 'rejected', 'changes-requested'] as const
+
+/** Approval decision an approval trigger can filter on. */
+export type AutomationApprovalDecision = (typeof AUTOMATION_APPROVAL_DECISIONS)[number]
+
+/**
+ * Detects a decided approval request on a Work Item.
+ *
+ * `approved` fires once every reviewer has approved, while `rejected` and `changes-requested` fire
+ * on the reviewer decision that sets the request to that state.
+ */
+export type AutomationApprovalTrigger = {
+  /** Trigger discriminator. */
+  type: 'approval'
+  /** Decision that starts the rule; omitted matches every decision. */
+  decision?: AutomationApprovalDecision
+}
+
+/** Automation rule が扱える12種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
@@ -140,6 +176,7 @@ export type AutomationTrigger =
   | AutomationCustomFieldTrigger
   | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger
+  | AutomationApprovalTrigger
   | AutomationRelationTrigger
   | AutomationFormTrigger
   | AutomationWebhookTrigger
@@ -250,6 +287,11 @@ export type AutomationNotifyAction = {
   type: 'notify'
   /** Notification recipient の member keys です。 */
   recipientMemberKeys: string[]
+  /**
+   * Also notifies the assignee of the Work Item the rule runs for. The rule needs at least one
+   * recipient key or this flag.
+   */
+  notifyAssignee?: boolean
   /** Notification title です。 */
   title: string
   /** Notification body です。 */
@@ -350,6 +392,11 @@ export type AutomationRule = {
   nextRunAt?: string
   /** Schedule trigger の最後に完了した occurrence timestamp です。 */
   lastRunAt?: string
+  /**
+   * Workspace member key of the administrator who created the rule. Rules created before this
+   * field existed have none; their failure notifications go to the Workspace administrators only.
+   */
+  createdByMemberKey?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終更新日時の ISO 8601 timestamp です。 */
@@ -385,6 +432,83 @@ export type UpdateAutomationRuleInput = Partial<Omit<CreateAutomationRuleInput, 
   /** 読み込み時点の optimistic revision です。 */
   expectedRevision: number
 }
+
+/** Body of a delete request for a rule, template, or recurring definition. */
+export type DeleteAutomationDefinitionInput = {
+  /** Revision the client read; a newer revision rejects the delete. */
+  expectedRevision: number
+}
+
+/** Work Item a dry run evaluates an unsaved rule definition against. */
+export type AutomationRuleDryRunInput = {
+  /** Rule definition as the editor would save it. */
+  rule: CreateAutomationRuleInput
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item ID inside the Team. */
+  workItemId: string
+}
+
+/** Result of one top-level condition in a dry run. */
+export type AutomationRuleDryRunConditionResult = {
+  /** Zero-based index in the rule's `conditions`. */
+  index: number
+  /** Whether the condition holds for the Work Item. */
+  matched: boolean
+  /** Whether the condition reads `event.` fields, which a dry run has no trigger event for. */
+  readsEventFields: boolean
+}
+
+/** One field an action would change on the Work Item. */
+export type AutomationRuleDryRunFieldChange = {
+  /** Work Item field name. */
+  field: string
+  /** Current value; absent when the field is unset. */
+  before?: AutomationValue
+  /** Value the action would write. */
+  after: AutomationValue
+}
+
+/** What one action would do if the rule ran now. */
+export type AutomationRuleDryRunActionPlan = {
+  /** Zero-based index in the rule's `actions`. */
+  index: number
+  /** Action discriminator. */
+  type: AutomationAction['type']
+  /**
+   * Fields an assign, move, or update action would change. Fields that already hold the target
+   * value are left out, so an empty list means the action would change nothing.
+   */
+  changes?: AutomationRuleDryRunFieldChange[]
+  /** Members a notify or approval action would reach. */
+  recipientMemberKeys?: string[]
+  /** Host of the endpoint a webhook action would call. */
+  webhookHost?: string
+}
+
+/** Result of evaluating an unsaved rule against one Work Item without running any action. */
+export type AutomationRuleDryRunResult = {
+  /** Whether every top-level condition holds, so the actions would run once the trigger fires. */
+  matched: boolean
+  /**
+   * Trigger the rule waits for. A dry run assumes it fired; it does not check that the Work Item
+   * could cause it.
+   */
+  triggerType: AutomationTrigger['type']
+  /** Result of each top-level condition. */
+  conditions: AutomationRuleDryRunConditionResult[]
+  /** Planned actions in execution order; empty when `matched` is false. */
+  actions: AutomationRuleDryRunActionPlan[]
+}
+
+/** Audit event type that tells the rule's creator and administrators an execution dead-lettered. */
+export const AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE = 'automation.execution.dead-lettered'
+
+/** Audit event type that tells the rule's creator and administrators the rule hit its rate limit. */
+export const AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE = 'automation.rule.rate-limited'
+
+/** Most administrators one rule failure notification reaches, besides the rule's creator. */
+export const AUTOMATION_FAILURE_NOTIFICATION_ADMIN_LIMIT = 20
 
 /** Automation template の3種類です。 */
 export type AutomationTemplateKind = 'work-item' | 'project' | 'workflow'
@@ -948,13 +1072,32 @@ export type RecurringSchedule = {
   startDate: string
   /** Weekly cadence の曜日です。0 が Sunday です。 */
   daysOfWeek?: number[]
-  /** Monthly cadence の日です。 */
+  /**
+   * Monthly cadence の日です。With `monthlyDay: 'business-day'` it is the business day number
+   * instead, and with `'last-day'` it is omitted.
+   */
   dayOfMonth?: number
+  /**
+   * How a monthly cadence picks its day. `day-of-month` (the default) uses {@link dayOfMonth},
+   * `last-day` uses the month's last calendar day, and `business-day` uses the
+   * {@link dayOfMonth}th working day of the owner Team's work calendar. `business-day` is only
+   * accepted on Recurring Work.
+   */
+  monthlyDay?: RecurringMonthlyDay
   /** Missed occurrence の catch-up policy です。 */
   catchUpPolicy: RecurringCatchUpPolicy
   /** 一回の catch-up で生成する最大 occurrence 数です。 */
   maxCatchUpOccurrences?: number
 }
+
+/** Ways a monthly recurring schedule picks its day. */
+export const RECURRING_MONTHLY_DAYS = ['day-of-month', 'last-day', 'business-day'] as const
+
+/** Way a monthly recurring schedule picks its day. */
+export type RecurringMonthlyDay = (typeof RECURRING_MONTHLY_DAYS)[number]
+
+/** Highest business day number a `business-day` monthly schedule accepts. */
+export const RECURRING_MAX_BUSINESS_DAY = 23
 
 /** Template から繰り返し Work Item を作成する定義です。 */
 export type RecurringWork = {
@@ -989,6 +1132,11 @@ export type RecurringWork = {
   nextRunAt: string
   /** 最後に materialize した occurrence timestamp です。 */
   lastRunAt?: string
+  /**
+   * schedule を最後に変えて次回実行を計算し直した UTC ISO 8601 timestamp です。
+   * 第 n 営業日の schedule は、これより前の実行時刻を実行しません。
+   */
+  scheduleChangedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終更新日時の ISO 8601 timestamp です。 */

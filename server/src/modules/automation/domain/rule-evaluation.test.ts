@@ -50,6 +50,79 @@ describe('Automation rule domain', () => {
     }, { ...event, eventType: 'automation.schedule' })).toBe(true)
   })
 
+  test('validates due-soon schedules and assignee notifications', () => {
+    const schedule = {
+      frequency: 'daily',
+      interval: 1,
+      timeZone: 'Asia/Tokyo',
+      localTime: '09:00',
+      startDate: '2026-07-16',
+      catchUpPolicy: 'skip',
+    }
+    expect(validateCreateAutomationRuleInput({
+      name: 'Due in 3 days',
+      enabled: true,
+      trigger: { type: 'schedule', schedule, dueWorkItems: { daysBefore: 3 } },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    })).toMatchObject({
+      trigger: { type: 'schedule', dueWorkItems: { daysBefore: 3 } },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: true, title: 'Due soon' }],
+    })
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Too far',
+      enabled: true,
+      trigger: { type: 'schedule', schedule, dueWorkItems: { daysBefore: 366 } },
+      actions: [{ type: 'comment', body: 'Hi' }],
+    })).toThrow('Automation due Work Item days must be 0 to 365.')
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Nobody',
+      enabled: true,
+      trigger: { type: 'schedule', schedule },
+      actions: [{ type: 'notify', recipientMemberKeys: [], notifyAssignee: false, title: 'Hi' }],
+    })).toThrow('Automation notification requires recipients.')
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Business day rule',
+      enabled: true,
+      trigger: {
+        type: 'schedule',
+        schedule: { ...schedule, frequency: 'monthly', monthlyDay: 'business-day', dayOfMonth: 1 },
+      },
+      actions: [{ type: 'comment', body: 'Hi' }],
+    })).toThrow('Business-day schedules are only available to Recurring Work.')
+  })
+
+  test('matches approval decisions by the approval audit event type', () => {
+    const approvalEvent = (eventType: string): AutomationEvent => ({
+      ...event,
+      eventType,
+      changes: [],
+    })
+    expect(matchesAutomationTrigger({ type: 'approval' }, approvalEvent('approval.completed')))
+      .toBe(true)
+    expect(matchesAutomationTrigger({ type: 'approval' }, approvalEvent('approval.approved')))
+      .toBe(false)
+    expect(matchesAutomationTrigger(
+      { type: 'approval', decision: 'approved' },
+      approvalEvent('approval.rejected'),
+    )).toBe(false)
+    expect(matchesAutomationTrigger(
+      { type: 'approval', decision: 'changes-requested' },
+      approvalEvent('approval.changes-requested'),
+    )).toBe(true)
+    expect(validateCreateAutomationRuleInput({
+      name: 'On rejection',
+      enabled: true,
+      trigger: { type: 'approval', decision: 'rejected' },
+      actions: [{ type: 'comment', body: 'Rejected' }],
+    }).trigger).toEqual({ type: 'approval', decision: 'rejected' })
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Bad decision',
+      enabled: true,
+      trigger: { type: 'approval', decision: 'pending' },
+      actions: [{ type: 'comment', body: 'Pending' }],
+    })).toThrow('Automation approval trigger decision is invalid.')
+  })
+
   test('matches trigger filters without AWS or transport state', () => {
     expect(matchesAutomationTrigger({
       type: 'status',

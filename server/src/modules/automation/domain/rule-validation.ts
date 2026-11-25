@@ -1,10 +1,14 @@
 import {
   APPROVAL_MAX_REVIEWERS,
+  AUTOMATION_APPROVAL_DECISIONS,
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
+  AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE,
   AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES,
   WORK_ITEM_RELATION_EVENT_TYPES,
   isWorkItemRelationEventType,
   type AutomationAction,
+  type AutomationApprovalDecision,
+  type AutomationDueWorkItemsSelection,
   type AutomationCondition,
   type AutomationRateLimit,
   type AutomationRetryPolicy,
@@ -244,6 +248,16 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'comment',
         ...(trigger.kind === undefined ? {} : { kind: trigger.kind }),
       }
+    case 'approval': {
+      const decision: unknown = trigger.decision
+      if (decision !== undefined && !isAutomationApprovalDecision(decision)) {
+        throw invalidInput('Automation approval trigger decision is invalid.')
+      }
+      return {
+        type: 'approval',
+        ...(decision === undefined ? {} : { decision }),
+      }
+    }
     case 'relation':
       return {
         type: 'relation',
@@ -261,14 +275,54 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'webhook',
         webhookId: requireBoundedText(trigger.webhookId, 'Webhook ID', 256),
       }
-    case 'schedule':
+    case 'schedule': {
+      const schedule = validateRecurringSchedule(trigger.schedule)
+      if (schedule.monthlyDay === 'business-day') {
+        throw invalidInput('Business-day schedules are only available to Recurring Work.')
+      }
       return {
         type: 'schedule',
-        schedule: validateRecurringSchedule(trigger.schedule),
+        schedule,
+        ...(trigger.dueWorkItems === undefined ? {} : {
+          dueWorkItems: validateDueWorkItemsSelection(trigger.dueWorkItems),
+        }),
       }
+    }
     default:
       throw invalidInput('Automation trigger type is invalid.')
   }
+}
+
+/**
+ * Validates the due-soon Work Item selection of a schedule trigger.
+ *
+ * @param value - Untrusted selection.
+ * @returns The normalized selection.
+ */
+function validateDueWorkItemsSelection(value: unknown): AutomationDueWorkItemsSelection {
+  const selection = requireRecord(value, 'Automation due Work Item selection')
+  const daysBefore: unknown = selection.daysBefore
+  if (
+    typeof daysBefore !== 'number' ||
+    !Number.isSafeInteger(daysBefore) ||
+    daysBefore < 0 ||
+    daysBefore > AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE
+  ) {
+    throw invalidInput(
+      `Automation due Work Item days must be 0 to ${AUTOMATION_DUE_WORK_ITEMS_MAX_DAYS_BEFORE}.`,
+    )
+  }
+  return { daysBefore }
+}
+
+/**
+ * Tests whether a value is an approval decision an approval trigger accepts.
+ *
+ * @param value - Untrusted decision.
+ * @returns Whether the value is a known approval decision.
+ */
+function isAutomationApprovalDecision(value: unknown): value is AutomationApprovalDecision {
+  return AUTOMATION_APPROVAL_DECISIONS.some((decision) => decision === value)
 }
 
 /**
@@ -454,12 +508,17 @@ function validateAutomationAction(value: unknown): AutomationAction {
         'Notification recipients',
         100,
       )
-      if (recipientMemberKeys.length === 0) {
+      if (action.notifyAssignee !== undefined && typeof action.notifyAssignee !== 'boolean') {
+        throw invalidInput('Automation notification assignee flag must be a boolean.')
+      }
+      const notifyAssignee = action.notifyAssignee === true
+      if (recipientMemberKeys.length === 0 && !notifyAssignee) {
         throw invalidInput('Automation notification requires recipients.')
       }
       return {
         type: 'notify',
         recipientMemberKeys,
+        ...(notifyAssignee ? { notifyAssignee } : {}),
         title: requireBoundedText(action.title, 'Notification title', 256),
         ...(action.body === undefined ? {} : {
           body: requireBoundedText(action.body, 'Notification body', 4_096),

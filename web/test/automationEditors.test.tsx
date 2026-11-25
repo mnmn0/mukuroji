@@ -5,11 +5,14 @@ import {
   AutomationTemplateEditor,
   BaselineSlipDaysField,
 } from '../src/automation/ui/AutomationEditors'
+import { createRecurringSchedule } from '../src/automation/model/recurringSchedule'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import {
   createDefaultAutomationWorkflowTemplatePayload,
+  createAutomationScheduleTrigger,
   createAutomationTrigger,
   isAutomationTriggerConfigurationValid,
+  readAutomationDueDaysBefore,
   parseAutomationTemplatePayload,
 } from '../src/automation/model/editorValidation'
 
@@ -126,6 +129,64 @@ describe('Automation editors', () => {
     expect(html).toContain('value="work-item.blocker-removed"')
     expect(html).toContain('blocker の解除')
     expect(html).toContain('value="work-item.sibling-order-changed"')
+  })
+
+  test('serializes approval decision triggers', () => {
+    expect(createAutomationTrigger('approval', 'rejected')).toEqual({ type: 'approval', decision: 'rejected' })
+    expect(createAutomationTrigger('approval', '')).toEqual({ type: 'approval' })
+    expect(isAutomationTriggerConfigurationValid('approval', 'changes-requested')).toBe(true)
+    expect(isAutomationTriggerConfigurationValid('approval', 'pending')).toBe(false)
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor initialTriggerType="approval" locale="ja" onCreate={async () => undefined} />,
+    )
+    expect(html).toContain('data-testid="automation-rule-approval-decision"')
+    expect(html).toContain('全員が承認')
+  })
+
+  test('serializes due-soon schedules, month ends, and business days', () => {
+    const base = {
+      catchUpPolicy: 'latest',
+      frequency: 'daily',
+      localTime: '09:00',
+      startDate: '2026-03-01',
+      timeZone: 'Asia/Tokyo',
+    } as const
+    expect(createAutomationScheduleTrigger(base, 3)).toMatchObject({
+      type: 'schedule',
+      dueWorkItems: { daysBefore: 3 },
+    })
+    expect(createAutomationScheduleTrigger(base)).not.toHaveProperty('dueWorkItems')
+    expect(readAutomationDueDaysBefore('')).toBeNull()
+    expect(readAutomationDueDaysBefore(' 0 ')).toBe(0)
+    expect(readAutomationDueDaysBefore('366')).toBeUndefined()
+    expect(readAutomationDueDaysBefore('-1')).toBeUndefined()
+    expect(createRecurringSchedule({ ...base, frequency: 'monthly', dayOfMonth: 15, monthlyDay: 'last-day' }))
+      .toEqual({ ...base, frequency: 'monthly', interval: 1, monthlyDay: 'last-day' })
+    expect(createRecurringSchedule({ ...base, frequency: 'monthly', dayOfMonth: 3, monthlyDay: 'business-day' }))
+      .toEqual({ ...base, frequency: 'monthly', interval: 1, dayOfMonth: 3, monthlyDay: 'business-day' })
+    expect(() => createRecurringSchedule({ ...base, frequency: 'monthly', dayOfMonth: 24, monthlyDay: 'business-day' }))
+      .toThrow('business day')
+  })
+
+  test('renders the due-soon field and month-end choice for schedule rules', () => {
+    const ruleHtml = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialSchedule={{
+          catchUpPolicy: 'latest',
+          dayOfMonth: 1,
+          frequency: 'monthly',
+          interval: 1,
+          localTime: '09:00',
+          startDate: '2026-03-01',
+          timeZone: 'Asia/Tokyo',
+        }}
+        locale="ja"
+        onCreate={async () => undefined}
+      />,
+    )
+    expect(ruleHtml).toContain('data-testid="automation-rule-schedule-due-days-before"')
+    expect(ruleHtml).toContain('月末')
+    expect(ruleHtml).not.toContain('value="business-day"')
   })
 
   test('keeps valid schedule time fields valid when only the cadence is invalid', () => {

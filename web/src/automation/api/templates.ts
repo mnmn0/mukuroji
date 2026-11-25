@@ -6,6 +6,7 @@ import {
   type AutomationTemplateApplication,
   type AutomationTemplateKind,
   type CreateAutomationTemplateInput,
+  type DeleteAutomationDefinitionInput,
   type UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
 import {
@@ -218,6 +219,30 @@ export function getAutomationTemplateApplication(
   return requestJson<AutomationTemplateApplication>(
     `${automationApiBaseUrl}/automation/template-applications/${encodeURIComponent(applicationId)}`,
     accessToken,
+  )
+}
+
+/**
+ * Deletes a template; the server refuses one a rule or recurring definition still uses.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param templateId - Definition to delete.
+ * @param input - Revision the client read.
+ * @param mutationContext - Mutation request context shared between retries.
+ * @returns A promise that resolves after the delete.
+ */
+export async function deleteAutomationTemplate(
+  accessToken: string,
+  templateId: string,
+  input: DeleteAutomationDefinitionInput,
+  mutationContext: MutationRequestContext,
+) {
+  await requestMutation<unknown>(
+    `${automationApiBaseUrl}/automation/templates/${encodeURIComponent(templateId)}`,
+    accessToken,
+    'DELETE',
+    input,
+    mutationContext,
   )
 }
 

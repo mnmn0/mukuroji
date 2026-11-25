@@ -63,11 +63,13 @@ import {
 import {
   DEFAULT_AUTOMATION_RATE_LIMIT,
   DEFAULT_AUTOMATION_RETRY_POLICY,
+  getPendingExecutionRecoveryAt,
 } from '../../domain/execution-policy'
 import {
   type AutomationEvent,
 } from '../../domain/rule-evaluation'
 import {
+  getFirstRecurringWakeUp,
   getNextRecurringOccurrence,
 } from '../../domain/recurring-schedule'
 import { teamScopeViolation, validateCreateAutomationRuleInput } from '../../domain/rule-validation'
@@ -304,11 +306,21 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     )
   }
 
-  /** Rule を作成します。 */
+  /**
+   * Rule を作成します。
+   *
+   * @param workspaceId - Workspace that owns the rule.
+   * @param input - Rule definition.
+   * @param idempotencyKey - Client idempotency key.
+   * @param createdByMemberKey - Member who creates the rule; not part of the replay fingerprint.
+   * @param assertPinnedActions - Check run on the actions after template versions are pinned.
+   * @returns The created or replayed rule.
+   */
   async createRule(
     workspaceId: string,
     input: CreateAutomationRuleInput,
     idempotencyKey?: string,
+    createdByMemberKey?: string,
     assertPinnedActions?: AutomationPinnedActionsGuard,
   ) {
     await this.ensureTable()
@@ -359,13 +371,14 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       }
       throw error
     }
+    const pinned = await this.pinWorkItemTemplateVersions(
+      normalizedWorkspaceId,
+      requestedDefinition.actions,
+      requestedDefinition.ownerTeamId,
+    )
     const definition = {
       ...requestedDefinition,
-      actions: await this.pinWorkItemTemplateVersions(
-        normalizedWorkspaceId,
-        requestedDefinition.actions,
-        requestedDefinition.ownerTeamId,
-      ),
+      actions: pinned.actions,
     }
     await assertPinnedActions?.(definition.actions)
     const now = new Date().toISOString()
@@ -383,6 +396,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       version: 1,
       revision: 1,
       ...(nextRunAt ? { nextRunAt: nextRunAt.toISOString() } : {}),
+      ...(createdByMemberKey?.trim() ? { createdByMemberKey: createdByMemberKey.trim() } : {}),
       createdAt: now,
       updatedAt: now,
     }
@@ -396,9 +410,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         rule,
         scheduledRuleIndexAttributes(rule),
         createIdentity,
-        webhookTriggerEndpoint
-          ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
-          : [],
+        [
+          ...(webhookTriggerEndpoint
+            ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
+            : []),
+          ...pinned.templateChecks,
+        ],
       )
     } catch (error) {
       if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
@@ -411,6 +428,8 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         )
         if (replay) return replay
       }
+      // A referenced template that changed or disappeared reports as unavailable, not as a conflict.
+      await this.pinWorkItemTemplateVersions(normalizedWorkspaceId, requestedDefinition.actions)
       if (webhookTriggerEndpoint) {
         await this.assertActiveInboundWebhookTrigger(
           normalizedWorkspaceId,
@@ -453,9 +472,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const webhookTriggerEndpoint = webhookTriggerChanged || webhookRuleEnabled
       ? await this.assertActiveInboundWebhookTrigger(workspaceId, normalized.trigger)
       : undefined
-    const pinnedActions = input.actions === undefined
-      ? current.actions
+    const pinned = input.actions === undefined
+      ? { actions: current.actions, templateChecks: [] }
       : await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions, current.ownerTeamId)
+    const pinnedActions = pinned.actions
     if (input.actions !== undefined) await assertPinnedActions?.(pinnedActions)
     const scheduleChanged = normalized.trigger.type === 'schedule' && (
       current.trigger.type !== 'schedule' ||
@@ -496,13 +516,19 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         rule,
         current.revision,
         scheduledRuleIndexAttributes(rule),
-        webhookTriggerEndpoint
-          ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
-          : [],
+        [
+          ...(webhookTriggerEndpoint
+            ? [createInboundWebhookRuleActiveConditionCheck(this.tableName, webhookTriggerEndpoint)]
+            : []),
+          ...pinned.templateChecks,
+        ],
       )
     } catch (error) {
       if (webhookTriggerEndpoint) {
         await this.assertActiveInboundWebhookTrigger(workspaceId, normalized.trigger)
+      }
+      if (input.actions !== undefined) {
+        await this.pinWorkItemTemplateVersions(workspaceId, normalized.actions)
       }
       throw error
     }
@@ -659,9 +685,27 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return template
   }
 
-  /** Template を削除します。 */
-  async deleteTemplate(workspaceId: string, templateId: string, expectedRevision: number) {
-    await this.deleteCurrent(workspaceId, `TEMPLATE#${encodeKey(templateId)}`, expectedRevision)
+  /**
+   * Template を削除します。
+   *
+   * @param workspaceId - Workspace that owns the template.
+   * @param templateId - Template to delete.
+   * @param expectedRevision - Template revision the caller read.
+   * @param expectedDefinitionRevision - Workspace definition revision that must still be current.
+   * @returns A promise that resolves after the delete.
+   */
+  async deleteTemplate(
+    workspaceId: string,
+    templateId: string,
+    expectedRevision: number,
+    expectedDefinitionRevision?: number,
+  ) {
+    await this.deleteCurrent(
+      workspaceId,
+      `TEMPLATE#${encodeKey(templateId)}`,
+      expectedRevision,
+      expectedDefinitionRevision,
+    )
   }
 
   /**
@@ -1824,7 +1868,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       normalized.ownerTeamId,
     )
     const now = new Date().toISOString()
-    const nextRunAt = getNextRecurringOccurrence(normalized.schedule, new Date(now))
+    const nextRunAt = getFirstRecurringWakeUp(normalized.schedule, new Date(now))
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
     const recurring: RecurringWork = {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -1848,9 +1892,14 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         recurring,
         recurringIndexAttributes(recurring),
         createIdentity,
+        [createTemplateReferenceConditionCheck(this.tableName, normalizedWorkspaceId, template)],
       )
     } catch (error) {
-      if (!createIdentity || !isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
+      if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
+      if (!createIdentity) {
+        await this.requireEnabledWorkItemTemplate(normalizedWorkspaceId, normalized.templateId, normalized.ownerTeamId)
+        throw persistenceError(error)
+      }
       return await this.getIdempotentCreateReplay<RecurringWork>(
         normalizedWorkspaceId,
         currentKey,
@@ -1885,17 +1934,15 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const mustFinishCurrentSlot = activeSlotExecution?.status === 'pending' ||
       activeSlotExecution?.status === 'running' ||
       (activeSlotExecution?.status === 'failed' && activeSlotExecution.retryable)
-    const nextRunAt = !scheduleChanged || mustFinishCurrentSlot
-      ? new Date(current.nextRunAt)
-      : getNextRecurringOccurrence(normalized.schedule, now)
+    const rescheduled = scheduleChanged && !mustFinishCurrentSlot
+    const nextRunAt = rescheduled
+      ? getFirstRecurringWakeUp(normalized.schedule, now)
+      : new Date(current.nextRunAt)
     if (!nextRunAt) throw invalidInput('Recurring schedule has no future occurrence.')
-    const templateVersion = input.templateId === undefined
-      ? current.templateVersion
-      : (await this.requireEnabledWorkItemTemplate(
-          workspaceId,
-          normalized.templateId,
-          current.ownerTeamId,
-        )).version
+    const template = input.templateId === undefined
+      ? undefined
+      : await this.requireEnabledWorkItemTemplate(workspaceId, normalized.templateId, current.ownerTeamId)
+    const templateVersion = template?.version ?? current.templateVersion
     const recurring: RecurringWork = {
       ...current,
       ...normalized,
@@ -1903,6 +1950,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       version: current.version + 1,
       revision: current.revision + 1,
       nextRunAt: nextRunAt.toISOString(),
+      ...(rescheduled ? { scheduleChangedAt: now.toISOString() } : {}),
       updatedAt: now.toISOString(),
     }
     await this.putVersionedUpdate(
@@ -1913,6 +1961,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       recurring,
       current.revision,
       recurringIndexAttributes(recurring),
+      template ? [createTemplateReferenceConditionCheck(this.tableName, workspaceId, template)] : [],
     )
     return recurring
   }
@@ -1942,6 +1991,47 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       ...current,
       revision: current.revision + 1,
       lastRunAt: normalizedLastRunAt,
+      nextRunAt: normalizedNextRunAt,
+      updatedAt: new Date().toISOString(),
+    }
+    await this.putCurrentUpdate(
+      workspaceId,
+      `RECURRING#${encodeKey(recurring.id)}`,
+      'recurring',
+      recurring,
+      current.revision,
+      recurringIndexAttributes(recurring),
+    )
+    return recurring
+  }
+
+  /**
+   * Moves a recurring definition's next run later without completing a slot.
+   *
+   * @param workspaceId - Workspace that owns the definition.
+   * @param recurringWorkId - Definition to defer.
+   * @param expectedRevision - Revision the scheduler read.
+   * @param nextRunAt - New next run, later than the current one.
+   * @returns The deferred definition.
+   */
+  async deferRecurringWork(
+    workspaceId: string,
+    recurringWorkId: string,
+    expectedRevision: number,
+    nextRunAt: string,
+  ) {
+    const current = await this.requireRecurringWork(workspaceId, recurringWorkId)
+    assertExpectedRevision(current.revision, expectedRevision)
+    if (!current.enabled) {
+      throw new AutomationError('conflict', 'RecurringWorkDisabled', 'Recurring Work definition is disabled.')
+    }
+    const normalizedNextRunAt = normalizeTimestamp(nextRunAt)
+    if (normalizedNextRunAt <= normalizeTimestamp(current.nextRunAt)) {
+      throw invalidInput('A deferred recurring run must be later than the current next run.')
+    }
+    const recurring: RecurringWork = {
+      ...current,
+      revision: current.revision + 1,
       nextRunAt: normalizedNextRunAt,
       updatedAt: new Date().toISOString(),
     }
@@ -2029,6 +2119,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
                 triggerEvent: event,
                 ruleExecutionKey: `${execution.workspaceId}#rule#${execution.ruleId}`,
                 startedAtExecutionId: `${execution.startedAt}#${execution.id}`,
+                ...executionDueIndexAttributes(execution),
               },
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
@@ -2956,27 +3047,38 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /**
-   * Pins create action template references to their current immutable versions.
+   * Create actions の template reference を current immutable version へ固定します。
+   *
+   * The returned checks make the definition write fail when a referenced template was changed or
+   * deleted after this read, so a template delete that passed its reference check cannot leave a
+   * saved definition pointing at a missing template.
    *
    * @param workspaceId - Workspace that owns the templates.
-   * @param actions - Validated rule actions.
+   * @param actions - Actions to pin.
    * @param ownerTeamId - Team that owns the rule, or undefined for a Workspace rule.
-   * @returns Actions with server-pinned template versions.
+   * @returns Pinned actions and one condition check per referenced template.
    */
   private async pinWorkItemTemplateVersions(
     workspaceId: string,
     actions: readonly AutomationAction[],
     ownerTeamId?: string,
   ) {
-    return await Promise.all(actions.map(async (action): Promise<AutomationAction> => {
+    const templates = new Map<string, AutomationTemplate>()
+    const pinnedActions = await Promise.all(actions.map(async (action): Promise<AutomationAction> => {
       if (action.type !== 'create' || !action.templateId) return action
       const template = await this.requireEnabledWorkItemTemplate(
         workspaceId,
         action.templateId,
         ownerTeamId,
       )
+      templates.set(template.id, template)
       return { ...action, templateVersion: template.version }
     }))
+    return {
+      actions: pinnedActions,
+      templateChecks: [...templates.values()].map((template) =>
+        createTemplateReferenceConditionCheck(this.tableName, workspaceId, template)),
+    }
   }
 
   /** Recurring definition を必須取得します。 */
@@ -3192,7 +3294,22 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 
   /** Current row を revision CAS 付きで削除します。 */
-  private async deleteCurrent(workspaceId: string, recordKey: string, expectedRevision: number) {
+  /**
+   * Deletes a current definition row and advances the Workspace definition revision.
+   *
+   * @param workspaceId - Workspace that owns the row.
+   * @param recordKey - Current row key.
+   * @param expectedRevision - Row revision the caller read.
+   * @param expectedDefinitionRevision - When given, the Workspace definition revision that must
+   *   still be current, so a definition saved after the caller's checks rejects the delete.
+   * @returns A promise that resolves after the delete.
+   */
+  private async deleteCurrent(
+    workspaceId: string,
+    recordKey: string,
+    expectedRevision: number,
+    expectedDefinitionRevision?: number,
+  ) {
     await this.ensureTable()
     try {
       const scopeKey = automationScopeKey(workspaceId)
@@ -3207,7 +3324,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
             },
           },
-          createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
+          createAutomationDefinitionRevisionUpdate(
+            this.tableName,
+            scopeKey,
+            expectedDefinitionRevision,
+          ),
         ],
       }))
     } catch (error) {
@@ -3293,13 +3414,25 @@ function scheduledRuleIndexAttributes(value: AutomationRule) {
     : {}
 }
 
+/**
+ * Builds the ScheduleDueIndex attributes of a rule execution the schedule worker must pick up:
+ * an expired runner lease, a retryable failure, or a reservation nobody claimed (so deleting or
+ * disabling the rule cannot strand it).
+ *
+ * @param value - Rule or Recurring Work execution.
+ * @returns Index attributes, or none when the execution needs no recovery.
+ */
 function executionDueIndexAttributes(value: AutomationExecution) {
-  return (value.status === 'running' || (value.status === 'failed' && value.retryable)) &&
-      value.nextRetryAt &&
-      !value.ruleId.startsWith('recurring:')
+  if (value.ruleId.startsWith('recurring:')) return {}
+  const dueAt = value.status === 'pending'
+    ? getPendingExecutionRecoveryAt(value)
+    : (value.status === 'running' || (value.status === 'failed' && value.retryable))
+      ? value.nextRetryAt
+      : undefined
+  return dueAt
     ? {
         scheduleShard: createAutomationScheduleShard(value.workspaceId, `execution:${value.id}`),
-        nextRunAtRecordKey: `${normalizeTimestamp(value.nextRetryAt)}#execution#${value.id}`,
+        nextRunAtRecordKey: `${normalizeTimestamp(dueAt)}#execution#${value.id}`,
       }
     : {}
 }
@@ -3322,12 +3455,16 @@ function automationScopeKey(workspaceId: string) {
  *
  * @param tableName - Automation table that stores the sentinel.
  * @param scopeKey - Encoded Workspace Automation partition key.
+ * @param expectedRevision - When given, the revision the sentinel must still hold (0 means the
+ *   sentinel must not exist yet).
  * @returns Atomic sentinel update transaction item.
  */
 function createAutomationDefinitionRevisionUpdate(
   tableName: string,
   scopeKey: string,
+  expectedRevision?: number,
 ): DynamoDbAutomationTransactionItem {
+  const fenced = expectedRevision !== undefined
   return {
     Update: {
       TableName: tableName,
@@ -3338,9 +3475,12 @@ function createAutomationDefinitionRevisionUpdate(
       UpdateExpression:
         'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
         '#revision = if_not_exists(#revision, :zero) + :one',
-      ConditionExpression:
-        'attribute_not_exists(scopeKey) OR (' +
-        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
+      ConditionExpression: fenced
+        ? expectedRevision === 0
+          ? 'attribute_not_exists(scopeKey)'
+          : '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :expected'
+        : 'attribute_not_exists(scopeKey) OR (' +
+          '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#revision': 'revision',
@@ -3351,6 +3491,7 @@ function createAutomationDefinitionRevisionUpdate(
         ':one': 1,
         ':schemaVersion': AUTOMATION_SCHEMA_VERSION,
         ':zero': 0,
+        ...(fenced && expectedRevision !== 0 ? { ':expected': expectedRevision } : {}),
       },
     },
   }
@@ -3633,6 +3774,33 @@ function createInboundWebhookActiveConditionCheck(
  * @param endpoint - Endpoint record referenced by the rule trigger.
  * @returns The transaction item wrapping the condition check.
  */
+/**
+ * Builds the check that a template a definition references is still the enabled row it read.
+ *
+ * @param tableName - Automation table.
+ * @param workspaceId - Workspace that owns the template.
+ * @param template - Template row read before the write.
+ * @returns A condition check transaction item.
+ */
+function createTemplateReferenceConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  template: AutomationTemplate,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: automationScopeKey(workspaceId),
+        recordKey: `TEMPLATE#${encodeKey(template.id)}`,
+      },
+      ConditionExpression: '#revision = :revision AND #enabled = :enabled',
+      ExpressionAttributeNames: { '#revision': 'revision', '#enabled': 'enabled' },
+      ExpressionAttributeValues: { ':revision': template.revision, ':enabled': true },
+    },
+  }
+}
+
 function createInboundWebhookRuleActiveConditionCheck(
   tableName: string,
   endpoint: AutomationInboundWebhookEndpointRecord,

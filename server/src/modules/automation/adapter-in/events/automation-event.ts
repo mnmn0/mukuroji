@@ -298,7 +298,14 @@ async function reflectWorkItemCompletionInDocuments(
   })
 }
 
-async function hydrateAutomationWorkItem(
+/**
+ * Attaches the current canonical Work Item named by an event's `teamId` and `issueId` metadata.
+ *
+ * @param event - Event to hydrate.
+ * @param workItems - Work Item reader; without one the event is returned unchanged.
+ * @returns The event with its Work Item, or unchanged when the Work Item is missing.
+ */
+export async function hydrateAutomationWorkItem(
   event: AutomationEvent,
   workItems: AutomationWorkItemReader | undefined,
 ): Promise<AutomationEvent> {

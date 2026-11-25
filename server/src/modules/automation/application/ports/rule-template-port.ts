@@ -51,11 +51,21 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     ruleId: string,
     version: number,
   ): Promise<AutomationRule | undefined>
-  /** Creates an idempotent rule. */
+  /**
+   * Creates an idempotent rule.
+   *
+   * @param workspaceId - Workspace that owns the rule.
+   * @param input - Validated rule definition.
+   * @param idempotencyKey - Client idempotency key; a replay returns the first rule.
+   * @param createdByMemberKey - Member who creates the rule; failure notifications reach them.
+   * @param assertPinnedActions - Check run on the actions after template versions are pinned.
+   * @returns The created or replayed rule.
+   */
   createRule(
     workspaceId: string,
     input: CreateAutomationRuleInput,
     idempotencyKey?: string,
+    createdByMemberKey?: string,
     assertPinnedActions?: AutomationPinnedActionsGuard,
   ): Promise<AutomationRule>
   /** Updates a rule with revision compare-and-swap. */
@@ -106,11 +116,22 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     templateId: string,
     input: UpdateAutomationTemplateInput,
   ): Promise<AutomationTemplate>
-  /** Deletes a template with revision compare-and-swap. */
+  /**
+   * Deletes a template with revision compare-and-swap.
+   *
+   * @param workspaceId - Workspace that owns the template.
+   * @param templateId - Template to delete.
+   * @param expectedRevision - Template revision the caller read.
+   * @param expectedDefinitionRevision - Workspace definition revision the caller read while
+   *   checking that no rule or recurring definition uses the template; any definition change in
+   *   between rejects the delete.
+   * @returns A promise that resolves after the delete.
+   */
   deleteTemplate(
     workspaceId: string,
     templateId: string,
     expectedRevision: number,
+    expectedDefinitionRevision?: number,
   ): Promise<void>
   /**
    * Reserves a pinned template-application receipt. A new receipt of a Project template keeps the

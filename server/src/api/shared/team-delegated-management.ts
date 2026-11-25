@@ -130,6 +130,23 @@ export async function listDelegatedManagementScopes(
 }
 
 /**
+ * Rejects a principal that manages no definitions at all before a route reads the definition it
+ * names, so members who manage nothing get the usual administration error and learn nothing
+ * about which definitions exist.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param managePermission - Enterprise permission that mutations of the definitions require.
+ * @throws WorkspaceAccessError when the principal manages neither the Workspace nor any Team.
+ */
+export async function requireSomeDelegatedManagement(
+  principal: WorkspacePrincipal,
+  managePermission: EnterprisePermissionId,
+): Promise<void> {
+  const scopes = await listDelegatedManagementScopes(principal, managePermission)
+  if (!scopes.workspace && scopes.teamIds.length === 0) requireWorkspaceAdministration(principal)
+}
+
+/**
  * Rejects Team rule actions that name a Project outside the owner Team.
  *
  * @param workspaceId - Workspace that owns the rule.
