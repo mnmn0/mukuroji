@@ -44,6 +44,7 @@ import {
   type FileTypeRejection,
   type FileTypeRejectionReason,
   type FileVersion,
+  type ProjectDeliverableApprovalState,
   type WorkflowStatusCategory,
   type WorkspaceFileTypeSettings,
   DEFAULT_WORKSPACE_FILE_TYPE_SETTINGS,
@@ -267,6 +268,18 @@ export type FileProofingCollection = {
     /** 新規 file を Workspace guest と共有できるかどうかです。 */
     canGrantGuestAccess: boolean
   }
+}
+
+/** One visible file of a scope with its current-version review state, for the Project deliverables list. */
+export type FileDeliverableSummary = {
+  /** File metadata projected for the current actor, with the current-version unresolved annotation count. */
+  file: FileAttachment
+  /** Approval state of the current version. */
+  approvalState: ProjectDeliverableApprovalState
+  /** Approval request that decided the state, absent when the state is `none`. */
+  approvalId?: string
+  /** Unresolved annotations left on the current version. */
+  unresolvedAnnotationCount: number
 }
 
 /** One file resolved through the canonical File ID reverse index. */
@@ -499,9 +512,9 @@ type StoredApprovalItem = ApprovalRequest & {
   workspaceId: string
   /** Approval が属する Team ID です。 */
   teamId: string
-  /** Approval が属する Work Item ID です。 */
-  issueId: string
-  /** Approval が属する assigned Project ID です。 */
+  /** Approval が属する Work Item ID です。Project file の approval では持ちません。 */
+  issueId?: string
+  /** Approval が属する assigned Project ID、または Project file の approval では所有 Project ID です。 */
   projectId?: string
   /** 全員承認後に適用する workflow status ID です。 */
   completionTransition?: string
@@ -631,6 +644,34 @@ type StoredDownloadItem = {
   requestFingerprint?: string
 }
 
+/**
+ * Receipt of a committed annotation delete, written in the delete transaction so that a retry of
+ * the same request (same actor, target, and `Idempotency-Key`) after a lost response succeeds
+ * instead of answering `404 AnnotationNotFound`.
+ */
+type StoredAnnotationDeleteReceiptItem = {
+  /** DynamoDB partition key of the file scope. */
+  scopeKey: string
+  /** DynamoDB sort key, derived from the scope and the idempotency key hash. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'annotation-delete-receipt'
+  /** File of the deleted annotation. */
+  fileId: string
+  /** Version of the deleted annotation. */
+  versionId: string
+  /** Deleted annotation ID. */
+  annotationId: string
+  /** Normalized member key of the author who deleted the annotation. */
+  actorMemberKey: string
+  /** Idempotency fingerprint of the delete request. */
+  requestFingerprint: string
+  /** Time of the delete. */
+  deletedAt: string
+  /** DynamoDB TTL, in epoch seconds. */
+  expiresAt: number
+}
+
 /** Object storage adapter が返す verified object metadata です。 */
 export type VerifiedFileObject = {
   /** Object の byte 数です。 */
@@ -740,6 +781,54 @@ export interface FileProofingClient {
     input: CreateFileAnnotationInput,
     auditContext?: MutationAuditContext,
   ): Promise<FileAnnotation>
+  /**
+   * Resolves or reopens one annotation. Repeating the current state returns it unchanged.
+   *
+   * @param scope - Scope that owns the file.
+   * @param actor - Authorized actor; scope write access is required.
+   * @param fileId - Annotated file.
+   * @param versionId - Annotated version.
+   * @param annotationId - Annotation to change.
+   * @param resolved - `true` to resolve, `false` to reopen.
+   * @param auditContext - Mutation audit context.
+   * @returns The annotation after the change.
+   */
+  setAnnotationResolution(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    resolved: boolean,
+    auditContext?: MutationAuditContext,
+  ): Promise<FileAnnotation>
+  /**
+   * Deletes one annotation written by the actor.
+   *
+   * @param scope - Scope that owns the file.
+   * @param actor - Authorized actor; only the annotation author may delete it.
+   * @param fileId - Annotated file.
+   * @param versionId - Annotated version.
+   * @param annotationId - Annotation to delete.
+   * @param auditContext - Mutation audit context.
+   */
+  deleteAnnotation(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<void>
+  /**
+   * Lists the visible files of one scope with their current-version approval state and unresolved
+   * annotation count. A scope without visible files costs one Query.
+   *
+   * @param scope - Work Item or Project scope.
+   * @param actor - Authorized actor of the scope.
+   * @returns Visible files of the scope, newest update first.
+   */
+  listDeliverables(scope: FileProofingScope, actor: FileProofingActor): Promise<FileDeliverableSummary[]>
   /** File を retention 付きで soft delete します。 */
   deleteFile(
     scope: FileProofingScope,
@@ -1091,17 +1180,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   async list(scope: FileProofingScope, actor: FileProofingActor): Promise<FileProofingCollection> {
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
-    const [fileItems, approvalItems] = await Promise.all([
+    const [fileItems, approvalItems, annotationItems] = await Promise.all([
       this.queryScope(scopeKey, 'FILE#'),
       this.queryScope(scopeKey, 'APPROVAL#'),
+      this.queryScope(scopeKey, 'ANNOTATION#'),
     ])
-    const storedFiles = fileItems.filter(isStoredFileItem)
-    const refreshedFiles = await Promise.all(storedFiles.map((file) => this.refreshScanStatuses(file)))
-    const files = refreshedFiles
-      .filter((file) => !file.deletedAt)
-      .filter((file) => !actor.guest || file.guestAccess)
-      .map((file) => toFileAttachment(file, actor))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    const unresolvedCounts = countUnresolvedAnnotations(annotationItems)
+    const files = (await this.readVisibleFiles(fileItems, actor))
+      .map((file) => withUnresolvedAnnotationCount(toFileAttachment(file, actor), unresolvedCounts))
     const visibleFileIds = new Set(files.map((file) => file.id))
     const approvals = approvalItems.filter(isStoredApprovalItem)
       .filter((approval) => {
@@ -1110,7 +1196,16 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           ? visibleFileIds.has(fileSubject.fileId)
           : !actor.guest
       })
-      .map((approval) => toApprovalRequest(approval, actor))
+      .map((approval) => {
+        const request = toApprovalRequest(approval, actor)
+        return request.subjectType === 'file-version'
+          ? {
+              ...request,
+              unresolvedAnnotationCount:
+                unresolvedCounts.get(createAnnotationCountKey(request.fileId, request.versionId)) ?? 0,
+            }
+          : request
+      })
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
 
     return {
@@ -1118,10 +1213,56 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       approvals,
       capabilities: {
         canUpload: actor.canWrite,
-        canRequestApproval: scope.kind === 'work-item' && actor.canWrite,
+        canRequestApproval: !scope.commentId && actor.canWrite && !actor.guest,
         canGrantGuestAccess: actor.canManage,
       },
     }
+  }
+
+  /** Lists visible files of one scope with their current-version review state. */
+  async listDeliverables(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+  ): Promise<FileDeliverableSummary[]> {
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    const files = await this.readVisibleFiles(await this.queryScope(scopeKey, 'FILE#'), actor)
+    if (files.length === 0) {
+      return []
+    }
+    const [approvalItems, annotationItems] = await Promise.all([
+      this.queryScope(scopeKey, 'APPROVAL#'),
+      this.queryScope(scopeKey, 'ANNOTATION#'),
+    ])
+    const unresolvedCounts = countUnresolvedAnnotations(annotationItems)
+    const approvals = approvalItems.filter(isStoredApprovalItem)
+    return files.map((stored) => {
+      const file = withUnresolvedAnnotationCount(toFileAttachment(stored, actor), unresolvedCounts)
+      const approval = findCurrentVersionApproval(approvals, file)
+      return {
+        file,
+        approvalState: approval ? toDeliverableApprovalState(approval.status) : 'none',
+        ...(approval ? { approvalId: approval.id } : {}),
+        unresolvedAnnotationCount: file.unresolvedAnnotationCount ?? 0,
+      }
+    })
+  }
+
+  /**
+   * Refreshes scan state and keeps the files the actor may see, newest update first.
+   *
+   * @param items - Raw `FILE#` rows of one scope.
+   * @param actor - Actor whose guest access filters the rows.
+   * @returns Visible, not deleted file rows.
+   */
+  private async readVisibleFiles(items: readonly unknown[], actor: FileProofingActor) {
+    const refreshedFiles = await Promise.all(
+      items.filter(isStoredFileItem).map((file) => this.refreshScanStatuses(file)),
+    )
+    return refreshedFiles
+      .filter((file) => !file.deletedAt)
+      .filter((file) => !actor.guest || file.guestAccess)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
   }
 
   /** Resolves one visible file without scanning every file scope in the workspace. */
@@ -1529,7 +1670,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       bodyMarkdown,
       authorMemberKey: actor.memberKey,
       createdAt: now,
-      capabilities: { canResolve: false },
+      capabilities: { canResolve: false, canDelete: false },
       ...(auditContext ? { requestFingerprint: auditContext.requestFingerprint } : {}),
     }
     const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
@@ -1571,6 +1712,241 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
 
     return toFileAnnotation(item, actor)
+  }
+
+  /** Resolves or reopens one annotation; repeating the current state returns it unchanged. */
+  async setAnnotationResolution(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    resolved: boolean,
+    auditContext?: MutationAuditContext,
+  ): Promise<FileAnnotation> {
+    requireFileWrite(actor)
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    const current = await this.readAnnotationForMutation(scopeKey, fileId, versionId, annotationId)
+    if ((current.resolvedAt !== undefined) === resolved) {
+      return toFileAnnotation(current, actor)
+    }
+    const now = auditContext?.occurredAt ?? new Date().toISOString()
+    const { resolvedAt: _resolvedAt, resolvedByMemberKey: _resolvedBy, ...unresolved } = current
+    const next: StoredAnnotationItem = resolved
+      ? { ...unresolved, resolvedAt: now, resolvedByMemberKey: actor.memberKey }
+      : unresolved
+    const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      createFileNotDeletedConditionCheck(this.tableName, scopeKey, fileId),
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: next,
+          ConditionExpression: resolved
+            ? 'attribute_exists(recordKey) AND attribute_not_exists(#resolvedAt)'
+            : 'attribute_exists(recordKey) AND attribute_exists(#resolvedAt)',
+          ExpressionAttributeNames: { '#resolvedAt': 'resolvedAt' },
+        },
+      },
+    ]
+    addAuditItem(transactionItems, this.auditTableName, auditContext, {
+      directoryId: scope.workspaceId,
+      eventType: resolved ? 'annotation.resolved' : 'annotation.reopened',
+      ...resolveFileAuditEntity(scope),
+      target: { type: 'annotation', id: current.id },
+      action: resolved ? 'annotation-resolved' : 'annotation-reopened',
+      metadata: createFileAuditMetadata(scope, actor, fileId, versionId),
+    })
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
+    } catch (error) {
+      if (!isConditionalTransactionError(error)) {
+        throw error
+      }
+      const latest = await this.getItem<StoredAnnotationItem>(scopeKey, current.recordKey)
+      if (latest && isStoredAnnotationItem(latest) && (latest.resolvedAt !== undefined) === resolved) {
+        return toFileAnnotation(latest, actor)
+      }
+      throw new FileProofingError(
+        409,
+        'AnnotationConflict',
+        'Annotation state changed. Reload and try again.',
+        { cause: error },
+      )
+    }
+    return toFileAnnotation(next, actor)
+  }
+
+  /** Deletes one annotation written by the actor. */
+  async deleteAnnotation(
+    scope: FileProofingScope,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    auditContext?: MutationAuditContext,
+  ): Promise<void> {
+    requireFileWrite(actor)
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    let current: StoredAnnotationItem
+    try {
+      current = await this.readAnnotationForMutation(scopeKey, fileId, versionId, annotationId)
+    } catch (error) {
+      if (
+        error instanceof FileProofingError &&
+        error.code === 'AnnotationNotFound' &&
+        await this.hasAnnotationDeleteReceipt(scopeKey, actor, fileId, versionId, annotationId, auditContext)
+      ) {
+        // The same request already deleted the annotation and only its response was lost.
+        return
+      }
+      throw error
+    }
+    if (normalizeMemberKey(current.authorMemberKey) !== normalizeMemberKey(actor.memberKey)) {
+      throw new FileProofingError(
+        403,
+        'AnnotationDeleteDenied',
+        'Only the annotation author can delete it.',
+      )
+    }
+    const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      createFileNotDeletedConditionCheck(this.tableName, scopeKey, fileId),
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: { scopeKey, recordKey: current.recordKey },
+          ConditionExpression: 'attribute_exists(recordKey) AND #author = :author',
+          ExpressionAttributeNames: { '#author': 'authorMemberKey' },
+          ExpressionAttributeValues: { ':author': current.authorMemberKey },
+        },
+      },
+    ]
+    if (auditContext) {
+      const deletedAt = auditContext.occurredAt
+      const receipt: StoredAnnotationDeleteReceiptItem = {
+        scopeKey,
+        recordKey: createAnnotationDeleteReceiptRecordKey(scopeKey, auditContext),
+        entryType: 'annotation-delete-receipt',
+        fileId,
+        versionId,
+        annotationId: current.id,
+        actorMemberKey: normalizeMemberKey(actor.memberKey),
+        requestFingerprint: auditContext.requestFingerprint,
+        deletedAt,
+        expiresAt: epochSecondsAfterDays(deletedAt, this.retentionDays),
+      }
+      transactionItems.push({
+        Put: {
+          TableName: this.tableName,
+          Item: receipt,
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        },
+      })
+    }
+    addAuditItem(transactionItems, this.auditTableName, auditContext, {
+      directoryId: scope.workspaceId,
+      eventType: 'annotation.deleted',
+      ...resolveFileAuditEntity(scope),
+      target: { type: 'annotation', id: current.id },
+      action: 'annotation-deleted',
+      metadata: createFileAuditMetadata(scope, actor, fileId, versionId),
+    })
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
+    } catch (error) {
+      if (!isConditionalTransactionError(error)) {
+        throw error
+      }
+      // Only this same request's receipt proves the delete succeeded. A receipt of another
+      // request under this key means the key was reused (409), and an annotation that another
+      // request deleted first is not found, as when this request had read it already gone.
+      const isSameRequestCommitted = await this.hasAnnotationDeleteReceipt(
+        scopeKey,
+        actor,
+        fileId,
+        versionId,
+        annotationId,
+        auditContext,
+      )
+      if (!await this.getItem<StoredAnnotationItem>(scopeKey, current.recordKey)) {
+        if (isSameRequestCommitted) return
+        throw new FileProofingError(404, 'AnnotationNotFound', 'Annotation was not found.', { cause: error })
+      }
+      throw new FileProofingError(
+        409,
+        'AnnotationConflict',
+        'Annotation state changed. Reload and try again.',
+        { cause: error },
+      )
+    }
+  }
+
+  /**
+   * Tells whether the same delete request already deleted the annotation: a receipt exists for
+   * the request's idempotency key, and its actor, target, and request fingerprint match.
+   *
+   * @param scopeKey - Partition key of the scope.
+   * @param actor - Member retrying the delete.
+   * @param fileId - Annotated file.
+   * @param versionId - Annotated version.
+   * @param annotationId - Annotation the retry targets.
+   * @param auditContext - Mutation context of the retry; without it there is no receipt to find.
+   * @returns Whether the retry should succeed without deleting anything.
+   * @throws FileProofingError `409 IdempotencyKeyReused` when the key was used for another request.
+   */
+  private async hasAnnotationDeleteReceipt(
+    scopeKey: string,
+    actor: FileProofingActor,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+    auditContext: MutationAuditContext | undefined,
+  ): Promise<boolean> {
+    if (!auditContext) return false
+    const receipt = await this.getItem<unknown>(
+      scopeKey,
+      createAnnotationDeleteReceiptRecordKey(scopeKey, auditContext),
+    )
+    if (!isStoredAnnotationDeleteReceiptItem(receipt)) return false
+    requireMatchingIdempotencyFingerprint(receipt.requestFingerprint, auditContext)
+    return receipt.actorMemberKey === normalizeMemberKey(actor.memberKey) &&
+      receipt.fileId === fileId &&
+      receipt.versionId === versionId &&
+      receipt.annotationId === annotationId
+  }
+
+  /**
+   * Reads one annotation of a live file version before an annotation mutation.
+   *
+   * @param scopeKey - Partition key of the scope.
+   * @param fileId - Annotated file.
+   * @param versionId - Annotated version.
+   * @param annotationId - Annotation to change.
+   * @returns The stored annotation.
+   */
+  private async readAnnotationForMutation(
+    scopeKey: string,
+    fileId: string,
+    versionId: string,
+    annotationId: string,
+  ): Promise<StoredAnnotationItem> {
+    const file = await this.getFile(scopeKey, requireText(fileId, 'File ID'))
+    requireFileNotDeleted(file)
+    requireStoredVersion(file, requireText(versionId, 'Version ID'))
+    const recordKey =
+      `${createAnnotationRecordPrefix(fileId, versionId)}${requireText(annotationId, 'Annotation ID')}`
+    const current = await this.getItem<unknown>(scopeKey, recordKey)
+    if (
+      !isStoredAnnotationItem(current) ||
+      current.fileId !== fileId ||
+      current.versionId !== versionId
+    ) {
+      throw new FileProofingError(404, 'AnnotationNotFound', 'Annotation was not found.')
+    }
+    return current
   }
 
   /** File を retention 付きで soft delete します。 */
@@ -1637,7 +2013,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest> {
     requireFileWrite(actor)
-    requireWorkItemScope(scope)
+    requireFileApprovalScope(scope)
+    if (scope.kind === 'project' && input.completionTransition !== undefined) {
+      throw new FileProofingError(
+        400,
+        'ApprovalCompletionTransitionUnsupported',
+        'A Project file approval cannot move a Work Item when it completes.',
+      )
+    }
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
     const file = await this.getFile(scopeKey, input.fileId)
@@ -1664,7 +2047,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       entryType: 'approval',
       workspaceId: scope.workspaceId,
       teamId: scope.teamId,
-      issueId: scope.issueId!,
+      ...(scope.issueId ? { issueId: scope.issueId } : {}),
       ...(scope.projectId ? { projectId: scope.projectId } : {}),
       id: approvalId,
       subjectType: 'file-version',
@@ -1699,8 +2082,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: 'approval.requested',
-      entityType: 'work-item',
-      entityId: createWorkItemAuditEntityId(scope),
+      ...resolveFileAuditEntity(scope),
       target: { type: 'approval', id: approvalId },
       action: 'requested',
       metadata: {
@@ -1787,8 +2169,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: 'approval.requested',
-      entityType: 'work-item',
-      entityId: createWorkItemAuditEntityId(scope),
+      ...resolveFileAuditEntity(scope),
       target: { type: 'approval', id: approvalId },
       action: 'requested',
       metadata: {
@@ -1897,7 +2278,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     auditContext?: MutationAuditContext,
     resolveCompletionTransition?: FileApprovalCompletionTransitionResolver,
   ): Promise<ApprovalRequest> {
-    requireWorkItemScope(scope)
+    requireFileApprovalScope(scope)
     const expectedRevision = requireApprovalRevision(input.expectedRevision)
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
@@ -1948,7 +2329,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       : candidate)
     const status = aggregateApprovalStatus(reviewers)
     const isCompleted = status !== 'pending'
-    const completionTransition = status === 'approved' && current.completionTransition
+    const completionTransition = status === 'approved' && current.completionTransition &&
+        scope.kind === 'work-item'
       ? await this.resolveCompletionTransition(
           current.completionTransition,
           resolveCompletionTransition,
@@ -2051,8 +2433,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: resolveApprovalDecisionEventType(status, reviewerStatus),
-      entityType: 'work-item',
-      entityId: createWorkItemAuditEntityId(scope),
+      ...resolveFileAuditEntity(scope),
       target: { type: 'approval', id: approvalId },
       action: status === 'approved' ? 'completed' : 'decision-recorded',
       metadata: {
@@ -2151,7 +2532,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     input: CancelFileApprovalInput,
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest> {
-    requireWorkItemScope(scope)
+    requireFileApprovalScope(scope)
     const expectedRevision = requireApprovalRevision(input.expectedRevision)
     await this.ensureReady()
     const scopeKey = createFileProofingScopeKey(scope)
@@ -2215,8 +2596,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
       eventType: 'approval.cancelled',
-      entityType: 'work-item',
-      entityId: createWorkItemAuditEntityId(scope),
+      ...resolveFileAuditEntity(scope),
       target: { type: 'approval', id: approvalId },
       action: 'cancelled',
       metadata: {
@@ -2933,6 +3313,18 @@ function createAnnotationRecordPrefix(fileId: string, versionId: string) {
   return `ANNOTATION#${requireText(fileId, 'File ID')}#${requireText(versionId, 'Version ID')}#`
 }
 
+/**
+ * Builds the record key of an annotation delete receipt. The prefix does not start with
+ * `ANNOTATION#`, so annotation queries never read receipts.
+ *
+ * @param scopeKey - Partition key of the file scope.
+ * @param context - Mutation context whose idempotency key hash identifies the request.
+ * @returns The receipt record key.
+ */
+function createAnnotationDeleteReceiptRecordKey(scopeKey: string, context: MutationAuditContext) {
+  return `ANNOTATION_DELETE#${createMutationResourceId('annotation_delete', context, scopeKey)}`
+}
+
 /** Reviewer query partition key を作成します。 */
 function createReviewerScopeKey(workspaceId: string, memberKey: string) {
   return `WORKSPACE#${requireText(workspaceId, 'Workspace ID')}#REVIEWER#${normalizeMemberKey(memberKey)}`
@@ -3157,7 +3549,7 @@ function toFileAttachment(item: StoredFileItem, actor: FileProofingActor): FileA
       actor.canManage || item.createdByMemberKey === actor.memberKey
     ),
     canAnnotate: actor.canWrite,
-    canRequestApproval: actor.canWrite && item.issueId !== undefined,
+    canRequestApproval: actor.canWrite && !actor.guest && item.targetType !== 'comment',
   }
   return {
     id: item.fileId,
@@ -3196,12 +3588,96 @@ function toFileAnnotation(item: StoredAnnotationItem, actor: FileProofingActor):
     requestFingerprint: _requestFingerprint,
     ...annotation
   } = item
+  const isAuthor = normalizeMemberKey(item.authorMemberKey) === normalizeMemberKey(actor.memberKey)
   return {
     ...annotation,
     capabilities: {
-      canResolve: actor.canManage || item.authorMemberKey === actor.memberKey,
+      canResolve: actor.canWrite && !actor.guest,
+      canDelete: actor.canWrite && !actor.guest && isAuthor,
     },
   }
+}
+
+/**
+ * Builds the key that groups annotation counts by file version.
+ *
+ * @param fileId - Annotated file.
+ * @param versionId - Annotated version.
+ * @returns The grouping key.
+ */
+function createAnnotationCountKey(fileId: string, versionId: string) {
+  return `${fileId}#${versionId}`
+}
+
+/**
+ * Counts unresolved annotations per file version.
+ *
+ * @param items - Raw `ANNOTATION#` rows of one scope.
+ * @returns Unresolved counts keyed by {@link createAnnotationCountKey}.
+ */
+function countUnresolvedAnnotations(items: readonly unknown[]) {
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    if (!isStoredAnnotationItem(item) || item.resolvedAt !== undefined) continue
+    const key = createAnnotationCountKey(item.fileId, item.versionId)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+/**
+ * Adds the current-version unresolved annotation count to a projected file.
+ *
+ * @param file - Projected file.
+ * @param counts - Unresolved counts of the scope.
+ * @returns The file with `unresolvedAnnotationCount`.
+ */
+function withUnresolvedAnnotationCount(
+  file: FileAttachment,
+  counts: ReadonlyMap<string, number>,
+): FileAttachment {
+  return {
+    ...file,
+    unresolvedAnnotationCount: counts.get(createAnnotationCountKey(file.id, file.currentVersion.id)) ?? 0,
+  }
+}
+
+/**
+ * Finds the latest not-cancelled approval of a file's current version.
+ *
+ * @param approvals - Approval rows of the scope.
+ * @param file - Projected file.
+ * @returns The approval that decides the deliverable state, if any.
+ */
+function findCurrentVersionApproval(
+  approvals: readonly StoredApprovalItem[],
+  file: FileAttachment,
+): StoredApprovalItem | undefined {
+  let latest: StoredApprovalItem | undefined
+  for (const approval of approvals) {
+    if (
+      approval.subjectType !== 'file-version' ||
+      approval.fileId !== file.id ||
+      approval.versionId !== file.currentVersion.id ||
+      approval.status === 'cancelled'
+    ) {
+      continue
+    }
+    if (!latest || approval.createdAt.localeCompare(latest.createdAt) > 0) {
+      latest = approval
+    }
+  }
+  return latest
+}
+
+/**
+ * Maps an approval status to the deliverable approval state.
+ *
+ * @param status - Approval status.
+ * @returns The deliverable approval state; `cancelled` reads as `none`.
+ */
+function toDeliverableApprovalState(status: ApprovalRequestStatus): ProjectDeliverableApprovalState {
+  return status === 'cancelled' ? 'none' : status
 }
 
 /** 保存済み approval から File version subject を安全に復元します。 */
@@ -3245,7 +3721,7 @@ function toApprovalRequest(item: StoredApprovalItem, actor: FileProofingActor): 
   const approval = {
     id: item.id,
     teamId: item.teamId,
-    issueId: item.issueId,
+    ...(item.issueId ? { issueId: item.issueId } : {}),
     ...(item.projectId ? { projectId: item.projectId } : {}),
     revision: item.revision,
     status: item.status,
@@ -3801,7 +4277,11 @@ function createApprovalAuditMetadata(
     issueId: scope.issueId,
     projectId: scope.projectId,
     ...(fileSubject ? { fileId: fileSubject.fileId, versionId: fileSubject.versionId } : {}),
-    deepLink: `/teams/${encodeURIComponent(scope.teamId)}/issues/${encodeURIComponent(scope.issueId ?? '')}`,
+    // A Project approval opens the Project screen, which hosts the files tab; the Web has no
+    // dedicated Project file route.
+    deepLink: scope.kind === 'work-item'
+      ? `/teams/${encodeURIComponent(scope.teamId)}/issues/${encodeURIComponent(scope.issueId ?? '')}`
+      : `/projects/${encodeURIComponent(scope.projectId ?? '')}/issues`,
   }
 }
 
@@ -3838,6 +4318,47 @@ function requireMatchingIdempotencyFingerprint(
 function requireWorkItemScope(scope: FileProofingScope) {
   if (scope.kind !== 'work-item' || !scope.issueId) {
     throw new FileProofingError(400, 'InvalidApprovalScope', 'Approval requires a Work Item scope.')
+  }
+}
+
+/**
+ * Checks that a file approval belongs to a Work Item or a Project scope, never to a comment.
+ *
+ * @param scope - Scope of the approval.
+ */
+function requireFileApprovalScope(scope: FileProofingScope) {
+  if (scope.commentId) {
+    throw new FileProofingError(400, 'InvalidApprovalScope', 'Approval requires a Work Item or Project scope.')
+  }
+  if (scope.kind === 'work-item') {
+    requireWorkItemScope(scope)
+    return
+  }
+  if (!scope.projectId) {
+    throw new FileProofingError(400, 'InvalidApprovalScope', 'Approval requires a Work Item or Project scope.')
+  }
+}
+
+/**
+ * Creates a condition that the file row still exists and is not deleted.
+ *
+ * @param tableName - File proofing table.
+ * @param scopeKey - Partition key of the scope.
+ * @param fileId - File to check.
+ * @returns The transaction condition check.
+ */
+function createFileNotDeletedConditionCheck(
+  tableName: string,
+  scopeKey: string,
+  fileId: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { scopeKey, recordKey: createFileRecordKey(fileId) },
+      ConditionExpression: 'attribute_exists(recordKey) AND attribute_not_exists(#deletedAt)',
+      ExpressionAttributeNames: { '#deletedAt': 'deletedAt' },
+    },
   }
 }
 
@@ -4045,6 +4566,24 @@ function isStoredFileItem(value: unknown): value is StoredFileItem {
 function isStoredAnnotationItem(value: unknown): value is StoredAnnotationItem {
   return typeof value === 'object' && value !== null &&
     'entryType' in value && value.entryType === 'annotation'
+}
+
+/**
+ * Checks for an annotation delete receipt row with every field the retry check compares.
+ *
+ * @param value - Stored row, if any.
+ * @returns Whether the row is a well-formed annotation delete receipt.
+ */
+function isStoredAnnotationDeleteReceiptItem(
+  value: unknown,
+): value is StoredAnnotationDeleteReceiptItem {
+  return typeof value === 'object' && value !== null &&
+    'entryType' in value && value.entryType === 'annotation-delete-receipt' &&
+    'fileId' in value && typeof value.fileId === 'string' &&
+    'versionId' in value && typeof value.versionId === 'string' &&
+    'annotationId' in value && typeof value.annotationId === 'string' &&
+    'actorMemberKey' in value && typeof value.actorMemberKey === 'string' &&
+    'requestFingerprint' in value && typeof value.requestFingerprint === 'string'
 }
 
 /** Approval item row を判定します。 */

@@ -13,6 +13,8 @@ const {
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
+import type { EnterpriseCustomRole } from '@mukuroji/contracts'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import {
   DynamoDbTeamIssuesClient,
 } from '../../../work-items'
@@ -957,4 +959,378 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
     TableName: 'issues-table',
     ConsistentRead: true,
   })
+})
+
+/**
+ * Creates a deliverable summary for one scope, as the file proofing client returns it.
+ *
+ * @param fileId - File ID of the summary.
+ * @param approvalState - Current-version approval state.
+ * @param updatedAt - File update time that orders the list.
+ * @returns The summary.
+ */
+function createDeliverableSummaryFixture(
+  fileId: string,
+  approvalState: 'none' | 'pending' | 'approved',
+  updatedAt: string,
+) {
+  const upload = createFileUploadSessionFixture()
+  return {
+    file: { ...upload.file, id: fileId, updatedAt, unresolvedAnnotationCount: 0 },
+    approvalState,
+    unresolvedAnnotationCount: approvalState === 'pending' ? 2 : 0,
+  }
+}
+
+test('lists Project deliverables only from the Project and its readable Work Items', async () => {
+  configureFakeProjectClients(true, {
+    role: 'viewer',
+    canonicalProjectIssueIds: ['visible-item', 'other-team-item'],
+    canonicalProjectIssueTeamIds: { 'other-team-item': 'other-team' },
+  })
+  const reads: Array<{ kind: string; teamId: string; issueId?: string; projectId?: string }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push({
+          kind: scope.kind,
+          teamId: scope.teamId,
+          ...(scope.issueId ? { issueId: scope.issueId } : {}),
+          ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        })
+        if (scope.kind === 'project') {
+          return [createDeliverableSummaryFixture('project-file', 'approved', '2026-07-10T00:00:00.000Z')]
+        }
+        return [createDeliverableSummaryFixture(`${scope.issueId}-file`, 'pending', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    deliverables: Array<{ file: { id: string }; owner: { kind: string; issueId?: string }; approvalState: string }>
+  }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual([
+    'visible-item-file',
+    'project-file',
+  ])
+  expect(body.deliverables[0]?.owner).toMatchObject({ kind: 'work-item', issueId: 'visible-item' })
+  expect(reads).toEqual([
+    { kind: 'project', teamId: 'core-team', projectId: 'refero' },
+    { kind: 'work-item', teamId: 'core-team', issueId: 'visible-item', projectId: 'refero' },
+  ])
+
+  const unapproved = await app.request(
+    '/api/teams/core-team/projects/refero/deliverables?approval=unapproved',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  const unapprovedBody = await unapproved.json() as { deliverables: Array<{ file: { id: string } }> }
+  expect(unapprovedBody.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['visible-item-file'])
+
+  const invalid = await app.request(
+    '/api/teams/core-team/projects/refero/deliverables?approval=everything',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(invalid.status).toBe(400)
+})
+
+test('does not read any deliverable when the Project is not readable', async () => {
+  configureFakeProjectClients(true, {
+    role: 'viewer',
+    projectAccesses: [{ projectId: 'other-project', role: 'viewer' }],
+    canonicalProjectIssueIds: ['hidden-item'],
+  })
+  let reads = 0
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables() {
+        reads += 1
+        return []
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(403)
+  expect(reads).toBe(0)
+})
+
+test('reads no attachment of a Work Item whose canonical row moved to another Project', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'viewer',
+    canonicalProjectIssueIds: ['visible-item', 'moved-item'],
+    detailAssignedProjectIds: { 'moved-item': 'other-project' },
+  })
+  const reads: string[] = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push(scope.issueId ?? scope.kind)
+        return scope.kind === 'project'
+          ? []
+          : [createDeliverableSummaryFixture(`${scope.issueId}-file`, 'none', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as { deliverables: Array<{ file: { id: string } }> }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['visible-item-file'])
+  expect(reads).toEqual(['project', 'visible-item'])
+  expect(calls.issueDetails.map((read) => ({ issueId: read.issueId, readOptions: read.readOptions })))
+    .toEqual([
+      { issueId: 'visible-item', readOptions: { consistentIssueRead: true, includeEvents: false } },
+      { issueId: 'moved-item', readOptions: { consistentIssueRead: true, includeEvents: false } },
+    ])
+})
+
+test('returns only Project files to an Enterprise role without work-items.read', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    canonicalProjectIssueIds: ['visible-item'],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:files-only', name: 'Files only',
+    permissions: ['teams.read', 'projects.read', 'files.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'files-only',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  const reads: string[] = []
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    fileProofing: createFileProofingStub({
+      async listDeliverables(scope) {
+        reads.push(scope.issueId ?? scope.kind)
+        return [createDeliverableSummaryFixture(`${scope.issueId ?? 'project'}-file`, 'none', '2026-07-12T00:00:00.000Z')]
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/deliverables', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as { deliverables: Array<{ file: { id: string } }>; nextCursor?: string }
+  expect(body.deliverables.map((deliverable) => deliverable.file.id)).toEqual(['project-file'])
+  expect(body.nextCursor).toBeUndefined()
+  expect(reads).toEqual(['project'])
+  expect(JSON.stringify(body)).not.toContain('visible-item')
+})
+
+test('requests approval of a Project file without a Work Item completion target', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const requests: Array<{ kind: string; projectId?: string; reviewerMemberKeys: string[] }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async list() {
+        const upload = createFileUploadSessionFixture()
+        return {
+          files: [{ ...upload.file, targetType: 'project', targetId: 'refero' }],
+          approvals: [],
+          capabilities: { canUpload: true, canRequestApproval: true, canGrantGuestAccess: false },
+        }
+      },
+      async createApproval(scope, _actor, input) {
+        requests.push({ kind: scope.kind, projectId: scope.projectId, reviewerMemberKeys: input.reviewerMemberKeys })
+        const { issueId: _issueId, ...approval } = createApprovalRequestFixture({ projectId: 'refero' })
+        return approval
+      },
+    }),
+  })
+  const request = (body: Record<string, unknown>) => app.request('/api/teams/core-team/projects/refero/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      versionId: 'version-1',
+      reviewerMemberKeys: [' Sato@example.com '],
+      ...body,
+    }),
+  })
+
+  const rejected = await request({ completionTransition: 'done' })
+  expect(rejected.status).toBe(400)
+  expect(await rejected.json()).toMatchObject({ code: 'ApprovalCompletionTransitionUnsupported' })
+
+  const response = await request({})
+  expect(response.status).toBe(201)
+  expect(requests).toEqual([{ kind: 'project', projectId: 'refero', reviewerMemberKeys: ['sato@example.com'] }])
+})
+
+test('accepts a Project file reviewer whose Enterprise role reads and approves files but not Work Items', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const filesOnly: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:file-reviewer', name: 'File reviewer',
+    permissions: ['teams.read', 'projects.read', 'files.read', 'files.approve'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  const projectOnly: EnterpriseCustomRole = {
+    ...filesOnly, roleId: 'custom:project-only', name: 'Project only', permissions: ['teams.read', 'projects.read'],
+  }
+  const readOnly: EnterpriseCustomRole = {
+    ...filesOnly, roleId: 'custom:file-reader', name: 'File reader',
+    permissions: ['teams.read', 'projects.read', 'files.read'],
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [
+      {
+        workspaceId, assignmentId: 'file-reviewer',
+        principalKind: 'member', principalId: 'sato@example.com', roleId: filesOnly.roleId,
+        scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' }, source: 'direct',
+      },
+      {
+        workspaceId, assignmentId: 'project-only',
+        principalKind: 'member', principalId: 'suzuki@example.com', roleId: projectOnly.roleId,
+        scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' }, source: 'direct',
+      },
+      {
+        workspaceId, assignmentId: 'file-reader',
+        principalKind: 'member', principalId: 'tanaka@example.com', roleId: readOnly.roleId,
+        scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' }, source: 'direct',
+      },
+    ],
+    customRoles: [filesOnly, projectOnly, readOnly],
+  })
+  const created: string[][] = []
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    fileProofing: createFileProofingStub({
+      async list() {
+        const upload = createFileUploadSessionFixture()
+        return {
+          files: [{ ...upload.file, targetType: 'project', targetId: 'refero' }],
+          approvals: [],
+          capabilities: { canUpload: true, canRequestApproval: true, canGrantGuestAccess: false },
+        }
+      },
+      async createApproval(_scope, _actor, input) {
+        created.push(input.reviewerMemberKeys)
+        const { issueId: _issueId, ...approval } = createApprovalRequestFixture({ projectId: 'refero' })
+        return approval
+      },
+    }),
+  })
+  const request = (reviewer: string) => app.request('/api/teams/core-team/projects/refero/approvals', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      dueAt: '2099-07-20T00:00:00.000Z',
+      fileId: 'file-1',
+      versionId: 'version-1',
+      reviewerMemberKeys: [reviewer],
+    }),
+  })
+
+  expect((await request('sato@example.com')).status).toBe(201)
+  const denied = await request('suzuki@example.com')
+  expect(denied.status).toBe(409)
+  expect(await denied.json()).toMatchObject({ code: 'ApprovalReviewerAccessDenied' })
+  // A reviewer who reads the files but cannot record a decision is not chosen either.
+  const cannotDecide = await request('tanaka@example.com')
+  expect(cannotDecide.status).toBe(409)
+  expect(await cannotDecide.json()).toMatchObject({ code: 'ApprovalReviewerAccessDenied' })
+  expect(created).toEqual([['sato@example.com']])
+})
+
+test('keeps Project file approvals in the reviewer Inbox only while the Project is readable', async () => {
+  const { issueId: _issueId, ...projectApproval } = createApprovalRequestFixture({ projectId: 'refero' })
+  for (const [hasAccess, expectedIds] of [[true, ['approval-1']], [false, []]] as const) {
+    configureFakeProjectClients(hasAccess, { role: 'viewer' })
+    setTestAppDependencies({
+      fileProofing: createFileProofingStub({
+        async listReviewerApprovals() {
+          return { approvals: [projectApproval] }
+        },
+      }),
+    })
+
+    const response = await app.request('/api/approvals/reviewer', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+
+    expect(response.status).toBe(200)
+    const body = await response.json() as { approvals: Array<{ id: string }> }
+    expect(body.approvals.map((approval) => approval.id)).toEqual([...expectedIds])
+    resetTestApp()
+  }
+})
+
+test('routes annotation resolve, reopen, and delete to the authorized file scope', async () => {
+  configureFakeProjectClients(true, { role: 'member' })
+  const calls: Array<{ action: string; kind: string; annotationId: string; resolved?: boolean }> = []
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async setAnnotationResolution(scope, _actor, fileId, versionId, annotationId, resolved) {
+        calls.push({ action: 'resolution', kind: scope.kind, annotationId, resolved })
+        return {
+          id: annotationId,
+          fileId,
+          versionId,
+          anchor: { kind: 'image', x: 0.5, y: 0.5 },
+          bodyMarkdown: 'Fix this.',
+          authorMemberKey: 'demo@example.com',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          ...(resolved ? { resolvedAt: '2026-07-13T00:00:00.000Z' } : {}),
+          capabilities: { canResolve: true, canDelete: true },
+        }
+      },
+      async deleteAnnotation(scope, _actor, _fileId, _versionId, annotationId) {
+        calls.push({ action: 'delete', kind: scope.kind, annotationId })
+      },
+    }),
+  })
+  const base = '/api/teams/core-team/projects/refero/files/file-1/versions/version-1/annotations/annotation-1'
+
+  const resolved = await app.request(`${base}/resolve`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(resolved.status).toBe(200)
+  expect(await resolved.json()).toMatchObject({ annotation: { resolvedAt: '2026-07-13T00:00:00.000Z' } })
+  const reopened = await app.request(
+    '/api/teams/core-team/issues/issue-1/files/file-1/versions/version-1/annotations/annotation-1/reopen',
+    { method: 'POST', headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(reopened.status).toBe(200)
+  const deleted = await app.request(base, {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(deleted.status).toBe(204)
+  expect(calls).toEqual([
+    { action: 'resolution', kind: 'project', annotationId: 'annotation-1', resolved: true },
+    { action: 'resolution', kind: 'work-item', annotationId: 'annotation-1', resolved: false },
+    { action: 'delete', kind: 'project', annotationId: 'annotation-1' },
+  ])
 })
