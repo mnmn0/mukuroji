@@ -809,6 +809,35 @@ export function TaskDetailPane({
     }
   }
 
+  /**
+   * Saves a status-only change for the Ready action under the same mutation lock as the editor.
+   *
+   * @param workflowStatusId - Target workflow status ID.
+   * @throws When another mutation is pending or the update fails, so the action reports a failure.
+   */
+  async function moveToWorkflowStatus(workflowStatusId: string) {
+    if (
+      isReadOnly ||
+      !task ||
+      !task.teamId ||
+      !onUpdateIssue ||
+      isIssueSavingRef.current ||
+      isHistoryRestorePending ||
+      isAiPlanningOperationPendingRef.current ||
+      isAiSummaryOperationPendingRef.current
+    ) {
+      throw new Error('Another Work Item change is in progress.')
+    }
+    isIssueSavingRef.current = true
+    setIsIssueSaving(true)
+    try {
+      await onUpdateIssue(task.teamId, task.id, { workflowStatusId })
+    } finally {
+      isIssueSavingRef.current = false
+      setIsIssueSaving(false)
+    }
+  }
+
   /** Keeps canonical Work Item save controls disabled while AI planning is pending. */
   function reportAiPlanningOperationPending(pending: boolean) {
     isAiPlanningOperationPendingRef.current = pending
@@ -1236,7 +1265,7 @@ export function TaskDetailPane({
                   className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                   defaultValue={seededWorkflowStatusId}
                   form={editorFormId}
-                  key={`status:${editorIdentity}:${selectedWorkItemTypeId}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
+                  key={`status:${editorIdentity}:${selectedWorkItemTypeId}:${currentWorkflowStatusId}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
                   name="workflowStatusId"
                 >
                   {workflowStatuses.map((status) => (
@@ -1679,7 +1708,14 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail && softwareFactoryEnabled ? (
-          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel
+            accessToken={accessToken}
+            configuration={resolvedConfiguration}
+            includeDescription={hasDescriptionSection}
+            onMoveToStatus={onUpdateIssue && !isReadOnly && !isWorkItemMutationPending ? moveToWorkflowStatus : undefined}
+            t={t}
+            task={issue}
+          />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}
@@ -1974,7 +2010,8 @@ function pickTaskDraftFields(item: CanonicalWorkItem): unknown {
     item.assignedProjectId,
     item.assigneeUserId,
     item.priority,
-    item.workflowStatusId,
+    // The status select is keyed by the saved status instead, so a status-only save, such as the
+    // Ready action, refreshes that select without discarding the other unsaved input.
     item.workItemTypeId,
     item.customFieldValues,
     item.contributorAssignments,
