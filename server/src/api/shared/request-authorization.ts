@@ -476,6 +476,11 @@ const enterpriseRoutePermissionRules = [
     permission: 'work-items.read',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/agent-runs/history',
+    permission: 'work-items.read',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/agent-runs/:runId/release',
     permission: 'work-items.write',

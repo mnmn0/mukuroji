@@ -263,6 +263,12 @@ const teamFactoryBoardRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'factoryBoard.title',
   descriptionKey: 'factoryBoard.description',
 }
+const teamRunHistoryRouteMetadata: WorkspaceRouteMetadata = {
+  activeTeamViewId: 'factory',
+  eyebrowKey: 'factoryBoard.history.eyebrow',
+  titleKey: 'factoryBoard.history.title',
+  descriptionKey: 'factoryBoard.history.description',
+}
 const teamTimeTrackingRouteMetadata: WorkspaceRouteMetadata = {
   activeTeamViewId: 'timesheet',
   eyebrowKey: 'timeTracking.page.eyebrow',
@@ -874,6 +880,15 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...teamTriageRouteMetadata,
       activeTeamId: decodeWorkspaceRouteParameter(teamTriageMatch.params.teamId),
+    }
+  }
+
+  const teamRunHistoryMatch = matchPath('/teams/:teamId/factory/history', pathname)
+
+  if (teamRunHistoryMatch?.params.teamId) {
+    return {
+      ...teamRunHistoryRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamRunHistoryMatch.params.teamId),
     }
   }
 

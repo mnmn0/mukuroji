@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS,
   type FactoryAnalyticsPeriodDays,
@@ -9,7 +9,8 @@ import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoardPages 
 import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
-import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import { createTranslator } from '../../shared/i18n/i18n'
+import { createProjectIssuesPath, createTeamIssuesPath, createTeamRunHistoryPath } from '../../shared/routing/paths'
 import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -67,6 +68,7 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
   const analyticsLabels = useMemo(() => createFactoryAnalyticsLabels(workspace.locale), [workspace.locale])
+  const historyLabel = useMemo(() => createTranslator(workspace.locale)('factoryBoard.history.open'), [workspace.locale])
   const formatNumber = useMemo(() => {
     const formatter = new Intl.NumberFormat(workspace.locale === 'ja' ? 'ja-JP' : 'en-US', { maximumFractionDigits: 1 })
     return (value: number) => formatter.format(value)
@@ -83,6 +85,11 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   return (
     <WorkspaceRouteContent isLoading={board.isLoading} sessionErrors={[board.error, reports.error, analytics.error]}>
       <div className="px-[clamp(16px,3vw,34px)] py-5">
+        {teamId ? (
+          <Link className="mb-3 inline-block text-sm text-[var(--workbench-primary-text)] underline-offset-2 hover:underline" to={createTeamRunHistoryPath(teamId)}>
+            {historyLabel}
+          </Link>
+        ) : null}
         <FactoryAnalyticsSummary
           analytics={analytics.data}
           errorMessage={analytics.error ? analyticsLabels.loadError : undefined}
