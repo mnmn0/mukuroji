@@ -58,8 +58,8 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   Work Item も変わっていれば競合として記録する。
 - 予定を作って link を保存したら、作成に使った Work Item の revision と作成した予定を link の最初の同期状態として
   保存する。最初の poll より前に Work Item の日付が変わっても、作成時の日付へ戻さない。
-  - 同期状態のないカレンダーの link を poll が先に読んだ場合は、予定の日付が Work Item と同じ（または
-    Work Item に日付がない）ときだけ、その予定と今の Work Item revision を最初の同期状態にする。日付が違えば、
+  - 同期状態のないカレンダーの link を poll が先に読んだ場合は、予定の日付が Work Item と同じときだけ、
+    その予定と今の Work Item revision を最初の同期状態にする。日付が違えば（Work Item の日付を消した場合も）、
     作成後に予定と Work Item のどちらが動いたか分からないので、どちらも書き換えずに競合として記録する。
   - 作成の再送が、最初の試行で古い日付から作った予定を返した場合は、その予定を同期済みとして保存しない。
     最初の poll が上の規則で競合を記録し、利用者が残す日付を選ぶ。

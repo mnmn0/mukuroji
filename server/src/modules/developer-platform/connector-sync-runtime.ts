@@ -406,7 +406,7 @@ export type ConnectorLinkedResource = {
   /**
    * Whether the resource shows the Work Item's dates. A retried create can return the resource
    * the first attempt made from older dates; such a resource is not recorded as synchronized, so
-   * the first poll writes the Work Item's dates to it.
+   * the first poll records a conflict instead of overwriting either side.
    */
   datesMatch: boolean
 }
@@ -581,8 +581,9 @@ export class ConnectorSyncEngine {
       // The link has no state yet: its first state was not recorded, or the event a retried create
       // returned did not show the Work Item's dates. An event that shows them becomes the
       // baseline. Otherwise either side may have moved since the event was created, so nothing is
-      // overwritten and someone chooses the dates to keep.
-      if (!workItem.schedule || hasSameDates(input.record.schedule, workItem.schedule)) {
+      // overwritten and someone chooses the dates to keep. A Work Item whose dates were cleared
+      // also counts as moved, since the event may have moved too.
+      if (hasSameDates(input.record.schedule, workItem.schedule)) {
         await this.commitSyncedState(
           input.workspaceId,
           link,

@@ -875,7 +875,14 @@ describe('calendar connectors (ADR 0089)', () => {
   })
 
   test('keeps a user edit made to an event before its link state is recorded', async () => {
-    for (const direction of ['inbound', 'bidirectional'] as const) {
+    for (const [direction, workItemSchedule] of [
+      ['inbound', { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' }],
+      ['bidirectional', { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' }],
+      // Only the event moves, as after a retried create that returned the first attempt's event.
+      ['bidirectional', { startDate: '2026-11-30', endDate: '2026-11-30', timeZone: 'Asia/Tokyo' }],
+      // The Work Item dates were cleared.
+      ['bidirectional', undefined],
+    ] as const) {
       const fixture = await createCalendarFixture()
       const link = await linkNewEvent(fixture, direction)
       // Someone moves the event in the calendar before the first poll records a baseline.
@@ -887,11 +894,10 @@ describe('calendar connectors (ADR 0089)', () => {
         end: { date: '2026-12-11' },
         etag: '"moved-by-user"',
       })
-      fixture.setWorkItem({
-        ...fixture.getWorkItem(),
-        revision: 4,
-        schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
-      })
+      const { schedule: _created, ...unscheduled } = fixture.getWorkItem()
+      fixture.setWorkItem(workItemSchedule
+        ? { ...unscheduled, revision: 4, schedule: { ...workItemSchedule } }
+        : { ...unscheduled, revision: 4 })
       const polled = await fixture.engine.pollInstallation({
         workspaceId: 'workspace-1',
         installationId: fixture.installation.id,
@@ -899,7 +905,7 @@ describe('calendar connectors (ADR 0089)', () => {
       })
       expect(polled.results).toMatchObject([{ kind: 'conflict', conflict: { status: 'open' } }])
       expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-10' } })
-      expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-05' })
+      expect(fixture.getWorkItem().schedule).toEqual(workItemSchedule)
     }
   })
 
