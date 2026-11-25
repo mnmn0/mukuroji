@@ -231,7 +231,9 @@ Web では、設定画面（ワークフローとフィールド）の「完了 
 
 Public API の `GET /api/v1/work-items/{workItemId}/completion-gate` と MCP の `get_task`（`completionGate`）は、同じ判定を server で行った結果を返す。Web の表示と違い、承認の件数は Gate の判定と同じく強い読み取りで読み、読めなければ `unavailable` にする（[Public API](public-api.md)）。
 
-CI、bot / 人の review、merge、未解決 blocker の条件、manager の override は後続で扱う（#354）。
+Work Item の manager（割り当てた Project の manager、Team の manager の直接の付与、system administrator。Project のない Work Item は Team の manager）は、Team API の更新に `completionGateOverride: { reason }`（前後の空白を除いて 1〜1,000 文字）を付けると、`required` の条件を満たさないまま完了にできる（[ADR 0100](adr/0100-completion-gate-manager-override.md)）。manager でなければ `403 ProjectAccessDenied`、理由が不正なら `400 InvalidWorkItemCompletionGateOverride`。override は Gate が拒否する更新でだけ効き、通した条件の ID と理由を監査 event `work-item.updated` の `metadata.completionGateOverride` と活動履歴の要約に残す。Public API・MCP・自動化・一括操作・承認の決定では override できない。Web ではタスク詳細の「完了 Gate」に、manager にだけ理由の入力欄が出る。
+
+CI、bot / 人の review、merge、未解決 blocker の条件、Update Feed と Factory board への override の表示は後続で扱う（#354）。
 
 ### 遷移を実行できる役割と状態ごとの必須項目
 

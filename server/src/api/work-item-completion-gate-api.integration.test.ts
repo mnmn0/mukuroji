@@ -407,3 +407,82 @@ test('reports the Gate state through the Public API without changing the Work It
     blocksCompletion: true,
   })
 })
+
+/**
+ * Records the completion Gate override each Work Item update commits with.
+ *
+ * @returns Overrides received by the persistence fake, `undefined` for an update without one.
+ */
+function captureGateOverrides() {
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const overrides: unknown[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(...args) {
+        return teamIssues.getTeamIssueDetail(...args)
+      },
+      async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
+        overrides.push(input.completionGateOverridden)
+        return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
+      },
+    }),
+  })
+  return overrides
+}
+
+test('lets a manager complete past the Gate with a reason and records the overridden conditions', async () => {
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required', humanApproval: 'warn' })
+  const overrides = captureGateOverrides()
+
+  const response = await patchWorkItem({
+    workflowStatusId: 'done',
+    completionGateOverride: { reason: '  Customer accepted the release in the review meeting.  ' },
+  })
+
+  expect(response.status).toBe(200)
+  // Only the required condition that blocked completion is recorded; the reason is trimmed.
+  expect(overrides).toEqual([{
+    reason: 'Customer accepted the release in the review meeting.',
+    conditions: ['acceptance-criteria'],
+  }])
+})
+
+test('records no override when the Gate does not block the update', async () => {
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [metCriterion] })
+  configureGate({ acceptanceCriteria: 'required' })
+  const overrides = captureGateOverrides()
+
+  const response = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Not needed' } })
+
+  expect(response.status).toBe(200)
+  expect(overrides).toEqual([undefined])
+})
+
+test('rejects a Gate override from a member and an override without a reason', async () => {
+  configureFakeProjectClients(true, { role: 'member', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required' })
+  const denied = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride: { reason: 'Ship it' } })
+  expect(denied.status).toBe(403)
+
+  resetTestApp()
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required' })
+  for (const completionGateOverride of [{ reason: '   ' }, { reason: 'x'.repeat(1001) }, 'Ship it', { reason: 'Ok', by: 'me' }]) {
+    const invalid = await patchWorkItem({ workflowStatusId: 'done', completionGateOverride })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'InvalidWorkItemCompletionGateOverride' })
+  }
+})
+
+test('never takes a recorded override from the request body', async () => {
+  configureFakeProjectClients(true, { role: 'manager', detailAcceptanceCriteria: [openCriterion] })
+  configureGate({ acceptanceCriteria: 'required' })
+
+  const response = await patchWorkItem({
+    workflowStatusId: 'done',
+    completionGateOverridden: { reason: 'Forged', conditions: ['acceptance-criteria'] },
+  })
+
+  expect(response.status).toBe(400)
+})

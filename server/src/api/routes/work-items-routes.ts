@@ -303,6 +303,8 @@ import {
   readWorkItemActualDateCorrection,
   requireWorkItemActualDateCorrectionPermission,
 } from '../shared/work-item-actual-dates'
+import { readWorkItemCompletionGateOverride } from '../shared/work-item-completion-gate-override'
+import { requireWorkItemManagerPermission } from '../shared/work-item-manager-access'
 import {
   projectAccessAllows,
   readWorkspaceMemberNames,
@@ -5315,8 +5317,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'member')
       // Built from public fields only; the raw body never reaches the adapter input.
-      const input = readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {})
-      const actualDateRequest = readWorkItemActualDateCorrection(input)
+      const overrideRequest = readWorkItemCompletionGateOverride(
+        readPublicWorkItemUpdateBody(await readJson<unknown>(c.req) ?? {}),
+      )
+      const actualDateRequest = readWorkItemActualDateCorrection(overrideRequest.body)
       const body = normalizeTeamIssueInput(
         actualDateRequest.body,
         context.team,
@@ -5348,6 +5352,17 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         }
       }
 
+      if (overrideRequest.reason !== undefined) {
+        // Only a manager of the Work Item may complete it past the Team's completion Gate.
+        await requireWorkItemManagerPermission(
+          principal,
+          teamId,
+          context,
+          detail.issue.assignedProjectId,
+          'Only a manager of the assigned Project or the Team can override the completion Gate.',
+        )
+      }
+
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,
@@ -5359,6 +5374,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         body,
         resolvedConfiguration,
         createPersonWorkflowRulePrincipal(principal, context),
+        overrideRequest.reason === undefined ? {} : { completionGateOverrideReason: overrideRequest.reason },
       )
 
       let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined

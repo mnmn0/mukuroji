@@ -743,6 +743,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
       'InvalidContributorAssignments',
       'InvalidAcceptanceCriteria',
       'InvalidWorkItemActualDates',
+      'InvalidWorkItemCompletionGateOverride',
       'InvalidWorkItemEffort',
       'InvalidWorkItemProgress',
     ].includes(error.code)

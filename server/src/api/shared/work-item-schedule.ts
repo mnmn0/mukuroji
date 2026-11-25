@@ -69,6 +69,7 @@ const publicWorkItemUpdateFields: Readonly<Record<keyof PublicUpdateTeamIssueReq
   typeChangeResolution: true,
   actualStartDate: true,
   actualEndDate: true,
+  completionGateOverride: true,
 }
 
 /**
@@ -173,6 +174,7 @@ export function rejectInternalWorkItemUpdateFields(
     'agentRunTransactItems',
     'authorizationConditionChecks',
     'authorizationSnapshot',
+    'completionGateOverridden',
     'configurationConditionChecks',
     'planningRevisionFence',
     'statusCategory',
