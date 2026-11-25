@@ -57,11 +57,13 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
   Work Item も変わっていれば競合として記録する。
 - 予定を作って link を保存したら、作成に使った Work Item の revision と作成した予定を link の最初の同期状態として
   保存する。最初の poll より前に Work Item の日付が変わっても、作成時の日付へ戻さない。
-  - 同期状態のないカレンダーの link を poll が先に読んだ場合は、その予定と今の Work Item revision を最初の
-    同期状態にし、日付が違えば（双方向なら）Work Item の日付を予定へ書く。予定は Mukuroji が Work Item から
-    作ったものなので、Work Item より新しい日付を持たない。
+  - 同期状態のないカレンダーの link を poll が先に読んだ場合は、予定の日付が Work Item と同じ（または
+    Work Item に日付がない）ときだけ、その予定と今の Work Item revision を最初の同期状態にする。日付が違えば、
+    作成後に予定と Work Item のどちらが動いたか分からないので、どちらも書き換えずに競合として記録する。
   - 作成の再送が、最初の試行で古い日付から作った予定を返した場合は、その予定を同期済みとして保存しない。
-    最初の poll が上の規則で Work Item の日付を書く。
+    最初の poll が上の規則で競合を記録し、利用者が残す日付を選ぶ。
+  - Graph の作成は、再送で最初の試行の予定が返ることがあるため、作成後に予定を読み直し、予定に記録した
+    time zone で日付を読む。
 - ETag は順序を持たないので、カレンダーの予定は保存済みの version と同じときだけ「変更なし」とみなす
   （他の connector の数値・文字列の大小比較は使わない）。
   順序がないため、poll は予定を読む前に各 link の同期状態の revision を控え、処理する時点で変わっていれば
@@ -72,6 +74,9 @@ Developer Platform には GitHub / GitLab 向けの connector の仕組み（OAu
     解決中に Work Item が変わって revision が合わなかった場合も同じく Work Item 側を新しくする。
   - 競合の解決で予定に書くときは、link の向き（inbound だけの link を含む）にかかわらず、競合で表示した ETag を
     条件にする。
+  - Work Item へ書く操作 ID には、条件にした revision と書く値を含める。読み直しの後に同じ値で選び直しても、
+    先の操作の別の要求として拒否されない。inbound の同期も、読んだ Work Item の revision を条件にする場合は
+    その revision を操作 ID に含め、再送で同期済みの revision を条件にしたときと別の操作にする。
   - 解決の claim を取った後で競合を読み直し、読んだ時点から競合が新しくなっていれば何もせずに失敗させる。
     同じ解決の再送は先の試行の claim を解放しない。claim の解放は取得した時刻も条件にし、lease が切れた後に
     同じ解決の別の試行が取り直した claim を、先の試行が解放しないようにする。

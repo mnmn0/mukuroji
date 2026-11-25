@@ -578,28 +578,32 @@ export class ConnectorSyncEngine {
       return { kind: 'skipped', linkId: link.id, reason: 'stale' }
     }
     if (link.resourceType === 'calendar-event' && !persisted) {
-      // Mukuroji created this event from the Work Item, so an event read before the link's first
-      // state is recorded holds no newer dates. Taking it as the baseline, instead of applying it,
-      // keeps a Work Item that changed since the event was created.
-      await this.commitSyncedState(
+      // The link has no state yet: its first state was not recorded, or the event a retried create
+      // returned did not show the Work Item's dates. An event that shows them becomes the
+      // baseline. Otherwise either side may have moved since the event was created, so nothing is
+      // overwritten and someone chooses the dates to keep.
+      if (!workItem.schedule || hasSameDates(input.record.schedule, workItem.schedule)) {
+        await this.commitSyncedState(
+          input.workspaceId,
+          link,
+          undefined,
+          workItem.revision,
+          input.record,
+          input.eventId,
+          true,
+        )
+        return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+      }
+      return this.persistConflict(
         input.workspaceId,
         link,
-        undefined,
-        workItem.revision,
+        installation,
+        workItem,
         input.record,
         input.eventId,
-        true,
       )
-      return this.pushChangedCalendarDates(input.workspaceId, link, workItem, input.record)
     }
     const state = persisted ?? createInitialSyncState(link, workItem.revision)
-    const operationId = createSyncOperationId(
-      'inbound',
-      input.workspaceId,
-      link.id,
-      input.eventId,
-      input.record.externalVersion,
-    )
     const decision = decideConnectorInboundSync({
       state,
       eventId: requireStableValue(input.eventId, 'Connector event ID'),
@@ -691,6 +695,17 @@ export class ConnectorSyncEngine {
     const expectedRevision = lastSyncedDates && hasSameDates(workItem.schedule, lastSyncedDates)
       ? workItem.revision
       : state.workItemRevision
+    // The gateway keys its receipt on the expected revision too. A write conditional on the Work
+    // Item as read names that revision in its operation, so a retry that chooses the synchronized
+    // revision instead is another operation, not a mismatching replay.
+    const operationId = createSyncOperationId(
+      'inbound',
+      input.workspaceId,
+      link.id,
+      input.eventId,
+      input.record.externalVersion,
+      ...(expectedRevision === state.workItemRevision ? [] : [`as-read-${expectedRevision}`]),
+    )
     // A revision conflict intentionally reaches the idempotent gateway. If a
     // previous attempt applied the same operation but crashed before the sync
     // state commit, its receipt wins over the now-stale revision snapshot.
@@ -1180,12 +1195,16 @@ export class ConnectorSyncEngine {
         actorUserId: actor.userId,
         expectedRevision: stored.conflict.localRevision,
         patch,
+        // The expected revision and the dates are part of the operation, so choosing again after
+        // the conflict took a newer Work Item, or merging other dates, is not a mismatching replay.
         operationId: createSyncOperationId(
           'resolve-local',
           actor.workspaceId,
           conflictId,
           resolution.resolution,
           stored.externalRecord.externalVersion,
+          String(stored.conflict.localRevision),
+          JSON.stringify(patch),
         ),
       })
       if (applied.kind === 'conflict') {

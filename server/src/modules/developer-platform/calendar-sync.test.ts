@@ -212,6 +212,9 @@ async function createCalendarFixture() {
     schedule: { startDate: '2026-11-30', endDate: '2026-11-30', timeZone: calendarPolicy.timeZone },
   }
   const patches: unknown[] = []
+  // Like the real gateway, an applied operation keeps a receipt keyed on its operation ID, which
+  // replays the same request and refuses a different one.
+  const receipts = new Map<string, { request: string, workItem: ConnectorWorkItemSnapshot }>()
   let rejection: ConnectorWorkItemRejection | undefined
   const workItems: ConnectorWorkItemGateway = {
     async authorize() {},
@@ -219,6 +222,10 @@ async function createCalendarFixture() {
       return structuredClone(workItem)
     },
     async applyExternal(input) {
+      const request = JSON.stringify({ expectedRevision: input.expectedRevision, patch: input.patch })
+      const receipt = receipts.get(input.operationId)
+      if (receipt && receipt.request !== request) throw new Error('The operation ID was reused for another request.')
+      if (receipt) return { kind: 'applied', workItem: structuredClone(receipt.workItem) }
       if (input.expectedRevision !== workItem.revision) return { kind: 'conflict', workItem: structuredClone(workItem) }
       if (rejection && input.patch.schedule) {
         return { kind: 'rejected', workItem: structuredClone(workItem), reason: rejection }
@@ -229,6 +236,7 @@ async function createCalendarFixture() {
         revision: workItem.revision + 1,
         ...(input.patch.schedule ? { schedule: { ...input.patch.schedule, timeZone: calendarPolicy.timeZone } } : {}),
       }
+      receipts.set(input.operationId, { request, workItem: structuredClone(workItem) })
       return { kind: 'applied', workItem: structuredClone(workItem) }
     },
   }
@@ -774,7 +782,7 @@ describe('calendar connectors (ADR 0089)', () => {
     expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-11-30' } })
   })
 
-  test('returns the event a retried create finds without writing to it, and syncs it on the first poll', async () => {
+  test('returns the event a retried create finds without writing to it, and asks which dates to keep', async () => {
     const fixture = await createCalendarFixture()
     const create = () => fixture.engine.createLinkedResource({
       workspaceId: 'workspace-1',
@@ -813,16 +821,27 @@ describe('calendar connectors (ADR 0089)', () => {
     })
     await fixture.engine.initializeLinkedResourceSync({ workspaceId: 'workspace-1', link, resource: retried })
     expect(await fixture.persistence.getLinkState('workspace-1', link.id)).toBeUndefined()
-    await fixture.engine.pollInstallation({
+    // Without a synced baseline the poll cannot tell whether someone moved the event, so it
+    // overwrites neither side and records a conflict.
+    const polled = await fixture.engine.pollInstallation({
       workspaceId: 'workspace-1',
       installationId: fixture.installation.id,
       resourceType: 'calendar-event',
     })
+    expect(polled.results).toMatchObject([{ kind: 'conflict', conflict: { status: 'open' } }])
     expect(fixture.patches).toEqual([])
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-11-30' } })
+    const [result] = polled.results
+    if (result?.kind !== 'conflict') throw new Error('Expected a conflict.')
+    await fixture.engine.resolveConflict(
+      { workspaceId: 'workspace-1', userId: 'installer-1' },
+      result.conflict.id,
+      { resolution: 'use-local' },
+    )
     expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-05' }, end: { date: '2026-12-06' } })
   })
 
-  test('takes an event polled before the link state is recorded as the baseline', async () => {
+  test('records a conflict for an event polled before the link state is recorded', async () => {
     const fixture = await createCalendarFixture()
     const link = await linkNewEvent(fixture)
     // The Work Item moves after the event was created and before its state is recorded.
@@ -831,14 +850,44 @@ describe('calendar connectors (ADR 0089)', () => {
       revision: 4,
       schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
     })
-    await fixture.engine.pollInstallation({
+    const polled = await fixture.engine.pollInstallation({
       workspaceId: 'workspace-1',
       installationId: fixture.installation.id,
       resourceType: 'calendar-event',
     })
+    expect(polled.results).toMatchObject([{ kind: 'conflict', conflict: { status: 'open' } }])
     expect(fixture.patches).toEqual([])
     expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-05' })
-    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-05' } })
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-11-30' } })
+  })
+
+  test('keeps a user edit made to an event before its link state is recorded', async () => {
+    for (const direction of ['inbound', 'bidirectional'] as const) {
+      const fixture = await createCalendarFixture()
+      const link = await linkNewEvent(fixture, direction)
+      // Someone moves the event in the calendar before the first poll records a baseline.
+      const event = fixture.google.events.get(link.externalId)
+      if (!event) throw new Error('Expected the event.')
+      fixture.google.events.set(link.externalId, {
+        ...event,
+        start: { date: '2026-12-10' },
+        end: { date: '2026-12-11' },
+        etag: '"moved-by-user"',
+      })
+      fixture.setWorkItem({
+        ...fixture.getWorkItem(),
+        revision: 4,
+        schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
+      })
+      const polled = await fixture.engine.pollInstallation({
+        workspaceId: 'workspace-1',
+        installationId: fixture.installation.id,
+        resourceType: 'calendar-event',
+      })
+      expect(polled.results).toMatchObject([{ kind: 'conflict', conflict: { status: 'open' } }])
+      expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-10' } })
+      expect(fixture.getWorkItem().schedule).toMatchObject({ startDate: '2026-12-05' })
+    }
   })
 
   test('writes new Work Item dates to an event whose title alone changed', async () => {
@@ -916,6 +965,49 @@ describe('calendar connectors (ADR 0089)', () => {
     })
     expect(polled.results).toMatchObject([{ kind: 'synced', workItemRevision: 5 }])
     expect(fixture.getWorkItem()).toMatchObject({ title: 'Renamed in Mukuroji', schedule: { startDate: '2026-12-03' } })
+  })
+
+  test('retries an event change applied to the Work Item as read after the state commit failed', async () => {
+    const fixture = await createCalendarFixture()
+    const link = await linkNewEvent(fixture, 'inbound')
+    await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    fixture.setWorkItem({ ...fixture.getWorkItem(), revision: 4, title: 'Renamed in Mukuroji' })
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-03' }, end: { date: '2026-12-06' }, etag: '"moved"' })
+    // The Work Item takes the event dates, and the sync state commit after it fails once.
+    const commit = fixture.persistence.commitLinkState.bind(fixture.persistence)
+    let failCommit = true
+    fixture.persistence.commitLinkState = async (input) => {
+      if (!failCommit) return commit(input)
+      failCommit = false
+      return false
+    }
+    await expect(fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })).rejects.toMatchObject({ code: 'ConnectorSyncStateConflict' })
+    expect(fixture.getWorkItem()).toMatchObject({ revision: 5, schedule: { startDate: '2026-12-03' } })
+    // A due-date Work Item keeps only the last day of the range, so on retry its dates match
+    // neither the event nor the last synchronized dates.
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
+    })
+    // The retry then conditions on the synchronized revision, which is a new operation rather than
+    // a replay of the first one with another request.
+    const retried = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(retried.results.map((result) => result.kind)).toEqual(['conflict'])
+    expect(fixture.getWorkItem()).toMatchObject({ revision: 5, schedule: { startDate: '2026-12-05' } })
   })
 
   test('skips an outbound write that read a Work Item older than the synchronized one', async () => {
@@ -1013,6 +1105,27 @@ describe('calendar connectors (ADR 0089)', () => {
       status: 'open',
       localRevision: 10,
     })
+  })
+
+  test('merges the same dates again after a refresh that kept the event version', async () => {
+    const fixture = await createCalendarFixture()
+    const conflict = await createScheduleConflict(fixture)
+    const event = fixture.google.events.get(conflict.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(conflict.externalId, { ...event, etag: '"changed-again"' })
+    fixture.google.hooks.failEventRead = true
+    const actor = { workspaceId: 'workspace-1', userId: 'installer-1' }
+    const merge = { resolution: 'merge' as const, mergedValues: { schedule: { startDate: '2026-12-14', endDate: '2026-12-14' } } }
+    await expect(fixture.engine.resolveConflict(actor, conflict.id, merge))
+      .rejects.toMatchObject({ code: 'ConnectorSyncConflictChanged' })
+    // The event could not be read, so the conflict still shows the old version. Merging again
+    // conditions on the newer Work Item and must not replay the first operation.
+    fixture.google.hooks.failEventRead = false
+    await expect(fixture.engine.resolveConflict(actor, conflict.id, merge))
+      .rejects.toMatchObject({ code: 'ConnectorSyncConflictChanged' })
+    const resolved = await fixture.engine.resolveConflict(actor, conflict.id, merge)
+    expect(resolved.status).toBe('resolved')
+    expect(fixture.google.events.get(conflict.externalId)).toMatchObject({ start: { date: '2026-12-14' }, end: { date: '2026-12-15' } })
   })
 
   test('uses the built-in protocol for calendar providers configured from the environment', async () => {
@@ -1125,6 +1238,7 @@ describe('Microsoft Graph calendar protocol', () => {
     const protocol = new MicrosoftGraphCalendarEventProtocol()
     const { request, requests } = createRequester([
       { status: 201, payload: graphEvent },
+      { status: 200, payload: graphEvent },
       { status: 404, payload: undefined },
       { status: 412, payload: undefined },
     ])
@@ -1152,7 +1266,8 @@ describe('Microsoft Graph calendar protocol', () => {
     // An event changed since the last read is not overwritten.
     await expect(protocol.push(request, { ...mutation, externalId: 'moved', expectedExternalVersion: 'W/"old"' }))
       .rejects.toMatchObject({ code: 'ConnectorExternalVersionChanged' })
-    expect(requests[2]?.headers).toMatchObject({ 'If-Match': 'W/"old"' })
+    expect(requests[1]?.method).toBe('GET')
+    expect(requests[3]?.headers).toMatchObject({ 'If-Match': 'W/"old"' })
   })
 
   test('reads the dates of a created event in the time zone it was written in', async () => {
@@ -1161,7 +1276,11 @@ describe('Microsoft Graph calendar protocol', () => {
     const written = { ...graphEvent, singleValueExtendedProperties: [] }
     const { request } = createRequester([
       { status: 201, payload: written },
+      { status: 200, payload: graphEvent },
       { status: 200, payload: written },
+      // A retried create returns the event the first attempt wrote in another time zone.
+      { status: 201, payload: written },
+      { status: 200, payload: graphEvent },
     ])
     const mutation = {
       resourceType: 'calendar-event' as const,
@@ -1175,6 +1294,11 @@ describe('Microsoft Graph calendar protocol', () => {
       .toEqual({ startDate: '2026-11-30', endDate: '2026-11-30' })
     expect((await protocol.push(request, { ...mutation, externalId: 'AAMkAGI2T_abc=' })).schedule)
       .toEqual({ startDate: '2026-11-30', endDate: '2026-11-30' })
+    // The event is read back with the time zone it records, not the one this attempt would write.
+    expect((await protocol.create(request, {
+      ...mutation,
+      schedule: { ...mutation.schedule, timeZone: 'America/Los_Angeles' },
+    })).schedule).toEqual({ startDate: '2026-11-30', endDate: '2026-11-30' })
   })
 
   test('reads a timed event as the days it covers', async () => {

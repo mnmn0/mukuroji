@@ -290,7 +290,7 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
 
   /**
    * Creates the event with a `transactionId` derived from the operation, which Graph uses to
-   * drop a retried create.
+   * drop a retried create, and reads it back with its recorded time zone.
    *
    * @param request - Authenticated provider requester.
    * @param mutation - Work Item contents and the stable operation ID.
@@ -307,7 +307,10 @@ export class MicrosoftGraphCalendarEventProtocol implements ConnectorResourcePro
       },
       headers: GRAPH_UTC_PREFERENCE,
     })
-    return readGraphEvent(response.payload, readGraphWriteTimeZone(mutation))
+    // A retried create returns the event the first attempt made, which may hold another time
+    // zone than this attempt's, so the event is read again with its recorded time zone.
+    const created = readGraphEvent(response.payload, readGraphWriteTimeZone(mutation))
+    return this.read(request, mutation.resourceType, created.externalId)
   }
 }
 
