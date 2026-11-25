@@ -1,5 +1,9 @@
 import type {
   AiAssistanceAvailableModel,
+  AiAssistanceMemberUsage,
+  AiAssistanceTaskUsage,
+  AiAssistanceUsageSummary,
+  AiAssistanceUsageTotals,
   AiAssistanceExternalProvider,
   AiAssistancePolicy,
   AiAssistancePreference,
@@ -10,7 +14,11 @@ import type {
   UpdateAiAssistancePolicyRequest,
   UpdateAiAssistancePreferenceRequest,
 } from '@mukuroji/contracts'
-import { AI_ASSISTANCE_MAX_AVAILABLE_MODELS } from '@mukuroji/contracts'
+import {
+  AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
+  AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD,
+  AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT,
+} from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -54,6 +62,21 @@ export async function updateAiAssistancePolicy(
     headers: createMutationHeaders(mutationContext),
     method: 'PUT',
   }))
+}
+
+/**
+ * Loads one month's AI usage, caps, and switch state for a Workspace manager.
+ *
+ * @param accessToken - Bearer token for an authorized Workspace administrator.
+ * @param month - Calendar month in UTC, as `YYYY-MM`; the current month when omitted.
+ * @returns The validated usage summary.
+ */
+export async function getAiAssistanceUsage(
+  accessToken: string,
+  month?: string,
+): Promise<AiAssistanceUsageSummary> {
+  const query = month === undefined ? '' : `?month=${encodeURIComponent(month)}`
+  return parseAiAssistanceUsageSummary(await requestJson(`/usage${query}`, accessToken))
 }
 
 /**
@@ -176,12 +199,16 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
     !value.enabledTasks.every(isAiAssistanceTask) ||
     hasDuplicates(value.enabledTasks) ||
     !isRetentionDays(value.retentionDays) ||
+    !isOptionalMonthlyTokenLimit(value.monthlyTokenLimit) ||
+    !isOptionalMonthlyCostLimit(value.monthlyCostLimitUsd) ||
     !isNonNegativeInteger(value.revision) ||
     !isIsoTimestamp(value.updatedAt)) {
     throw invalidResponseError()
   }
 
   const availableModels = parseAvailableModels(value.availableModels)
+  const monthlyTokenLimit = value.monthlyTokenLimit
+  const monthlyCostLimitUsd = value.monthlyCostLimitUsd
   return {
     schemaVersion: 1,
     enabled: value.enabled,
@@ -189,9 +216,113 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
     defaultModelId: value.defaultModelId,
     enabledTasks: value.enabledTasks,
     retentionDays: value.retentionDays,
+    ...(monthlyTokenLimit === undefined ? {} : { monthlyTokenLimit }),
+    ...(monthlyCostLimitUsd === undefined ? {} : { monthlyCostLimitUsd }),
     revision: value.revision,
     updatedAt: value.updatedAt,
     ...(availableModels === undefined ? {} : { availableModels }),
+  }
+}
+
+/**
+ * Checks an optional monthly token cap.
+ *
+ * @param value - Unknown field value.
+ * @returns Whether the value is absent or a positive integer within the server bound.
+ */
+function isOptionalMonthlyTokenLimit(value: unknown): value is number | undefined {
+  return value === undefined || (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT
+  )
+}
+
+/**
+ * Checks an optional monthly estimated-cost cap.
+ *
+ * @param value - Unknown field value.
+ * @returns Whether the value is absent or a positive USD amount within the server bound.
+ */
+function isOptionalMonthlyCostLimit(value: unknown): value is number | undefined {
+  return value === undefined || (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value <= AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD
+  )
+}
+
+/**
+ * Validates the monthly usage response.
+ *
+ * @param value - Unknown JSON returned by the usage endpoint.
+ * @returns The validated summary.
+ * @throws {AiAssistanceApiError} If the response is malformed.
+ */
+function parseAiAssistanceUsageSummary(value: unknown): AiAssistanceUsageSummary {
+  if (!isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    typeof value.month !== 'string' ||
+    !/^\d{4}-(0[1-9]|1[0-2])$/.test(value.month) ||
+    !Array.isArray(value.tasks) ||
+    !Array.isArray(value.members) ||
+    !isOptionalMonthlyTokenLimit(value.monthlyTokenLimit) ||
+    !isOptionalMonthlyCostLimit(value.monthlyCostLimitUsd) ||
+    typeof value.warning !== 'boolean' ||
+    typeof value.exhausted !== 'boolean' ||
+    typeof value.deploymentPaused !== 'boolean') {
+    throw invalidResponseError()
+  }
+  const tasks = value.tasks.map((entry: unknown): AiAssistanceTaskUsage => {
+    if (!isRecord(entry) || !isAiAssistanceTask(entry.task)) throw invalidResponseError()
+    return { ...parseUsageTotals(entry), task: entry.task }
+  })
+  const members = value.members.map((entry: unknown): AiAssistanceMemberUsage => {
+    if (!isRecord(entry) || !isIdentifier(entry.memberId)) throw invalidResponseError()
+    return { ...parseUsageTotals(entry), memberId: entry.memberId }
+  })
+  const monthlyTokenLimit = value.monthlyTokenLimit
+  const monthlyCostLimitUsd = value.monthlyCostLimitUsd
+  return {
+    schemaVersion: 1,
+    month: value.month,
+    totals: parseUsageTotals(value.totals),
+    tasks,
+    members,
+    ...(monthlyTokenLimit === undefined ? {} : { monthlyTokenLimit }),
+    ...(monthlyCostLimitUsd === undefined ? {} : { monthlyCostLimitUsd }),
+    warning: value.warning,
+    exhausted: value.exhausted,
+    deploymentPaused: value.deploymentPaused,
+  }
+}
+
+/**
+ * Validates the counts of one usage scope.
+ *
+ * @param value - Unknown totals object.
+ * @returns Validated totals.
+ * @throws {AiAssistanceApiError} If a count is missing or negative.
+ */
+function parseUsageTotals(value: unknown): AiAssistanceUsageTotals {
+  if (!isRecord(value) ||
+    !isNonNegativeInteger(value.generations) ||
+    !isNonNegativeInteger(value.inputTokens) ||
+    !isNonNegativeInteger(value.outputTokens) ||
+    typeof value.costUsd !== 'number' ||
+    !Number.isFinite(value.costUsd) ||
+    value.costUsd < 0 ||
+    !isNonNegativeInteger(value.costUnavailableGenerations)) {
+    throw invalidResponseError()
+  }
+  return {
+    generations: value.generations,
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    costUsd: value.costUsd,
+    costUnavailableGenerations: value.costUnavailableGenerations,
   }
 }
 

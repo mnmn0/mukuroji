@@ -1,5 +1,9 @@
 import type {
   AiAssistanceCitation,
+  AiAssistanceMemberUsage,
+  AiAssistanceTaskUsage,
+  AiAssistanceUsageSummary,
+  AiAssistanceUsageTotals,
   AiAssistanceDraft,
   AiAssistanceGeneration,
   AiAssistancePolicy,
@@ -527,6 +531,36 @@ export type ReserveAiAssistanceGenerationInput = {
   expiresAt: string
   /** Workspace/member budget charged only when this unique key is first reserved. */
   budget: AiAssistanceGenerationBudgetReservation
+  /** Monthly Workspace caps checked when this unique key is first reserved, when the policy sets any. */
+  monthlyBudget?: AiAssistanceMonthlyBudgetCheck
+}
+
+/** Monthly Workspace caps checked atomically with a new generation reservation. */
+export type AiAssistanceMonthlyBudgetCheck = {
+  /** Calendar month in UTC, as `YYYY-MM`. */
+  month: string
+  /** Token cap; recorded input-plus-output tokens must stay below it. */
+  tokenLimit?: number
+  /** Estimated-cost cap in USD; the recorded estimated cost must stay below it. */
+  costLimitUsd?: number
+}
+
+/** Provider usage of one finished generation attempt, counted once into the monthly totals. */
+export type RecordAiAssistanceGenerationUsageInput = {
+  /** Workspace partition that owns the usage. */
+  workspaceId: string
+  /** Member who requested the generation. */
+  memberId: string
+  /** Untrusted client key that the adapter hashes before persistence. */
+  idempotencyKey: string
+  /** Generation identifier bound to the receipt. */
+  generationId: string
+  /** Workflow the generation served. */
+  task: AiAssistanceTask
+  /** Calendar month in UTC the attempt ended in, as `YYYY-MM`. */
+  month: string
+  /** Provider-reported usage and cost estimate. */
+  usage: AiAssistanceUsage
 }
 
 /** Input used to classify an existing generation receipt without charging a new budget. */
@@ -762,6 +796,21 @@ export interface AiAssistanceStore {
   failGenerationReservation(
     input: FailAiAssistanceGenerationReservationInput,
   ): Promise<void>
+  /**
+   * Adds one finished attempt's provider usage to the monthly totals exactly once.
+   *
+   * @param input - Receipt identity, workflow, month, and provider usage.
+   * @returns Completion once the usage is counted or was already counted.
+   */
+  recordGenerationUsage?(input: RecordAiAssistanceGenerationUsageInput): Promise<void>
+  /**
+   * Reads the recorded usage of one month.
+   *
+   * @param workspaceId - Workspace partition that owns the usage.
+   * @param month - Calendar month in UTC, as `YYYY-MM`.
+   * @returns Workspace totals with the task and member breakdowns.
+   */
+  readMonthlyUsage?(workspaceId: string, month: string): Promise<AiAssistanceMonthlyUsage>
   /** Reads the current Workspace policy, when explicitly configured. */
   getPolicy(workspaceId: string): Promise<AiAssistancePolicy | undefined>
   /** Persists a revision-fenced Workspace policy. */
@@ -864,6 +913,11 @@ export type AiAssistanceServiceOptions = {
   memberTokenLimitPerMinute?: number
   /** Conservative input-plus-output token charge reserved for every unique key. */
   worstCaseTokensPerGeneration?: number
+  /**
+   * Reads the deployment-wide AI switch from runtime control; generation is
+   * paused for every Workspace while it returns false. Always on when omitted.
+   */
+  isDeploymentAiAssistanceEnabled?: () => Promise<boolean>
   /** Clock injected for deterministic tests. */
   now?: () => Date
   /** Identifier factory injected for deterministic tests. */
@@ -887,6 +941,14 @@ export interface AiAssistanceService {
     request: UpdateAiAssistancePolicyRequest,
     authorization: AiAssistancePolicyAuthorization,
   ): Promise<AiAssistancePolicy>
+  /**
+   * Reads one month's AI usage, caps, and switch state for a policy manager.
+   *
+   * @param actor - Authenticated Workspace actor allowed to manage AI policy.
+   * @param month - Calendar month in UTC, as `YYYY-MM`; the current month when omitted.
+   * @returns Totals and breakdowns with the warning and cap state.
+   */
+  getUsage(actor: AiAssistanceActor, month?: string): Promise<AiAssistanceUsageSummary>
   /** Reads the effective current-member preference. */
   getPreference(actor: AiAssistanceActor): Promise<AiAssistancePreference>
   /** Updates the current-member preference. */
@@ -959,4 +1021,14 @@ export interface AiAssistanceService {
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKey: string,
   ): Promise<AiAssistanceFeedbackWriteResult>
+}
+
+/** Recorded usage of one month, before caps and switches are applied. */
+export type AiAssistanceMonthlyUsage = {
+  /** Usage of the whole Workspace. */
+  totals: AiAssistanceUsageTotals
+  /** Usage by workflow. */
+  tasks: AiAssistanceTaskUsage[]
+  /** Usage by member. */
+  members: AiAssistanceMemberUsage[]
 }

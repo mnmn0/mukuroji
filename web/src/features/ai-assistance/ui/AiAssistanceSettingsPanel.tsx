@@ -4,6 +4,10 @@ import type {
   AiAssistancePreference,
   AiAssistanceTask,
 } from '@mukuroji/contracts'
+import {
+  AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD,
+  AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT,
+} from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../../shared/i18n/i18n'
 import { SectionHeader } from '../../../shared/ui/WorkbenchPrimitives'
@@ -14,7 +18,9 @@ import type { AiAssistanceSettingsMutationFeedback } from '../mutations/useAiAss
 import {
   useAiAssistancePolicy,
   useAiAssistancePreference,
+  useAiAssistanceUsage,
 } from '../queries/useAiAssistanceSettings'
+import { AiAssistanceUsageSection } from './AiAssistanceUsageSection'
 
 const policyTasks = ['triage', 'summary', 'search', 'planning'] as const satisfies readonly AiAssistanceTask[]
 
@@ -75,6 +81,13 @@ export function AiAssistanceSettingsPanelContainer({
     workspaceId,
   )
   const policyQuery = useAiAssistancePolicy(
+    accessToken,
+    canManagePolicy,
+    guardRequest,
+    cacheScope,
+    workspaceId,
+  )
+  const usageQuery = useAiAssistanceUsage(
     accessToken,
     canManagePolicy,
     guardRequest,
@@ -159,10 +172,18 @@ export function AiAssistanceSettingsPanelContainer({
           enabledTasks: visiblePolicy.enabledTasks,
           expectedRevision: policy.revision,
           retentionDays: visiblePolicy.retentionDays,
+          ...(visiblePolicy.monthlyTokenLimit === undefined
+            ? {}
+            : { monthlyTokenLimit: visiblePolicy.monthlyTokenLimit }),
+          ...(visiblePolicy.monthlyCostLimitUsd === undefined
+            ? {}
+            : { monthlyCostLimitUsd: visiblePolicy.monthlyCostLimitUsd }),
         }).then((saved) => {
           if (saved) {
             setPolicyDraft(undefined)
             setPolicyEditorVersion((version) => version + 1)
+            // The caps changed, so the warning and limit state of the usage are recomputed.
+            void usageQuery.mutate()
           }
         })
       }}
@@ -189,6 +210,15 @@ export function AiAssistanceSettingsPanelContainer({
       }}
       onPreferenceRetry={() => void preferenceQuery.mutate()}
     />
+    {canManagePolicy && deploymentEnabled ? (
+      <AiAssistanceUsageSection
+        loadError={Boolean(usageQuery.error)}
+        locale={locale}
+        onRetry={() => void usageQuery.mutate()}
+        t={t}
+        {...(usageQuery.data === undefined ? {} : { usage: usageQuery.data })}
+      />
+    ) : null}
     {canManagePolicy && deploymentEnabled ? (
       <AiProviderCredentialsSection
         // Remount per Workspace and member so a typed key or late save never crosses scopes.
@@ -543,6 +573,57 @@ export function AiAssistanceSettingsPanel({
                     {t('ai.settings.validation.retention')}
                   </p>
                 ) : null}
+
+                <div className="grid grid-cols-2 gap-3 max-[640px]:grid-cols-1">
+                  <label className="grid gap-2 text-app-caption font-semibold text-[var(--workbench-muted)]">
+                    {t('ai.settings.policy.monthlyTokenLimit')}
+                    <input
+                      aria-describedby={policyValidation?.monthlyLimitsValid
+                        ? 'ai-settings-monthly-limit-hint'
+                        : 'ai-settings-monthly-limit-hint ai-settings-monthly-limit-error'}
+                      aria-invalid={!policyValidation?.monthlyLimitsValid || undefined}
+                      className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
+                      inputMode="numeric"
+                      min="1"
+                      onChange={(event) => onPolicyChange?.(withMonthlyLimit(
+                        policy,
+                        'monthlyTokenLimit',
+                        event.target.value,
+                      ))}
+                      step="1"
+                      type="number"
+                      value={policy.monthlyTokenLimit ?? ''}
+                    />
+                  </label>
+                  <label className="grid gap-2 text-app-caption font-semibold text-[var(--workbench-muted)]">
+                    {t('ai.settings.policy.monthlyCostLimit')}
+                    <input
+                      aria-describedby={policyValidation?.monthlyLimitsValid
+                        ? 'ai-settings-monthly-limit-hint'
+                        : 'ai-settings-monthly-limit-hint ai-settings-monthly-limit-error'}
+                      aria-invalid={!policyValidation?.monthlyLimitsValid || undefined}
+                      className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
+                      inputMode="decimal"
+                      min="0.01"
+                      onChange={(event) => onPolicyChange?.(withMonthlyLimit(
+                        policy,
+                        'monthlyCostLimitUsd',
+                        event.target.value,
+                      ))}
+                      step="0.01"
+                      type="number"
+                      value={policy.monthlyCostLimitUsd ?? ''}
+                    />
+                  </label>
+                </div>
+                <p className="text-[11px] text-[var(--workbench-muted)]" id="ai-settings-monthly-limit-hint">
+                  {t('ai.settings.policy.monthlyLimitHint')}
+                </p>
+                {!policyValidation?.monthlyLimitsValid ? (
+                  <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" id="ai-settings-monthly-limit-error" role="alert">
+                    {t('ai.settings.validation.monthlyLimit')}
+                  </p>
+                ) : null}
               </fieldset>
 
               <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -699,6 +780,8 @@ type PolicyValidation = {
   modelsValid: boolean
   /** Whether retention is a positive whole number. */
   retentionValid: boolean
+  /** Whether both optional monthly caps are absent or within bounds. */
+  monthlyLimitsValid: boolean
   /** Whether an enabled Workspace exposes at least one workflow. */
   tasksValid: boolean
   /** Whether every policy field is currently valid. */
@@ -720,11 +803,26 @@ function validatePolicy(policy: AiAssistancePolicy): PolicyValidation {
     policy.retentionDays >= 1 &&
     policy.retentionDays <= 365
   const tasksValid = policy.enabledTasks.length > 0
+  const monthlyLimitsValid = (
+    policy.monthlyTokenLimit === undefined || (
+      Number.isSafeInteger(policy.monthlyTokenLimit) &&
+      policy.monthlyTokenLimit >= 1 &&
+      policy.monthlyTokenLimit <= AI_ASSISTANCE_MAX_MONTHLY_TOKEN_LIMIT
+    )
+  ) && (
+    policy.monthlyCostLimitUsd === undefined || (
+      Number.isFinite(policy.monthlyCostLimitUsd) &&
+      policy.monthlyCostLimitUsd >= 0.01 &&
+      policy.monthlyCostLimitUsd <= AI_ASSISTANCE_MAX_MONTHLY_COST_LIMIT_USD &&
+      Math.abs(Math.round(policy.monthlyCostLimitUsd * 100) - policy.monthlyCostLimitUsd * 100) < 1e-6
+    )
+  )
   return {
     modelsValid,
     retentionValid,
+    monthlyLimitsValid,
     tasksValid,
-    valid: modelsValid && retentionValid && tasksValid,
+    valid: modelsValid && retentionValid && tasksValid && monthlyLimitsValid,
   }
 }
 
@@ -742,6 +840,8 @@ function arePoliciesEqual(
   return base.enabled === draft.enabled &&
     base.defaultModelId === draft.defaultModelId &&
     base.retentionDays === draft.retentionDays &&
+    base.monthlyTokenLimit === draft.monthlyTokenLimit &&
+    base.monthlyCostLimitUsd === draft.monthlyCostLimitUsd &&
     areStringArraysEqual(base.allowedModelIds, draft.allowedModelIds) &&
     areStringArraysEqual(base.enabledTasks, draft.enabledTasks)
 }
@@ -756,4 +856,22 @@ function arePoliciesEqual(
 function areStringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length &&
     left.every((value) => right.includes(value))
+}
+
+/**
+ * Replaces one optional monthly cap from the typed text.
+ *
+ * @param policy - Current policy draft.
+ * @param field - Cap being edited.
+ * @param text - Typed value; empty text removes the cap.
+ * @returns The draft with the cap set or removed.
+ */
+function withMonthlyLimit(
+  policy: AiAssistancePolicy,
+  field: 'monthlyTokenLimit' | 'monthlyCostLimitUsd',
+  text: string,
+): AiAssistancePolicy {
+  const { [field]: _removed, ...rest } = policy
+  if (text.trim() === '') return rest
+  return { ...rest, [field]: Number(text) }
 }

@@ -507,7 +507,11 @@ code/configurationの揃ったversionへ切り替えます。
 ```
 
 `schemaVersion` は `1`、`mode` は `enabled`、`read-only`、`disabled` のどれか、`revision` は1以上の整数です。
-追加 property は validator が拒否します。Revision はoperator evidenceの監査sequenceであり、
+任意の `aiAssistance` に `"disabled"` を入れると、ほかの機能を止めずに全 Workspace の新しい AI 生成だけを
+`AiAssistanceDeploymentPaused`（`403`）で断ります（`"enabled"` か省略で通常どおり。
+[ADR 0101](adr/0101-ai-assistance-monthly-usage-and-deployment-switch.md)）。`mode` が実行を許さないときは AI も止まります。
+これ以外の追加 property は validator が拒否します。新しい field を足すときは、先に server を deploy してから
+その field を含む document を配ります。Revision はoperator evidenceの監査sequenceであり、
 runtimeのdurable fenceではありません。通常変更ではdeploymentごとに増加させ、同じrevisionの
 異なる内容を再利用しませんが、AppConfigが配布したvalidなrollback documentはrevisionの大小に
 かかわらずauthoritativeです。現行 document は global control であり、surfaceごとの mode は

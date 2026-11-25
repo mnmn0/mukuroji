@@ -201,6 +201,21 @@ Token price parameterはmodel/profile、service tier、source/destination region
 token数とこのreview済み単価から推定costをgeneration recordへ保存します。片方だけ、0、負数、非数値は
 provider生成前に設定エラーとなります。Prompt cachingは使わないためcache token単価はこの見積りに含めません。
 
+## Monthly usage and caps
+
+[ADR 0101](adr/0101-ai-assistance-monthly-usage-and-deployment-switch.md)に従い、provider usageが分かった試行ごとに、
+同じWorkspace Search tableのWorkspace partitionへ月ごとのcounter row（`AI_USAGE#MONTH#<YYYY-MM>#WORKSPACE`、
+`#TASK#<task>`、`#MEMBER#<member>`）を`ADD`で足します。月は試行が終わった時刻のUTC暦月です。生成数、input/output/合計
+token、整数micro-USDの推定cost、cost未計算の生成数を持ち、rowは月初からおよそ400日後にTTLで消えます。
+生成IDごとのmarker row `AI_USAGE_RECORDED#<generationId>` を同じtransactionで条件付きPutするため、同じ試行を2回は
+数えません。数えるのは生成の確定後で、失敗しても生成は失敗にしません（数え漏れは上限での停止が遅れるだけです）。
+
+管理者は`GET /api/ai-assistance/usage?month=YYYY-MM`（`workspace.manage`）で月の合計、task別、member別の値を読めます。
+Workspace policyの任意の`monthlyTokenLimit`と`monthlyCostLimitUsd`（1セント単位）を設定すると、予約transactionに
+今月のWorkspace rowへのConditionCheckが入り、どちらかに届いた後の新しい生成を`AiAssistanceMonthlyBudgetExceeded`
+（`429`）で断ります。すでに走っている生成の分だけ上限を超えることがあります。推定costはdeploy設定の単価から
+計算するため、providerの請求額とは一致しません。
+
 ## IAM and authentication
 
 Production は Lambda execution role の短期credentialをAWS SDK default credential chainから
@@ -734,8 +749,9 @@ fail closedとし、HTTP replayだけのrunを完全なdurability evidenceとし
 latency/cost budget超過、citation/redaction/withheld/replay failure、commit不一致のいずれかでpromotionを停止します。
 
 1. 新しいAI generationを停止する。影響Workspaceをpolicyでdisableし、横断的な機密性incidentでは既存global runtime
-   controlをdisableにする。現在はdeployment-wide AI専用kill switchがないため、全Workspaceを安全に止められない場合は
-   global API停止またはreview済みforward deployを選び、その制約をincident recordへ残す。
+   controlをdisableにする。全Workspaceの新しいAI generationだけを止めるときは、runtime controlのAppConfig documentへ
+   `"aiAssistance": "disabled"`を足して配布する（[ADR 0101](adr/0101-ai-assistance-monthly-usage-and-deployment-switch.md)）。
+   APIはAI以外の機能を止めず、新しい生成を`AiAssistanceDeploymentPaused`（`403`）で断る。
 2. Lambda timeout以上待ってin-flight provider callを終了させ、content-free report、metric、alarm、deploy parameter、
    artifact digestを固定する。Prompt/source/output/credentialをincident ticketへ複製しない。
 3. 直前の成功codeをrevertした新しいmain commitとして作り、前回のexact model ID/profile ARN、destination ARN、region、
