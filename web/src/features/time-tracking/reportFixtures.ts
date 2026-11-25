@@ -67,6 +67,58 @@ export const timeReportFixtureBudgetSummary: TimeTrackingSummary = {
   },
 }
 
+/**
+ * Team budget report of November whose period has its own budget, next to the scope's other
+ * budget per period.
+ */
+export const timeReportFixturePeriodBudgetSummary: TimeTrackingSummary = {
+  ...timeReportFixtureBudgetSummary,
+  budget: {
+    schemaVersion: 1,
+    workspaceId: 'workspace-demo',
+    teamId: 'core-team',
+    scopeType: 'team',
+    scopeId: 'core-team',
+    amountMinor: 300_000,
+    currency: 'JPY',
+    periodFrom: '2026-11-01',
+    periodTo: '2026-11-30',
+    periodBudget: true,
+    revision: 1,
+    updatedAt: '2026-11-02T00:00:00.000Z',
+  },
+  budgetPeriods: [
+    {
+      schemaVersion: 1,
+      workspaceId: 'workspace-demo',
+      teamId: 'core-team',
+      scopeType: 'team',
+      scopeId: 'core-team',
+      amountMinor: 300_000,
+      currency: 'JPY',
+      periodFrom: '2026-11-01',
+      periodTo: '2026-11-30',
+      periodBudget: true,
+      revision: 1,
+      updatedAt: '2026-11-02T00:00:00.000Z',
+    },
+    {
+      schemaVersion: 1,
+      workspaceId: 'workspace-demo',
+      teamId: 'core-team',
+      scopeType: 'team',
+      scopeId: 'core-team',
+      amountMinor: 450_000,
+      currency: 'JPY',
+      periodFrom: '2026-12-01',
+      periodTo: '2026-12-31',
+      periodBudget: true,
+      revision: 3,
+      updatedAt: '2026-11-03T00:00:00.000Z',
+    },
+  ],
+}
+
 /** Project budget report of Atlas: a JPY budget, an active baseline, and a slipping schedule. */
 export const projectBudgetReportFixture: ProjectBudgetReport = {
   teamId: 'core-team',

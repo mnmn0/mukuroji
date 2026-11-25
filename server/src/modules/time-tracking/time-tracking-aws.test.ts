@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
-import type { TimeEntry, TimeEntryHistory, TimePeriodClose } from '@mukuroji/contracts'
+import type { TimeBudget, TimeEntry, TimeEntryHistory, TimePeriodClose } from '@mukuroji/contracts'
 import {
   DynamoDbTimeTrackingRepository,
   TimeTrackingService,
@@ -326,6 +326,43 @@ describe('DynamoDbTimeTrackingRepository', () => {
     // A month someone else already closed still reports the close conflict.
     await expect(createFailingRepository(['ConditionalCheckFailed', 'None']).createPeriodClose(close, undefined, undefined, [ownerMembershipCheck]))
       .rejects.toMatchObject({ code: 'TimePeriodAlreadyClosed' })
+  })
+
+  test('keys a budget per period under its scope and lists only that scope', async () => {
+    const budget: TimeBudget = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'project',
+      scopeId: 'project-1',
+      amountMinor: 600_000,
+      currency: 'JPY',
+      periodFrom: '2026-04-01',
+      periodTo: '2027-03-31',
+      periodBudget: true,
+      revision: 1,
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    }
+    const commands: CommandWithInput[] = []
+    const repository = new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([
+      {},
+      {
+        Items: [
+          { ...budget, recordKey: 'TIME_BUDGET#project#team-1#project-1#PERIOD#2026-04-01#2027-03-31' },
+          // A Project whose ID continues with `#PERIOD#` shares the prefix but is another scope.
+          { ...budget, scopeId: 'project-1#PERIOD#x', recordKey: 'TIME_BUDGET#project#team-1#project-1#PERIOD#x#PERIOD#2026-04-01#2027-03-31' },
+        ],
+      },
+    ], commands))
+    await repository.saveBudget(budget, 0)
+    expect(commands[0]?.input).toMatchObject({
+      Item: { recordKey: 'TIME_BUDGET#project#team-1#project-1#PERIOD#2026-04-01#2027-03-31' },
+      ConditionExpression: 'attribute_not_exists(recordKey)',
+    })
+    expect(await repository.listBudgetPeriods('workspace-1', 'team-1', 'project', 'project-1')).toEqual([budget])
+    expect(commands[1]?.input).toMatchObject({
+      ExpressionAttributeValues: { ':prefix': 'TIME_BUDGET#project#team-1#project-1#PERIOD#' },
+    })
   })
 
   test('refuses a stored entry with neither a Work Item nor a category', async () => {
