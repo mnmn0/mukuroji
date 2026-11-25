@@ -356,7 +356,14 @@ export function MemberOffboardingDialog({
                       onClick={() => {
                         if (lastDayExpiry) {
                           void run('expiry-save', async () => {
-                            await onSaveAccessExpiry(lastDayExpiry, expiryBase.version)
+                            try {
+                              await onSaveAccessExpiry(lastDayExpiry, expiryBase.version)
+                            } catch (error) {
+                              // A refused save, such as a conflict with another administrator,
+                              // refills the field from the member's current expiry and version.
+                              setExpiryBase({ version: Number.NaN, lastDay })
+                              throw error
+                            }
                             // The saved value is no longer an edit, so the newer version is taken up.
                             setExpiryBase({ version: expiryBase.version, lastDay })
                           })

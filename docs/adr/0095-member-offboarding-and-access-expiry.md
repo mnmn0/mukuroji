@@ -30,7 +30,7 @@
   - 失効は冪等です。利用停止のあとで失効に失敗した場合は、`POST /api/workspace/members/:memberKey/credentials/revoke` で
     やり直せます。
   - この route は、失効する資格情報の ID を、失効の前に `Idempotency-Key` から決まる audit event
-    （`member.credentials-revoked`）に記録します。応答が失われて同じ key で再送したときは、記録した ID だけを
+    （`member.credential-revocation-started`）に記録します。応答が失われて同じ key で再送したときは、記録した ID だけを
     失効して同じ結果を返します。最初の request のあとで作られた資格情報は失効しません。
     同じ key で別の request を送ると 409 `WorkspaceIdempotencyConflict` です。
   - Public API は、Workspace の lifecycle を確かめた直後に、資格情報の作成者が active なメンバーかを

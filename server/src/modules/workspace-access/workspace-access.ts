@@ -47,8 +47,11 @@ export type { WorkspaceRole } from './domain/workspace-role'
 const INVITATION_ACCEPTANCE_LOCK_MS = 5 * 60_000
 const INVITATION_PROVISIONING_LEASE_MS = 5 * 60_000
 const WORKSPACE_IDENTITY_LIFECYCLE_VERSION = 2
-/** Audit event that records, as its receipt, the credentials a member-wide revocation revokes. */
-const MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE = 'member.credentials-revoked'
+/**
+ * Audit event that records, as its receipt, the credentials a member-wide revocation is about to
+ * revoke; each revocation writes its own event.
+ */
+const MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE = 'member.credential-revocation-started'
 const MANUAL_COGNITO_CLEANUP_MESSAGE =
   'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.'
 const WORKSPACE_INVITATION_AUDIT_FIELDS = [
@@ -3485,7 +3488,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       eventType: MEMBER_CREDENTIAL_REVOCATION_EVENT_TYPE,
       entityType: 'member',
       entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, normalizedMemberKey),
-      action: 'credentials-revoked',
+      action: 'credential-revocation-started',
       occurredAt: this.clock().toISOString(),
       changes: [],
       metadata: {
