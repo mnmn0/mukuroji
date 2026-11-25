@@ -16,10 +16,14 @@ describe('Work Item template form', () => {
   })
 
   test('writes form fields and keeps the fields the form does not edit', () => {
+    const schedule = {
+      mode: 'unscheduled',
+      calendarPolicy: { timeZone: 'Asia/Tokyo', workingWeekdays: [1, 2, 3, 4, 5], holidays: ['2026-11-23'] },
+    }
     const json = JSON.stringify({
       title: 'Review',
       customFieldValues: { points: 3 },
-      schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: [], holidays: [] } },
+      schedule,
     })
     let next = applyWorkItemTemplateFormValue(json, 'priority', 'high')
     next = applyWorkItemTemplateFormValue(next, 'assigneeUserId', 'member-1')
@@ -31,6 +35,7 @@ describe('Work Item template form', () => {
       description: 'Check the draft',
     })
     expect(JSON.parse(next)).toMatchObject({ customFieldValues: { points: 3 } })
+    expect(JSON.parse(next).schedule).toEqual(schedule)
 
     next = applyWorkItemTemplateFormValue(next, 'priority', '')
     next = applyWorkItemTemplateFormValue(next, 'assigneeUserId', ' ')

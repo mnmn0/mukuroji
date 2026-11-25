@@ -1,3 +1,4 @@
+import type { AutomationRuleDryRunResult } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { AutomationRuleDefinitionEditor } from './AutomationRuleDefinitionEditor'
 import {
@@ -16,7 +17,7 @@ const meta = {
     options: automationRuleEditorOptionsFixture,
     onSave: async () => undefined,
     onCancel: () => undefined,
-    onDryRun: async () => ({
+    onDryRun: async (): Promise<AutomationRuleDryRunResult> => ({
       matched: true,
       triggerType: 'status',
       conditions: [{ index: 0, matched: true, readsEventFields: false }],
@@ -51,6 +52,16 @@ export const AnyConditionWithOrderedActions: Story = {
         { type: 'notify', recipientMemberKeys: ['owner@example.com'], title: 'Assigned' },
       ],
     },
+    onDryRun: async (): Promise<AutomationRuleDryRunResult> => ({
+      matched: true,
+      triggerType: 'status',
+      conditions: [{ index: 0, matched: true, readsEventFields: false }],
+      actions: [
+        { index: 0, type: 'assign', changes: [{ field: 'assigneeUserId', after: 'sato@example.com' }] },
+        { index: 1, type: 'update', changes: [{ field: 'workflowStatusId', before: 'todo', after: 'in-review' }] },
+        { index: 2, type: 'notify', recipientMemberKeys: ['owner@example.com'] },
+      ],
+    }),
   },
 }
 

@@ -219,5 +219,6 @@ describe('AutomationRuleDefinitionEditor', () => {
 
     const readOnlyMarkup = renderToStaticMarkup(createElement(AutomationManagementPanel, { ...props, readOnly: true }))
     expect(readOnlyMarkup).not.toContain(`automation-rule-delete-${rule.id}`)
+    expect(readOnlyMarkup).not.toContain(`automation-rule-edit-${rule.id}`)
   })
 })

@@ -529,7 +529,7 @@ function RulesTab({
                 <button
                   className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                   data-testid={`automation-rule-toggle-${id}`}
-                  disabled={busyOperation === `rule:toggle:${id}`}
+                  disabled={busyOperation === `rule:toggle:${id}` || isEditing}
                   type="button"
                   onClick={() => void onToggle(rule)}
                 >
@@ -549,7 +549,7 @@ function RulesTab({
             {isEditing && onUpdate ? (
               <AutomationRuleDefinitionEditor
                 isSaving={busyOperation === `rule:update:${id}`}
-                key={`${id}:${rule.revision}`}
+                key={id}
                 locale={locale}
                 options={editorOptions}
                 rule={rule}
@@ -557,7 +557,8 @@ function RulesTab({
                 onDryRun={onDryRun}
                 onSave={async (input) => {
                   await onUpdate(rule, input)
-                  setEditingRuleId(undefined)
+                  // Close only this editor: another rule may have been opened while this one saved.
+                  setEditingRuleId((current) => current === id ? undefined : current)
                 }}
               />
             ) : null}

@@ -52,7 +52,7 @@ Rule を作った member は `createdByMemberKey` に記録する（fingerprint 
 
 ### 期限前の schedule rule
 
-`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていたり、完了・archive されていたりすれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。`catchUpPolicy: "skip"` でも、途中で止まった実行時刻は、すでに 1 件でも動いていれば遅れて再開したときに残りの Work Item を実行する。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
+`schedule` trigger に `"dueWorkItems": { "daysBefore": 3 }`（0〜365）を付けると、schedule の各実行時刻に、その time zone の日付から `daysBefore` 日後が期限の未完了 Work Item（archive 済みを除く）ごとに 1 回ずつ rule が動く（[ADR 0090](adr/0090-automation-due-soon-and-business-day-schedules.md)）。条件と action はその Work Item を対象にし、`event.metadata` に `teamId`、`issueId`、`dueDate`、`scheduledFor` が入る。Work Item は通知用の期限 index から読み、強整合で読み直して期限が変わっていたり、完了・archive されていたりすれば動かさない。同じ実行時刻と Work Item の組は 1 回だけ実行し、失敗した 1 件はその execution の retry に任せる。`catchUpPolicy: "skip"` でも、途中で止まった実行時刻は、すでに 1 件でも動いていれば（動いた Work Item がその後完了して期限一覧から外れていても、rule の execution 履歴で判定する）遅れて再開したときに残りの Work Item を実行する。rate limit は Work Item ごとの実行を数えるので、対象が多い Workspace では上げておく。
 
 Notify action の `notifyAssignee: true` は、rule が対象にしている Work Item の、rule が動いた時点の担当者にも通知する（同じ rule の前の assign action で変えた担当者ではない。dry-run も同じ）。`recipientMemberKeys` は空でもよいが、どちらか一方は必要。「期限 3 日前に担当者へ通知」は、毎日 9:00 の schedule に `dueWorkItems: { daysBefore: 3 }` と `{ "type": "notify", "recipientMemberKeys": [], "notifyAssignee": true, "title": "期限まで3日" }` で作る。
 

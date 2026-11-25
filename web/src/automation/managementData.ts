@@ -12,7 +12,7 @@ import type {
   AutomationRulePickerOption,
 } from './model/ruleDefinitionDraft'
 import type { ProjectDirectoryTeam } from '../projects/api'
-import { getWorkItemConfiguration } from '../work-items/api'
+import { getWorkItemConfiguration, WorkItemConfigurationApiError } from '../work-items/api'
 import type { AutomationWorkflowTargetOption } from './ui/AutomationManagementPanel'
 import {
   getAutomationExecutions,
@@ -147,8 +147,9 @@ function collectPickerOptions(
  * Loads the Workspace and Team Work Item configurations the panel uses.
  *
  * @param accessToken - Automation API の access token です。
- * @param teams - Teams whose configurations are read; unreadable ones are skipped.
+ * @param teams - Teams whose configurations are read; ones the viewer cannot read are skipped.
  * @returns Workflow application targets and the configurations that could be read.
+ * @throws The first Team failure other than a missing permission or a removed Team.
  */
 async function loadAutomationWorkflowConfigurations(
   accessToken: string,
@@ -164,6 +165,12 @@ async function loadAutomationWorkflowConfigurations(
   if (!workspace || workspace.status === 'rejected') {
     throw workspace?.reason ?? new Error('Workspace workflow configuration is unavailable.')
   }
+  // A Team the viewer cannot read is left out; any other failure fails the load, so the editor
+  // never offers an incomplete status or custom field list as if it were complete.
+  const teamFailure = teamResults.find((result) =>
+    result.status === 'rejected' && !isUnreadableTeamConfiguration(result.reason)
+  )
+  if (teamFailure?.status === 'rejected') throw teamFailure.reason
   const workflowTargets: AutomationWorkflowTargetOption[] = [
     {
       expectedRevision: workspace.value.configuration.revision,
@@ -192,4 +199,15 @@ async function loadAutomationWorkflowConfigurations(
       ...teamResults.flatMap((result) => result.status === 'fulfilled' ? [result.value.configuration] : []),
     ],
   }
+}
+
+/**
+ * Tells whether a Team configuration failed because the viewer cannot read it, as opposed to a
+ * temporary failure.
+ *
+ * @param error - Rejection reason of the Team configuration request.
+ * @returns Whether the Team is forbidden or no longer exists.
+ */
+function isUnreadableTeamConfiguration(error: unknown): boolean {
+  return error instanceof WorkItemConfigurationApiError && (error.status === 403 || error.status === 404)
 }

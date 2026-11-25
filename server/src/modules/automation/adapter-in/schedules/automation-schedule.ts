@@ -924,13 +924,7 @@ async function selectScheduledRuleDueOccurrences(
     return onTimeOccurrences
   }
   const started = rule.trigger.dueWorkItems
-    ? await hasStartedDueWorkItemOccurrence(
-        rule,
-        rule.trigger.dueWorkItems.daysBefore,
-        rule.trigger.schedule.timeZone,
-        firstOccurrence,
-        dependencies,
-      )
+    ? await hasStartedDueWorkItemOccurrence(rule, firstOccurrence, dependencies)
     : Boolean(await client.getExecution(
         rule.workspaceId,
         createAutomationExecutionId(rule, `scheduled-rule:${rule.id}:${firstOccurrence.toISOString()}`),
@@ -941,35 +935,37 @@ async function selectScheduledRuleDueOccurrences(
 }
 
 /**
+ * How many of a due-soon rule's newest executions are read to find whether a late occurrence
+ * started; the rule runs nothing past the earliest unfinished occurrence, so its newest
+ * executions belong to that occurrence when it started.
+ */
+const STARTED_DUE_WORK_ITEM_EXECUTION_LOOKUP_LIMIT = 5
+
+/**
  * Tests whether a late due-soon occurrence already ran for any of its Work Items, so a `skip`
  * policy resumes the rest instead of dropping them.
  *
- * Runs only when the occurrence is past its on-time window, and stops at the first execution found.
+ * Reads the rule's newest executions rather than the current due list, so the occurrence still
+ * counts as started after the Work Items it already ran for are completed, archived, or moved to
+ * another due date. Runs only when the occurrence is past its on-time window.
  *
  * @param rule - Due-soon schedule rule.
- * @param daysBefore - Days from the occurrence date to the due date.
- * @param timeZone - Time zone of the schedule.
  * @param occurrence - Occurrence the rule is still due for.
  * @param dependencies - Schedule dependencies.
  * @returns Whether an execution exists for the occurrence.
  */
 async function hasStartedDueWorkItemOccurrence(
   rule: AutomationRule,
-  daysBefore: number,
-  timeZone: string,
   occurrence: Date,
   dependencies: AutomationScheduleDependencies,
 ): Promise<boolean> {
-  if (!dependencies.dueWorkItems) return false
-  const dueDate = getDueDateForOccurrence(occurrence, timeZone, daysBefore)
-  const items = await dependencies.dueWorkItems.listOpenWorkItemsDueOn(rule.workspaceId, dueDate)
-  for (const item of items) {
-    const eventId = createDueWorkItemEventId(rule, occurrence, item.teamId, item.workItemId)
-    if (await dependencies.client.getExecution(rule.workspaceId, createAutomationExecutionId(rule, eventId))) {
-      return true
-    }
-  }
-  return false
+  const prefix = `scheduled-rule:${rule.id}:${occurrence.toISOString()}:due:`
+  const { executions } = await dependencies.client.listExecutions({
+    workspaceId: rule.workspaceId,
+    ruleId: rule.id,
+    limit: STARTED_DUE_WORK_ITEM_EXECUTION_LOOKUP_LIMIT,
+  })
+  return executions.some((execution) => execution.triggerEventId.startsWith(prefix))
 }
 
 /**

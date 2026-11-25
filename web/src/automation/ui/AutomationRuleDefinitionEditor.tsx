@@ -13,8 +13,6 @@ import {
   AUTOMATION_RULE_DRAFT_LIMIT,
   AUTOMATION_RULE_UPDATE_FIELDS,
   createAutomationRuleDraft,
-  createAutomationRuleDraftActions,
-  createAutomationRuleDraftConditions,
   createAutomationRuleDraftUpdate,
   createEmptyAutomationRuleActionDraft,
   isAutomationRuleActionDraftValid,
@@ -151,6 +149,11 @@ export function AutomationRuleDefinitionEditor({
   const t = useMemo(() => createTranslator(locale), [locale])
   const formId = useId()
   const [draft, setDraft] = useState<AutomationRuleDraft>(() => createAutomationRuleDraft(rule))
+  // Rows keep their own keys, so per-row state such as a typed path stays with its row on removal.
+  const [conditionKeys, setConditionKeys] = useState<number[]>(
+    () => draft.conditions.map((_condition, position) => position),
+  )
+  const nextConditionKey = useRef(draft.conditions.length)
   const [newActionType, setNewActionType] = useState<AutomationRuleDraftActionType>('notify')
   const presets = useMemo(() => createConditionFieldPresets(t, options.customFields), [t, options.customFields])
   const valid = isAutomationRuleDraftValid(draft)
@@ -236,12 +239,15 @@ export function AutomationRuleDefinitionEditor({
                 className="workbench-button-secondary min-h-9 px-3"
                 data-testid="automation-rule-edit-reset-conditions"
                 type="button"
-                onClick={() => setDraft((current) => ({
-                  name: current.name,
-                  match: 'all',
-                  conditions: [],
-                  actions: current.actions,
-                }))}
+                onClick={() => {
+                  setConditionKeys([])
+                  setDraft((current) => ({
+                    name: current.name,
+                    match: 'all',
+                    conditions: [],
+                    actions: current.actions,
+                  }))
+                }}
               >
                 {t('automation.ruleEdit.resetConditions')}
               </button>
@@ -269,7 +275,7 @@ export function AutomationRuleDefinitionEditor({
             ) : null}
             <ol className="grid gap-3">
               {draft.conditions.map((condition, index) => (
-                <li key={index}>
+                <li key={conditionKeys[index] ?? `extra-${index}`}>
                   <ConditionRow
                     condition={condition}
                     index={index}
@@ -277,10 +283,13 @@ export function AutomationRuleDefinitionEditor({
                     presets={presets}
                     t={t}
                     onChange={(next) => updateCondition(index, next)}
-                    onRemove={() => setDraft((current) => ({
-                      ...current,
-                      conditions: current.conditions.filter((_condition, position) => position !== index),
-                    }))}
+                    onRemove={() => {
+                      setConditionKeys((current) => current.filter((_key, position) => position !== index))
+                      setDraft((current) => ({
+                        ...current,
+                        conditions: current.conditions.filter((_condition, position) => position !== index),
+                      }))
+                    }}
                   />
                 </li>
               ))}
@@ -291,10 +300,13 @@ export function AutomationRuleDefinitionEditor({
                 data-testid="automation-rule-edit-add-condition"
                 disabled={draft.conditions.length >= AUTOMATION_RULE_DRAFT_LIMIT}
                 type="button"
-                onClick={() => setDraft((current) => ({
-                  ...current,
-                  conditions: [...current.conditions, { field: 'workItem.workflowStatusId', operator: 'equals', value: '' }],
-                }))}
+                onClick={() => {
+                  setConditionKeys((current) => [...current, nextConditionKey.current++])
+                  setDraft((current) => ({
+                    ...current,
+                    conditions: [...current.conditions, { field: 'workItem.workflowStatusId', operator: 'equals', value: '' }],
+                  }))
+                }}
               >
                 {t('automation.ruleEdit.addCondition')}
               </button>
@@ -460,7 +472,12 @@ function ConditionRow({ condition, index, onChange, onRemove, options, presets, 
             data-testid={`automation-rule-edit-condition-path-${index}`}
             placeholder="workItem.customFieldValues.field-id"
             value={condition.field}
-            onChange={(event) => onChange({ field: event.target.value, operator: condition.operator, value: condition.value })}
+            onChange={(event) => {
+              const field = event.target.value
+              const known = presets.find((candidate) => candidate.field === field)
+              const valueType = known?.kind === 'number' || known?.kind === 'boolean' ? known.kind : undefined
+              onChange({ field, operator: condition.operator, value: condition.value, ...(valueType ? { valueType } : {}) })
+            }}
           />
         ) : null}
       </div>
@@ -971,15 +988,17 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
   const [tested, setTested] = useState<{ key: string, result: AutomationRuleDryRunResult }>()
   const [failed, setFailed] = useState<{ key: string, message: string }>()
   const latestRequestKey = useRef<string | undefined>(undefined)
+  const update = createAutomationRuleDraftUpdate(rule, draft)
   const input: AutomationRuleDryRunInput = {
     teamId,
     workItemId: workItemId.trim(),
     rule: {
-      name: draft.name.trim(),
+      name: update.name ?? rule.name,
       enabled: rule.enabled,
       trigger: rule.trigger,
-      conditions: createAutomationRuleDraftConditions(draft),
-      actions: createAutomationRuleDraftActions(draft),
+      conditions: update.conditions ?? rule.conditions,
+      // Saving leaves unchanged actions out, so the preview runs the saved ones in that case too.
+      actions: update.actions ?? rule.actions,
       retryPolicy: rule.retryPolicy,
       rateLimit: rule.rateLimit,
       allowReentry: rule.allowReentry,
@@ -998,6 +1017,7 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
     latestRequestKey.current = requestKey
     setRunning(true)
     setFailed(undefined)
+    setTested(undefined)
     try {
       const response = await onDryRun(input)
       if (latestRequestKey.current === requestKey) setTested({ key: requestKey, result: response })
@@ -1038,6 +1058,12 @@ function DryRunSection({ canRun, draft, onDryRun, options, rule, t }: DryRunSect
             data-testid="automation-rule-dry-run-work-item"
             value={workItemId}
             onChange={(event) => setWorkItemId(event.target.value)}
+            onKeyDown={(event) => {
+              // The section sits inside the save form; Enter here runs the dry run instead of saving.
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              if (!running) void run()
+            }}
           />
         </label>
         <button
@@ -1120,7 +1146,7 @@ function describePlannedAction(
   if (action.changes) {
     if (action.changes.length === 0) return `: ${t('automation.ruleEdit.dryRunNoChange')}`
     return `: ${action.changes.map((change) =>
-      `${change.field} ${formatDryRunValue(change.before, options)} → ${formatDryRunValue(change.after, options)}`).join(', ')}`
+      `${change.field} ${formatDryRunValue(change.field, change.before, options)} → ${formatDryRunValue(change.field, change.after, options)}`).join(', ')}`
   }
   if (action.recipientMemberKeys) {
     return `: ${action.recipientMemberKeys.map((key) => readOptionLabel(options.members, key)).join(', ')}`
@@ -1130,17 +1156,48 @@ function describePlannedAction(
 }
 
 /**
- * Formats a value from a dry run change with picker labels where the ID is known.
+ * Formats a value from a dry run change, with the picker label when the field holds an ID.
  *
+ * Only member, status, and project fields are looked up, each in its own choices, so a title or
+ * description that happens to equal an ID is shown as written.
+ *
+ * @param field - Work Item field the change writes.
  * @param value - Value to format.
  * @param options - Picker choices.
  * @returns Readable text.
  */
-function formatDryRunValue(value: AutomationValue | undefined, options: AutomationRuleEditorOptions): string {
+function formatDryRunValue(
+  field: string,
+  value: AutomationValue | undefined,
+  options: AutomationRuleEditorOptions,
+): string {
   if (value === undefined || value === null || value === '') return '—'
   if (typeof value !== 'string') return JSON.stringify(value)
-  const known = [...options.members, ...options.statuses, ...options.projects].find((option) => option.id === value)
-  return known?.label ?? value
+  const choices = readDryRunFieldChoices(field, options)
+  return choices?.find((option) => option.id === value)?.label ?? value
+}
+
+/**
+ * Picks the choices whose IDs a dry run field holds.
+ *
+ * @param field - Work Item field the change writes.
+ * @param options - Picker choices.
+ * @returns The field's choices, or undefined for fields shown as written.
+ */
+function readDryRunFieldChoices(
+  field: string,
+  options: AutomationRuleEditorOptions,
+): readonly AutomationRulePickerOption[] | undefined {
+  switch (field) {
+    case 'assigneeUserId':
+      return options.members
+    case 'workflowStatusId':
+      return options.statuses
+    case 'assignedProjectId':
+      return options.projects
+    default:
+      return undefined
+  }
 }
 
 /**
