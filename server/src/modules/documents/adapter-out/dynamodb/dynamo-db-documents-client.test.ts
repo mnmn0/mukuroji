@@ -6456,6 +6456,37 @@ const NESTED_BLOCK_EXPORT = [
   'Note[^5-1]\n\n[^5-1]: first\n\n    ```js\n    code()\n    ```',
 ].join('\n\n') + '\n'
 
+test('writes a paragraph shaped like a native block with a footnote or reference as it is', () => {
+  const page = createPage({
+    blocks: REFERENCING_NATIVE_PARAGRAPHS
+      .map((text, index) => ({ id: `block-${index + 1}`, type: 'paragraph' as const, text })),
+  })
+  // web/test/documentsMarkdownImport.test.tsx imports this file back into the same paragraphs.
+  expect(renderDocumentExport(page, 'markdown', markdownInspector).content).toBe(REFERENCING_NATIVE_EXPORT)
+})
+
+/**
+ * Paragraphs that read as a checklist, a table, a heading, or an embed, with a footnote reference
+ * or a reference link whose definition is a block of its own.
+ */
+const REFERENCING_NATIVE_PARAGRAPHS = [
+  '- [ ] task[^n]\n\n[^n]: explanation',
+  '| A | B |\n| - | - |\n| 1[^n] | 2 |\n\n[^n]: cell note',
+  '# Heading[^n]\n\n[^n]: heading note',
+  '[Guide[^n]](https://example.com/g)\n\n[^n]: link note',
+  '- [ ] see [guide][g]\n\n[g]: https://example.com/g',
+]
+
+/** Markdown export of {@link REFERENCING_NATIVE_PARAGRAPHS}; the web import test reads it too. */
+const REFERENCING_NATIVE_EXPORT = [
+  '# Document',
+  '- [ ] task[^1-1]\n\n[^1-1]: explanation',
+  '| A | B |\n| - | - |\n| 1[^2-1] | 2 |\n\n[^2-1]: cell note',
+  '# Heading[^3-1]\n\n[^3-1]: heading note',
+  '[Guide[^4-1]](https://example.com/g)\n\n[^4-1]: link note',
+  '- [ ] see [guide](<https://example.com/g>)',
+].join('\n\n') + '\n'
+
 test('writes a task list nested in a paragraph list as it is, apart from a checklist block', () => {
   const page = createPage({
     blocks: [

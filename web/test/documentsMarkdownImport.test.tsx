@@ -531,6 +531,43 @@ describe('Markdown import of a file whose blocks reference each other', () => {
       .toEqual(['- [ ] a\n- b'])
   })
 
+  test('keeps a checklist, table, heading, or embed with a footnote as paragraph Markdown', () => {
+    // The server export of these paragraphs (see the referencing native paragraph export test in
+    // server/src/modules/documents/adapter-out/dynamodb/dynamo-db-documents-client.test.ts). A
+    // native block shows its text as written, so each stays a paragraph with its footnote.
+    const paragraphs = [
+      '- [ ] task[^1-1]\n\n[^1-1]: explanation',
+      '| A | B |\n| - | - |\n| 1[^2-1] | 2 |\n\n[^2-1]: cell note',
+      '# Heading[^3-1]\n\n[^3-1]: heading note',
+      '[Guide[^4-1]](https://example.com/g)\n\n[^4-1]: link note',
+    ]
+    const result = convert(`# Document\n\n${paragraphs.join('\n\n')}\n\n- [ ] see [guide](<https://example.com/g>)\n`)
+    if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+    expect(result.title).toBe('Document')
+    expect(result.blocks.map((block) => block.type === 'paragraph' ? block.text : block.type))
+      .toEqual([...paragraphs, 'checklist'])
+    // A reference link written inline by the export stays in the checklist item with its target.
+    expect(result.blocks[4]).toMatchObject({
+      type: 'checklist',
+      items: [{ text: 'see [guide](<https://example.com/g>)', checked: false }],
+    })
+    for (const text of paragraphs.map((paragraph) => renderParagraph(paragraph))) {
+      expect(text).toContain('data-footnote-ref')
+    }
+
+    // A reference link has its destination written inline, so its block keeps the definition and
+    // stays native.
+    expect(blocksOf('- [ ] see [guide][g]\n\n# Head [g]\n\n[g]: https://example.com/g'))
+      .toMatchObject([
+        { type: 'checklist', items: [{ text: 'see [guide](<https://example.com/g>)' }] },
+        { type: 'heading', text: 'Head [g](<https://example.com/g>)' },
+      ])
+    // Without footnotes or references, the same blocks are still native.
+    expect(blocksOf('- [ ] task\n\n| A |\n| - |\n| 1 |\n\n# Heading\n\n[Guide](https://example.com/g)')
+      .map((block) => block.type))
+      .toEqual(['checklist', 'table', 'heading', 'embed'])
+  })
+
   test('reads an exported page back into blocks that render as the page did', () => {
     const result = convert(BLOCK_SCOPED_EXPORT)
     if (!result.ok) throw new Error(`conversion failed: ${result.code}`)

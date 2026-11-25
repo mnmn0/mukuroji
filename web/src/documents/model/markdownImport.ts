@@ -198,6 +198,7 @@ export function convertMarkdownToDocument(
     options.createId,
     options.resolveLink,
     structure?.topLevelBlocks,
+    structure?.footnoteReferences.map(({ line }) => line).sort((a, b) => a - b),
   )
   if (!scanned.ok) return scanned
   const together = structure === undefined
@@ -271,6 +272,13 @@ export function titleFromMarkdownFileName(fileName: string): string {
  *   parsed. A list, quote, or footnote definition is kept whole in paragraph Markdown, so a code
  *   fence, heading, table, divider, or task item nested in it keeps its place instead of becoming
  *   a block of its own. Only a top-level list of task items alone becomes a checklist.
+ * @param footnoteLines - Lines that hold a footnote reference, in ascending order, when the file was
+ *   parsed. A top-level block with one of them, of any kind, is kept whole in paragraph Markdown,
+ *   with no part of it split off by the line scan, and such a paragraph never becomes an embed:
+ *   a checklist, table, heading, or embed shows its text without rendering footnotes, so it would
+ *   show the label instead of the footnote, and the definition, which only a paragraph block
+ *   carries along, would be lost. A link that uses a reference definition needs none of this,
+ *   since its destination is already written inline.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
@@ -278,6 +286,7 @@ function scanBlocks(
   createId: (prefix: string) => string,
   resolveLink?: (href: string) => string | undefined,
   topLevelBlocks?: readonly MarkdownTopLevelBlock[],
+  footnoteLines?: readonly number[],
 ):
   | { ok: true; blocks: ScannedBlock[]; paragraphLines: Map<string, MarkdownLineRange> }
   | { ok: false; code: 'table-too-large' } {
@@ -290,13 +299,14 @@ function scanBlocks(
     : (raw) => raw
   /** Whether each top-level block is a list of task items alone, once worked out. */
   const checklistBlocks = new Map<MarkdownLineRange, boolean>()
-  /** Containers kept whole in paragraph Markdown, by their first line. */
+  /** Top-level blocks kept whole in paragraph Markdown, by their first line. */
   const containers = new Map(
     (topLevelBlocks ?? [])
       .filter((block) =>
-        CONTAINER_BLOCK_TYPES.has(block.type) &&
-        block.last > block.first &&
-        !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks))
+        holdsLine(footnoteLines, block) || (
+          CONTAINER_BLOCK_TYPES.has(block.type) &&
+          block.last > block.first &&
+          !startsChecklist(lines, block.first, topLevelBlocks, checklistBlocks)))
       .map((block) => [block.first, block]),
   )
   let paragraph: string[] = []
@@ -306,7 +316,7 @@ function scanBlocks(
     const raw = paragraph.join('\n')
     const range = { first: paragraphFirstLine, last: paragraphFirstLine + paragraph.length - 1 }
     paragraph = []
-    const link = readStandaloneLink(raw)
+    const link = holdsLine(footnoteLines, range) ? undefined : readStandaloneLink(raw)
     // A target in `<>` may hold spaces, so only a target the resolver rewrites becomes an embed.
     const url = link
       ? (resolveLink?.(link.href) ?? (!link.angle && isEmbeddableUrl(link.href) ? link.href : undefined))
@@ -435,6 +445,27 @@ function scanBlocks(
   }
   flushParagraph()
   return { ok: true, blocks, paragraphLines }
+}
+
+/**
+ * Tells whether one of the given lines falls within a range of lines.
+ *
+ * @param lines - Line numbers in ascending order, or `undefined` for none.
+ * @param range - Lines to look at.
+ * @returns Whether a line of `lines` is in `range`.
+ */
+function holdsLine(lines: readonly number[] | undefined, range: MarkdownLineRange): boolean {
+  if (lines === undefined) return false
+  // The first line at or after the start of the range, found by bisection.
+  let low = 0
+  let high = lines.length
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if ((lines[middle] ?? 0) < range.first) low = middle + 1
+    else high = middle
+  }
+  const line = lines[low]
+  return line !== undefined && line <= range.last
 }
 
 /**
