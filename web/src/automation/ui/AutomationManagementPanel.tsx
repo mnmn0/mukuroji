@@ -118,6 +118,8 @@ export type AutomationManagementPanelProps = {
   recurringWork: RecurringWork[]
   /** Execution history です。 */
   executions: AutomationExecution[]
+  /** Searches older runs when the shown history is not complete; omitted when nothing remains. */
+  onLoadMoreExecutions?: () => Promise<unknown> | unknown
   /** Recurring Work の Team selector に表示する Team です。 */
   teams: RecurringTeamOption[]
   /** Workflow template の保存先と expected revision です。 */
@@ -195,6 +197,7 @@ export function AutomationManagementPanel({
   canViewWebhooks = true,
   errorMessage,
   executions,
+  onLoadMoreExecutions,
   initialTab = 'rules',
   isLoading = false,
   locale,
@@ -380,6 +383,7 @@ export function AutomationManagementPanel({
             executions={executions}
             locale={locale}
             readOnly={readOnly}
+            onLoadMore={onLoadMoreExecutions}
             onRetry={onRetryExecution}
           />
         ) : null}
@@ -1339,13 +1343,37 @@ type RunsTabProps = {
   readOnly: boolean
   /** Execution retry callback です。 */
   onRetry?: (execution: AutomationExecution) => Promise<unknown> | unknown
+  /** Searches older runs; shown as a button while older history remains unsearched. */
+  onLoadMore?: () => Promise<unknown> | unknown
 }
 
-function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsTabProps) {
+/**
+ * Lists automation runs with their action results and retry controls.
+ *
+ * @param props - Runs, locale, and callbacks.
+ * @returns The run history, with a control to search older runs when some remain.
+ */
+function RunsTab({ busyOperation, executions, locale, onLoadMore, onRetry, readOnly }: RunsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const loadMore = onLoadMore ? (
+    <button
+      className="workbench-button-secondary min-h-9 justify-self-start px-3 disabled:cursor-not-allowed disabled:opacity-55"
+      data-testid="automation-runs-load-more"
+      disabled={busyOperation === 'execution:load-more'}
+      type="button"
+      onClick={() => void onLoadMore()}
+    >
+      {t('automation.runs.loadMore')}
+    </button>
+  ) : null
 
   if (executions.length === 0) {
-    return <EmptyState message={t('automation.runs.empty')} />
+    return (
+      <div className="grid gap-3">
+        <EmptyState message={t(onLoadMore ? 'automation.runs.emptySearched' : 'automation.runs.empty')} />
+        {loadMore}
+      </div>
+    )
   }
 
   return (
@@ -1425,6 +1453,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
           </article>
         )
       })}
+      {loadMore}
     </div>
   )
 }

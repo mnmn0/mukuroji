@@ -1,10 +1,18 @@
 import type { AutomationExecution } from '@mukuroji/contracts'
 import { getAutomationExecutions } from '../api'
 
-/** Number of Team-owned runs the Team settings view collects. */
+/** Number of Team-owned runs after which one search stops reading pages. */
 const OWNED_EXECUTION_LIMIT = 50
-/** Upper bound of execution pages read to collect one Team's runs. */
+/** Upper bound of execution pages read in one search for one Team's runs. */
 const OWNED_EXECUTION_MAX_PAGES = 10
+
+/** One search of the Workspace execution history for a Team's runs. */
+export type OwnedAutomationExecutionPage = {
+  /** Runs owned by the Team, newest first. */
+  executions: AutomationExecution[]
+  /** Cursor where the next search continues, present while older history remains unsearched. */
+  nextCursor?: string
+}
 
 /**
  * Collects the latest runs of one Team's definitions by following the Workspace execution cursor,
@@ -12,19 +20,23 @@ const OWNED_EXECUTION_MAX_PAGES = 10
  *
  * @param accessToken - Automation API access token.
  * @param ownerTeamId - Team whose runs are collected.
- * @returns Up to {@link OWNED_EXECUTION_LIMIT} runs owned by the Team, newest first.
+ * @param startCursor - Cursor returned by the previous search, to continue into older history.
+ * @returns The Team's runs from whole pages until at least {@link OWNED_EXECUTION_LIMIT} are found,
+ *   and the cursor to continue when the search stopped before the end of the history.
  */
 export async function loadOwnedAutomationExecutions(
   accessToken: string,
   ownerTeamId: string,
-): Promise<AutomationExecution[]> {
+  startCursor?: string,
+): Promise<OwnedAutomationExecutionPage> {
   const owned: AutomationExecution[] = []
-  let cursor: string | undefined
+  let cursor = startCursor
   for (let page = 0; page < OWNED_EXECUTION_MAX_PAGES; page += 1) {
     const result = await getAutomationExecutions(accessToken, cursor ? { cursor } : {})
     owned.push(...result.executions.filter((execution) => execution.ownerTeamId === ownerTeamId))
-    if (owned.length >= OWNED_EXECUTION_LIMIT || !result.nextCursor) break
     cursor = result.nextCursor
+    // A whole page is kept, so the next search starts exactly where this one stopped.
+    if (!cursor || owned.length >= OWNED_EXECUTION_LIMIT) break
   }
-  return owned.slice(0, OWNED_EXECUTION_LIMIT)
+  return cursor ? { executions: owned, nextCursor: cursor } : { executions: owned }
 }

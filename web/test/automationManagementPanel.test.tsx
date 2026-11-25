@@ -97,6 +97,31 @@ describe('AutomationManagementPanel', () => {
     ])
   })
 
+  test('offers a search of older runs only while Team history remains unsearched', () => {
+    const render = (onLoadMoreExecutions?: () => void) => renderToStaticMarkup(
+      <AutomationManagementPanel
+        canViewWebhooks={false}
+        executions={[]}
+        initialTab="runs"
+        locale="en"
+        recurringWork={[]}
+        rules={[]}
+        teams={teams}
+        templates={[]}
+        onLoadMoreExecutions={onLoadMoreExecutions}
+      />,
+    )
+    const t = createTranslator('en')
+
+    const searchable = render(() => undefined)
+    const complete = render()
+
+    expect(searchable).toContain('data-testid="automation-runs-load-more"')
+    expect(searchable).toContain(t('automation.runs.emptySearched'))
+    expect(complete).not.toContain('automation-runs-load-more')
+    expect(complete).toContain(t('automation.runs.empty'))
+  })
+
   test('uses roving tab stops and wraps keyboard navigation across visible tabs', () => {
     const html = renderToStaticMarkup(
       <AutomationManagementPanel

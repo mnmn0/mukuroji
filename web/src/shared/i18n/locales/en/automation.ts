@@ -318,6 +318,8 @@ export const automationMessages = {
     'The server calculates the next occurrence in the selected IANA time zone, including DST.',
   'automation.recurring.nextRun': 'Next run',
   'automation.runs.empty': 'No executions yet.',
+  'automation.runs.emptySearched': 'No runs of this Team in the recent history. You can search older history.',
+  'automation.runs.loadMore': 'Search older runs',
   'automation.runs.execution': 'Execution',
   'automation.runs.retry': 'Retry',
   'automation.runs.actionResults': 'Action results',

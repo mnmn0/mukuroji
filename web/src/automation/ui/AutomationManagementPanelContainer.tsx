@@ -29,7 +29,10 @@ import {
   updateRecurringWork,
 } from '../api'
 import { runAutomationManagementMutation } from '../mutations/runAutomationManagementMutation'
-import { useAutomationManagement } from '../queries/useAutomationManagement'
+import {
+  loadMoreOwnedAutomationExecutions,
+  useAutomationManagement,
+} from '../queries/useAutomationManagement'
 import {
   selectOwnedAutomationData,
   selectTeamTemplateOptions,
@@ -118,6 +121,24 @@ export function AutomationManagementPanelContainer({
     }
   }
 
+  /** Searches older runs of the Team and appends them to the loaded history. */
+  async function loadMoreExecutions(teamId: string) {
+    setBusyOperation('execution:load-more')
+    setMutationErrorMessage(undefined)
+    try {
+      await mutate(
+        async (current) => current
+          ? await loadMoreOwnedAutomationExecutions(accessToken, teamId, current)
+          : current,
+        { revalidate: false },
+      )
+    } catch (loadError) {
+      setMutationErrorMessage(readErrorMessage(loadError, t('automation.error.load')))
+    } finally {
+      setBusyOperation((current) => current === 'execution:load-more' ? undefined : current)
+    }
+  }
+
   const initialTab = readInitialTab()
   const planningParentsQuery = useAutomationPlanningParents(
     accessToken,
@@ -131,6 +152,9 @@ export function AutomationManagementPanelContainer({
         ? readErrorMessage(error, t('automation.error.load'))
         : mutationErrorMessage}
       executions={data?.executions ?? []}
+      onLoadMoreExecutions={ownerTeamId !== undefined && loadedData?.executionsNextCursor
+        ? () => loadMoreExecutions(ownerTeamId)
+        : undefined}
       initialTab={initialTab}
       isLoading={isLoading}
       locale={locale}

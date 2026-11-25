@@ -237,6 +237,7 @@ Team の全 Project の manager（と owner / admin）は、ここで作成・�
 - Team のルールはその Team の Work Item でだけ動き、その Team の Work Item だけを変更・作成します。別の Team の Project への移動や、別の Team に作るアクションは保存できません。
 - Team のルールでは「フォーム送信」「Webhook 受信」のトリガーと「Webhook を送信」のアクションは使えません。必要なら owner / admin に Workspace のルールとして作ってもらいます。
 - Team の繰り返し作業は、その Team の Work Item を作ります。使えるテンプレートは同じ Team のものです。
+- Team の実行履歴は直近の履歴から探します。見つからない古い実行は **さらに古い実行を探す** で続きを探せます。
 - 依頼フォームも、Team を対象にしたフォームは その Team の全 Project の manager が作成・変更・公開できます。回答の一覧と添付は owner / admin が見ます。
 
 | タブ | 内容 |

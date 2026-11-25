@@ -314,6 +314,8 @@ export const automationMessages = {
     '夏時間を含む次回予定はサーバーが IANA タイムゾーンで計算します。',
   'automation.recurring.nextRun': '次回予定',
   'automation.runs.empty': '実行履歴はまだありません。',
+  'automation.runs.emptySearched': '直近の履歴にはこの Team の実行がありません。さらに古い履歴を探せます。',
+  'automation.runs.loadMore': 'さらに古い実行を探す',
   'automation.runs.execution': '実行',
   'automation.runs.retry': '再試行',
   'automation.runs.actionResults': 'アクション結果',

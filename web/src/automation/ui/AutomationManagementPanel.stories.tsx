@@ -158,3 +158,15 @@ export const TeamOwnedDefinitions: Story = {
     webhooks: [],
   },
 }
+
+/** Team の実行が直近の履歴に見つからず、さらに古い履歴を探せる状態です。 */
+export const TeamRunsSearchOlder: Story = {
+  args: {
+    canViewWebhooks: false,
+    teamScoped: true,
+    initialTab: 'runs',
+    executions: [],
+    onLoadMoreExecutions: () => undefined,
+    webhooks: [],
+  },
+}

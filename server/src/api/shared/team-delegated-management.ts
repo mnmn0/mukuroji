@@ -1,11 +1,13 @@
 import type {
   AutomationAction,
+  AutomationCreateAction,
   AutomationManagementScopes,
+  AutomationValue,
   EnterprisePermissionId,
 } from '@mukuroji/contracts'
 import { AutomationError } from '../../modules/automation'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
-import { workspaceDependencies } from './app-dependencies'
+import { automationDependencies, workspaceDependencies } from './app-dependencies'
 import {
   hasEnterpriseWorkspacePermission,
   listPermittedTeams,
@@ -146,7 +148,7 @@ export async function assertAutomationActionsUseOwnerTeamProjects(
     const projectId = action.type === 'move'
       ? action.targetProjectId
       : action.type === 'create'
-        ? action.values?.assignedProjectId
+        ? await readCreateActionProjectId(workspaceId, action)
         : action.type === 'update'
           ? action.patch.assignedProjectId
           : undefined
@@ -158,6 +160,32 @@ export async function assertAutomationActionsUseOwnerTeamProjects(
       )
     }
   }
+}
+
+/**
+ * Resolves the Project a create action assigns, letting the action's values override the
+ * template, as the executor does when it merges them.
+ *
+ * @param workspaceId - Workspace that owns the template.
+ * @param action - Create action of a rule.
+ * @returns The effective assigned Project value, or undefined when neither side sets one.
+ */
+async function readCreateActionProjectId(
+  workspaceId: string,
+  action: AutomationCreateAction,
+): Promise<AutomationValue | undefined> {
+  if (action.values !== undefined && 'assignedProjectId' in action.values) {
+    return action.values.assignedProjectId
+  }
+  if (!action.templateId) return undefined
+  const template = action.templateVersion !== undefined
+    ? await automationDependencies.ruleTemplates.getTemplateVersion(
+      workspaceId,
+      action.templateId,
+      action.templateVersion,
+    )
+    : await automationDependencies.ruleTemplates.getTemplate(workspaceId, action.templateId)
+  return template?.kind === 'work-item' ? template.payload.assignedProjectId : undefined
 }
 
 /**

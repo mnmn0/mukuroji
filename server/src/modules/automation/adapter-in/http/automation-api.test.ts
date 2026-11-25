@@ -5763,6 +5763,25 @@ test('lets a Team manager create and change rules of their own Team only', async
         updated.push(input)
         return createStoredTeamRule('core-team')
       },
+      async getTemplate(_workspaceId, templateId) {
+        return {
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          id: templateId,
+          workspaceId: 'user#demo@example.com',
+          kind: 'work-item',
+          name: 'Other Team follow-up',
+          enabled: true,
+          version: 1,
+          revision: 1,
+          payload: {
+            title: 'Follow up',
+            schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+            assignedProjectId: 'other-team-project',
+          },
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+        }
+      },
     }),
   })
   const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
@@ -5793,6 +5812,10 @@ test('lets a Team manager create and change rules of their own Team only', async
     ...teamRuleBody,
     actions: [{ type: 'update', patch: { assignedProjectId: 'other-team-project' } }],
   })
+  const otherTeamTemplateProject = await post({
+    ...teamRuleBody,
+    actions: [{ type: 'create', templateId: 'template-other-project' }],
+  })
   const formTrigger = await post({ ...teamRuleBody, trigger: { type: 'form', formId: 'form-1' } })
   const stopOwn = await app.request('/api/automation/rules/rule-team', {
     method: 'PATCH',
@@ -5809,7 +5832,14 @@ test('lets a Team manager create and change rules of their own Team only', async
   expect(ownTeam.status).toBe(201)
   expect(workspaceRule.status).toBe(403)
   expect(await workspaceRule.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
-  for (const response of [webhookAction, otherTeamCreate, otherTeamProject, otherTeamUpdate, formTrigger]) {
+  for (const response of [
+    webhookAction,
+    otherTeamCreate,
+    otherTeamProject,
+    otherTeamUpdate,
+    otherTeamTemplateProject,
+    formTrigger,
+  ]) {
     expect(response.status).toBe(403)
     expect(await response.json()).toMatchObject({ code: 'AutomationTeamScopeViolation' })
   }
