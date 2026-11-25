@@ -1,11 +1,8 @@
 import { useCallback, useState } from 'react'
-import useSWR from 'swr'
 import type { NotificationDestinationTestResult, NotificationMessageLocale } from '@mukuroji/contracts'
 import {
   deleteChannelDestination,
   deletePersonalSlackDestination,
-  getChannelDestination,
-  getPersonalSlackDestination,
   saveChannelDestination,
   savePersonalSlackDestination,
   testChannelDestination,
@@ -13,18 +10,10 @@ import {
   type ChannelDestinationOwner,
 } from '../api/destinations'
 import { NotificationsApiError } from '../api/errors'
+import { slackDestinationOwnerKey, useSlackDestinationQuery, type SlackDestinationState } from '../queries/useSlackDestinationQuery'
 
 /** State of a Slack destination as the settings card shows it. */
-export type SlackDestinationView = {
-  /** Whether a webhook is registered. */
-  configured: boolean
-  /** Channel name, for a Team or Project channel. */
-  label?: string
-  /** Language of posts, for a Team or Project channel. */
-  locale?: NotificationMessageLocale
-  /** Whether the caller may change and test it. */
-  canManage: boolean
-}
+export type SlackDestinationView = SlackDestinationState['view']
 
 /** Outcome shown under the card after the last action. */
 export type SlackDestinationOutcome =
@@ -88,25 +77,8 @@ export function useSlackDestination(
   owner: 'personal' | ChannelDestinationOwner | undefined,
   locale: NotificationMessageLocale,
 ): SlackDestinationController {
-  const ownerKey = owner === undefined ? undefined : owner === 'personal' ? 'personal' : `${owner.teamId}/${owner.projectId ?? ''}`
-  const key = accessToken && owner ? ['slack-destination', accessToken, ownerKey] as const : null
-  const query = useSWR(key, async () => {
-    if (!accessToken || !owner) throw new Error('Slack destination query is not ready.')
-    if (owner === 'personal') {
-      const state = await getPersonalSlackDestination(accessToken)
-      return { view: { configured: state.configured, canManage: true }, revision: 0 }
-    }
-    const destination = await getChannelDestination(accessToken, owner)
-    return {
-      view: {
-        configured: destination.configured,
-        ...(destination.label ? { label: destination.label } : {}),
-        locale: destination.locale,
-        canManage: destination.canManage,
-      },
-      revision: destination.revision,
-    }
-  }, { revalidateOnFocus: false, shouldRetryOnError: false })
+  const ownerKey = owner === undefined ? undefined : slackDestinationOwnerKey(owner)
+  const query = useSlackDestinationQuery(accessToken, owner)
   const [pending, setPending] = useState(false)
   // The outcome belongs to the owner it was reached for, so switching Teams or Projects drops it.
   const [result, setResult] = useState<{ ownerKey: string | undefined, outcome: SlackDestinationOutcome }>()
