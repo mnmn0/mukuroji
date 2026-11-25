@@ -56,6 +56,11 @@ export {
   type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'
 export {
+  updateMemberMembership,
+  type MemberMembershipUpdateInput,
+  type MemberMembershipUpdatePorts,
+} from './application/member-membership-update'
+export {
   resetMemberCredential,
   type MemberCredentialResetInput,
   type MemberCredentialResetPorts,

@@ -34,7 +34,7 @@ import {
 import {
   type DocumentAuthorizationRevisionMutationPort,
 } from '../documents'
-import type { WorkspaceRole } from './domain/workspace-role'
+import { canWorkspaceRoleManageMember, type WorkspaceRole } from './domain/workspace-role'
 import {
   canMemberAccessExpire,
   isMemberAccessExpired,
@@ -4510,15 +4510,7 @@ function assertCanUpdateMember(
   target: WorkspaceMember,
   nextRole: WorkspaceRole,
 ) {
-  if (actor.role === 'owner') {
-    return
-  }
-
-  if (
-    actor.role === 'admin' &&
-    (target.role === 'member' || target.role === 'guest') &&
-    (nextRole === 'member' || nextRole === 'guest')
-  ) {
+  if (canWorkspaceRoleManageMember(actor.role, target.role, nextRole)) {
     return
   }
 

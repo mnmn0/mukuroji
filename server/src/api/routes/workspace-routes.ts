@@ -23,7 +23,8 @@ import {
 import {
   requirePrivateDocumentManagerContinuity,
 } from '../../modules/workspace-access/document-manager-lifecycle'
-import { revokeMemberCredentials } from '../../modules/developer-platform'
+import { updateMemberMembership } from '../../modules/workspace-access'
+import { createMemberMembershipUpdatePorts } from '../../app/composition/member-membership-update'
 import {
   authenticationDependencies,
   developerPlatformDependencies,
@@ -922,53 +923,31 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
             )
           : undefined
 
-      if (status === 'active') {
-        const current = await workspaceDependencies.workspaceAccess.getMember(principal.directoryId, memberKey)
-        // Only a reactivation the actor may make revokes anything; the update refuses the rest.
-        const actorMayReactivate = principal.workspaceRole === 'owner' ||
-          (principal.workspaceRole === 'admin' && (current?.role === 'member' || current?.role === 'guest'))
-        if (current?.status === 'deactivated' && actorMayReactivate) {
-          // The access expiry job deactivates without revoking, so a member comes back without
-          // the credentials they had before (ADR 0095). Revoking first keeps a failed
-          // reactivation safe to repeat.
-          await revokeMemberCredentials(
-            developerPlatformDependencies,
-            principal.directoryId,
-            current.memberKey,
-            principal.userKey,
-          )
-        }
-      }
-
-      const member = await workspaceDependencies.workspaceAccess.updateMember(
-        principal.directoryId,
-        principal.userKey,
-        memberKey,
+      const member = await updateMemberMembership(
+        createMemberMembershipUpdatePorts({
+          workspace: workspaceDependencies,
+          developerPlatform: developerPlatformDependencies,
+        }),
         {
-          role,
-          status,
-          expectedVersion,
-          expectedPlanningRevision,
-          ...(authorizationConditionChecks.length === 0 ? {} : { authorizationConditionChecks }),
-          ...(expectedDocumentAuthorizationRevision === undefined
-            ? {}
-            : {
-                expectedDocumentAuthorizationRevision,
-              }),
+          workspaceId: principal.directoryId,
+          actorMemberKey: principal.userKey,
+          actorRole: principal.workspaceRole,
+          memberKey,
+          update: {
+            role,
+            status,
+            expectedVersion,
+            expectedPlanningRevision,
+            ...(authorizationConditionChecks.length === 0 ? {} : { authorizationConditionChecks }),
+            ...(expectedDocumentAuthorizationRevision === undefined
+              ? {}
+              : {
+                  expectedDocumentAuthorizationRevision,
+                }),
+          },
+          auditContext,
         },
-        auditContext,
       )
-      if (member.status === 'deactivated') {
-        // API keys and OAuth tokens act as their creator, so they are revoked with the membership
-        // and stay revoked if the member comes back (ADR 0095). Revocation is idempotent, so
-        // repeating the deactivation after a failure here finishes it.
-        await revokeMemberCredentials(
-          developerPlatformDependencies,
-          principal.directoryId,
-          member.memberKey,
-          principal.userKey,
-        )
-      }
 
       return c.json({ member })
     } catch (error) {
