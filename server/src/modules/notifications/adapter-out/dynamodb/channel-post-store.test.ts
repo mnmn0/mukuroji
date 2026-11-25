@@ -106,3 +106,25 @@ test('reports a partition whose read budget ran out on candidates that are no lo
   expect(page.invalidCount).toBe(0)
   expect(page.truncated).toBe(true)
 })
+
+test('delivers a valid post on the next run after unreadable candidates filled the read budget', async () => {
+  const ids: string[] = []
+  const probe = await queuedStore(Array.from({ length: 80 }, (_, index) => post(`event-${index}`)))
+  const target = probe.shardOf('event-0')
+  for (let index = 0; index < 80 && ids.length < 6; index += 1) {
+    if (probe.shardOf(`event-${index}`) === target) ids.push(`event-${index}`)
+  }
+  expect(ids).toHaveLength(6)
+  const valid = String(ids[5])
+  const { store } = await queuedStore(ids.map((id) => (id === valid ? post(id) : post(id, 'other-team'))))
+
+  const first = await store.listDue(String(target), now, 2)
+  expect(first.posts).toEqual([])
+  expect(first.invalidCount).toBe(4)
+  expect(first.truncated).toBe(true)
+  // The first run moved the unreadable rows out of the partition, so the next run reaches the valid post.
+  const second = await store.listDue(String(target), now, 2)
+  expect(second.invalidCount).toBe(1)
+  expect(second.posts.map((queued) => queued.eventId)).toEqual([valid])
+  expect(second.truncated).not.toBe(true)
+})
