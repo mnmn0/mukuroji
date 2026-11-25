@@ -216,6 +216,10 @@ export function TimeBudgetPanel({
       setMessage({ tone: 'error', text: t('timeTracking.report.invalidRange') })
       return
     }
+    // Saving a period that already has a budget replaces it, so its revision is expected.
+    const replaced = editTarget === 'newPeriod'
+      ? budgetPeriods.find((candidate) => candidate.periodFrom === periodFrom && candidate.periodTo === periodTo)
+      : budget
     setIsSaving(true)
     setMessage(undefined)
     try {
@@ -225,10 +229,8 @@ export function TimeBudgetPanel({
         ...(periodFrom ? { periodFrom } : {}),
         ...(periodTo ? { periodTo } : {}),
         ...(savesPeriodBudget ? { periodBudget: true } : {}),
-        expectedRevision: editTarget === 'newPeriod'
-          // Saving a period that already has a budget replaces it, so its revision is expected.
-          ? budgetPeriods.find((candidate) => candidate.periodFrom === periodFrom && candidate.periodTo === periodTo)?.revision ?? 0
-          : budget?.revision ?? 0,
+        expectedRevision: replaced?.revision ?? 0,
+        ...(replaced ? { expectedUpdatedAt: replaced.updatedAt } : {}),
       })
       setEditTarget(undefined)
       setMessage({ tone: 'status', text: t('timeTracking.budget.saved') })

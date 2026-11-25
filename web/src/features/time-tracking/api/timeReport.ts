@@ -49,6 +49,8 @@ export type SaveTimeBudgetInput = {
   periodBudget?: boolean
   /** Revision being replaced, or 0 for a new budget. */
   expectedRevision: number
+  /** Update time of the budget being replaced, which tells it apart from one deleted and saved again. */
+  expectedUpdatedAt?: string
 }
 
 const groupByValues = new Set<string>(['day', 'week', 'user', 'project', 'work-item', 'category'])
@@ -265,6 +267,7 @@ export async function saveTimeBudget(
       ...(input.periodTo ? { periodTo: input.periodTo } : {}),
       ...(input.periodBudget ? { periodBudget: true } : {}),
       expectedRevision: input.expectedRevision,
+      ...(input.expectedUpdatedAt ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
     }),
   })
   const budget = isRecord(data) ? readTimeBudget(data.budget) : undefined

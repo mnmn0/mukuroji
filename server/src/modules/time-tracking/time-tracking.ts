@@ -503,6 +503,11 @@ export type SaveTimeBudgetInput = {
   periodBudget?: boolean
   /** Expected budget revision, or zero for a new budget. */
   expectedRevision: number
+  /**
+   * Update time of the budget the caller read. A budget per period deleted and saved again starts
+   * at revision 1 once more, so this tells the new budget apart from the one that was read.
+   */
+  expectedUpdatedAt?: string
   /** Actor changing the budget. */
   updatedBy: string
   /** Optional client key used to make audit writes idempotent across retries. */
@@ -844,9 +849,16 @@ export interface TimeTrackingRepository {
   listBudgetPeriods(workspaceId: string, teamId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget[]>
   /**
    * Saves a Team or Project budget with optimistic concurrency and optional audit. A budget with
-   * `periodBudget` is stored as the scope's budget for its period.
+   * `periodBudget` is stored as the scope's budget for its period. An update also requires the
+   * stored budget to still have `expectedUpdatedAt`, when it is given.
    */
-  saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
+  saveBudget(
+    budget: TimeBudget,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+    expectedUpdatedAt?: string,
+  ): Promise<void>
   /** Deletes one of a scope's budgets per period while it is still at the read revision. */
   deleteBudgetPeriod(budget: TimeBudget, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team's rate card. */
@@ -1635,7 +1647,7 @@ export class TimeTrackingService {
       }
     }
     const current = await this.repository.getBudget(workspaceId, resolvedTeamId, input.scopeType, scopeId, period)
-    if (current && current.revision !== expectedRevision) {
+    if (current && (current.revision !== expectedRevision || (input.expectedUpdatedAt !== undefined && current.updatedAt !== input.expectedUpdatedAt))) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
     if (!current && expectedRevision !== 0) {
@@ -1686,11 +1698,14 @@ export class TimeTrackingService {
       occurredAt: budget.updatedAt,
     })
     const idempotencyPut = completion ? await completion(budget) : undefined
+    // The write also requires the update time read here, so a budget deleted and saved again
+    // meanwhile at the same revision is not overwritten.
     await this.repository.saveBudget(
       budget,
       expectedRevision,
       auditPut,
       idempotencyPut,
+      current?.updatedAt,
     )
     return budget
   }
@@ -2899,10 +2914,11 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     expectedRevision: number,
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
+    expectedUpdatedAt?: string,
   ) {
     const key = budgetKey(budget.workspaceId, budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget))
     const current = this.budgets.get(key)
-    if ((current?.revision ?? 0) !== expectedRevision) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
+    if ((current?.revision ?? 0) !== expectedRevision || (expectedUpdatedAt !== undefined && current?.updatedAt !== expectedUpdatedAt)) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     this.budgets.set(key, clone(budget))
   }
 }
@@ -3326,6 +3342,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     expectedRevision: number,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    expectedUpdatedAt?: string,
   ) {
     try {
       const put = {
@@ -3334,10 +3351,15 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           Item: { ...budget, recordKey: budgetRecordKey(budget.teamId, budget.scopeType, budget.scopeId, budgetStoragePeriod(budget)) },
           ...(expectedRevision === 0
             ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-            : {
-                ConditionExpression: 'revision = :expectedRevision',
-                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-              }),
+            : expectedUpdatedAt === undefined
+              ? {
+                  ConditionExpression: 'revision = :expectedRevision',
+                  ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+                }
+              : {
+                  ConditionExpression: 'revision = :expectedRevision AND updatedAt = :expectedUpdatedAt',
+                  ExpressionAttributeValues: { ':expectedRevision': expectedRevision, ':expectedUpdatedAt': expectedUpdatedAt },
+                }),
         },
       }
       if (auditPut || idempotencyPut) {

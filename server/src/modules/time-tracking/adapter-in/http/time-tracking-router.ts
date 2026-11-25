@@ -693,6 +693,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         ...(body.periodBudget === undefined ? {} : { periodBudget: readRequiredBoolean(body.periodBudget, 'Period budget') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        ...(body.expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt: readRequiredString(body.expectedUpdatedAt, 'Expected update time') }),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
@@ -720,6 +721,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         ...(body.periodBudget === undefined ? {} : { periodBudget: readRequiredBoolean(body.periodBudget, 'Period budget') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        ...(body.expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt: readRequiredString(body.expectedUpdatedAt, 'Expected update time') }),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })

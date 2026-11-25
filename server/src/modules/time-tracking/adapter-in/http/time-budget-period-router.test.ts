@@ -166,4 +166,18 @@ describe('budgets per period', () => {
     const stale = await router.request(read, { method: 'DELETE', headers })
     expect(stale.status).toBe(409)
   })
+
+  test('a save of a budget read before it was deleted and saved again is rejected', async () => {
+    const router = createFixture()
+    const body = { amountMinor: 1, currency: 'JPY', periodFrom: '2026-04-01', periodTo: '2026-09-30', periodBudget: true, expectedRevision: 0 }
+    const first: { budget: { updatedAt: string } } = await (await putProjectBudget(router, body)).json()
+    const path = '/api/teams/team-1/projects/project-1/time-budget/periods/2026-04-01/2026-09-30'
+    expect((await router.request(`${path}?expectedRevision=1`, { method: 'DELETE', headers })).status).toBe(204)
+    expect((await putProjectBudget(router, { ...body, amountMinor: 5 })).status).toBe(200)
+    // The new budget is at revision 1 again, but the edit was read from the first save.
+    const stale = await putProjectBudget(router, { ...body, amountMinor: 9, expectedRevision: 1, expectedUpdatedAt: first.budget.updatedAt })
+    expect(stale.status).toBe(409)
+    const summary = await readSummary(router, '2026-04-01', '2026-09-30')
+    expect(summary.budget).toMatchObject({ amountMinor: 5 })
+  })
 })

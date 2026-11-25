@@ -223,10 +223,10 @@ describe('time report API', () => {
   test('saves a Team or Project budget with the revision it replaces', async () => {
     const budget = timeReportFixtureBudgetSummary.budget
     let requests = respondWith({ budget })
-    await saveTimeBudget('token', 'core-team', { scopeType: 'team' }, { amountMinor: 500_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', expectedRevision: 2 })
+    await saveTimeBudget('token', 'core-team', { scopeType: 'team' }, { amountMinor: 500_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', expectedRevision: 2, expectedUpdatedAt: '2026-11-01T00:00:00.000Z' })
     expect(requests[0]?.method).toBe('PUT')
     expect(requests[0]?.url.pathname).toBe('/api/teams/core-team/time-budget')
-    expect(requests[0]?.body).toEqual({ amountMinor: 500_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', expectedRevision: 2 })
+    expect(requests[0]?.body).toEqual({ amountMinor: 500_000, currency: 'JPY', periodFrom: '2026-11-01', periodTo: '2026-11-30', expectedRevision: 2, expectedUpdatedAt: '2026-11-01T00:00:00.000Z' })
 
     requests = respondWith({ budget: { ...budget, scopeType: 'project', scopeId: 'atlas' } })
     await saveTimeBudget('token', 'core-team', { scopeType: 'project', projectId: 'atlas' }, { amountMinor: 1_000, currency: 'USD', expectedRevision: 0 })
