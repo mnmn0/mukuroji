@@ -18,6 +18,8 @@ import {
   type Tag,
 } from '@aws-sdk/client-s3'
 import {
+  AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
+  AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
   isCanonicalWorkItemKey,
   parseNotificationMessage,
   type EnterpriseIdentitySnapshot,
@@ -2546,6 +2548,16 @@ export async function hasCurrentSystemAdminMembership(
 }
 
 /**
+ * Automation events addressed to chosen Workspace members rather than to readers of a Work Item.
+ * A recipient needs only Workspace read access, the same access that reads execution history.
+ */
+const workspaceAutomationNotificationEventTypes: ReadonlySet<string> = new Set([
+  'automation.notification.requested',
+  AUTOMATION_EXECUTION_DEAD_LETTERED_EVENT_TYPE,
+  AUTOMATION_RULE_RATE_LIMITED_EVENT_TYPE,
+])
+
+/**
  * Rechecks active membership and current scoped content permissions.
  * @param event - Notification with refreshed canonical resource scope.
  * @param memberKey - Normalized recipient key.
@@ -2594,7 +2606,7 @@ async function isEligibleRecipient(
   let permissionCeiling: EnterprisePermissionId[] | undefined
   const readOnlyRecipient = event.notificationCandidates.length > 0 &&
     event.notificationCandidates.every((candidate) => candidate.reason === 'watcher')
-  const selectedWorkspaceRecipient = event.eventType === 'automation.notification.requested' &&
+  const selectedWorkspaceRecipient = workspaceAutomationNotificationEventTypes.has(event.eventType) &&
     !event.teamId && !event.projectId && !event.issueId && !event.planningTargetId &&
     event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && candidate.reason === 'automation')
   const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
