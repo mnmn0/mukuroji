@@ -1,6 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { AgentRunError, readAgentRunId } from '../../modules/agent-runs'
+import { AgentRunError, readAgentRunId, readAnswerAgentRunReportRequest } from '../../modules/agent-runs'
 import { ProjectDataError } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
@@ -17,6 +17,7 @@ import {
   releaseWebAgentRun,
   updateWebAgentSettings,
 } from './web-agent-run-service'
+import { answerWebAgentRunReport } from './web-agent-run-answer-service'
 import { getWebTeamFactoryAnalytics, readFactoryAnalyticsPeriod } from './web-agent-run-analytics-service'
 
 /** Default number of runs in a Work Item history page. */
@@ -120,6 +121,32 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const period = readFactoryAnalyticsPeriod(c.req.query('from'), c.req.query('to'))
       return c.json(await getWebTeamFactoryAnalytics(principal, c.req.param('teamId'), period))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.post('/api/teams/:teamId/work-items/:workItemId/agent-runs/:runId/reports/:sequence/answer', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const runId = readAgentRunId(c.req.param('runId'), '/runId')
+      const sequence = Number(c.req.param('sequence'))
+      if (!/^[1-9]\d{0,5}$/u.test(c.req.param('sequence'))) {
+        throw new AgentRunError('validation_failed', 'sequence must be a positive integer.', { pointer: '/sequence' })
+      }
+      const body = readAnswerAgentRunReportRequest(await readJson(c.req))
+      const teamId = c.req.param('teamId')
+      const workItemId = c.req.param('workItemId')
+      return c.json(await answerWebAgentRunReport(
+        principal,
+        teamId,
+        workItemId,
+        { runId, sequence },
+        body,
+        createRequestMutationContext(c, principal.directoryId, principal.actorId, principal.userKey, { runId, sequence, body }),
+      ), 201)
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }

@@ -1,5 +1,6 @@
 import {
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
+  type AgentRunReportAnswer,
   type AgentSettings,
 } from '@mukuroji/contracts'
 import {
@@ -414,6 +415,25 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       this.#register(reportPut, {
         check: (state) => !state.reports.has(reportKey),
         apply: (state) => { state.reports.set(reportKey, structuredClone(report)) },
+      }),
+    ]
+  }
+
+  /** @inheritdoc */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
+    const [reportUpdate] = this.#builder.createReportAnswerItems(report, answer)
+    if (!reportUpdate) throw new Error('The answer builder returned an unexpected item count.')
+    const reportKey = `${key(report.directoryId, report.teamId, report.runId)}|${report.sequence}`
+    return [
+      this.#register(reportUpdate, {
+        check: (state) => {
+          const current = state.reports.get(reportKey)
+          return current !== undefined && current.commentId === report.commentId && current.answer === undefined
+        },
+        apply: (state) => {
+          const current = state.reports.get(reportKey)
+          if (current) state.reports.set(reportKey, { ...current, answer: { ...answer } })
+        },
       }),
     ]
   }

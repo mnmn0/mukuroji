@@ -554,10 +554,15 @@ tool は次のとおり変更・追加する。
   `credentialId` は Team 管理権限を持つ member にだけ返す。
 - 解放、take over、resume の実行者は audit event の actor として記録する。
 - audit event は entity type `agent-run` を追加し、`agent-run.started`、`agent-run.reported`、
-  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed` を既存の
-  mutation transaction と outbox で記録する。heartbeat は audit event を作らず
+  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed`、
+  `agent-run.answered` を既存の mutation transaction と outbox で記録する。heartbeat は audit event を作らず
   `lastHeartbeatAt` だけを更新する。actor は credential owner の member とし、`metadata` に
   `runtime` と `agentName` を持つ。
+- `blocker`・`handoff` の report には、Work Item に comment できる member が回答を 1 つだけ保存できる。
+  回答は report の `answer`（本文・回答者・時刻・回答 comment の ID）として、回答者の comment と
+  `agent-run.answered` と同じ transaction で書く。report の条件（`commentId` 一致・`answer` 未保存）で
+  同時の別回答を拒み、同じ member の同じ本文の再送は保存済みの回答を返す。agent は Public API の
+  `agent-run-questions` と MCP の `get_task` の `questions` で読む。
 - Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
   OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
   （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。

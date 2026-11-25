@@ -1912,6 +1912,100 @@ describe('Web Agent Run routes', () => {
     expect(invalid.status).toBe(400)
   })
 
+  test('records one answer to a blocker report as the member\'s comment, shows it with the report, and replays a retry', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    for (const [sequence, kind] of [[1, 'progress'], [2, 'blocker']] as const) {
+      store.state.reports.set(`${workspaceId}|core-team|${held.runId}|${sequence}`, {
+        schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence,
+        kind, commentId: `cmt_${sequence}`, verifications: [], artifacts: [],
+        createdAt: new Date(Date.UTC(2026, 9, 22, 0, sequence)).toISOString(), createdBy: 'demo@example.com',
+      })
+    }
+    const comments: Parameters<CollaborationClient['createComment']>[0][] = []
+    setTestAppDependencies({
+      collaboration: createCollaborationStub({
+        /**
+         * Commits the answer's co-writes with the comment, failing like the real writer on a cancelled condition.
+         *
+         * @param input - Comment write.
+         * @returns The stored comment.
+         */
+        async createComment(input) {
+          if (!input.auditContext) throw new Error('An answer comment must be audited.')
+          try {
+            store.applyTransactItems(input.coWrites ?? [])
+          } catch (error) {
+            if (error instanceof InMemoryTransactionCanceledError) {
+              throw new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+            }
+            throw error
+          }
+          comments.push(input)
+          const id = deriveAuditedCommentId(input.entityKey, input.auditContext)
+          return {
+            id, rootCommentId: id, authorMemberKey: input.actorMemberKey, bodyMarkdown: input.bodyMarkdown, version: 1,
+            mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+            createdAt: input.auditContext.occurredAt, updatedAt: input.auditContext.occurredAt,
+          }
+        },
+      }),
+    })
+    const path = `http://localhost/api/teams/core-team/work-items/task-1/agent-runs/${held.runId}/reports`
+    /**
+     * Answers one report.
+     *
+     * @param sequence - Report sequence.
+     * @param body - Answer text.
+     * @param key - Idempotency key.
+     * @returns The response.
+     */
+    const answer = (sequence: number | string, body: unknown, key: string) => app.request(`${path}/${sequence}/answer`, {
+      method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body),
+    })
+    const created = await answer(2, { body: '  Use the staging bucket.\r\n' }, 'answer-1')
+    expect(created.status).toBe(201)
+    const saved = await created.json()
+    expect(saved.report).toMatchObject({ sequence: 2, kind: 'blocker', answer: { body: 'Use the staging bucket.', answeredBy: 'demo@example.com' } })
+    expect(saved.report.answer.commentId).toEqual(expect.any(String))
+    expect(store.state.reports.get(`${workspaceId}|core-team|${held.runId}|2`)?.answer?.body).toBe('Use the staging bucket.')
+    expect(comments).toHaveLength(1)
+    expect(comments[0]).toMatchObject({ bodyMarkdown: 'Use the staging bucket.', actorMemberKey: 'demo@example.com' })
+    expect(comments[0]?.coWrites?.length).toBeGreaterThanOrEqual(1)
+
+    // The same answer again replays; another answer to the answered report is refused.
+    const replay = await answer(2, { body: 'Use the staging bucket.' }, 'answer-2')
+    expect(replay.status).toBe(201)
+    expect((await replay.json()).report.answer).toEqual(saved.report.answer)
+    expect((await answer(2, { body: 'Use production.' }, 'answer-3')).status).toBe(409)
+
+    // Only blocker and handoff reports are questions, and the body is validated.
+    expect((await answer(1, { body: 'Not a question.' }, 'answer-4')).status).toBe(409)
+    expect((await answer(3, { body: 'Missing.' }, 'answer-5')).status).toBe(404)
+    expect((await answer(2, { body: '' }, 'answer-6')).status).toBe(400)
+    expect((await answer(2, { body: 'x', extra: true }, 'answer-7')).status).toBe(400)
+    expect((await answer('0', { body: 'x' }, 'answer-8')).status).toBe(400)
+
+    const listed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-run-reports', { headers })
+    expect((await listed.json()).items[0]).toMatchObject({ sequence: 2, answer: { body: 'Use the staging bucket.' } })
+  })
+
+  test('refuses an answer from a viewer', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
+    const held = createHeldRun('task-1')
+    store.seed(held)
+    store.state.reports.set(`${workspaceId}|core-team|${held.runId}|1`, {
+      schemaVersion: 1, runId: held.runId, directoryId: workspaceId, teamId: 'core-team', workItemId: 'task-1', sequence: 1,
+      kind: 'handoff', commentId: 'cmt_1', verifications: [], artifacts: [], createdAt: '2026-10-22T00:00:00.000Z', createdBy: 'demo@example.com',
+    })
+    const response = await app.request(`http://localhost/api/teams/core-team/work-items/task-1/agent-runs/${held.runId}/reports/1/answer`, {
+      method: 'POST', headers, body: JSON.stringify({ body: 'Go ahead.' }),
+    })
+    expect(response.status).toBe(403)
+    expect(store.state.reports.get(`${workspaceId}|core-team|${held.runId}|1`)?.answer).toBeUndefined()
+  })
+
   test('stops a report page at its byte budget so the response stays within the Lambda limit', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'viewer' })
     const held = createHeldRun('task-1')

@@ -24,6 +24,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ### Added
 
+- server API: `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` を追加しました。Work Item の
+  `blocker`・`handoff` report を新しい順に最大 20 件、人の回答（`answer`）付きで返します。scope は既存の
+  `work-items:read` です。report の応答にも、回答があれば `answer` が入ります（#411）。
+- MCP: `get_task` が `questions` で、タスクの `blocker`・`handoff` 報告と人の回答を返します。server が古いとき、
+  読み取りが拒否されたときは `null` です（#411）。
 - server API: `GET /api/v1/projects/{projectId}/charter?teamId=` を追加しました。Web の charter パネルと同じ
   ライフサイクル状態・コード・説明・目的・責任者・スポンサー・計画期間・タグ・関連リポジトリ URL を返します。
   scope は既存の `work-items:read` で、Project の viewer 以上が読めます（#638）。

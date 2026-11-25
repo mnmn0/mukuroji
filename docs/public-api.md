@@ -198,6 +198,11 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `=` を含む fragment のない `https` URL に限り、違反は `400 validation_failed` と `errors[].code` の `invalid_artifact_url`
   で返します。server は URL を取得しません。任意の query `assignedProjectId` を送ると、Run の
   Work Item がその Project にない場合は保存せず `403` を返し、receipt の再送時にも再検証します。
+- `GET /api/v1/work-items/{workItemId}/agent-run-questions?teamId=` は、Work Item の `blocker` と `handoff`
+  の report を新しい順に最大 20 件、人の回答（`answer`: `body`、`answeredBy`、`answeredAt`、回答 comment の
+  `commentId`）と一緒に返します。古いものが残るときは `hasMore` が `true` です。scope は `work-items:read` で、
+  Work Item を閲覧できる credential が読めます。応答は `Cache-Control: private, no-store` です。回答は Web の
+  会話から member が 1 つの report に 1 つだけ保存し、同じ transaction で回答者の comment と監査 event を保存します。
 - `POST /api/v1/work-items/{workItemId}/agent-runs/{runId}/take-over` は `Idempotency-Key` を
   要求し、同じメンバーの別 instance が持つ停滞 Run（lease 切れ）を `superseded` にして、呼び出し元
   instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の

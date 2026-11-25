@@ -278,6 +278,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
     async relatedDocuments() { return undefined },
+    async questions() { return undefined },
     async projectCharter() { return undefined },
     async document() { throw new AgentTaskError('not_found', 'Not found') },
     ...overrides,
@@ -984,6 +985,31 @@ describe('agent task lifecycle', () => {
     const outage = fixture([task('one')], {
       async relatedDocuments() { throw new AgentTaskError('unavailable', 'Down', true) },
     })
+    await expect(outage.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  test('shows the task\'s agent questions with their answers and keeps get_task working without them', async () => {
+    const questions = {
+      items: [{
+        schemaVersion: 1 as const, runId: 'run_00000000-0000-4000-8000-000000000001', teamId: 'team', workItemId: 'one', sequence: 2,
+        kind: 'blocker' as const, commentId: 'cmt_2', verifications: [], artifacts: [], createdAt: '2026-09-01T00:00:00.000Z',
+        answer: { body: 'Use staging.', answeredBy: 'member', answeredAt: '2026-09-01T00:10:00.000Z', commentId: 'cmt_3' },
+      }],
+      hasMore: false,
+    }
+    const reads: string[] = []
+    const { service } = fixture([task('one')], {
+      async questions(id) {
+        reads.push(id)
+        return questions
+      },
+    })
+    expect(await service.get('one')).toMatchObject({ task: { id: 'one' }, questions })
+    expect(reads).toEqual(['one'])
+    expect(await fixture([task('one')]).service.get('one')).toMatchObject({ questions: null })
+    const hidden = fixture([task('one')], { async questions() { throw new AgentTaskError('forbidden', 'Denied') } })
+    expect(await hidden.service.get('one')).toMatchObject({ questions: null })
+    const outage = fixture([task('one')], { async questions() { throw new AgentTaskError('unavailable', 'Down', true) } })
     await expect(outage.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
   })
 

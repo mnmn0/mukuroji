@@ -13,6 +13,7 @@ import {
   AGENT_SETTINGS_SCHEMA_VERSION,
   AGENT_RUN_HEARTBEAT_INTERVAL_SECONDS,
   type AgentRunOutcome,
+  type AgentRunReportAnswer,
   type AgentSettings,
 } from '@mukuroji/contracts'
 import {
@@ -25,7 +26,7 @@ import {
   type StoredAgentRunClaim,
   type ValidatedAgentSettingsUpdate,
 } from '../../domain/agent-run'
-import { readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
+import { isAgentRunQuestionReport, readAgentRunReportDetails, type AgentRunReportDetails, type StoredAgentRunReport } from '../../domain/agent-run-report'
 import {
   AgentRunError,
   createAgentRunCommitConflictError,
@@ -405,6 +406,14 @@ export interface AgentRunStore {
    */
   createReportItems(run: StoredAgentRun, report: StoredAgentRunReport, now: Date): AgentRunTransactItem[]
   /**
+   * Builds the write that records a person's answer on a `blocker` or `handoff` report. It fails when
+   * the report is gone or already answered, so two people never overwrite each other's answer.
+   * @param report - Report as read.
+   * @param answer - Answer to record.
+   * @returns The conditional report update.
+   */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[]
+  /**
    * Lists one Work Item's structured reports, newest first, with strongly consistent reads.
    * @param directoryId - Workspace ID.
    * @param teamId - Team ID.
@@ -757,6 +766,25 @@ function parseReportDetails(item: Record<string, unknown>): AgentRunReportDetail
 }
 
 /**
+ * Parses the answer stored on a report row and fails closed on any unexpected shape.
+ *
+ * @param value - Stored answer.
+ * @returns The answer.
+ */
+function parseReportAnswer(value: unknown): AgentRunReportAnswer {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw createAgentRunIntegrityError()
+  const record: Record<string, unknown> = { ...value }
+  const answer = {
+    body: storedString(record, 'body'),
+    answeredBy: storedString(record, 'answeredBy'),
+    answeredAt: storedTimestamp(record, 'answeredAt'),
+    commentId: storedString(record, 'commentId'),
+  }
+  if (Object.keys(record).length !== 4) throw createAgentRunIntegrityError()
+  return answer
+}
+
+/**
  * Parses a stored report row and fails closed on any unexpected shape.
  *
  * @param item - Stored row.
@@ -789,9 +817,11 @@ function parseReport(
     ...parseReportDetails(item),
     createdAt: storedTimestamp(item, 'createdAt'),
     createdBy: storedString(item, 'createdBy'),
+    ...(item.answer === undefined ? {} : { answer: parseReportAnswer(item.answer) }),
   }
   if (
     !kind ||
+    (report.answer !== undefined && !isAgentRunQuestionReport(report)) ||
     sequence < 1 ||
     item.directoryTeamId !== createAgentRunPartition(expected.directoryId, expected.teamId) ||
     item.workspaceId !== expected.directoryId ||
@@ -1634,6 +1664,23 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       ? encodeCursor({ directoryTeamId: last.directoryTeamId, recordKey: last.recordKey })
       : undefined
     return { reports, ...(nextCursor === undefined ? {} : { nextCursor }) }
+  }
+
+  /** @inheritdoc */
+  createReportAnswerItems(report: StoredAgentRunReport, answer: AgentRunReportAnswer): AgentRunTransactItem[] {
+    if (!isAgentRunQuestionReport(report) || report.answer !== undefined) {
+      throw new TypeError('createReportAnswerItems requires an unanswered blocker or handoff report.')
+    }
+    return [{
+      Update: {
+        TableName: this.#tableName,
+        Key: { directoryTeamId: createAgentRunPartition(report.directoryId, report.teamId), recordKey: reportRecordKey(report) },
+        UpdateExpression: 'SET #answer = :answer',
+        ConditionExpression: 'attribute_exists(#recordKey) AND #commentId = :commentId AND attribute_not_exists(#answer)',
+        ExpressionAttributeNames: { '#answer': 'answer', '#recordKey': 'recordKey', '#commentId': 'commentId' },
+        ExpressionAttributeValues: { ':answer': { ...answer }, ':commentId': report.commentId },
+      },
+    }]
   }
 
   /** @inheritdoc */

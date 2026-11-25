@@ -372,8 +372,10 @@ export function TaskDetailPane({
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   const agentRunReports = useAgentRunReportCommentDetails({
     accessToken: softwareFactoryEnabled ? accessToken : undefined,
+    canAnswer: collaboration?.capabilities.canComment ?? false,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
+    onAnswered: collaboration?.refresh,
     teamId: task?.teamId,
     workItemId: task?.id ?? '',
   })

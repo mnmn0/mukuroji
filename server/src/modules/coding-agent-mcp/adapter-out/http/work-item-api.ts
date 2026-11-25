@@ -3,11 +3,11 @@ import {
   isCanonicalWorkItemKey,
   type PublicProjectCharter,
   AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
-  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES, AGENT_RUN_QUESTIONS_MAX_ITEMS, AGENT_RUN_REPORT_ANSWER_MAX_LENGTH,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
-  AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument,
+  AgentCatalog, AgentDocument, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument, AgentTaskQuestions,
   AgentWorkItemApi,
 } from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
@@ -126,22 +126,32 @@ const runSchema: z.ZodType<AgentRunRecord> = z.object({
   stalled: z.boolean(), finishedAt: z.iso.datetime().optional(), finishedBy: z.string().min(1).optional(),
   reportCount: z.number().int().nonnegative(),
 })
+const reportSchema = z.object({
+  schemaVersion: z.literal(1), runId: z.string().regex(/^run_[0-9a-f-]{36}$/u), teamId: identifier, workItemId: identifier,
+  sequence: z.number().int().positive(), kind: z.enum(['progress', 'blocker', 'verification', 'artifact', 'handoff']),
+  commentId: identifier,
+  verifications: z.array(z.object({
+    command: z.string().min(1), status: z.enum(['passed', 'failed', 'skipped']), summary: z.string().min(1).optional(),
+  })).max(20),
+  artifacts: z.array(z.object({
+    type: z.enum(['pull-request', 'branch', 'commit', 'url']), url: z.string().startsWith('https://'), label: z.string().min(1).optional(),
+  })).max(20),
+  changedFileCount: z.number().int().nonnegative().optional(),
+  createdAt: z.iso.datetime(),
+  // Servers older than answers omit it.
+  answer: z.object({
+    body: z.string().min(1).max(AGENT_RUN_REPORT_ANSWER_MAX_LENGTH), answeredBy: z.string().min(1),
+    answeredAt: z.iso.datetime(), commentId: identifier,
+  }).optional(),
+})
 const reportResultSchema: z.ZodType<AgentRunReportResult> = z.object({
-  report: z.object({
-    schemaVersion: z.literal(1), runId: z.string().regex(/^run_[0-9a-f-]{36}$/u), teamId: identifier, workItemId: identifier,
-    sequence: z.number().int().positive(), kind: z.enum(['progress', 'blocker', 'verification', 'artifact', 'handoff']),
-    commentId: identifier,
-    verifications: z.array(z.object({
-      command: z.string().min(1), status: z.enum(['passed', 'failed', 'skipped']), summary: z.string().min(1).optional(),
-    })).max(20),
-    artifacts: z.array(z.object({
-      type: z.enum(['pull-request', 'branch', 'commit', 'url']), url: z.string().startsWith('https://'), label: z.string().min(1).optional(),
-    })).max(20),
-    changedFileCount: z.number().int().nonnegative().optional(),
-    createdAt: z.iso.datetime(),
-  }),
+  report: reportSchema,
   comment: commentSchema,
   run: runSchema,
+})
+const questionsSchema: z.ZodType<AgentTaskQuestions> = z.object({
+  items: z.array(reportSchema).max(AGENT_RUN_QUESTIONS_MAX_ITEMS),
+  hasMore: z.boolean(),
 })
 /** Agent brief, bounded in UTF-8 bytes like the server. */
 const briefText = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= AGENT_SETTINGS_BRIEF_MAX_BYTES)
@@ -420,6 +430,20 @@ export function createAgentWorkItemApi(
         if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
         throw error
       }
+    },
+    /** Reads a task's agent questions with their answers; a server older than the endpoint has none. */
+    async questions(id) {
+      let found: AgentTaskQuestions
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/agent-run-questions`, questionsSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.items.some((report) => report.teamId !== config.teamId || report.workItemId !== id)) {
+        throw new AgentTaskError('invalid_response', 'The API returned the questions of another task.')
+      }
+      return found
     },
     /** Reads a Project charter of the configured Team; a server older than the endpoint has none. */
     async projectCharter(projectId) {
