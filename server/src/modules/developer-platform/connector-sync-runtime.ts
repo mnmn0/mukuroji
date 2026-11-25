@@ -796,6 +796,13 @@ export class ConnectorSyncEngine {
       input.workspaceId,
       link.id,
     )
+    if (link.resourceType === 'calendar-event' && link.syncDirection === 'bidirectional' && !persisted) {
+      // Without a recorded state the write would have no event version to condition on, and the
+      // event may hold dates someone chose after it was created. The poll records the state, or a
+      // conflict when the dates differ, before any write. An outbound-only link is never read
+      // back, so the Work Item stays the source of its event.
+      return { kind: 'skipped', linkId: link.id, reason: 'stale' }
+    }
     if (persisted && persisted.workItemRevision > workItem.revision) {
       // A newer revision is already synchronized; this read is older than it.
       return { kind: 'skipped', linkId: link.id, reason: 'stale' }

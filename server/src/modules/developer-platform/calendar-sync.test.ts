@@ -1067,6 +1067,30 @@ describe('calendar connectors (ADR 0089)', () => {
     expect(fixture.getWorkItem()).toMatchObject({ revision: 5, schedule: { startDate: '2026-12-05' } })
   })
 
+  test('does not write to an event of a two-way link before its state is recorded', async () => {
+    const fixture = await createCalendarFixture()
+    // A retried create returned the first attempt's event, so the link has no recorded state.
+    const link = await linkNewEvent(fixture)
+    const event = fixture.google.events.get(link.externalId)
+    if (!event) throw new Error('Expected the event.')
+    fixture.google.events.set(link.externalId, { ...event, start: { date: '2026-12-10' }, end: { date: '2026-12-11' }, etag: '"moved-by-user"' })
+    fixture.setWorkItem({
+      ...fixture.getWorkItem(),
+      revision: 4,
+      schedule: { startDate: '2026-12-05', endDate: '2026-12-05', timeZone: 'Asia/Tokyo' },
+    })
+    expect(await fixture.engine.processOutbound({ workspaceId: 'workspace-1', link, operationId: 'push-early' }))
+      .toEqual({ kind: 'skipped', linkId: link.id, reason: 'stale' })
+    expect(fixture.google.requests.filter((request) => request.method === 'PATCH')).toEqual([])
+    const polled = await fixture.engine.pollInstallation({
+      workspaceId: 'workspace-1',
+      installationId: fixture.installation.id,
+      resourceType: 'calendar-event',
+    })
+    expect(polled.results).toMatchObject([{ kind: 'conflict' }])
+    expect(fixture.google.events.get(link.externalId)).toMatchObject({ start: { date: '2026-12-10' } })
+  })
+
   test('skips an outbound write that read a Work Item older than the synchronized one', async () => {
     const fixture = await createCalendarFixture()
     const link = await linkNewEvent(fixture, 'outbound')
