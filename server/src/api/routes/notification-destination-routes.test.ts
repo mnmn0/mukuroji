@@ -36,6 +36,7 @@ function installStores() {
       return record
     },
     async delete(input: DeleteChannelDestinationInput) { records.delete(JSON.stringify(input.target)) },
+    async recordAudit() {},
   }
   setTestAppDependencies({
     channelDestinations,

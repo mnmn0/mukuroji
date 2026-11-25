@@ -3,10 +3,12 @@ import type { ChannelDestinationRecord, ChannelDestinationTarget } from '../doma
 import { NotificationError } from '../domain/notification-error'
 import {
   deleteChannelDestination,
+  deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
   readExpectedRevision,
   readPersonalSlackWebhookUrl,
   saveChannelDestination,
+  savePersonalSlackDestination,
   testNotificationDestination,
   toPublicChannelDestination,
 } from './notification-destinations'
@@ -56,6 +58,7 @@ function memoryStore(initial?: ChannelDestinationRecord, rejectSave?: Error) {
       return next
     },
     async delete(input) { calls.push('delete'); record = undefined; removedRevision = input.expectedRevision + 1 },
+    async recordAudit() { calls.push('audit') },
   }
   return { store, calls, current: () => record }
 }
@@ -231,6 +234,21 @@ describe('channel destination save and delete', () => {
     await expect(deleteChannelDestination(store, { async delete() { throw new Error('Must not delete') } }, {
       workspaceId: 'workspace-1', target, secretIdOf, expectedRevision: 1, authorizationConditionChecks: [],
     })).rejects.toMatchObject({ status: 409 })
+  })
+})
+
+describe('personal destination', () => {
+  test('stores and removes the webhook before recording the audit event without the URL', async () => {
+    const webhooks = memorySecrets()
+    const audits: unknown[] = []
+    const audit = { async recordAudit(put: unknown) { webhooks.calls.push('audit'); audits.push(put) } }
+    const auditPut = { Put: { TableName: 'audit', Item: { eventType: 'notification-slack-destination.saved' } } }
+    await savePersonalSlackDestination(webhooks.secrets, audit, { secretId: 'member-secret', webhookUrl: url, auditPut })
+    expect(webhooks.values.get('member-secret')).toBe(url)
+    await deletePersonalSlackDestination(webhooks.secrets, audit, { secretId: 'member-secret' })
+    expect(webhooks.values.size).toBe(0)
+    expect(webhooks.calls).toEqual(['put member-secret', 'audit', 'delete member-secret'])
+    expect(JSON.stringify(audits)).not.toContain('hooks.slack.com')
   })
 })
 

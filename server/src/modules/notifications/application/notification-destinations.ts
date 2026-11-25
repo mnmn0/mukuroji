@@ -124,6 +124,47 @@ export function toPublicChannelDestination(
   }
 }
 
+/** Change to the caller's own Slack destination. */
+export type PersonalSlackDestinationCommand = {
+  /** Server-derived secret name of the caller. */
+  secretId: string
+  /** Audit event without the URL, or undefined when auditing is not configured. */
+  auditPut?: AuditTransactWriteItem
+}
+
+/**
+ * Stores the caller's own webhook, then records the change.
+ * @param secrets - Webhook storage.
+ * @param audit - Audit writer.
+ * @param command - Secret name, validated URL, and audit event.
+ */
+export async function savePersonalSlackDestination(
+  secrets: Pick<NotificationDestinationSecrets, 'put'>,
+  audit: Pick<ChannelDestinationStore, 'recordAudit'>,
+  command: PersonalSlackDestinationCommand & {
+    /** Validated official Slack webhook URL. */
+    webhookUrl: string
+  },
+): Promise<void> {
+  await secrets.put(command.secretId, command.webhookUrl)
+  if (command.auditPut) await audit.recordAudit(command.auditPut)
+}
+
+/**
+ * Removes the caller's own webhook, then records the change.
+ * @param secrets - Webhook storage.
+ * @param audit - Audit writer.
+ * @param command - Secret name and audit event.
+ */
+export async function deletePersonalSlackDestination(
+  secrets: Pick<NotificationDestinationSecrets, 'delete'>,
+  audit: Pick<ChannelDestinationStore, 'recordAudit'>,
+  command: PersonalSlackDestinationCommand,
+): Promise<void> {
+  await secrets.delete(command.secretId)
+  if (command.auditPut) await audit.recordAudit(command.auditPut)
+}
+
 /** Inputs of a channel destination save. */
 export type SaveChannelDestinationCommand = {
   /** Canonical Workspace ID. */

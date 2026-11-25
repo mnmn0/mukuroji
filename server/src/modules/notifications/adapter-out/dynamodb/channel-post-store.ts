@@ -13,6 +13,7 @@ import {
   parseNotificationMessage,
   type NotificationMessageLocale,
 } from '@mukuroji/contracts'
+import type { AuditTransactWriteItem } from '../../../audit'
 import type {
   ChannelDestinationStore,
   ChannelPost,
@@ -317,6 +318,14 @@ export class DynamoDbChannelPostStore implements ChannelDestinationStore, Channe
         ...(failed ? { ':next': post.nextAttemptAt, ':failedShard': post.shard.replace('slack-channel#', 'slack-channel-failed#') } : {}),
       },
     }))
+  }
+
+  /**
+   * Writes a standalone audit event.
+   * @param auditPut - Audit put without the webhook URL.
+   */
+  async recordAudit(auditPut: AuditTransactWriteItem): Promise<void> {
+    await this.#client.send(new TransactWriteCommand({ TransactItems: [auditPut] }))
   }
 
   /**

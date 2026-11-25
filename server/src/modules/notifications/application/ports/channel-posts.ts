@@ -70,6 +70,12 @@ export type ChannelDestinationStore = {
    * @throws NotificationError (409) when the revision changed.
    */
   delete(input: DeleteChannelDestinationInput): Promise<void>
+  /**
+   * Writes the audit event of a change that has no settings row, such as the caller's own
+   * Slack destination.
+   * @param auditPut - Audit put without the webhook URL.
+   */
+  recordAudit(auditPut: AuditTransactWriteItem): Promise<void>
 }
 
 /** Contents of one post queued for a Team or Project channel. */

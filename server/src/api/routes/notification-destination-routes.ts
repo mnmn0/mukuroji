@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import type { NotificationChannelDestination, PersonalSlackDestination } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
 import { createMutationAuditEventPut, getConfiguredAuditTableName, type AuditTransactWriteItem } from '../../modules/audit/audit'
@@ -8,17 +7,18 @@ import {
   NotificationError,
   createSlackTestMessageSender,
   deleteChannelDestination,
+  deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
   readExpectedRevision,
   readPersonalSlackWebhookUrl,
   saveChannelDestination,
+  savePersonalSlackDestination,
   slackChannelDestinationSecretId,
   slackNotificationSecretId,
   testNotificationDestination,
   toPublicChannelDestination,
   type ChannelDestinationTarget,
 } from '../../modules/notifications'
-import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { toNotificationErrorResponse } from '../shared/notification-access'
@@ -65,14 +65,22 @@ export function registerNotificationDestinationRoutes(routeApp: Hono): void {
 
   routeApp.put(PERSONAL_PATH, async (c) => await withPersonal(c, async (principal) => {
     const webhookUrl = readPersonalSlackWebhookUrl(await readJson<unknown>(c.req))
-    await workItemDependencies.notificationDestinationSecrets.put(personalSecretId(principal), webhookUrl)
-    await writeAudit(createPersonalAuditPut(c, principal, 'saved'))
+    const auditPut = createPersonalAuditPut(c, principal, 'saved')
+    await savePersonalSlackDestination(
+      workItemDependencies.notificationDestinationSecrets,
+      workItemDependencies.channelDestinations,
+      { secretId: personalSecretId(principal), webhookUrl, ...(auditPut ? { auditPut } : {}) },
+    )
     return c.json({ configured: true } satisfies PersonalSlackDestination)
   }))
 
   routeApp.delete(PERSONAL_PATH, async (c) => await withPersonal(c, async (principal) => {
-    await workItemDependencies.notificationDestinationSecrets.delete(personalSecretId(principal))
-    await writeAudit(createPersonalAuditPut(c, principal, 'deleted'))
+    const auditPut = createPersonalAuditPut(c, principal, 'deleted')
+    await deletePersonalSlackDestination(
+      workItemDependencies.notificationDestinationSecrets,
+      workItemDependencies.channelDestinations,
+      { secretId: personalSecretId(principal), ...(auditPut ? { auditPut } : {}) },
+    )
     return c.json({ configured: false } satisfies PersonalSlackDestination)
   }))
 
@@ -357,15 +365,6 @@ function createPersonalAuditPut(
       metadata: { adapter: 'notification-slack-destination' },
     },
   )
-}
-
-/**
- * Writes a standalone audit event.
- * @param put - Audit put, or undefined when auditing is not configured.
- */
-async function writeAudit(put: AuditTransactWriteItem | undefined) {
-  if (!put) return
-  await createDynamoDbDocumentClient().send(new TransactWriteCommand({ TransactItems: [put] }))
 }
 
 /**

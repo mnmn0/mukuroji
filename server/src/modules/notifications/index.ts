@@ -124,10 +124,12 @@ export { createSlackChannelPostSender, createSlackTestMessageSender } from './ad
 /** Exposes the destination settings use cases the HTTP routes call. */
 export {
   deleteChannelDestination,
+  deletePersonalSlackDestination,
   readChannelDestinationSaveBody,
   readExpectedRevision,
   readPersonalSlackWebhookUrl,
   saveChannelDestination,
+  savePersonalSlackDestination,
   testNotificationDestination,
   toPublicChannelDestination,
 } from './application/notification-destinations'
