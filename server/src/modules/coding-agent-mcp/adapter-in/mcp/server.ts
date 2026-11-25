@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
 import { CODING_AGENT_MCP_VERSION, describeCodingAgentMcpBuild, type ServerCompatibility } from '../../application/compatibility'
+import { createMultiTeamAgentTasks, type TeamWorkItemApi } from '../../application/multi-team-agent-tasks'
 import { AgentTaskError, type AgentWorkItemApi } from '../../application/work-item-api'
 import { result } from './tool-result'
 
@@ -35,6 +36,7 @@ get_task lists the newest blocker and handoff reports on the task under question
 get_task shows the task's acceptanceCriteria. Work toward them, and mark each one met or unmet with update_task acceptanceCriteria [{ id, satisfied }] as you verify it. Only people add, remove, or reword criteria; ask the user when a criterion looks wrong.
 Use report_progress for milestones, blockers, test results, and PR/artifact links. This appends a comment and does not change the task description or status. While you hold the task's run, put the commands you ran in verifications, links in artifacts, and choose kind: blocker or handoff when a person must decide (also move the task with move_task if the status should change). Structured fields need your active run; without one, report a plain message only. Pass that runId with every report during a run: a retry with the same runId and key then replays even after this MCP process restarted or the run closed.
 Use move_task for review/blocked statuses in the started category, complete_task only after acceptance and tests are satisfied, and reopen_task or cancel_task when explicitly intended. Select exact status IDs from get_configuration; workflow transitions and approvals are enforced by Mukuroji.
+When several Teams are configured, get_configuration lists each Team's settings and catalog under teams, get_next_task returns the Team of the selected task as teamId, and every other tool finds the Team of a task or run by itself; use the workflow status IDs of that task's Team. create_task takes teamId to choose the Team (the first configured Team by default).
 After complete_task, call finish_run with outcome=completed. When you stop without completing, call finish_run with outcome=paused (waiting for review, blocked, or asked by the user) or outcome=failed (you cannot complete it). finish_run never changes the task status. A paused task stays started, and get_next_task offers it again for resume_task when the Team chose resumable statuses and the task is in one of them; resume a task with a failed or released run only when the user asks.
 agent_run_not_active means your run was finished, released by a person, or taken over by another instance: stop working on that task and tell the user.
 Every mutation requires a UUID idempotencyKey. After timeout or transport failure retry the same operation with identical arguments and key. Never generate a fresh key to retry an uncertain write. After a revision conflict reload and reassess before issuing a new logical operation.
@@ -42,20 +44,32 @@ Follow nextCursor while hasMore is true, even for empty pages. Narrow Project/ty
 State means the recorded task and run state. Mukuroji does not start, stop, or monitor agent processes, and it never completes, cancels, or reassigns work automatically.`
 
 /**
+ * Tells a list of Team ports from a single port.
+ *
+ * @param api - Port or Team ports passed to the server.
+ * @returns True for Team ports.
+ */
+function isTeamList(api: AgentWorkItemApi | readonly TeamWorkItemApi[]): api is readonly TeamWorkItemApi[] {
+  return Array.isArray(api)
+}
+
+/**
  * Creates the MCP tool catalog independently of process startup and HTTP transport.
- * @param api - Public API port; credentials stay behind this boundary.
+ * @param api - Public API port; credentials stay behind this boundary. A list of Team ports
+ * serves one assignee across several Teams.
  * @param scope - Operator-selected assignment, Project, and display label.
  * @param readOnly - When true, exposes only read tools.
  * @param serverCompatibility - Reads this build's compatibility with the server; omitted in tests without a server.
  * @returns An unconnected MCP server ready for stdio or a test transport.
  */
 export function createCodingAgentMcpServer(
-  api: AgentWorkItemApi,
+  api: AgentWorkItemApi | readonly TeamWorkItemApi[],
   scope: AgentTaskScope,
   readOnly = false,
   serverCompatibility?: () => Promise<ServerCompatibility>,
 ): McpServer {
-  const tasks = createAgentTasks(api, scope)
+  const multiTeam = isTeamList(api)
+  const tasks = isTeamList(api) ? createMultiTeamAgentTasks(api, scope) : createAgentTasks(api, scope)
   const server = new McpServer({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION }, { instructions: guide })
   server.registerResource('workflow-guide', 'mukuroji://agent/workflow', { mimeType: 'text/plain', description: 'Task selection, lifecycle, progress, and recovery guide.' }, async (uri) => ({
     contents: [{ uri: uri.href, mimeType: 'text/plain', text: guide }],
@@ -112,9 +126,12 @@ export function createCodingAgentMcpServer(
       templateId: id.optional().describe('Work Item template ID from get_configuration catalog.templates.'),
       priority: z.enum(['high', 'medium', 'low']).optional().describe('Defaults to the template priority, else medium.'),
       dueDate: z.iso.date().optional(), customFieldValues: customValues.optional(), idempotencyKey: key,
+      // Only a server for several Teams takes teamId, so a single-Team client sees no new argument.
+      ...(multiTeam ? { teamId: id.optional().describe('Configured Team to create the task in; the first configured Team when omitted. Use its catalog from get_configuration teams.') } : {}),
     }), annotations: writeAnnotations,
-  }, ({ idempotencyKey, dueDate, priority, ...input }) => result(() => tasks.create({
+  }, ({ idempotencyKey, dueDate, priority, teamId, ...input }) => result(() => tasks.create({
     ...input, assigneeUserId: scope.assigneeUserId,
+    ...(typeof teamId === 'string' ? { teamId } : {}),
     // The server takes the template priority when none is sent.
     ...(priority !== undefined ? { priority } : input.templateId === undefined ? { priority: 'medium' } : {}),
     // Without a schedule the server uses the Workspace working calendar, as the Web does.
