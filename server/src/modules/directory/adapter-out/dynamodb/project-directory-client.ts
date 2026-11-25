@@ -1664,6 +1664,12 @@ export class DynamoDbProjectDirectoryClient {
     }
     const current = await this.getOrgStructure(directoryId, true)
     if (current.revision !== command.expectedRevision) {
+      // The same request may have committed after the receipt check above: only its receipt
+      // tells that success apart from a save by someone else.
+      if (requestKey) {
+        const replayed = await this.readOrgStructureReplay(directoryId, command, requestKey)
+        if (replayed) return replayed
+      }
       throw createOrgStructureConflictError()
     }
     const updatedAt = new Date().toISOString()

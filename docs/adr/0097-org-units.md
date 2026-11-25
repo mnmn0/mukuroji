@@ -24,7 +24,7 @@ Team ごとに割り当てるか、Workspace 全体に広げるしかなかっ�
     監査行の大きさの上限を超えないようにする。
   - 同じ transaction で、`Idempotency-Key` と request fingerprint を結ぶ receipt を Team 管理と共有の
     `TEAM_GRANT_REQUEST#<encodeURIComponent(workspaceId)>` partition に `attribute_not_exists(entryKey)` で書く（ADR 0080）。
-    応答を失った後の同じ key・同じ入力の再送は、receipt を見つけた場合だけ保存済みの構造を返す。同じ key で入力が異なる場合は
+    応答を失った後の同じ key・同じ入力の再送は、receipt を見つけた場合だけ保存済みの構造を返す。receipt は処理の最初、revision の不一致時、transaction の条件失敗時に強整合で読む。同じ key で入力が異なる場合は
     `IdempotencyKeyConflict`、receipt がない古い revision は `OrgStructureConflict` にする。
   - 所属させる Team は、アーカイブ済みを含めて Workspace に存在するものに限る。
 - Enterprise のロール scope に `org-unit` を加え、組み込みロール `org-unit:manager`（Team管理者と同じ権限）と

@@ -57,12 +57,14 @@ function toRowKey(key: unknown): string | undefined {
  * @param stored - Stored OrgUnit structure row, if any.
  * @param failTransaction - Whether the next transaction loses its condition.
  * @param beforeTransaction - Runs before each transaction, to change rows concurrently.
+ * @param beforeGet - Runs before each single-row read with its map key, to change rows concurrently.
  * @returns The client, the sent commands, the stored structure row, and every stored row.
  */
 function createClient(
   stored?: Record<string, unknown>,
   failTransaction = false,
   beforeTransaction?: (rows: Map<string, Record<string, unknown>>) => void,
+  beforeGet?: (rows: Map<string, Record<string, unknown>>, rowKey: string) => void,
 ) {
   const sent: SentCommand[] = []
   const rows = new Map<string, Record<string, unknown>>()
@@ -90,6 +92,7 @@ function createClient(
       return {}
     }
     const rowKey = toRowKey(command.input.Key)
+    if (rowKey !== undefined) beforeGet?.(rows, rowKey)
     return { Item: rowKey === undefined ? undefined : rows.get(rowKey) }
   }
   // The fake implements only `send`, the one method the directory client calls.
@@ -324,5 +327,51 @@ test('answers a lost transaction with success only when its receipt committed', 
   // Another administrator saved first and no receipt of this key exists: still a conflict.
   const raced = createClient(storedRow, true)
   await expect(raced.client.replaceOrgStructure(workspaceId, savedBody, createSaveContext('save-1', savedBody)))
+    .rejects.toMatchObject({ status: 409, code: 'OrgStructureConflict' })
+})
+
+test('answers a save whose duplicate committed between the receipt check and the revision read', async () => {
+  const context = createSaveContext('save-1', savedBody)
+  const receiptKey = `TEAM_GRANT_REQUEST#workspace%2F1\0KEY#${context.idempotencyKeyHash}`
+  let committed = false
+  /**
+   * Commits the identical request when the structure row is first read, after the receipt check.
+   *
+   * @param rows - Fake table rows.
+   * @param rowKey - Map key of the row being read.
+   */
+  const commitDuplicate = (rows: Map<string, Record<string, unknown>>, rowKey: string) => {
+    if (committed || !rowKey.startsWith('ORG_STRUCTURE#')) return
+    committed = true
+    rows.set(rowKey, { ...storedRow, ...savedBody, revision: 2, updatedAt: '2026-11-21T00:00:00.000Z' })
+    rows.set(receiptKey, {
+      directoryId: 'TEAM_GRANT_REQUEST#workspace%2F1',
+      entryKey: `KEY#${context.idempotencyKeyHash}`,
+      entryType: 'team-grant-request',
+      workspaceId,
+      requestFingerprint: context.requestFingerprint,
+      createdAt: '2026-11-21T00:00:00.000Z',
+    })
+  }
+
+  const { client, sent } = createClient(storedRow, false, undefined, commitDuplicate)
+  expect(await client.replaceOrgStructure(workspaceId, savedBody, context)).toEqual({
+    orgUnits: savedBody.orgUnits,
+    teamAssignments: savedBody.teamAssignments,
+    revision: 2,
+    updatedAt: '2026-11-21T00:00:00.000Z',
+  })
+  expect(sent.some((command) => 'TransactItems' in command.input)).toBe(false)
+
+  // The same key with another input, or no receipt at all, stays refused on the moved revision.
+  committed = false
+  const otherBody = { ...savedBody, teamAssignments: [] }
+  await expect(createClient(storedRow, false, undefined, commitDuplicate).client
+    .replaceOrgStructure(workspaceId, otherBody, createSaveContext('save-1', otherBody)))
+    .rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+  const movedByOther = createClient(storedRow, false, undefined, (rows, rowKey) => {
+    if (rowKey.startsWith('ORG_STRUCTURE#')) rows.set(rowKey, { ...storedRow, revision: 2 })
+  })
+  await expect(movedByOther.client.replaceOrgStructure(workspaceId, savedBody, context))
     .rejects.toMatchObject({ status: 409, code: 'OrgStructureConflict' })
 })
