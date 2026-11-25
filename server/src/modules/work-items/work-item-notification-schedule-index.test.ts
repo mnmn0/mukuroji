@@ -7,6 +7,7 @@ import {
   createWorkItemNotificationScheduleShard,
   createWorkItemNotificationScheduleShardName,
   createWorkItemNotificationScheduleUpdate,
+  createWorkItemStartedDirectoryTeamId,
 } from './work-item-notification-schedule-index'
 
 test('keeps only open Work Items with a deadline or in progress in the due index', () => {
@@ -67,10 +68,11 @@ test('writes the shard on every save and removes the due key when the Work Item 
   })
   expect(completed).toEqual({
     setExpressions: ['#notificationScheduleShard = :notificationScheduleShard'],
-    removeExpressions: ['#notificationDueKey'],
+    removeExpressions: ['#notificationDueKey', '#startedDirectoryTeamId'],
     expressionAttributeNames: {
       '#notificationScheduleShard': 'notificationScheduleShard',
       '#notificationDueKey': 'notificationDueKey',
+      '#startedDirectoryTeamId': 'startedDirectoryTeamId',
     },
     expressionAttributeValues: {
       ':notificationScheduleShard': createWorkItemNotificationScheduleShard('workspace-1', 'core-team', 'issue-1'),
@@ -82,6 +84,32 @@ test('writes the shard on every save and removes the due key when the Work Item 
     dueDate: '2026-08-01',
   })
   expect(rescheduled.setExpressions).toContain('#notificationDueKey = :notificationDueKey')
-  expect(rescheduled.removeExpressions).toEqual([])
+  expect(rescheduled.removeExpressions).toEqual(['#startedDirectoryTeamId'])
   expect(rescheduled.expressionAttributeValues[':notificationDueKey']).toBe('2026-08-01')
+})
+
+test('keeps only started, unarchived Work Items in the Team started index', () => {
+  expect(createWorkItemStartedDirectoryTeamId('workspace-1', 'core-team', { statusCategory: 'started', dueDate: '' }))
+    .toBe('workspace-1#team#core-team')
+  for (const statusCategory of ['backlog', 'unstarted', 'completed', 'canceled', 'triage', undefined]) {
+    expect(createWorkItemStartedDirectoryTeamId('workspace-1', 'core-team', { statusCategory, dueDate: '' }))
+      .toBeUndefined()
+  }
+  expect(createWorkItemStartedDirectoryTeamId('workspace-1', 'core-team', {
+    statusCategory: 'started',
+    dueDate: '',
+    archivedAt: '2026-07-01T00:00:00.000Z',
+  })).toBeUndefined()
+
+  expect(createWorkItemNotificationScheduleAttributes('workspace-1', 'core-team', 'issue-1', {
+    statusCategory: 'started',
+    dueDate: '',
+  })).toMatchObject({ startedDirectoryTeamId: 'workspace-1#team#core-team' })
+  const started = createWorkItemNotificationScheduleUpdate('workspace-1', 'core-team', 'issue-1', {
+    statusCategory: 'started',
+    dueDate: '',
+  })
+  expect(started.setExpressions).toContain('#startedDirectoryTeamId = :startedDirectoryTeamId')
+  expect(started.removeExpressions).not.toContain('#startedDirectoryTeamId')
+  expect(started.expressionAttributeValues[':startedDirectoryTeamId']).toBe('workspace-1#team#core-team')
 })

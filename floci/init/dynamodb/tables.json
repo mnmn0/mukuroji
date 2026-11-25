@@ -33,6 +33,10 @@
         "AttributeType": "S"
       },
       {
+        "AttributeName": "startedDirectoryTeamId",
+        "AttributeType": "S"
+      },
+      {
         "AttributeName": "customerCompletionPreparationAt",
         "AttributeType": "S"
       }
@@ -110,6 +114,22 @@
         ],
         "Projection": {
           "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "TeamStartedWorkItemIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "startedDirectoryTeamId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "updatedAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
         }
       },
       {

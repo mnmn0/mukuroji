@@ -146,6 +146,15 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // Sparse: only started, unarchived Work Items carry the partition key, so the Factory board reads
+  // a Team's started Work Items without the Team's other Work Items (ADR 0098).
+  workItemsTable.addGlobalSecondaryIndex({
+    indexName: 'TeamStartedWorkItemIndex',
+    partitionKey: { name: 'startedDirectoryTeamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   // Sparse: only Work Items waiting for Customer completion preparation carry the sort key.
   workItemsTable.addGlobalSecondaryIndex({
     indexName: 'WorkItemCustomerCompletionPreparationIndex',

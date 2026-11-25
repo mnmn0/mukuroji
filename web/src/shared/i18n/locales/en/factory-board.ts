@@ -12,6 +12,8 @@ export const factoryBoardMessages = {
   'factoryBoard.emptyDescription': 'When an agent starts a task, it appears here as processing.',
   'factoryBoard.noResults': 'No tasks match the filters.',
   'factoryBoard.incomplete': 'A read limit was reached, so some runs or tasks may not be shown.',
+  'factoryBoard.loadMore': 'Load more runs and tasks',
+  'factoryBoard.loadingMore': 'Loading more…',
   'factoryBoard.filter.label': 'Filters',
   'factoryBoard.filter.runtime': 'Runtime',
   'factoryBoard.filter.assignee': 'Assignee',
