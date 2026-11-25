@@ -1,6 +1,8 @@
+import type { AgentRunHistoryFilters } from '@mukuroji/contracts'
 import useSWR from 'swr'
-import { getTeamAgentRunBoard, getTeamFactoryAnalytics, listWorkItemAgentRunReports } from '../../../work-items/api/agentRuns'
+import { getTeamAgentRunBoard, getTeamAgentRunHistory, getTeamFactoryAnalytics, listWorkItemAgentRunReports } from '../../../work-items/api/agentRuns'
 import { createFactoryAnalyticsPeriod, type FactoryAnalyticsPeriodDays } from '../model/factoryAnalytics'
+import { createRunHistoryPeriod, mergeRunHistories, type RunHistoryPeriodDays } from '../model/runHistory'
 
 /**
  * Interval for reading the board again while it stays open. Each read evaluates many runs and Work
@@ -77,6 +79,41 @@ export function useFactoryAnalytics(accessToken: string | undefined, teamId: str
     {
       dedupingInterval: 60_000,
       // Another period's numbers are never shown under the newly selected period.
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+    },
+  )
+}
+
+/**
+ * Reads the Run history of several Teams for the period that ends at read time and merges it,
+ * newest finish first. The Teams are read in parallel, and the first failure fails the whole read,
+ * so the list never looks shorter than it is.
+ *
+ * @param accessToken - Session access token; reading is skipped without it.
+ * @param teamIds - Teams to read; reading is skipped when empty.
+ * @param days - Period length in days.
+ * @param filters - Filters every Team applies.
+ * @param teamNames - Display names by Team ID.
+ * @returns SWR state of the merged history.
+ */
+export function useAgentRunHistory(
+  accessToken: string | undefined,
+  teamIds: readonly string[],
+  days: RunHistoryPeriodDays,
+  filters: AgentRunHistoryFilters,
+  teamNames: Readonly<Record<string, string>>,
+) {
+  return useSWR(
+    accessToken && teamIds.length > 0 ? ['agent-run-history', accessToken, teamIds.join(','), days, JSON.stringify(filters)] as const : null,
+    async ([, token]) => {
+      const period = createRunHistoryPeriod(days, new Date())
+      const histories = await Promise.all(teamIds.map((teamId) => getTeamAgentRunHistory(token, teamId, { ...period, ...filters })))
+      return mergeRunHistories(histories, teamNames)
+    },
+    {
+      dedupingInterval: 30_000,
+      keepPreviousData: false,
       revalidateOnFocus: false,
       shouldRetryOnError: false,
     },

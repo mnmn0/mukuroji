@@ -18,6 +18,7 @@ import {
   updateWebAgentSettings,
 } from './web-agent-run-service'
 import { getWebTeamFactoryAnalytics, readFactoryAnalyticsPeriod } from './web-agent-run-analytics-service'
+import { getWebTeamAgentRunHistory, readAgentRunHistoryRequest } from './web-agent-run-history-service'
 
 /** Default number of runs in a Work Item history page. */
 const defaultHistoryPageSize = 20
@@ -120,6 +121,26 @@ export function registerAgentRunRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       const period = readFactoryAnalyticsPeriod(c.req.query('from'), c.req.query('to'))
       return c.json(await getWebTeamFactoryAnalytics(principal, c.req.param('teamId'), period))
+    } catch (error) {
+      return toAgentRunErrorResponse(c, error)
+    }
+  })
+
+  routeApp.get('/api/teams/:teamId/agent-runs/history', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const request = readAgentRunHistoryRequest({
+        from: c.req.query('from'),
+        to: c.req.query('to'),
+        outcome: c.req.query('outcome'),
+        assigneeUserId: c.req.query('assigneeUserId'),
+        runtime: c.req.query('runtime'),
+        projectId: c.req.query('projectId'),
+      })
+      c.header('Cache-Control', 'private, no-store')
+      return c.json(await getWebTeamAgentRunHistory(principal, c.req.param('teamId'), request))
     } catch (error) {
       return toAgentRunErrorResponse(c, error)
     }
