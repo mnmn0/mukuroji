@@ -20,6 +20,7 @@ import {
   type AiPlanningStructureParent,
 } from '../src/features/ai-assistance/mutations/useAiPlanningStructureAdoption'
 import { AiWorkItemPlanningAssistantView } from '../src/features/ai-assistance/ui/AiWorkItemPlanningAssistant'
+import { isWorkspaceOrProjectWorkItemListKey } from '../src/issues/queries/useWorkItems'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -57,7 +58,7 @@ const parent: AiPlanningStructureParent = {
 }
 
 /** Records the calls of a fake API backed by in-memory Work Items and dependencies. */
-function createFakeApi(options: { failParentOnce?: boolean } = {}) {
+function createFakeApi(options: { failParentOnce?: boolean; loseCreateResponseOnce?: boolean } = {}) {
   const created: { idempotencyKey: string; input: CreateWorkItemInput }[] = []
   const parents = new Map<string, string>()
   const parentCalls: WorkItemParentMutationInput[] = []
@@ -66,6 +67,7 @@ function createFakeApi(options: { failParentOnce?: boolean } = {}) {
   let graphRevision = 5
   let planningRevision = 9
   let failParent = options.failParentOnce ?? false
+  let loseCreateResponse = options.loseCreateResponseOnce ?? false
 
   const snapshot = (): PlanningSnapshot => ({
     ...planningSnapshotFixture,
@@ -91,6 +93,11 @@ function createFakeApi(options: { failParentOnce?: boolean } = {}) {
       if (!existing) {
         issuesByKey.set(context.idempotencyKey, id)
         created.push({ idempotencyKey: context.idempotencyKey, input })
+      }
+      if (loseCreateResponse) {
+        // The server made the child, but its response never reached the client.
+        loseCreateResponse = false
+        throw new Error('network')
       }
       return { ...teamIssueFixtures[0], id, teamId: 'team-1' }
     },
@@ -210,6 +217,28 @@ describe('AI planning structure adoption', () => {
     expect(fake.created).toHaveLength(2)
     expect(fake.parents.get('child-1')).toBe('story-1')
     expect(fake.parents.get('child-2')).toBe('story-1')
+  })
+
+  test('a retry after a lost create response reuses the first request even when the row was edited', async () => {
+    const fake = createFakeApi({ loseCreateResponseOnce: true })
+    const session = createAiPlanningStructureAdoptionSession(fake.api)
+    await expect(adoptAiPlanningStructure(session, 'token', parent, input)).rejects.toThrow('network')
+    expect(fake.created).toHaveLength(1)
+
+    const edited = { ...input, children: [{ ...input.children[0], title: 'Edited' }, input.children[1]] }
+    const result = await adoptAiPlanningStructure(session, 'token', parent, edited)
+
+    expect(result.childWorkItemIds).toEqual({ 'row-1': 'child-1', 'row-2': 'child-2' })
+    expect(fake.created.map((entry) => entry.input.title)).toEqual(['Write the plan', 'Review the plan'])
+  })
+
+  test('refreshes Workspace lists and the lists of the parent Project only', () => {
+    expect(isWorkspaceOrProjectWorkItemListKey(['workspace-work-items', 'token', false, ''], 'project-1')).toBe(true)
+    expect(isWorkspaceOrProjectWorkItemListKey(['project-issues', 'token', 'project-1', false, null, null], 'project-1'))
+      .toBe(true)
+    expect(isWorkspaceOrProjectWorkItemListKey(['project-issues', 'token', 'project-2', false, null, null], 'project-1'))
+      .toBe(false)
+    expect(isWorkspaceOrProjectWorkItemListKey(['project-issues', 'token', 'project-1', false, null, null])).toBe(false)
   })
 
   test('refuses a child type the parent does not allow before creating anything', async () => {

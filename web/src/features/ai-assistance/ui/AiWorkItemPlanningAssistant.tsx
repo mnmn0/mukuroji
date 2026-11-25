@@ -205,7 +205,9 @@ export function AiWorkItemPlanningAssistantView({
     !availableDraft
   const hasAdoptableDraft = availableDraft !== undefined &&
     (canAdoptDraft?.(availableDraft) ?? hasSupportedWorkItemPlanningFields(availableDraft))
-  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending
+  const [isStructureAdoptionPending, setIsStructureAdoptionPending] = useState(false)
+  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending ||
+    isStructureAdoptionPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === generation?.id &&
     hasAdoptableDraft
@@ -251,15 +253,26 @@ export function AiWorkItemPlanningAssistantView({
     : undefined
 
   /**
-   * Approves the visible draft for creating its children and dependencies. An already approved
-   * draft is reused; otherwise the server records the approval, which it refuses once the source,
-   * its revision, or the member's access changed after generation.
+   * Approves the visible draft before its children and dependencies are created. The decision is
+   * sent even when the draft is already approved, so the server checks again that the source, its
+   * revision, and the member's access did not change since generation. The adoption holds the
+   * Work Item save guard for its whole run, so this call does not take or release it.
    */
   const approveForStructureAdoption = async (): Promise<boolean> => {
-    if (generation?.decision?.outcome === 'approved') return true
-    const reviewed = await handleDecide('approved')
+    const reviewed = await onDecide('approved')
     return reviewed?.decision?.outcome === 'approved' &&
       getAvailableWorkItemPlanningDraft(reviewed) !== undefined
+  }
+
+  /**
+   * Holds the Work Item save guard and disables a new draft while children and dependencies are
+   * created, so neither a save nor a new generation remounts the section mid-way.
+   *
+   * @param pending - Whether the adoption is running.
+   */
+  const handleStructureAdoptionPendingChange = (pending: boolean) => {
+    setIsStructureAdoptionPending(pending)
+    onOperationPendingChange?.(pending)
   }
 
   /** Records approval before copying any supported value into local editor state. */
@@ -373,10 +386,11 @@ export function AiWorkItemPlanningAssistantView({
             accessToken={accessToken}
             approve={approveForStructureAdoption}
             context={structureAdoption}
-            disabled={isOperationPending}
+            disabled={isOperationPending && !isStructureAdoptionPending}
             draft={availableDraft}
             generationId={generation.id}
             key={generation.id}
+            onPendingChange={handleStructureAdoptionPendingChange}
             resolveWorkItemLabel={resolveWorkItemLabel}
             t={t}
           />

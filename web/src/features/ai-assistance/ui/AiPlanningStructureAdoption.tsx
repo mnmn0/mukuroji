@@ -39,6 +39,8 @@ export type AiPlanningStructureAdoptionProps = {
   adopt: (input: AiPlanningStructureAdoptionInput) => Promise<AiPlanningStructureAdoptionResult>
   /** Whether the adoption is in flight. */
   isPending: boolean
+  /** Reports when an adoption run, approval included, starts and ends. */
+  onPendingChange?: (pending: boolean) => void
   /** Refreshes the Work Item views after rows were created. */
   onAdopted?: () => void | Promise<void>
   /** Resolves a visible Team-qualified Work Item endpoint for review. */
@@ -76,6 +78,7 @@ export function AiPlanningStructureAdoption({
   generationId,
   isPending,
   onAdopted,
+  onPendingChange,
   resolveWorkItemLabel,
   t,
 }: AiPlanningStructureAdoptionProps) {
@@ -95,6 +98,7 @@ export function AiPlanningStructureAdoption({
   const [createdChildRows, setCreatedChildRows] = useState<ReadonlySet<string>>(() => new Set())
   const [createdDependencyRows, setCreatedDependencyRows] = useState<ReadonlySet<string>>(() => new Set())
   const [notice, setNotice] = useState<AdoptionNotice>()
+  const [isRunning, setIsRunning] = useState(false)
 
   if (draft.subtasks.length === 0 && draft.dependencies.length === 0) return null
 
@@ -103,7 +107,7 @@ export function AiPlanningStructureAdoption({
     canCreateChildren && childRows[subtask.id]?.selected && !createdChildRows.has(subtask.id))
   const pendingDependencies = draft.dependencies.filter((dependency) =>
     selectedDependencies.has(dependency.id) && !createdDependencyRows.has(dependency.id))
-  const isBusy = disabled || isPending
+  const isBusy = disabled || isPending || isRunning
   const canSubmit = !isBusy && (pendingChildren.length > 0 || pendingDependencies.length > 0)
 
   /** Replaces one field of a child row. */
@@ -132,6 +136,8 @@ export function AiPlanningStructureAdoption({
       return
     }
     setNotice(undefined)
+    setIsRunning(true)
+    onPendingChange?.(true)
     try {
       if (!await approve()) {
         setNotice('decision-required')
@@ -157,6 +163,9 @@ export function AiPlanningStructureAdoption({
       setNotice(error instanceof AiPlanningStructureAdoptionError && error.reason === 'child-type-denied'
         ? 'child-type-denied'
         : 'error')
+    } finally {
+      setIsRunning(false)
+      onPendingChange?.(false)
     }
   }
 

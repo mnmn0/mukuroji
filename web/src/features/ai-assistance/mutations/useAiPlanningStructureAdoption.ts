@@ -10,6 +10,7 @@ import {
   type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import { createTeamIssue, getTeamIssueDetail } from '../../../issues/api/workItems'
+import { isWorkspaceOrProjectWorkItemListKey } from '../../../issues/queries/useWorkItems'
 import { getPlanningSnapshot } from '../../../planning/api/snapshot'
 import { createWorkItemScheduleDependency } from '../../../planning/api/workItemDependencies'
 import {
@@ -163,6 +164,13 @@ export type AiPlanningStructureAdoptionSession = {
    * reuses them even when the reviewer edited the row in between, so no second child is created.
    */
   createdChildren: Map<string, string>
+  /**
+   * First create request sent for each generation and row. When a create's outcome is unknown
+   * (its response was lost), the retry sends this same request with the same idempotency key, so
+   * the server returns the child it made instead of creating a second one; edits made after that
+   * first attempt do not reach the child.
+   */
+  attemptedChildren: Map<string, CreateWorkItemInput>
   /** API calls to make. */
   api: AiPlanningStructureApi
 }
@@ -176,7 +184,7 @@ export type AiPlanningStructureAdoptionSession = {
 export function createAiPlanningStructureAdoptionSession(
   api: AiPlanningStructureApi = defaultAiPlanningStructureApi,
 ): AiPlanningStructureAdoptionSession {
-  return { api, createdChildren: new Map(), runner: createMutationRequestRunner() }
+  return { api, attemptedChildren: new Map(), createdChildren: new Map(), runner: createMutationRequestRunner() }
 }
 
 /**
@@ -242,8 +250,10 @@ export function useAiPlanningStructureAdoption({
       const result = await adoptAiPlanningStructure(session, accessToken, parent, input)
       // Lists, details, hierarchies, and the Planning graph of the Team read the new children and
       // dependencies; a failed refresh leaves the created rows in place.
+      // The Project and Workspace lists hold the children too, without the Team ID in their keys.
       await mutate(
-        (key) => Array.isArray(key) && (key.includes(parent.teamId) || key[0] === 'planning-snapshot'),
+        (key) => (Array.isArray(key) && (key.includes(parent.teamId) || key[0] === 'planning-snapshot')) ||
+          isWorkspaceOrProjectWorkItemListKey(key, parent.assignedProjectId),
       ).catch(() => undefined)
       return result
     } finally {
@@ -264,7 +274,7 @@ export function useAiPlanningStructureAdoption({
  * @returns Child Work Item IDs by row ID.
  */
 async function createChildren(
-  { api, createdChildren, runner }: AiPlanningStructureAdoptionSession,
+  { api, attemptedChildren, createdChildren, runner }: AiPlanningStructureAdoptionSession,
   token: string,
   parent: AiPlanningStructureParent,
   input: AiPlanningStructureAdoptionInput,
@@ -289,7 +299,7 @@ async function createChildren(
       childWorkItemIds[child.rowId] = created
       continue
     }
-    const request: CreateWorkItemInput = {
+    const request: CreateWorkItemInput = attemptedChildren.get(createdKey) ?? {
       ...(parent.assignedProjectId ? { assignedProjectId: parent.assignedProjectId } : {}),
       assigneeUserId: parent.assigneeUserId,
       ...(child.description ? { description: child.description } : {}),
@@ -299,6 +309,7 @@ async function createChildren(
       workItemTypeId: input.childWorkItemTypeId,
       ...(backlogStatus ? { quickCapture: true, workflowStatusId: backlogStatus.id } : {}),
     }
+    attemptedChildren.set(createdKey, request)
     const issue = await runner.run(
       `ai-planning:${input.generationId}:child:${child.rowId}`,
       JSON.stringify([parent.teamId, request]),
