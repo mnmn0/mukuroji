@@ -56,15 +56,6 @@ function apiForRelations() {
     getKey: async () => undefined,
     lookupKey: async (key) => ({ schemaVersion: 1, key, teamId: 'team', workItemId: key === 'ABC-1' ? 'parent' : 'other' }),
     getIssue: async (_teamId, workItemId) => task({ id: workItemId, assignedProjectId: 'web' }),
-    catalog: async (teamId, assignedProjectId) => {
-      writes.push(`catalog:${teamId}:${assignedProjectId}`)
-      return {
-        teamId, configurationRevision: 1, templates: [], workItemTypes: [{
-          id: 'default', name: 'Task', customFields: [], allowedChildTypeIds: ['default', 'bug'],
-          workflow: { initialStatusId: 'todo', statuses: [{ id: 'todo', name: 'Todo', category: 'unstarted', sortOrder: 0 }] },
-        }],
-      }
-    },
     createIssue: async (input, key) => {
       writes.push(`create:${key}:${input.title}:${input.assignedProjectId}:${input.assigneeUserId}`)
       const child = created.get(key) ?? task({ id: `child-${created.size + 1}`, title: input.title })
@@ -111,11 +102,9 @@ test('create_subtasks puts each child under the parent in its Project and finish
     teamId: 'team', workItemId: 'parent', subtasks: [{ id: 'child-1', title: 'Design' }, { id: 'child-2', title: 'Build' }],
   })
   expect(writes).toEqual([
-    'catalog:team:web',
     'create:split-key.subtask.0:Design:web:owner',
     'link:split-key.subtask.0.parent:child-1:parent:parent',
     'create:split-key.subtask.1:Build:web:member-2',
-    'catalog:team:web',
     'create:split-key.subtask.0:Design:web:owner',
     'link:split-key.subtask.0.parent:child-1:parent:parent',
     'create:split-key.subtask.1:Build:web:member-2',
@@ -124,21 +113,7 @@ test('create_subtasks puts each child under the parent in its Project and finish
   await expect(issues.createSubtasks({ ...input, subtasks: [] })).rejects.toMatchObject({ code: 'invalid_request' })
 })
 
-test('create_subtasks rejects a Type the parent does not allow before creating any Work Item', async () => {
-  const { api, writes } = apiForRelations()
-  const issues = createWorkspaceIssues(api)
-
-  await expect(issues.createSubtasks({
-    parentId: 'ABC-1',
-    subtasks: [{ title: 'Fix', typeId: 'bug' }, { title: 'Plan', typeId: 'epic' }],
-    idempotencyKey: 'typed-key',
-  })).rejects.toMatchObject({
-    code: 'invalid_request', message: expect.stringContaining('Subtask 2 uses Type epic'),
-  })
-  expect(writes).toEqual(['catalog:team:web'])
-})
-
-test('create_subtasks names a created Work Item whose parent link failed', async () => {
+test('create_subtasks names a created Work Item whose parent link failed and how to recover', async () => {
   const { api } = apiForRelations()
   const issues = createWorkspaceIssues({
     ...api,
@@ -146,7 +121,7 @@ test('create_subtasks names a created Work Item whose parent link failed', async
   })
 
   await expect(issues.createSubtasks({ parentId: 'ABC-1', subtasks: [{ title: 'Design' }], idempotencyKey: 'link-fails' }))
-    .rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('Work Item child-1 was created but is not linked') })
+    .rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('Work Item child-1 was created but is not linked to the parent yet; if its Type is not allowed under the parent, change it with save_issue and retry.') })
 })
 
 test('save_relation links and unlinks by key, and list_relations combines the tree with the other links', async () => {

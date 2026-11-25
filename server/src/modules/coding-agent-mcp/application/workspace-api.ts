@@ -1,5 +1,4 @@
 import {
-  DEFAULT_WORK_ITEM_TYPE_ID,
   parseWorkItemKey,
   type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
@@ -257,33 +256,6 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       return key === undefined ? {} : { key }
     } catch {
       return { warning: 'The Work Item was saved, but its key could not be read. Read it again with get_issue.' }
-    }
-  }
-
-  /**
-   * Rejects subtasks whose Type the parent's Work Item Type does not allow as a child, before any
-   * Work Item is created, so a denied Type never leaves an unlinked Work Item behind. A parent Type
-   * missing from the catalog, or a server that does not report allowed child Types, is left to the
-   * relation write to enforce.
-   * @param teamId - Team of the parent.
-   * @param parentIssue - Parent Work Item.
-   * @param subtasks - Requested subtasks.
-   * @returns Nothing when every Type is allowed or cannot be checked here.
-   * @throws AgentTaskError naming the first denied subtask.
-   */
-  async function assertSubtaskTypesAllowed(teamId: string, parentIssue: AgentTask, subtasks: WorkspaceSubtaskInput[]) {
-    const catalog = await api.catalog(teamId, parentIssue.assignedProjectId)
-    const parentTypeId = parentIssue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
-    const allowed = catalog.workItemTypes.find((type) => type.id === parentTypeId)?.allowedChildTypeIds
-    if (allowed === undefined) return
-    for (const [index, subtask] of subtasks.entries()) {
-      const typeId = subtask.typeId ?? DEFAULT_WORK_ITEM_TYPE_ID
-      if (!allowed.includes(typeId)) {
-        throw new AgentTaskError(
-          'invalid_request',
-          `No subtask was created. Subtask ${index + 1} uses Type ${typeId}, which the parent's Work Item Type ${parentTypeId} does not allow as a child. Allowed Types: ${allowed.join(', ') || 'none'}.`,
-        )
-      }
     }
   }
 
@@ -551,7 +523,6 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
       const parent = await resolveIssue(input.parentId, input.teamId)
       // Children join the parent's Project so that the people who see the parent also see them.
       const [{ memberId: owner }, parentIssue] = await Promise.all([api.me(), api.getIssue(parent.teamId, parent.workItemId)])
-      await assertSubtaskTypesAllowed(parent.teamId, parentIssue, input.subtasks)
       const created: Array<{ id: string, title: string, key?: string }> = []
       for (const [index, subtask] of input.subtasks.entries()) {
         let childId: string | undefined
@@ -576,10 +547,14 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
         } catch (error) {
           const done = created.length === 0 ? 'No subtask was finished.' : `Subtasks 1 to ${created.length} were created under the parent.`
           const message = error instanceof AgentTaskError ? error.message : 'The request failed.'
-          const unlinked = childId === undefined ? '' : ` Work Item ${childId} was created but is not linked to the parent yet.`
+          // The child exists once its creation succeeded, so name it: a Type the parent does not allow can be
+          // changed with save_issue, and the same arguments and key then replay the creation and link it.
+          const unlinked = childId === undefined
+            ? ''
+            : ` Work Item ${childId} was created but is not linked to the parent yet; if its Type is not allowed under the parent, change it with save_issue and retry.`
           throw new AgentTaskError(
             error instanceof AgentTaskError ? error.code : 'transport',
-            `${done} Subtask ${index + 1} failed: ${message}${unlinked} Retry with the same arguments and idempotencyKey to finish without duplicates; a conflict usually means the parent's Work Item Type does not allow that Type as a child.`,
+            `${done} Subtask ${index + 1} failed: ${message}${unlinked} Retry with the same arguments and idempotencyKey to finish without duplicates.`,
             error instanceof AgentTaskError ? error.retryable : true,
           )
         }

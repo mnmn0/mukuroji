@@ -1113,7 +1113,6 @@ describe('public API router', () => {
           type: 'select',
           options: [{ id: 'high', name: 'High', sortOrder: 0 }],
         }],
-        allowedChildTypeIds: ['incident'],
       }],
     } satisfies PublicWorkItemTypeCatalog
     const { platform, router } = createTestRouter({

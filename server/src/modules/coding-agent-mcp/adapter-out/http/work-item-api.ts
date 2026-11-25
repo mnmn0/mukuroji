@@ -98,7 +98,6 @@ export const catalogSchema: z.ZodType<AgentCatalog> = z.object({
       })),
     }),
     customFields: z.array(z.record(z.string(), z.unknown())),
-    allowedChildTypeIds: z.array(identifier).optional(),
   })),
   // Templates come from their own endpoint; the type catalog never lists them.
   templates: z.array(z.never()).default([]),
