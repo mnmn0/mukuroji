@@ -652,8 +652,14 @@ export type TeamAgentRunBoardResponse = {
   activeRunsHasMore: boolean
   /** Whether finished runs beyond {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} were left unread. */
   finishedRunsHasMore: boolean
-  /** Whether Work Items beyond {@link FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS} were left unread. */
+  /** Whether started Work Items beyond {@link FACTORY_BOARD_MAX_EVALUATED_WORK_ITEMS} were left unread. */
   startedWorkItemsHasMore: boolean
+  /**
+   * Opaque token that reads the next page of the sources left unread, passed back as the
+   * `continuation` query parameter; absent when every source was read to its end. A later page holds
+   * only the items of those sources, and a Work Item can appear on more than one page.
+   */
+  continuation?: string
 }
 
 /** Milliseconds in one hour. */

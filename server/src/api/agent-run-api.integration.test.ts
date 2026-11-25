@@ -2225,9 +2225,20 @@ describe('Factory board route', () => {
     setTestAppDependencies({
       teamIssues: createTeamIssuesFake({
         ...base,
-        async getPublicWorkItemPage(_directoryId, _teamId, options) {
+        async getPublicWorkItemPage() {
+          throw new Error('The board must read started Work Items from the started index.')
+        },
+        async listStartedWorkItemIds(_directoryId, _teamId, options) {
           pageReads.push(options.limit)
-          return { issues: await Promise.all(workItems.slice(0, options.limit).map(toIssue)) }
+          // The fake cursor is the offset into the Team's started Work Items.
+          const offset = options.cursor === undefined ? 0 : Number(options.cursor)
+          const started = workItems.filter((workItem) => workItem.statusCategory === 'started')
+          const page = started.slice(offset, offset + options.limit)
+          const next = offset + page.length
+          return {
+            workItemIds: page.map((workItem) => workItem.id),
+            ...(next < started.length ? { nextCursor: String(next) } : {}),
+          }
         },
         async getTeamIssueDetail(directoryId, teamId, issueId, options) {
           const workItem = workItems.find((candidate) => candidate.id === issueId)
@@ -2467,9 +2478,9 @@ describe('Factory board route', () => {
     setTestAppDependencies({
       teamIssues: createTeamIssuesFake({
         ...base,
-        async getPublicWorkItemPage(directoryId, teamId, options) {
+        async listStartedWorkItemIds(directoryId, teamId, options) {
           pageLimits.push(options.limit)
-          const page = await base.getPublicWorkItemPage(directoryId, teamId, options)
+          const page = await base.listStartedWorkItemIds(directoryId, teamId, options)
           return { ...page, nextCursor: 'next' }
         },
       }),
@@ -2477,6 +2488,63 @@ describe('Factory board route', () => {
     const { body } = await readBoard()
     expect(body.startedWorkItemsHasMore).toBe(true)
     expect(pageLimits).toEqual([100, 100, 100])
+  })
+
+  test('continues every lane that reached its bound until all failures and started Work Items are shown', async () => {
+    const now = Date.now()
+    const failedItems: BoardWorkItem[] = Array.from({ length: 600 }, (_, index) => ({ id: `failed-${index}`, statusCategory: 'unstarted' }))
+    const startedItems: BoardWorkItem[] = Array.from({ length: 350 }, (_, index) => ({ id: `started-${index}`, statusCategory: 'started' }))
+    const { store } = configureBoard([...failedItems, ...startedItems])
+    for (let index = 0; index < 600; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`failed-${index}`, new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
+    }
+    for (let index = 0; index < 350; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`started-${index}`, new Date(now - 3 * hourMs)), 'paused', 'agent', new Date(now - 2 * hourMs)))
+    }
+    const first = await readBoard()
+    expect(first.body).toMatchObject({ finishedRunsHasMore: true, startedWorkItemsHasMore: true, activeRunsHasMore: false })
+    expect(first.body.continuation).toBeString()
+    // The token is sealed: none of its parts reveals a DynamoDB key, and a changed token is refused.
+    const token = first.body.continuation ?? ''
+    for (const part of token.split('.')) expect(Buffer.from(part, 'base64url').toString('utf8')).not.toContain('Partition')
+    const tampered = `${token.slice(0, -2)}${token.endsWith('AA') ? 'BB' : 'AA'}`
+    expect((await app.request(
+      `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(tampered)}`,
+      { headers },
+    )).status).toBe(400)
+    const seen = new Set(first.body.items.map((item) => item.workItem.id))
+    let continuation = first.body.continuation
+    let pages = 1
+    while (continuation !== undefined) {
+      const response = await app.request(
+        `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(continuation)}`,
+        { headers },
+      )
+      expect(response.status).toBe(200)
+      const body: TeamAgentRunBoardResponse = await response.json()
+      // A later page is evaluated at the first page's read time, so lanes and windows agree.
+      expect(body.generatedAt).toBe(first.body.generatedAt)
+      for (const item of body.items) seen.add(item.workItem.id)
+      continuation = body.continuation
+      pages += 1
+      expect(pages).toBeLessThan(5)
+    }
+    // 600 failed runs need a second page of the failed lane; 350 started Work Items a second page of their source.
+    expect(pages).toBe(2)
+    for (const item of [...failedItems, ...startedItems]) expect(seen.has(item.id)).toBe(true)
+  })
+
+  test('rejects a malformed, forged, or foreign board continuation', async () => {
+    configureBoard([])
+    const read = async (continuation: string) => (await app.request(
+      `http://localhost/api/teams/core-team/agent-runs?continuation=${encodeURIComponent(continuation)}`,
+      { headers },
+    )).status
+    expect(await read('not-a-token')).toBe(400)
+    // A readable token, as an earlier version issued, is refused: tokens are sealed by the server.
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+    expect(await read(encode({ version: 1, since: new Date().toISOString(), failed: 'x' }))).toBe(400)
+    expect(await read(`b1.${'A'.repeat(16)}.${'A'.repeat(20)}.${'A'.repeat(22)}`)).toBe(400)
   })
 
   test('requires a session and a Team the caller can view', async () => {

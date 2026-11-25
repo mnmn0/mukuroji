@@ -12,6 +12,8 @@ export const factoryBoardMessages = {
   'factoryBoard.emptyDescription': 'エージェントがタスクを開始すると、ここに処理中として表示されます。',
   'factoryBoard.noResults': '絞り込み条件に一致するタスクはありません。',
   'factoryBoard.incomplete': '読み込み上限に達したため、表示されていない Run やタスクがある可能性があります。',
+  'factoryBoard.loadMore': '続きの Run とタスクを読み込む',
+  'factoryBoard.loadingMore': '読み込み中…',
   'factoryBoard.filter.label': '絞り込み',
   'factoryBoard.filter.runtime': 'ランタイム',
   'factoryBoard.filter.assignee': '担当者',

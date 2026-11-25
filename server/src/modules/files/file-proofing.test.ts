@@ -2441,11 +2441,12 @@ describe('file proofing domain', () => {
     expect(completionUpdate?.UpdateExpression).toContain(
       '#actualStartDate = :actualStartDate, #actualEndDate = :actualEndDate',
     )
-    // Completing the Work Item takes it out of the notification due index in the same update.
+    // Completing the Work Item takes it out of the notification due index and the Team started
+    // index in the same update.
     expect(completionUpdate?.UpdateExpression).toContain(
       '#notificationScheduleShard = :notificationScheduleShard',
     )
-    expect(completionUpdate?.UpdateExpression).toMatch(/ REMOVE #notificationDueKey$/)
+    expect(completionUpdate?.UpdateExpression).toMatch(/ REMOVE #notificationDueKey, #startedDirectoryTeamId$/)
     expect(state.documentClient.items.get(createMemoryKey({
       workspaceId: scope.workspaceId,
       recordKey: 'META',

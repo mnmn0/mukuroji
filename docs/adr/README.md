@@ -117,3 +117,4 @@
 | [0095](0095-member-offboarding-and-access-expiry.md) | メンバーの利用期限を読み取り時に効かせ、毎時の job で無効化する。無効化で本人の API キーを失効する | 提案 |
 | [0096](0096-member-last-sign-in-on-member-row.md) | メンバーの最終ログインを member row に version を変えずに記録し、owner と admin にだけ返す | 提案 |
 | [0097](0097-org-units.md) | OrgUnit（部門）で Team を束ね、部門のロールは配下の Team scope に展開して評価する | 提案 |
+| [0098](0098-team-started-work-item-index-and-board-continuation.md) | Team の started な Work Item を sparse index で引き、Factory board の上限で止まった lane を続きから読む | 提案 |

@@ -1,5 +1,8 @@
-import type { AgentRunHistoryFilters } from '@mukuroji/contracts'
+import { useMemo } from 'react'
 import useSWR from 'swr'
+import useSWRInfinite from 'swr/infinite'
+import type { AgentRunHistoryFilters, AgentRunView, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
+import { applyReleasedRunToBoard, mergeFactoryBoardPages } from '../model/factoryBoard'
 import { getTeamAgentRunBoard, getTeamAgentRunHistory, getTeamFactoryAnalytics, listWorkItemAgentRunReports } from '../../../work-items/api/agentRuns'
 import { WorkItemConfigurationApiError } from '../../../work-items/api/errors'
 import { createFactoryAnalyticsPeriod, type FactoryAnalyticsPeriodDays } from '../model/factoryAnalytics'
@@ -36,6 +39,68 @@ export function useTeamAgentRunBoard(accessToken: string | undefined, teamId: st
       shouldRetryOnError: false,
     },
   )
+}
+
+/**
+ * Reads a Team's Factory board like {@link useTeamAgentRunBoard}, and reads the rest of the sources
+ * that reached a read bound when asked. Loaded pages are read again in order on refresh, because
+ * the continuation of a page changes with the page before it.
+ *
+ * @param accessToken - Session access token; reading is skipped without it.
+ * @param teamId - Team ID; reading is skipped without it.
+ * @returns The combined board, its read state, and the actions on it.
+ */
+export function useTeamAgentRunBoardPages(accessToken: string | undefined, teamId: string | undefined) {
+  const query = useSWRInfinite(
+    (pageIndex, previousPage: TeamAgentRunBoardResponse | null) => {
+      if (!accessToken || !teamId) return null
+      if (pageIndex > 0 && !previousPage?.continuation) return null
+      return [
+        'factory-board-pages',
+        accessToken,
+        teamId,
+        pageIndex === 0 ? '' : previousPage?.continuation ?? '',
+      ] satisfies [string, string, string, string]
+    },
+    ([, token, currentTeamId, continuation]) =>
+      getTeamAgentRunBoard(token, currentTeamId, continuation === '' ? undefined : continuation),
+    {
+      dedupingInterval: 10_000,
+      refreshInterval: factoryBoardRefreshInterval,
+      revalidateFirstPage: true,
+      revalidateOnFocus: true,
+      shouldRetryOnError: false,
+    },
+  )
+  const pages = query.data
+  const data = useMemo(() => pages ? mergeFactoryBoardPages(pages) : undefined, [pages])
+  const boardError: unknown = query.error
+  const isLoadingMore = Boolean(query.isValidating && query.size > (pages?.length ?? 0))
+  return {
+    data,
+    error: boardError,
+    isLoading: query.isLoading,
+    isValidating: query.isValidating,
+    isLoadingMore,
+    /** Reads every loaded page again. */
+    refresh: () => query.mutate(),
+    /** Reads the next page when the last loaded page left sources unread. */
+    loadMore: () => {
+      if (!data?.continuation || isLoadingMore) return
+      void query.setSize(query.size + 1)
+    },
+    /**
+     * Shows a committed release on every loaded page without reading the board again.
+     *
+     * @param released - Run returned by the release.
+     */
+    applyRelease: async (released: AgentRunView) => {
+      await query.mutate(
+        (current) => current?.map((page) => applyReleasedRunToBoard(page, released) ?? page),
+        { revalidate: false },
+      )
+    },
+  }
 }
 
 /**
