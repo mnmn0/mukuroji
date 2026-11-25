@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type {
   FileAttachment,
   PublicWorkItemAttachment,
@@ -141,8 +142,8 @@ export function createCanonicalPublicAttachmentService(): PublicAttachmentServic
       const auditContext = createMutationAuditContext({
         workspaceId: access.scope.workspaceId,
         actor: { id: access.actorId, kind: 'user', displayName: access.actor.memberKey },
-        // A download is not retried as one request; the request ID keeps each one distinct.
-        idempotencyKey: `public-attachment-download:${request.requestId}`,
+        // Every issuance is its own audit event: a caller can reuse X-Request-Id, so it is only tracing metadata.
+        idempotencyKey: `public-attachment-download:${randomUUID()}`,
         ...(request.correlationId ? { correlationId: request.correlationId } : {}),
         request: { method: 'GET', path, body: null, query: { teamId } },
         source: { kind: 'api', requestId: request.requestId, method: 'GET', route: path },
@@ -165,8 +166,8 @@ export function createCanonicalPublicAttachmentService(): PublicAttachmentServic
           expiresAt: granted.expiresAt,
         } satisfies PublicWorkItemAttachmentDownload
       } catch (error) {
-        // The scan can still block the object after the listing read it; that is not downloadable.
-        if (error instanceof FileProofingError && (error.status === 403 || error.status === 404 || error.status === 423)) {
+        // The scan can still block the object, or it can be deleted, after the listing read it; neither is downloadable.
+        if (error instanceof FileProofingError && (error.status === 403 || error.status === 404 || error.status === 410 || error.status === 423)) {
           throw attachmentNotFound()
         }
         // The file changed after it was read; the client can list the attachments again and retry.

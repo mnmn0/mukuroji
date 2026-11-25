@@ -255,9 +255,17 @@ describe('public attachment service', () => {
     expect(accesses).toHaveLength(1)
     expect(accesses[0]).toMatchObject({ fileId: 'spec', versionId: 'spec-v2', disposition: 'attachment', requireCurrentVersion: true })
     expect(accesses[0]?.auditContext).toMatchObject({ workspaceId, correlationId: 'corr-1', source: { kind: 'api', requestId: 'request-1' } })
+    // A reused request ID still records a separate audit event for each download.
+    await download('spec')
+    expect(accesses).toHaveLength(2)
+    expect(accesses[1]?.auditContext?.idempotencyKeyHash).not.toBe(accesses[0]?.auditContext?.idempotencyKeyHash)
+    accesses.splice(1)
     await expect(download('pending')).rejects.toMatchObject({ status: 404 })
     await expect(download('missing')).rejects.toMatchObject({ status: 404 })
     failAfterListing = new FileProofingError(423, 'FileThreatDetected', 'Malware scanning blocked this file.')
+    await expect(download('spec')).rejects.toMatchObject({ status: 404 })
+    // A file deleted after the listing read it is not found, not a server error.
+    failAfterListing = new FileProofingError(410, 'FileDeleted', 'The file was deleted.')
     await expect(download('spec')).rejects.toMatchObject({ status: 404 })
     // A file that changed after the listing read it is a conflict the client can retry.
     failAfterListing = new FileProofingError(409, 'FileVersionConflict', 'The file changed.')
