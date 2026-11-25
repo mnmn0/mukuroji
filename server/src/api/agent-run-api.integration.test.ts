@@ -2809,6 +2809,25 @@ describe('Factory board route', () => {
     expect(body.hasMore).toBe(true)
   })
 
+  test('stops reading runs of a narrow filter at its read bound and says so', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([{ id: 'task-match', statusCategory: 'completed' }, { id: 'task-other', statusCategory: 'completed' }])
+    store.seed(finishAgentRun(createRunAt('task-match', new Date(now - 47 * hourMs)), 'completed', 'agent', new Date(now - 46 * hourMs)))
+    for (let index = 0; index < 650; index += 1) {
+      store.seed(finishAgentRun(createRunAt('task-other', new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs - index * 1_000)))
+    }
+    let reads = 0
+    const getRun = store.getRun.bind(store)
+    store.getRun = async (...args) => {
+      reads += 1
+      return getRun(...args)
+    }
+    const body = await readHistory(now, { runtime: 'codex' })
+    expect(body.runs).toEqual([])
+    expect(body.hasMore).toBe(true)
+    expect(reads).toBe(600)
+  })
+
   test('validates the Run history request and requires a session and a Team the caller can view', async () => {
     configureBoard([])
     const path = 'http://localhost/api/teams/core-team/agent-runs/history'

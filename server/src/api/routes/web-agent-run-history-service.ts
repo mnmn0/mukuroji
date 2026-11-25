@@ -35,6 +35,12 @@ const millisecondsPerDay = 86_400_000
 /** Strict UTC ISO 8601 instant accepted for the period bounds. */
 const isoInstantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u
 
+/**
+ * Most runs one request reads strongly. A narrow filter can leave most index entries out, so this
+ * bound keeps one request's reads small; the rest is reported through `hasMore`.
+ */
+const maximumHydratedRuns = 600
+
 /** Longest accepted member, Project, or other ID filter. */
 const maximumIdLength = 256
 
@@ -267,8 +273,8 @@ export async function getWebTeamAgentRunHistory(
   let index = 0
   let overflow = false
   // Candidates are read in batches until the response is full, so a narrow filter still fills it.
-  while (index < candidates.length && runs.length < AGENT_RUN_HISTORY_MAX_RUNS) {
-    const batch = candidates.slice(index, index + historyReadConcurrency * 2)
+  while (index < candidates.length && index < maximumHydratedRuns && runs.length < AGENT_RUN_HISTORY_MAX_RUNS) {
+    const batch = candidates.slice(index, Math.min(index + historyReadConcurrency * 2, maximumHydratedRuns))
     index += batch.length
     const read = await mapInOrderWithConcurrency(batch, historyReadConcurrency, async (entry) => {
       const stored = await workItemDependencies.agentRuns.getRun(principal.directoryId, teamId, entry.runId)
