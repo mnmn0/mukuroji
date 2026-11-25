@@ -403,6 +403,34 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/notification-reminders',
     permission: 'teams.manage',
   },
+  // Slack destinations (#399): Team channels belong to Team managers, Project channels to Project
+  // managers; the routes then check the caller's role on that Team or Project.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/notification-channel',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/notification-channel*',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/notification-channel*',
+    permission: 'projects.manage',
+  },
+  // The caller's own Slack destination changes no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/notification-preferences/slack-destination*',
+    permission: 'workspace.read',
+  },
   {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',

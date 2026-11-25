@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(615)
-  expect(new Set(inventory).size).toBe(611)
+  expect(inventory).toHaveLength(627)
+  expect(new Set(inventory).size).toBe(623)
   expect(inventory).toContain('POST /api/client-errors')
   expect(inventory).toContain('GET /api/customers/project-links')
   expect(inventory).toContain('GET /api/v1/projects/:projectId/charter')
@@ -192,7 +192,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
+  // Slack destinations (#399): the caller's own, a Team channel, and a Project channel.
+  expect(inventory).toContain('PUT /api/notification-preferences/slack-destination')
+  expect(inventory).toContain('POST /api/teams/:teamId/notification-channel/test')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/projects/:projectId/notification-channel')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'c917cfa07489c62c032b228bb7cf3fe1846923c59d9235b5da9c27eebcd982e0',
+    'f9fe63441c9e953d37c5836d0792965697144bed0348654327d2a5fac08ec6e4',
   )
 })
